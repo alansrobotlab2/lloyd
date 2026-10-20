@@ -6393,7 +6393,7 @@ def _body_ruling_gaps(para: str) -> list[str]:
                        "paragraph already gives"),
         ("land-time", "it does not name the land-time probe as the enforcement point "
                       "for a shell-authored body"),
-        ("scripts/automod/vault_guards.py:555",
+        ("scripts/automod/vault_guards.py:710-711",
          "it does not cite the line that hands the probe its vault"),
         ("LLOYD_VAULT_ROOT", "it does not name the knob that line sets"),
         ("tests/test_research_doc_claims.py::_task_files",
@@ -6410,7 +6410,8 @@ def test_the_accepted_open_bash_lane_records_the_body_rule_ruling():
     claim: the paragraph that accepts the Bash lane names #2589's body rule
            (`64b501c3`) as open on this lane for the same bind-mount reason, names
            the land-time probe as what enforces it for a shell-authored body —
-           `scripts/automod/vault_guards.py:555` setting `LLOYD_VAULT_ROOT`, grading
+           `scripts/automod/vault_guards.py:710-711` handing the probe its vault by
+           both routes, grading
            the corpus of `tests/test_research_doc_claims.py::_task_files` — and
            states its reopen trigger as an observable a reader can go and measure.
     verdict: #2589 put the rail on both writer lanes and ruled the Bash lane "not
@@ -6455,7 +6456,7 @@ def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
         "above came from an emptied paragraph and not from a missing ruling")
 
     for needle in ("64b501c3",
-                   "scripts/automod/vault_guards.py:555",
+                   "scripts/automod/vault_guards.py:710-711",
                    "LLOYD_VAULT_ROOT",
                    "tests/test_research_doc_claims.py::_task_files",
                    'guard="autonomy_body_rail"'):

@@ -376,6 +376,122 @@ def _copy_vault(dest: Path, live_vault: Path) -> str | None:
     return None
 
 
+#: The one name in a probe child's home that is NOT carried across from the real
+#: one: `obsidian` IS that run's own vault mirror, laid down at `<home>/obsidian` as
+#: a real directory. `Path.home() / "obsidian"` and `$LLOYD_VAULT_ROOT` are then one
+#: and the same path string, which is the property #3033 needs and a symlink could
+#: not give: a link resolves to the mirror, so a guard that compares the two routes
+#: as text would still see two answers, and a guard that deleted its vault home would
+#: have `rmtree` raise on the link instead of cleaning up its own scratch.
+HOME_VAULT_NAME = "obsidian"
+
+#: Names `probe_home` never symlinks across to the real home. `lloyd-data` is the
+#: third of these and the reason it stays absent rather than linked: linking it would
+#: point a guard that resolves its runtime store through `Path.home()` at the live
+#: `~/lloyd-data`, which is exactly the write the probe's fresh `LLOYD_DATA` root
+#: exists to keep off the box. `lloyd` is linked by the caller to the probe worktree
+#: (`lloyd_target`) rather than to the real home, so a guard that resolves a code
+#: root through `Path.home() / "lloyd"` gets the tree `PYTHONPATH` names and not the
+#: running system. `obsidian` the module fills with this draw's mirror.
+PROBE_HOME_SKIP = frozenset({"lloyd", "lloyd-data", HOME_VAULT_NAME})
+
+
+def probe_home(home: Path, lloyd_target: Path | None = None,
+               real_home: Path | None = None) -> str | None:
+    """Make `home` usable as a probe child's `HOME`; return why it cannot be.
+
+    A directory holding only a vault is not a home. `~/.gitconfig`, the caches and
+    the config directories every tool reads all live in the real one, and a child
+    that lost them would fail for a condition of its HOME and not of the vault it is
+    being shown — which is the false-refusal class #2283 exists to stop (four
+    refusals of a land whose failing nodes read no vault at all). So every entry of
+    the real home is symlinked across and the three names in `PROBE_HOME_SKIP` are
+    not: everything outside the vault that the child could read while the probe
+    inherited `HOME` outright it still reads, and the one path that had to move is
+    the one that moves.
+
+    That one name is the whole of #3033. The probe has always built a reverted
+    pre-land mirror and pointed `LLOYD_VAULT_ROOT` at it, but 125 of the 267 files
+    its own selection runs carry the literal `Path.home() / "obsidian"` — a route
+    that follows only `HOME`, against the 34 that honour
+    `LLOYD_VAULT_ROOT`/`vault_root(` — so for those guards both draws read the live
+    working tree with this land's uncommitted edit in it, every failure the land
+    caused appeared on the "before" side too, and the row absolved them as
+    "pre-existing, not this land" (#3029's land: `baseline: ran 18 / failed 4` on the
+    four nodes it went on to excuse, where the pre-land vault measured 18 passed /
+    0 failed).
+
+    A farm and not a copy, for the reason `worktree.ensure_round_home:84-87` gives
+    for the round's home: the goal is redirecting one name, not isolating the
+    machine. Copying the home would also make every guard that reads a config file
+    read a stale one. One unlinkable entry is a missing convenience and is skipped,
+    as it is there; a home that cannot be created at all is reported, because the
+    caller's safe answer to that is to not run the probe — never to run it on the
+    real home, which is the outcome this function exists to make impossible.
+    """
+    real = Path(real_home) if real_home else Path.home()
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(real.iterdir()):
+            if entry.name in PROBE_HOME_SKIP:
+                continue
+            link = home / entry.name
+            # `is_symlink()` as well as `exists()`: a link whose target has gone is
+            # still an entry, and `symlink_to` on top of it raises FileExistsError.
+            if link.is_symlink() or link.exists():
+                continue
+            try:
+                link.symlink_to(entry)
+            except OSError:
+                continue
+        if lloyd_target is not None:
+            anchor = home / "lloyd"
+            if not anchor.is_symlink() and not anchor.exists():
+                anchor.symlink_to(lloyd_target)
+    except OSError as exc:
+        return f"the directory at {home} could not be laid out: {exc}"
+    if not home.is_dir():
+        return f"the probe child's home at {home} is not a directory"
+    return None
+
+
+#: A mirror that is not laid out as `<home>/obsidian` — which `agreement` never does,
+#: but a caller that comes later or a test that calls `_run_selection` directly can —
+#: still gets a home, so the steered `HOME` is never conditional on the layout. The
+#: name is a sibling of the mirror inside the caller's own scratch, and its
+#: `obsidian` is a symlink to the mirror: the two routes then differ as path STRINGS
+#: (only `agreement`'s layout makes them identical), but the child reads and writes
+#: the bytes of the mirror it was shown, and never `~/obsidian`. That is the safety
+#: property; the string identity is the extra property the real probe has by shape.
+CHILD_HOME_NAME = ".child-home"
+
+
+def child_home(vault: Path) -> tuple[Path | None, str | None]:
+    """The `HOME` a probe child shown `vault` must be given, and why it could not be.
+
+    Derived from the mirror rather than passed, so the home and the vault cannot be
+    two unrelated arguments: `agreement` builds each draw's mirror at
+    `<home>/obsidian`, and this returns that home unchanged. Name-mangled rather than
+    guessed at: a caller that renames its mirror gets the symlinked sibling, not a
+    silently-wrong home. Returns `(None, why)` only when no home can be created at
+    all, which the caller must answer with no verdict — the fallback is the account's
+    real home, and the real home is the live vault.
+    """
+    vault = Path(vault)
+    if vault.name == HOME_VAULT_NAME:
+        return vault.parent, None
+    home = vault.parent / CHILD_HOME_NAME
+    link = home / HOME_VAULT_NAME
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(vault.resolve())
+    except OSError as exc:
+        return None, f"{home}: {type(exc).__name__}: {exc}"[:200]
+    return home, None
+
+
 def baseline_vault(dest: Path, live_vault: Path, paths: list[str]) -> dict:
     """The live vault as it stood before this land, at `dest`.
 
@@ -509,6 +625,24 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
                    workers: int = 1) -> dict:
     """One pytest run of `files` against `vault`, with the gate's mark expression.
 
+    **This child gets a steered `HOME`, derived from `vault` rather than passed**
+    (#3033). `agreement` lays every draw's mirror at `<home>/obsidian`, so the home
+    this run must be pointed at IS `vault.parent`, and deriving it is what makes the
+    two routes one directory by construction: 125 of the 267 files this function's own
+    selection runs carry the literal `Path.home() / "obsidian"`, a route that follows
+    only `HOME`, against the 34 that honour `LLOYD_VAULT_ROOT`/`vault_root(`. Passing
+    a home as a second argument would let the two disagree, and 30 existing tests
+    replace this function with a fake of the old shape, which a new required parameter
+    would silently re-shape into a signature the probe no longer has. A `vault` NOT
+    named `obsidian` therefore buys no verdict — the fallback would be the real home,
+    which is the live vault, and the one answer this item exists to make unobtainable.
+
+    Leaving `HOME` inherited is what the probe did before this fix: for those 125
+    files both draws read the live working tree with this land's uncommitted edit in
+    it, so every failure the land caused sat on the "before" side too and the row
+    absolved them as "pre-existing, not this land" (#3029: `baseline: ran 18 /
+    failed 4`, naming the four nodes that land broke).
+
     `workers` is per call, not a property of the function, and that is the whole
     of #2044 clause 3: `agreement` asks the two runs it makes for different
     things. The proposed-vault run is the whole 196-file selection and has to fit
@@ -550,9 +684,31 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
     mark, failed_ids, summary = _gate_tools()
     started = time.time()
     data_root.mkdir(parents=True, exist_ok=True)
+    # The child gets a steered `HOME`, derived from the mirror it is being shown
+    # (#3033). Never `os.environ`'s, and never a fallback to it: a child left with the
+    # account's home opens the LIVE `~/obsidian` for every guard that anchors on
+    # `Path.home()`, so on the pre-land side it would measure this land's own edit and
+    # report it as what was already there. `ran: 0` is the same "cannot tell" the
+    # timeout and no-summary rails answer with (#1958): read as "answered nothing", it
+    # stops the comparison instead of producing a verdict from the wrong tree.
+    home, home_err = child_home(Path(vault))
+    if home is not None:
+        home_err = probe_home(home, lloyd_target=tree)
+    if home is None or home_err:
+        return {"ran": 0, "failed": [], "seconds": round(time.time() - started, 1),
+                "files": len(files), "workers": workers,
+                "note": f"the probe child's home could not be built: {home_err}",
+                "excerpt": ""}
     env = {**os.environ,
            "PYTHONPATH": str(tree),
+           # For `agreement`'s own mirrors `vault` IS `<home>/obsidian` (derived in
+           # `child_home`), so the two routes are one directory by construction; `HOME`
+           # is what moves the guards that read `Path.home()`, and it moves this draw's
+           # mirror and nothing else. A guard that writes under its own vault home
+           # writes into this scratch copy — the property `baseline_vault`'s docstring
+           # states of the copy, true of the path and not only of `rmtree`.
            "LLOYD_VAULT_ROOT": str(vault),
+           "HOME": str(home),
            "LLOYD_DATA": str(data_root),
            NESTING_ENV: "1"}
     # The child is a fresh pytest run, and this module is one of the few places
@@ -1186,8 +1342,20 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=str(parent)))
     tree = scratch / "tree"
     probe_data = scratch / "probe-data"
-    proposed_vault = scratch / "vault-proposed"
-    base_vault = scratch / "vault-head"
+    # One HOME per draw (#3033), because a draw's vault is reachable two ways and both
+    # must name one directory: `LLOYD_VAULT_ROOT` for the guards that honour it,
+    # `Path.home() / "obsidian"` for the 125 that do not. Each mirror lives INSIDE its
+    # own home — `<home>/obsidian` — which is the layout `_run_selection` derives the
+    # child's `HOME` from, so the proposed draw gets the proposed mirror and every
+    # baseline draw the reverted one through one path each, and a guard that writes
+    # into its vault home writes into this scratch tree, which dies in the `finally`
+    # below. Both homes live inside this probe's scratch, so the `finally` and
+    # `_prune_leaked_scratch` reach them, and their names say which side drew — a
+    # witness line written by a child is the only place a reader can see that.
+    home_proposed = scratch / "home-proposed"
+    home_head = scratch / "home-head"
+    proposed_vault = home_proposed / HOME_VAULT_NAME
+    base_vault = home_head / HOME_VAULT_NAME
     slot = None
     try:
         wt = W.git(root, "worktree", "add", "--detach", "-q", str(tree), "HEAD")
@@ -1344,8 +1512,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
             if room < MIN_RUN_SECONDS:
                 break
             draws.append(_run_selection(interp, tree, retry_files, proposed_vault,
-                                        probe_data, mark_expr or mark,
-                                        room, 1))
+                                        probe_data, mark_expr or mark, room, 1))
             # No break on `ran: 0` any more, and #2521 is why the old rule came off.
             # It read "the budget that just failed to buy one will not buy two", which
             # was true only while every draw was handed the WHOLE remainder: a draw
@@ -1445,8 +1612,7 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
             if room < MIN_RUN_SECONDS:
                 break
             base_draws.append(_run_selection(interp, tree, failing_files, base_vault,
-                                             probe_data, mark_expr or mark,
-                                             room, 1))
+                                             probe_data, mark_expr or mark, room, 1))
             # As on the proposed side: a draw that answered nothing spent only its own
             # share, so the draw still owed keeps its own and gets asked anyway. The
             # `not completed_base` skip below is still the answer when neither reports.

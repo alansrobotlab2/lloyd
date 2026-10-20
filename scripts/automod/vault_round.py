@@ -1282,6 +1282,19 @@ def _guards_row(guards: dict) -> dict:
         for k in ("seconds", "files"):
             if blk.get(k) is not None:
                 out[key][k] = blk[k]
+    if guards.get("baseline_vault"):
+        # The revert witness, on the row that reasons from it (#3033). The probe's
+        # reason is a sentence about the PRE-LAND vault — "4 failing node(s) fail
+        # against the pre-land vault too" — and the row carried what the two draws
+        # counted while the fact that made the pre-land side a pre-land side (that
+        # `baseline_vault` put these very paths back, and which of them had no HEAD
+        # version and were deleted instead) stayed in the in-memory report. No
+        # `guards` dict in the ledger's history ever carried the key, so #3029's row
+        # could not be audited from the ledger at all: the reader had to re-run the
+        # probe against the pre-land vault to find out the guard had not.
+        out["baseline_vault"] = {
+            "restored": list(guards["baseline_vault"].get("restored") or []),
+            "removed": list(guards["baseline_vault"].get("removed") or [])}
     ack_row = guards.get("ack")
     if ack_row and (ack_row.get("requested") or ack_row.get("accepted")
                     or ack_row.get("unmatched")):

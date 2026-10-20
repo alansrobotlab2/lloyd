@@ -786,8 +786,9 @@ surfaces can delete one. The body rule #2589 landed (`64b501c3`) — refuse a ta
 that orders a tool the built prompt never delivers — is open on this lane for that same
 bind-mount reason and not for a second one: a Bash child authors a body with `cat >` and
 `sed -i`, so there is no write-time rail for it to reach. What enforces it here instead
-is the land-time probe: `scripts/automod/vault_guards.py:555` hands that probe its
-`LLOYD_VAULT_ROOT`, and the corpus the probe grades is
+is the land-time probe: `scripts/automod/vault_guards.py:710-711` hands that probe its
+vault down both routes a node can resolve one by — `LLOYD_VAULT_ROOT` and the child's
+own home directory, each naming the same directory — and the corpus the probe grades is
 `tests/test_research_doc_claims.py::_task_files`, which is why a shell-authored body
 naming an undelivered tool reddens the next round's base probe rather than the turn that
 wrote it. Reopen this ruling on one observable: that sweep yields an offender with no

@@ -1377,10 +1377,15 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     # only the spent half, so the shortfall they hit was readable only out of their
     # `reason` prose — and `budget_source` names which of the two ways that number was
     # arrived at produced it.
+    # #3033 adds `baseline_vault`: the refusal's sentence is about the PRE-LAND vault,
+    # and the path the pre-land side was built by was in the probe's report and never
+    # on the row — `grep -c '"baseline_vault"' ~/.local/state/lloyd-automod/promotions.jsonl`
+    # was 0 across the store and its archive, so #3029's absolution could not be
+    # audited from the ledger at all.
     assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
                       "nodes", "excerpt", "workers", "parallel_retry", "reason",
                       "parallel_retry_2", "baseline_2", "proposed_runs",
-                      "baseline_runs", "mirror_gap_s",
+                      "baseline_runs", "mirror_gap_s", "baseline_vault",
                       "budget", "budget_source"}, g
     assert "tests/test_guard.py::" in g["reason"], g["reason"]
     assert g["workers"] == 2, g
@@ -7916,3 +7921,399 @@ def test_the_refusal_row_distinguishes_a_kept_item_file_from_a_removed_one(vault
     assert kept.startswith("backlog/9-item.md") and "kept" in kept, kept
     assert row["reverted"][1] == "autonomy/1-task.md", row["reverted"]
     assert row["reverted"][2] == "autonomy/2-new.md", row["reverted"]
+
+
+# --------------------------------------------------------------------------- #
+# #3033: the pre-land baseline has to be the vault the node actually reads.
+#
+# The probe has always built a reverted pre-land mirror and pointed
+# `LLOYD_VAULT_ROOT` at it, and every guard in this module's own corpus reads the
+# vault through that knob — which is why 34 `pre_existing` rows in the ledger never
+# showed that for most of the selection the mirror was never opened. 125 of the 267
+# files `guard_selection` returns (measured on this tree) resolve the vault as
+# `Path.home() / "obsidian"`, against the 34 that honour
+# `LLOYD_VAULT_ROOT`/`vault_root(`, and `HOME` was never in the child's environment
+# (`grep -c HOME scripts/automod/vault_guards.py` was 0 before this section). For
+# those guards both draws read the live working tree with this land's own
+# uncommitted edit in it, so every failure the land caused sat on the "before" side
+# too and was absolved. #3029's land is the case the item quotes: `baseline: ran 18
+# / failed 4` naming the four nodes that land broke, where the same 18 nodes
+# measured `18 passed / 0 failed` against the pre-land vault. Main went red on an
+# `acceptance: met`, and two more items were needed to record what the guard had
+# waved through.
+#
+# Every fixture below is written the way the 125 are written, so each is
+# independently red at the base commit — a probe that absolves its own land cannot
+# pass a clause about refusing one.
+# --------------------------------------------------------------------------- #
+
+#: `GUARD_SRC`'s assertion reached the other way: no `LLOYD_VAULT_ROOT` anywhere, so
+#: the only route to the vault is `$HOME`. This is the reading
+#: `tests/test_skill_stranded_ruled_sets.py:71` takes ("Never app.paths.VAULT_ROOT"),
+#: and the reason `baseline_vault`'s reverted tree never reached the node it was
+#: built for.
+GUARD_SRC_HOME = '''"""A vault-reading guard anchored on `$HOME`, like 125 of the selection."""
+from pathlib import Path
+
+
+def _store_lines():
+    return [l for l in Path("store_lines.py").read_text().splitlines() if l.strip()]
+
+
+def test_the_prose_states_the_count_the_script_prints():
+    text = (Path.home() / "obsidian" / "skills" / "foo" / "SKILL.md").read_text()
+    stated = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("stores: ")]
+    assert stated[0] == len(_store_lines()), f"prose {stated[0]}, script {len(_store_lines())}"
+'''
+
+#: The same guard, plus the witness clause 1 asks for: one JSON line per draw,
+#: appended, naming every route by which that child could reach a vault and the
+#: prose figure it therefore read. The parent reads the file back after the probe,
+#: so what is asserted is what the child measured inside its own `HOME` — not a
+#: path this module computed from outside the subprocess.
+#:
+#: It writes into `LLOYD_TEST_ROUTES_WITNESS`, which the test puts in the
+#: environment: `_run_selection` builds the child's env from `os.environ`, so
+#: anything the test sets reaches the child, and the child's own scratch is deleted
+#: in the probe's `finally`.
+GUARD_SRC_ROUTES = GUARD_SRC_HOME.replace(
+    '''def test_the_prose_states_the_count_the_script_prints():
+    text = (Path.home() / "obsidian" / "skills" / "foo" / "SKILL.md").read_text()''',
+    '''def test_the_prose_states_the_count_the_script_prints():
+    import json
+    import os
+    home = Path.home()
+    witness = os.environ.get("LLOYD_TEST_ROUTES_WITNESS")
+    if witness:
+        with open(witness, "a") as fh:
+            fh.write(json.dumps({
+                "home": str(home),
+                "home_vault": str(home / "obsidian"),
+                "env_vault": os.environ.get("LLOYD_VAULT_ROOT"),
+                "lloyd": str(home / "lloyd"),
+                "data": os.environ.get("LLOYD_DATA"),
+                "prose": _prose_count(home),
+            }) + "\\n")
+    text = (home / "obsidian" / "skills" / "foo" / "SKILL.md").read_text()''').replace(
+    '''def _store_lines():''',
+    '''def _prose_count(home):
+    try:
+        txt = (home / "obsidian" / "skills" / "foo" / "SKILL.md").read_text()
+    except OSError:
+        return None
+    for line in txt.splitlines():
+        if line.startswith("stores: "):
+            return int(line.split()[-1])
+    return None
+
+
+def _store_lines():''')
+
+#: A guard that WRITES under the vault home it was shown, then asserts what
+#: `GUARD_SRC` asserts. `GUARD_SRC_WRITES` is the same hazard through
+#: `LLOYD_VAULT_ROOT`; this is the hazard through the route the 125 take, which is
+#: the one that could have reached the real `~/obsidian` once `HOME` was steered.
+GUARD_SRC_HOME_WRITES = '''"""A `$HOME`-anchored guard that mutates the vault it is shown."""
+from pathlib import Path
+
+
+def _store_lines():
+    return [l for l in Path("store_lines.py").read_text().splitlines() if l.strip()]
+
+
+def test_a_guard_that_mutates_its_vault_home():
+    import os
+    v = Path.home() / "obsidian"
+    (v / "PROBED-VIA-HOME").write_text("written through the steered HOME")
+    w = os.environ.get("LLOYD_TEST_WROTE_AT")
+    if w:
+        Path(w).write_text(str(v / "PROBED-VIA-HOME"))
+    text = (v / "skills" / "foo" / "SKILL.md").read_text()
+    stated = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("stores: ")]
+    assert stated[0] == len(_store_lines()), f"prose {stated[0]}, script {len(_store_lines())}"
+'''
+
+SKILL_AT_FIVE = "---\nname: foo\n---\nstores: 5\n"
+HOME_COUNT_NODE = "tests/test_guard.py::test_the_prose_states_the_count_the_script_prints"
+HOME_WRITE_NODE = "tests/test_guard.py::test_a_guard_that_mutates_its_vault_home"
+BACKLOG_ITEM_PATH = "backlog/9-item.md"
+
+
+def _witness(tmp_path, monkeypatch) -> Path:
+    """An (empty) witness file the probe's children append to. Named in the
+    environment because the child's own scratch is deleted with the probe."""
+    w = tmp_path / "routes.jsonl"
+    monkeypatch.setenv("LLOYD_TEST_ROUTES_WITNESS", str(w))
+    return w
+
+
+def _routes(w: Path) -> list[dict]:
+    import json
+    return [json.loads(l) for l in w.read_text().splitlines() if l.strip()]
+
+
+def _side(rows, end: str) -> list[dict]:
+    """The draws made against one mirror: `home-proposed` or `home-head`.
+
+    `agreement` may ask a side more than once — one parallel pass, then a serial
+    re-ask per failing node, and `BASELINE_DRAWS` two passes on the pre-land side —
+    so the witness is read per side rather than as a sequence.
+    """
+    return [r for r in rows if Path(r["home"]).name == end]
+
+
+def _item_body(vault, body: str) -> None:
+    """Edit a backlog item's body. A path the guard does not read, at HEAD, so the
+    land is about something else while the reverted mirror still has to put it back."""
+    (vault / BACKLOG_ITEM_PATH).write_text(
+        "---\nstatus: draft\n---\n" + body + "\n")
+
+
+def test_the_probe_child_reads_its_own_home_as_the_vault(tmp_path, vault, probed,
+                                                         monkeypatch):
+    """Clause 1, from inside the child. One land, one draw, one witness line.
+
+    The two routes are equal as STRINGS (`home_vault` == `env_vault`), which is the
+    property a symlink to the mirror would not have given and the property the 125
+    need; the home is the probe's scratch home and not the account's, and `$HOME`
+    did not arrive here by the test's own environment.
+    """
+    w = _witness(tmp_path, monkeypatch)
+    _prose(vault, SKILL_AT_FOUR, commit=True)          # prose agrees: nothing to refuse
+    probed(make_guard_tree(tmp_path / "rtree", src=GUARD_SRC_ROUTES), vault)
+    _item_body(vault, "an edit that changes no count")
+    assert V.land([BACKLOG_ITEM_PATH], "#3033 a clean land",
+                   item_id=None)["ok"]
+    rows = _routes(w)
+    proposed = _side(rows, "home-proposed")
+    assert len(proposed) == 1, f"nothing failed, so one draw was expected: {rows}"
+    r = proposed[0]
+    assert r["home_vault"] == r["env_vault"], r
+    assert r["prose"] == 4, r
+    assert str(tmp_path / "probe-scratch") in r["home"], r
+    assert r["home"] != str(Path.home()), "the child was handed the account's home"
+    assert not (Path(r["home"]) / "obsidian").is_symlink(), r
+    assert not _side(rows, "home-head"), f"no baseline draw was due: {rows}"
+
+
+def test_a_land_that_reddens_a_home_anchored_guard_is_refused(vault, tmp_path,
+                                                              probed, monkeypatch):
+    """Clauses 1 and 2. The prose goes 4→5; the guard reads it via `$HOME`.
+
+    The draw that judges the proposed vault must fail (`prose 5, script 4`), and the
+    draw that judges the reverted pre-land mirror must PASS (`prose 4`). Before
+    #3033 both children opened the live tree, so the second said `prose 5` too, the
+    node was classified `pre_existing`, and this land committed. The witness is the
+    proof of which tree each draw opened; the refusal is what the classification now
+    has to produce.
+    """
+    _two_workers(monkeypatch)
+    w = _witness(tmp_path, monkeypatch)
+    tree = make_guard_tree(tmp_path / "ftree", src=GUARD_SRC_ROUTES)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(tree, vault)
+    _prose(vault, SKILL_AT_FIVE)
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "#3033 five stores", item_id=None)
+    assert "code agreement failed" in str(ei.value), str(ei.value)
+    assert HOME_COUNT_NODE in str(ei.value), str(ei.value)
+    assert _head(vault) == head, "refused before any vault commit"
+    assert SKILL_AT_FOUR in (vault / "skills" / "foo" / "SKILL.md").read_text(), \
+        "the refused land left its edit in the working tree"
+
+    rows = _routes(w)
+    proposed, base = _side(rows, "home-proposed"), _side(rows, "home-head")
+    assert proposed and base, f"both sides must have been drawn: {rows}"
+    assert {r["prose"] for r in proposed} == {5}, proposed
+    assert {r["prose"] for r in base} == {4}, (
+        f"the pre-land draw read the pre-land prose, not this land's: {base}")
+    for r in rows:
+        assert r["home_vault"] == r["env_vault"], r
+    assert {r["home"] for r in proposed}.isdisjoint({r["home"] for r in base}), \
+        "both draws shared one home"
+
+    row = _events("vault_land")[0]
+    g = row["guards"]
+    assert g["state"] == "checked" and g["refuse"] is True, g
+    assert g["nodes"] == [HOME_COUNT_NODE], g
+    assert "pre-existing" not in g["reason"], g["reason"]
+    # Clause 4's refused half: the row now says which paths it was told were absent.
+    assert g["baseline_vault"] == {"restored": ["skills/foo/SKILL.md"],
+                                   "removed": []}, g
+
+
+def test_a_home_anchored_guard_red_on_both_mirrors_is_still_excused(vault, tmp_path,
+                                                                    probed, monkeypatch):
+    """Clause 3. Red at the vault's HEAD and red after: this land is not why.
+
+    The guard reads `skills/foo/SKILL.md`, which says 5 at HEAD, and this land edits
+    a backlog item the guard never opens. Both mirrors therefore say `prose 5`, so
+    the node is excused and the land proceeds — #2283's rule, kept by a guard that
+    reaches the vault the way the 125 do rather than the way the fixtures did. The
+    second assertion in `g["baseline_vault"]` is what the same row owed the reader
+    before: which path the pre-land side actually reverted.
+    """
+    _two_workers(monkeypatch)
+    w = _witness(tmp_path, monkeypatch)
+    tree = make_guard_tree(tmp_path / "ptree", src=GUARD_SRC_ROUTES)
+    _prose(vault, SKILL_AT_FIVE, commit=True)          # red at HEAD, for either mirror
+    probed(tree, vault)
+    _item_body(vault, "an edit no guard reads")
+    assert V.land([BACKLOG_ITEM_PATH], "#3033 pre-existing red",
+                   item_id=None)["ok"]
+    rows = _routes(w)
+    proposed, base = _side(rows, "home-proposed"), _side(rows, "home-head")
+    assert proposed and base, f"both sides must have been drawn: {rows}"
+    assert {r["prose"] for r in rows} == {5}, f"both mirrors disagree alike: {rows}"
+    g = _events("vault_land")[0]["guards"]
+    assert g["refuse"] is False, g
+    assert "pre-existing, not this land" in g["reason"], g["reason"]
+    assert g["pre_existing"] == [HOME_COUNT_NODE], g
+    assert g["baseline_vault"] == {"restored": [BACKLOG_ITEM_PATH], "removed": []}, g
+
+
+def test_a_guard_writing_its_vault_home_leaves_the_live_vault_untouched(vault, tmp_path,
+                                                                        probed,
+                                                                        monkeypatch):
+    """Clause 5. The safety `baseline_vault`'s docstring states of the copy, now of
+    the path: a guard that writes under `Path.home() / "obsidian"` writes into the
+    probe's scratch mirror, which dies in the probe's `finally`.
+
+    Both halves matter, and only the second one caught the bug at base. The guard
+    reports the ABSOLUTE path it wrote to — measured inside the child, so it is the
+    child's `$HOME` and not this module's guess — and that path must be the probe's
+    scratch mirror. At base it was literally
+    `/home/alansrobotlab/obsidian/PROBED-VIA-HOME`, and the file was really there
+    afterwards: the pre-fix probe wrote into the account's live vault, which the
+    first draft of this node passed by checking only its own fixture. A steered
+    `HOME` is therefore only safe because the mirror sits inside scratch, which is
+    why `probe_home` lays a real directory at `<home>/obsidian` rather than a symlink
+    back to the vault.
+    """
+    wrote = tmp_path / "wrote-at.txt"
+    monkeypatch.setenv("LLOYD_TEST_WROTE_AT", str(wrote))
+    tree = make_guard_tree(tmp_path / "wtree", src=GUARD_SRC_HOME_WRITES)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(tree, vault)
+    _item_body(vault, "an edit that changes no count")
+    assert V.land([BACKLOG_ITEM_PATH], "#3033 a mutating guard",
+                   item_id=None)["ok"]
+    target = Path(wrote.read_text().strip())
+    assert target.name == "PROBED-VIA-HOME", target
+    assert str(tmp_path / "probe-scratch") in str(target), (
+        f"the child wrote outside the probe's scratch: {target}")
+    assert target != Path.home() / "obsidian" / "PROBED-VIA-HOME", target
+    assert not target.is_symlink() and not target.parent.is_symlink(), target
+    assert not (vault / "PROBED-VIA-HOME").exists(), \
+        "the probe's child wrote through its HOME into the vault it came to judge"
+    dirt = git(vault, "status", "--porcelain").stdout
+    assert "PROBED-VIA-HOME" not in dirt, dirt
+
+
+def test_probe_home_moves_exactly_one_name_and_reports_why_it_cannot(tmp_path):
+    """`probe_home` itself, without a subprocess: what it links and what it refuses.
+
+    The farm is what keeps this a vault fix and not a "the child's tests now fail
+    for want of `~/.gitconfig`" fix — #2283's false-refusal class, paid for by a
+    guard that reads no vault at all. `lloyd` is the round's own third name and goes
+    to the probe worktree rather than the real home, so a guard resolving a code
+    root through `Path.home() / "lloyd"` gets the tree `PYTHONPATH` names.
+    """
+    real = tmp_path / "real"
+    (real / "obsidian").mkdir(parents=True)
+    (real / "lloyd-data").mkdir()
+    (real / "lloyd").mkdir()
+    (real / ".gitconfig").write_text("[user]\n")
+    (real / ".cache").mkdir()
+    target = tmp_path / "probe-worktree"
+    target.mkdir()
+    home = tmp_path / "home-proposed"
+
+    assert VG.probe_home(home, lloyd_target=target, real_home=real) is None
+    assert (home / ".gitconfig").is_symlink() and (home / ".cache").is_symlink()
+    assert (home / ".gitconfig").resolve() == (real / ".gitconfig").resolve()
+    for moved in ("obsidian", "lloyd-data"):
+        assert not (home / moved).exists(), f"{moved} was linked from the real home"
+    assert (home / "lloyd").is_symlink()
+    assert (home / "lloyd").resolve() == target.resolve()
+
+    # Idempotent: a second call over an existing farm changes nothing and fails not.
+    (home / "obsidian").mkdir()
+    assert VG.probe_home(home, lloyd_target=target, real_home=real) is None
+    assert (home / "obsidian").is_dir() and not (home / "obsidian").is_symlink()
+
+    # And the refusal, because the caller's alternative is the real home.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    err = VG.probe_home(blocked, lloyd_target=target, real_home=real)
+    assert isinstance(err, str) and str(blocked) in err, err
+
+
+def test_the_child_home_is_derived_from_the_mirror_it_is_shown(tmp_path):
+    """`child_home`, the derivation that makes the steered `HOME` unconditional.
+
+    `agreement` lays each draw's mirror at `<home>/obsidian`, and the home it hands
+    the child is that `<home>` — so the two routes to a vault are one path string,
+    which is what the 125 `Path.home() / "obsidian"` files and the 34
+    `$LLOYD_VAULT_ROOT` files need to agree. A caller with a differently-named mirror
+    still gets a home rather than an inherited one, because the only inherited option
+    is the account's real home, i.e. the live `~/obsidian`: the sibling
+    `.child-home/obsidian` is a symlink to the mirror, so the child reads and writes
+    THAT vault and never the live tree. The strings differ for that caller, and only
+    `agreement`'s own layout buys string identity — which the witness node asserts
+    from inside a real child.
+    """
+    laid_out = tmp_path / "home-head" / VG.HOME_VAULT_NAME
+    laid_out.mkdir(parents=True)
+    home, err = VG.child_home(laid_out)
+    assert (home, err) == (tmp_path / "home-head", None), (home, err)
+
+    other = tmp_path / "scratch" / "mirror"
+    other.mkdir(parents=True)
+    (other / "marker.txt").write_text("the mirror, not the live vault")
+    home2, err2 = VG.child_home(other)
+    assert err2 is None and home2 == tmp_path / "scratch" / VG.CHILD_HOME_NAME, (home2, err2)
+    link = home2 / VG.HOME_VAULT_NAME
+    assert link.is_symlink() and link.resolve() == other.resolve(), link
+    assert (link / "marker.txt").read_text() == "the mirror, not the live vault"
+
+    # A place it cannot create is the one answer that is no answer at all, and it is
+    # reported rather than swallowed: `_run_selection` turns it into `ran: 0` rather
+    # than launching a child on the home it came from. Only a home that has to be
+    # CREATED can fail — a mirror already named `obsidian` needs nothing built — so
+    # the case is a non-`obsidian` mirror under a directory that will not take one.
+    ro = tmp_path / "ro" / "scratch"
+    (ro / "mirror").mkdir(parents=True)
+    os.chmod(ro, 0o500)
+    try:
+        home3, err3 = VG.child_home(ro / "mirror")
+    finally:
+        os.chmod(ro, 0o700)
+    assert home3 is None, (home3, err3)
+    assert ".child-home" in err3 and "PermissionError" in err3, err3
+
+
+
+def test_the_row_carries_the_revert_whenever_the_probe_built_one():
+    """Clause 4, at the projection itself: `_guards_row` copied what it always had.
+
+    `agreement` has written `report["baseline_vault"]` since #2283; the row never
+    showed it (`grep -c '"baseline_vault"' ~/.local/state/lloyd-automod/promotions.jsonl`
+    was 0 across the whole store and its archive). The two keys are copied as lists,
+    so an absent half is an empty list rather than a `None` a reader has to expect;
+    and a probe that never reached the mirror — a budget skip, a skipped nesting run
+    — puts no key on the row, which is what keeps a skip from looking like a revert
+    of nothing.
+    """
+    rep = {"state": "checked", "refuse": False, "seconds": 1.0,
+           "baseline_vault": {"restored": ["skills/foo/SKILL.md"], "removed": []}}
+    assert V._guards_row(rep)["baseline_vault"] == {
+        "restored": ["skills/foo/SKILL.md"], "removed": []}, V._guards_row(rep)
+
+    half = V._guards_row({"state": "checked", "baseline_vault":
+                          {"restored": None, "removed": ["autonomy/1-task.md"]}})
+    assert half["baseline_vault"] == {"restored": [],
+                                      "removed": ["autonomy/1-task.md"]}, half
+    assert "baseline_vault" not in V._guards_row({"state": "skipped", "seconds": 0.4})
+
