@@ -1469,3 +1469,245 @@ def test_no_node_in_this_file_reaches_green_by_being_skipped_or_excluded():
         f"{len(defined)} test functions are defined here but "
         f"{len(gated)} nodes were collected; these are defined and not collected: "
         f"{sorted(missing)}")
+
+
+# ══════════════════════════ #3096: the two prose pointers ══════════════════════════
+#
+# Both rulings this surface keeps re-booking as "owed" were made and recorded on
+# 2026-10-20: #1799 owed entry 4 (23:46:11Z) ruled that `line-lost` stays the leg's
+# ONLY failure state — naming the note path and the row's sha, attributing no cause,
+# no `reflowed`/`sync-side` state added — and #1736 owed entry 3 (12:20:38Z) closed
+# the 2026-09-27 mechanism question as unresolvable on exhausted evidence. The prose
+# said otherwise in three places, which is how an already-answered question gets
+# re-booked as an absence by the next pass that reads it. Four nodes: the pointers
+# are gone and cannot silently return (cl. 1), the writer's own docstring carries the
+# closure (cl. 2), both vault sites carry the ruling and its unexercised trigger
+# (cl. 3), the four-state vocabulary is pinned so a fifth state is a deliberate act
+# (cl. 4), and the loss report's printed shape is pinned character for character
+# (cl. 5).
+#
+# These read the LIVE files, the same seam `test_the_skill_prose_names_the_component
+# _and_every_verdict_state` already reads: the prose is the leg's instruction sheet,
+# so a copy inside this repo would prove nothing about what a person running the
+# script actually reads.
+
+IMPL = SCRIPT.parent / "implementation.md"          # the leg's other prose surface
+AUTONOMY_PY = Path(A.__file__)                      # the writer this leg witnesses
+
+#: The exact strings that advertised a ruling as still owed. All three are listed on
+#: purpose: the first item written for this used `owed on #1799|that is owed there`,
+#: which cannot match the sentence at `app/autonomy.py` — it reads "is owed on #1736",
+#: so that pattern reports a clean file with the pointer standing (the triage caught
+#: it; a grep whose pattern misses its own target is a green light for the bug).
+OWED_POINTERS = ("owed on #1799", "owed on #1736", "that is owed there")
+
+
+def test_no_owed_pointer_survives_in_the_three_witness_prose_files():
+    """Clause 1: the three pointers are gone, and the 0-hit is proved not dead.
+
+    Every file is checked twice in one pass: first for a string the file MUST contain
+    for an unrelated reason (`nothing-examined` is one of the four state names in both
+    vault files, `readable back` is the writer's own return contract), then for each
+    owed pointer. Without the first assertion a 0-hit could mean the path resolved to
+    nothing — a grep against a missing file also returns no hits, which is the
+    0-hit-without-a-positive-control class this repo has been bitten by twice.
+    """
+    controls = {SCRIPT: "nothing-examined", IMPL: "nothing-examined",
+                AUTONOMY_PY: "readable back"}
+    for path, control in controls.items():
+        assert path.is_file(), f"{path} is a live prose surface and it is not there"
+        text = path.read_text(encoding="utf-8")
+        assert control in text, (
+            f"{path} no longer contains {control!r}, so this node cannot tell an "
+            "answered question from a file it failed to read — the positive control "
+            "and the absence below are one instrument, not two")
+        for pointer in OWED_POINTERS:
+            assert pointer not in text, (
+                f"{path} still says {pointer!r}: #1799 ruled on 2026-10-20 that "
+                "`line-lost` stays the leg's only failure state and #1736 closed the "
+                "2026-09-27 mechanism as unresolvable, so the sentence re-books a "
+                "made decision as an open one")
+
+
+def test_the_writer_docstring_states_the_09_27_mechanism_as_closed_not_owed():
+    """Clause 2: the docstring a future reader trusts says CLOSED, not owed.
+
+    Asserted on `A.append_daily_alert_line.__doc__` rather than a slice of the file:
+    the thing the item rules on is what the shipped function tells its caller, and a
+    docstring that moves within the file stays covered by it.
+    """
+    doc = A.append_daily_alert_line.__doc__ or ""
+    assert doc, "append_daily_alert_line has no docstring to carry the closure"
+    lowered = doc.lower()
+    assert "closed" in lowered, (
+        "the docstring must state the 2026-09-27 mechanism question as closed — "
+        "#1736 owed entry 3 settled it on 2026-10-20")
+    assert "unresolvable" in lowered or ("unsolvable" in lowered
+                                         and "exhausted" in lowered), (
+        "the closure has to say WHY it is closed: no evidence route that could "
+        "distinguish the two mechanisms survives, so it is unresolvable on exhausted "
+        "evidence and not merely unanswered")
+    assert "exhausted" in lowered, (
+        "the wording must name exhausted evidence, the entry's own term, or a reader "
+        "cannot tell a settled closure from an abandoned question")
+    assert "#1736" in doc, (
+        "the decision must name the item that made it, so the next reader goes to "
+        "the ruling instead of opening the question again")
+    for pointer in OWED_POINTERS:
+        assert pointer not in doc, f"the docstring still says {pointer!r}"
+    # The numbers #1736's own entry carries (round-record counts, blob counts, the
+    # log tail's depth) are not re-readable from the ledger — both activity lines are
+    # stored truncated mid-sentence — so they are deliberately absent here. Restating
+    # them would make this node cite a measurement nobody can re-run.
+    for unmeasurable in ("1928", "1,928", " of 5 blobs", "only ~10"):
+        assert unmeasurable not in doc, (
+            f"the docstring restates {unmeasurable!r}, a figure that cannot be "
+            "re-read from the ledger and so must not be cited as measured")
+
+
+def test_both_vault_prose_sites_carry_the_ruling_and_its_unexercised_trigger():
+    """Clause 3: the ruling as MADE in both files, plus the trigger that would reopen it.
+
+    The same sentence lives in the script comment and in `implementation.md`, and the
+    first item written for this named only the script — a round that fixed one site
+    and left the other would still have a pointer advertising an owed ruling, so both
+    paths are graded in one node over one list.
+
+    The trigger is checked as PROPOSED-and-unexercised, not as a ruling: #1799's
+    stored ledger line is truncated mid-sentence, so the revisit condition comes from
+    this item, and prose that quoted it as #1799's words would cite text nobody can
+    re-read.
+    """
+    for path in (SCRIPT, IMPL):
+        text = path.read_text(encoding="utf-8")
+        lowered = text.lower()
+        assert "only" in lowered and "failure state" in lowered, (
+            f"{path} does not state that `line-lost` is the leg's only failure state")
+        assert "no cause" in lowered or "attributing no cause" in lowered, (
+            f"{path} does not say the report attributes no cause")
+        assert "sha" in lowered and "note path" in lowered, (
+            f"{path} does not say the report names the note path and the row's sha")
+        assert "reflowed" in lowered and "sync-side" in lowered, (
+            f"{path} does not name the `reflowed`/`sync-side` state that was ruled "
+            "OUT, so a reader could add one believing nothing decided it")
+        assert "no `reflowed`/`sync-side` state is added" in text.replace(
+            "**no `reflowed`/`sync-side` state is added**",
+            "no `reflowed`/`sync-side` state is added"), (
+            f"{path} must say in those words that no such state is added, not merely "
+            "mention the two names: " + repr(text[-1200:]))
+        assert "substring" in lowered and "entry_prefix" in text, (
+            f"{path} is missing the revisit condition: a `line-lost` row whose "
+            "`entry_prefix` survives as a substring of a note line while its sha "
+            "matches nothing")
+        assert "unexercised" in lowered, (
+            f"{path} must mark that trigger as never yet seen — the leg does no "
+            "substring comparison today, so nothing on this box has produced it")
+        assert "ruled" in lowered, (
+            f"{path} must attribute the decision to #1799 as a ruling already made")
+
+
+def test_the_leg_can_emit_exactly_the_four_verdict_states_and_no_fifth():
+    """Clause 4: a fifth state has to be emitted, and emitting it trips this node.
+
+    The four verdict constants existed as names but nothing bounded the SET:
+    `test_the_skill_prose_names_the_component_and_every_verdict_state` asserts each
+    of the four APPEARS in SKILL.md, which a fifth state satisfies by appearing too,
+    so a `reflowed` state was addable with a fully green suite — exactly what #1799's
+    ruling forbids. The bound is read off the leg's own AST rather than off a name
+    convention: every `state=` the leg can hand back (the `result.update(state=…)`
+    calls and the `'state': …` dict entries), resolved to the module-level constants
+    they name. A new state only becomes a state by being emitted somewhere, so the
+    set of emitted names is the vocabulary and there is nothing to hand-filter.
+
+    The `kind` axis is asserted as a SEPARATE set, because the two axes share the
+    literal `"witnessed"` (it is both the green verdict and the proof kind) and a set
+    taken over both would quietly contain 5 strings and read as if the leg had a
+    fifth state. Same shape of scan, `kind=` instead of `state=`, and the two name
+    sets must be disjoint.
+    """
+    import ast
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+
+    def _emitted(keyword: str) -> set[str]:
+        """Constant names the leg assigns to `keyword=` or `'<keyword>': …`."""
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == keyword and isinstance(kw.value, ast.Name):
+                        found.add(kw.value.id)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (isinstance(key, ast.Constant) and key.value == keyword
+                            and isinstance(value, ast.Name)):
+                        found.add(value.id)
+        return {n for n in found if n.startswith("DAILY_NOTE_APPENDS_")}
+
+    states = _emitted("state")
+    kinds = _emitted("kind")
+
+    assert states == {
+        "DAILY_NOTE_APPENDS_GREEN", "DAILY_NOTE_APPENDS_LOST",
+        "DAILY_NOTE_APPENDS_NOTHING", "DAILY_NOTE_APPENDS_UNREADABLE"}, (
+        "the leg's verdict vocabulary changed shape: "
+        f"{sorted(states)} — #1799 ruled on 2026-10-20 that exactly these four "
+        "states exist and `line-lost` is the only failure state, so adding a fifth "
+        "is a deliberate act that has to amend this node and that ruling, not just "
+        "add a constant")
+    assert sorted(getattr(shc, n) for n in states) == [
+        "ledger-unreadable", "line-lost", "nothing-examined", "witnessed"], (
+        "the four names no longer carry the four strings the prose quotes literally")
+    assert kinds == {
+        "DAILY_NOTE_APPENDS_KIND_LOST", "DAILY_NOTE_APPENDS_KIND_PROOF",
+        "DAILY_NOTE_APPENDS_KIND_NOT_PROOF"}, (
+        f"the `kind` axis changed shape too: {sorted(kinds)} — it is a separate axis "
+        "from the verdict states and neither set may absorb the other")
+    assert not (states & kinds), (
+        f"the two axes share constant NAMES {sorted(states & kinds)}, so the "
+        "disjointness this node exists to hold is gone")
+    assert "not-a-proof" not in {getattr(shc, n) for n in states}, (
+        "a kind value is now reachable as a verdict state: the axes have collapsed")
+
+
+def test_a_lost_row_still_prints_its_sha_and_its_note_and_no_cause(witness):
+    """Clause 5: the prose moved; the line a person reads did not.
+
+    Pinned against the composed string rather than substrings of it, because "printed
+    shape unchanged" is only checkable if the shape is written out: field order, the
+    `sha256=` prefix, the parenthetical's three parts. A lost row whose report gained
+    a cause would still print the sha and the path and pass a substring check, and a
+    cause is exactly what #1799's ruling forbids.
+    """
+    # The note has to EXIST after the loss, holding body text and not the line: the
+    # helper's first-append-of-the-day path deletes the file instead, and that row's
+    # `why` is a FileNotFoundError — a read failure, not the sha-mismatch reading
+    # whose printed shape this clause is about.
+    note = witness["notes"] / f"{_today()}.md"
+    note.write_text(f"# {_today()}\n\n- body written before the alert\n",
+                    encoding="utf-8")
+    note, lost_row, _ = _confirm_an_append_then_clobber(witness)
+    assert note.exists(), "the note must survive with its body for this shape"
+    result = shc.check_daily_note_appends(ledger=witness["ledger"])
+    assert result["state"] == shc.DAILY_NOTE_APPENDS_LOST, result
+    reason = shc.daily_note_appends_reason(result)
+
+    assert f'line sha256={lost_row["line_sha256"]} in {note}' in reason, (
+        "the loss report's shape changed: it must open a lost row with "
+        "`line sha256=<sha> in <note path> (written <ts>, <why>, prefix <prefix>)` "
+        "and nothing else — got " + reason)
+    assert (f"(written {lost_row['ts']}, no line of the note hashes to this sha, "
+            f"prefix {lost_row['entry_prefix']!r})") in reason, (
+        "the parenthetical lost one of its three parts or rewrote the neutral `why`, "
+        "so the reader can no longer tell when the row was written or which alert it "
+        "witnessed: " + reason)
+    assert reason.startswith("1 confirmed daily-note alert line is no longer in "
+                            "its note \u2014 "), (
+        "the headline changed shape: " + reason)
+
+    for cause in ("deleted", "reflow", "sync-side", "sync ", "obsidian", "tamper",
+                  "editor", "rewrote", "clobber", "because"):
+        assert cause not in reason.lower(), (
+            f"the loss report now names a cause ({cause!r}); #1799's ruling is that "
+            "a missing line is evidence of LOSS only — the note has several mutators "
+            "and the leg cannot tell them apart: " + reason)

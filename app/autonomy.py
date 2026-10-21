@@ -3847,13 +3847,20 @@ def append_daily_alert_line(body: str) -> bool:
     21:24, ten minutes on, with content byte-identical to `HEAD`, which is that
     signature — this check returns True and the alarm is still gone. So the claim is
     "a returned True means the line was there when we returned", NOT "an alarm can no
-    longer be lost". Settling which of the two mechanisms the 09-27 instance was is
-    owed on #1736. What DOES witness these appends after the return is a second
+    longer be lost". Which of the two mechanisms the 09-27 instance actually was is a
+    CLOSED question, not an open one: #1736 settled it on 2026-10-20 as UNSOLVABLE on
+    exhausted evidence — every route that could have distinguished a
+    returned-truthy-without-landing from a later whole-file rewrite is gone, and no
+    surviving instrument on this box can settle it retroactively. Treat it as decided
+    (the decision being that the mechanism stays unknown), not as something still
+    being waited on. What DOES witness these appends after the return is a second
     surface, added for exactly that gap (#1799): a confirmed append writes one row
     to `~/lloyd-data/alerts/daily-note-appends.jsonl`, and the `daily_note_appends`
     leg of the system health check re-reads the last 48 h of those rows and reports
     any line whose sha is no longer in its note. It witnesses appends made after it
-    landed, so it cannot settle the 2026-09-27 instance — that is owed there.
+    landed, so it was never able to reach the 2026-09-27 instance — and #1736 closed
+    that retroactive half with the question, rather than leaving it pending behind
+    this leg.
     (`~/obsidian/memory/audit/writes.jsonl` is still not this: it records only the
     `vault_write` route.)
 
