@@ -38,10 +38,19 @@ What it deliberately does NOT do:
     the sweep's post-condition is "no note with no `task_id` still carrying a
     `review_status` of `pending` or `out_of_band`" rather than "every note has a
     `task_id`".
-  * **Touch a note that HAS a `task_id`.** Four such notes exist, and one of
-    them sits at `review_status: pending`. Whether the writer should also stamp
-    `measured_against` going forward is owed ruling 2 of #1769 — a decision about
-    the writer, not a licence to backfill four notes from a maintenance script.
+  * **Touch a note that HAS a `task_id`.** Such a note's mean is a measurement
+    of the task its key names, and its band verdict stands. Whether the writer
+    should also stamp `measured_against` going forward is ruled, not owed: the
+    #1769 owed-check ruling of 2026-09-30 (run `20260929_194724_owedcheck_5e0b`),
+    reaffirmed on 2026-10-20 (run `20261020_135123_owedcheck_bd8d`, the pass that
+    filed #3090), is that the writer does not stamp the key and the
+    with-`task_id` notes are not backfilled — `measured_against` stays a
+    void-only marker, written by this script and by nothing else. No count of
+    the with-`task_id` set lives in this file: the staging tree grows every
+    night, so one number in permanent prose is a claim waiting to go false
+    (#705 deleted exactly such a number from `workers/sources/bench_mine.py`'s
+    prose), and a `--dry-run` over the default root measures the set on the day
+    someone asks.
   * **Move or delete anything.** No `_rejected/`, no re-calibration. Relabelling
     cannot cost a promotion either: `POST /api/workers/pending/promote` never
     reads the staged note's `review_status` (it stamps `promoted` on the LANDED

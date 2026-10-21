@@ -44,7 +44,17 @@ layer awarded by default) rather than against the task sitting in the note's
 body. ``scripts/maintenance/relabel_stale_bench_calibration.py`` (#1769) labels
 such a note ``review_status: uncalibrated`` with ``calibration.status:
 stale_envelope`` and voids the band verdict; that set cannot grow, because the
-writer stamps the key. To re-measure one of those notes on demand: read the
+writer stamps the key. What the key's ABSENCE means is the other half of that
+ruling, and #1769 settled it on 2026-09-30 (reaffirmed 2026-10-20): a staged
+note carrying ``calibration.task_id`` with NO ``measured_against`` was measured
+against the task its own ``task_id`` names, so its band verdict describes the
+candidate sitting in the body and wants no provenance stamped onto it.
+``measured_against`` is therefore stamped by
+``scripts/maintenance/relabel_stale_bench_calibration.py`` alone, and only to
+void the band verdict of the note that script relabels — never by this writer,
+so the key's absence on a with-``task_id`` note is the normal shape of a real
+measurement, not a field to backfill. To re-measure one of those notes on
+demand: read the
 note's BODY, parse it with ``_candidate_frontmatter`` — which takes the note's
 TEXT, not a path — and pass the result as ``task=``. Never call
 ``calibrate_candidate(path)`` on a staged note: with no ``task=`` it falls back

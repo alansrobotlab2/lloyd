@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -324,9 +325,11 @@ def test_apply_sets_the_four_fields_on_every_note_with_no_task_id(tmp_path):
             # the same breath as it disowned the verdict.
             assert "runs" not in cal and "composites" not in cal, role
     for name, p in roles["calibrated"].items():
-        # `measured_against` on a note that HAS a task_id is owed ruling 2 of
-        # #1769 — a decision about what the writer should stamp going forward,
-        # which this script has no business making silently for four notes.
+        # `measured_against` on a note that HAS a task_id is ruled, not owed:
+        # #1769 decided it on 2026-09-30 and reaffirmed it on 2026-10-20 (the
+        # pass that filed #3090) — the writer does not stamp the key and the
+        # with-task_id notes are not backfilled. So the absence asserted below
+        # is the ruling's expected shape, not a gap waiting on a decision.
         assert "measured_against" not in _fm(p)["calibration"], (
             f"{name}: stamped a provenance the relabel has no ruling for")
 
@@ -722,3 +725,154 @@ def test_a_readme_with_front_matter_is_excluded_by_both_sides_of_the_check(tmp_p
     assert _fm(lower).get("review_status") == UNCALIBRATED, (
         "readme.md is a note: the exclusion is the exact name README.md, the "
         "queue's own test, not a case-insensitive prefix")
+
+
+# ---------------------------------------------------------------------------
+# #3090 — the prose a reader of this script actually gets
+#
+# Every node above reads the SCRIPT's bytes for an import or a call; none of them
+# read its docstring, and none read this file's own comments. That is how two
+# sentences here stayed false: a corpus count of "four" notes against a live set
+# three digits long, and a question #1769 decided on 2026-09-30 (the owed-check
+# run `20260929_194724_owedcheck_5e0b`) and decided again on 2026-10-20 (run
+# `20261020_135123_owedcheck_bd8d`, the pass that filed #3090) still described as
+# waiting on a ruling. The first falsification makes every other number in the
+# file untrustworthy; the second tells a reader to wait for a decision that
+# already says no.
+# ---------------------------------------------------------------------------
+
+def _script_docstring() -> str:
+    """The script's MODULE docstring, whitespace-flattened.
+
+    AST-extracted rather than matched over `SCRIPT.read_text()`, so a sentence
+    that left the docstring and reappears in a comment or a `print` cannot pass
+    as the prose this grades — #1689's rule for a ban with no eyes, applied to an
+    `in` (same reasoning as `test_workers_doc_claims._module_docstring`).
+    """
+    doc = ast.get_docstring(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+    assert doc, "the script has no module docstring — the extractor found nothing"
+    assert doc.startswith("Relabel the pre-#1710 staged bench-mine notes"), (
+        f"the extractor returned something that is not the script's docstring: "
+        f"{doc[:60]!r}")
+    return " ".join(doc.split())
+
+
+def _sentences(flat: str) -> list[str]:
+    """Sentences of already-flattened prose, split on terminal punctuation."""
+    return re.split(r"(?<=[.!?]) ", flat)
+
+
+def _comment_block_above(needle: str) -> str:
+    """The contiguous `#` lines directly above this file's only line containing
+    `needle`, flattened to one string.
+
+    The comment is a graded surface because it is the prose a reader of that
+    assertion gets: it explained WHY a with-`task_id` note must come back with no
+    `measured_against`, and until #3090 it explained that as an open question.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if needle in ln]
+    assert len(hits) == 1, (
+        f"{needle!r} matched {len(hits)} lines, so which comment this extracts is "
+        "ambiguous and the node below would grade the wrong prose")
+    block: list[str] = []
+    j = hits[0] - 1
+    while j >= 0 and lines[j].lstrip().startswith("#"):
+        block.append(lines[j].lstrip().lstrip("#").strip())
+        j -= 1
+    assert block, f"no `#` block above {needle!r} — deleted rather than corrected"
+    return " ".join(" ".join(b.split()) for b in reversed(block))
+
+
+def _prose_grep(needle: str) -> str:
+    """Case-insensitive `git grep` over exactly the two files whose prose #3090
+    touched, so a ban here is never answered by an unrelated file that happens to
+    use the same words for something else."""
+    out = subprocess.run(
+        ["git", "grep", "-i", "-n", needle, "--",
+         str(SCRIPT.relative_to(ROOT)), str(Path(__file__).relative_to(ROOT))],
+        cwd=str(ROOT), capture_output=True, text=True)
+    assert out.returncode in (0, 1), out.stderr  # 1 = no match, anything else is a breakage
+    return out.stdout
+
+
+def test_the_prose_records_the_measured_against_ruling_as_made():
+    """#3090 clause 3: both places that described the writer question as still
+    open now record it as DECIDED — the writer does not stamp the key, and the
+    with-`task_id` notes are not backfilled.
+
+    Graded on the sentence rather than the file because half the claim is the
+    wait and half is the decision: prose saying only "an exception-only marker"
+    is what a later round reads as permission to stamp the key on the
+    with-`task_id` notes after all.
+    """
+    # The open framing itself, banned before any extraction, and fragment-joined
+    # so this file cannot be its own hit (#1689's rule for a ban with no eyes).
+    out = _prose_grep("owed " + "ruling")
+    assert not out.strip(), (
+        f"the open-question framing is back in the prose a reader opens:\n{out}")
+
+    ruled = [s for s in _sentences(_script_docstring())
+             if "measured_against" in s and "writer" in s]
+    assert len(ruled) == 1, (
+        f"{len(ruled)} docstring sentences tie `measured_against` to the writer; "
+        "exactly one may state the ruling, and zero is the state that let the "
+        "open framing stand for three weeks")
+    s = ruled[0]
+    for fact in ("ruled, not owed", "does not stamp the key", "not backfilled",
+                 "void-only"):
+        assert fact in s, (
+            f"the ruling sentence lost {fact!r}: 'ruled, not owed' is what stops "
+            "a reader waiting on #1769, 'does not stamp the key' and 'not "
+            "backfilled' are the decision's two halves, and 'void-only' is what "
+            "tells the next round the key has exactly one purpose")
+    for day in ("2026-09-30", "2026-10-20"):
+        assert day in s, (
+            f"{day} dates one of the two owed-check passes that ruled this; a "
+            "'no' with no date behind it is the claim a later round re-opens")
+
+    # Fragment-joined for the same reason as the ban above: the call site would
+    # otherwise be the second hit and this would grade its own line.
+    blk = _comment_block_above('_fm(p)' + '["calibration"]')
+    for fact in ("ruled, not owed", "does not stamp the key", "not backfilled"):
+        assert fact in blk, (
+            f"the comment over the with-`task_id` assertion lost {fact!r} — that "
+            "comment is the only reason a reader knows the assert below pins a "
+            "ruling rather than a gap")
+    assert "2026-09-30" in blk and "2026-10-20" in blk, (
+        "the comment has to date both passes, or the next reader re-files the "
+        "question #1769 closed twice")
+
+
+def test_the_script_docstring_states_no_count_of_the_with_task_id_set():
+    """#3090 clause 4 — #705's class rule pointed at this file's own prose.
+
+    The bullet used to open with a count: that only a handful of notes carried a
+    `task_id` at all, and one of those sat at `review_status: pending`. That was
+    false the week it was written and is two orders of magnitude false now — 18
+    with-`task_id` notes at the 2026-09-30 ruling, and the 2026-10-21 sweep
+    behind #3090 counted a set that has not stopped growing since. A count of a
+    store that grows nightly is not a fact in permanent prose — and this one sat
+    in the file that tells a human which notes to LEAVE ALONE, where a stale
+    number is a wrong instruction rather than a stale curiosity. The replacement
+    says where the count comes from instead, so the absence of a number here
+    reads as a decision rather than an oversight.
+    """
+    for needle in ("Four such " "notes", "backfill four " "notes"):
+        out = _prose_grep(needle)
+        assert not out.strip(), f"{needle!r} is back in the relabel's prose:\n{out}"
+
+    cnt = [s for s in _sentences(_script_docstring()) if "No count of" in s]
+    assert len(cnt) == 1, (
+        f"{len(cnt)} sentences say where the with-`task_id` count lives. One may, "
+        "and zero is a bare deletion: a reader who cannot find a number and "
+        "cannot find the reason puts the number back")
+    s = cnt[0]
+    assert "with-`task_id` set" in s, (
+        f"it must name the SET it refuses to count, not notes in general: {s!r}")
+    assert "--dry-run" in s, (
+        "the count is available on demand from the sweep itself; without that "
+        "route stated, the missing number is a gap rather than a rule")
+    assert "grows every night" in s and "#705" in s, (
+        "the sentence must carry its why and the precedent that removed the "
+        "first such number, or the next tidy-up re-adds one")

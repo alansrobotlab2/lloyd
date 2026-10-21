@@ -825,6 +825,99 @@ def test_bench_mine_docstring_states_the_route_for_a_stale_note():
 
 
 # ---------------------------------------------------------------------------
+# #3090 — the other half of the #1769 ruling: what an ABSENT key states.
+#
+# #1769 ruled twice and only one ruling reached the code. The relabel route is
+# pinned by the node above; the second ruling — `measured_against` stays a
+# void-only marker and the writer never stamps it — was made 2026-09-30 (the
+# owed-check run `20260929_194724_owedcheck_5e0b`), reaffirmed 2026-10-20 (run
+# `20261020_135123_owedcheck_bd8d`, the pass that filed #3090), and then lived
+# only in #1769's owed ledger. That ledger sits on a `status: done` item, so no
+# later round re-derives it, while the staging tree keeps showing a reader what
+# looks like a missing field: the live sweep on 2026-10-21 finds every
+# with-`task_id` note carrying no `measured_against` at all (296 of them that
+# day, and `--dry-run` is the only honest count — a number written here is
+# false by the next night, which is the class #705 removed). The fix for a
+# reader who reads "missing" is a backfill, and #1769's ruling is that a
+# backfill would invent a provenance the trials never had. Graded sentence by
+# sentence for the reason the node above gives: a doc-wide `in` can be satisfied
+# by an unrelated sentence while the claim itself is the one that went back to
+# recommending the opposite.
+# ---------------------------------------------------------------------------
+
+def _ma_sentences(doc: str) -> list[str]:
+    """The docstring sentences that name `measured_against`, flattened.
+
+    One sentence per claim, because the ruling is two claims — what an absent
+    key means, and who may write it — and a check that let a single sentence
+    satisfy both would let either half be deleted with the other looking
+    untouched.
+    """
+    return [s for s in re.split(r"(?<=[.!?]) ", doc) if "measured_against" in s]
+
+
+def test_bench_mine_docstring_says_an_absent_key_means_the_named_task():
+    """#3090 clause 1: a staged note with `calibration.task_id` and NO
+    `measured_against` was measured against the task its `task_id` names.
+
+    Without this sentence the only statement of the invariant is a closed
+    item's ledger line, and the observable in the queue — hundreds of notes with
+    a `task_id` and no provenance key — reads as an omission.
+    """
+    doc = _module_docstring(_BENCH_MINE_SRC)
+    assert doc.startswith("bench-mine source"), (
+        f"the extractor returned something that is not this module's docstring: "
+        f"{doc[:60]!r}")
+
+    inv = [s for s in _ma_sentences(doc)
+           if "task_id" in s and "NO ``measured_against``" in s]
+    assert len(inv) == 1, (
+        f"{len(inv)} sentence(s) state what an absent `measured_against` means "
+        "next to `task_id`; exactly one may carry that claim, and zero is the "
+        "regression this node exists for — the ruling retreats to #1769's owed "
+        "ledger, on an item nobody re-opens")
+    assert "measured against the task" in inv[0], (
+        f"the sentence no longer names what an unmarked note's mean describes: "
+        f"{inv[0]!r}")
+    for fact in ("staged", "band verdict", "body"):
+        assert fact in inv[0], (
+            f"the invariant lost {fact!r}, and each one is a different misread: "
+            "without 'staged' it looks like a rule about ledger rows, without "
+            "'band verdict' the verdict itself is unaccounted for, and without "
+            "'body' a reader can still conclude the mean describes the staging "
+            "envelope — which is #1710")
+
+
+def test_bench_mine_docstring_says_only_the_relabel_script_stamps_the_key():
+    """#3090 clause 2: `measured_against` is stamped by
+    `scripts/maintenance/relabel_stale_bench_calibration.py` alone, and only to
+    void a band verdict — never by this writer.
+
+    The prohibition is the load-bearing half. A docstring that said only "the
+    relabel writes it" would still leave a round free to add the key to the
+    calibration block "for completeness", which is exactly the writer change
+    #1769's ruling refused and #3090's scope excludes.
+    """
+    doc = _module_docstring(_BENCH_MINE_SRC)
+    assert doc.startswith("bench-mine source"), (
+        f"the extractor returned something that is not this module's docstring: "
+        f"{doc[:60]!r}")
+
+    stamp = [s for s in _ma_sentences(doc) if "relabel_stale_bench_calibration" in s]
+    assert len(stamp) == 1, (
+        f"{len(stamp)} sentence(s) name the script allowed to stamp the key; one "
+        "may own that bound, and zero means the key has no stated owner again")
+    s = stamp[0]
+    assert "never by this writer" in s, (
+        "the writer's own prohibition is gone — that is the sentence a future "
+        "'stamp measured_against going forward' round has to overrule, and "
+        "#1769's ruling (2026-09-30, reaffirmed by #3090) is no")
+    assert "alone" in s and "void" in s, (
+        f"the bound needs BOTH the sole writer and the one purpose; 'a marker "
+        f"the relabel also uses' still leaves room for a second writer: {s!r}")
+
+
+# ---------------------------------------------------------------------------
 # #1774 clause 2 — the marker set reaches the SCAN, and only one caller builds it.
 #
 # #1711 taught the ledger input to read its `done:` markers but applied them after
