@@ -109,6 +109,13 @@ SERVICE_DOWN_ALERT_TITLE = "Service down, but no promotion to revert"
 # closing the alarm are two operations only `resolve` performs.
 VAULT_TRIP_ALERT_TITLE = "Vault mass deletion — sync stopped"
 DATA_TRIP_ALERT_TITLE = "Lloyd data root damaged — promotions halted"
+#: Not one of the retractable pair above, and deliberately not coalesced either:
+#: this one raises per throttled check with no `resolve`, exactly as the data
+#: root's twin does (raised inline in `check_data`). #3106 gave a measured clear
+#: condition to the two critical tripwires and only those two, so a snapshot
+#: alarm crossing back to fresh closes nothing — the next fresh reading is simply
+#: quiet. #3132.
+VAULT_SNAPSHOT_ALERT_TITLE = "Vault snapshots are not arriving"
 
 
 def log(msg: str) -> None:
@@ -362,6 +369,10 @@ class Guardian:
         # twice, and the alert says "first check" rather than guessing (#2057).
         self._strays_prev_check_at: float | None = None
         self._snapshots_checked_at = 0.0
+        # The vault's own half of the same reading (#3132): the data root's stamp
+        # and the vault's backup repo are two different mechanisms on two different
+        # schedules, so they get two counters and neither can silence the other.
+        self._vault_snapshots_checked_at = 0.0
         # Per tripwire title: whether the last tick already journalled that its clear
         # condition did NOT hold. A quiet one-way dict, never an open/closed latch —
         # the verdict comes from `_tripwire_is_clear` on every tick, and this only
@@ -1466,7 +1477,10 @@ class Guardian:
     # ── vault tripwire ─────────────────────────────────────────────────
     def check_vault(self) -> None:
         """Trip on a mass deletion of the vault: stop sync, pause workers,
-        halt promotions, keep evidence, alert. Never raises into the tick."""
+        halt promotions, keep evidence, alert. Also ask the vault's own backup
+        repository how old its newest commit is, the layer the tripwire cannot
+        watch (#3132). Never raises into the tick."""
+        self._vault_snapshot_stream(time.time())
         try:
             why, snap = self.vault.tick()
         except Exception as exc:  # noqa: BLE001
@@ -1525,6 +1539,76 @@ class Guardian:
             f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} clear\n"
             f"Sync will not start until then. Marker: {marker}",
             coalesce=True)
+
+    def _vault_snapshot_stream(self, now: float) -> None:
+        """Is the vault's git snapshot still arriving? #3078 priced the bound
+        (`vaultwatch.SNAPSHOT_MAX_AGE_SECONDS`, 3 h = twelve missed 15-minute
+        cycles) and wrote the reading (`snapshot_age_state`), and #3132 seats that
+        reading on the tick that can act on it — the way #1416 seats
+        `datawatch.snapshot_report` inside `check_data`.
+
+        The reading needed a caller because every way this layer stops is silent.
+        `backup-vault.sh` refuses with `exit 0`, `lloyd-vault-backup.timer` is a
+        `Type=oneshot` that reports success over a refusal, and the tripwire is
+        watching the wrong thing: it guards the vault, and a vault nobody is
+        copying away looks untouched. That is exactly 2026-10-16→10-20 — unit
+        enabled, firing on schedule, 370 runs each exiting 128, and no reader of
+        the result.
+
+        Three properties, all inherited from the data twin rather than invented
+        here: throttled to `policy.SNAPSHOT_CHECK_SECONDS`, so a standing condition
+        is a 15-minute alarm and not a 5-second one; muted while the vault tripwire
+        is set, because `backup-vault.sh` refuses to snapshot while that marker
+        exists and exits 0, making a frozen HEAD mid-incident the intended
+        behaviour and the trip's critical page the one already raised; and read as
+        a function rather than by shelling out to the CLI, because the verdict has
+        to land in `self.alert`'s fan-out — a printed-only verdict is one nobody
+        reads after the window closes, and the CLI's exit code has no caller in this
+        tree either.
+
+        There is deliberately no third guard for "this box has no vault", the way
+        the data twin checks its root marker: `evaluate` answers `the vault root is
+        missing` for a root that is not there whatever the history says, that trip
+        writes the marker, and the mute above is what keeps such a box from a second
+        page for the same absence.
+
+        Never raises. The vault half of the tick exists to stop sync within one
+        tick of a wipe, and a backup reading may not cost that.
+        """
+        if (now - self._vault_snapshots_checked_at < policy.SNAPSHOT_CHECK_SECONDS
+                or self.vault.tripped()):
+            return
+        self._vault_snapshots_checked_at = now
+        repo = vaultwatch.snapshot_repo()
+        try:
+            state = vaultwatch.snapshot_age_state(repo,
+                                                  vaultwatch.SNAPSHOT_MAX_AGE_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            log(f"vaultwatch snapshot check failed (continuing): {exc}")
+            return
+        if state["fresh"]:
+            return
+        self.alert(
+            "error", VAULT_SNAPSHOT_ALERT_TITLE,
+            f"{state['text']}.\n\n"
+            f"{repo} is the vault's only copy outside the vault: "
+            "`~/lloyd/scripts/backup/backup-vault.sh` commits the whole vault to it "
+            "every 15 minutes from `lloyd-vault-backup.timer`. Every way that stream "
+            "can stop is silent — a refusal exits 0 so the timer never flaps, "
+            "`Type=oneshot` reports success over it, and pruning never deletes the "
+            "newest commit, so the age of that commit is the only evidence left that "
+            "the timer is delivering at all. Disabled, masked, never armed, a box "
+            "asleep through the cycle, a full disk or a vault that shrank below its "
+            "last healthy measurement all read the same from here. What the runs "
+            "said is in the journal:\n"
+            "  journalctl --user -u lloyd-vault-backup.service -n 40 --no-pager\n"
+            "The same reading, and the same bound, from a shell:\n"
+            f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} status\n"
+            "Restore into a side directory with "
+            "`~/lloyd/scripts/backup/restore-vault.sh <rev> <dest>` — never over the "
+            "live vault — and check the tripwire marker before believing a stall: "
+            "this alarm is muted while it is set, because the script refuses to "
+            "snapshot during an incident.")
 
     # ── data-root tripwire ─────────────────────────────────────────────
     def _runtime_data_incident(self, now: float) -> None:

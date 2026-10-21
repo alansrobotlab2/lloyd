@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -135,7 +136,13 @@ def test_a_wipe_trips_whatever_state_the_tick_returns_from(guardian, monkeypatch
     marker = json.loads(g.vault.marker.read_text())
     assert "disappeared" in marker["reason"]
     assert marker["actions"]["sync"] == "stopped"
-    [(level, title, body)] = acted["alerts"]
+    # The one alert the tripwire raised, and only the tripwire's: the blanket
+    # `subprocess.run` stub above also starves the vault snapshot reading #3132 put
+    # in the same method, which answers `returncode=0, stdout=""` with "no readable
+    # HEAD commit" — a stall page with a different title, correct for that lie and
+    # not what this node is about. What a second alarm in `check_vault` does to the
+    # trip is pinned by `test_a_broken_snapshot_reading_cannot_stop_the_vault_tripwire`.
+    [(level, title, body)] = [a for a in acted["alerts"] if a[1] == G.VAULT_TRIP_ALERT_TITLE]
     assert level == "critical" and "sync stopped" in title
     assert "restore-vault.sh" in body and "clear" in body
     # Latched: the next tick does not act again.
@@ -213,6 +220,247 @@ def test_a_trip_still_halts_everything_and_now_arrives_named(guardian, monkeypat
         "the alert no longer quotes the pause it took, so whoever reads it cannot tell "
         "a held fleet from a backend that refused the hold")
     assert "restore-vault.sh" in body and "clear" in body
+
+
+# ── is the vault's own backup repo still moving? (backlog #3132) ──────────────
+#
+# #3078 gave the vault's git snapshot a bound (`SNAPSHOT_MAX_AGE_SECONDS`, 3 h,
+# twelve missed 15-minute cycles) and a reading (`snapshot_age_state`), and left
+# both with no caller: the data root's twin has been ticked by the guardian since
+# #1416, the vault's was a function, a CLI and a set of tests. That is how
+# 2026-10-16→10-20 read healthy — `lloyd-vault-backup.timer` enabled and firing,
+# 370 runs each exiting 128, and the only out-of-vault copy of the vault not
+# moving for four days. What follows is the poller, pinned the way the data
+# root's is pinned in `tests/test_data_home.py:345-417`.
+
+FOUR_HOURS = 4 * 3600.0
+
+
+def _backup_repo(dirs: Path, *, age_seconds: float) -> tuple[Path, str]:
+    """A backup-shaped bare repo whose HEAD commit is `age_seconds` old, and its sha.
+
+    Shaped like what `backup-vault.sh` writes — a bare repo driven by
+    `--git-dir` with a separate `--work-tree` — because the age that matters is
+    git's `%ct`, the one stamp `snapshot_age_state` reads and the one that
+    survives the repo being copied. The planted epoch is read back out of git
+    below: a node that planted nothing and passed anyway is the failure this
+    helper exists to refuse.
+    """
+    def git(*args: str, env: "dict | None" = None) -> str:
+        r = subprocess.run(["git", *args], capture_output=True, text=True,
+                           env=dict(os.environ, **(env or {})))
+        assert r.returncode == 0, f"{args}: {r.stdout}{r.stderr}"
+        return r.stdout.strip()
+
+    repo, work = dirs / "vault.git", dirs / "vaultwork"
+    work.mkdir(parents=True)
+    (work / "note.md").write_text("a note\n")
+    git("init", "--quiet", "--bare", str(repo))
+    git("--git-dir", str(repo), "--work-tree", str(work), "add", "--all", ".")
+    stamp = int(time.time() - age_seconds)
+    git("--git-dir", str(repo), "--work-tree", str(work), "commit", "--quiet", "--no-verify",
+        "-m", "snapshot", env={"GIT_AUTHOR_DATE": f"@{stamp} +0000",
+                               "GIT_COMMITTER_DATE": f"@{stamp} +0000"})
+    stored = git("--git-dir", str(repo), "log", "-1", "--format=%ct")
+    assert int(stored) == stamp, f"git stored committer time {stored}, not the planted {stamp}"
+    return repo, git("--git-dir", str(repo), "log", "-1", "--format=%H")
+
+
+def _snapshot_repo_is(monkeypatch, repo: Path) -> None:
+    """Point the check at a planted repo through the override both sides already
+    share, rather than by patching the function under test:
+    `vaultwatch.snapshot_repo()` reads `LLOYD_VAULT_BACKUP_REPO`, and so does
+    `backup-vault.sh`, which is what keeps the check and the writer naming one
+    repository without a config file."""
+    monkeypatch.setenv("LLOYD_VAULT_BACKUP_REPO", str(repo))
+
+
+def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp_path,
+                                                                   monkeypatch):
+    """The alarm itself, once, with the numbers a person needs in its body.
+
+    `backup-vault.sh` refuses with `exit 0` by design and the timer is a
+    `Type=oneshot`, so neither systemd nor the timer can show a stopped snapshot
+    stream; the vault tick is the surface that can. The same node holds the
+    throttle, because the tick runs every 5 s and a standing condition that
+    re-alerts every 5 s is an alarm nobody reads (#3132).
+    """
+    g, _, acted = guardian
+    fresh, _fresh_sha = _backup_repo(tmp_path / "fresh", age_seconds=60.0)
+    _snapshot_repo_is(monkeypatch, fresh)
+    g.check_vault()
+    assert not acted["alerts"], acted["alerts"]          # a snapshot a minute old is fine
+
+    stale, sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
+    _snapshot_repo_is(monkeypatch, stale)
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    [(level, title, body)] = acted["alerts"]
+    assert (level, title) == ("error", G.VAULT_SNAPSHOT_ALERT_TITLE), acted["alerts"]
+    assert str(stale) in body, body                      # the repo to go and look at
+    assert sha[:8] in body, body                         # the commit it is standing on
+    assert "4 h 0 m old" in body, body                   # its age, not just "stale"
+    assert "past the 3 h limit" in body, body            # and the bound it crossed
+    assert "lloyd-vault-backup.service" in body, body    # where the failing runs are
+
+    g.check_vault()
+    assert len(acted["alerts"]) == 1                     # throttled, not every 5 s tick
+
+    g._alert_seen.clear()                                # the fan-out's own 15-minute
+    g._vault_snapshots_checked_at = 0.0                  # repeat window, and the
+    g.check_vault()                                      # check's own throttle
+    assert len(acted["alerts"]) == 2                     # a stall standing for an
+    assert g._vault_snapshots_checked_at > 0.0           # hour keeps being reported
+
+    later, _s2 = _backup_repo(tmp_path / "later", age_seconds=60.0)
+    _snapshot_repo_is(monkeypatch, later)                # the timer is delivering again
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert len(acted["alerts"]) == 2                     # quiet from here on
+
+
+def test_the_vault_snapshot_alert_is_quiet_while_the_vault_tripwire_is_set(guardian,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """A stalled HEAD during a trip is intended behaviour, and the trip already
+    paged critical: `backup-vault.sh:57` refuses to snapshot while
+    `vault-tripped.json` exists and exits 0. A second alarm for the same incident
+    is how an alert gets ignored — the data root's twin mutes the same way
+    (`tests/test_data_home.py:371`)."""
+    g, _, acted = guardian
+    stale, _sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
+    _snapshot_repo_is(monkeypatch, stale)
+    g.vault.marker.write_text(json.dumps({"reason": "200 of 401 vault files disappeared"}),
+                              encoding="utf-8")
+    assert g.vault.tripped()
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert not acted["alerts"], acted["alerts"]
+    g.vault.marker.unlink()
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert [a[1] for a in acted["alerts"]] == [G.VAULT_SNAPSHOT_ALERT_TITLE], acted["alerts"]
+
+
+def test_a_backup_repo_with_no_readable_head_alerts_as_the_worst_age(guardian, tmp_path,
+                                                                     monkeypatch):
+    """The data twin's empty-store node (`tests/test_data_home.py:388`) mirrored
+    onto a git repo: pruning never deletes the newest snapshot, so entry COUNT
+    cannot separate an alive store from a dead one, and `git log` answering
+    `fatal: not a git repository` for a path that does not resolve must not read
+    as green. Both shapes are checked — a repo the timer never created, and a
+    bare repo with no commit — because both are a vault with no off-vault copy."""
+    g, _, acted = guardian
+    _snapshot_repo_is(monkeypatch, tmp_path / "never-created.git")
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    [(level, title, body)] = acted["alerts"]
+    assert (level, title) == ("error", G.VAULT_SNAPSHOT_ALERT_TITLE), acted["alerts"]
+    assert "no readable HEAD commit" in body, body
+    assert str(tmp_path / "never-created.git") in body, body
+
+    g._alert_seen.clear()                                # the alert's own repeat window
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    subprocess.run(["git", "init", "--quiet", "--bare", str(empty / "vault.git")],
+                   check=True, capture_output=True)
+    _snapshot_repo_is(monkeypatch, empty / "vault.git")
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert len(acted["alerts"]) == 2, acted["alerts"]
+
+
+def test_a_broken_snapshot_reading_cannot_stop_the_vault_tripwire(guardian, tmp_path,
+                                                                  monkeypatch):
+    """`check_vault` must never raise into the tick, and the snapshot read is new
+    code inside it: a `git` that hangs the box, a module that fails to import, a
+    repo on a mount that went away. The tripwire is the reason — it stops sync
+    within one tick of a wipe, and a check bolted above it may not cost that. The
+    reading here raises on purpose, and the wipe below still has to trip."""
+    g, vault, acted = guardian
+    _snapshot_repo_is(monkeypatch, tmp_path / "gone.git")
+
+    def unreadable(*_a, **_k):
+        raise RuntimeError("simulated git failure")
+
+    monkeypatch.setattr(VW, "snapshot_age_state", unreadable)
+    g.check_vault()                                      # does not raise
+    assert not acted["alerts"], acted["alerts"]
+    for folder in ("backlog", "skills", "memory", "knowledge"):
+        shutil.rmtree(vault / folder)
+    g.check_vault()
+    assert acted["sync"] == 1 and acted["workers"] == 1
+    assert [a[1] for a in acted["alerts"]] == [G.VAULT_TRIP_ALERT_TITLE], acted["alerts"]
+
+
+def test_the_vault_snapshot_check_runs_from_the_tick_even_while_paused(guardian, monkeypatch,
+                                                                       tmp_path):
+    """Placement, not just existence: `tick()` calls `check_vault()` above every
+    early return, and `paused` is the state a stalled backup is most likely to be
+    missed in — the vault trip's own pause, or a promotion window, suppresses
+    actions for minutes at a time. Driving `tick()` is what pins that the reading
+    happens in the part of the loop that always runs (#3132)."""
+    g, _, acted = guardian
+    stale, _sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
+    _snapshot_repo_is(monkeypatch, stale)
+    monkeypatch.setattr(g, "collect", lambda: {"now": time.time(), "supervisord": "ok",
+                                               "procs": {}, "probes": {}})
+    monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 600.0)
+    monkeypatch.setattr(g.state, "is_broken", lambda: False)
+    monkeypatch.setattr(g.state, "current", lambda: None)
+    monkeypatch.setattr(g, "evaluate_liveness", lambda s: (False, "ok"))
+    real_run = subprocess.run
+
+    def stubbed(cmd, *a, **k):
+        # The tick's other shell-outs (a systemctl that must not run here, a `df`
+        # whose numbers are not what this node is about) are silenced; the vault
+        # snapshot read is the one command allowed to reach the machine, because
+        # faking it would leave the placement untested.
+        if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]).endswith("git"):
+            return real_run(cmd, *a, **k)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", stubbed)
+    assert g.tick() == "paused"
+    assert [a[1] for a in acted["alerts"]] == [G.VAULT_SNAPSHOT_ALERT_TITLE], acted["alerts"]
+
+
+def test_the_poller_names_the_state_function_and_the_cli_stays_a_human_surface():
+    """Both halves of #3132's acceptance grep, pinned so they cannot rot into
+    each other's shape.
+
+    `guardian.py` must name `snapshot_age_state`: the poller has to read the SAME
+    measurement the operator's CLI prints, and a check that shelled out to the
+    CLI would be a second reader parsing a stdout nobody else reads (the class
+    rule #3106 states: a verdict that is only printed is one nobody can read
+    after the window closes). And the four paths the item's own grep names must
+    still contain no `snapshot-age`: that subcommand is built to be run by a
+    human and its exit code by a check that is not in this tree.
+
+    The pattern the item spells is `snapshot.age`, and its `.` matches any
+    character — so it is also the shape of `snapshot_age_state`, which the same
+    clause requires by name in `guardian.py`. The literal CLI token is the one
+    absence this change can honour while naming the function, so that is what is
+    asserted here. Positive control below: the same grep against the module that
+    defines the subcommand, where the token does live.
+    """
+    polled = [ROOT / "agent-services/guardian/guardian.py",
+              ROOT / "scripts/service_health_check.py",
+              ROOT / "agent-services/systemd", ROOT / "agent-services/supervisor"]
+    for path in polled:
+        assert path.exists(), f"{path} is not on the tree, so grepping it proves nothing"
+        text = (path.read_text(encoding="utf-8") if path.is_file() else
+                "".join(p.read_text(encoding="utf-8", errors="replace")
+                        for p in sorted(path.rglob("*")) if p.is_file()))
+        assert "snapshot-age" not in text, (
+            f"{path} now shells out to `vaultwatch.py snapshot-age`; the durable "
+            "record is the function, not a subprocess stdout")
+    guardian_src = (ROOT / "agent-services/guardian/guardian.py").read_text(encoding="utf-8")
+    assert "snapshot_age_state" in guardian_src, (
+        "the guardian no longer reads the one measurement the CLI prints, so the "
+        "two readers can disagree again — which is the premise #3132 filed")
+    vw_src = (ROOT / "agent-services/guardian/vaultwatch.py").read_text(encoding="utf-8")
+    assert "snapshot-age" in vw_src, "positive control: the CLI token still exists somewhere"
 
 
 # ── the sync gate ────────────────────────────────────────────────────────────

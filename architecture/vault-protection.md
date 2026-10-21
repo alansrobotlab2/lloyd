@@ -301,9 +301,18 @@ A killed run can leave `index.lock` in the backup repo, and did: from 2026-10-16
 the whole layer died for four days — 370 timer fires each exiting 128, the timer
 enabled and firing, nobody asking. The next run now clears holder-less locks
 older than 15 minutes itself, and #3078 priced staleness beside it: a newest
-snapshot over 3 h old (twelve missed cycles) reads stale via
-`vaultwatch.py snapshot-age`. That verdict has no poller yet — the data root's
-twin is ticked by the guardian, the vault's is CLI-only (#3132).
+commit over 3 h old (twelve missed cycles), or no readable HEAD commit at all,
+reads not-fresh from `vaultwatch.snapshot_age_state`. #3132 seated that reading on
+the guardian's vault check — the layer that can act on it, because the tripwire
+watches the vault and a vault nobody is copying away looks untouched, the script's
+refusals exit 0, and a `Type=oneshot` timer reports success over a refusal.
+Throttled to `policy.SNAPSHOT_CHECK_SECONDS` (15 min) like the data root's twin,
+which the guardian has ticked since #1416, and muted while the tripwire marker is
+set: the script refuses to snapshot during an incident and the trip has already
+paged critical. A not-fresh reading pages `Vault snapshots are not arriving`
+through the alert fan-out, naming the repo, the HEAD commit and the journal
+command; the CLI subcommand stays the operator's own reading of the same
+measurement.
 
 `scripts/backup/restore-vault.sh <rev> [dest]` checks a snapshot out into a side
 directory through a throwaway index. It refuses the live vault path. The swap
@@ -370,8 +379,10 @@ that pass so Lloyd's own writes do not read as downloads.
   itself cannot be bound read-only, because writing notes is ordinary work, and
   none of the entries is bound while the substrate is in fallback. 2.4 limits
   that to one tick of sync damage, and 2.5 limits local loss to 15 minutes —
-  only while the backup keeps landing, which the unpolled snapshot-age verdict
-  (#3132) is what would tell you.
+  only while the backup keeps landing, which the guardian's snapshot-age poller
+  (#3132) now pages on — detection, not recovery: the alarm says the copies
+  stopped, and a person still restarts the stream and decides what the repo should
+  hold, because a tool that deleted the vault may also be able to write the remedy.
 - **Remote damage within the tick.** `ob sync` can push some deletions in the
   ≤5 s before the tripwire. Obsidian Sync's server-side version history is the
   recovery for those.

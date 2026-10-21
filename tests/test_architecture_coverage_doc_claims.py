@@ -2063,14 +2063,20 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # the tripwire clear-condition predicates, `_seal_measured_incident` and the
     # retraction the tripwires' own ticks call (all below it, above `main`:
     # 2422 → 2610, net of the 20-line tail `_seal_measured_incident` took out of
-    # `reconcile_stranded_alert`). Nothing else moved them, which is the point of
+    # `reconcile_stranded_alert`). And again by #3132, which added the
+    # `VAULT_SNAPSHOT_ALERT_TITLE` constant with its 6-line comment and the
+    # `_vault_snapshots_checked_at` counter with its 3-line one (both above
+    # `evaluate_liveness`: 789 → 800, and `architecture/threat-model.md`'s T-26 cell
+    # re-pointed with it) and the 70-line `_vault_snapshot_stream` method plus the
+    # two docstring lines plus the call it gained (73 more, between the two):
+    # 2610 → 2694. Nothing else moved them, which is the point of
     # pinning a definition head at all — a change that shifts a cited line has to say
     # so here first.
-    assert heads[guardian]["main"] == 2610, (
-        f"`main` moved off :2610 ({heads[guardian]['main']}) — if it is gone "
+    assert heads[guardian]["main"] == 2694, (
+        f"`main` moved off :2694 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 789, (
-        f"`evaluate_liveness` moved off :789 "
+    assert heads[guardian]["evaluate_liveness"] == 800, (
+        f"`evaluate_liveness` moved off :800 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
