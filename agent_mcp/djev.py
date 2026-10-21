@@ -61,6 +61,53 @@ logger = logging.getLogger("lloyd-djev-tools")
 #: ~70 ms warm.
 CANDIDATE_CHARS = 1200
 
+#: What `djev_rank` annotates against when its schema has no measured floor
+#: (#3115), and the vocabulary the payload uses to say so.
+#:
+#: The floor a ranking is supposed to be judged by lives in
+#: `eval/djev/schemas.py`, and the `rerank` schema's `label_mass_floor` is
+#: deliberately `None`: listwise `label_mass` at n=12-16 measured 0.446, 0.807,
+#: 0.965 and 1.000 across four corpora, so a cutoff read off any one of those
+#: means nothing for the others — and 0.5 sits inside the band that spread
+#: calls healthy. The tool compared against a bare 0.5 anyway and reported the
+#: result with no sign of where it came from. The number stays, as the pointer
+#: it is; what it could not do before is name itself as uncalibrated.
+UNCALIBRATED_RANK_CUTOFF = 0.5
+
+#: The schema a ranking answer is judged against, and the two values
+#: `low_label_mass_cutoff_source` may hold. Resolution goes by schema NAME, not
+#: by `schemas.floor_for(seam)`: `BY_SEAM` holds only the seams the registry
+#: declares (`rerank`, `dedupe`, `entity`, `action_review`) and this tool's seam
+#: is `tool:rank`, which is absent from it — so `floor_for("tool:rank")` answers
+#: None for a MISSING KEY, exactly the value an unmeasured schema gives, and the
+#: two states would be indistinguishable in the one place the difference
+#: matters. `agent_mcp/vault.py`'s recall ranker has the same key problem with
+#: `recall_rank`; registering those seams is a separate ruling.
+RANK_SCHEMA_NAME = "rerank"
+CUTOFF_FROM_SCHEMA = "rerank_schema"
+CUTOFF_UNCALIBRATED_FALLBACK = "uncalibrated_fallback"
+
+
+def _rank_floor() -> float | None:
+    """The measured `label_mass` floor for a ranking, or None if none exists.
+
+    Read at call time, so the registry stays the only place a floor is set:
+    whenever `eval/djev/replay.py --floors` does give `rerank` one, this tool
+    follows without a second edit. `eval/` is not a package the aggregator
+    normally imports — the same best-effort reasoning as `_status`'s import
+    further down — and an annotation that cannot resolve must not cost the
+    caller the ordering it asked for (§8.1: advisory, fail open), so a failed
+    import is the honest None, which the payload then labels as a fallback.
+    """
+    try:
+        from eval.djev import schemas
+    except Exception as exc:  # noqa: BLE001 — an annotation never loses a ranking
+        logger.debug("djev rank: schema registry unreadable: %s", exc)
+        return None
+    schema = schemas.get(RANK_SCHEMA_NAME)
+    return schema.label_mass_floor if schema is not None else None
+
+
 _TRUST_NOTE = (
     "Scores are self-consistent within one call, NOT calibrated: the ordering "
     "is meaningful and the absolute numbers are not comparable to a fixed "
@@ -107,9 +154,17 @@ async def _rank(args: dict) -> str:
     # tests/test_recall_djev_ranker.py asserting `call["samples"] == 1`). Two
     # rank paths, two read budgets, one of them measured: choosing for the tool
     # side needs its own run, not a number copied across the seam.
+    # The registry's floor for a ranking, or None. Handed to the client as well
+    # as used for the annotation below, because `app/djev.py`'s per-row
+    # `low_trust` is `floor is not None and label_mass < floor` (`:355`) — with
+    # no floor threaded it was structurally False on every row, so the tool
+    # threw away the calibrated signal and shipped its own unowned 0.5 in its
+    # place (#3115). `floor` never reaches the engine: `_body` does not carry
+    # it, so no request and no read count changes here.
+    floor = _rank_floor()
     rows = await asyncio.to_thread(
         djev.rank, query, [c[:CANDIDATE_CHARS] for c in candidates],
-        seam="tool:rank", levels=levels,
+        seam="tool:rank", levels=levels, floor=floor,
         timeout=float(args.get("timeout_seconds") or djev.DEFAULT_TIMEOUT_S))
     if rows is None:
         return _err("djev did not answer (engine unreachable, disabled, or the "
@@ -121,8 +176,14 @@ async def _rank(args: dict) -> str:
                     "score": round(r["score"], 4), "level": r["label"],
                     "label_mass": round(r["label_mass"], 4),
                     "argmax_is_label": r["argmax_is_label"],
+                    # `.get`, not `[...]`: this is a pointer on an ordering, not
+                    # a precondition of it. A row that somehow lacked the field
+                    # reads as unflagged rather than raising away an answer the
+                    # caller asked for (§8.1's fail-open contract).
+                    "low_trust": r.get("low_trust", False),
                     "candidate": candidates[r["index"]][:160]})
-    low = [r["index"] for r in rows if r["label_mass"] < 0.5]
+    cutoff = floor if floor is not None else UNCALIBRATED_RANK_CUTOFF
+    low = [r["index"] for r in rows if r["label_mass"] < cutoff]
     return json.dumps({
         "query": query, "n": n, "levels": levels, "ranked": out,
         "note": _TRUST_NOTE,
@@ -130,6 +191,18 @@ async def _rank(args: dict) -> str:
         # probabilities are renormalized over the label set regardless of how
         # little mass landed there, so they always look confident.
         "min_label_mass": round(min(r["label_mass"] for r in rows), 4),
+        # Three keys, answering the one question a reader of
+        # `low_label_mass_indexes` has to be able to ask: is this cutoff
+        # something the calibration work measured? `label_mass_floor` is the
+        # registry's number or null; `low_label_mass_cutoff` is what was
+        # actually compared against; the source names which of the two it was.
+        # Today the answer is `null` / 0.5 / `uncalibrated_fallback`, and that
+        # is the honest state of the `rerank` schema, not an oversight.
+        "label_mass_floor": floor,
+        "low_label_mass_cutoff": cutoff,
+        "low_label_mass_cutoff_source": (
+            CUTOFF_FROM_SCHEMA if floor is not None
+            else CUTOFF_UNCALIBRATED_FALLBACK),
         "low_label_mass_indexes": low,
     }, default=str)
 

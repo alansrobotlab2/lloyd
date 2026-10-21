@@ -918,3 +918,78 @@ def test_the_dedupe_prose_check_refuses_the_paragraph_it_exists_to_refuse():
         "a §6.2 that never names the key is not the §6.2 the clause asks for")
 
     assert _dedupe_problems(_doc_text()) == [], "the shipped section fails the check it defines"
+
+
+# ---------------------------------------------------------------------------
+# #3115 — what this page may say about the cutoff `djev_rank` judged rows by
+#
+# Same shape as everything above: the doc is where the item came from (§11
+# carried the fixed 0.5 as an open gap), so a §11 that still carries it after
+# the fix is a to-do list that re-files a closed item, and a §5.1 that names a
+# number without its authority is the sentence that made the annotation read as
+# calibrated. The needles are therefore the key names and values the shipped
+# tool emits, read out of `agent_mcp/djev.py` rather than typed in here: if the
+# code renames a key, this fails and the doc has to move with it.
+# ---------------------------------------------------------------------------
+
+RANK_CLOSED_HEADING = ("### Closed 2026-10-21 — `djev_rank`'s fixed 0.5 "
+                       "cutoff (#3115)")
+
+
+def _rank_return_bullet(text: str) -> str:
+    """§5.1's bullet describing `djev_rank`'s returned body, up to the sample
+    call that follows it."""
+    i = text.index("- It returns `ranked:")
+    j = text.index("\n```", i)
+    return text[i:j]
+
+
+def test_section_5_1_names_the_cutoff_and_the_state_that_authorises_it():
+    """Clause 5, first half. The bullet used to end "`low_label_mass_indexes`:
+    the indexes under 0.5" — a number with no stated authority, which is
+    exactly how a leftover default reads as a judgement.
+    """
+    from agent_mcp import djev as tools
+
+    bullet = _rank_return_bullet(DOC.read_text())
+    for needle in ("label_mass_floor", "low_label_mass_cutoff",
+                   "low_label_mass_cutoff_source", "low_trust",
+                   tools.CUTOFF_UNCALIBRATED_FALLBACK, tools.CUTOFF_FROM_SCHEMA):
+        assert needle in bullet, (
+            f"§5.1 no longer tells a reader about {needle!r}, which the shipped "
+            "tool does emit — or the tool renamed it and this page drifted")
+    assert "the indexes under 0.5" not in bullet, (
+        "§5.1 is back to quoting the bare 0.5 as if it were the rule")
+    # The two signals are different things and the page has to say so: with no
+    # measured floor `low_trust` is false on every row while the fallback list
+    # can still fire, and a reader who conflates them learns the row is fine.
+    assert "must not be confused" in bullet
+
+
+def test_the_open_gaps_no_longer_list_the_rank_cutoff_and_the_record_owns_it():
+    """Clause 5, second half: §11 stops listing it as live, and the closed
+    record carries what a later reader cannot re-derive."""
+    text = DOC.read_text()
+    body = _section(text, "## 11. Known gaps")
+    assert RANK_CLOSED_HEADING in body, (
+        "§11 has no closed record for #3115, so the fixed 0.5 has no owner here "
+        "even once the code is fixed — and an open-gap list with no entry for a "
+        "shipped decision is the state that re-files the item")
+    open_part = body.split(CLOSED_HEADING, 1)[0]
+    assert "low_label_mass_indexes" not in open_part, (
+        "§11 still lists the rank tool's fixed 0.5 as an open gap")
+    assert "#3115" not in open_part, (
+        "the open gaps still point at the item that closed it")
+
+    record = body.split(RANK_CLOSED_HEADING, 1)[1]
+    for needle in ('schemas.get("rerank")',          # the lookup, by name
+                   'floor_for("tool:rank")',          # and the one rejected…
+                   "BY_SEAM",                         # …because this has no such key
+                   "still `None`",                    # what is NOT fixed
+                   "replay.py --floors",              # who does set it
+                   "0.446",                           # the spread that forbids one
+                   "advisory",                        # and it still refuses nothing
+                   "app/djev.py:307",                 # the 0.5 deliberately left alone
+                   "git grep"):                       # how to re-check it
+        assert needle in record, (
+            f"the #3115 closed record no longer carries {needle!r}")

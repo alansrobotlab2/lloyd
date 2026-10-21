@@ -131,7 +131,224 @@ def test_rank_orders_and_surfaces_label_mass(monkeypatch):
     out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
     assert [r["index"] for r in out["ranked"]] == [1, 0]
     assert out["min_label_mass"] == pytest.approx(0.30)
+    # The annotation is still the 0.5 fallback here — `rerank` has no measured
+    # floor — so what changed is that the payload now says so, and the client's
+    # own per-row flag travels with the row instead of being dropped.
     assert out["low_label_mass_indexes"] == [0]
+    assert out["label_mass_floor"] is None
+    assert out["low_label_mass_cutoff"] == pytest.approx(0.5)
+    assert out["low_label_mass_cutoff_source"] == "uncalibrated_fallback"
+    assert {r["index"]: r["low_trust"] for r in out["ranked"]} == {1: False, 0: True}
+
+
+# ---------------------------------------------------------------------------
+# djev_rank's low-trust annotation: whose cutoff is it? (#3115)
+#
+# The tool used to compare `label_mass` against a literal 0.5 that nothing
+# owns. `eval/djev/schemas.py` is where a floor is supposed to come from, and
+# the `rerank` schema's `label_mass_floor` is deliberately `None`: listwise
+# `label_mass` at n=12-16 measured 0.446, 0.807, 0.965 and 1.000 across four
+# corpora, so a cutoff read off any one of them means nothing for the others,
+# and 0.5 sits inside the band that spread calls healthy. `app/djev.py::rank`
+# already returns a floor-aware `low_trust` per row (`app/djev.py:355`, `:742`)
+# — the tool threaded no floor to it, so that flag was structurally False, and
+# then dropped the field from the emitted row.
+#
+# One trap the tests below exist to keep visible: `schemas.floor_for` keys on
+# `BY_SEAM`, which holds only `action_review`, `dedupe`, `entity` and `rerank`.
+# The tool's seam is `tool:rank`, absent from that dict, so
+# `floor_for("tool:rank")` returns None for a MISSING KEY and reads exactly
+# like "the schema has no measured floor" — the one distinction this fix is
+# about. Resolution therefore goes by schema NAME, not by the tool's seam.
+# ---------------------------------------------------------------------------
+
+def _client_rows(triples):
+    """Rows in the shape `app/djev.py::rank` returns: `(index, score,
+    label_mass)`, `low_trust` filled in False because these stubs stand in for
+    the no-floor path — the real flag is exercised through the HTTP stub."""
+    return [{"index": i, "score": s, "label": "irrelevant", "confidence": 0.5,
+             "label_mass": m, "argmax_is_label": True, "low_trust": False}
+            for i, s, m in triples]
+
+
+def _measured_rerank(monkeypatch, floor):
+    """Give the `rerank` schema a measured floor for one test. `Schema` is a
+    frozen dataclass, so the registry entry is replaced, not mutated."""
+    from dataclasses import replace
+
+    from eval.djev import schemas
+    monkeypatch.setitem(schemas.SCHEMAS, "rerank",
+                        replace(schemas.RERANK, label_mass_floor=floor))
+    return schemas
+
+
+@pytest.mark.parametrize("floor,mass_of_second,expected", [
+    # 0.55 is ABOVE the hardcoded 0.5 and BELOW a measured 0.8, so `[1]` here
+    # is only reachable through the registry.
+    (0.8, 0.55, [1]),
+    # 0.45 is BELOW the hardcoded 0.5 and ABOVE a measured 0.4, so the empty
+    # list is only reachable through the registry.
+    (0.4, 0.45, []),
+])
+def test_rank_flags_against_the_measured_rerank_floor_not_the_number_0_5(
+        monkeypatch, floor, mass_of_second, expected):
+    """A floor that exists in the registry has to move the annotation both
+    ways: up past 0.5 and down below it. Either direction alone is consistent
+    with still reading 0.5."""
+    from eval.djev import schemas
+    assert "tool:rank" not in schemas.BY_SEAM, (
+        "this test's premise: keying the lookup on the tool's own seam would "
+        "miss, return None, and fall back to 0.5 while claiming otherwise")
+
+    sent: dict = {}
+
+    def _rank(query, candidates, **k):
+        sent.update(k)
+        return _client_rows([(0, 0.9, 0.85), (1, 0.1, mass_of_second)])
+
+    monkeypatch.setattr(djev, "rank", _rank)
+    _measured_rerank(monkeypatch, floor)
+    out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
+    assert sent["floor"] == pytest.approx(floor), \
+        "the client builds `low_trust` from the floor it is handed"
+    assert out["label_mass_floor"] == pytest.approx(floor)
+    assert out["low_label_mass_cutoff"] == pytest.approx(floor)
+    assert out["low_label_mass_cutoff_source"] == "rerank_schema"
+    assert out["low_label_mass_indexes"] == expected
+
+
+def test_rank_names_its_fallback_cutoff_an_uncalibrated_diagnostic(monkeypatch):
+    """`rerank` has no measured floor today, and that is the deliberate state
+    (§7.3's four-corpus spread), so the shipped answer is: still annotate, but
+    say in the same body that the cutoff is a fallback nobody calibrated. A
+    reader must not be able to take `low_label_mass_indexes` for a judgement
+    the calibration work signed off on."""
+    from eval.djev import schemas
+    assert schemas.RERANK.label_mass_floor is None, \
+        "the state this test describes: rerank is unmeasured by design"
+
+    monkeypatch.setattr(djev, "rank", lambda q, c, **k:
+                        _client_rows([(0, 0.9, 0.99), (1, 0.1, 0.30)]))
+    out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
+    assert out["label_mass_floor"] is None
+    assert out["low_label_mass_cutoff"] == pytest.approx(0.5)
+    assert out["low_label_mass_cutoff_source"] == "uncalibrated_fallback"
+    assert "uncalibrated" in out["low_label_mass_cutoff_source"]
+    assert out["low_label_mass_indexes"] == [1], \
+        "the annotation itself still happens; only its authority changed"
+
+
+def test_a_ranking_wholely_under_the_cutoff_is_still_returned_in_full(monkeypatch):
+    """Advisory, fail open (§8.1: the recall ranker's contract). The old code
+    refused nothing and the new one must not start: every row under the cutoff
+    is a pointer for a reader, not a reason to withhold the ordering or to
+    spend an answer the caller asked for."""
+    monkeypatch.setattr(djev, "rank", lambda q, c, **k:
+                        _client_rows([(0, 0.9, 0.20), (1, 0.5, 0.15),
+                                      (2, 0.1, 0.10)]))
+    out = _call("djev_rank", {"query": "q", "candidates": ["a", "b", "c"]})
+    assert "error" not in out, out
+    assert [r["index"] for r in out["ranked"]] == [0, 1, 2]
+    assert out["low_label_mass_indexes"] == [0, 1, 2]
+    assert out["n"] == 3
+
+
+def _serve_rank(monkeypatch, scores, masses):
+    """Stand in for the engine's HTTP response for a rank-shaped request, so
+    the rows a test reads back were built by the real client."""
+    answers = {f"c{i}": {"type": "score", "score": s,
+                         "legend": {"0": "irrelevant", "1": "directly answers it"},
+                         "probabilities": {"0": 1 - s, "1": s},
+                         "confidence": max(s, 1 - s)}
+               for i, s in enumerate(scores)}
+    payload = {
+        "model": "djev", "answers": answers,
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+        "diagnostics": {"timing": {"total_ms": 40.0, "reads": 1},
+                        "chunks": [list(answers)],
+                        "questions": {f"c{i}": {"label_mass": m,
+                                                "argmax_is_label": True}
+                                      for i, m in enumerate(masses)}},
+    }
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        return _Resp(json.dumps(payload).encode())
+
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _open)
+
+
+def test_a_rank_call_posts_the_same_bytes_whether_or_not_the_floor_is_measured(monkeypatch):
+    """Threading a floor into the client must not change one byte of what the
+    engine is asked. A request that buys extra reads is a different cost, and
+    that would be a behaviour change hiding inside a change described as an
+    annotation — so the body posted by a call whose schema is measured and the
+    body posted by one whose schema is not have to be the same object's worth
+    of JSON.
+
+    Two-sided on purpose. Every other test here stubs the client and so never
+    sees a request at all; a leaked `floor` or `samples` key, or a body that
+    grew by one field, would pass all of them.
+    """
+    posted: list = []
+    _serve_rank(monkeypatch, [0.9, 0.6, 0.1], [0.9, 0.7, 0.6])
+    served = djev.urllib.request.urlopen
+
+    def _capture(req, timeout=None):
+        posted.append(json.loads(req.data.decode()))
+        return served(req, timeout=timeout)
+
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _capture)
+
+    _measured_rerank(monkeypatch, 0.8)
+    assert "error" not in _call("djev_rank", {"query": "q",
+                                              "candidates": ["a", "b", "c"]})
+    _measured_rerank(monkeypatch, None)
+    assert "error" not in _call("djev_rank", {"query": "q",
+                                              "candidates": ["a", "b", "c"]})
+
+    assert len(posted) == 2, f"one POST per call expected, got {len(posted)}"
+    measured, unmeasured = posted
+    assert measured == unmeasured, (
+        "the engine was asked something different depending on the resolved "
+        "floor, which is a client-side annotation and never a request field")
+    for body in posted:
+        for key in ("floor", "label_mass_floor", "samples", "max_samples"):
+            assert key not in body, f"{key} leaked into the engine request"
+
+
+def test_a_measured_floor_reaches_a_ranked_row_through_the_real_client(monkeypatch):
+    """The same field, traced across the boundary it actually crosses: the
+    registry in this process, the handler's `floor=`, the POST to the engine,
+    `app/djev.py::_build`'s per-row judgement, and the row a model reads out of
+    the MCP result. Stubbing `djev.rank` cannot show this, because dropping the
+    field happened on the far side of that stub: `low_trust` was computed by the
+    real client as `floor is not None and label_mass < floor` with `floor`
+    never passed, so it was structurally False on every row while the tool's own
+    0.5 annotation went the other way."""
+    monkeypatch.setattr(djev, "enabled", lambda: True)
+    _measured_rerank(monkeypatch, 0.8)
+    # Two candidates; the second reads 0.55 label_mass, under the 0.8 floor.
+    _serve_rank(monkeypatch, scores=(0.9, 0.2), masses=(0.95, 0.55))
+    out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
+    assert "error" not in out, out
+    by_index = {r["index"]: r for r in out["ranked"]}
+    assert by_index[1]["label_mass"] == pytest.approx(0.55)
+    assert by_index[1]["low_trust"] is True
+    assert by_index[0]["low_trust"] is False
+    assert out["low_label_mass_indexes"] == [1]
 
 
 # ---------------------------------------------------------------------------

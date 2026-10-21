@@ -438,10 +438,21 @@ here, and both would be wrong for a writer.
   confident ordering of a slice nobody chose. The error says to shortlist first.
 - A server-side canvas split is refused too, as "djev did not answer".
 - `levels` needs at least two entries, worst first, or the default is used.
-- It returns `ranked: [{rank, index, score, level, label_mass,
+- It returns `ranked: [{rank, index, score, level, label_mass, low_trust,
   argmax_is_label, candidate[:160]}]`, `min_label_mass`, a `note` that the
-  scores are not calibrated, and `low_label_mass_indexes`: the indexes under
-  0.5. That list is a pointer for a reader and refuses nothing (§11).
+  scores are not calibrated, and `low_label_mass_indexes` — the indexes under
+  a cutoff the same body names, so its authority is never a guess:
+  `label_mass_floor` is the `rerank` schema's measured floor (`null` today,
+  deliberately — §7.3), `low_label_mass_cutoff` is the number actually
+  compared, and `low_label_mass_cutoff_source` is `rerank_schema` or
+  `uncalibrated_fallback` for the 0.5 diagnostic that runs in its absence.
+  `low_trust` is a different thing and must not be confused with that list: it
+  is the client's floor-aware judgement on the row (§4), so while the schema is
+  unmeasured it is false on every row and a row can appear in
+  `low_label_mass_indexes` with `low_trust` false — the first is the fallback
+  pointer, the second is a measured floor's opinion, and with no floor there is
+  no second one. Both are pointers for a reader; neither refuses anything, and
+  a ranking wholly under the cutoff is still returned in full (§8.1).
 
 ```
 djev_rank(query="how do I restart the backend safely", candidates=[
@@ -1358,9 +1369,6 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 
 - **`SchemaDrift`'s message names `replay.py --calibrate`, which does not
   exist.** Calibration is `--corpus <c> --batch <n>` and a hand edit (§9.3).
-- **`djev_rank`'s `low_label_mass_indexes` uses a fixed 0.5.** It refuses
-  nothing, but it is the one fixed cutoff in the tree, inside the window
-  where healthy n=16 reads measured 0.446.
 - **Neither client entry point has a `samples` default**, one read or four. The
   ~40 ms headline is `samples=1`. No seam has measured whether one read is
   enough for its schema. `ask` and `ask_sync` both take `samples=None`
@@ -1467,6 +1475,43 @@ figures above are the leak's history, not the file's state. What the rule does
 **not** fix is provenance: a clone, a worktree, or a log that predates the move
 still reads as a clean corpus while being nothing of the kind, and `wc -l`
 cannot tell them apart (§9.3 step 5).
+
+### Closed 2026-10-21 — `djev_rank`'s fixed 0.5 cutoff (#3115)
+
+**What it was.** The tool's own annotation, present since the wiring commit
+`e0d245db`: every row whose `label_mass` fell under 0.5 was listed as
+`low_label_mass_indexes`, and nothing in the response said where 0.5 came from.
+0.5 sits inside the band healthy listwise reads measure — n=16 gave 0.446,
+0.807, 0.965 and 1.000 across four corpora (§7.3) — so the flag could fire on a
+row the design calls healthy, and a reader could not tell it from a calibrated
+judgement. `architecture/djev.md` §12 rule 1 is the sentence it violated.
+
+**The fix, and why the lookup is by schema name.** `agent_mcp/djev.py::_rank_floor`
+now asks the registry, and it deliberately uses `schemas.get("rerank")` rather
+than `schemas.floor_for("tool:rank")`: `BY_SEAM` has no `tool:rank` key, so a
+seam-keyed lookup returns `None` because the key is *missing*, which is the same
+value an unmeasured schema returns and the two states are indistinguishable in
+the one place the difference matters. Whatever the registry holds is also
+threaded into `djev.rank(..., floor=...)`, so the per-row `low_trust` §4
+describes is real instead of structurally false, and the emitted rows carry it
+(§5.1).
+
+**What it does NOT fix.** `rerank.label_mass_floor` is still `None` — that is
+calibration's call, not a code change (§7.3), and `eval/djev/replay.py --floors`
+has to set it from the seam's own rows. So today's annotation is still 0.5; what
+changed is that the payload says so, naming the key
+`low_label_mass_cutoff_source: "uncalibrated_fallback"` next to
+`label_mass_floor: null` (§5.1). The annotation is still advisory: no ranking is
+ever refused on it (§8.1).
+
+**The second 0.5 stays.** `app/djev.py:307` renders a `noul` answer's label as
+`"yes" if p >= 0.5 else "no"`. It is a rendering of a binary argmax, not a trust
+gate, and #3115's live defect was the unowned annotation, not the count — the
+claim that 0.5 appeared nowhere else was overstated and is not repeated here.
+
+`git grep -n "label_mass" -- agent_mcp/djev.py` shows the comparison reading
+`cutoff`, and the keys above in the returned body; the assertions are
+`tests/test_djev_tools.py` (`-k rank`) and `tests/test_djev_doc_claims.py`.
 
 ---
 
