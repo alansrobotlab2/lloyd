@@ -3494,6 +3494,13 @@ TRIAL_INGEST = TRIAL_DIR / "ingest.json"
 TRIAL_SCORE = TRIAL_DIR / "score.json"
 TRIAL_REACH = TRIAL_DIR / "reach.json"
 TRIAL_RUNNER = TRIAL_DIR / "run_trial.py"
+# The named-collection upper bound (#3086). Its `summary` is a broken tally — see the
+# block above the two nodes at the end of this file — so the ONLY usable evidence in it
+# is the per-query `top5`, which is what those nodes re-rank. Deliberately NOT added to
+# `_3076_require_trial()`: the nodes in that block never read this file, and a guard's
+# skip set has to name only what it actually opens, or an absent artifact silences
+# guards that were perfectly capable of grading themselves.
+TRIAL_UPPER = TRIAL_DIR / "upper.json"
 # The two qmd collection configs: the one the daemon reads, and the tracked copy
 # the nightly drift check compares it against. Neither may name lloyd-architecture
 # while this trial's verdict is "nothing was deployed".
@@ -4119,3 +4126,284 @@ def test_the_3076_trial_paths_survive_the_home_the_gate_runs_them_under():
     # skipped is what cost the previous round its gate.
     for key in ("note", "probe", "live_yml"):
         assert Path(got[key]).is_file(), (key, got[key])
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-20 round SM_20261020_234603 — #3086: the one tally #3076's repair left
+# behind. §3 of the measurement note asserts "The upper bound is genuinely high"
+# and prints, three lines under that assertion, the artifact's own summary as
+# `{"queries":10,"gold_in_top10":0,"gold_top1":0,"mean_reciprocal_rank":0.0}`.
+# That zero is not a measurement. The trial's runner ranks each query with
+#     rank = next((i + 1 for i, f in enumerate(files) if f.endswith("/" + gold)), None)
+# (`run_trial.py:527`), and the `files` it tests are the RAW hits the fork returned:
+# `qmd://lloyd-architecture/<name>?index=arm`. It is the `?index=arm` SUFFIX, not the
+# `qmd://` scheme, that defeats every `endswith`, so all ten `rank_in_named_collection`
+# values are null and the summary counts 0 / 0 / 0.0 for a run that was in fact finding
+# the gold document. Read past the bug, the SAME artifact's per-query `top5` puts gold
+# in the top five for 9 of 10 queries and at rank 1 for 7 of 10. The runner is untracked
+# runtime scratch under `~/lloyd-data/eval/3076/` — outside the repo and outside the
+# vault — so its summary will keep reading zero, and the note is the only durable place
+# the correction can live. Which is also the hazard: a re-run regenerates `upper.json`,
+# and then the quoted zero ages out together with the explanation beside it. So the
+# note quotes both numbers, and the node below recomputes them from the artifact and
+# goes red the moment the note's copy stops matching — a stale zero becomes a failing
+# test, not a silent citation.
+#
+# What the tally may NOT say: anything about rank 6-10. `top5` is truncated at five
+# hits, so the one miss (`research-pipeline`) is only ever shown as "not in the first
+# five". A note sentence writing the recomputed count as `gold_in_top10 = 9` would put
+# a new unbacked number where the old one was corrected, so clause 4's ban is checked
+# over the whole section rather than only over the sentences that carry a figure.
+# --------------------------------------------------------------------------- #
+
+#: The spellings that would turn a top-5 tally into a ten-deep claim. Checked against
+#: every non-anchor line of §3, so the bound holds across the section's prose and not
+#: just across the one sentence that quotes the figures.
+UPPER_OVERREACH = ("top-10", "top 10", "top ten", "in 10", "in ten")
+
+#: The §3 needles that make the artifact's own zero explainable rather than merely
+#: quoted: the file that computes it, the line that computes it, the expression that is
+#: wrong, the suffix that makes it wrong, and the field that comes back null.
+UPPER_BUG_NEEDLES = ("run_trial.py", "run_trial.py:527", "endswith", "?index=arm",
+                     "rank_in_named_collection", "untracked")
+
+#: The anchor key §3 carries its recomputed copy under, and the keys it must carry.
+UPPER_RECOMPUTED_KEYS = ("queries", "gold_in_top5", "gold_top1", "misses")
+
+#: Attribute names through which a guard could read a steered `$HOME`. `Path.home` and
+#: `os.path.expanduser`/`expandvars` are the three spellings that resolve to whatever
+#: home the interpreter was handed, so refusing these ATTRIBUTES — rather than a
+#: rendered call string — is the ban that can actually fire. See the node that uses it.
+HOME_READER_ATTRS = ("home", "expanduser", "expandvars")
+
+
+def _3076_home_reads(tree) -> set[str]:
+    """The attribute names in `tree` through which a path could be built off a steered
+    `$HOME` — the ONLY spelling of this ban that can fail.
+
+    The first attempt of this round wrote it as `not [c for c in called if
+    c.endswith("home()")]` over `ast.unparse(node.func)`, and `ast.unparse` of a
+    `Path.home()` call's FUNC is `Path.home`: the parentheses belong to the Call node,
+    not to its func, so no source has ever produced a rendered func ending in
+    `home()`. Review caught it; the review rung is right that an assertion which cannot
+    fail is worse than none, because it reads as coverage. Matching the ATTRIBUTE is the
+    same ban with a failure mode: whatever you do to the result — call it, divide it
+    into a path, assign it — the read of `home`/`expanduser`/`expandvars` is an
+    `ast.Attribute` node in the source. It is a helper rather than an inline expression
+    so the node can run it against a positive control, not only against the node it is
+    guarding.
+    """
+    import ast
+
+    return {node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in HOME_READER_ATTRS}
+
+
+def _3076_upper_names(top5) -> list[str]:
+    """One hit list as the basenames it names, gold-comparable.
+
+    `run_trial.py:528-530` already strips the `qmd://lloyd-architecture/` prefix on its
+    way into `top5`, so the stored strings are `<name>?index=arm` and the `?index=`
+    suffix is ALL that is left to strip. The trailing split on `/` is a deliberate
+    no-op today: it keeps this reader correct if a re-run ever stores the raw URI, and
+    it means a node never fails for the wrong reason by insisting on a prefix the
+    artifact stopped writing.
+    """
+    return [h.split("?index=")[0].split("/")[-1] for h in (top5 or [])]
+
+
+def _3076_upper_tally(artifact: dict) -> dict:
+    """gold-in-top-5 and rank-1 over `queries[].top5` — the artifact read past its own
+    broken summary, from the per-query lists rather than from any `rank` field (every
+    one of which is null, which is the bug, not the result)."""
+    queries = artifact["queries"]
+    hit5, rank1, misses = 0, 0, []
+    for q in queries:
+        names = _3076_upper_names(q.get("top5"))
+        # The shape the arithmetic above depends on, asserted rather than assumed: a
+        # hit list that came back longer than five, or still carrying a scheme or a
+        # suffix, would make `gold_in_top5` a number computed on junk.
+        assert len(names) <= 5, (q["id"], names)
+        assert all("?" not in n and "/" not in n for n in names), (q["id"], names)
+        if q["gold"] in names:
+            hit5 += 1
+        else:
+            misses.append(q["id"])
+        if names and names[0] == q["gold"]:
+            rank1 += 1
+    return {"queries": len(queries), "gold_in_top5": hit5, "gold_top1": rank1,
+            "misses": sorted(misses)}
+
+
+def _3076_section(text: str, heading: str) -> str:
+    """The note's one section that opens with `heading`, up to the next `## ` heading.
+
+    A section, not a `file:line` slice: this note has already been re-issued once
+    (`aeaceeae` repaired its listing, its tables and its no-touch block), and every
+    line number in it moved. The heading is the address that survives an edit.
+    """
+    lines = text.splitlines()
+    at = [k for k, l in enumerate(lines) if l.startswith(heading)]
+    assert len(at) == 1, f"want exactly one line starting {heading!r}, found {len(at)}"
+    rest = lines[at[0] + 1:]
+    end = next((k for k, l in enumerate(rest) if l.startswith("## ")), len(rest))
+    return "\n".join(rest[:end])
+
+
+def test_the_3076_note_requotes_the_upper_bound_the_summary_cannot_report():
+    """Clauses 1-4: §3 quotes the named-collection upper bound as `upper.json` actually
+    supports it — gold in top-5 for 9 of 10 queries and gold at rank 1 for 7 of 10 — on
+    a `<!-- 3076:upper:recomputed -->` anchor the existing anchor parser reads, keeps the
+    artifact's own all-zero summary verbatim beside it, and says in the same section why
+    that zero is a path-form bug in the untracked runner.
+
+    Both directions are pinned. The note's anchor must equal the tally recomputed here
+    from `queries[].top5`, so a re-run that changes the artifact turns this node red
+    instead of leaving the note quoting a stale number; and the note's copy of the
+    artifact's `summary` must equal the artifact's `summary`, so the zero the note
+    prints stays the zero the file holds. Neither figure may be worded as a ten-deep
+    result: `top5` stops at five hits, so the artifact cannot support a rank 6-10 claim
+    about the one miss, `research-pipeline`.
+    """
+    require_live_data(TRIAL_UPPER, "the #3076 named-collection upper-bound artifact",
+                      kind="file")
+    require_live_data(TRIAL_NOTE, "the #3076 measurement note", kind="file")
+
+    art = json.loads(TRIAL_UPPER.read_text())
+    want = _3076_upper_tally(art)
+    # The ANCHOR MAP IS READ OUT OF §3, NOT OUT OF THE WHOLE NOTE. Both clauses are
+    # §3-clauses: clause 1 asks for the recomputed line in that section and clause 2
+    # asks for the zero "in the same section" as its explanation, so an anchor lifted
+    # into §4 or an appendix has to be red, not green-and-shelved. The parser scans the
+    # text it is handed, so handing it the section is what makes placement checkable;
+    # the first attempt of this round parsed the whole file and the review rung named
+    # it as the one clause-1 gap. (The zero line is separately re-checked as a §3 line
+    # below, so a §3-scoped map and a §3-scoped line test cannot disagree.)
+    sec = _3076_section(TRIAL_NOTE.read_text(), "## 3.")
+    anchors = _3076_anchor_map(sec, "upper")
+
+    # Clause 1: the recomputed figures are there, on an anchor line, and they are the
+    # artifact's own numbers — 9 of 10 in top-5 and 7 of 10 at rank 1 as this run stands.
+    assert "recomputed" in anchors, (
+        f"§3 carries no `<!-- 3076:upper:recomputed -->` anchor (keys present: "
+        f"{sorted(anchors)}), so the section still quotes only the broken summary")
+    rec = anchors["recomputed"]
+    assert tuple(rec) == UPPER_RECOMPUTED_KEYS, sorted(rec)
+    assert rec == want, (
+        f"the note's anchor says {rec} but recomputing upper.json's per-query top5 "
+        f"gives {want}: the tally in the note is not the artifact's tally")
+    assert want["queries"] == 10, want
+    assert (want["gold_in_top5"], want["gold_top1"]) == (9, 7), (
+        f"the artifact now tallies {want['gold_in_top5']}/{want['queries']} in top-5 and "
+        f"{want['gold_top1']}/{want['queries']} at rank 1, not the 9 and 7 the note and "
+        "the item both quote — the trial was re-run, and §3 has to be rewritten, not "
+        "this assertion widened")
+    assert want["misses"] == ["research-pipeline"], want
+
+    # Clause 2: the artifact's own summary is still quoted, verbatim, still zero, and
+    # still the artifact's own — and the section states why it reads that way.
+    assert "summary" in anchors, f"the verbatim zero line was dropped: {sorted(anchors)}"
+    assert anchors["summary"] == art["summary"], (
+        f"the note prints {anchors['summary']} where upper.json holds {art['summary']}: "
+        "a re-run changed the artifact and the note's quotation of it is now stale")
+    assert anchors["summary"]["gold_in_top10"] == 0 == anchors["summary"]["gold_top1"], (
+        "the summary stopped being the broken one — if the runner was fixed at source, "
+        "§3's explanation is obsolete and has to be rewritten, not left beside a zero "
+        "that no longer exists")
+    assert anchors["summary"]["mean_reciprocal_rank"] == 0.0, anchors["summary"]
+    assert [q.get("rank_in_named_collection") for q in art["queries"]] == [None] * len(
+        art["queries"]), "some rank is no longer null, so the endswith bug is gone"
+    for needle in UPPER_BUG_NEEDLES:
+        assert needle in sec, f"§3 no longer names {needle!r}: the zero is quoted but " \
+                              "no longer explained, and a reader is left to cite it"
+    assert any(l.startswith("<!-- 3076:upper:summary -->") for l in sec.splitlines()), \
+        "the zero must stay visible as its own line in §3, not paraphrased into prose"
+
+    # Clause 1 again, in prose: the two figures are quoted as counts of ten queries,
+    # each beside the window that supports it — 9 next to top-5, 7 next to rank 1.
+    for num, windows in ((want["gold_in_top5"], ("top-5", "top 5", "top five")),
+                         (want["gold_top1"], ("rank 1", "rank-1", "first place"))):
+        quoting = [l for l in sec.splitlines()
+                   if re.search(rf"\b{num} of {want['queries']}\b", l)]
+        assert quoting, f"§3 never states {num} of {want['queries']} in words"
+        for line in quoting:
+            assert any(w in line for w in windows), (num, windows, line)
+
+    # Clause 4: nowhere in the section does any figure become a ten-deep claim. Only
+    # anchor lines are exempt, and they are the artifact's own key names.
+    for line in sec.splitlines():
+        if line.startswith("<!-- 3076:"):
+            continue
+        assert not any(s in line for s in UPPER_OVERREACH), (
+            f"§3 says something ten-deep on a source truncated at five hits: {line!r}")
+
+
+def test_the_3076_upper_bound_guard_is_anchored_read_only_and_launches_nothing():
+    """Clause 5, read off the AST of the node above rather than off its prose: it opens
+    `upper.json` and the note through production-anchored constants, skips BY NAME
+    through `require_live_data` when either is absent, imports no way to launch a
+    process, and calls no `$HOME`-derived path constructor — the gate runs this file
+    with `HOME` at the round's farm (`scripts/automod/gate.py:1595`), where a steered
+    home names a mirror or nothing at all.
+
+    `ast` and not a substring scan, because the node's own docstring has to be ALLOWED
+    to name the things it must not do: a `grep`-style check would fail for writing this
+    paragraph. What is checked is the call graph of the compiled function, which is the
+    thing that could actually re-run a trial or spend a GPU.
+    """
+    import ast
+    import inspect
+
+    target = test_the_3076_note_requotes_the_upper_bound_the_summary_cannot_report
+    tree = ast.parse(inspect.getsource(target))
+    called = [ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names}
+    imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+
+    # No way to run anything: clause 3 is a read of an existing artifact, and a node
+    # that shells out is a node that could re-run the trial the item forbids.
+    assert not [c for c in called if c.split(".")[0] in
+                {"subprocess", "os", "pty", "signal"}], called
+    assert not {"subprocess", "os", "pty"} & imported, sorted(imported)
+    # No path built from the environment: `ROOT` is this tree, and at the gate that is
+    # the round's worktree, not the trial's scratch or the vault.
+    assert "ROOT" not in names, sorted(names)
+    # Finding (a), the review rung's own words: the previous commit's
+    # `not [c for c in called if c.endswith("home()")]` could never fail, because
+    # `ast.unparse` of a `Path.home()` call's func is `Path.home` — the parens are the
+    # Call's, not the func's. The ban now reads the ATTRIBUTE, and runs against a
+    # positive control in the same breath: a snippet holding all three steerable-home
+    # spellings has to be flagged by the same helper, or the assertion below is being
+    # satisfied by absence rather than by detection. The control is the part an
+    # unfalsifiable assertion was missing.
+    assert not _3076_home_reads(tree), _3076_home_reads(tree)
+    control = ast.parse(
+        "from pathlib import Path\nimport os\n"
+        "a = Path.home() / 'lloyd-data'\n"
+        "b = os.path.expanduser('~/lloyd-data')\n"
+        "c = os.path.expandvars('$HOME/lloyd-data')\n"
+        "d = Path.home().joinpath('x')\n")
+    assert _3076_home_reads(control) == {"home", "expanduser", "expandvars"}, (
+        _3076_home_reads(control), "the ban detects nothing, so it bans nothing")
+
+    # Skips by name, on both of the two files it reads, both of which are files.
+    guards = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name) and node.func.id == "require_live_data"]
+    guarded = {ast.unparse(call.args[0]) for call in guards if call.args}
+    assert {"TRIAL_UPPER", "TRIAL_NOTE"} <= guarded, (sorted(guarded), len(guards))
+    for call in guards:
+        kwargs = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+        assert kwargs.get("kind") == "'file'", ast.unparse(call)
+    assert all(isinstance(call.args[-1], ast.Constant) for call in guards
+               if call.args), "each skip names WHICH piece is missing"
+
+    # And the constants it reads through are production-anchored, whatever `$HOME`
+    # the interpreter was started with.
+    assert TRIAL_UPPER == TRIAL_DIR / "upper.json"
+    assert TRIAL_DIR == production_data_root() / "eval" / "3076"
+    for path in (TRIAL_UPPER, TRIAL_NOTE):
+        assert path.is_absolute() and path.is_relative_to(ACCOUNT_HOME), (
+            path, ACCOUNT_HOME, "not anchored at the account home, so at the gate this "
+            "guard would be certifying a mirror of the file it is certifying")
