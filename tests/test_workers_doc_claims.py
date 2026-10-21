@@ -2052,3 +2052,237 @@ def test_workers_md_does_not_restate_the_retired_unscheduled_claim():
     assert "#2309" in row, (
         "the row no longer says what put the source on a timer, so a reader has no "
         "record of when it started")
+
+
+# --------------------------------------------------------------------------- #
+# The queue discriminator: which arm reaches `mark_failed` (item #3087)
+#
+# §5's in-band-failure bullet and
+# `architecture/research-pipeline.md` §3 state the same rule from two sides, and
+# until now nothing read `workers/pool.py` from either file to check it —
+# `git grep -nw -e mark_completed -e mark_failed` over this file and
+# `tests/test_research_doc_claims.py` was empty when the item was filed, and every
+# node above that cites `workers/pool.py` does so in prose without opening it. The
+# BEHAVIOUR was never
+# unguarded: `test_an_in_band_failure_does_not_send_the_item_back_for_a_retry` in
+# `tests/test_workers_pool.py` drives a real pool over a source that returns
+# `{"status": "failed"}` and asserts the queue row comes back `completed`. What
+# nothing held was this page's prose against that code.
+
+#: The pool's source, read as text. The claim is about which queue call sits on
+#: which arm of one `try`, which an import cannot answer.
+POOL_SRC = ROOT / "workers" / "pool.py"
+
+#: Slice anchors. Symbols, never line numbers. The sentence `25364e54` deleted from
+#: `architecture/research-pipeline.md` §3 anchored this rule to three of them — `:717`,
+#: `:744`, `:773` — and on that commit's `workers/pool.py` not one of the three named a
+#: queue call: `awk 'NR==717||NR==744||NR==773' <(git show 25364e54^:workers/pool.py)`
+#: gives `poll_idle_seconds: float = 2.0,`, a comment about boot reconciliation, and
+#: `"engaged_since": None,`. A number is not a citation. An anchor that stops being
+#: unique fails the node rather than silently reading a different slice, which is the
+#: same failure in the other direction.
+#: One anchor opens the region, and the arms inside it are found STRUCTURALLY rather
+#: than by a second and third needle — because neither could be anchored to occur once:
+#: `grep -c 'finally:' workers/pool.py` is 2 and `grep -c 'except Exception as e:'` is
+#: 12, so the previous commit had to search for them forward from a fixed point, which
+#: is exactly what made its ordering assertion true by construction. Indentation is the
+#: third anchor instead, and it also keeps the returned arm's inner `except Exception:`
+#: (the `cost_outlier.arm_after_run` wrapper, nested one level deeper) out of the list.
+_POOL_VERDICT = 'run_status = norm["status"]'        # opens the try whose arms follow
+
+#: The handler expressions this guard expects to be exactly the raised arms of that
+#: `try`, in the order the source states them. Compared against what `_pool_raised_arms`
+#: parses out of `workers/pool.py`, and NOT against literals the helper itself inserted:
+#: the previous commit's `assert set(arms) == {"asyncio.TimeoutError", "Exception"}`
+#: checked the dict's keys against the two strings that helper had just built it from,
+#: so no source could have made it fail. A third handler, a renamed one, a dropped one
+#: or a reordered pair all reach this line.
+POOL_RAISED_ARMS = ("asyncio.TimeoutError", "Exception")
+
+
+def _pool_lines() -> list[str]:
+    return POOL_SRC.read_text(encoding="utf-8").splitlines()
+
+
+def _pool_line_once(lines: list[str], needle: str) -> int:
+    hits = [i for i, ln in enumerate(lines) if needle in ln]
+    assert len(hits) == 1, (
+        f"`workers/pool.py` now has {len(hits)} lines containing {needle!r}, so this "
+        "guard's slice boundary is ambiguous. Re-point it at something the file says "
+        f"once. The alternative — indexing by line number — is what the sentence "
+        "`25364e54` deleted got wrong, and the claim at stake here is "
+        f"{DOC_RAISED_ARM!r}.")
+    return hits[0]
+
+
+def _pool_indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _pool_enclosing_try(lines: list[str], inside: int) -> tuple[int, int]:
+    """The nearest `try:` above `inside` that is INDENTED LESS than it, with its
+    indentation. Shallower and nearest: the innermost enclosing `try` is the one whose
+    handlers are this job's raised arms, and a `try` nested inside the body has handlers
+    of its own that are not ours to read."""
+    ind = _pool_indent(lines[inside])
+    for i in range(inside - 1, -1, -1):
+        if lines[i].strip() == "try:" and _pool_indent(lines[i]) < ind:
+            return i, _pool_indent(lines[i])
+    raise AssertionError(
+        f"`workers/pool.py` has no `try:` above {lines[inside].strip()!r}, so the arms "
+        f"this guard reads as 'raised' are no longer an exception's doing — and the §5 "
+        f"clause they are pinned against is {DOC_RAISED_ARM!r}.")
+
+
+def _pool_try_clauses(lines: list[str], try_at: int,
+                      ind: int) -> tuple[list[tuple[str, int]], int]:
+    """Every clause of the `try` at `try_at` in source order as (clause text, line), and
+    the line where the statement ends.
+
+    A clause is a line at the `try`'s OWN indentation beginning `except`, `else:` or
+    `finally:`; anything deeper is a body, and the first same-or-shallower line that is
+    not one of those closes the statement. Indentation, not a needle, is what keeps the
+    returned arm's nested `except Exception:` out of this list — and if the pool ever
+    grows a third handler it shows up here rather than being skipped past.
+    """
+    clauses: list[tuple[str, int]] = []
+    end = len(lines)
+    for i in range(try_at + 1, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            continue
+        if _pool_indent(line) > ind:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("except", "else:", "finally:")):
+            clauses.append((stripped, i))
+            continue
+        end = i
+        break
+    return clauses, end
+
+
+def _pool_clause_kind(clause: str) -> str:
+    """`except asyncio.TimeoutError as e:` → `asyncio.TimeoutError`: the handler named
+    as the source writes it, with no binding and no colon, because that is the form
+    `POOL_RAISED_ARMS` states and the form a reader searches for."""
+    return clause[len("except "):].split(" as ")[0].rstrip(":").strip()
+
+
+def _pool_raised_arms(lines: list[str]) -> dict[str, str]:
+    """The arms that run when the job RAISES, keyed by the handler expression the source
+    actually states and in the order it states them, each slice running to the clause
+    that follows it — the `finally:` releasing the semaphore on this `try`, or the end of
+    the statement if it ever grows no `finally`.
+
+    Keys and boundaries are both read out of the file. Nothing here inserts a key and
+    then checks the result for that key: the two assertions that survived from the
+    previous commit were exactly that, and the review rung named both. The handler NAMES
+    need no uniqueness assertion either — CPython rejects a duplicate handler for the
+    same type on one `try` ("duplicate handler for type"), so the dict below cannot lose
+    an entry to a collision, and an assertion that the lengths match would be the third
+    guard that can never fire. A file that somehow did state one is a file that does not
+    import, and `workers/pool.py` failing to import fails the suite by itself.
+    """
+    verdict = _pool_line_once(lines, _POOL_VERDICT)
+    try_at, ind = _pool_enclosing_try(lines, verdict)
+    clauses, end = _pool_try_clauses(lines, try_at, ind)
+    handlers = [(kind, at) for kind, at in clauses if kind.startswith("except")]
+    assert handlers, (
+        "the `try` that reads the returned verdict in `workers/pool.py` has no handler "
+        "at all, so there is no raised arm left to tell apart from a returned one, and "
+        f"§5's rule is {DOC_RAISED_ARM!r}.")
+    assert verdict < handlers[0][1], (
+        "the returned-verdict line is no longer in that `try`'s body — it sits inside "
+        "its first handler — so the slice this file's doc describes as a RAISED "
+        f"exception is the arm that handles a RETURNED verdict: {DOC_RAISED_ARM!r}.")
+    return {_pool_clause_kind(kind):
+            "\n".join(lines[at:next((a for _, a in clauses if a > at), end)])
+            for kind, at in handlers}
+
+
+#: The clause, verbatim from §5's in-band-failure bullet, asserted to still be that
+#: page's wording by the node below and quoted in the messages of the node above it.
+DOC_RAISED_ARM = "only a *raised* exception reaches `mark_failed`"
+
+
+def test_both_raised_arms_release_the_queue_with_mark_failed():
+    """Clause 2: the raised arms are the only thing that fails a queue row.
+
+    Every handler the pool has on that `try` — asserted below to be exactly the two
+    `POOL_RAISED_ARMS` names, in the order the source states them, read out of the file —
+    calls `mark_failed` and never `mark_completed`, and each still writes the run row
+    `status="failed"` — which is the half that makes this a discriminator rather than a
+    call count: on this page's own evidence the run row reads `failed` on both arms, so
+    the queue call is the only thing separating an in-band failure (schedule intact) from
+    a raised one (backoff, attempts).
+    """
+    arms = _pool_raised_arms(_pool_lines())
+    # Tuple, not set: the ORDER is a claim about the source too, and `_pool_raised_arms`
+    # returns the handlers in the order the file states them, so a swapped pair lands
+    # here instead of passing. Both sides of this comparison come from different places —
+    # the left is parsed from `workers/pool.py`, the right is this file's expectation —
+    # which is the property the previous commit's version lacked.
+    assert tuple(arms) == POOL_RAISED_ARMS, (
+        f"`workers/pool.py`'s raised arms are {tuple(arms)}, not {POOL_RAISED_ARMS}, so "
+        "the pair this guard pins is not the pair the code has: a third handler would "
+        "need the same `mark_failed` before §5's rule still read as the whole rule, and a "
+        f"renamed or dropped one means this file is quoting {DOC_RAISED_ARM!r} against "
+        "arms that no longer exist.")
+    for name, arm in arms.items():
+        assert "mark_failed" in arm, (
+            f"the {name} arm no longer calls `mark_failed`, so a job that raises stops "
+            f"being retried by the queue. The page this file guards says the opposite: "
+            f"{DOC_RAISED_ARM!r}.")
+        assert "mark_completed" not in arm, (
+            f"`mark_completed` reached the {name} arm, so the rule is no longer which "
+            "arm a failure took but only whether it took one — and the doc's "
+            f"contrast collapses: {DOC_RAISED_ARM!r}.")
+        assert 'status="failed"' in arm, (
+            f"the {name} arm no longer writes the run row `failed` inside the handler, "
+            "so `runs.status` stopped being the thing both arms share. This guard's "
+            "point is that the QUEUE call is the discriminator precisely because "
+            "`runs.status` says the same word on every arm; if that stops being true, "
+            "say so in §5 as well as here.")
+
+
+def test_workers_jobs_md_names_the_queue_call_each_arm_takes():
+    """Clause 4: §5's in-band bullet has to keep naming the calls, in the right arms.
+
+    Read as one `## ` section, not paragraph by paragraph: this doc states the rule as a
+    bullet inside a bullet, so it spans several blank-line blocks and reading one of them
+    would see half a sentence. What has to be unique is the SECTION — §5, Intake, is the
+    queue's surface and the only place the two calls belong together.
+    """
+    text = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    # One `## ` section may state the rule. Not one paragraph: this doc writes its
+    # claims as bullets inside a bullet, so the rule is spread over several `\n\n`
+    # blocks and splitting there would read half a bullet as a contradiction. A second
+    # SECTION naming both calls is a real risk — two places, two rules — so that is
+    # what has to be unique.
+    sections = [s for s in re.split(r"(?m)^## .*$", text)
+                if "mark_completed" in s and "mark_failed" in s]
+    assert len(sections) == 1, (
+        f"{len(sections)} sections of `architecture/workers-jobs.md` name both queue "
+        "calls, so the discriminator now has two homes in one page and this node reads "
+        "whichever comes first. Keep the rule where §5 has it.")
+    flat = " ".join(sections[0].split())
+    assert DOC_RAISED_ARM in flat, (
+        f"§5 lost {DOC_RAISED_ARM!r}, the clause the code-side assertions above quote. "
+        "The behaviour test whose failure message this passage explains is "
+        "tests/test_workers_pool.py::test_an_in_band_failure_does_not_send_the_item_"
+        "back_for_a_retry, and it asserts the queue row comes back `completed`.")
+    assert ("calls `mark_completed` **regardless** — " + DOC_RAISED_ARM) in flat, (
+        "§5 no longer states the two arms in one breath: the returned verdict settled "
+        "with `mark_completed` regardless, and only a raised exception reaching "
+        "`mark_failed`. Split across sentences it stops being a discriminator — which is "
+        "the shape `architecture/research-pipeline.md`'s deleted §3 sentence had, where a "
+        "`mark_completed` mention sat "
+        "beside a `failed` branch and read as if the failed arm were settled differently.")
+    assert ("So a source that returns `failed` and expects a retry does not get one "
+            "from the queue.") in flat, (
+        "§5 stopped naming the consequence for the returned arm, so the asymmetry is "
+        "left as two call names instead of what each arm costs the schedule.")
+    assert "and the queue's backoff" in flat, (
+        "§5 no longer says what a raised exception reaches besides the call — the "
+        "backoff is the reason the split matters to a reader who runs a job on a timer.")

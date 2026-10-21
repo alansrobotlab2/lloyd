@@ -1492,3 +1492,189 @@ def test_the_rails_and_this_guard_share_one_definition():
         assert sh.body_undelivered_tools(path.read_text(encoding="utf-8")) == [], (
             f"{path.name} is in the corpus with an undelivered tool named; the rails would "
             "now refuse the write that produced it")
+
+
+# --------------------------------------------------------------------------- #
+# The queue discriminator on a RETURNED verdict (item #3087)
+#
+# A source that comes back `{"status": "failed"}` is a COMPLETED queue item: the
+# pool writes the run row `failed` and settles the queue row with
+# `mark_completed`, and only a RAISED exception reaches `mark_failed` and the
+# queue's backoff. That split is what keeps a research job that fails every night
+# on its own schedule instead of burning attempts, and it lives in
+# `workers/pool.py` — a file neither doc-claim file read at all when this was
+# filed, so the two architecture pages could say anything about it. They had, once:
+# `architecture/research-pipeline.md` §3 described that arm as settling the queue
+# "with `mark_completed` at `:717`, immediately after the `run_status == "failed"` branch
+# decides the log level" until 25364e54 deleted the sentence. The call it names is the
+# one asserted below and is still what the code does; what was wrong was the citation —
+# at that commit `:717` was a `WorkPool.__init__` parameter and the settle was 1,224
+# lines below at `:1941`. Which is the reason every anchor in this block is a symbol.
+# `git grep -nw -e mark_completed -e mark_failed` over
+# `tests/test_research_doc_claims.py` and `tests/test_workers_doc_claims.py` was
+# empty at that fix (the positive control that the zero is an absence, not a bad
+# pattern: the same command form hits `tests/test_workers_pool.py`), so the
+# sentence had no reader. The BEHAVIOUR was never unguarded —
+# `tests/test_workers_pool.py::test_an_in_band_failure_does_not_send_the_item_back_for_a_retry`
+# drives a real pool over a source that returns `{"status": "failed"}` and asserts
+# the queue row comes back `completed` — what had nothing holding it together was
+# the code's arm against the prose about it. These nodes are that seam, from the
+# half that owns the research doc.
+
+#: The pool's own source. Read as text, not imported: this is a claim about which
+#: queue call sits on which arm of one `try`, and an import cannot answer that.
+POOL_SRC = ROOT / "workers" / "pool.py"
+
+#: Slice anchors, each of which must occur exactly once in the file. Symbols rather
+#: than line numbers, because the citation in that deleted sentence was already stale
+#: when it was removed: `git show 25364e54^:workers/pool.py` puts the settle on line
+#: 1941 and line 717 inside `WorkPool.__init__`. An anchor that stops being unique
+#: fails the node, so "the file grew a second one" cannot quietly make the slice mean
+#: something else. These two anchors are deliberately local to this file rather than
+#: shared with the file that owns the other doc (`tests/test_workers_doc_claims.py`),
+#: because `except Exception` is NOT unique here — the returned arm holds an inner one,
+#: the `cost_outlier.arm_after_run` wrapper — and a shared helper that reaches past this
+#: slice would only invite it to be widened.
+_POOL_ARM_START = 'run_status = norm["status"]'       # the returned verdict is read
+_POOL_RAISED_START = "except asyncio.TimeoutError:"   # end of the slice (the file's only one)
+
+
+def _pool_lines() -> list[str]:
+    return POOL_SRC.read_text(encoding="utf-8").splitlines()
+
+
+def _pool_line_once(lines: list[str], needle: str) -> int:
+    hits = [i for i, ln in enumerate(lines) if needle in ln]
+    assert len(hits) == 1, (
+        f"`workers/pool.py` holds {len(hits)} lines containing {needle!r}, so the "
+        "slice this guard reads is no longer identifiable by that anchor. Re-point the "
+        f"anchor at something the file says once, and do not index by line number: the "
+        f"claim this keeps honest is {DOC_FAILED_ARM!r}, and the §3 sentence "
+        "`architecture/research-pipeline.md` deleted had a line number that pointed at "
+        "a constructor parameter instead of the settle.")
+    return hits[0]
+
+
+def _returned_verdict_slice(lines: list[str]) -> str:
+    """The returned-verdict arm: from the line that reads the source's verdict up to
+    the line that opens the first raised-exception handler — which is where the
+    verdict stops being data and an exception starts. Everything the pool does with a
+    returned verdict, including the `status == "failed"` branch, the ledger record,
+    the run-row write and the queue settle, is between those two lines."""
+    return "\n".join(lines[_pool_line_once(lines, _POOL_ARM_START):
+                           _pool_line_once(lines, _POOL_RAISED_START)])
+
+
+#: The clause, quoted from `architecture/research-pipeline.md` §3 and asserted to be
+#: that doc's wording by the node below. A failure message that quoted a sentence the
+#: doc no longer contains would send a reader to text that is not there — the same
+#: defect #3087 is about, one layer down.
+DOC_FAILED_ARM = "nothing on that arm reaches `mark_failed`"
+
+
+def test_the_pool_settles_a_returned_failure_on_the_queue_with_mark_completed():
+    """Clause 1: the arm a research job's failure actually takes.
+
+    `run_status = norm["status"]` through the `except asyncio.TimeoutError:` that
+    ends it is the whole of what happens when a source returns a verdict — including
+    the `status == "failed"` branch, the ledger record, the run-row write with
+    `status=run_status`, and the queue settle. On that arm the queue call is
+    `mark_completed` exactly once and `mark_failed` appears not at all.
+    """
+    slice_ = _returned_verdict_slice(_pool_lines())
+    assert "mark_completed" in slice_, (
+        "the returned-verdict arm no longer calls `mark_completed`, so a source that "
+        "comes back failed is back on the retry ladder. The doc sentence this pins: "
+        f"{DOC_FAILED_ARM!r} — which means the settle on that arm is the completed one.")
+    assert slice_.count("mark_completed") == 1, (
+        "a second `mark_completed` appeared inside the returned arm, so which settle a "
+        f"given verdict takes is now conditional. The doc says the opposite: "
+        f"{DOC_FAILED_ARM!r}.")
+    assert "mark_failed" not in slice_, (
+        "`mark_failed` reached the returned-verdict arm. The doc sentence this node "
+        f"quotes: {DOC_FAILED_ARM!r}. The behaviour counterpart lives in "
+        "tests/test_workers_pool.py::test_an_in_band_failure_does_not_send_the_item_"
+        "back_for_a_retry, and it is asserting the queue row comes back `completed`.")
+    assert "status=run_status" in slice_, (
+        "the run-row write left the slice, so the pair this guard exists to pin — a "
+        "`failed` run row beside a completed queue row — is no longer one readable "
+        "passage. Fix the slice's anchors; do not drop this assertion, which is the "
+        "half that makes the two queue calls a discriminator rather than a trivia.")
+
+
+def test_the_research_doc_states_the_discriminator_the_pool_code_keeps():
+    """Clause 3: `architecture/research-pipeline.md` has to keep saying what the code does.
+
+    The doc must name the returned arm's settle, name the raised arm's settle, say
+    explicitly that the returned arm never reaches `mark_failed`, and name the
+    condition (`raised`) that separates them — the same shape asserted of
+    `architecture/workers-jobs.md` in `tests/test_workers_doc_claims.py`, so the two
+    pages cannot drift apart from each other either.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    # One PARAGRAPH may state the rule here. The unit differs from
+    # `tests/test_workers_doc_claims.py` on purpose: this doc writes the claim as one
+    # paragraph, while workers-jobs.md writes it as a bullet inside a bullet — each file
+    # reads its own doc's shape rather than one shared splitter.
+    paragraphs = [p for p in text.split("\n\n")
+                  if "mark_completed" in p and "mark_failed" in p]
+    assert len(paragraphs) == 1, (
+        f"{len(paragraphs)} passages state the discriminator, so this node's reading is "
+        "one of them and the doc can carry two different rules in one file. Keep the "
+        "claim in one place; the guard reads one place.")
+    para = paragraphs[0]
+    # EVERY prose assertion below, including the quoted clause, reads the passage with
+    # its line-wrapping collapsed. The doc is re-wrapped to a column by whoever edits it,
+    # and a substring that straddles a newline is then absent from the raw text while the
+    # claim is unchanged — shortness does not protect a quote, since what matters is
+    # where the wrap lands, not how few words the quote has. The previous commit checked
+    # DOC_FAILED_ARM against the raw paragraph and every other assertion against the
+    # collapsed one, so a re-wrap of that sentence red-flagged a node whose claim had not
+    # moved, which is the failure mode a doc guard must not have.
+    flat = " ".join(para.split())
+    assert DOC_FAILED_ARM in flat, (
+        f"§3 lost {DOC_FAILED_ARM!r}, the sentence that makes the returned arm's "
+        "silence readable. Re-insert it rather than deleting this assertion: the "
+        "code-side half (`status=run_status` beside `mark_completed`) is what the "
+        "clause above pins, and this is the other half of the same fact.")
+    assert "Only a *raised* exception" in flat, (
+        "the passage no longer names a RAISED exception as the other arm, which is the "
+        "distinction the pool implements — a returned verdict and a raised exception are "
+        "different events with different queue outcomes, and without that word the doc "
+        f"contradicts the sentence it also carries: {DOC_FAILED_ARM!r}.")
+    assert "`mark_failed` is the only thing that re-queues" in flat, (
+        "the passage stopped saying `mark_failed` is the only thing that re-queues an "
+        "item — the sentence that makes the returned arm's `mark_completed` the whole "
+        "story about the schedule, not one outcome among several.")
+    assert "burns no retry budget" in flat, (
+        "the passage no longer states that a returned failure costs the schedule "
+        "nothing, so the asymmetry is left as two call names instead of a consequence: "
+        f"the run row fails, the queue row does not — {DOC_FAILED_ARM!r}.")
+    # The CONTRAST, sentence-scoped — not the vocabulary. The previous commit looped over
+    # ("backoff", "attempt") as bare substrings, which pinned nothing: `attempt` is
+    # satisfied by `max_attempts`, and this paragraph carries that word for an unrelated
+    # reason (the retry ladder's own numbers, two sentences later), so a rewording that
+    # deleted the raised arm's consequence entirely stayed green. A sentence now has to
+    # hold both halves of the asymmetry in one breath, which is how the discriminator is
+    # actually claimed and the only shape that can be wrong.
+    sentences = re.split(r"(?<=\.)\s+", flat)
+    raised = [s for s in sentences if "*raised*" in s]
+    assert len(raised) == 1, (
+        f"{len(raised)} sentences carry `*raised*`, so the doc states the other arm's "
+        "consequence in more than one place and this node reads whichever it found "
+        f"first; the rule belongs in one sentence beside {DOC_FAILED_ARM!r}.")
+    assert "fails the queue row" in raised[0] and "`mark_failed`" in raised[0], (
+        f"the one sentence naming the raised arm ({raised[0]!r}) no longer says that arm "
+        "FAILS THE QUEUE ROW beside naming `mark_failed`, so the two arms are no longer "
+        f"contrasted by consequence and the discriminator reads as a naming convention — "
+        f"compare the returned arm's own sentence, which pairs `mark_completed` with "
+        f"{DOC_FAILED_ARM!r}.")
+    settling = [s for s in sentences if "*returns*" in s]
+    assert len(settling) == 1, (
+        f"{len(settling)} sentences carry `*returns*`, so which arm the returned verdict "
+        "settles is stated more than once and can now disagree with itself.")
+    assert "`mark_completed`" in settling[0] and "`mark_failed`" not in settling[0], (
+        f"the sentence describing the RETURNED arm ({settling[0]!r}) no longer settles "
+        "it with `mark_completed` alone, which is the half the code-side slice above "
+        f"pins in `workers/pool.py` — it is also the shape of the sentence `25364e54` "
+        f"deleted for naming the wrong call. The claim to keep is: {DOC_FAILED_ARM!r}.")
