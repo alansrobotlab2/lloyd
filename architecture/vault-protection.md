@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, vault, safety, guardian, autoresearch, sync]
 type: reference
 status: implemented
-date: 2026-09-21
+date: 2026-10-21
 ---
 
 # Vault protection: four layers, none of which trusts the prompt
@@ -78,7 +78,11 @@ check, and older copies of the runner live in automod worktrees.
 - **Which sessions.** Ids starting `bench_` (what old runner copies still mint),
   `<date>_<time>_bench_<hex>` (what the runner records under now) and
   `pt-eval-` (the preserved-thinking eval replays real session prompts with the
-  full toolbox). A `task:*` subagent inherits its parent's answer. `benchmine`,
+  full toolbox). A `task:*` subagent inherits its parent's answer, and a
+  `task:*` id whose parent **cannot be resolved** is sandboxed too (#2025): the
+  registry is a 20-deep in-process ring, so an evicted row or an aggregator
+  restart is a miss, and a miss that read "not sandboxed" handed a bench
+  trial's subagent the full write toolbox. `benchmine`,
   the bench-mining worker, is a different producer and is not sandboxed. The
   slug is matched exactly.
 - **Bash runs under bubblewrap.** `/` is bound read-only, `/tmp`, `/run` and
@@ -111,7 +115,8 @@ check, and older copies of the runner live in automod worktrees.
   count on the trace and the ledger row — refusing the read does not erase the
   reach for it, and the count is the reward-hacking signal.
 - **A state-changing call that arrives with no session id is refused** (#1053,
-  `main.py:517`). `is_sandboxed_session("")` is False by design, so before this
+  the third numbered refusal in `main.call_tool`). `is_sandboxed_session("")`
+  is False by design, so before this
   the *absence* of a session id was itself a route back to the whole write
   surface: a trial that dropped its own id from `_meta` got `Write` back.
   Read-only tools still dispatch with no session id, so `tools/list` and every
@@ -122,8 +127,25 @@ check, and older copies of the runner live in automod worktrees.
   that skips `call_tool` still cannot run a sandboxed command bare. The probe
   attempts a write the user could make outside the sandbox (`touch /` would
   fail on permissions and prove nothing).
+- **Ordinary Bash runs under bwrap too, with the opposite profile.**
+  `agent_mcp/_path_sandbox.py` (#2109, landed `b3b652b6`) wraps every
+  *non*-sandboxed Bash spawn — foreground and background — in `--bind / /`
+  plus one `--ro-bind` per entry of `PROTECTED_SHELL_RO_ROOTS`: the five
+  write-deny-set members **plus** `~/obsidian/lloyd/USER.md` and `MEMORY.md`,
+  which are deliberately not in the deny-set because the nightly's sanctioned
+  route for rewriting them is `Write`/`vault_write`. Files bind as files, never
+  as their parent directory (a parent bind would silently make
+  dream-consolidation's `.consolidate-lock` stamp unwritable), and an absent
+  entry is skipped rather than fatal. This is the answer to "a parser of shell
+  can always be out-spelled": the kernel answers EROFS to a shape nobody
+  recognised — `truncate -s 0`, `perl -ni`, `ln -sfn`, `git -C ~/obsidian
+  checkout -- lloyd/USER.md`. **This profile fails open, on purpose**: when
+  bwrap cannot build a namespace the command runs bare with a WARNING and
+  `/state` reads `protected_path_sandbox.fallback: true` — a ruling made with a
+  person on it, because refusing Bash for every attended and worker session on
+  a kernel hiccup is an outage of the whole agent.
 
-`/state` reports `tool_sandbox`. The runner's `require_tool_sandbox` reads it
+`/state` reports `tool_sandbox` and `protected_path_sandbox`. The runner's `require_tool_sandbox` reads it
 and raises before any trial starts unless the sandbox is enforced, bwrap works
 and the recorded slug is covered. A runner checkout can be newer than the
 aggregator serving it.
@@ -153,16 +175,24 @@ can land the write**:
 | `protected_roots()` / `check_protected_delete` | does this command *take out* the vault, the lloyd tree or `$HOME`? | the Bash lane: the hook and `main.call_tool` |
 | `PROTECTED_WRITE_ROOTS` / `write_deny_reason` | may this file be *written* at all? | three lanes, one predicate: the file tools `agent_mcp/builtin_fs._gate_check` (#1049, landed `485fa6c0`), Bash via `check_bash_write_denied` (#1620), and `vault_write` via `agent_mcp/vault._protected_write_refusal` (#1757). `automod_vault_land` is the remaining exemption — it validates before it writes, which is what the refusal text routes a writer to |
 
-The write deny-set is four entries — `~/.openclaw`, `~/lloyd/agent-services`,
-`~/lloyd/.venvs`, `~/obsidian/lloyd/SOUL.md` — and it runs ahead of
+The write deny-set is five entries — `~/.openclaw`, `~/lloyd/agent-services`,
+`~/lloyd/.venvs`, `~/.local/share/uv/python` (all five lloyd venvs link one
+uv-managed interpreter, so a round writing "its own worktree" was judged a write
+to a pointer outside the set and allowed the shared binary — the entry makes the
+interpreter itself protected; `b8322052`), and `~/obsidian/lloyd/SOUL.md` — and
+it runs ahead of
 `_gate_check`'s create early-return and outside the `harness.edit_gates.enabled`
 switch, so "delete it then Write it back" and "no session bound" are neither a
 route; it fails closed, and the lift is a `ContextVar` no tool argument can set.
 It is deliberately *not* `protected_roots()`: those roots are the vault, the
 lloyd tree and `$HOME`, and refusing writes under them refuses every ordinary
-note. **The asymmetry is open**: `write_deny_reason` is consulted from the fs
-lane and nowhere else, so a redirect or `tee` on the Bash lane reaches the same
-four targets unchecked — tracked as #1049's remaining half.
+note. **The asymmetry is shut**: `write_deny_reason` is now asked by every lane
+that can land a write — fs (#1049), Bash since #1620 (`check_bash_write_denied`,
+fifth in `check_bash_command`), `vault_write` since #1757 — and on the Bash lane
+the kernel enforces the superset list (2.1's `--ro-bind` layer), so an
+unrecognised redirect or `tee` spelling at these targets meets EROFS without
+ever being parsed. What stays uncovered is the fallback case: a substrate that
+cannot build its mounts is parser-only by policy.
 
 At dispatch the aggregator enforces the whole regex table except `sudo`,
 whose `\bsudo\b` matches the word inside grep text. The hook-less paths ran
@@ -206,7 +236,7 @@ for a stronger reason: a wipe must be caught while paused, while BROKEN, with
 supervisord unreachable, and with nothing under observation. The existing
 `evaluate_data_damage` counted vault files only inside a promotion's window.
 
-The walk costs ≈12 ms for 5.8k files (re-measured 2026-09-21) and skips `.git`,
+The walk costs ≈15 ms for 8.6k files (re-measured 2026-10-21) and skips `.git`,
 which churns thousands of loose objects. It trips on:
 
 - a missing vault root;
@@ -267,6 +297,14 @@ It refuses while the tripwire is set, or when the vault holds under 90% of the
 last snapshot's count. Either way it exits 0 and says why, so the timer does not
 flap to failed.
 
+A killed run can leave `index.lock` in the backup repo, and did: from 2026-10-16
+the whole layer died for four days — 370 timer fires each exiting 128, the timer
+enabled and firing, nobody asking. The next run now clears holder-less locks
+older than 15 minutes itself, and #3078 priced staleness beside it: a newest
+snapshot over 3 h old (twelve missed cycles) reads stale via
+`vaultwatch.py snapshot-age`. That verdict has no poller yet — the data root's
+twin is ticked by the guardian, the vault's is CLI-only (#3132).
+
 `scripts/backup/restore-vault.sh <rev> [dest]` checks a snapshot out into a side
 directory through a throwaway index. It refuses the live vault path. The swap
 stays a human step, and its order (sync stays stopped, swap, `clear`, then
@@ -326,27 +364,37 @@ that pass so Lloyd's own writes do not read as downloads.
 ## 3. What is still not covered
 
 - A process that is **not** a bench or eval session and deletes the vault by a
-  route 2.3 does not parse, such as a compiled binary or a variable built
-  across commands. 2.4 limits that to one tick of sync damage, and 2.5 limits
-  local loss to 15 minutes.
+  route 2.3 does not parse. A compiled binary or a variable built across
+  commands is now stopped *when it is a shell child aiming at a shell-ro-list
+  entry* — the kernel binds do not depend on parsing (2.1) — but the vault root
+  itself cannot be bound read-only, because writing notes is ordinary work, and
+  none of the entries is bound while the substrate is in fallback. 2.4 limits
+  that to one tick of sync damage, and 2.5 limits local loss to 15 minutes —
+  only while the backup keeps landing, which the unpolled snapshot-age verdict
+  (#3132) is what would tell you.
 - **Remote damage within the tick.** `ob sync` can push some deletions in the
   ≤5 s before the tripwire. Obsidian Sync's server-side version history is the
   recovery for those.
 - **The sandboxed prefixes are a list.** A new eval driver that replays prompts
-  with live tools must mint a sandboxed id. Of the two producers that exist,
-  `tests/test_tool_sandbox.py` pins only the bench runner's mint
-  (`_trial_session_id`); the eval driver's shape at
-  `eval/run_preserve_thinking_eval.py:254` is covered by a literal in the
-  parametrised table, so renaming that prefix would leave its sessions
-  unsandboxed with a green suite (#1333).
-- **A route that is none of the three lanes.** The write deny-set is now asked by
-  every MCP lane that can land a path — the file tools, Bash since #1620, and
-  `vault_write` since #1757, which was the open hole (#1049's remaining half). What
-  is left uncovered is a write that reaches the file by none of them: a compiled
-  binary, a path assembled across commands 2.3 does not parse, or the sanctioned
+  with live tools must mint a sandboxed id. Both producers that exist are now
+  pinned through their named mints: `tests/test_tool_sandbox.py` asserts the
+  aggregator sandboxes the bench runner's `_trial_session_id` **and** the eval
+  driver's `new_trial_session_id`, so renaming `SANDBOXED_TRIAL_ID_PREFIX` in
+  `eval/run_preserve_thinking_eval.py` goes red (#1333 closed), and that driver
+  refuses to start a trial whose id the aggregator would not sandbox
+  (`require_sandboxed_trial_session`). What remains uncovered is the next
+  driver, not the two that exist.
+- **A write that reaches the file by none of the three lanes.** The write
+  deny-set is now asked by every MCP lane that can land a path — the file
+  tools, Bash since #1620, and `vault_write` since #1757, which was the open
+  hole (#1049's remaining half) — and the Bash lane has the kernel superset
+  behind the parser, except in fallback. What is left: a write during that
+  fallback, a writer that never reaches the aggregator at all (in-process code
+  paths), or the sanctioned
   `automod_vault_land` / autoresearch promotion routes, which validate by contract
   instead of by location.
 
 ## Review log
 
 - **2026-09-21 — `stale`.** All four layers are live and verified against the tree (tripwire on every tick, sync start-gate, 15-min timer last snapshot 09:00:49, `require_tool_sandbox` reporting `enforced`/`bwrap` true), but three things landed after 09-14 and are now written in: the bench-corpus read deny (#651) and the sessionless-write refusal (#1053) in 2.1, and `protected_paths`' second predicate — the write deny-set (#1049), which 2.3 now tabulates against the delete predicate, including the open asymmetry that the Bash lane does not consult it. Corrected: the §3 claim that the suite pins both id producers (it pins only the bench runner; #1333), and the tripwire walk cost, re-measured at ≈12 ms over 5.8k files.
+- **2026-10-21 — `stale`.** All layers live; the tree moved after 09-21 in ways the prose missed. The write deny-set is **five** entries (uv interpreter store, `b8322052`) and §2.3 said four; #1620 and #1757 shut the Bash- and `vault_write`-lane halves of the asymmetry §2.3 still called open — a paragraph contradicting its own table above it; and #2109 landed a kernel layer the doc never described: `agent_mcp/_path_sandbox.py` (`b3b652b6`) ro-binds the deny-set plus `USER.md`/`MEMORY.md` into every ordinary Bash spawn, deliberately failing open with `/state protected_path_sandbox.fallback`. Also corrected: an unresolvable `task:*` parent now sandboxes (#2025); the eval-driver id mint is pinned, so the §3 #1333 bullet is closed; `main.py:517` re-pointed to `call_tool`'s third numbered refusal; walk cost re-measured ≈15 ms over 8.6k files; #3078 gave the backup repo dead-lock self-clear and a 3 h stale-snapshot bound. Filed: #3131 (`check_bash_command` counts itself as "five checks" while chaining six), #3132 (the stale-snapshot verdict has no poller), #3133 (three silent-green paths in `tests/test_path_sandbox.py`).
