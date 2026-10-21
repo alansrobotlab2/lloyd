@@ -1201,22 +1201,39 @@ bridge's 40 rows at all, so a regeneration that skips it drops or freezes them
 
 Offline, or in a worktree (Thunderbird will read zero there), this prints every
 tool with its module, its marks and its required arguments. §6 is this output
-plus a hand-written "Does" column:
+plus a hand-written "Does" column. The last line emits the two counts
+(`TOTALS`, then the tool count and the module count), which are the figures this
+page states in four places of prose: the front-matter `summary:` and the count
+line in the intro give both, the intro's "mounts 29 Python modules" and the §1
+diagram give the module count. That line printed nothing until #3126, so the
+copies were typed from memory and at this item's filing the page carried three
+different module counts at once (26 / 27 / 29). Printing the totals leaves every
+copy one measurement from the truth; moving the numbers into them is still the
+human step of a regeneration —
+`tests/test_tools_md_inventory_parity.py` reads §6's tables and this snippet,
+never prose:
 
 ```bash
 PYTHONPATH=. .venvs/lloyd/bin/python - <<'EOF'
 import asyncio
 from agent_mcp import main as m, annotations as A
-for t in asyncio.run(m.list_tools()):
+rows = [(m._dispatch[t.name].__name__.rsplit(".", 1)[-1], t)
+        for t in asyncio.run(m.list_tools())]
+for mod, t in rows:
     a, n = t.annotations, t.name
     marks = [k for k, on in (("RO", a.read_only_hint), ("DX", a.destructive_hint),
              ("ID", a.idempotent_hint and not a.read_only_hint), ("OW", a.open_world_hint),
              ("RX", n in A.REPEAT_EXPECTED), ("FX", A.side_effecting(n)),
              ("PM", n in A.PLAN_MODE_ALWAYS_ALLOWED)) if on]
     req = (t.input_schema or {}).get("required") or []
-    print(m._dispatch[n].__name__.rsplit(".", 1)[-1], n, " ".join(marks), ",".join(req), sep="\t")
+    print(mod, n, " ".join(marks), ",".join(req), sep="\t")
+print(f"TOTALS\ttools={len(rows)}\tmodules={len({mod for mod, _ in rows})}")
 EOF
 ```
+
+`tests/test_tools_md_inventory_parity.py` runs that block and holds its totals
+against the same dispatch table it compares §6 to, so a regeneration that stops
+printing the number is caught rather than quietly copied.
 
 ## Review log
 
