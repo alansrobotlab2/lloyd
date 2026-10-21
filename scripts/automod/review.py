@@ -3678,12 +3678,33 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     # #1845, recorded by #1958): the list names grader-authored citation defects only,
     # `parse_review` takes no prechecks, and `honesty_prechecks_with_standing` stays the
     # one place a live-module finding is demoted. The tolerated hazard is a `blocking`
-    # precheck beside a non-empty `unreliable` buying a free re-gate; measured
-    # 2026-10-01 over the ledger's review rows it has happened 0 times in 1,118 (32
-    # rows carry a blocking precheck, 24 a non-empty `unreliable`, none both). Reopen
-    # only when that count is above zero, and then by routing the precheck into the
-    # `external_blocker` detail so the attempt stays unspent — never by a suppression
-    # term here.
+    # precheck beside a non-empty `unreliable` buying a free re-gate, and the count that
+    # reopens this ruling is PER REVIEW ROW — one `review` event in the promotions ledger
+    # carrying BOTH a precheck with `severity: "blocking"` AND a non-empty `unreliable`,
+    # because a single row is the unit `rung_review` short-circuits on. Grouping the same
+    # measurement by `round_id` is NOT the trigger's join: a round files many review
+    # rows, so a blocking precheck from one row beside an `unreliable` from another is a
+    # pairing that never happened. Measured 2026-10-21 over every `review` event in the
+    # live `promotions.jsonl` AND its `promotions-archive-*` rotations — 2,167 rows, of
+    # which only 675 are in the live file, so a re-check that skips the rotations answers
+    # for under a third of the population — 0 carry both, 42 carry a blocking precheck,
+    # 95 a non-empty `unreliable`. Reopen only when that row count is above zero, and
+    # then by routing the precheck into the `external_blocker` detail so the attempt
+    # stays unspent — never by a suppression term here.
+    #
+    # `SM_20260928_133329` (2026-09-28) is the ledger's ONLY round-level hit, and the hit
+    # is manufactured by exactly that wrong join: its blocking precheck
+    # (`tests/test_eval_corpus_guard.py:1869`) rides its 14:22:23Z row, whose gate row
+    # charged the attempt (`review_attempt: 2`, no `external_blocker`), while its two
+    # past-EOF attempt-spared rows (13:52:34Z, 13:59:26Z) carry only the ADVISORY `:1876`
+    # precheck. Different rows of one round, so no row ever paired the two.
+    #
+    # The past-EOF population beside that one is 23 rows, and this figure is a population
+    # of GATE rows — `event: "gate"`, `rung: "review"` (of 2,570), `external_blocker` set,
+    # `past EOF` in `detail`, no `review_attempt` key — not a review-row count, since a
+    # `review` event carries no gate key at all. Joined back to the `review` row of the
+    # same timestamp, 0 of those 23 pair a blocking precheck with the row that spent no
+    # attempt.
     #
     # No new bound is needed. `rung_review` counts every grading turn against
     # REVIEW_HARD_CAP, so a grader that repeats its own phantom number ends there, and

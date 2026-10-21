@@ -2586,3 +2586,214 @@ def test_the_canary_smoke_row_says_the_trace_diff_is_informational():
         assert feature in body, (
             f"the row cites `canary_smoke.run` as the failure surface, but it "
             f"no longer checks {feature}")
+
+
+# --- §4.5g The precheck/block-list reopen trigger is counted per review ROW -------
+#
+# `#1958` declined to widen the #1750 past-EOF block-list to deterministic prechecks
+# and recorded the measurement that keeps the decline standing. Its comment stated the
+# figures but not their JOIN KEY, and #3102 restated the standing trigger as a join on
+# `round_id` — a round, not a row. The two joins disagree on the same ledger: per row
+# the co-occurrence is 0, per round it is 1. A re-measurement written from the round
+# wording therefore "reopens" a ruling the ledger does not support, which is the one
+# thing the comment exists to prevent. #3104 puts the join key, the re-measured dated
+# figure set and the single round-level false positive into the comment, and this
+# section is why they cannot silently rot again: the #3037 row-7 precedent, applied to
+# a code comment instead of a doc table.
+#
+# The pin reads the shipped file, never a copy of the figures kept here — two carriers
+# of one measurement that each hold their own numbers are what rotted in the first
+# place (§4.5f).
+
+REVIEW_PY = ROOT / "scripts" / "automod" / "review.py"
+
+#: The ruling sentence that opens the trigger comment inside `parse_review`. The block
+#: is found from this anchor outward over contiguous comment lines, so the pin follows
+#: the paragraph when it moves and does not depend on a line number.
+PRECHECK_TRIGGER_ANCHOR = "Deterministic prechecks stay out of this block-list"
+
+#: The join key, the precheck condition and the two things that are NOT the trigger's
+#: join. Every one of these was either absent or the opposite of the truth before #3104.
+ROW_JOIN_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the count is stated per review row", re.compile(r"\bper review row\b", re.I)),
+    ("one row carrying BOTH conditions",
+     re.compile(r"one `review` event.{0,300}?both", re.I | re.S)),
+    ("the precheck condition is severity blocking",
+     re.compile(r'severity:\s*"blocking"')),
+    ("the unreliable condition is non-empty", re.compile(r"non-empty `unreliable`")),
+    ("round_id is named as NOT the join",
+     re.compile(r"`round_id` is not the trigger's join", re.I)),
+    ("why a round is the wrong unit", re.compile(r"many review rows", re.I)),
+    ("what the round join manufactures",
+     re.compile(r"(?:never happened|manufactur)", re.I)),
+)
+
+#: The dated figure set #3104 re-measured, plus the reach of the reading. Each figure
+#: is matched in place, and the date is a needle too: an undated set is a set nobody can
+#: tell is stale, which is exactly how the 2026-10-01 numbers outlived their own ledger.
+DATED_FIGURES_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the reading's publication date", re.compile(r"2026-10-21")),
+    ("the review-row denominator", re.compile(r"2,?167")),
+    ("zero rows carry both", re.compile(r"\b0\b.{0,30}?\bboth\b", re.I | re.S)),
+    ("rows with a blocking precheck",
+     re.compile(r"\b42\b.{0,60}?blocking", re.I | re.S)),
+    ("rows with a non-empty unreliable",
+     re.compile(r"\b95\b.{0,60}?unreliable", re.I | re.S)),
+    ("the live ledger", re.compile(r"`promotions\.jsonl`")),
+    ("the rotated archives are in scope", re.compile(r"promotions-archive-")),
+    ("how much a live-only re-check misses",
+     re.compile(r"(?:only 675|under a third)", re.I)),
+)
+
+#: The 2026-10-01 figures #3104 retires. Word boundaries matter: the round id
+#: `SM_20260928_133329` the block now names ends in digits that contain a bare `32`, and
+#: a needle that trips inside a round id is a needle that gets deleted rather than kept.
+RETIRED_FIGURE_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the retired denominator 1,118", re.compile(r"\b1,118\b")),
+    ("the retired blocking-precheck count 32", re.compile(r"\b32\b")),
+    ("the retired unreliable count 24", re.compile(r"\b24\b")),
+)
+
+#: The verbatim retired sentence, kept here as a positive control. Every needle above
+#: must bite it: an absence assertion whose pattern matches nothing is not a guard.
+RETIRED_SENTENCE = ("measured 2026-10-01 over the ledger's review rows it has happened "
+                    "0 times in 1,118 (32 rows carry a blocking precheck, 24 a non-empty "
+                    "`unreliable`, none both)")
+
+#: The one round the round-level join hits, and the row-level facts that dissolve it.
+FALSE_POSITIVE_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the round is named", re.compile(r"SM_20260928_133329")),
+    ("it is the only round-level hit",
+     re.compile(r"only round-level hit", re.I)),
+    ("the blocking precheck is cited by file and line",
+     re.compile(r"test_eval_corpus_guard\.py:1869")),
+    ("it rides the attempt-charged row",
+     re.compile(r"14:22:23Z.{0,140}?review_attempt: 2", re.S)),
+    ("that row charged rather than spared",
+     re.compile(r"no `external_blocker`", re.I)),
+    ("the past-EOF rows carry the advisory precheck only",
+     re.compile(r":1876.{0,80}?precheck|ADVISORY `:1876`", re.I | re.S)),
+    ("the two attempt-spared rows are dated",
+     re.compile(r"13:52:34Z.{0,60}?13:59:26Z", re.S)),
+    ("the resolution: different rows of one round",
+     re.compile(r"different rows of one round", re.I)),
+)
+
+#: The 23-row figure and the store it is counted over. This is the trap one level down:
+#: a `review` event carries no gate key, so a "23 past-EOF rows carry no blocking
+#: precheck" claim is only checkable by joining a `gate` row to a `review` row unless the
+#: block says which population the 23 belongs to.
+GATE_POPULATION_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("23 is stated as a count of gate rows",
+     re.compile(r"\b23 rows\b.{0,200}?\bgate rows\b", re.I | re.S)),
+    ("the gate rung is named", re.compile(r'`rung: "review"`')),
+    ("its denominator", re.compile(r"2,?570")),
+    ("the attempt-spared test", re.compile(r"no `review_attempt` key", re.I)),
+    ("why it cannot be a review-row count",
+     re.compile(r"`review` event carries no gate key", re.I)),
+    ("0 of the 23 pair with a blocking precheck",
+     re.compile(r"\b0 of (?:those )?23\b.{0,120}?blocking", re.I | re.S)),
+)
+
+
+def _precheck_trigger_block() -> str:
+    """The `#1750` trigger comment in `parse_review`, '#' stripped and whitespace
+    collapsed, found from the ruling sentence outward over contiguous comment lines.
+
+    The walk covers the whole comment the ruling lives in, not just its first
+    paragraph, because the false positive and the gate-row population are the second and
+    third paragraphs of that same block. The collapse is `_flat`'s: without it, a retired
+    figure re-wrapped across a line break would dodge a needle that exists to forbid it.
+    """
+    lines = REVIEW_PY.read_text(encoding="utf-8").splitlines()
+    idxs = [i for i, ln in enumerate(lines) if PRECHECK_TRIGGER_ANCHOR in ln]
+    assert len(idxs) == 1, (
+        f"`{PRECHECK_TRIGGER_ANCHOR!r}` appears {len(idxs)} times in review.py; the "
+        "trigger comment is found by that sentence and one pin cannot grade two")
+    i = idxs[0]
+    j = i
+    while j > 0 and lines[j - 1].lstrip().startswith("#"):
+        j -= 1
+    k = i + 1
+    while k < len(lines) and lines[k].lstrip().startswith("#"):
+        k += 1
+    body = "\n".join(ln.strip().lstrip("#") for ln in lines[j:k])
+    block = " ".join(body.split())
+    assert len(block) > 400, (
+        f"the comment block around the anchor collapsed to {len(block)} chars — the "
+        "anchor's paragraph is no longer the block #3104 re-wrote")
+    return block
+
+
+def test_the_precheck_reopen_trigger_states_its_join_is_per_review_row():
+    """#3104 clause 1: the block names its own join, and names `round_id` as NOT it.
+
+    The hazard is one review event that carries both a `blocking` precheck and a
+    non-empty `unreliable`, because that one row is the unit `rung_review` short-circuits
+    on (gate.py returns with `external_blocker` and no `review_attempt` before
+    `decide_with_entries` is reached). The block has to say the unit, because the
+    measurement without it has two honest answers that differ.
+    """
+    block = _precheck_trigger_block()
+    for label, res in ROW_JOIN_RES:
+        assert res.search(block), (
+            f"the trigger block no longer states {label}, which is what tells a "
+            "re-measurer which join reproduces the ruling's own figure")
+
+
+def test_the_precheck_reopen_trigger_carries_the_dated_figure_set_and_not_the_retired_one():
+    """#3104 clause 2: 2026-10-21's reading is in the block, 2026-10-01's is gone.
+
+    The re-measured set is 0 co-occurrences in 2,167 review rows, 42 rows with a blocking
+    precheck and 95 with a non-empty `unreliable`, over the live `promotions.jsonl` AND
+    its `promotions-archive-*` rotations — the rotations are 1,492 of those 2,167 rows,
+    so a re-check that reads only the live file answers for under a third of the
+    population and looks identical to one that read all of it. The retired figures
+    (denominator 1,118, blocking 32, unreliable 24) are asserted absent with needles
+    first shown to bite the verbatim retired sentence: the unreliable count had already
+    quadrupled while the co-occurrence stayed 0, so a stale figure is not a harmless one.
+    """
+    block = _precheck_trigger_block()
+    for label, res in DATED_FIGURES_RES:
+        assert res.search(block), f"the trigger block no longer states {label}"
+    for label, res in RETIRED_FIGURE_RES:
+        assert res.search(RETIRED_SENTENCE), (
+            f"the {label} needle no longer bites the sentence it exists to forbid, so "
+            "the absence check below proves nothing")
+        assert not res.search(block), (
+            f"the trigger block carries the retired 2026-10-01 figure again ({label}); "
+            "one dated figure set belongs in the block at a time")
+
+
+def test_the_precheck_reopen_trigger_names_the_round_level_false_positive():
+    """#3104 clause 3: `SM_20260928_133329` is named, and why its hit is manufactured.
+
+    The round has four `review` rows. Its blocking precheck
+    (`tests/test_eval_corpus_guard.py:1869`) rides the 14:22:23Z row, whose gate row
+    charged the attempt (`review_attempt: 2`, no `external_blocker`); the two past-EOF
+    attempt-spared rows (13:52:34Z, 13:59:26Z) each carry only the ADVISORY `:1876`
+    precheck. No single row pairs the two conditions, so the round join's lone hit is an
+    artefact of the join — which is precisely the sentence that stops the next reader
+    reading `1` as evidence to reopen the ruling.
+    """
+    block = _precheck_trigger_block()
+    for label, res in FALSE_POSITIVE_RES:
+        assert res.search(block), (
+            f"the trigger block no longer states {label}: without the row-level "
+            "resolution the named round reads as real evidence against the ruling")
+
+
+def test_the_precheck_reopen_trigger_states_the_23_rows_as_a_gate_population():
+    """#3104 clause 4: the 23 is the `gate` `rung: "review"` population, not review rows.
+
+    23 of 2,570 gate rows carry `external_blocker` with `past EOF` in `detail` and no
+    `review_attempt` key, and joining each back to the `review` row of the same timestamp
+    yields 0 with a blocking precheck. The distinction is not pedantry: a `review` event
+    has no gate key at all, so a block that said "0 of the 23 review rows" would be
+    uncheckable except by the very round-to-round join this section exists to rule out.
+    """
+    block = _precheck_trigger_block()
+    for label, res in GATE_POPULATION_RES:
+        assert res.search(block), (
+            f"the trigger block no longer states {label}, which is what keeps the 23 "
+            "from being re-read as a review-row count")
