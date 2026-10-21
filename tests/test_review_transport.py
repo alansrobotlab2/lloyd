@@ -917,6 +917,43 @@ def test_only_a_blocking_honesty_finding_refuses_the_round(tmp_path):
     assert "does not belong" in text
 
 
+def test_the_vault_honesty_demotion_leaves_a_code_round_refusing_the_same_entry(tmp_path):
+    """#3105 clause 3: #3105's demotion keys on the SURFACE the caller graded, so a
+    code round loses nothing. The entry that is advisory under
+    `require_tests=False` is blocking here, in a worktree that really contains
+    `tests/`, and it still refuses; the entry about a note stays advisory on both
+    surfaces, which is the pre-existing path rule this must not disturb.
+    `test_only_a_blocking_honesty_finding_refuses_the_round` above is the same
+    code-surface rule it must not weaken, and it passes unchanged.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    assert 1\n")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "x.py").write_text("1\n")
+    met = {"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 1,
+           "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}
+    entry = {"file": "tests/test_x.py", "line": 9, "severity": "blocking",
+             "problem": "cannot fail", "actionable_in_round": True, "same_as_prior": False}
+    note = {**entry, "file": "knowledge/ai/note.md", "line": 107,
+            "problem": "the claim in the note is false"}
+
+    def graded(require_tests: bool):
+        return RV.parse_review({"premise": "sound", "summary": "fine", "clauses": [met],
+                                "test_honesty": [entry, note], "seams_unverified": [],
+                                "amendments_ok": True, "amendments_note": ""},
+                               worktree=tmp_path, changed_tests=["tests/test_x.py"],
+                               n_clauses=1, require_tests=require_tests,
+                               tests_passed=True)
+
+    code = graded(True)
+    assert [h["severity"] for h in code["test_honesty"]] == ["blocking", "advisory"]
+    kind, findings = RV.decide(code, [])
+    assert kind == "retry" and findings.startswith("test honesty tests/test_x.py:9"), findings
+    vault = graded(False)
+    assert [h["severity"] for h in vault["test_honesty"]] == ["advisory", "advisory"]
+    assert RV.decide(vault, [])[0] == "pass"
+
+
 def test_evidence_paths_with_symbols_anchors_or_a_dead_absolute_prefix_still_resolve(tmp_path):
     (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
     n = RV.normalize_evidence_path

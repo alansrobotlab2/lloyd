@@ -8317,3 +8317,58 @@ def test_the_row_carries_the_revert_whenever_the_probe_built_one():
                                       "removed": ["autonomy/1-task.md"]}, half
     assert "baseline_vault" not in V._guards_row({"state": "skipped", "seconds": 0.4})
 
+
+
+# ── #3105: the honesty demotion covers the honesty class, and no clause verdict ─
+#
+# `grade_vault` is the surface that grades prose by reading and running the landed
+# files, so from 2026-10-21 a `test_honesty` entry can no longer refuse it (see
+# `tests/test_automod_review.py`'s #3105 section for why: a vault diff is
+# `skills/**` and cannot contain the `~/lloyd` node #3103's grader cited). What has
+# to stay true is the half that actually grades the prose: a clause that is not
+# `met` still refuses, and that is the rail which catches prose that drops a phrase
+# a `~/lloyd` doc test pins.
+
+#: Both classes in one grading: clause 1 met, clause 2 unmet, and #3103's
+#: `blocking` honesty entry naming the code-tree node
+#: tests/test_system_health_check_vault_sync.py:1608 that a vault diff cannot add.
+GRADER_SAYS_ONE_CLAUSE_UNMET_WITH_HONESTY = {
+    "premise": "sound", "summary": "one clause is missing from the prose",
+    "test_honesty": [{
+        "file": "tests/test_system_health_check_vault_sync.py", "line": 1608,
+        "severity": "blocking",
+        "problem": ("test_both_docs_state_that_a_non_green_row_does_not_imply_exit_3 "
+                    "is NOT present in the post-edit file in the checked-out tree, "
+                    "and there is NO commit for it on this branch"),
+        "actionable_in_round": True, "same_as_prior": False}],
+    "seams_unverified": [],
+    "clauses": [
+        {"clause": 1, "verdict": "met", "evidence_path": "skills/foo/SKILL.md",
+         "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": "named"},
+        {"clause": 2, "verdict": "unmet", "evidence_path": "skills/foo/SKILL.md",
+         "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+         "note": "the docs still let a non-green row read as a passing exit code"}]}
+
+
+def test_an_unmet_clause_still_refuses_a_vault_grading_beside_an_honesty_entry(vault, items,
+                                                                              monkeypatch):
+    """#3105 clause 4: the demotion is confined to the honesty class. Run through
+    the REAL `grade_vault` with only `run_grader` replaced, the grading whose
+    honesty entry is now advisory still refuses while clause 2 is `unmet` — and the
+    honesty finding rides along in the advisory spelling rather than being the
+    reason. Prose that drops a pinned phrase is caught by the clause, not by a test
+    this surface may not add.
+    """
+    import scripts.automod.review as RV
+    write_item(items, 419, ["the skill names the retry rule",
+                            "the docs never let a non-green row read as a passing exit code"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": True,
+                                      "structured": GRADER_SAYS_ONE_CLAUSE_UNMET_WITH_HONESTY})
+    kind, findings, clauses = RV.grade_vault(item_id=419, paths=["skills/foo/SKILL.md"],
+                                             diff="x", attempt=2)
+    assert kind == "retry", f"the demotion let an unmet clause through: {kind} — {findings}"
+    assert "clause 2 unmet" in findings, findings
+    assert "test honesty" not in findings.split(";")[0], findings
+    assert "advisory tests/test_system_health_check_vault_sync.py:1608" in findings, findings
+    assert [c["verdict"] for c in clauses] == ["met", "unmet"], clauses

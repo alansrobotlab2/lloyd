@@ -1795,6 +1795,10 @@ Paths changed: {', '.join(paths)}.
 Per clause, in order: say what in the changed text satisfies it (file and line) \
 or what is missing. `met` needs an evidence_path under the vault and \
 how_verified `read`; there are no tests here, so leave test_node_id empty. \
+Leave `test_honesty` empty: this tree holds no test file, so nothing in this \
+diff can be a dishonest test — anything you would put there belongs in \
+`summary`. Prose that drops a phrase a `~/lloyd` doc test pins shows up as an \
+unmet clause when a clause names it; grade the clauses, not the test suite. \
 A clause about something this edit REMOVES cites it as `<path> (absent)` — the \
 removed path itself, or the directory it empties, with that marker on it. The \
 absence is the witness, so never go looking for a deleted file on disk. \
@@ -2209,6 +2213,14 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     on a seam the operator had ruled non-blocking. `vault_round` passes the count
     it already computes for the ledger row, so the grader's prior-review prompt and
     this decision cannot disagree about which attempt this is.
+
+    Since #3105 the honesty class cannot refuse this surface either. `parse_review`
+    records every `test_honesty` entry at `advisory` when called with
+    `require_tests=False` as this route calls it, so the only verdict that can
+    reach `retry` from here is a clause that is not `met` (or an unsound premise).
+    The entry is not dropped: it rides into `findings` as an `advisory …` line, so a
+    grader that thinks it spotted something is answered, it just cannot spend one of
+    the round's two attempts on a `tests/**` file this surface may not add.
     """
     from scripts.automod import backlog as B, state as S, vault_round as VR
     vault = Path(vault or VR.VAULT)
@@ -3314,7 +3326,10 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                  pre_existing_failures=frozenset(), clause_texts=()) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
     evidence does not hold up. None if unusable. `require_tests=False` is
-    the vault shape: prose has no pytest node to point at.
+    the vault shape: prose has no pytest node to point at, and — since #3105 —
+    a diff with no test in it has no test for the honesty class to judge, so on
+    that surface every `test_honesty` entry is recorded at `advisory` severity
+    whatever the grader wrote, and `decide` can still only refuse on a clause.
 
     `tests_passed` is whether the gate's `tests` rung passed on this commit,
     and `changed_paths` the diff's whole file list: together they let a
@@ -3621,6 +3636,24 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                           f"checkable")
     unreliable.extend(added_test_denials({"clauses": clauses}, added_tests=added_tests))
     honesty = []
+    # #3105 — a grading made WITHOUT tests has no tests for the honesty class to
+    # find, so on that surface nothing in the list may be blocking, whichever
+    # severity the grader wrote. `require_tests=False` is the vault shape (see the
+    # signature): `build_vault_prompt` tells the grader "there is no code and no
+    # test suite here", and `VAULT_SURFACE_RULES`
+    # (`workers/sources/autocode.py`) forbids the implementer from opening
+    # a code round to answer it — so the demand is unsatisfiable by construction on
+    # the surface that asks it. It is also unanswerable by the path test below:
+    # `testpaths.is_test_path` reads only `<root>/pytest.ini`, the vault has none,
+    # so `read_testpaths(vault)` falls back to `DEFAULT_TESTPATHS = ("tests",)` and
+    # ANY citation spelling `tests/…` reads as a test-tree path even in a tree with
+    # no tests at all. That is how #3103 spent both of its attempts on 2026-10-21:
+    # two refusals, all ten clause verdicts `met`, the second one naming a node
+    # that exists at `~/lloyd` HEAD. Keyed on the SURFACE the caller graded, never
+    # on the shape of the cited path — and the code surface keeps the rail whole
+    # (`tests/test_review_transport.py::
+    # test_only_a_blocking_honesty_finding_refuses_the_round`).
+    honesty_advisory_only = not require_tests
     for raw in (obj.get("test_honesty") or []):
         if isinstance(raw, dict) and str(raw.get("problem") or "").strip():
             file = str(raw.get("file") or "")[:200]
@@ -3631,7 +3664,11 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 sev = "blocking"
             # The list is about TESTS in the diff. A remark filed against a
             # vault note or a script is advice, whatever the grader called it.
-            if not TP.is_test_path(_trim_citation_prefix(file), worktree):
+            # On a no-tests surface that is the only reading (#3105); the clause
+            # rails stay the real guard there, so prose that drops a substring a
+            # `~/lloyd` doc test pins is refused by the clause the item pins.
+            if (honesty_advisory_only
+                    or not TP.is_test_path(_trim_citation_prefix(file), worktree)):
                 sev = "advisory"
             honesty.append({"file": file,
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,

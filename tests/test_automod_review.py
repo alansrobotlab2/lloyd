@@ -5568,3 +5568,142 @@ def test_an_answer_for_a_clause_outside_its_slice_is_still_dropped():
         '{"premise": "sound", "clauses": [{"clause": 5, "verdict": "met",'
         ' "evidence_path": "a.md"}]}', [4])
     assert recovered is None, recovered
+
+
+# ── #3105: a test-honesty entry cannot refuse a vault-surface grading ────────
+#
+# `automod_vault_land(item_id=3103, …)` was refused twice on 2026-10-21 with every
+# clause `met` on both attempts. Both refusals were `test_honesty`: the first
+# judged whether a `~/lloyd` test covers the new prose, the second that the node it
+# named was "NOT present in the post-edit … in the checked-out tree, and there is NO
+# commit for it on this branch". Neither is answerable on this surface: a vault
+# diff is `skills/**` (`vault_round._vault_review`), the tree under review holds no
+# test at all, and `VAULT_SURFACE_RULES` (`workers/sources/autocode.py`)
+# forbids the implementer from adding one. The path test that already exists cannot
+# tell the surfaces apart either — `testpaths.is_test_path` reads only
+# `<root>/pytest.ini`, the vault has none, so it falls back to
+# `DEFAULT_TESTPATHS = ("tests",)` and calls any `tests/…` citation a test-tree path
+# in a tree with no tests. So the rule is keyed on the surface the caller graded.
+
+#: #3103's second refusal, reproduced as the grader filed it. The cited node is
+#: real and lives in the CODE tree: `git -C ~/lloyd grep -n
+#: 'def test_both_docs_state_that_a_non_green_row' HEAD -- tests/` prints it at
+#: tests/test_system_health_check_vault_sync.py:1608 (added by `8b31dfb7`).
+HONESTY_ON_A_LLOYD_TEST = {
+    "file": "tests/test_system_health_check_vault_sync.py", "line": 1608,
+    "severity": "blocking",
+    "problem": ("test_both_docs_state_that_a_non_green_row_does_not_imply_exit_3 "
+                "is NOT present in the post-edit file in the checked-out tree, and "
+                "there is NO commit for it on this branch"),
+    "actionable_in_round": True, "same_as_prior": False}
+
+
+def _scratch_vault_tree(root: Path) -> Path:
+    """A vault-shaped tree: prose, and no test suite anywhere in it."""
+    (root / "skills" / "foo").mkdir(parents=True)
+    (root / "skills" / "foo" / "SKILL.md").write_text("# foo\n\nretry the probe\n",
+                                                      encoding="utf-8")
+    return root
+
+
+def _parse_vault_way(vault: Path, honesty: list[dict]):
+    """`parse_review` exactly as `grade_vault` calls it: the vault
+    as the worktree, no changed tests, `require_tests=False`, and the lander's own
+    `paths` as `changed_paths`."""
+    return RV.parse_review(
+        {"premise": "sound", "summary": "the prose change satisfies the clause",
+         "clauses": [{"clause": 1, "verdict": "met",
+                      "evidence_path": "skills/foo/SKILL.md", "evidence_line": 3,
+                      "test_node_id": "", "how_verified": "read", "note": "named"}],
+         "test_honesty": honesty, "seams_unverified": [],
+         "amendments_ok": True, "amendments_note": ""},
+        worktree=vault, changed_tests=[], n_clauses=1, require_tests=False,
+        changed_paths=["skills/foo/SKILL.md"])
+
+
+def test_a_vault_grading_records_every_honesty_entry_as_advisory(tmp_path):
+    """#3105 clause 1: a grading parsed the vault way records every `test_honesty`
+    entry at `advisory` severity, whatever severity the grader wrote — the cited
+    node in the code tree, a remark about the note it changed, one the grader
+    itself filed as advisory, and the legacy shape that carries no `severity` field
+    at all (which keeps the old `blocking` default on the code surface).
+    """
+    vault = _scratch_vault_tree(tmp_path)
+    parsed = _parse_vault_way(vault, [
+        HONESTY_ON_A_LLOYD_TEST,
+        {**HONESTY_ON_A_LLOYD_TEST, "file": "skills/foo/SKILL.md", "line": 3},
+        {**HONESTY_ON_A_LLOYD_TEST, "severity": "advisory"},
+        {"file": "tests/test_x.py", "line": 9, "problem": "asserts nothing",
+         "actionable_in_round": True, "same_as_prior": False}])
+    assert [h["severity"] for h in parsed["test_honesty"]] == ["advisory"] * 4
+    # `decide` routes on `honesty_is_blocking`, so that is the predicate that has
+    # to be false — a severity string nothing consults would pass here and still refuse.
+    assert not [h for h in parsed["test_honesty"] if RV.honesty_is_blocking(h)]
+
+
+def test_a_vault_grading_whose_clauses_are_met_returns_pass(tmp_path):
+    """#3105 clause 2: the shape of #3103's second attempt — one clause `met`, and
+    the only grader finding a `blocking` honesty entry naming a `tests/…` path —
+    decides `pass`, and the finding is not dropped. It reaches the findings string
+    in the `advisory …` spelling, the same one a code-surface advisory rides in on,
+    so a grader that thinks it saw something is answered rather than deleted.
+    """
+    vault = _scratch_vault_tree(tmp_path)
+    parsed = _parse_vault_way(vault, [HONESTY_ON_A_LLOYD_TEST])
+    kind, findings = RV.decide(parsed, [], attempt=2, policy=RV.seams_policy())
+    assert kind == "pass", f"the honesty rail refused anyway: {kind} — {findings}"
+    assert ("advisory tests/test_system_health_check_vault_sync.py:1608" in findings), findings
+    assert ("test_both_docs_state_that_a_non_green_row_does_not_imply_exit_3"
+            in findings), findings
+
+
+def test_the_honesty_demotion_is_keyed_on_the_surface_not_the_cited_path(tmp_path, monkeypatch):
+    """#3105 clause 5, in both directions. On the vault surface a citation naming
+    `skills/foo/SKILL.md` and one naming `tests/…` come out the same way, so no
+    `tests/`-prefix special case is doing the work — and the vault parse never
+    consults `testpaths.is_test_path` about the cited file at all, which is what
+    makes this a surface rule rather than a path rule in a surface's clothes. On
+    the code surface the SAME two citations split exactly as they always did: the
+    rule about a note still files it as advice, a `blocking` one about a test still
+    refuses, and that split is where the path rail is genuinely consulted.
+    """
+    vault = _scratch_vault_tree(tmp_path / "vault")
+    cited: list = []
+    real = RV.TP.is_test_path
+
+    def spy(rel, root=None):
+        cited.append(str(rel))
+        return real(rel, root)
+
+    monkeypatch.setattr(RV.TP, "is_test_path", spy)
+    both = _parse_vault_way(vault, [HONESTY_ON_A_LLOYD_TEST,
+                                    {**HONESTY_ON_A_LLOYD_TEST, "file": "skills/foo/SKILL.md",
+                                     "line": 3}])
+    assert [h["severity"] for h in both["test_honesty"]] == ["advisory", "advisory"]
+    assert not [c for c in cited if "test_system_health_check_vault_sync" in c], cited
+    assert RV.decide(both, [], attempt=2, policy=RV.seams_policy())[0] == "pass"
+
+    code = tmp_path / "code"
+    (code / "app").mkdir(parents=True)
+    (code / "app" / "x.py").write_text("1\n", encoding="utf-8")
+    (code / "tests").mkdir()
+    (code / "tests" / "test_system_health_check_vault_sync.py").write_text(
+        "def test_it():\n    assert 1\n", encoding="utf-8")
+    cited.clear()
+    code_parsed = RV.parse_review(
+        {"premise": "sound", "summary": "fine",
+         "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "app/x.py",
+                      "evidence_line": 1, "test_node_id":
+                      "tests/test_system_health_check_vault_sync.py::test_it",
+                      "how_verified": "ran", "note": "ok"}],
+         "test_honesty": [HONESTY_ON_A_LLOYD_TEST,
+                          {**HONESTY_ON_A_LLOYD_TEST, "file": "skills/foo/SKILL.md",
+                           "line": 3}],
+         "seams_unverified": [], "amendments_ok": True, "amendments_note": ""},
+        worktree=code, changed_tests=["tests/test_system_health_check_vault_sync.py"],
+        n_clauses=1, require_tests=True, tests_passed=True)
+    assert [h["severity"] for h in code_parsed["test_honesty"]] == ["blocking", "advisory"]
+    assert "tests/test_system_health_check_vault_sync.py" in cited, cited
+    kind, findings = RV.decide(code_parsed, [])
+    assert kind == "retry" and findings.startswith(
+        "test honesty tests/test_system_health_check_vault_sync.py:1608"), findings
