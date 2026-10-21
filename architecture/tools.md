@@ -22,13 +22,13 @@ summary: The lloyd-mcp aggregator — 147 tools across 29 modules behind one
   tool with its properties.
 type: reference
 status: implemented
-date: 2026-09-21
+date: 2026-10-21
 ---
 
 # MCP tools
 
 Every tool Lloyd can call lives in the **lloyd-mcp aggregator**: one
-`Server("lloyd")` in its own process that mounts 26 Python modules and
+`Server("lloyd")` in its own process that mounts 29 Python modules and
 advertises their tools as one flat namespace. There is no per-plugin server
 and no gateway. The in-process harness (`app/harness/`) is the client that
 dispatches tools. The Tools page's discovery (`app/mcp_discovery.py`) opens its
@@ -39,7 +39,9 @@ the tree plus the Thunderbird bridge's 40), which the live `:8500/health` agrees
 with once `Scratchpad` is listed — it read 146/28 the morning before. The model is
 shown fewer: `_BackgroundTaskDrain` is never advertised, `recall_observation` is
 offered only to a turn whose relief writes observation stubs (#1481), and the four
-`discord_*` tools sit in `disabled_tools`, so an ordinary chat turn sees 141. Twelve were retired on
+`discord_*` tools sit in `disabled_tools`, so a chat turn sees 141 on config.yaml
+alone, and 126 on this box, where the live override disables fifteen mail verbs
+more (§8). Twelve were retired on
 2026-09-23 as duplicates of, or subsumed by, a tool that stays: `fact_check`
 (`fact_resolve`), `fact_profile` (`fact_get`, which took its cap and `query`
 ranking), `browser_type` (`browser_fill(keystrokes=true)`), #376's
@@ -79,7 +81,7 @@ harness answers it itself (see §7).
    Inner Voice pre-tool deny, skill dispatch        5. module.call_tool(...)
  MCPPool._invoke ──── one HTTP session per call ──▶ 6. effect ledger finish
    _meta: session, turn, call, model,
-   base_url, summary, effect_scope               27 modules  ─  builtin_fs, builtin_bash, vault,
+   base_url, summary, effect_scope               29 modules  ─  builtin_fs, builtin_bash, vault,
    re-send only readOnly/idempotent tools                        facts, browser, thunderbird, ...
  tool_result: spill to disk above 50k chars
 ```
@@ -150,6 +152,7 @@ Two properties of this layout drive most of what follows:
 | `POST /browser/navigate` | the Browser tab's URL bar. A route and not a tool, because the user typing a URL is not the agent calling something |
 | `GET /changes` | what a turn wrote (`?session=&turn=`), from the change ledger |
 | `POST /changes/revert` | undo a turn's writes per file, refusing by name any file that moved since |
+| `POST /subagents/{task_id}/{verb}` | steer or cancel one in-flight `Task` by id (§Subagents). Credential-guarded. The backend's own `/api/subagents/...` route is a thin proxy onto this, and `Task` refuses to spawn a child the caller cannot steer (§9) |
 
 These ride beside `/mcp` because `Task`, background Bash children and
 Playwright all live in **this** process. The backend has no handle on them, so
@@ -255,15 +258,23 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    (`scripts/autoresearch/bench_runner_sdk.py`). A denial becomes a tool result
    the model reads ("Tool call denied: …"). Non-Bash writes have their own
    lane: `builtin_fs` refuses `Write`/`Edit` under `PROTECTED_WRITE_ROOTS` —
-   the credential tree, `~/lloyd/agent-services`, `~/lloyd/.venvs`, and
-   `~/obsidian/lloyd/SOUL.md` (`app/harness/protected_paths.py:151`, landed
+   the credential tree, the uv-managed Python tree, `~/lloyd/agent-services`,
+   `~/lloyd/.venvs`, and `~/obsidian/lloyd/SOUL.md`
+   (`app/harness/protected_paths.py:151`, landed
    2026-09-20) — lifted only by the `allow_protected_writes()` contextvar,
    which is settable in code and by no production caller today. It is not
    `protected_roots()`: those are `$HOME`, the vault and the code tree, and
    refusing writes under them would refuse every note and every round.
 4. **Invoke.** `MCPPool._invoke` opens one short-lived HTTP session per call
    and stamps `_meta` (below). The call bound is `CALL_TIMEOUT_SECONDS` 660 s,
-   and the HTTP read timeout sits 30 s above it. It re-sends after a transport
+   and the HTTP read timeout sits 30 s above it — but that is a **ceiling**, not
+   the bound for every tool: a budget declared in `annotations.TIMEOUT_SECONDS`
+   rides to the pool as `Tool._meta["lloyd/timeoutSeconds"]` and, while
+   `harness.mcp_pool.per_tool_timeouts` is true, `MCPPool._call_timeout` uses
+   the lesser of it and 660 s (`mcp_pool.py:611-620`). Today five tools declare
+   one — `Bash` 630 s, `http_fetch`/`http_search` 120 s, `http_request` 180 s,
+   `automod_gate_wait` 600 s — so a hung web fetch dies at its own budget
+   instead of at the fleet ceiling. It re-sends after a transport
    failure **only** for a tool annotated `readOnlyHint` or `idempotentHint`
    (`_retry_safe`). A transport error says nothing about whether the server
    ran the call, and a retried `automod_gate` once became two concurrent gates
@@ -333,6 +344,8 @@ iteration ([[editing-safeguards]]).
 | `lloyd/model`, `lloyd/base_url` | the calling turn's model and endpoint | `Task`, so a subagent inherits its parent's model |
 | `lloyd/summary` | the model's caption for this call | background Bash and `Task` rows, which a human reads later |
 | `lloyd/effect_scope` | the worker queue item | the effect ledger |
+| `lloyd/surface` | `chat` or `worker` | `Task`, so a subagent inherits its parent's surface and its hide-everything rule (§8) |
+| `lloyd/grant_scope`, `lloyd/disallowed_tools` | the turn's grant scope and its deny list | `Task`, which rebuilds the child's deny list from them — the only reason a subagent cannot call what its parent could not, once the child's own calls come back over loopback where no contextvar survives |
 
 A legacy `_session_id` argument is still accepted and stripped before the
 handler validates, so a harness and an aggregator at different versions still
@@ -344,7 +357,7 @@ correlate.
 
 Each tool carries MCP `ToolAnnotations`, built from one central table in
 `agent_mcp/annotations.py` rather than on each `Tool(...)`. The classification
-is security-relevant and easier to review as one ordered file than as 155
+is security-relevant and easier to review as one ordered file than as 147
 constructor calls. The sets are explicit rather than pattern-matched: a regex
 over names gets `email_apply_filters` and `autonomy_get_task` wrong in
 opposite directions. `annotate()` is a default, not an override. A module that
@@ -388,7 +401,7 @@ before discovery has run. `PLAN_MODE_ALWAYS_ALLOWED` exists because
 deadlock.
 
 The tests cover one direction only. `test_annotation_tables_have_no_stale_entries`
-fails on a name in `READ_ONLY`, `DESTRUCTIVE`, `IDEMPOTENT` or
+fails on a name in `READ_ONLY`, `DESTRUCTIVE`, `IDEMPOTENT`, `TIMEOUT_SECONDS` or
 `PLAN_MODE_ALWAYS_ALLOWED` that no longer exists (`REPEAT_EXPECTED` is not
 checked). Thunderbird's names are exempt only while that module exports
 nothing, which it always does inside an automod worktree, because the bridge
@@ -441,9 +454,9 @@ only when a change both names it there and reads it somewhere.
 Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
 `tests/test_mcp_pool_retry_policy.py` and the `fact_resolve_apply` cases in
 `tests/test_memory_improvement.py`. One name in the class is still open by
-decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`annotations.py:75`)
+decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`annotations.py:83`)
 and its handler `mkdir`s the screenshot directory and writes a PNG on every call
-(`browser.py:664-671`). It is a derived artifact, like the code graph's cache
+(`browser.py:1015-1032`). It is a derived artifact, like the code graph's cache
 `annotations.py` explicitly justifies a few lines above — but that comment covers
 only `graph_*`, and `_retry_safe` re-sends it, so a dropped transport leaves two
 PNGs. Low severity: no vault state, no authority, and the duplicate is
@@ -470,10 +483,12 @@ self-evidently a file with a fresh timestamp.
 | `autoresearch` | 2 | prompt-variant rounds: their status, and restoring prompts from a snapshot. A round is scheduled by the worker source or run with `scripts.autoresearch.run_round` |
 | `backlog` | 4 | the kanban backlog. `backlog_write_task` runs write-time dedupe ([[backlog]]) |
 | `browser` | 13 | Playwright Chromium, with the SSRF guard on resolved addresses |
+| `desktop` | 2 | look at Alan's Hyprland desktop and act on it. `desktop_act` needs the lease only Alan grants from Mission Control's Desktop tab; refused outright for a background, worker, bench or eval turn. `architecture/desktop.md` is the authority |
+| `recall_observation` | 1 | one tool, and its own module: read back a tool result that context pressure replaced with an observation stub. Advertised only to a turn whose relief actually writes those stubs (`app/harness/tool_result_spill.py:331-333`, #1481) |
 | `code_graph` | 6 | structural navigation over graphify's AST extraction (§9) |
 | `discord_bot` | 4 | Discord. All four are disabled in config today |
 | `djev` | 3 | typed decisions on GPU 2's DiffusionGemma, ~40 ms each. Ranking only: the scores are not calibrated ([[djev]]) |
-| `facts` | 9 | the knowledge-graph fact layer and store ([[knowledge-graph]]) |
+| `facts` | 7 | the knowledge-graph fact layer and store ([[knowledge-graph]]). `fact_check` and `fact_profile` were retired 2026-09-23 into `fact_resolve` and `fact_get`, which is why this row once read 9 |
 | `vault` | 5 | the Obsidian vault: read, write, search, recall |
 | `session` | 5 | `MEMORY.md`/`USER.md`, and transcript search |
 | `mission_control` | 2 | chat session listing |
@@ -530,6 +545,12 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `EnterPlanMode` | ID RX PM | — | Enter research-only plan mode; every non-read-only tool leaves the advertised list |
 | `ExitPlanMode` | ID RX PM | — | Commit a plan plus todos, or cancel, and leave plan mode |
 
+#### `builtin_scratchpad` (1)
+
+| Tool | Properties | Required | Does |
+|---|---|---|---|
+| `Scratchpad` | FX | `action` | Append or read this session's own mid-turn notes (`append` / `read`), additive and never replacing a note, in a file under the runtime data root; re-injected under the pressure anchor (#1554). In no `annotations` table, so `state_changing_tool` answers True and a call with no session id is denied rather than run unsandboxed |
+
 #### `builtin_task` (1)
 
 | Tool | Properties | Required | Does |
@@ -549,7 +570,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `session_inject_context` | FX | `source`, `summary` | Push a background producer's finding into the user's active chat |
 | `ambient_decide` | FX PM | `session_id`, `surface` | Record the routing decision of an ambient turn (surface or stay quiet). Ambient turns only |
 
-#### `autonomy` (7)
+#### `autonomy` (8)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -583,18 +604,25 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `browser_navigate` | OW RX | `url` | Load a URL (private hosts refused, loopback allowed) |
-| `browser_snapshot` | RO OW | `full` | Accessibility tree of the page, with `eN` refs for the action tools. Each child frame gets its own `### frame <n> <url>` section; a frame that could not be read is listed with the reason (#424) |
+| `browser_snapshot` | RO OW | — | Accessibility tree of the page, with `eN` refs for the action tools. Each child frame gets its own `### frame <n> <url>` section; a frame that could not be read is listed with the reason (#424) |
 | `browser_click` | OW RX | `ref` | Click an element by ref |
 | `browser_scroll` | OW RX | — | Scroll the page |
 | `browser_press` | OW RX | `key` | Press a key or chord |
 | `browser_tabs` | OW RX | `action` | List, switch, open or close tabs |
 | `browser_screenshot` | RO OW | — | PNG of the page, also saved under `logs/screenshots/` |
-| `browser_evaluate` | OW RX | `script`, `frame_index` | Run JavaScript in the page and return the result; `frame_index` runs it inside `page.frames[n]` instead of the main frame (#424) |
+| `browser_evaluate` | OW RX | `script` | Run JavaScript in the page and return the result; `frame_index` runs it inside `page.frames[n]` instead of the main frame (#424) |
 | `browser_fill` | OW RX | `ref`, `value` | Set a field's value in one write that fires input/change, or key by key with `keystrokes=true` for search-as-you-type fields. Absorbed `browser_type` |
 | `browser_wait` | OW RX | `condition` | Wait for a selector, text, navigation or network idle |
 | `browser_select` | OW RX | `ref` | Pick an option in a `<select>` by value or label |
 | `browser_drag` | OW RX | `source_ref`, `target_ref` | Drag one element onto another |
 | `browser_cookies` | OW RX | `action` | Get, set or clear cookies |
+
+#### `desktop` (2)
+
+| Tool | Properties | Required | Does |
+|---|---|---|---|
+| `desktop_capture` | RO OW | — | Look at a Hyprland window: a screenshot plus a numbered list of its interactable elements (`som`), or image only (`vision`), elements only (`ax`), or the open-window list (`windows`). Read-only, so no lease is needed |
+| `desktop_act` | OW RX | `action` | Act on it: click, drag, scroll, type, key, `set_value`, `focus_window`. Needs the desktop lease, which only Alan grants from Mission Control's Desktop tab, and is refused outright for a background, worker, bench or eval turn; hard refusals (lock/logout keys, password fields, shell-dangerous typed text) are checked before the lease |
 
 #### `code_graph` (6)
 
@@ -686,6 +714,12 @@ re-implements the caps.
 | `ide_open_folder` | ID RX PM | `path` | Point the IDE tab's file tree at a directory |
 | `ide_open_file` | ID RX PM | `path` | Open a file in the IDE tab |
 | `ide_close_tab` | ID RX PM | `path` | Close an IDE editor tab |
+
+#### `recall_observation` (1)
+
+| Tool | Properties | Required | Does |
+|---|---|---|---|
+| `recall_observation` | RO | `id` | Return the whole text of a tool result that context pressure replaced with an observation stub, by the id the stub prints. Only ids from this session's own stubs resolve (#1481). Advertised only to a turn whose relief writes those stubs, which is why a turn that never saw a stub cannot call it |
 
 #### `research` (5)
 
@@ -812,7 +846,11 @@ catches an unpaired edit.
 
 - Server level: `mcp_servers.<name>.enabled: false`
 - Tool level: `mcp_servers.<name>.disabled_tools: [bare_tool_name, ...]`.
-  Today: the four `discord_*` tools.
+  In config.yaml today: the four `discord_*` tools. The live override on this
+  box carries fifteen more — the Thunderbird mail mutators, `email_delete` and
+  `email_empty_trash` among them — which is why a chat turn resolves to 126
+  tools here against the 141 config.yaml implies (measured 2026-10-21), and why
+  a rebuild boots mail mutation this machine has switched off (#3128).
 
 config.yaml holds the hand-edited defaults and is read-only at boot. The Tools
 page writes `data/tool_overrides.yaml`, which is merged over it
@@ -1147,11 +1185,19 @@ what it edits: the edit gates key on the raw `task:*` session.
 
 ## 11. Regenerating the inventory
 
-The running server counts exactly what it dispatches:
+The running server counts exactly what it dispatches — **counts only**:
+`discovery.<module>.tools` is an integer, so this checks a total and catches a
+module that lost a tool without saying which one:
 
 ```bash
 curl -s http://127.0.0.1:8500/health | python3 -m json.tool   # tools, modules, per-module
 ```
+
+The names with their annotations come from `tools/list` on the same server,
+which since #1053 needs `X-Lloyd-Aggregator-Token: $(cat ~/.local/state/lloyd/aggregator-token)`
+on the request header. That is the only route that can see the Thunderbird
+bridge's 40 rows at all, so a regeneration that skips it drops or freezes them
+(#3127).
 
 Offline, or in a worktree (Thunderbird will read zero there), this prints every
 tool with its module, its marks and its required arguments. §6 is this output
@@ -1192,3 +1238,28 @@ EOF
   `/steer` and the Running Agents panel's stop button — under the ratified
   `orchestrator-session` policy (#411; #1135's owed-check rulings of
   2026-10-04 and 2026-10-20). See **Subagents (`Task`)** above.
+- **2026-10-21 — stale (arch review).** Against the tree at `b316b5b9` and a
+  token-bearing `tools/list` (147 tools / 29 modules, both agreeing): the prose
+  carried three different module counts (26 in §intro, 27 in the §1 diagram, 29
+  in the summary) and the §6 tables had lost `desktop` (2 tools) and
+  `recall_observation` (1) entirely, plus the `Scratchpad` row, while
+  `#### autonomy` declared 7 over 8 rows and the Modules table said `facts` 9
+  against its own 7-row section (#3126). Corrected the counts, added the missing
+  module rows and tool rows, and fixed two `required` cells (`browser_snapshot`
+  has no `required`; `browser_evaluate` requires only `script`) and two drifted
+  citations (`annotations.py:83`, `browser.py:1015-1032`). The §5 marks columns
+  were checked row by row against `annotations.py` and 143 of 143 agreed — the
+  drift is all in the counts, not the classification. Added the per-call timeout
+  mechanism the page was missing (`annotations.TIMEOUT_SECONDS` →
+  `_meta["lloyd/timeoutSeconds"]` → `MCPPool._call_timeout`, honoured since
+  `harness.mcp_pool.per_tool_timeouts: true`), the three `_meta` keys the pool
+  stamps but the table did not list (`lloyd/surface`, `lloyd/grant_scope`,
+  `lloyd/disallowed_tools`), the `POST /subagents/{task_id}/{verb}` route, and
+  the uv Python tree's entry in `PROTECTED_WRITE_ROOTS`. Filed: the §6 inventory
+  has no parity test (#3126), §11's commands cannot regenerate the Thunderbird
+  rows since #1053 (#3127), config.yaml's `disabled_tools` no longer describes
+  the served surface and the parity test only reads `tool_search` (#3128),
+  `autonomy_run_task`'s description says the run is backgrounded while the
+  handler awaits it (#3129), and `loop.py:2855` cited in §9 is 80 lines stale
+  with `tests/test_task_depth_cap.py` pinning the literal string, so the doc was
+  left holding the number the test forbids moving (#3130).
