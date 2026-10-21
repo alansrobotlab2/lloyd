@@ -19,7 +19,7 @@ summary: GPU 2's structured-decision engine — how it is served, its wire
   that say rank with it and do not gate on it.
 type: reference
 status: implemented
-date: 2026-09-25
+date: 2026-10-21
 ---
 
 # djev — the structured-decision engine on GPU 2
@@ -623,7 +623,15 @@ a log. **Probe 2026-09-23T19:07Z**: `shadow.jsonl` holding 34 `rerank` rows with
 newest 2026-09-21T08:57:40Z, while `dedupe` and `entity` in the same file had
 grown past 145 and 46 and were still growing daily. The shape that reading shows —
 rerank's stream stopped where the other two kept moving — is what this section
-asserts; the counts are the probe's.
+asserts; the counts are the probe's. Read again 2026-10-21: the file now holds
+**9 `rerank` rows** and its neighbours have grown to 885 `dedupe`, 374 `entity`
+and 265,618 `action_review`. It went *down* since 2026-09-23 because 27 of those
+34 were the fixture rows quarantined on 2026-09-27 (§11). What is left is the
+seam's real history: seven rows on 2026-09-21, and **two more on
+2026-10-11T16:54Z and 17:44Z** in production's own shape (`query`, `scores`,
+`pool_size`) — the first since #1336 and the only two since, which is what an
+actual qmd-reranker window looks like in this log. Nobody wrote down opening it,
+so the rows are the only record that it happened.
 
 Its one live window remains the kill switch pulled to `"qmd"` with the engine
 still answering — a ranker rollback, which is exactly when
@@ -673,8 +681,11 @@ which it was — and unlike the first draft of this section, that bit cannot be
 recovered afterwards: `meta` carries `name` and `candidates` and nothing else
 (measured 2026-09-21 — every `dedupe` row in the live log has the meta key set
 `('candidates', 'name')`), and the tags and `force` flag that decided
-`mergeable` at `backlog.py:458-460` are never passed to the hook, though all
-three are in scope at its call site. Filed as #934.
+`mergeable` — the flag is `judged` at `backlog.py:613-616` today, and `forced`
+sits beside it at `:613` — are never passed to the hook, though all three are in
+scope at its call site (`:617`). Filed as #934, and still open there as of
+2026-10-21: `_djev_shadow_dedupe(args, similar, target, cfg)` takes none of them,
+so re-filed as #3114.
 
 ### 6.3 Entity SAME/DIFFERENT — `scripts/memory/entity_semantic_gate.py`
 
@@ -726,6 +737,13 @@ of `MODES`, `threshold` and `label_mass_floor` stay unset, and the reason is not
 missing calibration but an absent positive class — no shadow row is labelled, so
 FP and FN cannot be computed at all. Re-run it with
 `python -m eval.djev.action_review_calibration`.
+
+Re-counted 2026-10-21, on the live log rather than the pinned extract: **265,618
+rows**, first still 2026-09-25T18:45:16Z, newest today — still two orders of
+magnitude above every other seam, and still not one labelled row, so the ruling
+above is unchanged by the volume. The 57,325 / 963 / 180.5 figures are the
+published snapshot every calibration assertion divides by
+(`tests/test_action_review_calibration.py`), not a running count.
 
 ### 6.5 Voice addressee — `agent-services/voice/addressee.py` (a gate)
 
@@ -944,6 +962,13 @@ prompts; the 10-way `edges` shape moved most (7 of 10). Meaningless names did
 not clear the floor. So the name is part of the frozen schema, like the order,
 and a name that says the opposite of its description is a defect a hash cannot
 see.
+
+**It holds on the weekly re-runs.** The probe now runs as a scheduled job and
+writes its reports under `~/lloyd-data/eval/djev/`, outside the repo, so this
+table is the pinned original and not the latest read: 2026-10-11 and 2026-10-19
+both give nonce 5/38 (0.13, under the control) and inverted 13/38 (0.34, over
+it), against 0/38 for the identical repeat. Same verdict, same magnitude, one
+month on.
 
 ---
 
@@ -1184,10 +1209,13 @@ rows = djev.rank(query, shortlist)   # ≤16 (max_n, at most 32), else ValueErro
    sends>`. Write the threshold, the floor, `calibrated_on` and
    `calibrated_hash` into the schema by hand, as the calibrated ones do.
 5. Let the shadow rows accumulate, then set the floor from them
-   (`replay.py --floors`) — **after** quarantining the fixture rows still in
-   the log from before #1324 landed (§11), or the floor is a floor set from
-   tests. Once it is live, a run appends nothing: `wc -l` on the log across a
-   full suite moves only with production traffic.
+   (`replay.py --floors`). Check the log's provenance before trusting the
+   distribution: the pre-#1324 fixture rows (§11) were quarantined to
+   `shadow.fixtures.jsonl` on 2026-09-27, so a floor read from today's log is
+   no longer fixture-dominated — but a checkout whose log predates that move
+   still is, and `wc -l` cannot tell the two apart. Once this is live, a run
+   appends nothing: `wc -l` on the log across a full suite moves only with
+   production traffic.
 
 ### 9.4 Turning a schema into a gate
 
@@ -1300,17 +1328,22 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 
 ---
 
-## 11. Known gaps (2026-09-20, re-checked 2026-09-25)
+## 11. Known gaps (2026-09-20, re-checked 2026-10-21)
 
 - **`SchemaDrift`'s message names `replay.py --calibrate`, which does not
   exist.** Calibration is `--corpus <c> --batch <n>` and a hand edit (§9.3).
 - **`djev_rank`'s `low_label_mass_indexes` uses a fixed 0.5.** It refuses
   nothing, but it is the one fixed cutoff in the tree, inside the window
   where healthy n=16 reads measured 0.446.
-- **The client's default is `samples: "auto"`**, one read or four. The ~40 ms
-  headline is `samples=1`. No seam has measured whether one read is enough for
-  its schema. The `djev_decide` input schema tells the model `samples`
-  defaults to 1, which is wrong: omitted, it is `"auto"`.
+- **Neither client entry point has a `samples` default**, one read or four. The
+  ~40 ms headline is `samples=1`. No seam has measured whether one read is
+  enough for its schema. `ask` and `ask_sync` both take `samples=None`
+  (`app/djev.py:510`, `:585`) and `_body` writes the key only when it is not
+  `None`, so a caller that does not name one gets the **server's** `"auto"`
+  policy (§3.3), not one read — which is what this page used to call "the
+  client's default", a different claim about a different object. The `djev_decide` input schema tells the model `samples`
+  defaults to 1, which is wrong for the same reason: omitted, it is `"auto"`.
+  Filed as #3112.
 - **Engine contention** between shadow reads and tool calls (§5.3). It is
   harmless while every consumer is advisory.
 - **Scores repeat only while `BATCH_INVARIANT=1` is on** (§8.2). Production
@@ -1321,15 +1354,20 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   behaviour, which is why it is tolerable, not why it is finished.
 - **No ground truth remains for `entity`** (§7.2). Any future entity gate needs
   a new human-checked set.
-- **The `action_review` seam has no rows** (§6.4), because the pool has been
-  paused since it landed.
+- **The `action_review` seam is the only one whose traffic nobody can label**
+  (§6.4): 265,618 rows by 2026-10-21, none of them a labelled case, so its
+  threshold question is closed as permanently-shadow rather than answered. The
+  bullet here used to read "has no rows, because the pool has been paused since
+  it landed" — true for four days in 2026-09-25, false from 2026-09-25T18:45Z on,
+  and it contradicted §6.4 thirty lines above it.
 
 ### Closed 2026-09-21 — test runs wrote to production's shadow log (#1324)
 
 **What it was.** `STATE_DIR`, `SHADOW_LOG` and `PENDING_DROPS` are
-`Path.home()` literals bound at import (`app/djev_shadow.py:68-71`) and
-`_write()` opens `SHADOW_LOG` on the recorder's daemon thread at *write* time
-(`:295`), so a per-test patch could not hold: `tests/test_djev_shadow.py`
+`Path.home()` literals bound at import (`app/djev_shadow.py:83-86`, re-pointed
+2026-10-21 from the `:68-71` this was written against) and `_write()` opens
+`SHADOW_LOG` on the recorder's daemon thread at *write* time (`:313`), so a
+per-test patch could not hold: `tests/test_djev_shadow.py`
 patched the three names and a queued job still drained after its `monkeypatch`
 tore down, into the corpus §9.3 step 5 reads. `tests/test_backlog_dedupe.py`
 and `test_backlog_spawn_loop.py` reached the seam with no shadow isolation at
@@ -1381,16 +1419,28 @@ run, which is why that count is a person's post-landing check.
 
 **What is left, and it is a person's call.** The 63 fixture rows counted at
 08:19Z — 36 `dedupe` under the two titles above plus 27 `rerank` with an empty
-`meta` — stay in the log; a code round does not edit a live state file. The
-count is a snapshot and rises by a couple of rows every time anyone falsifies
-this pin by removing the fixture, so quarantine by the RULE (drop `rerank` rows
-with an empty `meta`, and `dedupe` rows whose `meta.name` is one of those two
-titles), never by taking the last 63. Until that happens any floor read by
-`replay.py --floors` is fixture-dominated. Once this is live,
-`wc -l ~/.local/state/lloyd-djev/shadow.jsonl` across a full-suite run should
-move only with production traffic.
+`meta` — stayed in the log when this closed: a code round does not edit a live
+state file. The count is a snapshot and rises by a couple of rows every time
+anyone falsifies this pin by removing the fixture, so the call was to quarantine
+by the RULE (drop `rerank` rows with an empty `meta`, and `dedupe` rows whose
+`meta.name` is one of those two titles), never by taking the last 63. Until that
+happens any floor read by `replay.py --floors` is fixture-dominated. Once this is
+live, `wc -l ~/.local/state/lloyd-djev/shadow.jsonl` across a full-suite run
+should move only with production traffic.
 
 Re-counted by that rule on 2026-09-25: 65 rows of 346, still in the log.
+
+**The person's call was made, on 2026-09-27, by that rule.** Read at
+2026-10-21: `~/.local/state/lloyd-djev/shadow.fixtures.jsonl` holds 65 rows —
+38 `dedupe` under the two titles above and 27 `rerank` with an empty `meta` —
+beside `shadow.jsonl.bak-20260927`, and the live `shadow.jsonl` carries **zero**
+rows of either shape: no `dedupe` row names either fixture title, and all 9 of
+its surviving `rerank` rows carry a `meta`. So the residue this record owed is
+paid, `replay.py --floors` is no longer fixture-dominated, and the two dated
+figures above are the leak's history, not the file's state. What the rule does
+**not** fix is provenance: a clone, a worktree, or a log that predates the move
+still reads as a clean corpus while being nothing of the kind, and `wc -l`
+cannot tell them apart (§9.3 step 5).
 
 ---
 
@@ -1499,8 +1549,9 @@ keeps the findings that should not be re-derived.
   (2608.00824); complete-list fusion (2608.07152); a tuned convex α beats RRF
   from a handful of labels (2210.11934). All fork work (#1475).
 
-**What became of them** (re-checked 2026-09-25). Two landed, one is fork work
-that landed, one is open, and nine were measured and closed `rejected`:
+**What became of them** (re-checked 2026-09-25; the #1477 row re-checked
+2026-10-21). Two landed, one is fork work that landed, and ten were measured and
+closed `rejected`:
 
 | item | idea | outcome |
 |---|---|---|
@@ -1514,7 +1565,7 @@ that landed, one is open, and nine were measured and closed `rejected`:
 | #1474 | anchored or sequential chunks past 32 rows | rejected: more documents found, head ordered worse, ~0.5 s slower |
 | #1475 | qmd fork first-stage changes | **landed** in the fork: complete-list fusion at depth 100 |
 | #1476 | djev generates for the ex-secondary jobs | rejected: equal score, worse spoken form, slower than an idle primary |
-| #1477 | rebuild on the 2026-09-23 upstream | open: trialled 2026-09-25 and not adopted (§7.1) |
+| #1477 | rebuild on the 2026-09-23 upstream | closed 2026-09-25 as rejected: trialled end to end and not adopted — its `--constrained` read pins `label_mass` to 1.0, which would empty the trust signal (§7.1) |
 | #1478 | djev as cluster pair judge and entity second vote | rejected: no ground truth left to show a gain (§6.3) |
 | #1479 | the calibration ladder | **landed** `a0cb33de` + `cf6b572b`; dedupe cannot climb it yet (§9.4) |
 
@@ -1571,6 +1622,28 @@ djev on Lloyd's traffic; the recall eval decides.
   isolated levels is one row per level, so a 32-candidate recall is ~128 rows; the request shape is part of the measurement.
 
 ## Review log
+
+- **2026-10-21 — `stale`, corrected against HEAD `1e665dbc`.** Every named path,
+  test, constant and config key still lands (`app/djev.py`'s `RANK_DEFAULT_N`/
+  `RANK_MAX_N`/`SERVED_CANVAS_ROWS`/`CANVAS_CHUNK_QUESTIONS`, `SEAMS`,
+  `queue_max`, the registry's five thresholds and four floors, the recall
+  constants, the 16 test modules, the `:8011` health route answering
+  `{"status": "ok"}`), so the mechanism is what runs. Four statements had come
+  untrue. §11 still said `action_review` had **no rows** while §6.4 said it was
+  the busiest seam 30 lines above; the live log says 265,618 rows through today.
+  §6.1, §9.3 step 5 and this page's own 2026-09-21 entry all said the fixture
+  quarantine was still owed — it was made on 2026-09-27, by the rule the record
+  asked for: `shadow.fixtures.jsonl` holds those 65 rows and the live log has
+  none of either shape, so `replay.py --floors` is no longer fixture-dominated.
+  §11 attributed the `samples` default to the client, which has none. §13 called
+  #1477 open; it is closed `rejected`. Re-pointed two anchors that had moved
+  (`app/djev_shadow.py:68-71`→`:83-86`, `:295`→`:313`, and `backlog.py:458-460`→
+  `:613-616`, whose flag is `judged` now), refreshed the seam volumes from the
+  live log, added the rerank seam's two 2026-10-11 production rows and the
+  name-prior probe's two monthly reproductions. Filed #3112 (`djev_decide`'s
+  `samples` description), #3113 (`SchemaDrift` names a `--calibrate` that does
+  not exist), #3114 (the dedupe row still cannot say why it was not eligible,
+  the gap #934 closed without fixing) and #3115 (`djev_rank`'s hardcoded 0.5).
 
 - **2026-09-25 — refreshed against HEAD `cd72bc92`.** Checked the client,
   tools, schemas, recorder, seams, config and committed conf against the tree
