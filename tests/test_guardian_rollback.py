@@ -1687,8 +1687,12 @@ def test_a_voice_outage_is_never_evidence_about_the_promoted_tree(tmp_path, monk
         return True
 
     monkeypatch.setattr(g, "do_rollback", _record_rollback)
+    # `alert_file_incident` is here because a healthy `check_vault` / `check_data` tick
+    # now asks the alert file which incident it asserts before deciding to retract one
+    # (#3106); None is the answer a real Notifier gives over this node's empty gdir.
     g.notifier = type("N", (), {"alert": lambda *a, **k: None,
-                                "resolve": lambda *a, **k: None})()
+                                "resolve": lambda *a, **k: None,
+                                "alert_file_incident": lambda *a, **k: None})()
 
     out = g.tick()
 

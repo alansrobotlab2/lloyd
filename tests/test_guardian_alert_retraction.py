@@ -859,3 +859,264 @@ def test_an_incident_this_process_cannot_clear_is_left_byte_identical(tmp_path,
         "a clear condition holding for one guard must not seal a different guard's "
         "incident — ALERT.md is one last-writer-wins slot and this is the guard "
         "that keeps that from mattering")
+
+
+
+# ── the tripwires: an alarm a later tick can close (#3106) ──────────────────
+#
+# The two `critical` titles this file had no node for were the only two alarms in
+# the guardian with no resolver of any kind. Each was spelled once, inside its own
+# `self.alert(...)` call, and nowhere else in the tracked tree, while every
+# `notifier.resolve` site named some other title — poolwatch's, tmpwatch's,
+# `RUNTIME_DATA_ALERT_TITLE`, `SUPERVISOR_ALERT_TITLE`, `SERVICE_DOWN_ALERT_TITLE`,
+# and the map-constrained variable in `reconcile_stranded_alert`. So the two
+# families whose body orders a human to "restore into a side directory … swap it in
+# with the stack stopped" were exactly the two that could never be retracted, while
+# the one whose remedy is moving a stray file was retracted constantly.
+# `vaultwatch.clear()` / `datawatch.clear()` — what that human then runs — unlinks
+# the marker, re-baselines and persists without naming the notifier: clearing the
+# incident and closing the alarm were two operations only `resolve` performed.
+#
+# Every node here drives a REAL trip over a temporary tree — a top-level folder of
+# 25 files, over `vaultwatch.TOPDIR_MIN_FILES`, emptied — then the real `clear()`,
+# and requires the alarm to close: on the tick, and in a second process.
+
+def _gstate(tmp_path):
+    """Where a Guardian from `_tripwire_guardian` keeps its state — and so its
+    ALERT.md: `args.guardian_state`, not the vault box `_notifier` builds."""
+    return tmp_path / "gstate"
+
+FAMILIES = ("vault", "data")
+
+
+def _tripwire_guardian(tmp_path, monkeypatch, family):
+    """A Guardian whose watched tree is this test's, alarm surfaces all real.
+
+    Only the family under test has anything to lose: the other root is an empty
+    directory for `vaultwatch` (no top-level folder of its own to empty) and one
+    without `.lloyd-data-root` for `datawatch`, which refuses to arm a root it has
+    never seen. That keeps ALERT.md's single slot un-contested — exactly one
+    tripwire can fire per node — instead of the harness deciding which of two
+    critical alerts won the file.
+
+    Calling it twice on one `tmp_path` is how a restart is tested here: the tree is
+    created only when it is not there already, so the second Guardian sees the tree
+    the first one left, with the same `gdir`, nothing of its own remembered, and the
+    baseline reloaded from the state file the first process persisted.
+
+    `_stop_sync`, `_pause_workers` and `_vault_evidence` are stubbed because they
+    stop supervisord programs, POST at the live backend and shell out to `ps`.
+    `check_data`'s other two reads are stubbed because they judge the code tree and
+    the snapshot directory, neither of which these nodes are about — and an
+    un-stubbed "Data snapshots are not arriving" would take ALERT.md's slot away
+    from the title under test. The watch, its latch, the marker, `clear()`, the
+    notifier, ALERT.md and the daily note are the shipped code, and `Guardian.alert`
+    runs with its real repeat window set to zero so a second call for one incident
+    needs no sleep.
+    """
+    import types
+
+    import guardian as G
+    import policy as GP
+    import datawatch as DW
+
+    watched = tmp_path / f"watched-{family}"
+    if not watched.exists():
+        (watched / "notes").mkdir(parents=True)
+        for i in range(25):                 # over vaultwatch.TOPDIR_MIN_FILES
+            (watched / "notes" / f"n{i}.md").write_text("x\n", encoding="utf-8")
+        if family == "data":
+            (watched / DW.ROOT_MARKER).write_text("", encoding="utf-8")
+    inert = tmp_path / f"inert-{family}"
+    inert.mkdir(exist_ok=True)
+    vault_root, data_root = ((str(inert), str(watched)) if family == "data"
+                             else (str(watched), str(inert)))
+
+    monkeypatch.setattr(GP, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(GP, "DATA_ROOT", data_root)
+    monkeypatch.setattr(GP, "REPO", str(tmp_path / "repo"))
+    monkeypatch.setattr(GP, "ALERT_REPEAT_SECONDS", 0.0)
+    (tmp_path / "memory").mkdir(exist_ok=True)
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs=PROGRAM, interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+    monkeypatch.setattr(g, "_stop_sync", lambda: "stopped")
+    monkeypatch.setattr(g, "_pause_workers", lambda actor: "paused")
+    monkeypatch.setattr(g, "_vault_evidence", lambda stamp: None)
+    monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(g, "ensure_chronic", lambda: None)
+    monkeypatch.setattr(g, "_runtime_data_incident", lambda *a, **k: [])
+    monkeypatch.setattr(DW, "snapshot_report", lambda *a, **k: (True, ""))
+    watch = g.vault if family == "vault" else g.data
+    check = g.check_vault if family == "vault" else g.check_data
+    title = (G.VAULT_TRIP_ALERT_TITLE if family == "vault"
+             else G.DATA_TRIP_ALERT_TITLE)
+    return g, watch, check, title
+
+
+def _trip_and_note(tmp_path, monkeypatch, family):
+    """Trip one wire for real: arm, delete a folder, alert. Both artefacts back."""
+    import shutil
+
+    g, watch, check, title = _tripwire_guardian(tmp_path, monkeypatch, family)
+    check()                                 # arms the watch; nothing has been lost yet
+    assert g.notifier.alert_file_incident() is None, "arming the watch raised an alarm"
+    shutil.rmtree(f"{watch.root}/notes")
+    check()                                 # the mass deletion
+    assert g.notifier.alert_file_incident() == (title, False), (
+        f"a wipe of {watch.root} did not put {title!r} in ALERT.md as a live directive")
+    return g, watch, check, title, _note(tmp_path)
+
+
+def _guardian_sections(text: str) -> dict[str, str]:
+    """Each `## Self-mod guardian: <title>` heading mapped to its body."""
+    out: dict[str, str] = {}
+    for chunk in text.split(f"\n{notify.DAILY_SECTION_PREFIX}")[1:]:
+        head, _, body = chunk.partition("\n")
+        out[head.strip()] = body
+    return out
+
+
+def _open_titles(text: str) -> list[str]:
+    """Which incidents the note still reports open, by its own markers.
+
+    Read from the markers rather than from a count of headings, because the marker is
+    what `notify._daily_open_at` asks and what `resolve` erases: a node that counted
+    headings would pass on a section `resolve` had never been able to see.
+    """
+    return [t for t, body in _guardian_sections(text).items()
+            if body.rstrip().endswith(notify.DAILY_STILL_OPEN)]
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_tripwire_alert_is_written_where_a_retraction_can_reach_it(
+        tmp_path, monkeypatch, family):
+    """Clause 3, first half: the section a trip writes must be sealable at all.
+
+    This is the block the item's own triage found standing in
+    `~/obsidian/memory/2026-10-20.md` long after the trip was adjudicated fictitious
+    261 seconds after it fired. An uncoalesced section carries no
+    `DAILY_STILL_OPEN`; `_daily_open_at` calls a section open only while its body
+    ends with that marker; `resolve` seals only what it finds open. So the
+    restore-and-swap paragraph was not merely un-retracted — it was invisible to the
+    call that would have retracted it, which returned True over it (#1590).
+    """
+    g, watch, check, title, note = _trip_and_note(tmp_path, monkeypatch, family)
+    sections = _guardian_sections(note)
+    assert list(sections) == [title], f"the note's sections are {list(sections)}"
+    assert _open_titles(note) == [title], (
+        "a trip's section must end with the still-open marker, or `resolve` has "
+        f"nothing to seal:\n{note}")
+    assert "swap it in" in sections[title], (
+        "the body under test has to be the restore directive itself")
+    assert _lines(_gstate(tmp_path))[0] == f"# {title}", _lines(tmp_path)
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_tripwire_alarm_closes_on_the_tick_its_tree_measures_whole(
+        tmp_path, monkeypatch, family):
+    """Clause 2: no restart is wanted and none happens.
+
+    The order is the real one: trip, a human restores the tree and runs the watch's
+    own `clear()`, the guardian's next check of that root measures it whole. The seal
+    has to be on ALERT.md by the end of that tick, because the stranded alarm this
+    item was filed from had already outlived three guardian restarts, each of which
+    called `reconcile_stranded_alert` and logged nothing.
+    """
+    g, watch, check, title, note = _trip_and_note(tmp_path, monkeypatch, family)
+    assert watch.clear() is True, "`clear()` reports no marker to remove"
+    assert watch.tripped() is None
+
+    check()                                                 # same process, next check
+
+    assert g.notifier.alert_file_incident() == (title, True), (
+        "ALERT.md is still a live directive after the root measured whole")
+    assert len(_cleared_lines(_gstate(tmp_path))) == 1, _cleared_lines(_gstate(tmp_path))
+    sealed = (_gstate(tmp_path) / "ALERT.md").read_text(encoding="utf-8")
+    assert notify.ALERT_CLEARED_BANNER in sealed, (
+        "the retracted file must still carry the alarm's text, quoted")
+    assert "swap it in" in sealed, "quoted, not deleted — that is the whole point"
+    sealed_note = _note(tmp_path)
+    assert _open_titles(sealed_note) == [], "the daily-note section is still open"
+    dated = [ln for ln in sealed_note.splitlines()
+             if ln.startswith(f"{notify.DAILY_CLEARED_PREFIX} ")]
+    assert len(dated) == 1, dated
+
+    # A third and fourth check write nothing: the alarm is closed, and re-stamping a
+    # closed incident would move the one time a later reader ages.
+    alert_bytes, sealed_bytes = (_gstate(tmp_path) / "ALERT.md").read_bytes(), sealed_note.encode()
+    check()
+    check()
+    assert (_gstate(tmp_path) / "ALERT.md").read_bytes() == alert_bytes, (
+        "a closed tripwire alarm was re-sealed")
+    assert _note(tmp_path).encode() == sealed_bytes, (
+        "a second retraction of a closed incident rewrote the daily note")
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_restarted_guardian_retracts_a_tripwire_alarm_it_can_measure(
+        tmp_path, monkeypatch, family):
+    """Clause 1: `reconcile_stranded_alert` owns both tripwire titles.
+
+    One process trips the wire and is dropped; the tree is restored and cleared; a
+    SECOND Guardian over the same state directory and the same root decides from the
+    file's own H1 plus its own two reads. This is the half that already existed for
+    the three latch-backed titles (#3019); for these two it was a silent
+    `nothing-to-reconcile`, because nothing in the tree had ever handed either title
+    to `resolve` and the map cannot tell "no guard owns this" from "the guard that
+    owns it never named it".
+    """
+    g, watch, check, title, note = _trip_and_note(tmp_path, monkeypatch, family)
+    watch.clear()
+
+    g2, watch2, check2, title2 = _tripwire_guardian(tmp_path, monkeypatch, family)
+    assert title2 == title and watch2.tripped() is None
+    assert g2.notifier.alert_file_incident() == (title, False)
+
+    assert g2.reconcile_stranded_alert() == "sealed", (
+        "the marker is gone and the watch's own baseline reads the root whole, so the "
+        "restore directive in ALERT.md is a live order for an incident that is over")
+    assert g2.notifier.alert_file_incident() == (title, True)
+    assert len(_cleared_lines(_gstate(tmp_path))) == 1, _cleared_lines(_gstate(tmp_path))
+    assert g2.reconcile_stranded_alert() == "nothing-to-reconcile", (
+        "a sealed incident must not be reconciled again on a later start")
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_tripwire_alarm_stays_open_while_its_marker_is_still_set(
+        tmp_path, monkeypatch, capsys, family):
+    """Clause 1's other half, and clause 4's "no seal from an unmet condition".
+
+    The marker IS the incident: `clear()` is what the human runs once the tree is
+    back, so a guardian that sealed ALERT.md while it stood would be announcing an
+    all-clear over a wipe that is still latched and still refusing sync and
+    snapshots. Byte-for-byte identical, because the sealed file carries the stamp a
+    later reader ages and a second write would move it.
+    """
+    g, watch, check, title, note = _trip_and_note(tmp_path, monkeypatch, family)
+    before = (_gstate(tmp_path) / "ALERT.md").read_bytes()
+
+    g2, watch2, check2, _ = _tripwire_guardian(tmp_path, monkeypatch, family)
+    assert watch2.tripped() is not None, "the second process cannot see the latch"
+    assert g2.reconcile_stranded_alert() == "still-open"
+    assert (_gstate(tmp_path) / "ALERT.md").read_bytes() == before, (
+        "a seal was written over a live tripwire")
+    assert "does not hold" in capsys.readouterr().out
+
+    # The same verdict on the check tick with the marker set and the tree otherwise
+    # whole — a human who restored the files but has not cleared the latch yet, which
+    # can last hours while the tick runs every 5 s. So the verdict is journalled on
+    # the transition into it, not per tick.
+    check2()
+    assert (_gstate(tmp_path) / "ALERT.md").read_bytes() == before
+    capsys.readouterr()
+    check2()
+    check2()
+    assert "does not hold" not in capsys.readouterr().out, (
+        "the same not-clear verdict was journalled on every tick of one incident")

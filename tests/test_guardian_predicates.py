@@ -4491,3 +4491,213 @@ def test_one_incident_carries_the_tree_stray_and_the_data_root_shadow_together(t
     sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
     assert len(sections) == 1, sections
     assert finding["trusted"] in sections[0]
+
+
+# ---------------------------------------------------------------------------
+# the tripwires: two reads, or no all-clear (#3106)
+# ---------------------------------------------------------------------------
+# Every predicate above answers a question one guardian process can ask about its
+# own subject. The two tripwires had no such predicate at all: their alarm asked a
+# human to restore a tree, and the only thing that could ever report that the human
+# had done it was a `resolve(...)` call no code in the tree made. The rule this
+# section pins is the one that replaces that gap — the clear condition is the
+# marker's absence AND a measurement of the tree that evaluates clean against this
+# watch's own baseline, and everything short of both answers not-clear and leaves
+# ALERT.md standing. #2056's "an all-clear nobody observed" from the retract side:
+# a seal is a claim that a recovery was seen, so a read that failed, a latch that
+# is still set, or a baseline that was never taken each forbid it.
+
+def _tripwire_watch(tmp_path, *, family="vault", files=1000, state="gstate",
+                    tick_it=True):
+    """One real watcher over one real tree, with a real baseline on record.
+
+    1000 files inside one top-level folder, which is the shape both tripwires guard:
+    the folder guard (`vaultwatch.TOPDIR_MIN_FILES` = 20) then covers a deletion no
+    total-fraction rule would notice. Nothing here is a stand-in — the watch, its
+    baseline, its state file and its marker are the shipped objects, because the
+    reads under test are `tripped()` and `measure()`+`judge()`, and a stub of either
+    would be a stub of the clause.
+    """
+    import vaultwatch as VW
+    import datawatch as DW
+
+    root = tmp_path / family
+    (root / "notes").mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        (root / "notes" / f"n{i}.md").write_text("x\n", encoding="utf-8")
+    if family == "data":
+        (root / DW.ROOT_MARKER).write_text("", encoding="utf-8")
+        watch = DW.DataWatch(str(root), tmp_path / state)
+    else:
+        watch = VW.VaultWatch(str(root), tmp_path / state)
+    if not tick_it:
+        return watch                                    # no baseline: the cold case
+    why, _ = watch.tick()
+    assert why is None and watch.history, "the watch recorded no baseline for a real tree"
+    assert watch.tripped() is None
+    return watch
+
+
+def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
+                                                                    monkeypatch):
+    """The clear condition, five ways it does not hold and the one way it does.
+
+    The True half is checked for what it CLAIMS as well as when it fires: its
+    sentence is the text `resolve` writes into ALERT.md and into the daily note, so
+    it reports the measurement and says in the same breath that the worker pause and
+    the promotion halt are not what it lifted — the guardian never touches either.
+    """
+    import json
+    import os
+
+    import guardian as Gmod
+    import vaultwatch as VW
+
+    watch = _tripwire_watch(tmp_path)
+    g = Gmod.Guardian.__new__(Gmod.Guardian)
+
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is True, note
+    assert watch.root in note and str(watch.history[-1].total) in note, note
+    assert "worker pause" in note, (
+        "the all-clear must not read as lifting the pause it did not lift")
+
+    # 1. The marker is the incident. `clear()` is what the human runs after the
+    #    restore, so a seal written while it stands reports a recovery nobody made
+    #    and drops the sync gate's own evidence.
+    watch.marker.write_text(json.dumps({"reason": "top-level folder 'notes' "
+                                       "(1000 files) vanished"}), encoding="utf-8")
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is False and str(watch.marker) in note, note
+
+    # 2. A marker that exists but does not parse. `tripped()` answers
+    #    {"reason": "unreadable marker"} rather than None for exactly this, and an
+    #    incident this process cannot read is not a closed one.
+    watch.marker.write_text("{ this is not json", encoding="utf-8")
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is False and "unreadable marker" in note, note
+    watch.marker.unlink()
+
+    # 3. No baseline on record: a missing comparison, not a favourable one. This is
+    #    the condition `datawatch.armed` encodes for the data root
+    #    (`len(self.history) >= MIN_SAMPLES`) — a machine that has never measured the
+    #    tree cannot assert it is intact — and the vault watch has no such property, so
+    #    the predicate asks the history directly and both roots get the same answer.
+    cold = _tripwire_watch(tmp_path, state="other-gstate", tick_it=False)
+    assert not cold.history, "expected a watch with no persisted baseline"
+    clear, note = g._tripwire_is_clear(cold)
+    assert clear is False and "no baseline" in note, note
+
+    # 4. The tree still reads damaged: the folder is emptied again. `judge` is the
+    #    same function that raised the alarm, so the alarm cannot be closed by a
+    #    reading that would have opened it.
+    import shutil
+    shutil.rmtree(f"{watch.root}/notes")
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is False and "still reads" in note, note
+
+    # 5. The tree cannot be measured at all. `measure()` answers None for a root it
+    #    cannot `stat` — a stale mount, a parent whose permissions deny it — which is
+    #    the shipped failure shape substituted here; the chmod-the-root case is
+    #    measured below, and it is NOT this one: an unreadable root still lstats, and
+    #    measures 0 files, which is case 4 (`judge` reads it as an empty folder).
+    unreachable = {"on": True}
+    real_measure = VW.measure
+    def _measure(root, *rest, **kw):
+        return None if unreachable["on"] else real_measure(root, *rest, **kw)
+
+    monkeypatch.setattr(VW, "measure", _measure)
+    notes = Path(watch.root) / "notes"        # watch.root is a str, as the class stores it
+    notes.mkdir(parents=True, exist_ok=True)
+    for i in range(1000):
+        (notes / f"n{i}.md").write_text("x\n", encoding="utf-8")
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is False and "could not be measured" in note, note
+
+    # ...and the same call with the read restored, so the five answers above are the
+    # gate deciding and not an unreachable branch.
+    unreachable["on"] = False
+    watch.tick()
+    clear, note = g._tripwire_is_clear(watch)
+    assert clear is True, note
+
+    # The real-filesystem control named above: chmod'ing the root away does not
+    # produce a None, it produces 0 files, and the clear condition refuses on the
+    # measurement rather than on the read having failed.
+    os.chmod(watch.root, 0o000)
+    try:
+        clear, note = g._tripwire_is_clear(watch)
+        assert clear is False, f"an unreadable root read as clear: {note}"
+        assert "could not be measured" not in note, (
+            "0 files from an unreadable root is a damaged tree, not a failed read — "
+            "the two answers must not be conflated")
+    finally:
+        os.chmod(watch.root, 0o755)
+
+
+@pytest.mark.parametrize("broken_read", ["unmeasurable root", "unreadable marker"])
+def test_no_seal_is_written_from_a_tripwire_read_that_failed(tmp_path, monkeypatch,
+                                                             capsys, broken_read):
+    """Clause 4: a failed read never becomes ALERT.md's `cleared:` line.
+
+    A real Notifier and a real ALERT.md holding one of the tripwire titles as a live
+    directive, so "no seal" is a byte comparison rather than a mocked call count. The
+    verdict is `still-open`, the log says the clear condition does not hold, and
+    `resolve` is never reached — the spy below forwards to the real method, so a
+    passing run also proves the seal would have worked had the condition held, which
+    the tail of this node then shows it does.
+    """
+    import guardian as Gmod
+    import notify as notify_mod
+    import vaultwatch as VW
+
+    watch = _tripwire_watch(tmp_path)
+    title = Gmod.DATA_TRIP_ALERT_TITLE
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    g = Gmod.Guardian.__new__(Gmod.Guardian)
+    g.notifier = notify_mod.Notifier(ledger=tmp_path / "ledger.jsonl",
+                                     state_dir=tmp_path / "gstate",
+                                     vault_root=str(vault),
+                                     backend_url="http://127.0.0.1:1",
+                                     external=False)
+    g._tripwire_still_open = {}
+    monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+    g.notifier.alert("critical", title,
+                     "Restore into a side directory with restore-data.sh (never in "
+                     "place), check it, swap it in with the stack stopped.",
+                     coalesce=True)
+    path = tmp_path / "gstate" / notify_mod.ALERT_FILE_NAME
+    before = path.read_bytes()
+    assert g.notifier.alert_file_incident() == (title, False)
+
+    calls: list[str] = []
+    real_resolve = g.notifier.resolve
+
+    def _spy(t, note):
+        calls.append(t)
+        return real_resolve(t, note)
+
+    monkeypatch.setattr(g.notifier, "resolve", _spy)
+    unreachable = {"on": broken_read == "unmeasurable root"}
+    real_measure = VW.measure
+    def _measure(root, *rest, **kw):
+        return None if unreachable["on"] else real_measure(root, *rest, **kw)
+
+    monkeypatch.setattr(VW, "measure", _measure)
+    if broken_read == "unreadable marker":
+        watch.marker.write_text("{ not json", encoding="utf-8")
+
+    assert g._retract_tripwire_alert(watch, title) == "still-open"
+    assert path.read_bytes() == before, "a seal was written from a failed read"
+    assert calls == [], f"`resolve` ran on a clear condition nobody measured: {calls}"
+    out = capsys.readouterr().out
+    assert "does not hold" in out, out
+
+    unreachable["on"] = False
+    if broken_read == "unreadable marker":
+        watch.marker.unlink()
+    watch.tick()
+    assert g._retract_tripwire_alert(watch, title) == "sealed"
+    assert calls == [title]
+    assert path.read_bytes() != before

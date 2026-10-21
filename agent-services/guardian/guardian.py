@@ -91,6 +91,25 @@ DATA_TRIP_ACTOR = "guardian-data-trip"
 SUPERVISOR_ALERT_TITLE = "supervisord was unreachable"
 SERVICE_DOWN_ALERT_TITLE = "Service down, but no promotion to revert"
 
+# ── the two tripwire alert titles (#3106) ──────────────────────────────────
+# The same rule for the same reason, and these two are the incident that proves
+# it. Each was spelled exactly once in the tracked tree — inside its own emitting
+# `self.alert(...)` call, at no other line — so the one process that CAN measure
+# their recovery (`vaultwatch` / `datawatch`: the trip marker absent and the
+# watch's own baseline evaluating clean) had no title to hand `notifier.resolve`,
+# and neither watch named the notifier at all. The consequence was inverted
+# rather than merely missing: the two families whose alert body orders a human to
+# restore a tree into a side directory and swap it in with the stack stopped were
+# exactly the two that could never be retracted, while the runtime-data family —
+# whose remedy is moving one stray file — has been retracted dozens of times.
+# A drifted string here reads as "no guard owns this incident" and is silently
+# left alone, which is #3019's sentence about the pair above, and the reason
+# `clear()` on either watch is not enough: it unlinks the marker, re-baselines
+# and persists without touching the notifier, so clearing the incident and
+# closing the alarm are two operations only `resolve` performs.
+VAULT_TRIP_ALERT_TITLE = "Vault mass deletion — sync stopped"
+DATA_TRIP_ALERT_TITLE = "Lloyd data root damaged — promotions halted"
+
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [guardian] {msg}", flush=True)
@@ -343,6 +362,13 @@ class Guardian:
         # twice, and the alert says "first check" rather than guessing (#2057).
         self._strays_prev_check_at: float | None = None
         self._snapshots_checked_at = 0.0
+        # Per tripwire title: whether the last tick already journalled that its clear
+        # condition did NOT hold. A quiet one-way dict, never an open/closed latch —
+        # the verdict comes from `_tripwire_is_clear` on every tick, and this only
+        # decides whether to say it twice (#3106). `_retract_tripwire_alert` also
+        # tolerates it missing, because several test homes build a Guardian with
+        # `__new__` and set only the fields they use.
+        self._tripwire_still_open: dict[str, bool] = {}
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
         self.tmp = tmpwatch.TmpWatch()
         # Every alarm the worker fleet has lives inside `WorkerPool._scheduler_loop`
@@ -1447,6 +1473,11 @@ class Guardian:
             log(f"vaultwatch failed (continuing): {exc}")
             return
         if not why:
+            # Nothing tripped on THIS measurement, which is also the only tick that
+            # can close an alarm an earlier one raised (#3106). The snapshot `tick()`
+            # just took is handed over, so the clear condition is judged on a real
+            # reading of this root rather than on a second walk of it.
+            self._retract_tripwire_alert(self.vault, VAULT_TRIP_ALERT_TITLE, snap)
             return
         log(f"VAULT TRIPWIRE: {why}")
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1475,8 +1506,15 @@ class Guardian:
         gstate.append_event(self.state.ledger, {"event": "vault_tripwire", "reason": why,
                                                 "files_before": before, "files_after": after,
                                                 "actions": actions})
+        # `coalesce=True` is what makes this alert retractable at all, not a tidier
+        # note: `_vault_note` writes a non-coalesced section WITHOUT
+        # `notify.DAILY_STILL_OPEN`, `_daily_open_at` calls a section open only while
+        # its body ends with that marker, and `resolve` seals only what it finds open —
+        # so an uncoalesced section is a block of imperative restore instructions that
+        # no retraction can ever reach, and `resolve` returns True over it (#1590).
+        # #2221 clause 3 made the same argument for the supervisord alert.
         self.alert(
-            "critical", "Vault mass deletion — sync stopped",
+            "critical", VAULT_TRIP_ALERT_TITLE,
             f"{why}\n\nFiles: {before} → {after}.\n"
             f"Obsidian Sync: {actions['sync']}\nWorker pool: {actions['workers']}\n"
             f"Promotions: {actions['promotions']}\nEvidence (process list at the "
@@ -1485,7 +1523,8 @@ class Guardian:
             "`~/lloyd/scripts/backup/restore-vault.sh` (never in place), check it, "
             "swap it in, then clear the tripwire with\n"
             f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} clear\n"
-            f"Sync will not start until then. Marker: {marker}")
+            f"Sync will not start until then. Marker: {marker}",
+            coalesce=True)
 
     # ── data-root tripwire ─────────────────────────────────────────────
     def _runtime_data_incident(self, now: float) -> None:
@@ -1748,6 +1787,11 @@ class Guardian:
             log(f"datawatch failed (continuing): {exc}")
             return
         if not why:
+            # The data root's half of #3106: the tick that measures the root whole is
+            # the tick that can close the alarm an earlier one raised. `tick()` answers
+            # (None, None) for a root it refuses to watch at all, and the predicate
+            # treats an unmeasured root as NOT clear rather than as a clean one.
+            self._retract_tripwire_alert(self.data, DATA_TRIP_ALERT_TITLE, snap)
             return
         log(f"DATA TRIPWIRE: {why}")
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1772,15 +1816,19 @@ class Guardian:
         gstate.append_event(self.state.ledger, {"event": "data_tripwire", "reason": why,
                                                 "files_before": before, "files_after": after,
                                                 "actions": actions})
+        # `coalesce=True` for the reason given at the vault tripwire above: without the
+        # still-open marker no retraction can reach this section, and this is the body
+        # that orders "swap it in with the stack stopped".
         self.alert(
-            "critical", "Lloyd data root damaged — promotions halted",
+            "critical", DATA_TRIP_ALERT_TITLE,
             f"{why}\n\nFiles: {before} → {after}.\nWorker pool: {actions['workers']}\n"
             f"Promotions: {actions['promotions']}\nEvidence: {actions['evidence']}\n\n"
             f"Hourly read-only snapshots are in {policy.DATA_SNAPSHOTS}. Restore into "
             "a side directory with `~/lloyd/scripts/backup/restore-data.sh` (never in "
             "place), check it, swap it in with the stack stopped, then clear with\n"
             f"  /usr/bin/python3 {Path(datawatch.__file__).resolve()} clear\n"
-            f"Snapshots are refused until then. Marker: {marker}")
+            f"Snapshots are refused until then. Marker: {marker}",
+            coalesce=True)
 
     def _stop_sync(self) -> str:
         try:
@@ -2239,6 +2287,150 @@ class Guardian:
                 "read; which program the alert named is not recoverable from this "
                 "process, so the note names none")
 
+    # ── tripwire clear conditions (#3106) ────────────────────────────────
+    def _tripwire_is_clear(self, watch, snap=None) -> tuple[bool, str]:
+        """Whether one tripwire's incident is over, from the two reads that watch owns.
+
+        The tripwires were the only alarms in the file with no resolver because they
+        were the only ones whose recovery is not a latch this process holds: a vault or
+        data-root wipe is undone by a human restoring the tree and running
+        `vaultwatch.py clear` / `datawatch.py clear`, and `clear()` unlinks the marker,
+        re-baselines and persists — it never names the notifier, so the ALERT.md that
+        orders the restore outlives the incident it was written for. The condition that
+        IS measurable in-process is the same pair `vaultwatch.sync_gate` and
+        `datawatch.snapshot_gate` already read to decide whether to let sync or a
+        snapshot run: the marker is absent, and the tree evaluates clean against the
+        watch's own baseline.
+
+        Four answers come back False, and each is a case where a seal would be an
+        all-clear nobody observed (#2056's rule, read from the retract side):
+
+        * the marker is present — including one that exists but does not parse, which
+          `tripped()` reports as `{"reason": "unreadable marker"}` rather than as
+          absent, so an incident this process cannot read is never a closed one;
+        * the root cannot be measured (`measure` answers None for a root it cannot
+          `stat`) — an unreadable tree is not an intact one, and this is the same
+          mistake the KG-unreadable path (#1525) and the shadow scan (#3109) refuse to
+          make by answering `[]`;
+        * the watch holds no baseline at all, which is a missing comparison rather than
+          a favourable one;
+        * the watch's own `judge` still finds the wipe (root missing, root replaced,
+          the drop across the peak, or a top-level folder emptied), so the alarm is
+          live and the file stays exactly as found.
+
+        `snap` is the snapshot the caller's `tick()` already measured, passed so the
+        clear condition is judged on a real reading of this root without walking it a
+        second time every 5 s; a caller with no tick behind it (the startup
+        reconciliation) leaves it None and this reads the tree once.
+
+        The True sentence is the text `resolve` writes into ALERT.md and the daily
+        note, so it claims the measurement and nothing beyond it: it names the root,
+        the count, and the absent marker, and it says explicitly that lifting the pause
+        or the promotion hold is still someone's act — the guardian never lifted either.
+        """
+        marker = watch.tripped()
+        if marker:
+            return False, (f"the {watch.what} tripwire marker is still set at "
+                           f"{watch.marker} ({marker.get('reason')})")
+        if snap is None:
+            snap = vaultwatch.measure(watch.root, skip_top=watch.skip_top)
+        if snap is None:
+            return False, f"{watch.root} could not be measured at all this tick"
+        if not watch.history:
+            return False, f"{watch.root} has no baseline measurement on record"
+        why = watch.judge(snap)
+        if why:
+            return False, f"the watch still reads the {watch.what} as damaged: {why}"
+        return True, (f"{watch.root} measures {snap.total} files against this watch's "
+                      "baseline and its "
+                      f"{watch.what} tripwire marker is absent, so the restore-and-swap "
+                      "instructions above are stale — this says the tree measures whole, "
+                      "not that the worker pause or the promotion halt was lifted: that "
+                      "is still whoever holds it")
+
+    def _vault_tripwire_is_clear(self) -> tuple[bool, str]:
+        """The vault tripwire's clear condition, with no snapshot to reuse (#3106)."""
+        return self._tripwire_is_clear(self.vault)
+
+    def _data_tripwire_is_clear(self) -> tuple[bool, str]:
+        """The data root's, same reads, its own root and baseline (#3106)."""
+        return self._tripwire_is_clear(self.data)
+
+    def _retract_tripwire_alert(self, watch, title: str, snap=None) -> None:
+        """Close a tripwire alarm on the tick its own watch measures the tree whole.
+
+        The startup reconciliation (#3019) settles an inherited ALERT.md once, before
+        the loop; it cannot settle one whose incident ends *while this process is
+        running* and whose recovery is a file operation in another process — a human
+        running `datawatch.py clear` at 21:28 is not a guardian restart, and the
+        stranded alarm on this box at filing had already outlived three restarts that
+        each logged nothing. So the same question is asked on the tripwire's own check
+        tick, and `check_vault` / `check_data` hand over the snapshot they just took.
+
+        The gate is the file, not a latch: `alert_file_incident()` (#3019's read side)
+        answers which incident ALERT.md asserts and whether it is sealed. That is both
+        the cheap test — one small file read per tick, where `resolve` would scan every
+        dated note — and the honest one: the seal this reaches is the live directive in
+        the slot every reader opens first, plus the daily-note section for the same
+        title that `resolve` reaches inside `notify.DAILY_SCAN_DAYS`. Once another
+        incident has taken the single slot, this process has no index to the stale
+        section, which is the sweep's subject, not this one's.
+
+        `Guardian.alert` is deliberately not consulted: its repeat suppression is about
+        fan-out volume, and a retraction is not an alert. The one thing suppressed here
+        is the log line — an incident a human has not cleared yet stays open for hours
+        while the tick runs every 5 s, so the "does not hold" verdict is journalled on
+        the transition into it and not again until it changes.
+
+        Returns `reconcile_stranded_alert`'s verdict token (`still-open`, `sealed`,
+        `not-sealed`, `sealed-note-out-of-reach`), or None when ALERT.md was never
+        asserting this incident — the callers in `check_vault`/`check_data` discard it;
+        it exists so a test can pin the verdict without scraping the log.
+        """
+        incident = self.notifier.alert_file_incident()
+        if incident is None or incident[0] != title or incident[1]:
+            return                      # ALERT.md is not asserting this incident at all
+        clear, note = self._tripwire_is_clear(watch, snap)
+        if not clear:
+            if self._tripwire_still_open.get(title):
+                return                  # same verdict as the last tick: stay quiet
+            self._tripwire_still_open[title] = True
+        else:
+            self._tripwire_still_open[title] = False
+        return self._seal_measured_incident(title, clear, note)
+
+    def _seal_measured_incident(self, title: str, clear: bool, note: str, *,
+                                via: str = "a measured clear condition") -> str:
+        """Retract an incident whose clear condition this process just measured.
+
+        The tail `reconcile_stranded_alert` has always had, split out so the startup
+        path and the tripwire's own tick (#3106) report one vocabulary —
+        `still-open`, `not-sealed`, `sealed`, `sealed-note-out-of-reach` — and cannot
+        drift apart in the wording a human reads at 3am. `via` is the only thing that
+        differs: which process measured it. The out-of-window case stays recorded
+        rather than swallowed for #2221's reason — `resolve` seals ALERT.md and still
+        answers False when a dated note is beyond `notify.DAILY_SCAN_DAYS`, so its bool
+        cannot be the verdict on the seal.
+        """
+        if not clear:
+            log(f"ALERT.md still asserts {title!r} — its clear condition does not "
+                f"hold, so the incident stays open: {note}")
+            return "still-open"
+        complete = self.notifier.resolve(title, note)
+        after = self.notifier.alert_file_incident()
+        if after is None or not after[1]:
+            log(f"ALERT.md still asserts {title!r} after reconciliation: resolve "
+                "could not seal the file — the incident stays as a live directive")
+            return "not-sealed"
+        if complete:
+            log(f"ALERT.md incident sealed by {via}: {title} — {note}")
+            return "sealed"
+        log(f"ALERT.md incident sealed: {title}, but a daily-note section for it is "
+            f"older than notify.DAILY_SCAN_DAYS="
+            f"{notify_mod.DAILY_SCAN_DAYS} and stays open for a human to seal — "
+            "this run does NOT report the incident as fully cleared")
+        return "sealed-note-out-of-reach"
+
     def reconcile_stranded_alert(self) -> str:
         """Seal an ALERT.md incident this process did not raise but has outlived.
 
@@ -2265,12 +2457,22 @@ class Guardian:
         seal the incident this item was filed from, nor any incident older than the
         change, which is the same mechanism still holding it.
 
-        Only the three latch-backed titles are candidates. Two of the five
+        Only the five titles this map names are candidates. Two of the seven
         `notifier.resolve` sites already recompute from the measured condition
         instead of a latch (poolwatch's `reason == "running"`, the stray check's
-        `not strays`) and need nothing; a title outside this map is left exactly as
-        found, because sealing an incident whose cause this process cannot measure
-        would be the worse failure — an all-clear nobody observed.
+        `not strays`) and need nothing. Three of the five here are latch-backed; the
+        other two are the tripwires, and they belong in this map for the reason their
+        exclusion never was (#3106): their cause is not something this process cannot
+        measure but something it measures every tick — the trip marker's absence and
+        the tree evaluating clean against the watch's own baseline, the same pair
+        `vaultwatch.sync_gate` and `datawatch.snapshot_gate` already read to let sync
+        or a snapshot run. They were absent because nothing in the tree had ever handed
+        their title to `resolve`, which is the drifted-string failure the constants
+        above were added to prevent: a title no call site names is indistinguishable
+        from a title no guard owns, and this method logs nothing about either. A title
+        outside the map is still left exactly as found, because sealing an incident
+        whose cause this process cannot measure would be the worse failure — an
+        all-clear nobody observed.
 
         Returns a token, for the log and for the tests that pin it:
         `nothing-to-reconcile` (no file, an unreadable one, one already sealed, or a
@@ -2293,30 +2495,16 @@ class Guardian:
             tmpwatch.ALERT_TITLE: self._tmp_is_clear,
             SUPERVISOR_ALERT_TITLE: self._supervisor_answered,
             SERVICE_DOWN_ALERT_TITLE: self._liveness_is_healthy,
+            VAULT_TRIP_ALERT_TITLE: self._vault_tripwire_is_clear,
+            DATA_TRIP_ALERT_TITLE: self._data_tripwire_is_clear,
         }
         condition = conditions.get(title)
         if condition is None:
             return "nothing-to-reconcile"
         clear, note = condition()
-        if not clear:
-            log(f"ALERT.md still asserts {title!r} — its clear condition does not "
-                f"hold, so the incident stays open: {note}")
-            return "still-open"
-        complete = self.notifier.resolve(title, note)
-        after = self.notifier.alert_file_incident()
-        if after is None or not after[1]:
-            log(f"ALERT.md still asserts {title!r} after reconciliation: resolve "
-                "could not seal the file — the incident stays as a live directive")
-            return "not-sealed"
-        if complete:
-            log(f"ALERT.md incident sealed on startup by a process that never "
-                f"raised it: {title} — {note}")
-            return "sealed"
-        log(f"ALERT.md incident sealed on startup: {title}, but a daily-note "
-            f"section for it is older than notify.DAILY_SCAN_DAYS="
-            f"{notify_mod.DAILY_SCAN_DAYS} and stays open for a human to seal — "
-            "this run does NOT report the incident as fully cleared")
-        return "sealed-note-out-of-reach"
+        return self._seal_measured_incident(
+            title, clear, note,
+            via="a measured clear condition on a process that never raised it")
 
     def run(self) -> int:
         log(f"guardian starting: repo={self.repo} programs={self.programs}")

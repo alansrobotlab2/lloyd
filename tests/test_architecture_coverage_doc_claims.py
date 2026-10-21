@@ -2058,13 +2058,19 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # Re-pointed again by #3109, which added the module-level `_shadow_alert_body`
     # (50 lines, above `evaluate_liveness`) and the data-root leg of
     # `_runtime_data_incident` (55 more, between the two): 2317 → 2422 and 713 → 763.
-    # Nothing else moved them, which is the point of pinning a definition head at
-    # all — a change that shifts a cited line has to say so here first.
-    assert heads[guardian]["main"] == 2422, (
-        f"`main` moved off :2422 ({heads[guardian]['main']}) — if it is gone "
+    # And again by #3106, which added the two tripwire title constants and the
+    # `_tripwire_still_open` comment (both above `evaluate_liveness`: 763 → 789) and
+    # the tripwire clear-condition predicates, `_seal_measured_incident` and the
+    # retraction the tripwires' own ticks call (all below it, above `main`:
+    # 2422 → 2610, net of the 20-line tail `_seal_measured_incident` took out of
+    # `reconcile_stranded_alert`). Nothing else moved them, which is the point of
+    # pinning a definition head at all — a change that shifts a cited line has to say
+    # so here first.
+    assert heads[guardian]["main"] == 2610, (
+        f"`main` moved off :2610 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 763, (
-        f"`evaluate_liveness` moved off :763 "
+    assert heads[guardian]["evaluate_liveness"] == 789, (
+        f"`evaluate_liveness` moved off :789 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
