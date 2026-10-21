@@ -337,6 +337,83 @@ def test_cumulative_file_is_what_latest_points_at(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #3122: one date's judging spans several invocations — the dated files
+# must describe the whole date, not only the last invocation
+# ---------------------------------------------------------------------------
+
+
+def test_two_invocations_on_one_dated_file_leave_every_proposal(tmp_path):
+    """clause 2 — two `emit_proposals` calls given the SAME dated run_log.
+
+    The skill's recipe (`--limit 20` calibration, then the derived slice via
+    `--from-candidates`) invokes the emitter once per invocation on one UTC
+    date, and `run_log.open("w")` left only the last call's proposals in the
+    dated file: run_67_20261021_174238 reported 68 proposals and the dated
+    file held 26 rows. Both calls' rows must stand in the dated file — a pair
+    the second call restates appears twice there, its invocation's own row
+    each time — while the durable record the sweep loads through `latest`
+    still holds that pair exactly once.
+    """
+    run_log, cumulative, latest = _paths(tmp_path)
+    ser.emit_proposals([_proposal("intel-pipeline", "intel-pipeline config", 0.8)],
+                       run_log=run_log, cumulative=cumulative, latest=latest)
+    ser.emit_proposals([_proposal("qwen3-tts", "qwen 3 tts", 0.9),
+                        _proposal("intel-pipeline", "intel-pipeline config", 0.93)],
+                       run_log=run_log, cumulative=cumulative, latest=latest)
+
+    rows = [json.loads(l) for l in run_log.read_text().splitlines() if l.strip()]
+    assert [(r["canonical"], r["variant"]) for r in rows] == [
+        ("intel-pipeline", "intel-pipeline config"),
+        ("qwen3-tts", "qwen 3 tts"),
+        ("intel-pipeline", "intel-pipeline config"),
+    ], "the dated file must hold every invocation's rows, in write order"
+
+    cum = [json.loads(l) for l in cumulative.read_text().splitlines() if l.strip()]
+    keys = [(r["canonical"], r["variant"]) for r in cum]
+    assert len(keys) == 2 and len(set(keys)) == 2, \
+        f"the cumulative record must hold each (canonical, variant) once, got {keys}"
+    restated = [r for r in cum
+                if (r["canonical"], r["variant"]) == ("intel-pipeline", "intel-pipeline config")]
+    assert float(restated[0]["confidence"]) == 0.93, "the refresh still wins in the record"
+
+    assert latest.is_symlink() and Path(latest.readlink()).name == cumulative.name
+    seen = sweep.load_semantic_proposals(tmp_path)
+    assert {(r["canonical"], r["variant"]) for r in seen} == {
+        ("intel-pipeline", "intel-pipeline config"), ("qwen3-tts", "qwen 3 tts")}
+
+
+def test_from_candidates_judging_leaves_the_candidate_file_per_invocation(
+        tmp_path, monkeypatch):
+    """clause 3 — the candidate path is the ONE dated file that stays per-invocation.
+
+    Step 1 of the skill's recipe writes the dated candidate file; step 3 judges
+    against it via `--from-candidates`. If that write were appended to, the fed-
+    back pool would carry every pair twice and a second `--limit` slice would
+    charge the budget for the same pairs twice (#3122's scope guard on
+    `CANDIDATE_LOG.open("w")`). Drive generation, then the judging invocation,
+    then a second generation over the same date, and the file must hold exactly
+    the pairs generation selected — unchanged, once each, after all three.
+    """
+    cand = tmp_path / "semantic-entity-candidates-2099-01-01.jsonl"
+    _drive_main(tmp_path, monkeypatch, ["--skip-judge"])          # step 1: write pool
+    written = cand.read_text()
+    rows = [l for l in written.splitlines() if l.strip()]
+    assert len(rows) == 2, (
+        f"the synthetic pool must yield its 2 candidate pairs, got {len(rows)} — "
+        "anything else makes the byte checks below vacuous")
+
+    _drive_main(tmp_path, monkeypatch, ["--from-candidates", str(cand)])   # step 3
+    assert cand.read_text() == written, \
+        "the judging invocation rewrote or grew the dated candidate file"
+
+    _drive_main(tmp_path, monkeypatch, ["--skip-judge"])          # second writing run
+    assert cand.read_text() == written, (
+        "two candidate-writing invocations must leave the selected pool ONCE — "
+        "appending here would double the pool the next --from-candidates "
+        "--limit slice runs over and charge the same pairs twice")
+
+
+# ---------------------------------------------------------------------------
 # #1410: a wiped accumulated record is announced, not merged into silently
 # ---------------------------------------------------------------------------
 
@@ -743,16 +820,17 @@ def test_skill_states_the_measured_pool_limit_and_timeout():
 def test_the_skill_contract_tests_are_never_excluded_from_the_run():
     """#1569 clause 2: green had to come from the fix, not from stepping around it.
 
-    These two tests read `~/obsidian` directly, so they are the one place a live
-    claim about the skill gets checked. They are NOT excluded by the gate's marker
-    today — collected 58 equals selected 58 for this file — and that is what this
-    pins: if a future red is answered by marking either node `live_vault`, the run
-    goes green with the contract never read. So: no skip/xfail marker on either
-    node, and neither marked `live_vault`.
+    These tests read `~/obsidian` directly, so they are the one place a live
+    claim about the skill gets checked. They are NOT excluded by the gate's
+    marker today — collected 58 equals selected 58 for this file — and that is
+    what this pins: if a future red is answered by marking a node `live_vault`,
+    the run goes green with the contract never read. So: no skip/xfail marker on
+    any of these nodes, and none marked `live_vault`.
     """
     src = Path(__file__).read_text(encoding="utf-8")
     for name in ("test_skill_states_the_measured_pool_limit_and_timeout",
-                 "test_skill_says_propose_only_and_drops_the_shrinking_pool_claim"):
+                 "test_skill_says_propose_only_and_drops_the_shrinking_pool_claim",
+                 "test_skill_says_the_dated_files_are_per_date_not_per_invocation"):
         m = re.search(r"((?:@[^\n]*\n)*)def " + name, src)
         assert m, f"{name} is gone; a red test was deleted rather than fixed"
         decorators = m.group(1)
@@ -769,6 +847,39 @@ def test_skill_says_propose_only_and_drops_the_shrinking_pool_claim():
     assert "cannot shrink" in text
     for stale in ("shrinks", "drains across weeks"):
         assert stale not in text, f"skill still claims the pool {stale!r}"
+
+
+def test_skill_says_the_dated_files_are_per_date_not_per_invocation():
+    """clause 4 (#3122) — the skill must forbid reading a dated file as the
+    run total of one invocation.
+
+    The fix chose append over per-invocation filenames (a timestamped name like
+    `semantic-proposals-2026-10-21T175728Z.jsonl` does not match #1410's
+    `semantic-proposals-????-??-??.jsonl` witness glob, which would silently
+    disarm the wipe alarm), so a dated judgments/proposals file describes its
+    DATE and only the printed `[summary] newly_judged=` line describes an
+    invocation. Pinned as the text the next weekly run actually reads; like the
+    clause 11/12 doc tests, a missing vault is a failure, not a skip.
+    """
+    assert VAULT_SKILL.exists(), (
+        f"{VAULT_SKILL} is absent; #3122 clause 4 is a claim about that file")
+    text = VAULT_SKILL.read_text(encoding="utf-8")
+    assert re.search(r"every\s+judging\s+invocation\s+of\s+that\s+UTC\s+date", text), (
+        "nothing in the skill says the dated judgments and proposals files carry "
+        "every judging invocation of the date, so a sliced run's dated file can "
+        "still be read as one invocation's total")
+    assert re.search(r"row\s+count\s+is\s+an\s+upper\s+bound\s+on\s+distinct\s+pairs", text), (
+        "the skill does not state that an appended dated file can repeat a pair, "
+        "so its row count reads as an exact count of pairs judged")
+    assert re.search(r"existence\s+check,\s*not\s+a\s+count\s+check", text), (
+        "the post-run check is not labelled an existence check and nothing forbids "
+        "reading the dated file's row count as the run's throughput")
+    assert "`[summary] newly_judged=`" in text, (
+        "the post-run check does not name the printed [summary] newly_judged= "
+        "line as the per-invocation number to report")
+    assert re.search(r"candidate\s+file\s+is\s+the\s+exception", text), (
+        "the skill does not mark the candidate file as the one dated output that "
+        "stays per-invocation, so a reader cannot tell which dated file to count")
 
 
 def test_verdict_cache_comment_no_longer_claims_a_shrinking_pool():

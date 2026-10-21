@@ -148,8 +148,11 @@ def test_the_slice_advances_between_two_runs(harness, tmp_path):
     Run one judges the head and appends its verdicts; run two, over the same
     candidate file with no other change, must step past them. Under the old code
     both runs took `candidates[:limit]` — the same ten pairs, judged twice, while
-    the backlog behind them never moved. Also the file seam: each run's judgment
-    log holds that run's ten rows only, and no row carries the selection key.
+    the backlog behind them never moved. Also the file seam, re-pinned by #3122
+    ("two or more judging invocations on the same UTC date leave every judged
+    pair ... in the dated files (append rather than truncate)"): the dated
+    judgments file holds BOTH slices' ten rows, in write order, and no row
+    carries the selection key.
     """
     rc1, out1, judged1, cands = harness(n_total=100, n_cached=0, limit=10)
     assert rc1 == 0
@@ -168,9 +171,65 @@ def test_the_slice_advances_between_two_runs(harness, tmp_path):
 
     rows = [json.loads(ln) for ln in
             (tmp_path / "judg.jsonl").read_text().splitlines() if ln.strip()]
-    assert len(rows) == 10, f"run two's judgment log has {len(rows)} rows, expected its own 10"
-    assert [r["a"] for r in rows] == [c["a"] for c in cands[10:20]]
+    assert len(rows) == 20, (
+        f"the dated judgments file holds {len(rows)} rows; since #3122 two "
+        "invocations of one date leave the UNION of both slices, not just the "
+        "last slice's own 10")
+    assert [r["a"] for r in rows] == [c["a"] for c in cands[:20]], \
+        "the file must hold run one's slice then run two's, in write order"
     assert not any("_cache_key" in r for r in rows), "the selection key leaked to disk"
+
+
+def test_two_judging_invocations_leave_every_row_of_the_date(
+        harness, ser, tmp_path, monkeypatch):
+    """clause 1 (#3122): the dated judgments file carries EVERY judging
+    invocation of its date, and each row keeps its own `judged_at`.
+
+    The skill's weekly recipe makes one date hold two judging invocations
+    (`--limit 20` calibration, then the derived slice via `--from-candidates`),
+    and `JUDGMENT_LOG.open("w")` truncated the first slice when the second
+    wrote: the 2026-10-21 run judged 594 pairs and left 274 rows on disk. Drive
+    that same shape — ten judgments, then ten more into the same dated path —
+    under a fixed clock so the stamps are exact: run one's ten rows must stand
+    in the file with run one's stamp AFTER run two has written, and run two's
+    ten rows must carry run two's own stamp.
+    """
+    import datetime as _dt
+
+    class _Clock(_dt.datetime):
+        offset = _dt.timedelta(0)
+
+        @classmethod
+        def now(cls, tz=None):
+            naive = _dt.datetime(2026, 10, 22, 12, 0) + cls.offset
+            return naive.replace(tzinfo=tz) if tz else naive
+
+    monkeypatch.setattr(ser, "datetime", _Clock)
+
+    rc1, _out1, _judged1, cands = harness(n_total=100, n_cached=0, limit=10)
+    assert rc1 == 0
+    stamp1 = "2026-10-22T12:00:00+00:00"
+    rows1 = [json.loads(ln) for ln in
+             (tmp_path / "judg.jsonl").read_text().splitlines() if ln.strip()]
+    assert [r["a"] for r in rows1] == [c["a"] for c in cands[:10]]
+    assert [r["judged_at"] for r in rows1] == [stamp1] * 10, \
+        "a newly judged row must carry its own judged_at, so a row in a file " \
+        "appended across invocations stays attributable to its own judging"
+
+    _Clock.offset = _dt.timedelta(minutes=10)
+    rc2, _out2, _judged2, _ = harness(n_total=100, n_cached=0, limit=10)
+    assert rc2 == 0
+    stamp2 = "2026-10-22T12:10:00+00:00"
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "judg.jsonl").read_text().splitlines() if ln.strip()]
+    assert len(rows) == 20, (
+        f"{len(rows)} rows after two invocations; run one's 10 were erased or "
+        "run two's not appended")
+    assert rows[:10] == rows1, \
+        "run one's rows must survive byte-for-byte with their own judged_at, " \
+        "not be rewritten under run two's stamp"
+    assert [r["a"] for r in rows[10:]] == [c["a"] for c in cands[10:20]]
+    assert [r["judged_at"] for r in rows[10:]] == [stamp2] * 10
 
 
 def test_limit_counts_uncached_pairs_not_slots(harness):

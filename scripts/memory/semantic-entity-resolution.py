@@ -1132,12 +1132,23 @@ def accumulated_record_lost(cumulative: Path, existing: dict, run_log: Path) -> 
 
 def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
                    latest: Path, now_iso: str | None = None) -> dict:
-    """Write this run's file, refresh the cumulative record, point `latest` at it.
+    """Append this invocation's proposals to the dated file, refresh the
+    cumulative record, point `latest` at it.
 
     `latest` used to be re-pointed at the run's dated file, which is how an
     unconsumed proposal disappeared without a trace (#744). It now names the
     cumulative record, so the sweep's single loader path sees every proposal that
     is still open. Returns counts for the run report.
+
+    The dated file is opened "a", not "w" (#3122): the skill's own recipe runs
+    the judging as two or more invocations of one date (a `--limit 20`
+    calibration, then the derived slice), each of which calls this, and "w" left
+    only the LAST invocation's proposals in the dated file — the 2026-10-21 run
+    reported 68 proposals and the file held 26 rows. The dated filename pattern
+    is unchanged, so #1410's accumulated-record-loss witness
+    (`accumulated_record_lost` globbing `semantic-proposals-????-??-??.jsonl`)
+    still sees the file. Per-pair dedupe belongs to the cumulative record, which
+    is what the sweep actually loads.
 
     A cumulative record that is missing is merged into as an empty one and the
     result is a healthy-looking total; on 2026-09-23 the data-root move had
@@ -1157,7 +1168,7 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
               f"{lost_proof.name} holds earlier proposals — rebuilding it from "
               f"{len(existing)} rows; restore the record from a data snapshot "
               f"before the sweep acts on a partial one")
-    with run_log.open("w") as f:
+    with run_log.open("a") as f:
         for rec in proposals:
             f.write(json.dumps(rec) + "\n")
     merged = merge_proposals(existing, proposals, now_iso)
@@ -1267,6 +1278,10 @@ def main() -> int:
         candidates = generate_candidates(entities, aliases, neighbors)
         print(f"[info] {len(candidates)} candidate pairs after filtering")
 
+        # "w" and NOT "a" (#3122 scope guard): step 3 of the skill's recipe
+        # feeds this file back via `--from-candidates`, so appending here would
+        # double the pool and charge `--limit` for the same slice twice. This
+        # file is the one dated output that is legitimately per-invocation.
         with CANDIDATE_LOG.open("w") as f:
             for c in candidates:
                 f.write(json.dumps(c) + "\n")
@@ -1321,9 +1336,10 @@ def main() -> int:
                 verdict_counts["error"] += 1
                 print(f"  [{i}/{len(candidates)}] ERROR  {pair['a']!r} vs {pair['b']!r}: {j}")
                 continue
+            judged_at = datetime.now(timezone.utc).isoformat()
             append_verdict({"key": key, "a": pair["a"], "b": pair["b"],
                             "def_a": hash_a, "def_b": hash_b,
-                            "judged_at": datetime.now(timezone.utc).isoformat(), **j})
+                            "judged_at": judged_at, **j})
             cache[key] = j
             verdict = j["verdict"]
             conf = j["confidence"]
@@ -1337,11 +1353,20 @@ def main() -> int:
                 f"  [{i:>4}/{len(candidates)}] {verdict:<8} c={conf:.2f} {dt_ms:5.0f}ms "
                 f"{pair['a'][:28]!r:<32}<->{pair['b'][:28]!r:<32} {flag}"
             )
-            record = {**pair, **j}
+            # `judged_at` rides along with the verdict (#3122): the dated file
+            # is appended to across invocations, and the stamp is what keeps
+            # every row attributable to the judging that wrote it.
+            record = {**pair, **j, "judged_at": judged_at}
             judgments.append(record)
             newly_judged += 1
 
-        with JUDGMENT_LOG.open("w") as f:
+        # Append, not truncate (#3122): the skill's recipe runs two judging
+        # invocations of one date (SKILL.md §Scheduling posture steps 1 and 3)
+        # and "w" made the second erase the first's rows — 594 pairs judged on
+        # 2026-10-21, 274 rows on disk. Each row carries its own `judged_at`;
+        # a row count over the date is an upper bound on distinct pairs (a
+        # no-limit re-run also writes cache-hit rows, tagged "cached").
+        with JUDGMENT_LOG.open("a") as f:
             for r in judgments:
                 f.write(json.dumps(r) + "\n")
         print(f"\n[info] judgments → {JUDGMENT_LOG}")
