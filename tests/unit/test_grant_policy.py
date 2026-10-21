@@ -1256,10 +1256,37 @@ def test_the_shipped_task_declares_no_rearm_grant_and_the_write_stays_denied(tmp
     assert task is not None, f"{path.name} does not parse; the scheduler would not run it"
 
     # Clause 1: giving up the authority must not cost the task its own dispatch.
-    assert task.get("status") == "up_next", (
-        f"{path.name} is {task.get('status')!r}, not up_next. #2093 removes an "
-        "authority from this task, not the task — a status that moved here is a "
+    #
+    # `status` in that file is runtime state the fleet writes into it, not shipped
+    # config: a run claims the task by writing `in_progress` (`app/autonomy.py:4563`)
+    # and it returns to `up_next` when the run completes or the claim outlives its
+    # timeout (`:598`, `:3412`, `:114-121`). The vault's own commits show this file
+    # alternating between exactly those two values on 2026-10-19, -20 and -21 —
+    # `git log -L '/^status:/,+1:autonomy/40-nightly-reflection-config.md'` — so the
+    # literal `up_next` this line held pinned a moment in a running fleet rather than
+    # #2093's ruling, and the node went red on 2026-10-21 with the nightly simply in
+    # flight. That is the self-inflicted red this node's own docstring already warns
+    # about for the clock (#848/#853, #973), and a node that goes red while the
+    # system is behaving correctly also mis-attributes itself to whatever round
+    # happens to trip it (#1196). What the clause claims is that the task is still
+    # scheduled, so that is what it measures now: queued, or claimed by a run in
+    # progress. A parked, done, paused, archived or failed task still fails here —
+    # the falsification clause 1 exists for is untouched.
+    SCHEDULED_STATUSES = ("up_next", "in_progress")
+    assert task.get("status") in SCHEDULED_STATUSES, (
+        f"{path.name} is {task.get('status')!r}, outside the two statuses a scheduled "
+        f"task holds ({', '.join(SCHEDULED_STATUSES)}). #2093 removes an authority "
+        "from this task, not the task — a status that moved anywhere else is a "
         "different change, and a stopped nightly hides the rest of this node")
+    # The pair above is a literal, so it can drift from what the queue dispatches on.
+    # `DISPATCHING_STATUS` is the one status a run actually starts from
+    # (`app/harness/policy.py:318-322`, mirroring `_is_task_due`); the other half of
+    # the pair is the `in_progress` a claim writes. If the queue's status ever moves,
+    # this node has to move with it knowingly, not accept the new value silently.
+    assert policy.DISPATCHING_STATUS in SCHEDULED_STATUSES, (
+        f"the queue dispatches {policy.DISPATCHING_STATUS!r} but this node accepts "
+        f"{SCHEDULED_STATUSES}: the node's idea of a scheduled task no longer covers "
+        "the status that actually starts a run")
     assert task.get("skill_name") == "nightly-reflection-config", (
         f"{path.name} resolves skill_name={task.get('skill_name')!r}; without "
         "that name the run has no SKILL.md to follow, whatever its grants say")
