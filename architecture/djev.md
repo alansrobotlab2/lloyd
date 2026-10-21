@@ -674,18 +674,44 @@ at all, so the one thing a language model needs to answer the question is the
 one thing it has never seen. It asks one `same_finding` `choice` per candidate
 (the top three) in a single canvas. The candidate heads are read by the worker.
 `actual` is what production did (`merged_into`, `rule`). The shadow fires for
-every create that has candidates, including human, `force`, `blocker` and
-`umbrella` writes that were never eligible to merge. For those, `merged_into:
-null` means "not eligible", not "merge declined", and the row does not record
-which it was — and unlike the first draft of this section, that bit cannot be
-recovered afterwards: `meta` carries `name` and `candidates` and nothing else
-(measured 2026-09-21 — every `dedupe` row in the live log has the meta key set
-`('candidates', 'name')`), and the tags and `force` flag that decided
-`mergeable` — the flag is `judged` at `backlog.py:613-616` today, and `forced`
-sits beside it at `:613` — are never passed to the hook, though all three are in
-scope at its call site (`:617`). Filed as #934, and still open there as of
-2026-10-21: `_djev_shadow_dedupe(args, similar, target, cfg)` takes none of them,
-so re-filed as #3114.
+every create that has candidates — human, `force`, `blocker` and `umbrella`
+writes included, not only the eligible ones — so `merged_into: null` has three
+causes, and exactly one of them is a state the djev answer can be scored
+against. The row records which one it was: `meta` carries `name`, `candidates`,
+`judged`, `spawn_write`, `forced` and `tags` — the last the normalized list
+`spawn_write` and `judged` were tested against, so a reader can tell a failure
+caused by a tag from one caused by a missing tag — every value computed by
+`_dedupe` and already in scope at the call, so telling the states apart needs no
+re-read of the board:
+
+| `merged_into` | `judged` | `forced` | what the row says |
+| --- | --- | --- | --- |
+| an id | true | false | production merged: djev's answer is the disagreement to read |
+| null | true | false | eligible and nothing mergeable — **the negative class** |
+| null | true | true | the filer forced past the merge. Not a verdict |
+| null | false | either | never eligible to merge. Not a verdict |
+
+`judged` is false for a write with no `spawned-by-*` tag, one tagged `blocker`
+or `umbrella`, or a run in observation mode (`dedupe.merge: false`), and `tags`
+is what separates the first two from the third. It stays **true** for a
+`force: true` create: there the pair was eligible to be judged and it was the
+filer who declined the append — hence `forced` as its own key, and hence the
+negative class as `judged` AND NOT `forced`, not `judged` alone. A row with no
+`judged` key at all predates the writer that records it and is **neither**
+class; a later census filters by `ts` and never reads the old rows as negatives,
+because that would be the absent-negative-class defect wearing a label. (probe
+2026-10-21: 897 `dedupe` rows in the live log, 857 of them a null `merged_into`,
+none of them carrying an eligibility key at all — the size of the corpus that
+filter has to skip.)
+
+What the row still does not buy on its own: `label_dedupe` in
+`eval/cross_engine_disagreement_arm1/rubric.py` returns `None` for every null,
+so that arm's gold set can still only ever carry `DD-SAME-RULE-MERGE`. Teaching
+it the second table row — and only the second, with the absent key staying
+inadmissible — is the follow-on that turns these rows into calibration data.
+`tests/test_djev_shadow_isolation.py` holds one probe per shape above, driven
+through `backlog_write_task` and read back off the recorder's own log, and
+`tests/test_djev_doc_claims.py` pins this paragraph to the writer.
 
 ### 6.3 Entity SAME/DIFFERENT — `scripts/memory/entity_semantic_gate.py`
 

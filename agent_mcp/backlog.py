@@ -614,7 +614,8 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None, dict | None]:
         judged = (spawn_write and cfg.get("merge", True)
                   and not (_NEVER_MERGE_TAGS & set(tags)))
         target = SIM.merge_target(similar, cfg=cfg) if judged and not forced else None
-        _djev_shadow_dedupe(args, similar, target, cfg)
+        _djev_shadow_dedupe(args, similar, target, cfg, judged=judged,
+                            spawn_write=spawn_write, forced=forced, tags=tags)
         # Neither an append (the item reads as finished to every other reader)
         # nor a silent twin (it re-finds what the closed item already
         # settled): the filer is shown what closed it and decides (#1051).
@@ -647,7 +648,8 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None, dict | None]:
 
 
 def _djev_shadow_dedupe(args: dict, similar: list[dict], target: dict | None,
-                        cfg: dict) -> None:
+                        cfg: dict, *, judged: bool, spawn_write: bool,
+                        forced: bool, tags: list[str]) -> None:
     """Record djev's "same finding?" beside the merge production just decided.
 
     THIS caller, not `merge_target`. `merge_target` is handed rows of
@@ -655,6 +657,21 @@ def _djev_shadow_dedupe(args: dict, similar: list[dict], target: dict | None,
     body text at all, so the one thing a language model needs to answer the
     question is the one thing that function has never seen. Here the write's
     own `name` and `description` are in hand.
+
+    The four keyword-only arguments are the eligibility the caller had already
+    worked out, and they are required because `actual.merged_into` is null for
+    three writes that mean different things: never eligible (`judged` false —
+    no spawn tag, a `blocker`/`umbrella` tag, or observation mode), forced past
+    a merge that was on offer (`forced` true), and eligible with nothing
+    mergeable. Without them the row carries one null and a reader cannot say
+    which, so the only class it can ever evidence is a merge that happened:
+    `eval/cross_engine_disagreement_arm1/rubric.py::label_dedupe` returns `None`
+    for every null and the seam has no negative class at all. `tags` is the
+    NORMALIZED list `_dedupe` computed — the value `spawn_write` and `judged`
+    were tested against, so a reader can tell a failure caused by a tag from one
+    caused by a missing tag — while `forced` comes from the write's own `force`
+    argument. A caller that does not know the answers has to say so explicitly,
+    which is why these are keyword-only with no default.
 
     The candidate HEADS are a disk read per candidate, so they are read by the
     shadow worker through a callable and never on the write path — the whole
@@ -706,6 +723,14 @@ def _djev_shadow_dedupe(args: dict, similar: list[dict], target: dict | None,
             actual={"merged_into": int(target["id"]) if target else None,
                     "rule": (target or {}).get("rule")},
             meta={"name": name[:200],
+                  # Why `merged_into` may be null. Read them together: `judged`
+                  # true with a null is "eligible and not merged", the negative
+                  # class the seam could not produce before; `judged` false is
+                  # "never eligible"; `forced` true is "the filer said create
+                  # anyway". A row with NO `judged` key predates this writer and
+                  # is neither class — never silently a negative.
+                  "judged": judged, "spawn_write": spawn_write, "forced": forced,
+                  "tags": list(tags),
                   "candidates": [{"id": int(r["id"]), "score": r.get("score"),
                                   "lexical": r.get("lexical"),
                                   "shared": r.get("shared"),

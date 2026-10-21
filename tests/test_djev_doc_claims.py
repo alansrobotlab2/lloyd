@@ -788,3 +788,133 @@ def test_the_index_parity_check_still_never_reads_a_rosters_owner():
     assert "three shadow seams" in index, (
         "the Review-log entry recording that deletion has gone, and "
         "`test_architecture_index_parity.py` forbids rewriting the log")
+
+
+# ── #3114: §6.2 may not say a dedupe row's null is unreadable ────────────────
+#
+# §6.2 is what #3114 was filed FROM: it recorded that a `dedupe` shadow row
+# cannot tell "never eligible to merge" from "the merge was declined", called
+# that unrecoverable, and named the two item numbers that owed the fix. The
+# writer now passes `judged`, `spawn_write`, `forced` and the normalized `tags`
+# into `meta`, so the paragraph is not free to keep the conclusion — an open gap
+# left in a page's live text is a to-do list a later reader re-files, which is
+# exactly how #934 came back as #3114. Same shape as `test_the_fixture_claim_
+# matches_the_fixture`, one heading over: the prose must state what runs.
+
+#: The keys §6.2 states as recorded, backticked exactly as the section writes
+#: them. `name` and `candidates` belong to the set the section names, and the
+#: whole set is what `tests/test_djev_shadow_isolation.py::
+#: test_an_eligible_spawn_create_records_why_its_merged_into_is_null` asserts
+#: against the row, so a key added or renamed in the writer fails here too.
+DEDUPE_META_KEYS = ("`name`", "`candidates`", "`judged`", "`spawn_write`",
+                    "`forced`", "`tags`")
+
+#: The conclusion, and the measurement it was drawn from. Both are strings a
+#: reader can grep to check this node, which is why they are needles and not
+#: para-phrases. The wrap is the doc's own: the shipped paragraph broke "cannot
+#: be" from "recovered" across a line.
+STALE_DEDUPE_CLAIMS = ("the row does not record", "cannot be recovered",
+                       "cannot be\nrecovered", "('candidates', 'name')")
+
+#: An item number in a section's live text reads as an open gap. The Review log
+#: at the foot of the page keeps both numbers as the record of when they were
+#: filed and closed; §11's fixture entry above is the same failure, one heading
+#: over, with the same remedy.
+OPEN_ITEM_REFS = ("#934", "#3114")
+
+
+def _dedupe_section(text: str) -> str:
+    """§6.2 alone, bounded on BOTH sides.
+
+    Sliced rather than searched whole-page: §6.3 is a different seam, so a
+    "`judged`" satisfied by its prose would be a green earned from the wrong
+    section — and §6.2 is the only paragraph this item was filed from.
+    """
+    started = text.find("### 6.2")
+    assert started >= 0, (
+        "architecture/djev.md has no §6.2 for the dedupe seam any more, so the "
+        "prose this node exists to check is not where the item left it")
+    end = text.find("### 6.3", started)
+    assert end > started, "§6.2 no longer ends where §6.3 begins, so this is not one section"
+    return text[started:end]
+
+
+def _dedupe_problems(text: str) -> list[str]:
+    """Every way §6.2 can be wrong about what a `dedupe` row records. Returned,
+    not asserted, so the seed below can be run through the same code."""
+    section = _dedupe_section(text)
+    problems = [f"§6.2 no longer names {k} as recorded in `meta`"
+                for k in DEDUPE_META_KEYS if k not in section]
+    problems += [f"§6.2 still says {needle!r}" for needle in STALE_DEDUPE_CLAIMS
+                 if needle in section]
+    problems += [f"§6.2 still points at {ref} as though the gap were open"
+                 for ref in OPEN_ITEM_REFS if ref in section]
+    return problems
+
+
+def test_section_6_2_states_the_eligibility_the_dedupe_row_records():
+    """Clause 4: §6.2 names `judged`, `spawn_write`, `forced` and `tags` as
+    recorded in `meta`, and has neither the "the row does not record which it
+    was" sentence, the `('candidates', 'name')` measurement it came from, nor the
+    sentence pointing at #934/#3114 as an open gap.
+
+    The keys are then checked against the writer rather than against another
+    paragraph, in this file's tradition of reading words out of files: `meta`
+    must contain each key the prose names, and `_dedupe` must pass it in — a page
+    that names a key the hook never receives is the claim that made this item.
+    """
+    problems = _dedupe_problems(_doc_text())
+    assert not problems, "; ".join(problems)
+
+    import inspect
+
+    from agent_mcp import backlog
+
+    hook = inspect.getsource(backlog._djev_shadow_dedupe)
+    caller = inspect.getsource(backlog._dedupe)
+    for key in ("judged", "spawn_write", "forced", "tags"):
+        assert f'"{key}"' in hook, (
+            f"§6.2 says the row records `{key}` and the hook never puts it in `meta`")
+        assert f"{key}={key}" in caller, (
+            f"`_dedupe` does not pass `{key}`, so the value in the row is a default "
+            "or an accident — which is the defect, renamed")
+
+
+def test_the_dedupe_prose_check_refuses_the_paragraph_it_exists_to_refuse():
+    """Red side, for the same reason every other node here runs it: the check is
+    not a word list copied off the shipped page. The seed below is §6.2 as it
+    stood before this change, word for word, and it is refused on every count the
+    clause names. The green half then rides the shipped file."""
+    stale = (
+        "### 6.2 Backlog dedupe — `agent_mcp/backlog.py::_dedupe`\n\n"
+        "The hook sits at the `backlog_write_task` caller that holds `name` and\n"
+        "`description`, **not** at `merge_target`. That function is handed rows of\n"
+        "`{id, title, status, score, lexical, shared, created, source}` and no body text\n"
+        "at all, so the one thing a language model needs to answer the question is the\n"
+        "one thing it has never seen. It asks one `same_finding` `choice` per candidate\n"
+        "(the top three) in a single canvas. The candidate heads are read by the worker.\n"
+        "`actual` is what production did (`merged_into`, `rule`). The shadow fires for\n"
+        "every create that has candidates, including human, `force`, `blocker` and\n"
+        "`umbrella` writes that were never eligible to merge. For those, `merged_into:\n"
+        "null` means \"not eligible\", not \"merge declined\", and the row does not record\n"
+        "which it was — and unlike the first draft of this section, that bit cannot be\n"
+        "recovered afterwards: `meta` carries `name` and `candidates` and nothing else\n"
+        "(measured 2026-09-21 — every `dedupe` row in the live log has the meta key set\n"
+        "`('candidates', 'name')`), and the tags and `force` flag that decided\n"
+        "`mergeable` — the flag is `judged` at `backlog.py:613-616` today, and `forced`\n"
+        "sits beside it at `:613` — are never passed to the hook, though all three are in\n"
+        "scope at its call site (`:617`). Filed as #934, and still open there as of\n"
+        "2026-10-21: `_djev_shadow_dedupe(args, similar, target, cfg)` takes none of them,\n"
+        "so re-filed as #3114.\n"
+        "\n### 6.3 Entity SAME/DIFFERENT\n")
+
+    problems = _dedupe_problems(stale)
+    assert problems, (
+        "the check accepted the paragraph it was written to refuse, so it grades nothing")
+    for fragment in ("the row does not record", "('candidates', 'name')", "#934", "#3114"):
+        assert any(fragment in p for p in problems), (
+            f"the seed carried {fragment!r} and the check did not report it")
+    assert any("`spawn_write`" in p for p in problems), (
+        "a §6.2 that never names the key is not the §6.2 the clause asks for")
+
+    assert _dedupe_problems(_doc_text()) == [], "the shipped section fails the check it defines"

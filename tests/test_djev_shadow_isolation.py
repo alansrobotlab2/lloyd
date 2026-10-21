@@ -288,3 +288,185 @@ def test_a_child_pytest_run_leaves_no_shadow_log_in_its_home(tmp_path):
     assert any(r.get("seam") == "dedupe" for r in mine), (
         f"the child produced no dedupe row anywhere under {tmp_path}, so 'no row in "
         f"its HOME' was a silence and not a result: {proc.stdout[-600:]}")
+
+
+# ── #3114: a null `merged_into` has to say which of its causes it was ────────
+#
+# `actual.merged_into` is null for three different writes: one that was never
+# eligible to merge (no `spawned-by-*` tag, or a `blocker`/`umbrella` tag, or
+# observation mode), one the filer forced past the merge, and one that WAS
+# eligible and simply had nothing mergeable. Only the last is evidence about
+# djev's judgement, and until the writer passed `judged`, `spawn_write` and
+# `forced` into `meta` a reader could not tell them apart: `eval/cross_engine_
+# disagreement_arm1/rubric.py::label_dedupe` therefore returns `None` for every
+# null, which is why the seam has no negative class at all and 857 of the live
+# log's 897 `dedupe` rows are inadmissible. These nodes pin the four keys that
+# fix it — `judged`, `spawn_write`, `forced` and the normalized `tags` — one
+# shape each, plus the shape (`eligible`) that the other three must not be
+# confusable with.
+#
+# Each probe name is distinct so three rows written into the ONE session log
+# stay attributable, the same way `_mine` above attributes by `meta.name`.
+
+#: Marks each eligibility shape's row. `_mine` keys on `NAME`/`PROBE`, so these
+#: never enter the leak assertions of the four nodes above.
+SPAWN_TAG = "spawned-by-autocode"
+PROBE_NAMES = {
+    "eligible": "#3114 probe an eligible spawn write whose candidates merge nothing",
+    "no-spawn-tag": "#3114 probe a human write carrying no spawned-by tag",
+    "forced": "#3114 probe a force true create its filer pushed past the merge",
+    "blocker-tag": "#3114 probe a blocker tagged spawn write never offered a merge",
+    #: The clause-3 probe asks the same shape with a `tags` argument in the
+    #: string shape `normalize_tags` exists for, so it needs its own name: the
+    #: session shadow log is shared, and two rows would make "exactly one" a
+    #: collision rather than a result.
+    "blocker-tag-raw": "#3114 probe a blocker tagged spawn write whose tags arrived as prose",
+}
+
+
+def _probe_row(board, monkeypatch, shape: str, *, tags, force: bool = False,
+               score: float = 0.5) -> dict:
+    """One real create of one eligibility shape, flushed, and its `dedupe` row.
+
+    Goes through `backlog_write_task`'s own handler rather than calling the hook,
+    because the boundary under test is the whole write path: `_handle_write` →
+    `_dedupe`, which computes the three flags → `djev_shadow.shadow()`, which
+    enqueues → the recorder's daemon thread, which writes the row. A direct call
+    would pass with the call site still dropping the arguments, which is exactly
+    the defect.
+
+    `score` sits under `DEFAULTS["threshold"]` (0.78) and the board item was
+    created an hour ago, so neither merge rule can reach it: rule A needs the
+    score AND `lexical_min`, rule B needs a candidate created inside
+    `recent_window_seconds` (600). Every shape here therefore leaves
+    `merged_into` null — the state whose cause is in question.
+    """
+    from agent_mcp import backlog as BL
+    from agent_mcp import backlog_similar as SIM
+    name = PROBE_NAMES[shape]
+    created = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    fm = {"status": "draft", "priority": "medium", "created": created,
+          "board": "lloyd", "tags": ["backlog"]}
+    (board / "10-existing.md").write_text(
+        "---\n" + yaml.dump(fm, default_flow_style=False) +
+        f"---\n\n# {EXISTING[0]}\n\n{EXISTING[1]}\n", encoding="utf-8")
+    monkeypatch.setattr(SIM, "semantic_candidates",
+                        lambda text, **kw: [{"id": 10, "score": score}])
+    args = {"name": name, "description": BODY, "board": "lloyd", "tags": tags}
+    if force:
+        args["force"] = True
+
+    log = Path(djev_shadow.SHADOW_LOG)
+    before = len(_rows(log))          # the session log is shared: only the tail is ours
+    out = json.loads(BL._handle_write(args))
+    left = djev_shadow.flush(timeout=30.0)
+
+    assert out.get("created") is True, f"{shape}: the write did not create: {out}"
+    assert left == 0, f"{shape}: the queue did not drain, so the row below is not all of it"
+    rows = [r for r in _rows(log)[before:] if (r.get("meta") or {}).get("name") == name]
+    assert len(rows) == 1, (f"{shape}: this create appended {len(rows)} shadow rows for "
+                            f"{name!r}, not the one the seam owes every shape")
+    assert rows[0]["seam"] == "dedupe", rows[0]
+    return rows[0]
+
+
+def test_an_eligible_spawn_create_records_why_its_merged_into_is_null(board, djev_answered,
+                                                                     monkeypatch):
+    """Clause 1: for a write that WAS eligible, the null reads as
+    "eligible and not merged" — `judged: true`, `spawn_write: true`,
+    `forced: false`, with nothing mergeable on offer.
+
+    This is the positive case the three shapes below are read against: with the
+    flags present but all false the row would be indistinguishable from a human
+    write, so asserting the true side here is what stops the change from being
+    satisfied by four constant keys.
+    """
+    from agent_mcp import backlog_similar as SIM
+
+    row = _probe_row(board, monkeypatch, "eligible", tags=[SPAWN_TAG])
+
+    assert row["actual"]["merged_into"] is None, row["actual"]
+    meta = row["meta"]
+    assert meta["judged"] is True, f"a spawn write was recorded as never judged: {meta}"
+    assert meta["spawn_write"] is True, meta
+    assert meta["forced"] is False, meta
+    # And the null is genuinely "nothing mergeable", not a merge that was
+    # skipped: the one candidate listed sits under the threshold rule A needs.
+    assert [c["score"] for c in meta["candidates"]] == [0.5], meta["candidates"]
+    assert 0.5 < float(SIM.DEFAULTS["threshold"]), "the probe's candidate is mergeable"
+    # The key set `architecture/djev.md` §6.2 now states. `test_djev_doc_claims.py`
+    # pins the prose to these names, so a key added or renamed here fails there.
+    assert set(meta) == {"name", "judged", "spawn_write", "forced", "tags", "candidates"}, (
+        f"the recorded key set moved to {sorted(meta)}, and §6.2 still describes the old one")
+
+
+#: Each never-eligible shape, the argument that makes it one, the KEY that
+#: carries its cause, and the full eligibility triple the row must read. The
+#: forced write is the interesting row: `judged` stays TRUE there, because the
+#: pair was eligible to be judged and it was the filer's `force`, not the flags,
+#: that skipped the append — which is why the negative class is `judged` true
+#: AND `forced` false, and why `forced` is one of the four recorded keys rather
+#: than something a reader may infer from `judged`.
+NEVER_ELIGIBLE = (
+    ("no-spawn-tag", ["backlog"], False, "spawn_write",
+     {"spawn_write": False, "judged": False, "forced": False}),
+    ("forced", [SPAWN_TAG], True, "forced",
+     {"spawn_write": True, "judged": True, "forced": True}),
+    ("blocker-tag", [SPAWN_TAG, "blocker"], False, "judged",
+     {"spawn_write": True, "judged": False, "forced": False}),
+)
+
+
+@pytest.mark.parametrize("shape,tags,force,cause,expect", NEVER_ELIGIBLE,
+                         ids=[s[0] for s in NEVER_ELIGIBLE])
+def test_a_never_eligible_create_records_the_condition_that_excluded_it(
+        board, djev_answered, monkeypatch, shape, tags, force, cause, expect):
+    """Clause 2: the seam still fires for every shape that was never eligible to
+    merge — `_probe_row` asserts this create appended exactly one row — and the
+    row says WHICH condition excluded it. The missing spawn tag reads on
+    `spawn_write`, `force: true` reads on `forced`, a `blocker` tag reads on
+    `judged`; the other two keys stay at their true values so the three rows are
+    three different readings, not one row written three times.
+
+    Before #3114 all three were byte-identical in the only fields that could
+    tell them apart, which is why `merged_into: null` could not be read as
+    anything.
+    """
+    row = _probe_row(board, monkeypatch, shape, tags=tags, force=force)
+    meta = row["meta"]
+
+    assert row["actual"]["merged_into"] is None, row["actual"]
+    for key, want in expect.items():
+        assert meta[key] is want, (
+            f"{shape}: `meta.{key}` read {meta[key]!r}, expected {want!r}. The key that "
+            f"names this shape's cause is `{cause}`; on any other value the null is "
+            f"readable as some other shape's null: {meta}")
+
+
+def test_the_row_carries_the_normalized_tags_that_decided_eligibility(board, djev_answered,
+                                                                     monkeypatch):
+    """Clause 3: `meta.tags` is the list `_dedupe` computes at
+    `agent_mcp/backlog.py:607` — `normalize_tags` of the caller's `tags`, the
+    same value `judged` and `spawn_write` were tested against — not the raw
+    argument.
+
+    The argument is deliberately the string shape `normalize_tags` exists for
+    (`app/backlog_tags.py:90`): models answer the schema's array with
+    `'[a, b]'` prose, and four such rows are on the board. Recording the raw
+    value would put a string in the row and leave a reader unable to match the
+    tag that caused the eligibility failure, while recording
+    `args["tags"]` verbatim is the bug this node refuses. Duplicates go too, so
+    the list is the one the flags were computed from.
+    """
+    from app.backlog_tags import normalize_tags
+
+    raw = "['spawned-by-autocode', 'blocker', 'blocker']"
+    row = _probe_row(board, monkeypatch, "blocker-tag-raw", tags=raw)
+
+    assert row["meta"]["tags"] == ["spawned-by-autocode", "blocker"], row["meta"]
+    assert row["meta"]["tags"] == normalize_tags(raw), "the recorded list is not the normalized one"
+    # The tag, not the caller, is what excluded this write — the pairing the
+    # key exists for: `judged` false beside `spawn_write` true and a tag in
+    # `_NEVER_MERGE_TAGS` says so without re-reading the board.
+    assert row["meta"]["judged"] is False, row["meta"]
+    assert row["meta"]["spawn_write"] is True, row["meta"]
