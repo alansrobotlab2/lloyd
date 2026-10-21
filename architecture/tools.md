@@ -1073,7 +1073,7 @@ a tool running in the aggregator has no other way to know them.
 Every child's `RunOptions.disallowed_tools` gets `Task` appended
 (`agent_mcp/builtin_task.py:366-368`), which the harness honours at advertise
 time (`app/harness/tool_schema.py:186`, `build_tool_list`) and again at
-dispatch (`app/harness/loop.py:2855`, `_pre_dispatch`: "disabled by
+dispatch (`app/harness/loop.py`, `_pre_dispatch`: "disabled by
 configuration") — this is the layer that holds on the real path, because a
 child's tool calls re-enter `main.call_tool` over loopback `/mcp` from a fresh
 ASGI task where no contextvar survives. The `_task_depth` contextvar check
@@ -1277,6 +1277,9 @@ printing the number is caught rather than quietly copied.
   rows since #1053 (#3127), config.yaml's `disabled_tools` no longer describes
   the served surface and the parity test only reads `tool_search` (#3128),
   `autonomy_run_task`'s description says the run is backgrounded while the
-  handler awaits it (#3129), and `loop.py:2855` cited in §9 is 80 lines stale
-  with `tests/test_task_depth_cap.py` pinning the literal string, so the doc was
-  left holding the number the test forbids moving (#3130).
+  handler awaits it (#3129). Fixed since: §9 cited a `loop.py` line number for the
+  dispatch-time disallow check while that line was the `finish_reason` wall-clock
+  cut eighty lines away, and `tests/test_task_depth_cap.py` pinned the literal
+  string, so the doc was holding a number the test forbade moving (#3130) — the
+  number is gone rather than moved, and what the pin holds now is the function and
+  the refusal string §9 quotes.

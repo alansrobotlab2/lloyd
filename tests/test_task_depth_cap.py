@@ -140,13 +140,108 @@ def test_the_rationale_carries_a_because_and_the_task_id_alternative():
 @pytest.mark.parametrize("cite,func,needle", [
     ("agent_mcp/builtin_task.py:37", None, "MAX_TASK_DEPTH = 1"),
     ("app/harness/tool_schema.py:186", "build_tool_list", "if bare in disallowed"),
-    ("app/harness/loop.py:2855", "_pre_dispatch", "for d in effective_disallowed"),
+    # No line number, unlike its four siblings: `loop.py` is the one file in this
+    # list that changes every round, and the digits were what went stale (#3130).
+    # The doc cites the file the same way, and `_body()` finds the function by AST,
+    # so this key holds the enforcement rather than its address.
+    ("app/harness/loop.py", "_pre_dispatch", "for d in effective_disallowed"),
     ("agent_mcp/builtin_task.py:366-368", "_task", 'disallowed.append("Task")'),
     ("agent_mcp/builtin_task.py:282-285", "_task", "MAX_TASK_DEPTH"),
 ])
 def test_each_cited_site_still_holds_what_the_doc_says(cite, func, needle):
     assert f"`{cite}`" in _section(), f"the doc no longer cites {cite}"
+    # The suffix is the line or range the doc happens to carry, and only the four
+    # cold-file keys have one; a bare `app/harness/loop.py` is its own path. Nothing
+    # here reads the digits, which is the whole point of #3130 — the number was the
+    # part that rotted while this test stayed green.
     path = cite.rsplit(":", 1)[0]
     where = func or "module level"
     assert needle in _body(path, func), (
         f"{needle!r} is no longer in {path} ({where}); the enforcement moved — update tools.md")
+
+#: A line-number citation of the harness loop, the kind that rots. `loop.py`
+#: moves with every unrelated round, which is exactly why `_body()` above
+#: resolves the function by AST instead of by line: the number is the part that
+#: goes stale, the function is the part that holds the claim. Mirrors
+#: `LINE_CITE` in `tests/test_testing_doc_claims.py`, whose comment is the same
+#: diagnosis ("conftest.py line numbers are how every cite in this repo's docs
+#: went stale").
+LOOP_LINE_CITE = re.compile(r"loop\.py:\d+")
+
+#: What §9 quotes as the refusal the dispatch-time layer returns, and the string
+#: `_pre_dispatch` actually builds (`content=f"Tool {name!r} is disabled by
+#: configuration."`). Checked against the source below rather than against a line,
+#: so the sentence and the code it describes cannot drift apart again without a red
+#: test. The doc's fragment is the code's tail, which is what the last assertion
+#: below pins: a rewording of either has to move both.
+DOC_QUOTED_REFUSAL = "disabled by configuration"
+DISPATCH_REFUSAL = "is disabled by configuration"
+
+
+def test_the_dispatch_citation_names_the_function_and_no_line_number():
+    """§9 points at the dispatch-time layer by function, never by line (#3130).
+
+    The page explains why nesting stops at one level, and this is the layer that
+    holds on the real path, so a wrong pointer here is worse than a missing one:
+    §9 carried a `loop.py` line number whose line was
+    `cut_by_wall = str(args_dict.get("finish_reason", "")) == "length"` — seventy-
+    five lines above the disallow check the sentence meant — and the pin below
+    stayed green on it, because its own teeth are needle-in-function.
+    """
+    section = _section()
+    assert LOOP_LINE_CITE.findall(section) == [], (
+        "a loop.py line number in §9 is an address the next unrelated loop.py "
+        f"round strands: {LOOP_LINE_CITE.findall(section)}")
+    assert "`app/harness/loop.py`" in section, (
+        "the dispatch-time layer must still name the file it lives in")
+    # Flattened, the way the rationale node above reads the section: the page
+    # wraps its prose, and a wrap is not part of what the sentence quotes.
+    cited_layer = " ".join(section[section.index("`app/harness/loop.py`"):][:130].split())
+    assert "_pre_dispatch" in cited_layer, (
+        f"`_pre_dispatch` must be named beside the file, not elsewhere: {cited_layer!r}")
+    assert DOC_QUOTED_REFUSAL in cited_layer, (
+        f"§9 must keep quoting the refusal it claims: {cited_layer!r}")
+
+
+def test_the_page_stops_narrating_the_stale_citation_as_still_open():
+    """The review log at the foot of the page used to assert this bug was live.
+
+    It sits outside the §9 section, so no pin read it — which is how a page can
+    carry a fixed defect and keep promising to fix it. After #3130 the clause has
+    to say the number is gone, not that the test forbids moving it.
+    """
+    text = DOC.read_text()
+    assert LOOP_LINE_CITE.findall(text) == [], (
+        f"the whole page is what a reader greps: {LOOP_LINE_CITE.findall(text)}")
+    para = next((blk for blk in text.split("\n\n") if "(#3130)" in blk), "")
+    assert para, "the page stopped recording #3130 rather than recording it closed"
+    assert "Fixed since" in para, (
+        "the block that names #3130 has to assert the citation was repaired — a "
+        f"review log left in `Filed:` tense keeps promising this fix: {para[-260:]}")
+
+
+def test_the_dispatch_layer_claim_is_pinned_by_its_string_not_its_line():
+    """The claim §9 quotes has to be found in `_pre_dispatch`, wherever it sits.
+
+    This is the half that de-numbering alone does not buy: the doc quoting a
+    string is a claim about code, and the only honest way to pin a claim about
+    code that moves is to read the code. If the refusal's wording is ever
+    reworded, this fails and §9 gets updated with it — the drift that #3130 was
+    filed from is a doc asserting a string the function no longer returns.
+    """
+    body = " ".join(_body("app/harness/loop.py", "_pre_dispatch").split())
+    assert DISPATCH_REFUSAL in body, (
+        f"§9 quotes {DOC_QUOTED_REFUSAL!r} as what dispatch returns, and "
+        "_pre_dispatch no longer contains it — update the doc's sentence")
+    # Read the quoted fragment out of the page rather than restating it: this is
+    # the assertion that fails when the two drift, in either direction — the code
+    # reworded, or the doc quoting a string dispatch never returns.
+    flat = " ".join(_section().split())
+    quoted = re.search(r'"([^"]+)"', flat[flat.index("`app/harness/loop.py`"):][:220])
+    assert quoted, '§9 no longer quotes a refusal beside the loop.py cite'
+    assert quoted.group(1) in body, (
+        f"§9 quotes {quoted.group(1)!r} as what dispatch returns, and "
+        "_pre_dispatch does not contain it — the citation is stranded again")
+    assert "for d in effective_disallowed" in body, (
+        "the disallow list §9 describes is assembled in this function; the "
+        "parametrised pin above cites this function for it")
