@@ -265,8 +265,31 @@ export interface BackgroundSession {
   last_active: string
 }
 
+// #3089: the gate the board-steward `apply` flip waits on, published instead of
+// hand-queried. `judged` is summed over ticks whose ledger row carried a judged
+// count, so `ticks_with_judged` beside `ticks_in_window` is what tells a source
+// that ran and judged nothing from one that never ran; `rate` is null when
+// nothing was judged, never 1.0. `truncated` says the scan hit its row ceiling,
+// which makes the counts a floor rather than a total. Thresholds live in
+// config.yaml's board-steward comment, not here.
+export interface WorkerJudgement {
+  window_days: number
+  window_since: string
+  ticks_in_window: number
+  ticks_with_judged: number
+  judged: number
+  agree: number
+  disagree: number
+  rate: number | null
+  scanned_limit: number
+  truncated: boolean
+}
+
 export interface WorkerSourceHealth {
   name: string
+  // Absent on every other source: the judgement gate is board-steward's, and a
+  // zero-filled copy elsewhere would read as a judged week that source never had.
+  judgement?: WorkerJudgement | null
   configured: boolean
   enabled: boolean
   // null = the source does not set it. For a source that never runs

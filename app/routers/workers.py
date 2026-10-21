@@ -293,6 +293,26 @@ async def workers_health(days: int = 7, runs: int = 10):
     # page if the `depth` read failed and came back empty — the one case where a
     # source MUST be listed is the case the failing read would hide it from.
     names = sorted(set(sources_cfg) | set(rollup) | set(depth) | set(pending))
+
+    # #3089: the #1688 `apply`-flip gate, on the row it gates. `agreement()` has
+    # carried a per-tick `judged` count since that item landed and nothing read it, so
+    # the figure the flip depends on existed only as a hand-run sqlite query over
+    # `workers.db` — and a gate nobody can look at is not a gate. Read over the
+    # source's OWN 7-day window (`judgement_aggregate`'s default, the window
+    # `config.yaml`'s thresholds are stated over) and deliberately NOT over this
+    # route's `?days=`, so asking for one day cannot silently narrow the gate. It
+    # publishes the number and judges nothing: an unmet gate reads here as unmet
+    # instead of being absent until someone misses it. `None` on failure rather than
+    # a zero-filled aggregate, because a failed read must not look like a week in
+    # which nothing was judged — the two are the pair clause 2 exists to separate.
+    judgement = None
+    if "board-steward" in names:
+        try:
+            judgement = await loop.run_in_executor(
+                None, partial(dispatch_watch.judgement_aggregate, q))
+        except Exception as e:  # noqa: BLE001 - a section, not the page
+            logger.warning("workers health judgement aggregate failed: %s", e)
+            judgement = None
     out = []
     for name in names:
         cfg = sources_cfg.get(name) or {}
@@ -348,6 +368,10 @@ async def workers_health(days: int = 7, runs: int = 10):
             # about a source nothing is dispatching.
             "dispatch": dispatch.get(name),
             "recent": recent,
+            # #3089: present on the board-steward row, absent elsewhere —
+            # the gate is that source's, and a zero-filled field on another
+            # source would read as a judged week it never had.
+            **({"judgement": judgement} if name == "board-steward" else {}),
         })
     return JSONResponse({"initialized": True, "days": days,
                          **window_fields, "sources": out})

@@ -18,7 +18,9 @@ the frontend calls it yet. `workers.enabled` now travels the same route.
 from __future__ import annotations
 
 import inspect
+import json
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2419,3 +2421,133 @@ def test_attribution_at_the_callers_left_both_pause_defaults_exactly_where_they_
     assert _journal_rows(pool) == [
         ("1", poolmod.HOLDER_PERSON, "unattributed"),
         ("0", poolmod.HOLDER_PERSON, "unattributed")], _journal_rows(pool)
+
+
+# ═══════ #3089: the rolling judgement gate, published on the row it gates ═══════
+#
+# `agreement()` has carried a per-tick `judged` count since #1688 and read it
+# nowhere, so the figure the board-steward `apply` flip is gated on existed only
+# as a hand-run sqlite query. These nodes cross the HTTP seam: the same aggregate
+# `workers/sources/board_steward.py` computes has to arrive on this endpoint's
+# board-steward row, with the counts that let a reader tell an empty week from a
+# week of ticks that judged nothing, and it must NOT appear on any other source's
+# row. The arithmetic itself is pinned over fixtures in tests/test_board_steward.py;
+# what is pinned here is that the route carries it.
+
+class _JudgingQueue(_WmQueue):
+    """The health stub plus the one read the judgement aggregate makes.
+
+    It answers `list_runs_joined` the way the store does — string cutoff in, rows
+    whose `completed_at` and `meta_json` are STRINGS out — because that is the
+    whole substance of the window rule: a float bound against that column selects
+    nothing, and the aggregate would then report a quiet week instead of a broken
+    query. The assertions here are on the SHAPE of the call; the numbers it
+    produces are pinned at their own level.
+    """
+
+    def __init__(self, watermarks, judged_rows):
+        super().__init__(watermarks)
+        self.judged_rows = judged_rows
+        self.calls: list = []
+
+    def list_runs_joined(self, source, since_iso, limit=20000):
+        self.calls.append((source, since_iso, limit))
+        assert isinstance(since_iso, str), (
+            f"the window bound reached the store as {type(since_iso).__name__}; "
+            "`runs.completed_at` holds an ISO-8601 string, so a numeric bound "
+            "matches nothing and an empty aggregate reads as no traffic")
+        assert source == "board-steward", (
+            f"the aggregate must read its own source's rows, got {source!r}")
+        return [r for r in self.judged_rows if r["completed_at"] >= since_iso][:limit]
+
+
+def _judged_row(days_ago: float, judged: int, agree: int) -> dict:
+    ts = (datetime.now(timezone.utc)
+          - timedelta(days=days_ago)).isoformat()
+    return {"completed_at": ts, "meta_json": json.dumps({
+        "agreement": {"agree": list(range(agree)),
+                      "disagree": list(range(agree, judged)),
+                      "no_opinion": [], "missed": [], "machine_moves": judged,
+                      "proposed": judged, "judged": judged,
+                      "rate": (agree / judged) if judged else None}})}
+
+
+def _judgement_client(monkeypatch, tmp_path, judged_rows):
+    """A health client whose queue serves `judged_rows` to the aggregate.
+
+    `board-steward` is the only configured source, so a field leaking onto other
+    rows would be invisible — the sibling is configured too and asserted clean.
+    """
+    q = _JudgingQueue({}, list(judged_rows))
+    client = _health_client(monkeypatch, tmp_path, {},
+                            {"board-steward": {"enabled": True,
+                                               "interval_seconds": 900},
+                             "other-source": {"enabled": True,
+                                              "interval_seconds": 900}})
+    monkeypatch.setattr(router, "get_queue", lambda: q)
+    return client, q
+
+
+def test_the_board_steward_health_row_publishes_the_judgement_gate(
+        monkeypatch, tmp_path):
+    """Clauses 1 and 2: the totals, the window they span, and the rows behind them.
+
+    Four things have to arrive together or the field misleads: the summed
+    `judged`, the agree rate, `window_days`, and BOTH row counts. `ticks_in_window`
+    beside `ticks_with_judged` is what separates a source that ran four times and
+    judged nothing from one that did not run at all — 0 judged alone reads the same
+    for both, and the second is an outage while the first is a quiet week.
+    """
+    rows = [_judged_row(1, 2, 1), _judged_row(2, 0, 0), _judged_row(3, 5, 4),
+            _judged_row(9, 50, 0)]                      # outside the 7-day window
+    client, q = _judgement_client(monkeypatch, tmp_path, rows)
+
+    body = client.get("/api/workers/health").json()
+    j = _row(body, "board-steward")["judgement"]
+    assert j is not None, "the row carries no judgement field at all"
+    assert j["judged"] == 7 and j["agree"] == 5 and j["disagree"] == 2, j
+    assert j["rate"] == round(5 / 7, 4) or abs(j["rate"] - 5 / 7) < 1e-9, (
+        "the rate is not agree/judged over the summed counts: " + str(j))
+    assert j["window_days"] == 7, j
+    assert j["ticks_in_window"] == 3, (
+        "the 9-day-old tick is inside the window the field names: " + str(j))
+    assert j["ticks_with_judged"] == 3, j
+    assert j["window_since"], "the figure does not say where its window starts"
+
+    # The window is the aggregate's own, not the endpoint's: `?days=1` narrows the
+    # run rows on the page and must not silently narrow the flip gate.
+    body1 = client.get("/api/workers/health?days=1").json()
+    assert _row(body1, "board-steward")["judgement"]["judged"] == 7, (
+        "`?days=1` narrowed the gate the flip depends on")
+    assert q.calls and all(c[1] == q.calls[0][1] for c in q.calls), (
+        "the aggregate's cutoff moved with `?days=`: " + str(q.calls))
+
+    assert "judgement" not in _row(body, "other-source"), (
+        "the gate is board-steward's; a zero-filled copy on another source reads "
+        "as a judged week that source never had")
+
+
+def test_a_failing_aggregate_read_publishes_no_numbers(monkeypatch, tmp_path):
+    """A failed read says `null`, because an empty aggregate would say something else.
+
+    `judged: 0, rate: null, ticks_in_window: 0` is the shape of a source that ran
+    and judged nothing — a fact about the source. A store that could not be read
+    is a fact about the box, and rendering it as the first shape is how an outage
+    gets filed as a quiet week. `None` is the only value that keeps the two apart.
+    """
+    class _Broken(_JudgingQueue):
+        def list_runs_joined(self, source, since_iso, limit=20000):
+            raise sqlite3.OperationalError("no such table: runs")
+
+    q = _Broken({}, [])
+    client = _health_client(monkeypatch, tmp_path, {},
+                            {"board-steward": {"enabled": True,
+                                               "interval_seconds": 900}})
+    monkeypatch.setattr(router, "get_queue", lambda: q)
+
+    body = client.get("/api/workers/health").json()
+    assert body["initialized"] is True, "one source's read must not blank the page"
+    row = _row(body, "board-steward")
+    assert row["judgement"] is None, (
+        "a failed read was rendered as an aggregate, so the page now claims "
+        "something about a week it could not read: " + str(row.get("judgement")))

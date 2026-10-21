@@ -73,9 +73,10 @@ never judged.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -477,6 +478,127 @@ def guardian_announce(title: str, body: str, level: str) -> Any:
     from workers.service_probe import guardian_announce as _announce
 
     return _announce(title, body, level)
+
+
+#: The only source whose judgement this gates, named here rather than imported from
+#: `workers.sources.board_steward` for the closure reason stated above. A typo in it
+#: selects 0 rows and the aggregate reads an empty week, so the health node asserts
+#: the string against the source's own `NAME`.
+BOARD_STEWARD_SOURCE = "board-steward"
+
+# ── the board-steward judgement gate, read not written ───────────────────────────
+#
+# #1688 made a steward tick's judgement recordable and nothing read it, so the
+# figure the `apply` flip is gated on lived only in a hand-run sqlite query.
+# The reader lives HERE rather than in `workers/sources/board_steward.py`, next
+# to the writer it reads, for one reason: `app.routers.workers` is reachable from
+# the backend agent's import closure, and importing a module that also contains a
+# WRITER (`apply_moves`, which writes to the live backlog) would put that writer
+# inside a tool agent's reach as a bare import. `workers.dispatch_watch` is
+# already in that closure and already imported by this route as the read-only
+# watcher it is, so hosting the aggregate here adds no edge to
+# tests/fixtures/worker_co_presence_baseline.json. The cost of the move is that
+# the reader no longer sits beside the code that emits the block, and
+# `tests/test_board_steward.py::test_the_judgement_reader_names_the_keys_the_writer_emits`
+# is what pays that cost back: it asserts the keys read here are the keys
+# `agreement()` writes.
+#: Rolling window `judgement_aggregate` reads, in days. Seven is the window #1688's
+#: owed entry named for the `apply` flip gate, so the figure the health route shows
+#: and the thresholds written in `config.yaml`'s board-steward comment are ONE
+#: measurement rather than two that happen to agree.
+JUDGEMENT_WINDOW_DAYS = 7
+
+#: Rows one aggregate scan reads at most, and the reason it cannot be "no limit":
+#: `WorkQueue.list_runs_joined` puts its `limit` into `LIMIT ?`, and SQLite answers a
+#: NULL there with `datatype mismatch`, so there is no unbounded call to make. The
+#: number is set above board-steward's heaviest realistic week (~271 run rows in the
+#: live 7-day window on 2026-10-20), and `truncated` below is what stops the ceiling
+#: from being a silent wrong answer: a window that overflows it reports a FLOOR, not
+#: a total.
+JUDGEMENT_SCAN_LIMIT = 5000
+
+
+def judgement_aggregate(queue: Any, window_days: int = JUDGEMENT_WINDOW_DAYS,
+                        now: Optional[datetime] = None) -> dict:
+    """Add up #1688's per-tick `agreement` over a rolling window: the flip gate, readable.
+
+    #1688 made each tick's own record gateable — `agreement()` carries `judged`, and
+    `rate` is None over an empty judged set — but nothing downstream added the ticks
+    up, so the trailing-7-day figures the `apply` flip waits on could only be had by
+    hand-running sqlite over `workers.db` (measured that way on 2026-10-20: judged
+    86, agree 57, disagree 29, rate 0.663). This is that query where the fleet's own
+    health route already reads the store, and `GET /api/workers/health` puts its
+    result on the board-steward row.
+
+    Read-only, and it decides nothing. It does not touch `apply`; whether `judged
+    >= 100` and `rate >= 0.90` are the right numbers is a ruling #1688 owes, not
+    something a function can settle. It reports, and traffic or a person flips.
+
+    What a row must look like to count: only a row whose `meta_json.agreement`
+    carries an INTEGER `judged` contributes, and it contributes to BOTH sides.
+      - a `failed`/`skipped`/`interrupted` tick carries no `agreement` block at all
+        (175 such rows since #1688 landed) and adds nothing to either side;
+      - a pre-#1688 row carries an `agreement` block with NO `judged` key (119 such
+        rows, 13 of them with a non-empty `agree` list). Taking the numerator from
+        those and the denominator only from keyed rows would inflate the rate — the
+        same false-100% #1688 exists to stop — so they are out of both sides.
+    A `judged: 0` tick IS counted as read and adds 0 to both sums, which is why no
+    run of zero-judged ticks lifts the rate: summed `judged` 0 gives rate None, never
+    1.0.
+
+    The window is a string comparison, deliberately. `runs.completed_at` is an
+    ISO-8601 TEXT column with a `+00:00` offset, so `list_runs_joined`'s
+    `completed_at >= since` filters lexicographically and the cutoff below is built
+    in that same shape; a numeric cutoff against that column selects 0 rows and
+    reads as "no traffic" instead of "not old enough".
+
+    `ticks_in_window` and `ticks_with_judged` are the pair that makes an empty window
+    legible rather than reassuring: 0 rows read is a quiet or newly-created store,
+    40 rows read with 0 keyed is a source that has stopped judging, and those are
+    different facts about different problems.
+    """
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    since = (ref - timedelta(days=int(window_days))).isoformat(timespec="seconds")
+    agg = {"window_days": int(window_days), "window_since": since,
+           "ticks_in_window": 0, "ticks_with_judged": 0,
+           "judged": 0, "agree": 0, "disagree": 0, "rate": None,
+           "scanned_limit": JUDGEMENT_SCAN_LIMIT, "truncated": False}
+    rows = queue.list_runs_joined(source=BOARD_STEWARD_SOURCE, since_iso=since,
+                                  limit=JUDGEMENT_SCAN_LIMIT)
+    # Filling the SELECT's own ceiling is the only signal that more rows exist, and
+    # it is stated rather than assumed: without it `ticks_in_window` would equal the
+    # limit and read as a measurement of the window. SQLite has no unbounded
+    # `LIMIT ?` — a NULL there is a `datatype mismatch` — so the ceiling is real and
+    # has to be visible.
+    agg["truncated"] = len(rows) >= JUDGEMENT_SCAN_LIMIT
+    for row in rows:
+        agg["ticks_in_window"] += 1
+        meta = row.get("meta_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta or "{}")
+            except ValueError:
+                continue        # an unreadable row is not a judged tick
+        block = (meta or {}).get("agreement")
+        if not isinstance(block, dict):
+            continue            # failed / skipped / interrupted: no tick happened
+        judged = block.get("judged")
+        if not isinstance(judged, int) or isinstance(judged, bool):
+            continue            # pre-#1688 shape: no denominator to weigh against
+        agg["ticks_with_judged"] += 1
+        agg["judged"] += judged
+        agg["agree"] += len(block.get("agree") or [])
+        agg["disagree"] += len(block.get("disagree") or [])
+    if agg["judged"]:
+        agg["rate"] = round(agg["agree"] / agg["judged"], 4)
+    return agg
+
+
+def _agreement_block_keys() -> tuple[str, ...]:
+    """The keys of an `agreement()` block this reader depends on, for the coupling test."""
+    return ("judged", "agree", "disagree")
 
 
 def dispatch_health(queue: Any, sources: "dict[str, dict] | None" = None,

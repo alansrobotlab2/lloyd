@@ -133,6 +133,13 @@ WORKER_SOURCE_HEALTH_KEYS = {"name", "configured", "enabled", "inner_voice",
                              "pending_wait_max_seconds",
                              "pending_wait_over_bound_count",
                              "pending_wait_bound_seconds"}
+#: #3089 adds ONE key to ONE source's row: `judgement`, the summed 7-day figure the
+#: board-steward `apply` flip is gated on. Deliberately not in the base set — every
+#: other row keeps its exact shape, because a `judgement: null` spread across all
+#: sources reads as "a gate exists here with nothing in it" for sources that have no
+#: gate, which is the same false absence this item set out to remove. `api.ts`
+#: declares it optional for exactly that reason.
+BOARD_STEWARD_HEALTH_KEYS = WORKER_SOURCE_HEALTH_KEYS | {"judgement"}
 
 
 async def test_workers_health_shape(client, monkeypatch, tmp_path):
@@ -169,7 +176,11 @@ async def test_workers_health_shape(client, monkeypatch, tmp_path):
         "claim no clamp: %r" % ({k: body[k] for k in ("oldest_input",
                                                      "window_clamped_to_hours")},))
     for src in body["sources"]:
-        assert set(src) == WORKER_SOURCE_HEALTH_KEYS, sorted(src)
+        if src["name"] == "board-steward":
+            # #3089's one addition, and it must stay on this row only.
+            assert set(src) == BOARD_STEWARD_HEALTH_KEYS, sorted(src)
+        else:
+            assert set(src) == WORKER_SOURCE_HEALTH_KEYS, sorted(src)
         # `health` is None for a source with no runs in the window — a rate
         # over zero runs is unknown, not 0%.
         assert src["health"] is None or set(src["health"]) >= {
@@ -205,8 +216,17 @@ def test_the_web_client_declares_every_field_the_route_returns():
     for key in ("pending_wait_max_seconds", "pending_wait_over_bound_count",
                 "pending_wait_bound_seconds"):
         assert key in declared, f"#2185's {key} is missing from WorkerSourceHealth"
-    assert not (declared - WORKER_SOURCE_HEALTH_KEYS), \
-        f"client declares fields the route never sends: {sorted(declared - WORKER_SOURCE_HEALTH_KEYS)}"
+    # #3089's `judgement` joins the declared set, and `dispatch` is subtracted as
+    # before rather than this pair being widened to swallow it: the key is optional
+    # in the type (`judgement?:`) because only board-steward's row carries it, so it
+    # must not read as a field every row sends. It is checked as optional here and as
+    # present-and-null-able on the route side in tests/test_workers_router.py.
+    assert declared - WORKER_SOURCE_HEALTH_KEYS == {"judgement"}, (
+        f"the client type gained or lost a field beyond #3089's one: "
+        f"{sorted(declared - WORKER_SOURCE_HEALTH_KEYS)}")
+    assert "judgement?:" in block, (
+        "`judgement` is declared REQUIRED, but every source row except "
+        "board-steward's has no such field, so a required type lies about them")
     assert WORKER_SOURCE_HEALTH_KEYS - declared == {"dispatch"}, {
         "emitted_but_undeclared": sorted(WORKER_SOURCE_HEALTH_KEYS - declared),
         "expected": "exactly `dispatch`, the one pre-existing gap (see the docstring)"}

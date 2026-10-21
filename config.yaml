@@ -1792,7 +1792,20 @@ workers:
     # summed `judged` count clears a minimum and whose rate holds over it —
     # a tick that judged nothing has no rate (#1688) — and with the
     # `autocode.status_pipeline` / `close_on_settle` handover decided as a
-    # precondition of the flip, not as its consequence. With `apply: true`
+    # precondition of the flip, not as its consequence.
+    # THE TWO NUMBERS, stated (#3089): summed `judged` >= 100 AND agree `rate`
+    # >= 0.90, both over the rolling 7-day window — the same window
+    # `judgement_aggregate` measures and the health route publishes as
+    # `judgement` on this source's row of `GET /api/workers/health`, so the gate
+    # and the figure that clears it are read from one place and `?days=` cannot
+    # narrow either. Measured over the 7 days ending 2026-10-21T02:11Z the
+    # window read summed judged 80, agree 51, disagree 29, rate 0.637 across 265
+    # board-steward run rows (210 of them carrying `judged`), so NEITHER
+    # threshold is met and the gate reads NOT cleared — an unmet gate is a
+    # reason to keep dry-running, not a number to adjust. Whether 100 and 0.90
+    # are the right two numbers is a ruling still owed to owed-check on #3089,
+    # not a diff; a round that reported this gate cleared would be reporting a
+    # phantom rate. With `apply: true`
     # it writes through the one status writer and `select_confirmed` takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.

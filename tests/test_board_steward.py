@@ -9,6 +9,7 @@ never the steward's: it cannot set `done`.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -1245,3 +1246,269 @@ def test_the_committed_witness_bytes_reproduce_the_failure_counts():
     assert (meta["figures"]["truncated_by_day"]
             == {"2026-10-02": 6, "2026-10-03": 5, "2026-10-04": 7}), (
         meta["figures"]["truncated_by_day"])
+
+
+# ── #3089: the rolling judgement aggregate the `apply` flip is gated on ─────────
+#
+# #1688 made a tick's judgement recordable (`agreement()` carries `judged`, and
+# `rate` is None over an empty judged set) but left it unread: the 7-day figures
+# the flip depends on had to be derived by hand with a sqlite query over
+# workers.db. These nodes pin the aggregate that replaces that hand-run query —
+# its arithmetic over a fixture, which rows are allowed to touch it at all, and
+# the window rule that decides what is in the week.
+
+import datetime as _dt
+
+from workers.queue import WorkQueue as _WorkQueue
+from workers import dispatch_watch as DW
+
+
+def _iso(days_ago: float, *, hours: int = 0) -> str:
+    """An ISO instant `days_ago` days behind NOW, with an explicit +00:00 offset.
+
+    Built the way the column is actually written (`record_run` stores whatever the
+    pool hands it, and the pool hands `datetime.now(timezone.utc).isoformat()`, so
+    every live `completed_at` carries `+00:00`), because the window rule this
+    aggregates over is a STRING comparison and a fixture written as `Z` or as a
+    naive local stamp would test a different column than the one production has.
+    """
+    return (_dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(days=days_ago, hours=hours)).isoformat()
+
+
+def _seed_tick(queue, *, days_ago: float, agreement: dict | None = None,
+               status: str = "success", extra_meta: dict | None = None):
+    """Write one run row as the pool writes it, at `days_ago`, with `meta.agreement`.
+
+    `agreement=None` means the row has no `agreement` block at all, which is what a
+    `failed` or `skipped` tick looks like live (175 such rows since #1688 landed);
+    pass a dict verbatim for the judged case and `{"agree": [...]}` with no
+    `judged` key for a row written before #1688 existed.
+    """
+    meta = dict(extra_meta or {})
+    if agreement is not None:
+        meta["agreement"] = agreement
+    queue.record_run(
+        run_id=f"run_steward_{days_ago}_{status}", queue_id=None, source=W.NAME,
+        status=status, started_at=_iso(days_ago, hours=1), completed_at=_iso(days_ago),
+        duration_seconds=120.0, summary="seeded", meta_json=json.dumps(meta))
+
+
+def _judged(n: int, agree: int, disagree: int | None = None) -> dict:
+    """A per-tick `agreement()` block with `n` judged decisions, `agree` of them agreed."""
+    disagree = (n - agree) if disagree is None else disagree
+    return {"agree": list(range(agree)), "disagree": list(range(agree, agree + disagree)),
+            "no_opinion": [], "missed": [], "machine_moves": n, "proposed": n,
+            "judged": n, "rate": (agree / n) if n else None}
+
+
+def test_the_aggregate_sums_judged_ticks_and_never_invents_a_rate(tmp_path):
+    """Clause 3: zero-judged ticks add nothing, and an all-zero week has NO rate.
+
+    Three ticks that judged nothing plus one that judged 2 and agreed on 1 must
+    read summed judged 2 and rate 0.5. The failure this pins is the arithmetic
+    #1688 removed one level down and that a naive sum re-introduces one level up:
+    `agree / ticks` over four ticks, or `(1) / (1 judged tick)`, either of which
+    reads 100% while the source judged twice in a week. An unmeasured week has to
+    stay visibly unmeasured (`rate` None), because the flip gate is `rate >= 0.90`
+    and a phantom 1.0 clears a threshold nobody earned.
+    """
+    q = _WorkQueue(tmp_path / "workers.db")
+    for i in range(3):
+        _seed_tick(q, days_ago=i + 1, agreement=_judged(0, 0))
+    _seed_tick(q, days_ago=4, agreement=_judged(2, 1))
+
+    agg = DW.judgement_aggregate(q)
+    assert agg["judged"] == 2, agg
+    assert agg["agree"] == 1 and agg["disagree"] == 1, agg
+    assert agg["rate"] == 0.5, (
+        "three unjudged ticks must not dilute or inflate the one judged tick: " + str(agg))
+    assert agg["ticks_in_window"] == 4, agg
+    assert agg["ticks_with_judged"] == 4, (
+        "a zero-judged tick still JUDGED (it just had nothing to judge), so it "
+        "belongs in the keyed count and not in the excluded one: " + str(agg))
+
+    q2 = _WorkQueue(tmp_path / "zero.db")
+    for i in range(4):
+        _seed_tick(q2, days_ago=i + 1, agreement=_judged(0, 0))
+    zero = DW.judgement_aggregate(q2)
+    assert zero["judged"] == 0 and zero["rate"] is None, (
+        "a week of ticks that judged nothing must report NO rate; any number here, "
+        "and 1.0 above all, is the phantom that clears the flip gate by default: "
+        + str(zero))
+
+
+def test_only_rows_carrying_judged_reach_the_aggregate(tmp_path):
+    """Clause 4: a row without `judged` is excluded from BOTH sides of the fraction.
+
+    Two live populations do this. 175 rows since #1688 carry no `agreement` block
+    at all (failed / skipped / interrupted ticks), and 119 older rows carry an
+    `agreement` block written before #1688 added the key — 13 of those with a
+    NON-EMPTY `agree` list. Summing `len(agree)` over everything while taking the
+    denominator only from keyed rows puts 2 agreements over 2 judged decisions on
+    a fixture that judged nothing new: the rate climbs without any new judgement,
+    which is exactly the inflation that would flip `apply` on stale evidence.
+    """
+    q = _WorkQueue(tmp_path / "workers.db")
+    _seed_tick(q, days_ago=1, agreement=_judged(2, 1))                 # keyed
+    _seed_tick(q, days_ago=2, agreement=None, status="failed")          # no block
+    _seed_tick(q, days_ago=3, agreement=None, status="skipped")         # no block
+    _seed_tick(q, days_ago=4, agreement=None, status="interrupted")     # no block
+    # A pre-#1688 row: an `agreement` block with two agreements and NO `judged`.
+    _seed_tick(q, days_ago=5, agreement={"agree": [7, 8], "disagree": [],
+                                         "no_opinion": [], "missed": [],
+                                         "machine_moves": 2, "proposed": 2,
+                                         "rate": 1.0})
+    _seed_tick(q, days_ago=6, agreement=_judged(0, 0))                  # keyed, zero
+    q.record_run(run_id="run_steward_unparseable", queue_id=None, source=W.NAME,
+                 status="done", started_at=_iso(1, hours=1), completed_at=_iso(1),
+                 duration_seconds=1.0, summary="seeded", meta_json="{not json")
+
+    agg = DW.judgement_aggregate(q)
+    assert agg["judged"] == 2 and agg["agree"] == 1 and agg["disagree"] == 1, agg
+    assert agg["rate"] == 0.5, (
+        "the rate moved without any new judgement — the 2 agreements on the "
+        "pre-#1688 row joined the numerator while its absence from `judged` left "
+        "the denominator alone: " + str(agg))
+    assert agg["ticks_in_window"] == 7, agg
+    assert agg["ticks_with_judged"] == 2, (
+        "only the keyed rows may be counted as read; the two block-less statuses "
+        "and the pre-#1688 row must show up as read-but-not-keyed: " + str(agg))
+
+
+def test_the_window_is_a_string_comparison_on_completed_at(tmp_path):
+    """Clause 5: 6 days old is inside a 7-day window, 8 days old is outside.
+
+    The column holds an ISO-8601 string with a `+00:00` offset, and
+    `list_runs_joined` compares it lexicographically against a computed ISO cutoff
+    — which works precisely because both sides are UTC with the same offset. The
+    trap is the "obvious" alternative: `completed_at >= <epoch float>` selects ZERO
+    rows (SQLite compares text against a numeric as different types, text always
+    losing), and an empty aggregate reads as a source with no traffic rather than
+    as a broken query. So the boundary tick is the test: a row that is 8 days old
+    has to be excluded and a 6-day row included, with the counts saying which
+    happened.
+    """
+    q = _WorkQueue(tmp_path / "workers.db")
+    _seed_tick(q, days_ago=1, agreement=_judged(3, 3))
+    _seed_tick(q, days_ago=6, agreement=_judged(2, 2))     # inside
+    _seed_tick(q, days_ago=8, agreement=_judged(50, 0))    # outside, and disagreeing
+    _seed_tick(q, days_ago=30, agreement=_judged(9, 9))    # far outside
+
+    agg = DW.judgement_aggregate(q)
+    assert agg["ticks_in_window"] == 2, agg
+    assert agg["judged"] == 5 and agg["agree"] == 5, (
+        "the window boundary moved: the 8-day row's 50 disagreements are the tell "
+        "that the cutoff stopped matching, and a 0-row read would be the "
+        "epoch-comparison bug announcing itself: " + str(agg))
+    assert agg["rate"] == 1.0 and agg["window_days"] == 7, agg
+    assert agg["window_since"].startswith(
+        (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=7)).isoformat()[:13]), (
+        "the window is not named on the figure, so a reader cannot tell which "
+        "week this is: " + str(agg))
+    # 6 days inside and 8 outside is a 1-day margin at the boundary, which is wide
+    # enough that this node does not care what time of day it runs at; the cutoff
+    # itself is asserted, not inferred from the count.
+    assert agg["window_since"] <= _iso(6), (
+        "the cutoff is later than a tick that is 6 days old, so a 6-day row would "
+        "be cut out of a 7-day window: " + agg["window_since"])
+    assert agg["window_since"] > _iso(8), (
+        "the cutoff is at or before a tick that is 8 days old, so the window is "
+        "wider than the 7 days it claims: " + agg["window_since"])
+
+
+def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
+    """Clause 5 (second half): the gate lives in the file that would flip it.
+
+    `config.yaml`'s board-steward comment has always said the flip waits for a
+    summed `judged` count to clear "a minimum" with a rate that "holds over it" —
+    which is a gate with no numbers in it, so no reader can tell cleared from
+    unmet without a query. The two thresholds and the date they were measured are
+    now in the comment beside the flag, and the node pins all three plus the fact
+    that `apply` is still false: stating a threshold next to a flipped flag would
+    be a flip dressed as documentation.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    keys = [i for i, ln in enumerate(lines) if ln.strip() == "board-steward:"]
+    assert len(keys) == 1, (
+        f"the source block this gate is written into must be findable by its own key, "
+        f"found {len(keys)}")
+    # The gate lives in the comment ABOVE the key, so the block is that comment run
+    # and the key's own lines — not a fixed window of text, which would drift into
+    # the neighbouring source's comment and let its prose satisfy this node.
+    start = keys[0]
+    while start > 0 and (lines[start - 1].strip().startswith("#")
+                         or not lines[start - 1].strip()):
+        start -= 1
+    end = keys[0] + 1
+    while end < len(lines) and (lines[end].startswith("      ")
+                                or lines[end].strip().startswith("#")):
+        end += 1
+    block = "\n".join(lines[start:end])
+    assert "apply: false" in block, (
+        "the slice did not capture the flag the comment gates: " + block[-200:])
+
+    assert "judged` >= 100" in block, (
+        "the judged-count threshold is not stated as a number in the "
+        "board-steward block: " + block[:200])
+    assert ">= 0.90" in block, "the agree-rate threshold is not stated as a number"
+    assert "7-day" in block or "7 days" in block, (
+        "the thresholds are meaningless without the window they are measured over")
+    assert re.search(r"2026-\d\d-\d\d", block), (
+        "the figures need the date they were measured, or the next reader cannot "
+        "tell a stale reading from a current one")
+    assert "not cleared" in block.lower(), (
+        "the comment must say what today's figures read, so an unmet gate is not "
+        "mistaken for an absent one")
+    # The flag itself is read as YAML, not as prose: the comment says
+    # "Flip to `apply: true` only after …" and a substring test would trip on its
+    # own instruction. The value is the only thing that answers "is it flipped?".
+    import yaml
+    cfg = yaml.safe_load(text)
+    assert cfg["workers"]["sources"]["board-steward"]["apply"] is False, (
+        "this item exposes the gate; it does not open it")
+    assert "owed" in block.lower(), (
+        "whether 100 and 0.90 are the right numbers is a ruling owed to owed-check, "
+        "and the comment has to say the numbers are proposals rather than settled")
+
+
+def test_the_judgement_reader_lives_in_the_watcher_and_names_the_writers_keys():
+    """The two costs of hosting the reader away from the writer, both paid back.
+
+    `judgement_aggregate` sits in `workers/dispatch_watch.py`, not beside the
+    `agreement()` that emits the block, because importing a module containing the
+    board-steward WRITER (`apply_moves`) into the backend's import closure would put
+    a live backlog writer inside a tool agent's reach as a bare import — the edge
+    `tests/fixtures/worker_co_presence_baseline.json` exists to keep out. Two things
+    follow, and both are pinned here rather than left to the reader's good intentions:
+     - the source name the reader selects rows for is a literal in the watcher, so it
+       is asserted against the source module's own `NAME`; a drifted string selects 0
+       rows and the gate reads an empty week, not a broken query;
+     - the keys the reader counts are the keys the writer emits, checked by calling
+       `agreement()` and reading what it returns, so renaming a key on either side
+       fails a node instead of silently dropping a term out of the flip gate.
+    """
+    assert DW.BOARD_STEWARD_SOURCE == W.NAME, (
+        "the reader selects a source the writer is not named "
+        f"{DW.BOARD_STEWARD_SOURCE!r} vs {W.NAME!r}: the aggregate would read 0 rows "
+        "and report a week in which nothing was judged")
+    emitted = W.agreement(moves=[{"item_id": 1, "status": "up_next"},
+                                  {"item_id": 2, "status": "done"}],
+                           expected={1: ("up_next", "triaged"),
+                                     2: ("up_next", "triaged")},
+                           current={1: "up_next", 2: "up_next"})
+    for key in ("judged", "agree", "disagree"):
+        assert key in emitted, (
+            f"agreement() no longer emits {key!r}, which is the term the aggregate "
+            "sums — the reader is in another module and cannot fail when this one "
+            "renames a key")
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers"
+           / "workers.py").read_text(encoding="utf-8")
+    assert "dispatch_watch.judgement_aggregate" in src, (
+        "the health route stopped reading the aggregate from the watcher, so the "
+        "closure reason for the placement is gone and it should be revisited")
+    assert "from workers.sources.board_steward import" not in src, (
+        "the backend route imports the board-steward source module again, which is "
+        "the co-presence the placement exists to avoid — the guard in "
+        "tests/test_worker_capability_allowlist.py fails with it")
