@@ -327,6 +327,23 @@ Three layers, in the order a turn meets them:
    delete; `log.jsonl` there records each one. Anything else — one byte, a directory,
    an unlisted name — alerts as before. `datawatch.py inert` lists what the next check
    would move.
+4. **A 0-byte database inside the data root that shadows a populated one is named, never
+   moved** (`datawatch.data_root_shadows`, measured in the same `_runtime_data_incident`
+   tick, #3109). The check above cannot see it: its candidates are git's untracked entries
+   and the data root is not a repository. The shape came from the live root — a 0-byte
+   `kg.sqlite` at the top while `_pipeline/vault-derived/kg.sqlite` holds 160,882,688
+   bytes, and the same accident in the opposite direction as a 0-byte
+   `_pipeline/workers.db` — and a 0-byte file is a valid *empty* SQLite database, so a
+   probe opened at the wrong path prints 0 rows instead of failing. The verdict comes from
+   enumerating the root and comparing basenames across depths, both directions, with no
+   name list; the store to trust is the one `app/data_root.py` declares for that basename
+   through a `*_DB_RELATIVE` constant, the same single spelling `policy.kg_db_path` reads,
+   so a root or layout move moves the answer with it. Same inertia tests as the move above
+   — one name, zero bytes, `INERT_MIN_AGE_SECONDS`, no sidecar — and then it stops:
+   **report-only**, raised under the same alert title with `needs_human=True`, because a
+   file under the data root is a person's to remove. A scan that cannot walk the root
+   raises rather than answering `[]`, and the day's note is not cleared on a tree-only
+   measurement.
 
 ## The move (2026-09-22)
 

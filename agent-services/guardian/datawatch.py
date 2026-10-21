@@ -413,6 +413,201 @@ def quarantine_inert(tree: str, names, data_root: str = DATA_ROOT,
 CACHE_DIRS = frozenset({"code-graph"})
 
 
+#: The file extensions a data-root scan treats as a database. The SQLite sidecars above
+#: are excluded by SUFFIX, so a 0-byte `usage.db-shm` never enters as a name at all.
+_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+#: How deep under the data root the shadow scan looks, and how many directory entries it
+#: reads before refusing to answer. Both bound a tick of a watchdog that must not block,
+#: and neither is a limit the live root comes near: a full-depth walk of it on 2026-10-21
+#: touched 115,307 directories and 663,207 files (778,514 entries) in 1.75 s, and its 90
+#: database files all sit at depth 5 or shallower. They are runaway guards — a tree that
+#: trips either bound gets an error, never a clean answer it did not measure, which is why
+#: a bound sits above the measurement rather than at it: a root that gains a level of
+#: nesting must not start reporting "no shadows" because the scan stopped early.
+SHADOW_MAX_DEPTH = 6
+SHADOW_MAX_ENTRIES = 1_000_000
+
+
+def _declared_db_relatives(repo: str) -> dict[str, str]:
+    """`{basename: root-relative path}` for every `*_DB_RELATIVE` the repo declares.
+
+    `app/data_root.py` spells the data root's store layout once — `KG_DB_RELATIVE` today,
+    and `QUARANTINE_DIR_RELATIVE` beside it for a different purpose — so that a root or
+    layout move is one edit (#1525, #2110, #3095: a stored command naming the old root
+    returns a clean-looking non-answer). A check that re-spelled `_pipeline/vault-derived/
+    kg.sqlite` would keep pointing at the retired layout after such a move and call a
+    relocated store missing, which is the defect `policy.kg_db_path` was written for.
+    Enumerating the `*_DB_RELATIVE` suffix rather than naming `KG_DB_RELATIVE` means the
+    next store the layout module declares is consulted with no change here.
+
+    Empty dict when the module cannot be loaded, and that is not an all-clear: the
+    shadow verdict comes from the scan, and this only says WHICH store the repo itself
+    declares for a name.
+    """
+    mod = P._data_root_module(repo)
+    if mod is None:
+        return {}
+    out: dict[str, str] = {}
+    for attr in dir(mod):
+        if not attr.endswith("_DB_RELATIVE"):
+            continue
+        value = getattr(mod, attr, None)
+        if value is None:
+            continue
+        rel = os.path.normpath(str(value))
+        if not rel or rel == "." or os.path.isabs(rel) or rel.startswith(".."):
+            continue                      # not a path under the root: not a store layout
+        out.setdefault(os.path.basename(rel), rel)
+    return out
+
+
+def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
+                      now: float | None = None) -> list[dict]:
+    """Every 0-byte database in the data root whose name is populated elsewhere under
+    the same root, as `(shadow, trusted)` pairs. READ-ONLY: never creates, moves,
+    truncates or unlinks anything.
+
+    The shape, from the live root: `kg.sqlite` at 0 bytes at the top while the knowledge
+    graph the code opens — `app.paths.VAULT_KG_DB`, `_pipeline/vault-derived/kg.sqlite` —
+    holds 160,882,688 bytes. A 0-byte file is a valid *empty* SQLite database, so a probe
+    that opened the bare name from the wrong cwd does not get an error; it gets 0 rows,
+    and prints "the KG is empty" about a populated store. That is the 2026-08-23/24
+    incident class this item names, and the same origin as the 2026-10-02 in-tree
+    `workers.db` story: `sqlite3` creates the file on connect. It happened twice in
+    opposite directions (`_pipeline/workers.db` at 0 bytes beside the populated queue
+    store at the top), which is why the check runs both ways.
+
+    Why a new predicate and not the existing two. `stray_in_tree` is scoped to the CODE
+    tree by construction — its candidates are git's untracked entries, and the data root
+    is not a repo, so it returns `[]` here and always will. `inert_residue` does the
+    right arithmetic but cannot reach this file from either side: a name must be in
+    `RUNTIME_NAMES` (a prediction, and `kg.sqlite` is not in it), nested names are skipped
+    outright, and the "the real store is elsewhere" test looks only at the data root's
+    TOP level (`os.path.join(data_root, name)`), which is never where a
+    `_pipeline/vault-derived/` store lives. Handing it the data root as its tree returns
+    `[]` for both live pairs. The property is a name at one depth whose populated
+    counterpart sits at another depth under one root, so the fix enumerates the root and
+    compares names — no name list to maintain, and no new entry in `RUNTIME_NAMES`, which
+    is the axis the item rules out.
+
+    Both halves of a pair must be measurements, and the exclusions are the same ones
+    `inert_residue` earns its right to act on: a regular file, one name, zero bytes,
+    untouched for `INERT_MIN_AGE_SECONDS`, no SQLite sidecar beside it. `CACHE_DIRS` is
+    not scanned (a rebuild in progress is not a shadow), and the scan does not follow a
+    symlink or descend past `SHADOW_MAX_DEPTH`.
+
+    The trusted half is the populated copy the ROOT itself declares — whichever store
+    `app/data_root.py` names for that basename via a `*_DB_RELATIVE` constant — and it
+    wins over every other populated copy of that name even a shallower or larger one,
+    because the finding's purpose is to send a human to the file the code actually opens.
+    Only when the layout module names no store for the basename does the check fall back to
+    the shallowest populated copy (then largest), because a root's own top level is what its
+    code conventionally opens (`WORKERS_DB` and `USAGE_DB` are `DATA_ROOT / name`).
+    `declared` in each finding says which of the two it was, so the alert never guesses
+    where the real store is.
+
+    A root that cannot be read RAISES rather than returning `[]`. #2056 is the reason:
+    substituting an empty list for a failed measurement retracted three open sections of
+    `memory/2026-10-02.md` while the same title was still alerting an hour later. The
+    caller catches this and says nothing in either direction.
+
+    Report-only on purpose. `quarantine_inert` MOVES code-tree residue into
+    `QUARANTINE_DIR_RELATIVE`; a data-root file is a person's call — the item's own
+    reasoning, and `guardian.py`'s existing `needs_human` split for a retained name. The
+    removal of the two live 0-byte files is a human action under `~/lloyd-data`."""
+    now = time.time() if now is None else now
+    root = os.path.abspath(data_root)
+    if not os.path.isdir(root):
+        raise OSError(f"data root is not a readable directory: {root}")
+    declared = _declared_db_relatives(repo)
+
+    # One bounded walk: basename -> [(depth, size, path)]. Depth is levels below the
+    # root, so a top-level file is 1 and `_pipeline/workers.db` is 2.
+    found: dict[str, list[tuple[int, int, str]]] = {}
+    seen = 0
+    truncated = False
+    stack: list[tuple[str, int]] = [(root, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            continue
+        with entries:
+            for de in entries:
+                seen += 1
+                if de.is_dir(follow_symlinks=False):
+                    if depth == 0 and de.name in CACHE_DIRS:
+                        continue
+                    if depth + 1 < SHADOW_MAX_DEPTH:
+                        stack.append((de.path, depth + 1))
+                    continue
+                if not de.name.endswith(_DB_SUFFIXES):
+                    continue
+                try:
+                    st = de.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    found.setdefault(de.name, []).append(
+                        (depth + 1, st.st_size, de.path))
+        if seen > SHADOW_MAX_ENTRIES:
+            truncated = True
+            break
+
+    out: list[dict] = []
+    for name, recs in sorted(found.items()):
+        empties = sorted((p, d) for d, sz, p in recs if sz == 0)
+        populated = sorted(((p, d, sz) for d, sz, p in recs if sz > 0),
+                           key=lambda r: (r[1], -r[2], r[0]))
+        if not empties or not populated:
+            continue                      # one side of the pair is missing: no shadow
+        # The store to trust is the one the repo DECLARES for this name whenever that copy
+        # is itself populated; the shallowest-then-largest sort is only the fallback for a
+        # name the layout module does not declare. The order is not cosmetic: a populated
+        # `sub/kg.sqlite` at depth 2 outranks the declared `_pipeline/vault-derived/
+        # kg.sqlite` at depth 3 on depth alone (and a bigger undeclared copy outranks it on
+        # size), and the alert's whole job is to name the file a human should open and
+        # count. Sorting first and looking up the declaration afterwards also mislabels the
+        # finding `declared=False` for a root that does declare the store, which is the
+        # difference between "this came from the layout module" and "the check guessed".
+        # Both sides are compared by `normpath` because a declared relative path and a
+        # scandir path are two spellings of one file.
+        rel = declared.get(name)
+        declared_path = os.path.normpath(os.path.join(root, rel)) if rel else None
+        trusted_path, trusted_depth, trusted_size = next(
+            (r for r in populated
+             if declared_path and os.path.normpath(r[0]) == declared_path),
+            populated[0])
+        trusted_norm = os.path.normpath(trusted_path)
+        for shadow, depth in empties:
+            try:
+                st = os.lstat(shadow)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_size != 0 or st.st_nlink != 1:
+                continue
+            if now - st.st_mtime < INERT_MIN_AGE_SECONDS:
+                continue
+            if any(os.path.lexists(shadow + suffix) for suffix in _SQLITE_SIDECARS):
+                continue
+            out.append({
+                "shadow": shadow, "name": name, "depth": depth,
+                "trusted": trusted_path, "trusted_depth": trusted_depth,
+                "trusted_size": trusted_size,
+                "declared": declared_path is not None
+                and trusted_norm == declared_path,
+                "declared_relative": rel,
+            })
+    out.sort(key=lambda f: f["shadow"])
+    if truncated:
+        # The bound was hit, so an absence after here is a scan that stopped, not a
+        # root that is clean. Loud rather than silent, and never a claim of all-clear.
+        raise OSError(f"data-root shadow scan stopped after {seen} entries under {root} "
+                      f"(SHADOW_MAX_ENTRIES); its silence would be a partial measure")
+    return out
+
+
 class DataWatch(V.VaultWatch):
     what = "data"
     skip_top = CACHE_DIRS

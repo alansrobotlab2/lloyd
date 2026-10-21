@@ -4175,3 +4175,319 @@ def test_a_sealed_alert_never_reports_an_out_of_window_note_as_cleared(tmp_path,
     assert any("DAILY_SCAN_DAYS" in line and TW.ALERT_TITLE in line for line in logged), (
         "the leftover note was swallowed: no log line names it or the window that "
         f"cannot reach it: {logged!r}")
+
+
+# ── #3109: the data root's half of the same hazard ─────────────────────────
+#
+# `datawatch.data_root_shadows` and its own exclusions are pinned in
+# `tests/test_guardian_data_root_shadow.py`. What these nodes pin is the seam: that a
+# finding from that check reaches `RUNTIME_DATA_ALERT_TITLE`, that the raise carries
+# `needs_human=True` all the way to the board channel, that the body names the root it
+# measured and the store to trust, and that a scan which could not run buys neither an
+# alert nor a retraction. The predicate itself is not re-tested here; the stand-in below
+# returns what the check would return, because the live data root cannot be made to hold
+# a 0-byte store by a test that must not write there.
+
+
+def _shadow_finding(root, trusted_size=4096):
+    """One `data_root_shadows` finding: `root/kg.sqlite` at 0 bytes over a populated store.
+
+    Shaped by hand from the keys `datawatch._shadow` builds, which its own tests pin.
+    """
+    return {
+        "shadow": str(root / "kg.sqlite"), "name": "kg.sqlite", "depth": 1,
+        "trusted": str(root / "_pipeline" / "vault-derived" / "kg.sqlite"),
+        "trusted_depth": 3, "trusted_size": trusted_size,
+        "declared": True,
+        "declared_relative": "_pipeline/vault-derived/kg.sqlite",
+    }
+
+
+def _shadow_incident(tmp_path, monkeypatch, strays=()):
+    """The #1536 stray harness with the data-root leg wired, over a root THIS test names.
+
+    Three wraps, each wrapped rather than replaced for the reason the #2056 nodes give: a
+    stub could only see that a call happened, not what it asserted.
+
+      * `datawatch.data_root_shadows` — returns `findings` and can be made to raise. The
+        live check's own arithmetic is pinned in
+        `tests/test_guardian_data_root_shadow.py`; here the question is what a finding
+        does to the alert path.
+      * `datawatch.DATA_ROOT` — a named path, because clause 5 says the body names the
+        root it measured and a test cannot assert a path it did not choose.
+      * `Notifier.alert` — records the kwargs and the fan-out result AND calls the real
+        method, so the daily note, the ledger and the board channel are all still the real
+        thing.
+      * `datawatch.quarantine_inert` — a recording stand-in, installed only after
+        `_stray_incident_with` has installed its own silent one (see below), because a
+        data-root finding must never reach the code-tree move and a shadow finding must
+        not change what that move is asked to do.
+
+    Returns the guardian, the note, `tick`, the `resolve` recorder, the recorded alerts,
+    the shadow scan and the number of move calls.
+    """
+    import guardian as gmod
+
+    root = tmp_path / "lloyd-data"
+    root.mkdir()
+    scan = _StrayDetector([])
+    scan.findings = []
+
+    def _scan(data_root, repo=None, now=None):
+        scan.calls += 1
+        scan.repo = data_root
+        if scan.fails:
+            raise RuntimeError("simulated shadow-scan failure")
+        return list(scan.findings)
+
+    def _set(new_findings):
+        scan.findings = list(new_findings)
+
+    scan.set = _set
+    moved_calls = []
+    monkeypatch.setattr(gmod.datawatch, "data_root_shadows", _scan)
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(root))
+
+    g, note, tick, clears, detector = _stray_incident_with(
+        tmp_path, monkeypatch, _StrayDetector(strays))
+    # AFTER the harness, which patched the same attribute with a silent
+    # `lambda *a, **k: []` of its own — a real move would `lstat`, and could unlink, a
+    # name in the production checkout that `policy.REPO` still is here. Installing the
+    # recorder first would have it overwritten, and every `moved_calls == []` below
+    # would then be unfailable no matter what the guardian did: a counter nothing can
+    # increment proves nothing. `test_the_move_recorder_sees_a_code_tree_move` is the
+    # control that shows this one is on the live path.
+    monkeypatch.setattr(gmod.datawatch, "quarantine_inert",
+                        lambda *a, **k: moved_calls.append(a) or [])
+    alerts = []
+    real_alert = g.notifier.alert
+
+    def _alert(level, title, body, **kw):
+        res = real_alert(level, title, body, **kw)
+        alerts.append({"level": level, "title": title, "body": body,
+                       "kwargs": kw, "result": res})
+        return res
+
+    g.notifier.alert = _alert
+    return g, note, tick, clears, alerts, scan, root, moved_calls
+
+
+def test_the_move_recorder_sees_a_code_tree_move(tmp_path, monkeypatch):
+    """Positive control: the counter the zero-assertions depend on can be incremented.
+
+    With a code-tree stray present and the loop armed, `_runtime_data_incident` calls
+    `quarantine_inert(policy.REPO, strays, policy.DATA_ROOT, now)` before anything else
+    (`agent-services/guardian/guardian.py:1597`) — so the recorder must see exactly one
+    call, scoped to the tree, or the `moved_calls == []` assertions in this file would
+    pass on a broken harness.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch, strays=("usage.db",))
+    tick()
+
+    assert len(moved_calls) == 1, (
+        f"the recorder saw {len(moved_calls)} move calls on a tick that had a tree stray, "
+        "so every zero-count assertion in this file would pass unfalsifiably")
+    assert moved_calls[0][0] == gmod.policy.REPO, (
+        f"the move was not scoped to the code tree: {moved_calls[0][0]}")
+
+
+def test_a_data_root_shadow_alerts_under_the_stray_title_asking_for_a_human(tmp_path, monkeypatch):
+    """#3109 clause 5: the finding surfaces as `RUNTIME_DATA_ALERT_TITLE`, needs_human.
+
+    Two channels are checked, not one. The kwargs prove the guardian asked for a human;
+    `"backlog" in result` proves the board channel actually opened — #2308 is the story of
+    a `needs_human` intention that lived only in a body's prose and produced 46 ledger rows
+    with no board item behind any of them.
+
+    And the move counter stays at zero — a falsifiable claim only because
+    `test_the_move_recorder_sees_a_code_tree_move` shows the same counter increments when a
+    move IS attempted: the code-tree branch relocates an empty stray because an in-tree file
+    is git-ignored cruft, while this one sits in the data root, where the same action is a
+    deletion a person owns.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    scan.set([_shadow_finding(root)])
+    tick()
+
+    assert scan.calls == 1, "the data root was not measured on this check"
+    assert scan.repo == str(root), (
+        f"it measured {scan.repo}, not the data root the guardian is configured with")
+    assert len(alerts) == 1, f"expected one alert, got {len(alerts)}"
+    assert alerts[0]["title"] == gmod.RUNTIME_DATA_ALERT_TITLE
+    assert alerts[0]["kwargs"].get("needs_human") is True, (
+        f"a data-root shadow must ask for a human: {alerts[0]['kwargs']}")
+    assert alerts[0]["kwargs"].get("coalesce") is True, (
+        "one incident, one daily-note section (#1536)")
+    assert "backlog" in alerts[0]["result"], (
+        f"needs_human=True did not open the board channel: "
+        f"{sorted(alerts[0]['result'])}")
+    assert moved_calls == [], (
+        "a data-root finding must never reach the code-tree move")
+
+
+def test_the_shadow_alert_names_both_paths_and_the_root_it_measured(tmp_path, monkeypatch):
+    """The body's sentences, checked as written — the finding is only dangerous as a pair.
+
+    A reader who is told only "a 0-byte kg.sqlite exists" has two options, and one of them
+    is deleting the 160 MB store. So the empty file and the populated store to trust are
+    both named, the trusted one with the bytes it holds, and the root that was measured is
+    named so a stale section can be traced to the tree it was measured against (#1536's
+    second finding). The timestamp is UTC with its `Z` suffix, the same rule
+    `guardian.py`'s `format_stamp` states: a naive local time in a machine-facing record
+    is read as UTC by every later reader.
+    """
+    import re
+
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    finding = _shadow_finding(root, trusted_size=160882688)
+    scan.set([finding])
+    tick()
+
+    assert len(alerts) == 1
+    body = alerts[0]["body"]
+    assert str(root) in body, f"the root it measured is not named: {body}"
+    assert finding["shadow"] in body
+    assert finding["trusted"] in body
+    assert "(160,882,688 bytes)" in body, (
+        "the store to trust must carry the bytes it holds: " + body)
+    assert "deletes NOTHING" in body
+    assert re.search(r"checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", body), (
+        f"no UTC-with-Z check time in the body: {body}")
+    assert "_DB_RELATIVE" in body, (
+        "the finding was declared by the layout module, and the body must say so")
+    # The #2061 lesson, applied to a body with a list in it: a heading inside the body
+    # truncates the section at the first one on the next refresh, so the tail of the
+    # instructions would be the part that vanished.
+    assert "\n## " not in body and not body.startswith("##"), body
+
+    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(sections) == 1, sections
+    assert finding["trusted"] in sections[0], (
+        "the trusted store is in the alert but not in the daily note")
+
+
+def test_a_cleared_data_root_retracts_the_open_alert(tmp_path, monkeypatch):
+    """The shadow gone is an incident closed on the same surface it was opened on.
+
+    The clearance names BOTH roots: the sentence used to name only the code tree
+    (`memory/2026-10-02.md`'s two retractions each asserted an empty tree and neither said
+    which), and once a data-root file is in the same title, a clearance that names only one
+    of them is an assertion about a root the check may not have walked.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    scan.set([_shadow_finding(root)])
+    tick()
+    assert len(alerts) == 1
+    scan.set([])
+    tick()
+
+    assert len(alerts) == 1, f"a cleared root must not raise a second alert: {alerts}"
+    assert clears, "the open incident was never retracted"
+    assert clears[-1][0] == gmod.RUNTIME_DATA_ALERT_TITLE
+    assert clears[-1][1] is True, "the resolve did not seal a section"
+    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(sections) == 1, "one incident must not leave two sections"
+    assert "cleared:" in sections[0]
+    assert str(root) in sections[0], (
+        f"the clearance does not name the data root it walked: {sections[0]}")
+    assert gmod.policy.REPO in sections[0], (
+        "the clearance lost the code tree it also claims about")
+
+
+def test_a_clean_data_root_raises_no_alert(tmp_path, monkeypatch):
+    """An empty result is not an incident: the check runs and says nothing.
+
+    The note is what is asserted, not the `resolve` recorder. `resolve` still runs on a
+    clean check — it is idempotent and writes nothing while no section of ours is open —
+    and its return value is NOT order-independent in this file: other nodes here open
+    alerts under this same title against shared notifier state, so a seal can come back
+    True for an incident this node never raised (the coupling
+    `test_retraction_writes_only_to_sections_of_ours` notes). This node's own note is
+    per-test, so "no section of ours exists" is the claim that survives reordering.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    tick()
+
+    assert alerts == [], f"a clean data root raised: {alerts}"
+    assert scan.calls == 1, "the data root was not measured on this check"
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE) == [], (
+        "a clean data root wrote a section anyway")
+
+
+def test_a_failed_shadow_scan_claims_nothing_and_retracts_nothing(tmp_path, monkeypatch):
+    """The scan raising must not read as "clean, retract".
+
+    One title now carries two conditions, so the seal on a clean CODE tree would close a
+    section that may still be holding a data-root file the check failed to look at — which
+    is #2056 verbatim: `memory/2026-10-02.md` holds sections sealed by checks that never
+    measured what they claimed. The failure is in the log; the record keeps its
+    still-open marker.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    scan.set([_shadow_finding(root)])
+    tick()
+    assert len(alerts) == 1
+
+    scan.fails = True
+    scan.set([])          # what a caught raise leaves behind: an empty list
+    tick()
+
+    assert len(alerts) == 1, f"a failed scan raised anyway: {alerts}"
+    assert clears == [], (
+        f"a check that could not measure the data root retracted it: {clears}")
+    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(sections) == 1 and "cleared:" not in sections[0], (
+        f"the open incident was sealed over a failed measurement: {sections}")
+
+
+def test_one_incident_carries_the_tree_stray_and_the_data_root_shadow_together(tmp_path, monkeypatch):
+    """Two roots, one title, one section — and the human ask survives the pairing.
+
+    The two findings share a title deliberately: `Guardian.alert` suppresses a same-title
+    repeat inside ALERT_REPEAT_SECONDS (900 s) while the check runs hourly, so two calls
+    would deliver one body and log the other away. This node pins the merge in both
+    directions: the tree's wording and the data root's wording are both in the one body, and
+    the raise still asks for a human even though the stray here is a non-watch-list name
+    whose own paragraph offers the reader a response they can carry out (`workers.db`
+    retained would ask for the same thing for a different reason — #2308).
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch, strays=("usage.db",))
+    finding = _shadow_finding(root)
+    scan.set([finding])
+    tick()
+
+    assert len(alerts) == 1, f"one incident means one call: {alerts}"
+    body = alerts[0]["body"]
+    assert "usage.db" in body, f"the code tree's finding was dropped: {body}"
+    assert finding["shadow"] in body and finding["trusted"] in body
+    assert alerts[0]["kwargs"].get("needs_human") is True
+    assert len(moved_calls) == 1, (
+        f"the tree stray's move did not run as before: {moved_calls}")
+    assert moved_calls[0][0] == gmod.policy.REPO, (
+        f"the move left the code tree: {moved_calls[0][0]}")
+    assert finding["name"] not in moved_calls[0][1], (
+        f"the data root's shadow was handed to the code-tree move: {moved_calls[0][1]}")
+    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(sections) == 1, sections
+    assert finding["trusted"] in sections[0]

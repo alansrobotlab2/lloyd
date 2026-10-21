@@ -251,6 +251,56 @@ def _stray_alert_body(tree: str, names, now: float,
     return "\n\n".join(paras)
 
 
+def _shadow_alert_body(data_root: str, shadows, now: float) -> str:
+    """The daily-note body for a 0-byte database shadowing a populated store (#3109).
+
+    A second root for the same coalesced title as the code-tree stray alert, and one
+    paragraph, deliberately. `Notifier._vault_note` appends under `## Self-mod guardian:
+    {title}` and seals with the NEXT `## `, so a body carrying a heading of its own is a
+    body whose tail silently does not reach the note — the shape clause 2 of #2061 exists
+    to catch — and `resolve` is title-scoped, so one heading is also what lets the
+    clearance retract the whole incident. Everything else here is a bullet.
+
+    Both halves of every pair are named because the hazard is the PAIR, not the file: the
+    empty one answers a count with 0 instead of failing, and the reader needs the store to
+    trust named with the bytes it holds to tell a store from a stand-in. The root that was
+    measured is named too — a reader chasing a stale section has to be able to tell which
+    root it was measured against, which is #1536's second finding.
+
+    Deletion is the reader's, never the guardian's. `datawatch.quarantine_inert` MOVES
+    code-tree residue into the quarantine directory; these files sit in the DATA root,
+    where the item's own reasoning says a removal reads as data loss and needs an owner,
+    so the wording asks a person and the raise carries `needs_human=True`. Whether that
+    stays report-only is a ruling no round makes (owed on #3109).
+    """
+    paras = [
+        f"A 0-byte database inside {data_root} has the same name as a populated database "
+        f"elsewhere under that same root ({len(shadows)} such "
+        f"file{'s' if len(shadows) != 1 else ''}, checked "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}). An empty file is a "
+        "valid SQLite database, so opening one answers a count with 0 instead of failing: "
+        "a probe run with the wrong cwd reports an empty store while the real one is "
+        "populated. This check moves and deletes NOTHING — a file under the data root is "
+        "a person's call, and this alert is the whole action.",
+        "",
+        "Each empty file, and the populated store to trust beside its name:",
+    ]
+    for f in shadows:
+        line = (f"- empty `{f['shadow']}` (0 bytes) — trust `{f['trusted']}` "
+                f"({f['trusted_size']:,} bytes)")
+        if f.get("declared"):
+            line += (" — the store `app/data_root.py` declares for that name through its "
+                     "*_DB_RELATIVE constant")
+        paras.append(line)
+    paras.append(
+        "Before removing an empty file, confirm it holds nothing: "
+        "`sqlite3 -readonly <path> .tables` must print nothing, and no `-wal` or `-shm` "
+        "may sit beside it. Then find the writer that opened the wrong path — each of "
+        "these was a command run with the data root as its cwd against a bare database "
+        "name, which is how `kg.sqlite` came to exist at the root at all (#3109).")
+    return "\n\n".join(paras)
+
+
 class Guardian:
     # Defaults for the three fields #2221 added, declared on the CLASS and not only in
     # `__init__`, because two tests in `test_guardian_rollback.py` build a Guardian with
@@ -1472,8 +1522,22 @@ class Guardian:
         now carries the one fact this method actually holds: did THIS process move
         anything, or not. `moved` is therefore bound above the branch that fills it — the
         retraction is reachable on the SAME tick as a move that emptied the tree (the
-        `strays = [...]` filter below and the `elif not strays:` after it are one tick),
-        and a local read only in the retraction would be an unbound name on that path.
+        `strays = [...]` filter below and the `elif not strays and not shadows:` after it
+        are one tick), and a local read only in the retraction would be an unbound name on
+        that path.
+
+        #3109 adds a second root to the same check, and it is a second root rather than a
+        second name in the same scan because nothing above can see it: `stray_in_tree`
+        enumerates git's untracked entries and the data root is not a repository, so a
+        0-byte `kg.sqlite` sitting in `~/lloyd-data` beside the populated
+        `_pipeline/vault-derived/kg.sqlite` the code actually opens is invisible to a
+        check that only walks the code tree — and an empty SQLite file answers a count
+        with 0 instead of failing, which is the 2026-08-23/24 "the KG is empty" class. The
+        two halves share this one title and one coalesced section because
+        `Guardian.alert` suppresses a same-title repeat within 900 s and the check runs
+        hourly: two calls would deliver one body and log the other away. What they do NOT
+        share is the response — the tree's residue gets moved, the data root's is named
+        for a person, `needs_human=True`, and neither file is touched here.
         """
         # `measured` is a flag rather than a sentinel value in `strays` because the
         # absence of a measurement must not be expressible as either a finding or an
@@ -1502,6 +1566,26 @@ class Guardian:
             # the record: an open incident whose last measurement failed. The reason is
             # in the log line above.
             return
+        # The data root's half of the same hazard (#3109): a 0-byte database inside
+        # `datawatch.DATA_ROOT` whose name is populated elsewhere under that root. The
+        # code-tree scan above cannot see it — `stray_in_tree`'s candidates are git's
+        # untracked entries and the data root is not a repo — and neither can the move
+        # below, which is scoped to the tree. Measured separately and never moved: the
+        # tree's residue gets relocated because an in-tree stray is git-ignored cruft,
+        # while a file under the data root is a person's call.
+        #
+        # A raise here claims nothing in either direction, which is #2056's rule read
+        # from the other side: `data_root_shadows` refuses to answer `[]` for a root it
+        # could not walk, precisely so this leg cannot mistake "unreadable" for "clean"
+        # and retract a section that is still true.
+        shadows: list[dict] = []
+        shadow_measured = False
+        shadow_root = datawatch.DATA_ROOT
+        try:
+            shadows = datawatch.data_root_shadows(shadow_root, policy.REPO, now)
+            shadow_measured = True
+        except Exception as exc:  # noqa: BLE001
+            log(f"data-root shadow check failed (continuing): {exc}")
         if strays and self.data.armed:
             # Residue first: an empty, idle second copy of a store that lives in the
             # data root is moved there and reported as news, not as an incident — on
@@ -1523,36 +1607,44 @@ class Guardian:
                               for name, dest in moved)
                     + "\n\n0 bytes, idle, and the real store is in "
                     f"{policy.DATA_ROOT}; nothing was deleted.")
-        if strays and self.data.armed:
-            # `coalesce` is what keeps one incident to one section on the daily
-            # note. This check runs every STRAY_CHECK_SECONDS (3600 s) and the
-            # condition can outlast many of them, so the hourly cadence used to
-            # append a whole new section per check — 21 copies of ONE incident in
-            # memory/2026-09-25.md, each naming a different snapshot of the set
-            # and none ever retracted. Guardian's own repeat guard cannot help:
-            # ALERT_REPEAT_SECONDS is 900 s and 3600 > 900 always, so every
-            # finding passed straight through (#1536).
-            # Every sentence below is `_stray_alert_body`'s, from the `lstat` this
-            # call takes — including the cause, which used to be a remembered
-            # mechanism rather than a reading of these numbers, and the two offers,
-            # which used to be unconditional and were both wrong for a retained
-            # store (#2057).
+        if (strays or shadows) and self.data.armed:
+            # One `alert` call per check, whatever the number of conditions reporting,
+            # because `Guardian.alert` suppresses a same-title repeat inside
+            # ALERT_REPEAT_SECONDS (900 s) and this check runs hourly: raising the tree
+            # body and then the data-root body would deliver one of them and log the
+            # other as "(suppressed repeat)" — the finding would vanish without a trace
+            # every hour both are true (#1536's mechanism, aimed at a new pair of
+            # conditions). So the two bodies are concatenated into the one coalesced
+            # section instead, each naming the root it measured.
             #
-            # `needs_human` is the same test `_stray_alert_body` uses to decide which
-            # paragraph to write (`_stray_alert_body`'s own `retained`), and it belongs
-            # on THIS call because the body cannot carry it: the Retained paragraph says
-            # neither offered response applies without ever saying `needs a human`, so
-            # #775's `asks_for_a_human` fallback never opened the backlog channel for it
-            # either. 46 firings of this title in the promotion ledger since 2026-09-25,
-            # every one of them the retained `workers.db`, produced 46 ledger rows and
-            # zero board items (#2308). A set of only non-watch-list names keeps the flag
-            # False: that body offers a response the reader can carry out themselves, so
-            # filing it would hand the board a decision the alert already answers.
+            # `needs_human` is now `retained or shadows`, and the shadow half is
+            # unconditional because that finding has no automated answer at all: the
+            # file is in the data root, where moving it is the item's own definition of a
+            # person's call. The tree half keeps its existing test — a set of names that
+            # are not on the watch list comes with a response the reader can carry out, so
+            # filing those would hand the board a decision the alert already answers
+            # (#2308, and the 46 ledger rows with no board item behind them).
+            body = ""
+            if strays:
+                body = _stray_alert_body(policy.REPO, strays, now, prev_check)
+            if shadows:
+                shadow_body = _shadow_alert_body(shadow_root, shadows, now)
+                body = f"{body}\n\n{shadow_body}" if body else shadow_body
             retained = [n for n in strays if n in datawatch.RUNTIME_NAMES]
-            self.alert("error", RUNTIME_DATA_ALERT_TITLE,
-                       _stray_alert_body(policy.REPO, strays, now, prev_check),
-                       coalesce=True, needs_human=bool(retained))
-        elif not strays:
+            self.alert("error", RUNTIME_DATA_ALERT_TITLE, body,
+                       coalesce=True,
+                       needs_human=bool(retained) or bool(shadows))
+        elif not strays and not shadows and shadow_measured:
+            # `and shadow_measured`, and it is the reason the scan above records whether
+            # it ran at all: the two conditions share one coalesced section, so a shadow
+            # scan that raised cannot be allowed to seal that section on the strength of a
+            # tree that IS clean — the section may be holding a data-root file this check
+            # failed to look at, and #2056 is exactly the story of a section closed by a
+            # check that did not measure it. A stale alarm that keeps its
+            # `_(still open on the next check)_` marker beats a retraction nobody can
+            # justify; the tree half's stale instructions are the cheaper of the two
+            # errors, and the failure is in the log line above.
+            #
             # The condition cleared, so the retraction goes on the SAME surface
             # the alarm used — the acceptance half of #1536. Not gated on
             # `data.armed` the way the alert is: a guardian that paused mid-incident
@@ -1560,12 +1652,18 @@ class Guardian:
             # nothing unless one of our sections is actually open. It is
             # idempotent, so the hourly all-clear after the first stays silent.
             #
-            # `elif not strays` and not a bare `else`, which is what #2056 clause 2 is
-            # about: the alert fires on `strays and self.data.armed`, and a finding
-            # held by a disarmed guardian takes neither branch — a paused loop has not
-            # closed the incident, it has stopped checking it, so it has earned no
-            # statement in either direction. The failed-measurement case above is the
-            # third outcome and it returned before reaching here.
+            # `elif not strays and not shadows` and not a bare `else`, which is what
+            # #2056 clause 2 is about: the alert fires on `(strays or shadows) and
+            # self.data.armed`, and a finding held by a disarmed guardian takes neither
+            # branch — a paused loop has not closed the incident, it has stopped checking
+            # it, so it has earned no statement in either direction. The failed-measurement
+            # case above is the third outcome and it returned before reaching here.
+            #
+            # `and not shadows` is the half #3109 adds, and it is the retract side of the
+            # rule that made `data_root_shadows` raise instead of answering `[]`: a
+            # section naming a data-root file is still true when the CODE tree is clean,
+            # and retracting it on a tree-only measurement is the #2056 seal again — an
+            # open incident closed by a check that never looked at it.
             #
             # The line names the root it measured because "on the latest check" is not
             # auditable by the reader who finds it a day later: the two retractions in
@@ -1580,16 +1678,23 @@ class Guardian:
             # and this loop did not do anything". The tree's `workers.db` was found gone with
             # the shipped move path never having run, which is the case the old line
             # described as a clean bill of health.
+            # Said only when the shadow scan actually measured, because the sentence
+            # asserts an absence: a shadow check that raised must not buy the clearance a
+            # root it never walked (#3109, and #2056's unreadable-is-not-empty again).
+            shadow_note = (f", and no 0-byte database shadowing a populated store under "
+                           f"{shadow_root}" if shadow_measured else "")
             if moved:
                 cleared = (
-                    f"no runtime stores inside the code tree of {policy.REPO} — the "
+                    f"no runtime stores inside the code tree of {policy.REPO}"
+                    f"{shadow_note} — the "
                     f"guardian moved {len(moved)} inert file"
                     f"{'s' if len(moved) != 1 else ''} on this check "
                     f"({', '.join(name for name, _ in moved)}); the instructions above "
                     "are stale, nothing further to move")
             else:
                 cleared = (
-                    f"no runtime stores inside the code tree of {policy.REPO} — absent "
+                    f"no runtime stores inside the code tree of {policy.REPO}"
+                    f"{shadow_note} — absent "
                     "with no move recorded by the guardian, so the instructions above "
                     "are stale and nothing here accounts for a path that was named and "
                     "is now gone")

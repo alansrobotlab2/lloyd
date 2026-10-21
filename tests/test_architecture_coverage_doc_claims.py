@@ -2055,13 +2055,16 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
         heads[rel] = {name: lo for lo, _hi, name in spans}
     # Both heads re-pointed by #3019, which added a reconciliation method to
     # `Guardian` and two module constants above it: 2179 → 2317 and 702 → 713.
+    # Re-pointed again by #3109, which added the module-level `_shadow_alert_body`
+    # (50 lines, above `evaluate_liveness`) and the data-root leg of
+    # `_runtime_data_incident` (55 more, between the two): 2317 → 2422 and 713 → 763.
     # Nothing else moved them, which is the point of pinning a definition head at
     # all — a change that shifts a cited line has to say so here first.
-    assert heads[guardian]["main"] == 2317, (
-        f"`main` moved off :2317 ({heads[guardian]['main']}) — if it is gone "
+    assert heads[guardian]["main"] == 2422, (
+        f"`main` moved off :2422 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 713, (
-        f"`evaluate_liveness` moved off :713 "
+    assert heads[guardian]["evaluate_liveness"] == 763, (
+        f"`evaluate_liveness` moved off :763 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
