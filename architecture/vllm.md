@@ -5,7 +5,7 @@ relations:
 tags: [architecture, lloyd, vllm, primary, kv-cache, gpu, throughput, benchmarks]
 type: reference
 status: implemented
-date: 2026-09-21
+date: 2026-10-21
 ---
 
 # The primary engine: vLLM setup, tuning, throughput
@@ -43,12 +43,20 @@ supervisord as `agent-llm-primary`. The live command line, verbatim:
   --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
   --speculative-config {"method": "mtp", "num_speculative_tokens": 3}
   --kv-cache-memory-bytes 15032385536
-  --language-model-only
+  --limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0}
+  --mm-processor-kwargs {"max_pixels": 2119936}
   --max-num-batched-tokens 4096
   --gdn-prefill-backend flashinfer --no-enable-flashinfer-autotune
   --kv-cache-dtype fp8
   --engram-config {"cpu_offload": true}
 ```
+
+Read the block against the running process, not against this page: `tr '\0' ' ' <
+/proc/$(pgrep -f vllm.entrypoints.cli.main | head -1)/cmdline`. It is the tree's
+own truth and it moves — `--language-model-only` was in this block until
+2026-09-23, when `7c7d6d69` loaded the vision tower and the launcher swapped
+that flag for the two `--limit-mm-per-prompt`/`--mm-processor-kwargs` lines
+above (§3.1's image assert is what keeps the swap from silently reversing).
 
 The last two are the flags this configuration exists for, and both come from
 the conf's environment rather than the launcher's defaults: `--kv-cache-dtype
@@ -67,9 +75,15 @@ outer residual and QSA output gate fusions); on 2026-10-12 it was rebuilt again
 at `a98247ab4db6` for the Qwen4Exp fusions and bugfixes that followed (the
 setup script's header lists them; SETUP.md has the summary), with FlashInfer
 0.7.0.post1 and its prebuilt cubins. Each rebuild goes to a new dated venv
-path; the 09-17 build stays at `.venvs/vllm-flash-next-main` and the 09-10 one
-at `.venvs/vllm-flash-next-main-0910`, both revert targets by `VLLM_VENV` in
-the conf. The launcher runs `vllm serve` through its module since 10-12 (the
+path; the 09-17 build at `.venvs/vllm-flash-next-main` is now the **only**
+revert target on the box. The 09-10 venv `.venvs/vllm-flash-next-main-0910` that
+the conf's older comment still tells a human to switch `VLLM_VENV` to, and the
+BF16 worker build `.venvs/vllm-qwen38-flash-next` that the launcher still
+defaults `VLLM_VENV` to, have both been deleted: measured 2026-10-21,
+`ls -d ~/lloyd/.venvs/*vllm*` returns `-djev`, `-flash-next-main`,
+`-flash-next-main-1012` and `-omni`, and either switch now dies at the
+launcher's venv check ("vLLM venv not found at $VLLM_VENV") with the running
+engine already down (#3136). The launcher runs `vllm serve` through its module since 10-12 (the
 `openai.api_server` module is deprecated upstream).
 
 Two served names, deliberately: `primary` is the alias every caller in this
@@ -78,13 +92,20 @@ substring-matches at boot.
 
 **The load-bearing values live in supervisord's `environment=`, not in the
 launcher.** `agent-llm-primary.conf` carries `VLLM_VENV`, `KV_CACHE_DTYPE=fp8`,
-`MAX_NUM_BATCHED_TOKENS=4096` and `KV_CACHE_MEMORY_BYTES=15032385536` (§3). The
-launcher's own fallbacks are the older
-BF16 worker build (`VLLM_VENV` defaults to `.venvs/vllm-qwen38-flash-next`,
-`KV_CACHE_DTYPE` to empty), so a conf that loses those lines boots a
-perfectly healthy engine with §3 undone. That is exactly the failure §3.1
-asserts against, and the precedent is real: on 2026-09-06 an automod rollback
-reverted the *secondary's* launcher under the same alias and port.
+`MAX_NUM_BATCHED_TOKENS=4096`, `KV_CACHE_MEMORY_BYTES=15032385536` (§3) **and
+`LANGUAGE_MODEL_ONLY=0` with `MM_IMAGES_PER_PROMPT=20`** — the launcher's own
+default is `1`, text-only, so a conf that loses those last two boots a
+perfectly healthy engine that refuses every screenshot while
+`models.primary.supports_vision: true` keeps claiming otherwise (§3.1's #1420
+assert is what catches that, not the model identity check). Its other fallbacks
+are the older BF16 worker build (`VLLM_VENV` defaults to
+`.venvs/vllm-qwen38-flash-next`, `KV_CACHE_DTYPE` to empty), so a conf that
+loses the KV lines was meant to boot a perfectly healthy engine with §3 undone —
+"meant to", because that fallback venv is now deleted (§1), which turns that
+silent regression into a boot that fails its venv check. The dtype half of it is
+exactly what §3.1 asserts against, and the precedent is real: on 2026-09-06 an
+automod rollback reverted the *secondary's* launcher under the same alias and
+port.
 
 ### 1.1 Slots: identity, the other cards, and who a subagent talks to
 
@@ -99,11 +120,15 @@ carries the slot table and the identity probe in full.)
   `expect_model` reports `unchecked`, so **update it whenever a slot's occupant
   changes** or the check is inert. `expect_kv_cache_dtype` /
   `expect_kv_pool_tokens_min` are the same idea one level down (§3.1).
-- **The two venvs.** `start-qwen38-flash-next.sh` adapts to whichever
-  `VLLM_VENV` names: `vllm-qwen38-flash-next` (the PLE-offload-worker build, the
-  script's own fallback default) and `vllm-flash-next-main-1012` (vLLM main,
-  UVA offload — what `agent-llm-primary.conf` serves, a main build since
-  2026-09-10, this venv since 10-12).
+- **The venvs it adapts to.** `start-qwen38-flash-next.sh` reads whichever
+  `VLLM_VENV` names and changes the PLE spelling, the fp8 guard and the module
+  path accordingly. Two exist on this box today: `vllm-flash-next-main-1012`
+  (vLLM main, UVA offload — what `agent-llm-primary.conf` serves, a main build
+  since 2026-09-10, this venv since 10-12) and `vllm-flash-next-main` (the
+  09-17 `dff1bde` build, the revert target). The third one the script can speak
+  — the PLE-offload-worker build `vllm-qwen38-flash-next`, which is also its
+  fallback default — has been deleted, so the two-venv branch is currently
+  reachable only by rebuilding it (#3136).
 - **The secondary (`:8091`, Qwen3.6-35B-A3B UD-Q3_K_XL, llama.cpp,
   `--parallel 1` because llama.cpp divides `--ctx-size` across slots and the
   full 256K window was the point) is off since 2026-09-20** —
@@ -141,7 +166,11 @@ open; the report is `~/rma/gpu-xid79-falloff-report.md`.
 
 The unit's own `Documentation=` line points at
 `file:///home/alansrobotlab/lloyd/gpu-xid79-falloff-report.md`, which has
-never existed in this tree. Harmless, but do not go looking for it there.
+never existed in this tree. Harmless, but do not go looking for it there — the
+line is the one route from `systemctl status nvidia-power-limit.service` to why
+the clamp exists at all, so a reader under an incident takes a dead path: #3138
+is pointing it at the report above, in both the repo copy and the installed
+one.
 
 ### 2.2 Why it needs a unit at all
 
@@ -237,14 +266,27 @@ Three numbering schemes on this box, and only two of them agree:
 
 | `nvidia-smi` | PCI | `/dev/nvidiaN` | Card | Serves |
 |---|---|---|---|---|
-| 0 | 01:00.0 | `/dev/nvidia2` | RTX 3090 | Qwen3-TTS, the voice worker, qmd |
-| 1 | 41:00.0 | `/dev/nvidia1` | RTX PRO 6000 | **this engine** |
-| 2 | 61:00.0 | `/dev/nvidia0` | RTX 3090 | the llama.cpp secondary |
+| 0 | 01:00.0 | `/dev/nvidia3` | RTX 3090 | Qwen3-TTS, the voice worker, qmd |
+| 1 | 41:00.0 | `/dev/nvidia2` | RTX PRO 6000 | **this engine** |
+| 2 | 42:00.0 | `/dev/nvidia4` | RTX 3090 | djev (`agent-djev.conf`, `GPU=2`) |
+| 3 | 61:00.0 | `/dev/nvidia0` | RTX 3090 | the omni TTS (pinned by GPU UUID, not index) |
+| 4 | 62:00.0 | `/dev/nvidia1` | RTX 3090 | nothing pins it |
+
+The node column is `/proc/driver/nvidia/gpus/<pci>/information`'s `Device
+Minor:`, read on the box 2026-10-21. Rows 2–4 are new here and were overdue:
+`2e08e6d3` (2026-10-07, "moar gpus") took §2.3's clamp table to five cards and
+left this one at three, so it still read index 2's bus id as `61:00.0` (now
+index 3) and still gave index 2 "the llama.cpp secondary" — a tenant that has
+been off since 2026-09-20 (`secondary_enabled: false`, §1.1) and is djev now.
+`tests/test_infrastructure_gpu_inventory.py` pins the §2.3 table and §GPUs at
+five rows and deliberately excludes this one by header; #3137 asks it to cover
+this table too, so the correction is not another hand-copy.
 
 `-i <n>` is nvidia-smi enumeration, i.e. PCI bus order — the same order the
 engine launchers pin with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so the clamp table
-and `CUDA_VISIBLE_DEVICES` agree. The **device-node number does not**, and is
-very nearly reversed. When attributing GPU usage from `/proc` or an fd list,
+and `CUDA_VISIBLE_DEVICES` agree. The **device-node number does not**, and after
+the two cards were added it is not even close to reversed (`01:00.0` is
+`/dev/nvidia3`, `61:00.0` is `/dev/nvidia0`). When attributing GPU usage from `/proc` or an fd list,
 map through the PCI bus id and never trust the node number. CUDA's default
 order is FASTEST_FIRST, so any process that forgets the pin puts its
 "device 0" on the Blackwell. `start-qwen38-flash-next.sh` exports the pin
@@ -413,7 +455,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 
 | Knob | Default | Production | Notes |
 |---|---|---|---|
-| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1012`** | the BF16 worker build vs the FP8 main build (dated per rebuild; the undated path is the 09-17 revert target) |
+| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1012`** | the BF16 worker build vs the FP8 main build (dated per rebuild; the undated path is the 09-17 revert target). The default names a venv that no longer exists (§1, #3136) |
 | `KV_CACHE_DTYPE` | *(empty = BF16)* | **`fp8`** | §3 |
 | `MAX_NUM_BATCHED_TOKENS` | *(empty = vLLM's 8192)* | **`4096`** | §5.1 |
 | `MAX_MODEL_LEN` | `262144` | default | §4 |
@@ -424,7 +466,9 @@ Every knob is an environment variable the launcher reads, so an arm is one
 | `MTP_ENABLED` / `MTP_TOKENS` | `1` / `3` | default | multi-token prediction, k=3 |
 | `GDN_PREFILL_BACKEND` | `flashinfer` | default | |
 | `FLASHINFER_AUTOTUNE` | `0` | default | |
-| `LANGUAGE_MODEL_ONLY` | `1` | default | |
+| `LANGUAGE_MODEL_ONLY` | `1` (text-only) | **`0`** | `0` loads the vision tower and replaces `--language-model-only` with `--limit-mm-per-prompt`, since 2026-09-23 (`7c7d6d69`). A conf that drops this line boots a text-only engine that still *claims* vision — §3.1's #1420 assert is the only thing that notices |
+| `MM_IMAGES_PER_PROMPT` | `0` (refuse images) | **`20`** | must stay ≥ `harness.images.max_outbound` (`config.yaml:511`, 20) — the count the harness evicts down to, so below it a screenshot-heavy turn dies at the engine and the harness never re-sends it |
+| `MM_MAX_PIXELS` | `2119936` (1456²) | default | bounds one image near 2.1k tokens; the same value the aux fallback uses |
 | `MOE_BACKEND` | *(empty)* | default | |
 | `EXTRA_ARGS` / `ARM_ENV` | — | — | one-shot arm plumbing; since 2026-09-17 the arm file is sourced above **every** row of this table (it used to sit below the first five, so an arm could not move them and said nothing) |
 
@@ -1254,3 +1298,4 @@ has still not been run as of 2026-09-11.
 - 2026-10-01 — **§10 counts 2026-09-27 (#2005).** The earlier day the 09-29 paragraph left uncounted is committed as `tests/fixtures/vllm_prefix_miss_2026-09-27.json`, a fifth extract, while its engine status lines were still in the rotation (7,039 of them in `.log.4`/`.log.5`). `tests/test_vllm_doc_claims.py` recomputes every figure in the new paragraph and walks the day's 17 chat miss events one by one: 6 churned, 7 sat at or over the gate, 4 had neither, 3 of them clear of the gate by a wide margin. The filing condition is therefore met on two independent counted days, and the accepted-loss paragraph and the 09-29 paragraph now say so and name both extracts. The upstream report itself, a write to a third-party repository, was at this date Alan's to make: **2026-10-20 — superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250**, posting the vLLM#57032 comment being **DROPPED, not owed**.
 - 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events then on the record are 4 + 1 + 1 at 0.1–0.7 s, every one of those six spanned by a single status line — the seventh, 2026-10-15's, added below by #2852, is not (126.5 s over 14 lines) — while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the ruling's published consequence did not move and its evidence set was then the three extracts 2026-09-27, 2026-09-29 and 2026-10-01; the comment body itself, a write to a third-party repository, then belonged to #2250 (Alan), which is the ask the 2026-10-20 note at the end of this entry records as dropped. **2026-10-16: superseded on the evidence set by #2852** — 2026-10-15 is the **fourth counted day on which the condition is met**, so the set is now **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**, and the stance moved no further than it moved for the third: the evidence set grew and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**, so the four-extract evidence set this entry grew carries no upstream ask and no counted day re-opens one.
 - 2026-10-16 — **§10 counts 2026-10-15 (#2852).** The fourth counted day on which the accepted-loss filing condition is met, committed as `tests/fixtures/vllm_prefix_miss_2026-10-15.json` byte-identical to the daily job's copy (`test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte` compares the two files, because the 10-15 status lines leave the rotation with the same turn the 10-01 ones did). `test_the_seventh_day_figures_are_the_derivation` recomputes every figure in the new §10 paragraph from the fixture at the config gate, and `test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool` attributes its one chat miss (`2026-10-15T15:54:11`, iteration 17, 112,821 tokens cold, 126.5 s over 14 status lines, gap KV peak 0.511 against the 0.60 gate, 408,165 tokens computed against 413,190 free blocks). Two things this day cost the page, both paid here rather than carried. **One:** it is the first counted day whose window contains no engine boot, so #2665's windowing leaves `pool_tokens` empty and the churn join unmeasured; the free-block figure is computed on 844,969 tokens read from the rotation's last boot before the window (`INFO 10-12 16:21:06`), the paragraph says so, and `_with_pool` pins it so `_gap_events` can walk a day `derive` cannot — at that pool the day's churn split is 44 of 109. The margin is thin and the entry says so: not-churned holds only above an 834,693-token pool (98.8% of the walk's need), so this is the weakest of the four qualifying days. **Two:** the gap-shape generalisation the 2026-10-05 entry above records as settled — every qualifying gap sub-second and spanned by a single status line — is true of the six events then on the record and false of this seventh, and no rail would have caught it, because the two asserts that held it walked only the three older fixtures. They now scan all four, the sub-second claim is scoped to the six it covers, and the derived negative half fails any future re-widening. Stance unchanged: a fourth qualifying day adds evidence, not stance, and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**; this day's event stands in the four-extract evidence set as the weakest of the four and answers to no upstream ask.
+- 2026-10-21 — **stale, corrected.** §1's verbatim command line still carried `--language-model-only` and no `--limit-mm-per-prompt`, a month after `7c7d6d69` (2026-09-23) loaded the vision tower: the live argv now runs `--limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0} --mm-processor-kwargs {"max_pixels": 2119936}`, because `agent-llm-primary.conf` sets `LANGUAGE_MODEL_ONLY=0` over the launcher's `1` — a knob §5's table did not list, and the only conf-set value that fails *silently* (a text-only engine that still passes the model-identity check), which is what §3.1's #1420 assert exists for. The §1 paragraph telling a human which `VLLM_VENV` to switch for a rollback named `.venvs/vllm-flash-next-main-0910`, and the launcher's fallback default names `.venvs/vllm-qwen38-flash-next`; both directories are gone (`ls -d ~/lloyd/.venvs/*vllm*` → `-djev`, `-flash-next-main`, `-flash-next-main-1012`, `-omni`), so the fallback this page relied on to turn a lost conf line into a quietly-wrong boot is now a dead venv check — #3136. §2.4's index map was still a three-card table from before `2e08e6d3`: index 2 given as `61:00.0` (it is `42:00.0`, and djev runs on it) serving "the llama.cpp secondary", off since 2026-09-20, no rows for indices 3 and 4, and both `/dev/nvidiaN` minors wrong — the one §2 table `tests/test_infrastructure_gpu_inventory.py` deliberately excludes from its harvester, hence #3137. Two §10 line citations are stale — `vllm_prefix_miss_window.py:225-229` for `derive`'s `by_kind` loop (really 287-291) and `:61-66` for `session_kind` (really 84-89) — and are **left as they stand**: both sit inside the 2026-09-25 counted reading, which `test_the_ninth_extract_moves_no_graded_reading` pins by sha256 pending a round that re-derives every figure in it, and `test_criterion_a_names_the_population_it_counted` requires the classifier be cited **by line**, so the symbol-for-number substitution this page's §8 lesson would otherwise recommend fails both rails. #3139 carries the corrected numbers and the two rails a fix has to satisfy; the test file's copy of the same range is in the same item, and the `nvidia-power-limit.service` `Documentation=` path that has never resolved is #3138. What held, re-measured rather than assumed: the five clamp values and their ranges against the unit's environment, the 844,969-token fp8 pool and 4096 batched tokens, `DEFAULT_MM_MAX_POS: 262144`, YaRN off with `context_length` absent, the `:8096` boot-probe route (`/v1/tokenize` 404 on the live engine), `PREFIX_CACHE_TOK_S = 6000.0`, the ram-gate floors and their clone in `round restart --only`, `app/prefix_miss.py`'s six trigger constants, `app/engine_pressure.py`'s 300 s ring, the `sessions.py:917` / `messages.py:2117` / `sessions_io.py:282` cites, `app/engine_pressure.py` in §6.2's writer list, and the argv's `--scheduling-policy priority --async-scheduling --enable-prefix-caching`. Filed #3136 #3137 #3138 #3139.
