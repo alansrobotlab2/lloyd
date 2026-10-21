@@ -98,6 +98,15 @@ async def _rank(args: dict) -> str:
     levels = [str(x) for x in levels] if isinstance(levels, list) and len(levels) >= 2 \
         else list(djev.RANK_LEVELS)
 
+    # No `samples` is passed here, and this round deliberately leaves that
+    # inconsistency standing rather than fixing it (#3112). The rank TOOL
+    # therefore runs the engine's auto policy — 1 read, or 4 when a first read
+    # is uncertain — while the recall RANKER pins samples=1, because on that
+    # path `architecture/djev.md` §8.1 measured `samples: "auto"` as 200 ms
+    # slower AND worse-ordered than one read (the recall side is pinned by
+    # tests/test_recall_djev_ranker.py asserting `call["samples"] == 1`). Two
+    # rank paths, two read budgets, one of them measured: choosing for the tool
+    # side needs its own run, not a number copied across the seam.
     rows = await asyncio.to_thread(
         djev.rank, query, [c[:CANDIDATE_CHARS] for c in candidates],
         seam="tool:rank", levels=levels,
@@ -130,6 +139,52 @@ async def _rank(args: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _VALID_TYPES = ("noul", "choice", "score")
+
+#: Upper bound of a meaningful fixed `samples` count. It belongs to the engine,
+#: not to this client: `agent-services/llm/djev-spark/server/structured_server.py`
+#: answers a fixed count with `{"mode": "fixed", "n": min(samples, 32)}`, so a
+#: larger number is accepted and clamped rather than refused — which is why the
+#: handler refuses only a count below 1. Named here because the schema
+#: description and the refusal message both have to state the same range; the
+#: client deliberately does not enforce it.
+SAMPLES_MAX = 32
+
+
+def _samples_error(raw: Any) -> str:
+    return (f"samples must be a positive count of noise draws between 1 and "
+            f"{SAMPLES_MAX} (got {raw!r}). Omit the field to let the engine "
+            f"choose: its auto policy is one read, or up to four when a first "
+            f"read is uncertain.")
+
+
+def _samples_arg(args: dict) -> "tuple[int | None, str | None]":
+    """The `samples` argument as the engine should receive it, or an error.
+
+    An absent field stays `None`, and `app/djev.py::_body` writes the key only
+    when it is not None, so the request reaches djev with no `samples` and the
+    engine applies its own default — `value.get("samples", "auto")`, mode auto
+    with max 4 — which is one read, or four when a first read's entropy is
+    above its threshold. That is the honest reading of an omitted field, and
+    the schema description now says so.
+
+    What must not stay is the falsy collapse. The handler used to write
+    `int(args["samples"]) if args.get("samples") else None`, so an explicit `0`
+    became the very auto policy the caller had just tried to override. The
+    engine refuses a 0 outright (`SchemaError: schema: samples must be a
+    positive count or "auto"`), but the client turns any engine failure into
+    "engine unreachable, disabled, or the response was malformed", so the
+    argument can never be named from there. This is the one place it can be.
+    """
+    raw = args.get("samples")
+    if raw is None:
+        return None, None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None, _samples_error(raw)
+    if n < 1:
+        return None, _samples_error(raw)
+    return n, None
 
 
 def _validate(questions: Any) -> str | None:
@@ -201,11 +256,14 @@ async def _decide(args: dict) -> str:
     bad = _validate(questions)
     if bad:
         return _err(bad)
+    samples, samples_err = _samples_arg(args)
+    if samples_err:
+        return _err(samples_err)
 
     out = await djev.ask(
         state, questions, seam="tool:decide",
         instructions=str(args.get("instructions") or "") or None,
-        samples=int(args["samples"]) if args.get("samples") else None,
+        samples=samples,
         timeout=float(args.get("timeout_seconds") or djev.DEFAULT_TIMEOUT_S))
     if out is None:
         return _err("djev did not answer (engine unreachable, disabled, or the "
@@ -351,8 +409,12 @@ async def list_tools():
                     "instructions": {"type": "string", "description":
                                      "Optional context prepended to every question"},
                     "samples": {"type": "integer", "description":
-                                "Noise draws to average (default 1; more is "
-                                "steadier and proportionally slower)"},
+                                "Noise draws to average per question. Omitting "
+                                "it is not one read: the engine's auto policy "
+                                "is one read, or four when a first read is "
+                                f"uncertain. A positive count fixes it (above "
+                                f"{SAMPLES_MAX} the engine clamps to "
+                                f"{SAMPLES_MAX})"},
                     "verbose": {"type": "boolean", "description":
                                 "Every diagnostic instead of the compact "
                                 "answer (default false)"},

@@ -186,6 +186,92 @@ def test_decide_accepts_questions_as_a_json_string(monkeypatch):
     assert "type must be one of" in out["error"]
 
 
+def _decide_props() -> dict:
+    for t in asyncio.run(tools.list_tools()):
+        if t.name == "djev_decide":
+            return t.input_schema["properties"]
+    raise AssertionError("djev_decide is not advertised")  # pragma: no cover
+
+
+def _capturing_ask(monkeypatch) -> list:
+    """Records the kwargs of every `app.djev.ask` call; answers nothing."""
+    seen: list[dict] = []
+
+    async def _ask(*a, **k):
+        seen.append(k)
+        return None
+    monkeypatch.setattr(djev, "ask", _ask)
+    return seen
+
+
+def test_decide_samples_description_names_the_engine_auto_policy():
+    """"#3112: the description said `default 1`, but omitting the field sends
+    no `samples` at all — `app/djev.py::_body` writes the key only when it is
+    not None — so the engine answers under its own default of `auto`: one
+    read, or four when a first read's entropy is above 0.1. A model reading
+    the old text believed its call was one cheap read when it may have cost
+    four."""
+    desc = _decide_props()["samples"]["description"]
+    assert "default 1" not in desc.lower()
+    assert "auto" in desc.lower()
+    assert "omit" in desc.lower()
+    assert "one read" in desc.lower() and "four" in desc.lower()
+    # The upper bound of a fixed count is the engine's own clamp, not a
+    # ceiling this client enforces.
+    assert str(tools.SAMPLES_MAX) in desc
+
+
+@pytest.mark.parametrize("bad", [0, -3])
+def test_decide_refuses_non_positive_samples_without_calling_the_engine(
+        monkeypatch, bad):
+    """0 used to be falsy, so the handler turned an explicit "one read
+    refused" into the auto policy it had just been asked not to run. The
+    engine refuses a 0 outright (`structured_server.py`: samples must be a
+    positive count or "auto"), and the client swallows that into "engine
+    unreachable, disabled, or the response was malformed" — so this handler
+    is the one place the bad argument can still be named."""
+    seen = _capturing_ask(monkeypatch)
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"a": {"type": "noul"}},
+                                "samples": bad})
+    assert seen == []
+    assert "samples" in out["error"]
+    assert "positive" in out["error"].lower()
+    assert f"1 and {tools.SAMPLES_MAX}" in out["error"]
+
+
+def test_decide_refuses_an_uncountable_samples_without_calling_the_engine(
+        monkeypatch):
+    seen = _capturing_ask(monkeypatch)
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"a": {"type": "noul"}},
+                                "samples": "many"})
+    assert seen == []
+    assert "samples" in out["error"] and "positive" in out["error"].lower()
+
+
+def test_decide_forwards_samples_none_when_the_field_is_omitted(monkeypatch):
+    """The behaviour half of #3112 is deliberately NOT changed: an omitted
+    field must keep reaching the engine as no `samples` key at all, so the
+    auto policy still answers it. Fixing the description must not silently
+    change what any existing call costs."""
+    seen = _capturing_ask(monkeypatch)
+    out = _call("djev_decide", {"state": "s", "questions": {"a": {"type": "noul"}}})
+    assert len(seen) == 1
+    assert seen[0]["samples"] is None
+    assert "No decision was made" in out["error"]
+
+
+def test_decide_forwards_an_explicit_positive_samples_count(monkeypatch):
+    """Without this, "forward nothing" would satisfy the omission test too:
+    a fixed count is the case the field exists to express."""
+    seen = _capturing_ask(monkeypatch)
+    _call("djev_decide", {"state": "s", "questions": {"a": {"type": "noul"}},
+                          "samples": 5})
+    assert len(seen) == 1
+    assert seen[0]["samples"] == 5
+
+
 # ---------------------------------------------------------------------------
 # djev_status
 # ---------------------------------------------------------------------------
