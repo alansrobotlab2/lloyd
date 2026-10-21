@@ -237,6 +237,20 @@ _ORPHAN_HANDLE_RE = re.compile(r"^\s*/{1,2}\s*@[\w][\w.\-]{1,39}$")
 #: prose on the line to lose, and no sentence begins this way.
 _TAG_MENTION_LINE_RE = re.compile(r"^\s*(?:[@#][^\W_][\w.\-]*\s*)+$")
 
+#: A colon-LESS promo heading flanked by emoji, which is what a channel's
+#: `🛒 Gear Links 🛒` / `🎥 Related Videos 🎥` section becomes once every URL
+#: under it has been taken out (#3121). The two shapes in the list above that
+#: could reach this line both need a colon: `_FOOTER_SECTION_LABEL_RE` demands
+#: `…:` and `_FOOTER_LABEL_RE` demands wording (`my links`, `resources`) this
+#: heading does not carry, so the instrument called both lines clean and the
+#: published digest counted a residue-only body as content. Narrow by
+#: construction, per #2509: decoration plus one of two phrases and nothing else
+#: on the line, so `My gear links are here` and `Watch the full walkthrough`
+#: are prose. The name stays second-to-last in the list rather than first
+#: because `Related Videos:` must keep the shape that already owned it.
+_PROMO_HEADING_RE = re.compile(
+    r"^\W*(?:gear\s*links?|related\s*videos?)\W*$", re.IGNORECASE)
+
 #: Ordered so a line reporting more than one shape reports the most specific:
 #: a run of `#tag`s is a hashtag tail before it is a mention line, an orphan
 #: handle is also a mention line, a rule is the weakest evidence of the set and
@@ -253,6 +267,7 @@ _FOOTER_RESIDUE_SHAPES: tuple = (
     ("footer-phrase", _FOOTER_PHRASE_RE),
     ("channel-greeting", _GREETING_ANCHOR_RE),
     ("email", _EMAIL_RE),
+    ("promo-heading", _PROMO_HEADING_RE),
     ("rule", _RULE_LINE_RE),
 )
 
@@ -345,6 +360,49 @@ def footer_residue_lines(text: str) -> "list[tuple[int, str]]":
     """
     return [(i, shape) for i, ln in enumerate(text.splitlines(), 1)
             if (shape := footer_residue_shape(ln)) is not None]
+
+
+#: Shapes that cannot make a whole body footer-only on their own: see
+#: `footer_only` for the two rulings they carry (#1900's greeting, #1561's rule).
+_FOOTER_ONLY_INSUFFICIENT = frozenset({"channel-greeting", "rule"})
+
+
+def footer_only(text: str) -> bool:
+    """True when `text` has no non-blank line that is NOT footer residue (#3121).
+
+    The whole-body half of the same closed list. The stripper cannot express
+    this itself: `strip_link_footer` deliberately abstains rather than empty a
+    body (#1900, `if not any(...): return lines`), so a text that is nothing but
+    footer survives the strip unchanged and comes back looking like content.
+    That is the state `🛒 Gear Links 🛒\\n\\n🎥 Related Videos 🎥` reached the
+    writer in — 34 characters, published as a digest entry because the writer's
+    `stripped == summary` short-circuit read it as "no footer to remove".
+
+    Asking the closed-list classifier instead of the strip means the writer and
+    the instrument answer from one predicate: the count `corpus_shape.py` keeps
+    over a published digest and the decision to skip an item cannot disagree.
+
+    Two shapes are excluded from carrying it on their own, and both exclusions
+    are rules this module already owns rather than new guesses. `channel-greeting`
+    is one because `_greeting_is_whole_body` (#1900) exists precisely to tell a
+    greeting and nothing else apart from a greeting with its paragraph after it —
+    a line-by-line classifier cannot make that distinction, and `Welcome to the
+    channel. Today we walk through the new tokenizer…` is a single line the
+    greeting anchor reports while its content is the rest of the line. `rule` is
+    the other because #1561 abstains from reading a bare rule as a footer ("a
+    channel that rules its own sections"). A body therefore needs at least one
+    line that could not be prose — a heading, a label, a handle, a hashtag run —
+    before it counts as footer-only.
+
+    Empty text is not footer-only, because there is no residue to name; callers
+    that treat "no body" uniformly already have their own empty check.
+    """
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    shapes = [footer_residue_shape(ln) for ln in lines]
+    return (all(shapes)
+            and any(shape not in _FOOTER_ONLY_INSUFFICIENT for shape in shapes))
 
 
 def _drop_footer_residue(lines: list) -> list:

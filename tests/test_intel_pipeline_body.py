@@ -3722,6 +3722,31 @@ def test_prose_that_merely_mentions_subscribe_or_opens_welcome_to_survives(
 # overridable; `test_each_digest_property_fires_on_a_seeded_vault` is what that buys.
 DIGEST_REL = Path("knowledge") / "ai-llms" / "youtube-digest.md"
 
+#: The newest dated section already in the digest when #3121 landed. Residue
+#: under a section AT OR BELOW this date was published before the writer could see
+#: the shape and is excused by the node below; residue under any later section is
+#: a fresh publish and fails it. Keyed on the date heading rather than a list of
+#: titles so the excuse cannot silently grow as entries are appended.
+DIGEST_PRE_3121_DATE = "2026-10-21"
+
+_DATE_SECTION_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
+
+
+def _digest_section_dates(lines) -> dict:
+    """Line number → the dated `## ` section it sits in.
+
+    A line above the first date heading maps to `None`, which is never excused:
+    front matter has no body to carry residue, and the node's own reading already
+    skips it, so `None` reaching the excuse would mean the two disagreed.
+    """
+    out, current = {}, None
+    for i, ln in enumerate(lines, 1):
+        hit = _DATE_SECTION_RE.match(ln)
+        if hit:
+            current = hit.group(1)
+        out[i] = current
+    return out
+
 
 def _shipped_digest() -> Path:
     """The published digest, resolved through `board_presence.vault_root()`.
@@ -4464,8 +4489,35 @@ def test_no_shipped_digest_body_carries_a_tag_run_line():
         path = vault / rel
         assert path.is_file(), path
         lines = path.read_text(errors="replace").splitlines()
-        assert residue_lines(lines) == [], [
-            (n, t, s) for n, t, s in residue_lines(lines)]
+        # A reported line is excused only when it sits under a dated section that
+        # was already published when #3121 landed; the bound is a date, so the
+        # excuse cannot grow as entries are appended, and no count is pasted in.
+        #
+        # Why it has to be said out loud: this node exists to FIRE on a shape,
+        # and until #3121 the predicate could not see `🛒 Gear Links 🛒` — that is
+        # the only reason `== []` held on a note carrying 12 promo-heading lines
+        # under 7 entries dated 2026-10-07 to 2026-10-21. Naming the shape makes
+        # those lines visible; whether the published ones come out of the note is
+        # #3121's owed ruling on a vault this round must not rewrite. Residue
+        # under any section after 2026-10-21 fails here.
+        dated = _digest_section_dates(lines)
+        reported = residue_lines(lines)
+        fresh = [(n, t, s) for n, t, s in reported
+                 if not (dated.get(n) and dated[n] <= DIGEST_PRE_3121_DATE)]
+        assert fresh == [], fresh
+        # The excuse covers the one shape #3121 makes visible and nothing else:
+        # any other shape under a historical entry is not this item's to carry.
+        # Over the note the fix was filed from the excuse must also be NON-EMPTY,
+        # because an empty one there would mean the paragraph above had quietly
+        # become a no-op. The robotics digest carries no residue at all, so the
+        # non-empty half is asked of the file that has it, not of both.
+        excused = {s for n, t, s in reported
+                   if dated.get(n) and dated[n] <= DIGEST_PRE_3121_DATE}
+        assert excused <= {"promo-heading"}, excused
+        if rel == str(DIGEST_REL):
+            assert excused == {"promo-heading"}, (
+                "the digest #3121 was filed over no longer carries the historical "
+                "promo headings this node excuses, so the excuse is untested")
         headings = sum(1 for ln in lines if ln.startswith("### "))
         rules = sum(1 for ln in lines if ln.strip() == "---")
         assert rules == headings + 2, (rel, headings, rules)
@@ -4473,5 +4525,238 @@ def test_no_shipped_digest_body_carries_a_tag_run_line():
         seeded = list(lines)
         at = next(i for i, ln in enumerate(seeded) if ln.startswith("### ")) + 4
         seeded.insert(at, "#ai #aitools")
-        fired = residue_lines(seeded)
-        assert [s for _, _, s in fired] == ["hashtag-run"], fired
+        fired_before = residue_lines(lines)
+        # Compared on (line text, shape) and not on line number, because the
+        # inserted line shifts every number below it by one.
+        fired_new = [(t, s) for _, t, s in residue_lines(seeded)
+                     if (t, s) not in {(t, s) for _, t, s in fired_before}]
+        assert fired_new == [("#ai #aitools", "hashtag-run")], fired_new
+
+
+# ---------------------------------------------------------------------------
+# #3121 — the footer that IS the whole body
+#
+# `youtube_scanner.py:408` stores `clip_body(strip_link_footer(raw_description))`,
+# so what the writer re-strips is the scanner's already-stripped output. For the
+# 2026-10-21 row below the strip emptied the description down to its two promo
+# labels, the writer's `stripped == summary` path handed those labels back
+# verbatim without ever consulting `ends_a_sentence`, and the digest published a
+# 34-char "digest" of a video we have nothing to say about. Three published
+# shapes came out of a scan of all 288 `### ` entries of
+# `knowledge/ai-llms/youtube-digest.md` on 2026-10-21 (body = the lines between
+# `**Source:**` and `[Link]`): the label pair as the whole body (2026-10-07,
+# 2026-10-21), one label as the whole body (2026-10-14, 2026-10-16), and a real
+# sentence with the pair appended below it (2026-10-15 twice, 2026-10-17). The
+# instrument was blind to all of them: `footer_residue_shape` answered None for
+# both labels, because `_FOOTER_SECTION_LABEL_RE` demands a trailing colon and
+# `_FOOTER_LABEL_RE` demands wording the emoji-flanked heading does not have.
+#
+# One closed-list shape is the whole fix on the classifier side, and #2509's own
+# docstring asks for exactly that pairing — one shape added there is "counted by
+# the instrument and dropped by the writer in the same edit". The fixture is the
+# recorded row rather than an invented description, because every one of these
+# shapes was first noticed in a published note.
+# ---------------------------------------------------------------------------
+
+#: The recorded `gate_description` of the scored 2026-10-21 row for
+#: youtube.com/watch?v=8FEm8mMzeLE ("It Begins... Local AI and the Cloud Start
+#: Sharing"), copied byte for byte out of
+#: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/intel-2026-10-21.jsonl` on
+#: 2026-10-21: 1,856 characters over 45 lines, the channel's own sentence first
+#: and every link block under it.
+AZISK_DESCRIPTION = "\n".join([
+    'I let AI read my medical records and search the web, with one rule: my private information stays on my Mac.',
+    '🔹 Perplexity Hybrid Compute - https://www.perplexity.ai/hub/products/hybrid-compute',
+    '',
+    '🛒 Gear Links 🛒',
+    '',
+    '🪛🪛Highly rated precision driver kit: https://amzn.to/4fkMVfg',
+    '💻☕ Favorite 15" display with magnet: https://amzn.to/3zD1DhQ',
+    '🎧⚡ Great 40Gbps T4 enclosure: https://amzn.to/3JNwBGW',
+    '🛠️🚀 My nvme ssd: https://amzn.to/3YLEySo',
+    '📦🎮 My gear: https://www.amazon.com/shop/alexziskind',
+    '',
+    '🎥 Related Videos 🎥',
+    '',
+    '🧱🖥️ Mac Studio Cluster - https://youtu.be/25xVqvL5j4g',
+    '🧳🧰 Mini PC portable setup - https://youtu.be/4RYmsrarOSw',
+    '🍎💻 Dev setup on Mac - https://youtu.be/KiKUN4i1SeU',
+    '💸🧠 Cheap mini runs a 70B LLM 🤯 - https://youtu.be/xyKEQjUzfAk',
+    '🧪🔥 RAM torture test on Mac - https://youtu.be/l3zIwPgan7M',
+    '🍏⚡ FREE Local LLMs on Apple Silicon | FAST! - https://youtu.be/bp2eev21Qfo',
+    '🧠📉 REALITY vs Apple’s Memory Claims | vs RTX4090m - https://youtu.be/fdvzQAWXU7A',
+    '🧬🐍 Set up Conda - https://youtu.be/2Acht_5_HTo',
+    '⚡💥 Thunderbolt 5 BREAKS Apple’s Upcharge - https://youtu.be/nHqrvxcRc7o',
+    '🧠🚀 INSANE Machine Learning on Neural Engine - https://youtu.be/Y2FOUg_jo7k',
+    '🧱🖥️ Mac Mini Cluster - https://youtu.be/GBR6pHZ68Ho',
+    '',
+    '* 🛠️ Developer productivity Playlist - https://www.youtube.com/playlist?list=PLPwbI_iIX3aQCRdFGM7j4TY_7STfv2aXX',
+    '🔗 AI for Coding Playlist: 📚 - https://www.youtube.com/playlist?list=PLPwbI_iIX3aSlUmRtYPfbQHt4n0YaX0qw',
+    '',
+    '',
+    'My Silicon Exchange site prompt: https://gist.github.com/alexziskind1/fe55f03892f3fe1d6d8cf6065c631bb8',
+    '',
+    '— — — — — — — — — ',
+    '',
+    '❤️ SUBSCRIBE TO MY YOUTUBE CHANNEL 📺',
+    'Click here to subscribe: https://www.youtube.com/@AZisk?sub_confirmation=1',
+    '',
+    '— — — — — — — — —',
+    '',
+    'Join this channel to get access to perks:',
+    'https://www.youtube.com/channel/UCajiMK_CY9icRhLepS8_3ug/join',
+    '',
+    '— — — — — — — — —',
+    '📱 ALEX on X: https://x.com/digitalix',
+    '',
+    '#macstudio     #macbook    #perplexity'
+])
+
+#: What the strip leaves: the two promo labels with nothing under either. This is
+#: also the string stored as that row's `summary` and the whole published body.
+PROMO_LABEL_PAIR = "🛒 Gear Links 🛒\n\n🎥 Related Videos 🎥"
+
+#: The 18-char single-label body, published twice (2026-10-14, 2026-10-16).
+RELATED_LABEL_ONLY = "🎥 Related Videos 🎥"
+
+#: A published tail case (2026-10-15 x2, 2026-10-17): real prose, 136 chars, with
+#: the label pair appended under it. From the live digest, `DGX Spark DELL GB10
+#: Unboxing` and its siblings.
+DGX_TAIL_BODY = ("I wired eight DGX Sparks into a 1TB \u201cVRAM\u201d cluster, because "
+                 "NVIDIA wouldn\u2019t show how to go past two.\n\n" + PROMO_LABEL_PAIR)
+
+#: Real channel copy, 137 chars, URL-free, published verbatim (`The Cheapest 4TB
+#: DGX Spark Alternative…`). The case clause 4 must not eat.
+REAL_CHANNEL_COPY = ("I took the \u201ccheapest\u201d GB10 box (Asus GX10) and pulled a "
+                     "storage move that changes what these DGX Spark\u2013style machines "
+                     "are actually worth.")
+
+#: The scored row's own `summary` — the scanner's stored output, which is what
+#: the writer receives.
+AZISK_STORED_SUMMARY = PROMO_LABEL_PAIR
+
+#: The one name the closed list gives this heading style.
+PROMO_HEADING_SHAPE = "promo-heading"
+
+
+def test_the_recorded_row_strips_to_footer_residue_and_no_sentence():
+    """The mechanism, measured rather than recited. The channel's opening
+    sentence is a trailer lead-in — a sentence ending in a colon directly above a
+    link block — so `_drop_url_blocks` takes the run *including* that line, the
+    same rule the #2509 fixture `TRAILER_WITH_LABEL` already pins. What is left of
+    the 1,856-char description is footer and nothing else: the two promo labels,
+    two separator rules and a hashtag run.
+
+    The strip cannot remove that itself — it will not empty a body (#1900) —
+    which is exactly why a whole-body predicate has to sit beside the shape. And
+    the row AS STORED is narrower than the strip's output: its `summary` is the
+    34-char label pair, a fixed point of the strip. That is what the writer
+    receives, and why its `stripped == summary` path saw nothing to act on.
+    """
+    assert len(AZISK_DESCRIPTION) == 1856, "the fixture stopped being the recorded row"
+    stripped_desc = body_mod.strip_link_footer(AZISK_DESCRIPTION)
+    assert "http" not in stripped_desc, "a link block survived the strip"
+    assert body_mod.footer_only(stripped_desc) is True, (
+        f"the recorded description still strips to something the closed list "
+        f"calls content: {stripped_desc!r}")
+    assert body_mod.footer_only(AZISK_DESCRIPTION) is False, (
+        "the description as published carries a sentence, so naming the shape "
+        "must not read the whole recorded row as footer — only its remainder")
+    assert len(AZISK_STORED_SUMMARY) == 34, "the stored summary is not the body"
+    assert body_mod.strip_link_footer(AZISK_STORED_SUMMARY) == AZISK_STORED_SUMMARY
+
+
+def test_the_emoji_promo_heading_is_named_residue_by_the_one_predicate():
+    """Clause 2. Both labels answer to one closed-list shape, so the instrument
+    that counts residue in a published digest and the stripper that removes it
+    cannot disagree about what residue is — the #2737 false green was exactly a
+    section the counter called clean."""
+    for line, label in ((PROMO_LABEL_PAIR.split("\n\n")[0], "gear links"),
+                        (RELATED_LABEL_ONLY, "related videos")):
+        shape = body_mod.footer_residue_shape(line)
+        assert shape is not None, f"the instrument still calls the {label} label clean"
+        assert shape == PROMO_HEADING_SHAPE, (
+            f"the {label} label is classified {shape!r}, not {PROMO_HEADING_SHAPE!r} — "
+            "the closed list would then hold two entries for one heading style")
+    # The instrument's own return shape is (1-based line, shape name), so the
+    # pair's two lines are 1 and 3 with the blank between them skipped.
+    assert body_mod.footer_residue_lines(PROMO_LABEL_PAIR) == [
+        (1, PROMO_HEADING_SHAPE), (3, PROMO_HEADING_SHAPE)], (
+        "the instrument does not report both lines of the published 34-char body")
+    assert body_mod.footer_residue_lines(RELATED_LABEL_ONLY) == [
+        (1, PROMO_HEADING_SHAPE)]
+
+
+def test_a_label_only_body_is_no_body_and_the_write_run_skips_the_item(intel_state,
+                                                                       capsys):
+    """Clause 1. Two promo labels are not a digest, and the item goes through the
+    skip counter #1509 already prints — no second skip path, and no edit of the
+    note that already carries the section (#1269 clause 1, append-only). The run
+    is driven for real because the contract names the line it prints, not just
+    the predicate behind it."""
+    item = _yt(summary=AZISK_STORED_SUMMARY,
+               title="It Begins... Local AI and the Cloud Start Sharing")
+    assert vw_mod.lacks_body(item) is True, "a body of two promo labels is still a body"
+    # `None`, not the empty string: `_entry_body` returns None here and that is
+    # the marker the skip reads. An empty string means something else in this
+    # module — a body that duplicates its own title — and is still published.
+    assert vw_mod._entry_body(item) is None
+    assert vw_mod.write_item_to_vault(item, DIGEST_PROFILE) is False
+
+    import json
+    row = {"id": "youtube:AZisk:8FEm8mMzeLE",
+           "title": "It Begins... Local AI and the Cloud Start Sharing",
+           "url": "https://www.youtube.com/watch?v=8FEm8mMzeLE",
+           "source": "youtube", "category": "youtube",
+           "summary": AZISK_STORED_SUMMARY,
+           "why": "The title suggests a hybrid AI architecture involving local models.",
+           "relevance": 6, "urgency": 0, "projects": [], "authors": [],
+           "published": "", "discovered_at": "2026-10-21T10:40:00",
+           "gate_description": AZISK_DESCRIPTION, "grade_source": "llm",
+           "source_tags": []}
+    scored = intel_state / "feeds" / "intel-2026-10-21.jsonl"
+    scored.parent.mkdir(parents=True, exist_ok=True)
+    scored.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    capsys.readouterr()
+    assert vw_mod.write_all_to_vault("2026-10-21") == 0, "the label pair was published"
+    out = capsys.readouterr().out
+    assert "skipped (no body): 1" in out, out
+    assert "It Begins" not in out
+    published = [f.read_text() for f in
+                 (intel_state / "vault" / "knowledge").rglob("*.md")]
+    assert not any("It Begins" in text for text in published), (
+        "the run printed the skip and appended the section anyway")
+
+
+def test_a_body_that_has_prose_keeps_it_and_loses_the_labels():
+    """Clause 3. The same shape has to come off the end of a body that does have
+    something to say — 2026-10-15 twice and 2026-10-17 published the pair under a
+    real sentence — and stripping must never trade a sentence for tidiness."""
+    assert len(DGX_TAIL_BODY) == 136, "the tail fixture stopped being the published body"
+    assert body_mod.strip_link_footer(DGX_TAIL_BODY) == DGX_TAIL_BODY.split("\n\n")[0]
+    # A label pair that is the *whole* body is the one case the strip will not
+    # act on, and it will not because emptying a body is never the answer (#1900).
+    assert body_mod.strip_link_footer(PROMO_LABEL_PAIR) == PROMO_LABEL_PAIR
+    assert body_mod.strip_link_footer(RELATED_LABEL_ONLY) == RELATED_LABEL_ONLY
+    # The real row therefore has no body: refused, rather than published emptied.
+    assert vw_mod.lacks_body(_yt(summary=body_mod.strip_link_footer(AZISK_DESCRIPTION)))
+
+
+def test_real_channel_copy_is_still_published_verbatim(tmp_path, intel_state):
+    """Clause 4. The equality path that handed the labels back is the same path
+    that publishes 108–501 chars of channel copy unchanged (#1269 clause 2 —
+    pasted source text is not ours to rewrite), so it stays, and the skip has to
+    fire on the label shape alone."""
+    assert len(REAL_CHANNEL_COPY) == 137
+    assert body_mod.strip_link_footer(REAL_CHANNEL_COPY) == REAL_CHANNEL_COPY
+    item = _yt(summary=REAL_CHANNEL_COPY, title="The Cheapest 4TB DGX Spark Alternative")
+    assert vw_mod.lacks_body(item) is False
+    assert REAL_CHANNEL_COPY in vw_mod._entry_body(item)
+    assert REAL_CHANNEL_COPY in _publish(tmp_path, item)
+    # Copy that merely mentions a video, or ends without punctuation, is not
+    # residue: the shape is a heading with no sentence in it, not the word
+    # "video" and not a missing full stop.
+    assert not vw_mod.lacks_body(_yt(summary="Watch the full walkthrough"))
+    assert body_mod.footer_residue_shape("Watch the full walkthrough") is None
+    assert body_mod.footer_residue_shape("Related Videos:") == "footer-section-label", (
+        "the colon form must keep the shape that already owned it")

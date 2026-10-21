@@ -11,7 +11,7 @@ from . import state as scanner_state
 from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
 from .body import (NO_ITEM_DESCRIPTION, clean_body, ends_a_sentence,
-                   is_interest_profile_prose, strip_link_footer)
+                   footer_only, is_interest_profile_prose, strip_link_footer)
 
 
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
@@ -459,7 +459,24 @@ def _entry_body(item: ScoredItem) -> str:
         # is what makes `stripped == summary` mean "no footer AND no link block", which is
         # the only claim this short-circuit is entitled to make.
         stripped = strip_link_footer(summary)
-        if stripped == summary:              # no footer and no link block: as-is
+        # A summary that IS the footer has no body, and `stripped == summary`
+        # cannot tell the two apart: the strip abstains rather than empty a body
+        # (#1900), so a summary that is nothing but promo headings comes back
+        # identical and the comparison below reads that as "nothing to remove".
+        # That short-circuit is how a 34-char pair of labels was published as a
+        # digest entry (#3121).
+        #
+        # The test is the closed list's own answer, not a second guessed shape,
+        # so the writer's skip and `corpus_shape.py`'s residue count cannot
+        # disagree about what residue is (#2509's pairing). It sits ABOVE the
+        # `why` fallback on purpose: falling through instead would publish the
+        # scorer's `why` — a real sentence — and `lacks_body` would then never
+        # fire, which is the ordering trap this item's triage names. A body with
+        # a sentence in it is not footer-only, so nothing here can eat channel
+        # copy: #1269 clause 2 stands.
+        if footer_only(stripped):
+            return None
+        if stripped == summary:             # no footer and no link block: as-is
             return summary
         if ends_a_sentence(stripped):
             return stripped
@@ -502,6 +519,29 @@ def is_trailer_only(body: str) -> bool:
     return bool(lines) and all(_TRAILER_LINE_RE.match(line) for line in lines)
 
 
+def carries_no_prose(body: str | None) -> bool:
+    """True when a rendered body is nothing a reader could read as prose.
+
+    Two shapes, and the difference between them is a ruling this module already
+    made. `is_trailer_only` covers a body that is only `Co-authored-by:`-style
+    trailers (#1509) but cannot see an absent body — it needs a line to exist to
+    classify it — so a body of `None` fell through both skip routes and published
+    a heading with nothing under it. #3121 is the first shape that renders `None`:
+    a summary that is nothing but footer labels returns `None` from `_entry_body`
+    instead of falling through to the scorer's `why`, because publishing `why`
+    would swap the channel's empty body for the rubric's opinion (#2011's
+    direction) and leave `lacks_body` reading a real sentence — the ordering trap
+    this item's triage names.
+
+    An EMPTY string is deliberately NOT this predicate's to refuse. `clean_body`
+    returns `""` for a body that duplicates its own title, and `test_an_omitted_body_leaves_no_blank_body_line`
+    pins that such an item is still written, with the body line simply absent.
+    `None` is therefore the marker of "no body exists", which is what the skip
+    means, and it is only ever returned by the footer-only branch.
+    """
+    return body is None or is_trailer_only(body)
+
+
 def lacks_body(item: ScoredItem) -> bool:
     """True when the entry this item would render carries no prose at all.
 
@@ -510,7 +550,7 @@ def lacks_body(item: ScoredItem) -> bool:
     """
     if resolve_video_note(item) is not None:
         return False
-    return is_trailer_only(_entry_body(item))
+    return carries_no_prose(_entry_body(item))
 
 
 def _note_pointer(item: ScoredItem, note: Path, digest_path: Path) -> str:
@@ -617,8 +657,12 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     # Format content - just the entry, not the full file
     body = _note_pointer(item, note, vault_path) if note else _entry_body(item)
     # The batch filter counts these; this is the other public route in (#1509).
-    if not note and is_trailer_only(body):
-        print(f"  Skipping (no body — trailer only): {item.url}")
+    # Same predicate as `lacks_body`, so a body that renders empty (#3121) is
+    # refused here too rather than written as a heading with nothing under it.
+    if not note and carries_no_prose(body):
+        print(f"  Skipping (no body — "
+              f"{'trailer only' if is_trailer_only(body) else 'no prose left'}): "
+              f"{item.url}")
         return False
     body_block = f"{body}\n\n" if body else ""
 
@@ -724,11 +768,15 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
 
     # A body that is only a `Co-authored-by:`-style trailer says nothing (#1509):
     # refuse it here, where the drop is counted, rather than let it land silently.
+    # The predicate widened for #3121 to also hold a body that renders EMPTY (a
+    # summary that was nothing but footer labels), so the line names both shapes
+    # rather than claiming git trailers for a body that has no trailer in it.
     bodied = [item for item in fresh if not lacks_body(item)]
     no_body = len(fresh) - len(bodied)
     if no_body:
-        print(f"Held {no_body} item(s) whose body is only git trailers "
-              f"(vault_writer.is_trailer_only)")
+        print(f"Held {no_body} item(s) whose rendered body carries no prose — "
+              f"only git trailers (vault_writer.is_trailer_only) or nothing at all "
+              f"(vault_writer.carries_no_prose)")
 
     # Load written state
     written_state = load_written_state()
