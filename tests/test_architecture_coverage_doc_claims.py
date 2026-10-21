@@ -3786,10 +3786,28 @@ _INTERPRETER = re.compile(r"(?:^|/)python\d*(?:\.\d+)?\Z")
 # after a module is a *symbol* citation — `check_bash_command`,
 # `allow_protected_writes`, `check_deployed_copies`.
 _COMMAND_WORD = re.compile(r"\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+# A git commit id, which prose cites in a provenance parenthetical right where a
+# command list goes: `agent_mcp/_path_sandbox.py` (#2109, landed `b3b652b6`).
+# Seven hex characters is git's own short-id floor, and this tree cites 8 — the
+# id that made #3135 red. Refused on the DOC side only: the source side reads its
+# verbs out of `add_parser(...)`, where the spelling is authoritative whatever it
+# looks like, while harvesting from prose has to guess, and a hex span there is
+# provenance no operator could run. Undropped, that guess became two claims
+# beside a module with no dispatch chain, which grew the sweep node's excused
+# list from three to five and fired its anti-vacuity pin (#3135) — and
+# the arch-review cadence writes this exact shape into the Review log of whatever
+# doc it reviews next, so rewording the doc once would only go red again.
+_COMMIT_SHA = re.compile(r"\A[0-9a-f]{7,}\Z")
 # A bracket opened right after a module citation is the doc's own way of saying
 # "and these are its commands" — `supply_chain.py` (`fixtures`,
 # `scan --write-baseline`). Prose inside the bracket ends the list.
 _LIST_GAP = re.compile(r"\A[\s,]*\Z")
+
+
+def _harvestable_verb(tok):
+    """True for a span a doc sits beside a module citation that may be read as a
+    subcommand: verb-shaped, and not a git commit id."""
+    return bool(_COMMAND_WORD.match(tok)) and not _COMMIT_SHA.match(tok)
 
 
 def _script_module(tok):
@@ -3847,7 +3865,9 @@ def command_claims(text):
     claim is a verb span sitting inside a bracket opened immediately after a
     module citation on the same line. A module cited without a verb is recorded
     only so the list form has something to hang on — nothing here is decided
-    about a module that is not on disk.
+    about a module that is not on disk. A span that is a git commit id
+    (`_COMMIT_SHA`) is never a verb, so a provenance parenthetical beside a
+    module makes no claim at all.
     """
     claims = []
     for ln, line in enumerate(text.splitlines(), 1):
@@ -3862,13 +3882,13 @@ def command_claims(text):
                 listing, opened = cited, True
             module, rest = _span_module_and_rest(span)
             if module is not None:
-                if rest and _COMMAND_WORD.match(rest[0]):
+                if rest and _harvestable_verb(rest[0]):
                     claims.append((ln, span, module, rest[0]))
                 cited, listing, opened, prev_end = module, None, False, m.end()
                 continue
             if listing is not None:
                 if ((opened or _LIST_GAP.match(gap)) and rest
-                        and _COMMAND_WORD.match(rest[0]) and _only_flags(rest[1:])):
+                        and _harvestable_verb(rest[0]) and _only_flags(rest[1:])):
                     claims.append((ln, span, listing, rest[0]))
                     opened, prev_end = False, m.end()
                     continue
@@ -4284,6 +4304,54 @@ def test_a_flag_shaped_token_is_never_harvested_as_a_verb():
     assert [c[3] for c in command_claims(line)] == ["scan", "board-pass"], (
         "the extraction itself found nothing, so the skip proves nothing")
     assert undispatched_claims(line) == [], undispatched_claims(line)
+
+
+def test_a_git_commit_id_beside_a_module_is_never_read_as_a_subcommand():
+    """#3135: the doc half of the span grammar refuses a git commit id as a verb.
+
+    `agent_mcp/_path_sandbox.py` (#2109, landed `b3b652b6`) is provenance prose
+    the 2026-10-21 arch-review wrote into vault-protection.md at :131 and :400.
+    `_COMMAND_WORD` accepts `b3b652b6` — lowercase hex is a legal subcommand
+    spelling — so the citation was harvested as a command claim against a module
+    with no dispatch chain, and the excused list in
+    `test_no_architecture_doc_cites_a_command_its_module_does_not_dispatch` grew
+    from the three claims it pins to five. That pin compares the whole sorted
+    list, so an unexplained ARRIVAL fails it exactly like a drop — which is why a
+    green tree went red with no round's diff present.
+
+    Both harvest sites are refused — the list site (a bracket opened right after
+    the module, the shape that fired here) and the inline site (module and token
+    inside one span): a citation whose only candidate verb is a commit id makes no
+    claim at all. Positive controls beside each refusal, same module and same
+    bracket shape with a verb-shaped token in the sha's place, so the two empties
+    are the refusal and not the extractor going blind; and the source side still
+    accepts a hex-worded verb, because there the spelling is read out of
+    `add_parser(...)`, not guessed from prose.
+    """
+    assert command_claims(
+        "`agent_mcp/_path_sandbox.py` (#2109, landed `b3b652b6`)\n") == []
+    assert [v for _, _, _, v in command_claims(
+        "`app/harness/supply_chain.py` (landed #2109, `status`)\n")] == ["status"], \
+        "the list site stopped harvesting a verb-shaped token in that bracket shape"
+
+    assert command_claims("`app/harness/supply_chain.py b3b652b6`\n") == [], \
+        "the inline site still read a commit id as a subcommand"
+    assert [v for _, _, _, v in command_claims(
+        "`app/harness/supply_chain.py status`\n")] == ["status"], \
+        "the inline site stopped harvesting a real verb"
+
+    assert _verb_like("b3b652b6"), (
+        "the refusal moved off the doc side: a source verb that spells as hex is "
+        "read out of add_parser(...), where the spelling is authoritative")
+
+    cited = [v for f in sorted(ARCH.glob("*.md"))
+             for _, _, _, v in command_claims(
+                 f.read_text(encoding="utf-8", errors="replace"))
+             if v and _COMMIT_SHA.match(v)]
+    assert cited == [], (
+        f"the live corpus cites {cited} as subcommands again — the arch-review "
+        f"cadence writes this exact prose into the Review log of whatever doc it "
+        f"reviews next, so the refusal belongs in the extractor, not the doc")
 
 
 def test_the_widened_sweep_is_shown_able_to_fail(tmp_path):
