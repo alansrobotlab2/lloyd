@@ -547,3 +547,128 @@ def test_a_clause_whose_leading_digits_are_a_measurement_survives_byte_for_byte(
     # A single clause that does number itself at 1 is still just a numbering.
     assert B.clean_clauses(["1. Both witness files exist at the named vault paths."]) == \
         ["Both witness files exist at the named vault paths."]
+
+
+# ── #3098: one clause the writer stored as two rows ─────────────────────────
+#
+# Rows 3 and 4 below are item #3092's clause 3 verbatim as its confirmed
+# `backlog_triage` ledger row still carries it in
+# `~/.local/state/lloyd-automod/promotions.jsonl`: the guided finalizer wrote the
+# clause's two lines as two array elements, so the contract holds SIX rows for
+# FIVE clauses and row 4 opens with no enumerator at all. The grader is handed the
+# rows and answers the clauses it can read (1..5), the merge maps them
+# positionally, and the orphan row comes back `partial (downgraded: not graded)` —
+# a blocking entry. Round `SM_20261021_013732` spent a review attempt on exactly
+# that, with all five real clauses `met`. The other four rows keep their
+# enumerators and lose their prose: the row COUNT is the defect.
+WRAPPED_TAIL = ("MAX_SESSIONS , )` helper and fails if the block reverts to pending wording "
+                "or drops the pass id or the eviction trip wire, so a later edit cannot "
+                "silently reopen the question — tests/test_component_manifest_retention.py")
+SIX_ROWS_FIVE_CLAUSES = [
+    "1. `app/component_manifest.py`'s comment block above `MAX_SESSIONS` no longer presents "
+    "the cap as undecided — tests/test_component_manifest_retention.py",
+    "2. The same block records the ruling as made and which way it went — "
+    "tests/test_component_manifest_retention.py",
+    "3. A new node in `tests/test_component_manifest_retention.py` reads the block with the "
+    "existing `_comment_above(",
+    WRAPPED_TAIL,
+    "4. The residency pricing the existing witness node grades survives the edit — "
+    "tests/test_component_manifest_retention.py",
+    "5. `tests/test_component_manifest_retention.py:664` no longer describes the cap "
+    "decision as owed work — tests/test_component_manifest_retention.py",
+]
+
+
+def test_a_clause_stored_in_two_rows_is_read_as_the_one_clause_it_is():
+    """#3098 clause 1. N+1 rows holding one enumerator-less row, with the others
+    running a contiguous `1.`…`N.`, are N clauses: the orphan is the row above it
+    wrapped, so it joins onto that row with one space and no clause word is lost."""
+    assert len(SIX_ROWS_FIVE_CLAUSES) == 6
+    assert sum(1 for c in SIX_ROWS_FIVE_CLAUSES if not B._CLAUSE_LINE.match(c)) == 1, \
+        "the fixture must stay one orphan among five numbered rows"
+
+    out = B.clean_clauses(SIX_ROWS_FIVE_CLAUSES)
+    assert len(out) == 5, [c[:60] for c in out]
+    # The join added exactly the one byte the writer removed: a space, where the
+    # newline was. The two halves are otherwise byte-identical to what was stored.
+    assert out[2] == SIX_ROWS_FIVE_CLAUSES[2][3:] + " " + WRAPPED_TAIL, out[2]
+    assert "`_comment_above( MAX_SESSIONS , )`" in out[2], out[2]
+    assert out[:2] == [SIX_ROWS_FIVE_CLAUSES[0][3:], SIX_ROWS_FIVE_CLAUSES[1][3:]]
+    assert out[3:] == [SIX_ROWS_FIVE_CLAUSES[4][3:], SIX_ROWS_FIVE_CLAUSES[5][3:]]
+    lost = [w for w in WRAPPED_TAIL.split() if w not in out[2]]
+    assert not lost, f"the continuation lost {lost}"
+    # Where the bound is, said out loud rather than left to the phrase "no word
+    # lost": `CLAUSE_MAX_CHARS` caps a CLAUSE, so two halves whose joined length
+    # passes it are cut to it exactly as a single clause that long already is —
+    # #3092's own clause 3 joins to 329 characters, nowhere near it.
+    halves = B._join_wrapped_clause(["1. " + "A" * 560, "B" * 60, "2. next clause"])
+    assert len(halves) == 2 and len(halves[0]) == B.CLAUSE_MAX_CHARS, \
+        [len(x) for x in halves]
+    assert halves[0].startswith("1. " + "A" * 560 + " " + "B")
+
+
+def test_the_join_lives_in_clean_clauses_so_the_writer_and_every_reader_agree(isolated):
+    """#3098 clause 2. `clean_clauses` is the one funnel: the writer of a new
+    contract (`cap_new_clauses`, called by `record_verdict`) and every reader
+    (`acceptance_clauses_of`, over front matter AND over the ledger event) see the
+    same joined clauses, so an already-poisoned stored row is repaired on read as
+    well as on the next write."""
+    joined = B.clean_clauses(SIX_ROWS_FIVE_CLAUSES)
+    assert len(joined) == 5, joined
+
+    # The writer: five kept, nothing silently past the cap. Before the join the
+    # same input was seven rows on a six-clause contract and cap_new_clauses cut
+    # a real clause out of the contract without saying so.
+    kept, dropped = B.cap_new_clauses(SIX_ROWS_FIVE_CLAUSES)
+    assert kept == joined and dropped == [], (len(kept), len(dropped))
+
+    p = write_item(isolated, 3098)
+    B.record_verdict(B.item_by_id(3098), "confirmed", "re-read from the ledger row",
+                     acceptance="x", acceptance_clauses=list(SIX_ROWS_FIVE_CLAUSES))
+    fm = _fm(p)
+    assert list(fm["acceptance_clauses"]) == joined, fm["acceptance_clauses"]
+    assert "`_comment_above( MAX_SESSIONS , )`" in p.read_text(), "the body block split too"
+
+    # Every reader, over both places a contract is stored.
+    assert B.acceptance_clauses_of({}, fm) == joined
+    assert B.acceptance_clauses_of({"acceptance_clauses": SIX_ROWS_FIVE_CLAUSES}) == joined
+
+
+def test_the_collapse_never_joins_a_list_that_is_not_one_clause_wrapped():
+    """#3098 clause 3. Each shape that is NOT a wrapped clause is returned
+    untouched, and `_self_numbered` keeps every answer it had before: a guard
+    that widened here would merge two real clauses into one and the grader would
+    never see the difference."""
+    # The positive control, so a broken signature cannot pass by never firing.
+    assert B._join_wrapped_clause(["1. a", "an orphan tail", "2. b"]) == \
+        ["1. a an orphan tail", "2. b"]
+
+    # (a) an all-unnumbered list is not a numbering one row short.
+    assert B._join_wrapped_clause(UNNUMBERED) == UNNUMBERED
+    assert B.clean_clauses(UNNUMBERED) == UNNUMBERED
+    # (b) the measurement shape: one numbered row among unnumbered siblings
+    #     carries TWO orphan rows, and `2. GB…` is a quantity, not clause 2.
+    measured = ["The volume has 3 mounts",
+                "2. GB of free space must remain after the sweep",
+                "The note records the count"]
+    assert B._join_wrapped_clause(measured) == measured
+    assert B.clean_clauses(measured) == measured
+    lone = ["2. GB of free space must remain after the sweep"]
+    assert B._join_wrapped_clause(lone) == lone
+    # (c) a leading orphan continues nothing, (d) a numbering with a gap did not
+    #     come from one list, (e) two orphans is prose with stray enumerators.
+    headless = ["an unnumbered fragment first", "1. a", "2. b"]
+    gapped = ["1. a", "an orphan tail", "3. c"]
+    two = ["1. a", "orphan one", "orphan two", "2. b"]
+    for ragged in (headless, gapped, two):
+        assert B._join_wrapped_clause(ragged) == ragged, ragged
+
+    # `_self_numbered` is untouched by the join: the same six answers as at base.
+    assert B._self_numbered(SELF_NUMBERED) is True
+    assert B._self_numbered(UNNUMBERED) is False
+    assert B._self_numbered(measured) is False
+    assert B._self_numbered(lone) is False
+    assert B._self_numbered([]) is False
+    assert B._self_numbered(["1. one", "2. two", "4. four", "5. five"]) is True
+    # And #3002's shape still strips to its content, join not firing on it.
+    assert B.clean_clauses(SELF_NUMBERED) == UNNUMBERED

@@ -1173,7 +1173,7 @@ CLAUSE_MAX_CHARS = 600
 
 def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     """Clauses as a bounded list of non-placeholder strings. `limit` is
-    `MAX_CLAUSES` where a new contract is written, else the read bound."""
+    `MAX_CLAUSES` on a write, else the read bound. Two rows of one clause: one."""
     out: list[str] = []
     for v in (values or []):
         s = acceptance_text(v)
@@ -1181,7 +1181,7 @@ def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
             out.append(s[:CLAUSE_MAX_CHARS])
         if len(out) >= limit:
             break
-    return _strip_self_numbering(out)
+    return _strip_self_numbering(_join_wrapped_clause(out))
 
 
 def cap_new_clauses(values) -> tuple[list[str], list[str]]:
@@ -1496,7 +1496,10 @@ def _self_numbered(entries: list[str]) -> bool:
     nobody finished. Requiring the WHOLE list is what keeps a measurement a
     measurement: the enumerator and the one space after it are the only bytes ever
     removed, and `split_clause_lines` has applied the same reading to a body
-    section through the same `_CLAUSE_LINE` since #1378.
+    section through the same `_CLAUSE_LINE` since #1378. What that reading
+    selects is a clause's START line: #3098 made the splitter fold a clause's
+    wrapped continuation lines onto it, which changes how many clauses a block
+    has, never what one of them strips to.
     """
     if not entries:
         return False
@@ -1533,6 +1536,58 @@ def _strip_self_numbering(entries: list[str]) -> list[str]:
         if s and s not in seen:
             seen.append(s)
     return seen
+
+
+def _join_wrapped_clause(entries: list[str]) -> list[str]:
+    """Join back the row that one wrapped clause was stored as, so a contract
+    has as many rows as it has clauses (#3098).
+
+    A clause whose text carries a literal newline reaches a contract as TWO
+    rows: the guided finalizer split item #3092's clause 3 at its newline and
+    stored six array elements for five clauses, the sixth of which opened on
+    the code fragment ``MAX_SESSIONS , )` helper and fails if …`` with no
+    enumerator at all. Position is what a clause is graded by — `build_prompt`
+    renders `f"{i}. {c}"` and the merge reads the answer's `clause` back as
+    that index — so the grader was handed six, answered the five it could read,
+    and `parse_review` synthesized a sixth `partial (downgraded: not graded):
+    not addressed by the grader`, which `decide_by_grader` counts as blocking:
+    round `SM_20261021_013732` spent a review attempt with all five real clauses
+    `met`, and the ONLY blocking entry of its `review` row was that orphan.
+    `_self_numbered` cannot catch this shape — it requires EVERY row numbered,
+    and the orphan is precisely the row that is not, so it disqualifies the
+    whole list.
+
+    The signature is exact because every other reading of a ragged list is a
+    measurement, not a split clause: fire only when EXACTLY ONE row opens with no
+    `<n>.` / `<n>)` enumerator AND the rows that do carry one run a contiguous
+    `1.` … `N.`. Then that row is the continuation of the row above it, joined
+    with one space — the only bytes it adds are the newline the writer removed.
+    An all-unnumbered list is not short one row of a numbering; two or more
+    unnumbered rows is prose with a stray enumerator in it (the `2. GB of free
+    space` shape `_self_numbered` deliberately protects); a leading orphan
+    continues nothing; a numbering with a gap did not come from one list. All
+    four are returned untouched, and `test_the_collapse_never_joins_a_list_that_is_not_one_clause_wrapped`
+    pins each.
+
+    Runs before `_strip_self_numbering`, so the joined list is fully and
+    correctly numbered and its enumerators then strip as one list; and it runs
+    under `CLAUSE_MAX_CHARS`, which caps a CLAUSE — two halves of one clause
+    share the cap exactly as one long clause would.
+    """
+    if len(entries) < 2:
+        return entries
+    orphans = [i for i, s in enumerate(entries) if not _CLAUSE_LINE.match(s)]
+    if len(orphans) != 1 or orphans[0] == 0:
+        return entries
+    nums = [int(_CLAUSE_LINE.match(s).group(1)) for s in entries
+            if _CLAUSE_LINE.match(s)]
+    if nums != list(range(1, len(nums) + 1)):
+        return entries
+    k = orphans[0]
+    joined = list(entries)
+    tail = joined.pop(k)
+    joined[k - 1] = f"{joined[k - 1]} {tail}"[:CLAUSE_MAX_CHARS]
+    return joined
 
 
 #: A witness name belongs to its first occupant, and this generator was the thing
@@ -1944,11 +1999,26 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
 
 def split_clause_lines(text: str, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     """Numbered lines (`1. …`, `2) …`) into clauses; unnumbered prose is one
-    clause. A `-` or `none` placeholder is no clause at all."""
+    clause. A `-` or `none` placeholder is no clause at all.
+
+    A numbered line and the unnumbered lines under it are ONE clause. The text
+    path of a triage verdict is a free-form block, so a clause that wraps puts
+    its tail on a line with no enumerator, and reading only the numbered lines
+    handed the round a clause that stopped mid-sentence and silently lost the
+    rest — the same defect `_join_wrapped_clause` closes on the structured path,
+    arrived at from the other side (#3098). Lines before the FIRST numbered line
+    are the field's own lead-in (`ACCEPTANCE_CLAUSES: as follows`), not a
+    clause's tail, and stay out of the contract."""
     lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
-    numbered = [m.group(2) for m in (_CLAUSE_LINE.match(ln) for ln in lines) if m]
-    if numbered:
-        return clean_clauses(numbered, limit=limit)
+    rows: list[str] = []
+    for ln in lines:
+        m = _CLAUSE_LINE.match(ln)
+        if m:
+            rows.append(m.group(2))
+        elif rows:
+            rows[-1] = f"{rows[-1]} {ln.strip()}"
+    if rows:
+        return clean_clauses(rows, limit=limit)
     return clean_clauses([" ".join(str(text or "").split())], limit=limit)
 
 

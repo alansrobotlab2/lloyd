@@ -647,6 +647,90 @@ def test_a_clause_the_grader_did_not_mention_is_not_met(wt):
     assert "clauses_unreadable" not in parsed
 
 
+# #3098: the contract the review rung is handed must have as many rows as the
+# item has clauses. Six rows for five clauses is what item #3092's confirmed
+# ledger row carried — the guided finalizer wrote one clause's two lines as two
+# array elements — and the grader, answering the five it could read, left row 6
+# to be synthesized as `partial (downgraded: not graded)`, the ONLY blocking
+# entry that refused round SM_20261021_013732 with all five real clauses `met`.
+SPLIT_ROWS_3092 = [
+    "1. the cap is no longer presented as undecided",
+    "2. the block records the ruling and the trip wire",
+    "3. A new node reads the block with the existing `_comment_above(",
+    "MAX_SESSIONS , )` helper and fails if the block reverts",
+    "4. the residency pricing survives the edit",
+    "5. the two stale messages stop saying owed",
+]
+
+
+def _answers(n, *, upto):
+    """A grader answer with one real `met` for each clause 1..upto of an n-row contract."""
+    return {"premise": "sound", "summary": "each clause read off disk", "test_honesty": [],
+            "seams_unverified": [],
+            "clauses": [{"clause": i, "verdict": "met", "evidence_path": "app/x.py",
+                         "evidence_line": 3, "test_node_id": "tests/test_x.py::test_it",
+                         "how_verified": "ran", "note": f"graded clause {i}"}
+                        for i in range(1, upto + 1)]}
+
+
+def _grade(wt, answer, *, n_clauses, clause_texts):
+    return RV.parse_review(answer, worktree=wt, changed_tests=["tests/test_x.py"],
+                           n_clauses=n_clauses, tests_passed=True,
+                           changed_paths=["app/x.py", "tests/test_x.py"],
+                           clause_texts=clause_texts)
+
+
+def test_a_round_handed_the_joined_contract_passes_and_an_abstention_still_refuses(
+        wt, isolated):
+    """#3098 clause 5: the row count is fixed where the rows are MADE.
+
+    The merger-side alternative — read a missing index on an otherwise
+    answerable set as the grading rail — is barred by
+    `test_a_clause_the_grader_did_not_mention_is_not_met` directly above, which
+    pins that one readable index is an abstention about the CHANGE and must keep
+    refusing. So the contract has to be right at ingest, and this node reads the
+    poisoned rows through the real handoff (`item_contract`) rather than
+    asserting a helper's return.
+    """
+    assert len(SPLIT_ROWS_3092) == 6, "six stored rows for five clauses is the defect"
+    write_item(isolated, 3098, clauses=SPLIT_ROWS_3092)
+    _confirm(3098, acceptance="; ".join(SPLIT_ROWS_3092), clauses=SPLIT_ROWS_3092,
+             surface="code")
+    contract = RV.item_contract(3098)
+    assert len(contract["clauses"]) == 5, contract["clauses"]
+    assert contract["clauses"][2] == ("A new node reads the block with the existing "
+                                      "`_comment_above( MAX_SESSIONS , )` helper and fails "
+                                      "if the block reverts"), contract["clauses"][2]
+
+    # All five clauses answered `met`: the round passes, with nothing blocking.
+    parsed = _grade(wt, _answers(5, upto=5), n_clauses=len(contract["clauses"]),
+                    clause_texts=contract["clauses"])
+    assert [c["verdict"] for c in parsed["clauses"]] == ["met"] * 5, parsed["clauses"]
+    assert parsed["downgraded"] == []
+    kind, findings = RV.decide_by_grader(parsed, [])
+    assert kind == "pass", findings
+    assert RV.decide_with_entries(parsed, [])["blocking"] == []
+
+    # The abstention guard is untouched: four answers to a five-row contract is
+    # still silence about a clause of the CHANGE, and still refuses.
+    four = _grade(wt, _answers(5, upto=4), n_clauses=len(contract["clauses"]),
+                  clause_texts=contract["clauses"])
+    assert [c["verdict"] for c in four["clauses"]] == ["met"] * 4 + ["partial"], four["clauses"]
+    assert "clauses_unreadable" not in four
+    kind4, findings4 = RV.decide_by_grader(four, [])
+    assert kind4 == "retry", findings4
+    assert "not addressed by the grader" in findings4, findings4
+
+    # And the refusal this item was filed for is still exactly what the merge
+    # does with a 6-row contract — the proof that the fix is at ingest and the
+    # merge rule did not move.
+    six = _grade(wt, _answers(6, upto=5), n_clauses=6, clause_texts=SPLIT_ROWS_3092)
+    assert six["clauses"][5]["verdict"] == "partial"
+    assert six["clauses"][5]["downgraded"] == ["not graded"], six["clauses"][5]
+    kind6, findings6 = RV.decide_by_grader(six, [])
+    assert kind6 == "retry" and "not addressed by the grader" in findings6, findings6
+
+
 def test_clause_entries_in_another_shape_are_recorded_as_unreadable(wt):
     """`id`/`status` instead of `clause`/`verdict`: not one index is usable.
 
@@ -2604,6 +2688,68 @@ def test_acceptance_clauses_fall_back_to_the_prose_for_old_items(isolated):
     assert B.acceptance_clauses_of({"acceptance": "-"}) == []
     assert B.split_clause_lines("1. a\n2) b\n") == ["a", "b"]
     assert B.split_clause_lines("just prose") == ["just prose"]
+
+
+# #3098 clause 4: the text path of a triage verdict is free-form, so a clause that
+# wraps puts its tail on a line with no enumerator. Reading only the numbered lines
+# handed the round a clause that stopped mid-sentence and silently lost the rest.
+WRAPPED_TEXT_BLOCK = (
+    "1. The manifest module records the ruling.\n"
+    "2. The residency pricing survives the edit unchanged.\n"
+    "3. A new node reads the block with the existing `_comment_above(\n"
+    "MAX_SESSIONS , )` helper and fails if the block reverts.\n")
+
+
+def _words_of(block: str) -> list[str]:
+    """Every word of a numbered block, its enumerators excluded — they are
+    structure the splitter consumes, not clause content."""
+    return [w for ln in block.splitlines()
+            for w in re.sub(r"^\d{1,2}[.)]\s+", "", ln.strip()).split()]
+
+
+def test_a_wrapped_numbered_line_joins_onto_its_clause_and_loses_no_text():
+    """A line with no enumerator under a numbered line is that clause wrapped."""
+    got = B.split_clause_lines(WRAPPED_TEXT_BLOCK)
+    assert len(got) == 3, got
+    assert got[2] == ("A new node reads the block with the existing `_comment_above( "
+                      "MAX_SESSIONS , )` helper and fails if the block reverts."), got[2]
+    held = " ".join(got)
+    assert not [w for w in _words_of(WRAPPED_TEXT_BLOCK) if w not in held], (
+        f"a wrapped clause lost words: {held!r}")
+    # The same block with a fourth numbered clause: four clauses, wrap included.
+    four_in = WRAPPED_TEXT_BLOCK + "4. The stale messages stop saying owed.\n"
+    four = B.split_clause_lines(four_in)
+    assert len(four) == 4 and four[3] == "The stale messages stop saying owed.", four
+    assert not [w for w in _words_of(four_in) if w not in " ".join(four)], four
+    # Prose BEFORE the first numbered line is the field's own lead-in
+    # (`ACCEPTANCE_CLAUSES: as follows`), not a clause's tail, and stays out.
+    assert B.split_clause_lines("as follows\n1. a\n2. b") == ["a", "b"]
+    # Nothing is numbered, so the whole block is the one clause it always was.
+    assert B.split_clause_lines("just prose\nwrapped over two lines") == \
+        ["just prose wrapped over two lines"]
+    # The other direction #3098 names, pinned rather than guessed at: a
+    # continuation that carries its OWN number is indistinguishable from a new
+    # clause by line shape alone, so it stays a clause of its own. No text is
+    # lost out of it — which is the half this splitter can promise.
+    numbered_cont = "1. a\n2. x head\n2. x continuation tail\n3. c\n"
+    numbered = B.split_clause_lines(numbered_cont)
+    assert numbered == ["a", "x head", "x continuation tail", "c"], numbered
+    assert not [w for w in _words_of(numbered_cont) if w not in " ".join(numbered)]
+
+
+def test_a_wrapped_clause_survives_the_triage_text_path_into_the_contract():
+    """The producer boundary this defect arrived through. The verdict block the
+    text-path finalizer parses becomes the stored contract, so the continuation
+    has to reach the contract — and `clean_clauses` must not then re-split what
+    the splitter joined, which would hand the review rung rows the grader cannot
+    answer and spend a review attempt on the orphan (#3098 clause 4)."""
+    verdict = ("VERDICT: confirmed\nSURFACE: code\nCHECK: pytest -q\nEVIDENCE: it holds.\n"
+               "ACCEPTANCE: all of it\nACCEPTANCE_CLAUSES:\n"
+               f"{WRAPPED_TEXT_BLOCK}HUMAN_CLAUSES: none\nSPAWNED: none\n")
+    clauses = T.parse_verdict(verdict)["acceptance_clauses"]
+    assert len(clauses) == 3, clauses
+    assert "`_comment_above( MAX_SESSIONS , )`" in clauses[2], clauses[2]
+    assert not [w for w in _words_of(WRAPPED_TEXT_BLOCK) if w not in " ".join(clauses)], clauses
 
 
 # ── the implement side: prompt, resume, abort reason ───────────────────────
