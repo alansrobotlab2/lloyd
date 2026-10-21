@@ -62,6 +62,9 @@ STRANDED_ORIGIN = "human_clauses"
 # genuinely recorded entry behind them waits behind historical debt (#2055).
 MAX_STRANDED_PER_RUN = 5
 
+# A clause's own leading enumerator, the shape `backlog._CLAUSE_LINE` strips.
+_CLAUSE_NUMBER = re.compile(r"^\d{1,2}[.)]\s+(.*\S)$")
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -139,6 +142,21 @@ def _since(fm: dict) -> str:
     return ""
 
 
+def _clause_key(value: Any) -> str:
+    """A clause's text for the derived-entry dedupe: `_text`, less a leading `N.`.
+
+    `clean_clauses` strips a self-numbered list's enumerators since 109be9ea (#3002),
+    so a `human_clauses` row stored `1. Do X` derives as `Do X` — while every ruling
+    recorded before that commit kept `1. Do X` in `owed_settled`/`owed_outside`. Exact
+    text stopped matching, and on 2026-10-21 537 closed items were stranded again with
+    clauses already ruled on; 155 had been re-ruled by owed-check two to seven times.
+    Both sides go through this key so a ruling matches its clause whichever side of
+    that commit it was written on."""
+    what = _text(value)
+    m = _CLAUSE_NUMBER.match(what)
+    return m.group(1) if m else what
+
+
 def derived_entries(fm: dict) -> list[dict]:
     """`human_clauses` strings that appear in none of `owed`, `owed_settled` and
     `owed_outside`.
@@ -174,21 +192,21 @@ def derived_entries(fm: dict) -> list[dict]:
     clauses = B.human_clauses_of(None, fm)
     if not clauses:
         return []
-    seen = {_text(e.get("what")) for e in _recorded(fm)}
-    seen |= {_text(r.get("what")) for r in (fm.get(SETTLED_KEY) or []) if isinstance(r, dict)}
+    seen = {_clause_key(e.get("what")) for e in _recorded(fm)}
+    seen |= {_clause_key(r.get("what")) for r in (fm.get(SETTLED_KEY) or []) if isinstance(r, dict)}
     # `owed_outside` is a ruling too. Left out, a derived clause ruled `outside`
     # was derived again on the next tick, ruled again and announced again: #538
     # was filed on Alan's list six times in 28 minutes on 2026-10-02, a toast and
     # a spoken alert each, until a seventh session happened to answer `settled`.
-    seen |= {_text(r.get("what")) for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict)}
+    seen |= {_clause_key(r.get("what")) for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict)}
     seen.discard("")
     since = _since(fm)
     out: list[dict] = []
     for clause in clauses:
         what = _text(clause)
-        if not what or what in seen:
+        if not what or _clause_key(what) in seen:
             continue
-        seen.add(what)
+        seen.add(_clause_key(what))
         out.append({"what": what, "kind": "check", "since": since,
                     "recheck_after": "", "rechecks": 0, "origin": STRANDED_ORIGIN})
     return out

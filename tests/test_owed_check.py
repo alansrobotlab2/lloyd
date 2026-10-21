@@ -1090,6 +1090,23 @@ def test_a_derived_clause_ruled_outside_is_not_derived_or_listed_again(isolated)
     assert again[0]["since"] == first[0]["since"], "it has waited since the first ruling"
 
 
+def test_a_clause_ruled_under_its_old_number_is_not_derived_again(isolated):
+    """2026-10-21: `clean_clauses` strips a self-numbered list's `N.` since #3002, so
+    `human_clauses: ["1. X", "2. Y"]` derives `X` and `Y` — but rulings written before
+    that recorded `1. X`. Compared as exact text, every such item was stranded again and
+    owed-check re-ruled 155 of them (up to seven times each). A ruling under the old
+    numbered text still answers the clause, in `owed_settled` and `owed_outside` alike,
+    and a clause nobody ruled on is still derived."""
+    p = write_item(isolated, 4100, status="done", extra={
+        "completed": "2026-10-14T17:43:27",
+        "human_clauses": [f"1. {_DISPOSITION}", f"2. {_READSIDE}", "3. Nobody ruled on this."],
+        "owed_settled": [{"what": f"2. {_READSIDE}", "outcome": "ruling",
+                          "at": "2026-10-18T06:19:18", "evidence": "e"}],
+        "owed_outside": [{"what": f"1. {_DISPOSITION}", "needs": "hands",
+                          "since": "2026-10-18T06:19:18"}]})
+    assert [e["what"] for e in O.entries_of(fm_of(p))] == ["Nobody ruled on this."]
+
+
 # ── The pending hand-run (#3017) ────────────────────────────────────────────
 #
 # A decision can be RULED and still not EXECUTED. PS-3 is the case: seven entity
