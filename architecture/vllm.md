@@ -763,7 +763,9 @@ has still not been run as of 2026-09-11.
   contexts sharing one pool, each idle between its own iterations (below), that
   cannot hold, so the re-stated bar asks for what a person feels (a, d) and a
   budget for the rest (b). Clearing it needs a day with real chat in it, and
-  the day below is the first the counter has.
+  the day counted below is still the reading this page marks the four criteria
+  against: 2026-09-25. 2026-10-09 is recorded below as a later day on which all
+  four hold as well.
 - **The counted reading: 2026-09-25 00:00 → 2026-09-26 00:00 UTC** (one full
   UTC day at the shape the bar names — slots 6, 2 rounds, the
   844,969-token FP8 pool — and the first day counted at it, since the 09-23
@@ -1182,6 +1184,30 @@ has still not been run as of 2026-09-11.
   event joins the four-extract evidence set rather than an ask — the escalation is
   **DROPPED, not owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
+- **2026-10-09 is the newest day, as counted through 2026-10-19, on which all
+  four acceptance-bar criteria hold.** Derived by
+  `scripts.vllm_prefix_miss_window.derive` over the extract committed as
+  `tests/fixtures/vllm_prefix_miss_2026-10-09.json`, byte-identical to the
+  standing daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the
+  day's 9 chat turns carries a prefix miss, so (a) holds over a population a
+  person can point at rather than over zero of zero; 90 misses and 10,120,616
+  re-prefilled tokens against §6.1's per-day 97 and 10.3M, which is 92.8% of the
+  misses and 98.3% of the tokens, so (b) holds with 1.7% of the token budget
+  left and the page calls that thin rather than rounding it up; KV p50 0.172, so
+  (c) holds with room; and 4 of 2,318 two-request windows run under 15 tok/s,
+  all 4 of them excluded as cold admissions in flight with 0 counted against, so
+  (d) holds. The day is 406 turns, 406 measured, 37 turns carrying the 90
+  misses, and its pool comes from a boot line inside the window: **844,969**
+  tokens, the FP8 size named above. What this day does not do is replace
+  anything. 2026-09-25 stays the counted reading the four criteria are marked
+  against, and the filing-condition evidence set is unmoved — `derive` gives 0
+  chat turns with a miss, so no event on 2026-10-09 meets the accepted-loss
+  filing condition and the paragraphs above still count four days. Nor is it
+  today's engine: the day predates the **2026-10-12 16:21** boot, so it was
+  served before the vLLM main `a98247ab4db6` build §1 names, and what carries to
+  the fleet as it runs now is the bar's shape, not its engine. 2026-10-03 clears
+  the same four on the daily job's copy, which is not in the tree, so this page
+  states no figure for it and headlines it nowhere.
 
 - **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
   vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in

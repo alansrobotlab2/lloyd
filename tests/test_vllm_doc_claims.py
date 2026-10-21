@@ -44,6 +44,7 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -3991,3 +3992,280 @@ def test_the_rail_refuses_an_upstream_ask_without_refusing_its_refusal(cfg):
             "stops promising the write, and these two single-entry spans are read nowhere "
             "else in this file, so a whole-page scan alone would not notice a promise left "
             "in one of them")
+
+
+# ── #3101: 2026-10-09, the day the standing counter has that clears the acceptance bar ────
+#
+# §10 evidenced its acceptance bar through the 2026-09-25 counted reading alone, and the bar
+# bullet closed by telling the reader "the day below is the first the counter has". The
+# standing daily extract job (the one that writes `~/lloyd-data/vllm-prefix-miss/`) has since
+# counted a day on which all four criteria hold — 2026-10-09 — and the page had no way to say
+# so, so a bar met on one late-September day read as a bar that had never been met twice.
+# This block commits that day's extract and re-derives every figure in the new §10 bullet from
+# it, the way `test_the_seventh_day_figures_are_the_derivation` does for 2026-10-15.
+#
+# Two refusals, and both are the item's rather than this round's. FIRST: the day is not a
+# counted day. `_qualifying` returns the empty list over its bytes — `derive` gives 0 chat turns
+# with a miss, so no event meets the accepted-loss filing condition — and the evidence set stays
+# exactly the four days §10's prose names. That is asserted by
+# `test_the_ninth_extract_moves_no_graded_reading` rather than assumed. SECOND: the day gets no
+# ordinal. The same derive over the committed extracts shows 2026-09-25 and 2026-10-09 clearing
+# all four, and over the daily job's still-present copies it shows 2026-10-03 doing the same on
+# a one-turn chat population, so "the second day to clear the bar" is refuted by the derivation
+# this block runs. What the page says instead is "newest", dated to the window the counter had
+# reached (2026-10-19) — the windowed-superlative shape #1918's rule asks for.
+
+NINTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-09.json"
+_NINTH_HEADING = "- **2026-10-09 is the newest day"
+_BAR_HEADING = "- **The acceptance bar"
+# The 2026-09-25 counted reading and the four criteria marked against it, raw and unflattened:
+# from that bullet up to the first counted-day paragraph after it. #3101 sets a new day BESIDE
+# that reading and re-cuts nothing IN it, so the block has to leave this round byte for byte.
+# Re-check with:
+#   python -c "import hashlib,pathlib; r=pathlib.Path('architecture/vllm.md').read_text(); \
+#   print(hashlib.sha256(r[r.index('- **The counted reading: 2026-09-25'):\
+#   r.index('- **The 2026-09-29 re-open')].encode()).hexdigest())"
+_SEPTEMBER_READING_SHA = "b7653a7c657d355b206f2c7a0cdbadcab62133b025cf8ee274691ba68dbdccc7"
+
+
+@pytest.fixture(scope="module")
+def ninth_raw() -> dict:
+    return json.loads(NINTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def ninth(ninth_raw, cfg) -> dict:
+    """2026-10-09 as `derive` reports it on the committed bytes, at the gate `config.yaml`
+    carries — the window holds its own boot line, so the pool needs no pinning."""
+    return W.derive(ninth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _bullet_at(head: str) -> str:
+    """One §10 bullet, whole, whitespace-collapsed and stripped of `**`, bounded at the next
+    top-level bullet or heading so a phrase demanded of it cannot be answered by prose the page
+    grows underneath."""
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index(head)
+    nxt = re.search(r"^- |^## ", raw[start + len(head):], re.M)
+    end = start + len(head) + nxt.start() if nxt else len(raw)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def _ninth_bullet() -> str:
+    return _bullet_at(_NINTH_HEADING)
+
+
+def _bar_bullet() -> str:
+    return _bullet_at(_BAR_HEADING)
+
+
+def _september_counted_reading() -> str:
+    """The 2026-09-25 reading and its (a)/(b)/(c)/(d) bullets, byte for byte, not flattened."""
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index("- **The counted reading: 2026-09-25")
+    return raw[start:raw.index("- **The 2026-09-29 re-open")]
+
+
+def test_the_ninth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(ninth_raw):
+    """#3101 clause 1: 2026-10-09 is in the tree, tracked, canonical, and identical to the copy
+    the standing daily job wrote — so the committed evidence IS the reading, not a transcription.
+
+    Byte identity is asked of the daily job's file, for #2852's and #2912's reason: what is worth
+    pinning is that nobody re-cut the numbers between the job that finds a day and the round that
+    commits it. The retention argument is sharper here than for 10-15 — that directory reaches
+    back only to 2026-09-30, so the 09-23…09-29 daily copies are already gone, and 10-09's copy
+    is one sweep from following them. After the sweep this fixture is the only copy, which is
+    also why an untracked file would be the day lost rather than a tidy tree.
+    """
+    assert ninth_raw["window"] == ["2026-10-09", "2026-10-10"], (
+        "the pinned reading is a 00:00→00:00 UTC window like every other reading; a fixture from "
+        "another window is a different day wearing this day's file name")
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(NINTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{NINTH_EXTRACT.name} is on disk but not in git; `tests/fixtures/.gitignore` negates "
+        "this family on purpose, so an extract nobody `git add`ed is invisible to every node "
+        "that re-derives a counted day")
+    raw = NINTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(ninth_raw, separators=(",", ":")) + "\n", (
+        f"{NINTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes")
+    assert len(raw.splitlines()) == 1
+    daily = DAILY_EXTRACT_DIR / NINTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; its extract is the other half of "
+                    "this identity and only the job can produce it")
+    assert raw == daily.read_text(encoding="utf-8"), (
+        f"the committed fixture and the daily job's copy at {daily} differ; one of them is not "
+        "the reading, and §10 cites the figures as though they were the same file")
+    assert NINTH_EXTRACT in _tracked_extracts(), (
+        "the extract family no longer enumerates this day, so the derived evidence set cannot "
+        "see the counted day it is supposed to include")
+
+
+def test_the_ninth_day_figures_are_the_derivation(ninth_raw, ninth, cfg, s10):
+    """#3101 clause 2 and 3: every figure in §10's 2026-10-09 bullet is `derive`'s own, at the
+    gate `config.yaml` carries, recomputed from the committed bytes — and so is the verdict the
+    bullet draws from them.
+
+    Nothing here is quoted from the item that filed it. The four criteria are re-checked as
+    arithmetic on the derivation (a chat turn with no miss, a day under §6.1's per-day budget, a
+    KV p50 under the gate, no non-cold two-request window under the stall line), because the
+    bullet's claim is that all four HOLD, and a node that only matched its digits would still
+    pass on a day that stopped clearing them. The baseline (b) is measured against is read out of
+    §10's own (b) bullet rather than restated here, so a re-cut of §6.1 moves this node and the
+    sentence together instead of silently re-scaling a percentage.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert ninth["turns"] == 406 and ninth["measured"] == 406
+    assert ninth["turns_with_misses"] == 37
+    assert ninth["misses"] == 90 and ninth["reprefill_tokens"] == 10120616
+    assert ninth["chat_turns"] == 9 and ninth["chat_turns_with_misses"] == 0
+    assert round(ninth["kv_p50"], 3) == 0.172
+    assert ninth["two_request_windows"] == 2318
+    assert ninth["two_request_under_stall"] == 4
+    assert ninth["two_request_under_stall_cold_in_flight"] == 4
+    assert ninth["two_request_under_stall_cold_prefill"] == 0
+    assert ninth["two_request_under_stall_not_cold"] == 0
+    assert ninth_raw["pool_tokens"] == [844969], (
+        f"the window carries {ninth_raw['pool_tokens']}, not one boot line at 844,969; the pool "
+        "the bullet cites is one the window itself measured")
+    assert ninth["pool_tokens"] == 844969
+
+    baseline = re.search(r"(\d+) misses and ([\d.]+)M tokens a day", s10)
+    assert baseline, (
+        "§10 no longer states §6.1's per-day baseline in the (b) bullet, so the percentage the "
+        "2026-10-09 sentence reports has no denominator on the page to be checked against")
+    per_day_misses = int(baseline.group(1))
+    per_day_tokens = round(float(baseline.group(2)) * 1_000_000)
+    assert (per_day_misses, per_day_tokens) == (97, 10_300_000), (
+        f"§6.1's per-day baseline now reads {per_day_misses} / {per_day_tokens:,}, so (b) is a "
+        "different budget than the one the 2026-10-09 sentence measured itself against")
+
+    # The four criteria, as arithmetic rather than as prose.
+    assert ninth["chat_turns"] > 0 and ninth["chat_turns_with_misses"] == 0, "(a)"
+    assert (ninth["misses"] <= per_day_misses
+            and ninth["reprefill_tokens"] <= per_day_tokens), "(b)"
+    assert ninth["kv_p50"] < gate, "(c)"
+    assert ninth["two_request_under_stall_not_cold"] == 0, "(d)"
+
+    p = _ninth_bullet()
+    assert (f"{ninth['chat_turns_with_misses']} of the day's {ninth['chat_turns']} chat turns "
+            "carries a prefix miss") in p
+    assert (f"{ninth['misses']} misses and {ninth['reprefill_tokens']:,} re-prefilled tokens "
+            f"against §6.1's per-day {per_day_misses} and 10.3M") in p
+    assert (f"{100 * ninth['misses'] / per_day_misses:.1f}% of the misses and "
+            f"{100 * ninth['reprefill_tokens'] / per_day_tokens:.1f}% of the tokens") in p
+    assert f"{100 - 100 * ninth['reprefill_tokens'] / per_day_tokens:.1f}% of the token budget" in p
+    assert f"KV p50 {ninth['kv_p50']:.3f}" in p
+    assert f"({gate:.2f})" in p, (
+        f"the bullet no longer states the gate `config.yaml` carries ({gate:.2f}), so the "
+        "(c) figure on the page has no denominator beside it")
+    assert (f"{ninth['two_request_under_stall']} of {ninth['two_request_windows']:,} "
+            "two-request windows run under 15 tok/s") in p
+    assert (f"all {ninth['two_request_under_stall']} of them excluded as cold admissions in "
+            f"flight with {ninth['two_request_under_stall_not_cold']} counted against") in p
+    assert (f"{ninth['turns']} turns, {ninth['measured']} measured, "
+            f"{ninth['turns_with_misses']} turns carrying the {ninth['misses']} misses") in p
+    assert f"{ninth['pool_tokens']:,} tokens" in p
+    assert NINTH_EXTRACT.name in p
+    assert "2026-10-12 16:21" in p and "a98247ab4db6" in p, (
+        "the bullet must say which engine did NOT serve this day; the boot and the build §1 "
+        "names are the two things that date it")
+    assert "2026-09-25 stays the counted reading" in p
+
+    # One bullet, one day: the figures belong to a single paragraph, and the one earlier day
+    # the page names is named WITHOUT a figure, because it has no committed extract.
+    raw_doc = DOC.read_text(encoding="utf-8")
+    assert raw_doc.count(_NINTH_HEADING) == 1
+    assert raw_doc.count(f"{ninth['reprefill_tokens']:,}") == 1, (
+        f"{ninth['reprefill_tokens']:,} now appears twice on the page, so a second paragraph "
+        "cites this day's tokens without deriving them")
+    said = [s for s in p.split(". ") if "2026-10-03" in s]
+    assert len(said) == 1, (
+        "§10's 2026-10-09 bullet must name 2026-10-03 once, as the thinner-population day it "
+        "is not headlining — and name it in one sentence, or the no-figure rule below has to "
+        "guess which sentence it grades")
+    assert not re.findall(r"\d+", said[0].replace("2026-10-03", "")), (
+        f"the sentence naming 2026-10-03 carries a figure ({said[0]!r}) and no committed "
+        "extract can produce one: §10's own rule is that it cites no figure the extracts in "
+        "the tree cannot reproduce, so the day is either named figure-free or committed too")
+
+
+def test_the_bar_bullet_keeps_the_counted_reading_and_names_a_later_clearing_day(cfg):
+    """#3101 clause 4: the bar bullet no longer implies 2026-09-25 is the only day the counter
+    has met the bar, and still hands the four marks to 2026-09-25.
+
+    The old close — "the day below is the first the counter has" — was the sentence that made
+    §10's bar look like a one-day result, and nothing pinned it: a page-wide grep for
+    `acceptance bar|first the counter has` in this file returned 0 hits before this node, so the
+    clause about what the bar bullet may imply had no instrument at all. The ordinals are banned
+    as day-counts only ("first day", "second day", …): the bar's own body says
+    "not a fifth measurement", which is a claim about criteria and has to survive.
+    """
+    raw_doc = DOC.read_text(encoding="utf-8")
+    bar, ninth_p = _bar_bullet(), _ninth_bullet()
+    assert "first the counter has" not in raw_doc, (
+        "the bar bullet still closes on the first-the-counter-has claim, which §10 cannot "
+        "maintain now that a second day clears all four criteria")
+    assert "2026-09-25" in bar and "still the reading this page marks the four criteria " \
+        "against" in bar, (
+        "the bar bullet must keep 2026-09-25 as the reading the four criteria are marked "
+        "against; acknowledging a later day is not a re-point of the counted reading")
+    assert "2026-10-09" in bar and "later day on which all four hold" in bar, (
+        "the bar bullet still reads as though no day after the counted one had met the bar")
+    for span, where in ((bar, "the bar bullet"), (ninth_p, "the 2026-10-09 bullet")):
+        hits = re.findall(r"\b(first|second|third|fourth|fifth|sixth)\s+day\b", span)
+        assert not hits, (
+            f"{where} states a day-count ordinal ({hits}); among the committed extracts "
+            "2026-09-25 and 2026-10-09 both clear all four and the daily job's copies show "
+            "2026-10-03 doing the same, so no ordinal is derivable — the page says newest")
+    assert "2026-09-25" in ninth_p and _NINTH_HEADING in raw_doc
+
+
+def test_the_ninth_extract_moves_no_graded_reading(ninth_raw, ninth, cfg):
+    """#3101 clause 5: admitting the day to the tracked family moves nothing §10 already grades.
+
+    Family membership needed no node edited: `_tracked_extracts()` enumerates by name family,
+    which is how #1921, #2005, #2248, #2852 and #2912 each arrived. What has to be asserted is
+    the other half — membership is not counting, and neither is a bar-clearing day. The day
+    carries no chat miss at all, so `_qualifying` returns the empty list over its bytes and the
+    filing-condition evidence set stays exactly the four days §10's composed prose names. The
+    digest below is the strictest form of the same promise: the counted reading and its four
+    criterion bullets are the densest prose on the page and this round was told to leave them
+    alone, so it is checked as bytes rather than as a handful of phrases that could survive a
+    re-cut of the numbers between them.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert _qualifying(ninth_raw, gate) == [], (
+        "a 2026-10-09 chat miss now meets the filing condition, so this day stops being "
+        "bar-evidence-only and becomes a counted day — which is owed-check's ruling, not this "
+        "fixture's")
+    assert ninth["chat_turns_with_misses"] == 0, (
+        "the day now carries a chat miss, and the empty `_qualifying` above is no longer "
+        "explained by the derivation")
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], (
+        "the derived §10 evidence set moved under a commit that promised to touch no graded "
+        "reading, so either the criteria changed or this day's bytes did")
+    assert "2026-10-09" not in days, (
+        "a bar-clearing day has been admitted to the filing-condition evidence set, which is a "
+        "different question with a different owner")
+    assert EXTRACT.name == "vllm_prefix_miss_2026-09-25.json", (
+        "the suite's counted-reading extract moved; #1812's triage names the traps in "
+        "re-pointing it and this round is not that round")
+    assert NINTH_EXTRACT in _tracked_extracts()
+    windows = {c.name: json.loads(c.read_text(encoding="utf-8"))["window"][0]
+               for c in _tracked_extracts()}
+    assert windows[NINTH_EXTRACT.name] == "2026-10-09"
+    assert len(set(windows.values())) == len(windows), (
+        f"two extracts now carry one day: {windows}")
+    block = _september_counted_reading()
+    assert hashlib.sha256(block.encode("utf-8")).hexdigest() == _SEPTEMBER_READING_SHA, (
+        "the 2026-09-25 counted reading and its (a)/(b)/(c)/(d) bullets changed bytes. #3101 "
+        "records a day beside that reading and re-cuts nothing in it: a real re-read of "
+        "2026-09-25 belongs in its own round, with every figure in those bullets re-derived "
+        "from `EXTRACT` the way the nodes above do, not smuggled into a commit that added a "
+        "fixture for a different day")
