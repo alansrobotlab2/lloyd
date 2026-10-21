@@ -1811,3 +1811,282 @@ def test_the_health_vocabulary_is_per_endpoint(monkeypatch):
         "probe verdict is an input to the rollback decision")
     assert probes.ok_statuses_for(tts_url) == probes.HEALTHY_OK_STATUSES
     assert probes.ok_statuses_for("http://127.0.0.1:8080/health") == probes.OK_STATUSES
+
+
+# ── the zone on the stamp in the row that already carries a UTC created_at ───
+#
+# `do_rollback` built ONE naive local value, `time.strftime("%Y%m%d_%H%M%S")`, and
+# put it to two jobs: the `stamp` field of the `rollback_started` row appended to
+# `promotions.jsonl`, and the artefact names in `_rollback_once` (the
+# `guardian-broken-<stamp>` tag and the `broken_dir/<stamp>` directory).
+# `gstate.append_event` writes `created_at` as UTC (`now_iso()`, gstate.py:25-26)
+# into that SAME row, of the file `scripts/automod/scorecard.py` reads as UTC — so
+# one record carried two clocks seven hours apart, and the automod loop's own
+# scoreboard was the reader at risk. The fix splits the two values: the ledger
+# field carries its zone, the names stay as they were, because git refuses a
+# colon in a ref name (asserted below against the real binary, rc 128).
+#
+# No node here freezes the clock. The digits are compared against the LOCAL wall
+# clock of the instant the LEDGER ITSELF records — `ts`, which `gstate.append_event`
+# writes in the same call as `created_at` — which is the instant at issue and
+# survives real timing; freezing `time.time` process-wide would perturb the
+# rollback's own wait loops to make a point about a format string. `TZ` is switched
+# at RUNTIME with `time.tzset()`, because `setenv` alone does not move libc's
+# tables, and because the box is -0700 while Kathmandu is +05:45: the two zones
+# disagree in both hours and minutes, so a writer emitting UTC digits is off one
+# way for the hours and the other for the minutes, and cannot pass by accident.
+#
+# The three names this section needs are imported HERE, not in the header, because
+# a comment further down this file cites `tests/test_guardian_rollback.py:581` — the
+# last line of `_fake_guardian`'s docstring — and two lines added to the header
+# would leave that citation pointing past the line it means. Verified by text rather
+# than by a line number, which is the thing at risk here: at the base commit
+# `sed -n 581p` prints "actually moved is exercised rather than stubbed away.", and
+# with header imports added that text had moved to 583.
+
+import re
+from datetime import datetime, timedelta
+
+#: The zone these nodes pin: +05:45, a non-whole-hour offset, so no rounding flatters.
+_KATHMANDU = "Asia/Kathmandu"
+_KATHMANDU_OFFSET = timedelta(hours=5, minutes=45)
+#: `gstate.now_iso()`'s form — a trailing Z and no offset.
+_CREATED_AT_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+@pytest.fixture()
+def kathmandu():
+    """Run the node at +05:45 and PROVE it took, so a UTC runner cannot satisfy
+    the zone assertions vacuously.
+
+    `TZ` is set and restored by hand, NOT with `monkeypatch.setenv`: monkeypatch
+    puts the variable back in its own teardown, which runs AFTER this `finally`, so
+    a `time.tzset()` there would re-read Kathmandu and leave libc's tables switched
+    for every later test in the process. That leak was measured, not imagined: with
+    the monkeypatch version of this fixture, running `tests/test_guardian_rollback.py
+    tests/test_guardian_predicates.py` in one process failed the stray-file alert
+    body node in the second file — which renders local wall-clock strings — while
+    that same node passed on its own. Order on the way out is therefore: restore the
+    variable, then call `tzset()`."""
+    prev = os.environ.get("TZ")
+    os.environ["TZ"] = _KATHMANDU
+    time.tzset()
+    try:
+        assert datetime.now().astimezone().utcoffset() == _KATHMANDU_OFFSET, (
+            f"TZ did not take (offset {datetime.now().astimezone().utcoffset()}): "
+            "every zone assertion below would pass on a UTC box")
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prev
+        time.tzset()
+        assert datetime.now().astimezone().utcoffset() != _KATHMANDU_OFFSET, (
+            "the fixture left the process on +05:45 for whoever runs next")
+
+
+def _rolled_back(tmp_path, monkeypatch):
+    """One real rollback through `do_rollback`, and the row it appended."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+    assert g.do_rollback("crash", "backend FATAL") is True
+    return g, repo, _row(g, "rollback_started")
+
+
+def test_the_rollback_row_carries_an_offset_bearing_stamp_and_its_other_keys(tmp_path,
+                                                                            monkeypatch,
+                                                                            kathmandu):
+    """#3100 clause 1. The `stamp` in the `rollback_started` row the guardian's
+    rollback path appends parses with a UTC offset, and the row is otherwise the
+    row it was.
+
+    Before the fix the value was `20261021_105440`: `datetime.fromisoformat` gives
+    a naive datetime, and a reader holding it cannot tell whether to read it as
+    local (right, but only on the box that wrote it) or as the UTC the rest of the
+    ledger speaks (wrong by seven hours). The row's own subject is asserted
+    alongside it because the whole point is that ONE FIELD changed: an
+    `event`/`trigger`/`reason`/`from`/`to` set that moved is a different change
+    than this item.
+    """
+    g, repo, row = _rolled_back(tmp_path, monkeypatch)
+
+    assert {"event", "trigger", "reason", "from", "to", "stamp"} <= set(row), \
+        f"the row lost a field beside the stamp: {sorted(row)}"
+    assert row["event"] == "rollback_started" and row["trigger"] == "crash", row
+    assert row["reason"] == "backend FATAL", row
+    assert row["from"] == repo["newer"] and row["to"] == repo["older"], (
+        "the row's subject moved while its stamp changed")
+    assert "commits" not in row and "batch" not in row, (
+        "a single-promotion rollback grew batch keys: "
+        f"{sorted(set(row) & {'commits', 'batch'})}")
+
+    parsed = datetime.fromisoformat(row["stamp"])
+    assert parsed.utcoffset() is not None, (
+        f"`{row['stamp']}` is still naive: read as UTC it is wrong by the whole "
+        "offset, read as local by nothing, and the reader cannot tell which")
+
+
+def test_the_marked_stamp_names_the_local_clock_and_not_utc(tmp_path, monkeypatch,
+                                                            kathmandu):
+    """#3100 clause 2. The zone is marked WITHOUT moving the reading, pinned under
+    a zone this box does not run in.
+
+    "The offset is present" alone would let a writer emit `created_at`'s `now_iso()`
+    form — UTC, trailing Z, offset and all — and call the zone marked while shifting
+    the digits five hours forty-five away from every other timestamp a person reads
+    beside `journalctl`. So the digits are graded against the LOCAL wall clock of
+    the instant this very row records: its own `ts`, which `gstate.append_event`
+    writes in the same call. The offset must NOT be added to `ts` to derive the
+    expected digits — that would be the UTC reading, and the claim here is the local
+    one. `kathmandu` is what makes this non-vacuous: the box is -0700, so a UTC
+    writer would pass the digits check here only if the box were UTC too.
+    """
+    g, repo, row = _rolled_back(tmp_path, monkeypatch)
+
+    parsed = datetime.fromisoformat(row["stamp"])
+    assert parsed.utcoffset() == _KATHMANDU_OFFSET, (
+        f"the stamp marks {parsed.utcoffset()}, not the +05:45 the guardian ran in")
+
+    local_digits = time.strftime("%Y%m%d_%H%M%S", time.localtime(row["ts"]))
+    assert parsed.strftime("%Y%m%d_%H%M%S") == local_digits, (
+        f"`{row['stamp']}` does not read the local clock of its own `ts` "
+        f"({local_digits})")
+    assert not row["stamp"].endswith("Z"), (
+        "the field was converted to UTC instead of marked with its zone")
+    assert parsed.strftime("%H:%M") != row["created_at"][11:16], (
+        "the stamp's digits became identical to created_at's UTC ones")
+    assert abs(parsed.timestamp() - row["ts"]) <= 1.0, (
+        "one record, two instants: the marked digits do not point at `ts`")
+
+
+def test_the_offset_never_reaches_the_tag_or_the_evidence_directory(tmp_path,
+                                                                   monkeypatch,
+                                                                   kathmandu):
+    """#3100 clause 3. The split is load-bearing, not tidy.
+
+    One value used to serve both jobs, and `git tag` rejects a ref name carrying
+    a colon (measured: exit 128, `is not a valid tag name`). Marking the zone the
+    way this row now does — `%Y-%m-%dT%H:%M:%S%z`, whose `T` and colons are what
+    `datetime.fromisoformat` in clause 1 needs — in that one variable would have
+    raised inside `_rollback_once` at the evidence-preservation step, on every
+    attempt, in the single path that runs when a bad promotion has to be reverted.
+    So the artefacts are asserted against the real repo: the tag that exists is
+    the old compact form, and the offset-bearing field is asserted to be
+    something git will not accept as a name — the control that says this split is
+    a constraint and not a preference.
+    """
+    g, repo, row = _rolled_back(tmp_path, monkeypatch)
+
+    digits = time.strftime("%Y%m%d_%H%M%S", time.localtime(row["ts"]))
+    tags = git(repo["path"], "tag", "--list", "guardian-broken-*").stdout.split()
+    assert tags == [f"guardian-broken-{digits}"], (
+        f"the tag changed form: {tags} (expected the pre-fix compact name)")
+    assert re.fullmatch(r"guardian-broken-\d{8}_\d{6}", tags[0]), tags[0]
+
+    evidence = sorted(p.name for p in g.state.broken_dir.iterdir())
+    assert evidence == [digits], (
+        f"the evidence directory is named {evidence}, not the naive stamp")
+    assert re.fullmatch(r"\d{8}_\d{6}", evidence[0]), evidence[0]
+
+    # The control: the value that is now in the ledger is not a legal ref name.
+    assert ":" in row["stamp"], f"the field lost the colons: {row['stamp']}"
+    refused = git(repo["path"], "tag", f"guardian-broken-{row['stamp']}")
+    assert refused.returncode != 0, (
+        f"git accepted `guardian-broken-{row['stamp']}`, so the LEDGER FIELD is "
+        "back to a naive form (the node above this one grades it) and nothing here "
+        "forces the names to stay separate any more")
+    assert "not a valid tag name" in (refused.stderr or refused.stdout)
+
+
+def test_the_offset_bearing_row_is_appended_and_earlier_lines_are_untouched(
+        tmp_path, monkeypatch):
+    """#3100 clause 4. This lands a new FIELD VALUE into a live 22,190-row ledger
+    of which 0 rows carry `stamp` and 0 are `rollback_*` — nothing has ever fired
+    this path on this box — so the cheap wrong version (rewrite the file, restamp
+    history) would only surface as a changed sha under someone's reader. Seed
+    rows, byte-compare the prefix, and check the NEW row's own `created_at` and
+    `ts` are still exactly what `gstate.append_event` writes.
+
+    Run WITHOUT the zone fixture on purpose: clause 1-3's nodes hold the guardian
+    at +05:45, and this one's `created_at` is the file's own UTC format, which is
+    the pairing the fix has to survive in the same record.
+    """
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+
+    before = [
+        {"event": "item_landed", "round_id": "SM_OLD", "item_id": 1111},
+        {"event": "review", "round_id": "SM_OLD", "verdict": "pass"},
+    ]
+    for entry in before:
+        gstate.append_event(g.state.ledger, dict(entry))
+    seed_bytes = g.state.ledger.read_bytes()
+    seed_lines = seed_bytes.decode().splitlines()
+    assert len(seed_lines) == 2
+
+    assert g.do_rollback("crash", "backend FATAL") is True
+
+    now_bytes = g.state.ledger.read_bytes()
+    assert now_bytes.startswith(seed_bytes), (
+        "the ledger was rewritten, not appended to: pre-existing rows moved")
+    lines = now_bytes.decode().splitlines()
+    assert lines[:2] == seed_lines, "a seeded row is not byte-identical"
+    added = lines[2:]
+    new = [json.loads(ln) for ln in added]
+    started = [r for r in new if r.get("event") == "rollback_started"]
+    assert len(started) == 1, [r.get("event") for r in new]
+
+    # The untouched half of `append_event`'s own contract, on the new row.
+    row = started[0]
+    assert {"ts", "created_at"} <= set(row), sorted(row)
+    assert _CREATED_AT_Z.match(row["created_at"]), (
+        f"`created_at` left gstate.now_iso()'s UTC form: {row['created_at']}")
+    assert isinstance(row["ts"], float) and row["ts"] > 0, row["ts"]
+    assert abs(datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+               .timestamp() - row["ts"]) <= 2.0, (
+        "`created_at` and `ts` no longer agree, independent of the stamp")
+    # The point of the item, in one line: the two clock fields of this record
+    # now name the same instant and say which zone each is in.
+    assert abs(datetime.fromisoformat(row["stamp"]).timestamp() - row["ts"]) <= 1.0, (
+        "the stamp and the row's UTC instant still disagree by an unmarked offset")
+
+
+def test_exactly_one_stamp_site_changed_and_the_journal_line_and_names_are_untouched():
+    """#3100 clause 5, the scope-out, read off the tree rather than off this diff.
+
+    The item is one field in one ledger row. The other `%Y%m%d_%H%M%S` sites are
+    artefact NAMES (the two other `guardian.py` stamps and `rollback.py`'s
+    `lloyd.failed-<stamp>` venv swap), `memwatch.py` names its dumps with the
+    OPPOSITE skew — a UTC `gmtime` argument — and the `log()` journal print goes
+    to the journal with no zone at all because journald stamps its own. None of
+    those is this item, and a companion ruling on them is owed, not taken here;
+    so the file is asserted to still carry exactly three naive stamps, the one
+    new offset literal, and the journal line unchanged.
+    """
+    src = (GUARDIAN_DIR / "guardian.py").read_text(encoding="utf-8")
+    assert src.count('time.strftime("%Y%m%d_%H%M%S")') == 3, (
+        "a naive artefact-name stamp was converted besides the ledger field")
+    assert 'stamp = time.strftime("%Y%m%d_%H%M%S")' in src, (
+        "the name variable itself went, which is the sprawl this item excludes")
+    assert src.count('time.strftime("%Y-%m-%dT%H:%M:%S%z")') == 1, (
+        "more than the rollback ledger row learned to mark its zone")
+
+    rb_src = (GUARDIAN_DIR / "rollback.py").read_text(encoding="utf-8")
+    assert 'stamp = time.strftime("%Y%m%d_%H%M%S")' in rb_src, (
+        "rollback.py's `lloyd.failed-<stamp>` name changed form")
+
+    mw_src = (GUARDIAN_DIR / "memwatch.py").read_text(encoding="utf-8")
+    assert "time.strftime('%Y%m%d_%H%M%S', time.gmtime(snap['ts']))" in mw_src, (
+        "memwatch's UTC-named dumps changed beside the guardian's")
+
+    journal = [ln for ln in src.splitlines()
+               if "print(" in ln and "[guardian]" in ln and "strftime" in ln]
+    assert len(journal) == 1, f"`log()`'s journal line is not the one line expected: {journal}"
+    assert "%z" not in journal[0], (
+        "the journal print gained a zone; journald stamps its own and this item "
+        "does not touch it")

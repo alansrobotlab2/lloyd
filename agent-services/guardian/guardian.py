@@ -1021,7 +1021,7 @@ class Guardian:
         stamp = time.strftime("%Y%m%d_%H%M%S")
         gstate.append_event(self.state.ledger, {
             "event": "rollback_started", "trigger": trigger, "reason": reason[:1000],
-            "from": head, "to": target, "stamp": stamp,
+            "from": head, "to": target, "stamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),  # marked, unlike the name
             **({"commits": batch, "batch": len(batch)} if batch else {}),
         })
 
