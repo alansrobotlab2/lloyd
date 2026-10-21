@@ -51,9 +51,9 @@ VAULT = ACCOUNT_HOME / "obsidian"
 
 #: The committed bytes the witness tests read. Nothing in the clause-1/2/4 witness
 #: may depend on a live store: `DEFAULT_RETENTION_DAYS = 14`
-#: (`app/component_manifest.py:302`) prunes the day file and the session within a
-#: fortnight, and a test whose real assertions live behind an `if day_present:`
-#: branch turns into a `return` that still reports passed.
+#: (`app/component_manifest.py::DEFAULT_RETENTION_DAYS`) prunes the day file and the
+#: session within a fortnight, and a test whose real assertions live behind an
+#: `if day_present:` branch turns into a `return` that still reports passed.
 FIXTURES = ROOT / "tests" / "fixtures"
 WITNESS_LINE_PATH = FIXTURES / "step_replay_fidelity_witness.ndjson"
 WITNESS_SESSION_PATH = FIXTURES / (

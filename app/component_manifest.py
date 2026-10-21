@@ -209,8 +209,20 @@ DEFAULT_SUBDIR = "lloyd-request-manifests"
 #: holding raw component text instead of the pair costs 42,662 B median per session
 #: over the same 2,332 `turn_start` lines, which at 1024 entries is ~43.7 MB of
 #: confidential prompt text resident in a server that also serves the requests asking
-#: for it. Whether 1024 is still the right cap now an entry is a pair is an open
-#: ruling, not a settled one (#1782 entry 4, owed after live traffic).
+#: for it. That question is ruled, and the answer is the number above: #1782's
+#: owed-check pass `20261020_135806_owedcheck_aa92` decided on 2026-10-20 to keep
+#: 1024 as a pure count bound — no raise, and no age- or activity-based expiry,
+#: because a TTL is the silent blank on a round that is still running, which is the
+#: failure this bound exists to prevent. Shrinking it has nothing left to buy, since
+#: the residency the cap used to price is now the pair cost above, and raising it
+#: had no measured gain to deploy: distinct sessions per day ran 441 to 654 over
+#: 2026-10-13…20 against the 826 of the busiest observed day (2026-09-26), and
+#: `evictions` read 0 live on 2026-10-20. What replaces the question is a trip wire
+#: the same counter already answers — raise the cap only on a `GET /health`
+#: `manifest` reading that shows `evictions` > 0 with `sessions` near
+#: `max_sessions`. Until that fires, an edit to this number is widening enforcement
+#: with no ruled reason, which is what the clause-#3092 node in
+#: `tests/test_component_manifest_retention.py` refuses.
 MAX_SESSIONS = 1024
 
 _UNRECORDED = "unrecorded"

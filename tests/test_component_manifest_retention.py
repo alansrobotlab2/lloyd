@@ -661,7 +661,10 @@ def test_the_bound_stays_1024_and_stays_a_pure_count():
     The cap's rationale moved underneath it — a session's entry now costs a
     digest pair where it cost 42,662 B of component text, so the residency
     pressure #1782 counted is gone and the bound could eventually be *raised*.
-    Ruling that is owed work (#1782 entry 4), not this round's. What no round
+    That question is closed, not owed: #1782's owed-check pass
+    `20261020_135806_owedcheck_aa92` ruled on 2026-10-20 to keep 1024, and to
+    raise it only on the eviction trip wire its comment states — which is what
+    the two nodes at the end of this file pin. What no round
     may do is quietly change the *kind* of bound: the autonomy and research
     rounds that run for hours are exactly the sessions an age- or activity-based
     expiry blanks, which is why the file has carried "the bound is a count, not
@@ -675,7 +678,8 @@ def test_the_bound_stays_1024_and_stays_a_pure_count():
     """
     assert cm.MAX_SESSIONS == 1024, (
         f"MAX_SESSIONS is {cm.MAX_SESSIONS}: this node is the guard that the "
-        "number owed a ruling from #1782 entry 4 is still the number in the file")
+        "number #1782's owed-check pass 20261020_135806_owedcheck_aa92 ruled to "
+        "keep is still the number in the file")
 
     for n in range(cm.MAX_SESSIONS):
         cm.note_components(f"count-{n}", {"system_prompt": "p"})
@@ -757,3 +761,146 @@ def test_the_comment_prices_the_registry_in_digest_pairs_and_names_the_way_back(
     _says(_in("median"), median,
           "the raw-text cost per session, off the committed witness bytes", "a median")
     cm._reset_registry()
+
+
+# --------------------------------------------------------------------------- #
+# #3092: the cap ruling is recorded as MADE, together with the trip wire that
+# replaced the open question.
+# --------------------------------------------------------------------------- #
+
+#: The owed-check pass that closed #1782's entry-4 question, copied from that
+#: item's `owed_settled` entry (`outcome: ruling`, `at: '2026-10-20T21:01:41'`,
+#: `follow_up: 3092`) in vault
+#: `backlog/1782-component-manifest-stop-128-sessions-from-blanking.md`.
+CAP_OWED_CHECK = "20261020_135806_owedcheck_aa92"
+
+#: The four spellings the block above `MAX_SESSIONS` used for a question #1782 had
+#: already settled. Each reads to the next reader as "nobody has decided this yet",
+#: which is the defect class #2958 pinned for the intel-pipeline skip sets at
+#: `tests/test_corpus_shape.py:1026` and #2957 for the funnel census at
+#: `tests/test_funnel_census.py:873`: the ruling is recorded, only the prose in the
+#: code still says otherwise, and the next session books the work again. This tuple
+#: is the only place in the repo those phrases now appear, and here they are the
+#: things being refused.
+CAP_PENDING_MARKERS = ("open ruling", "not a settled one", "1782 entry 4",
+                       "owed after live traffic")
+
+
+def _prose_of(block: str) -> str:
+    """A comment block as the continuous prose a reader actually reads.
+
+    The `#:` markers are markup, not text, and a comment wraps mid-sentence: a
+    phrase pinned against the lines joined whole would grade the column the comment
+    happened to wrap at rather than the sentence. Folding the marker away line by
+    line and joining on one space is what lets the nodes below name a phrase and
+    mean it. (`_sentences` above keeps its own folding and its own splitting — the
+    #1880 residency node is not this round's to touch.)
+    """
+    return " ".join(re.sub(r"^\s*#+:?\s*", "", line) for line in block.splitlines())
+
+
+def test_the_cap_ruling_is_recorded_as_made_with_its_trip_wire():
+    """#3092 clauses 1-3: the block says the cap is ruled, and which way it went.
+
+    Deleting the stale sentence is not enough. A block that merely stops asking
+    leaves a reader who finds the number in a year unable to tell whether it was
+    examined or simply inherited, and #2958 found that a rewrite which only removes
+    the pending sentence tends to leave a second one standing. So the three ways this
+    ruling can be silently reopened are each refused: the block REVERTS TO PENDING
+    WORDING (every one of the four spellings below, block-wide), it DROPS THE PASS ID
+    (the sentence that carries `20261020_135806_owedcheck_aa92` must itself also say
+    the question is ruled, name `#1782`, carry the date, and state which way it went),
+    or it DROPS THE EVICTION TRIP WIRE (the sentence carrying "trip wire" must name
+    the `GET /health` `manifest` reading, the threshold `evictions` > 0, and the
+    occupancy half).
+
+    Sentence-scoped, deliberately: a block-wide `assert "ruled"` is satisfied by the
+    unrelated tail phrase "with no ruled reason", so deleting the ruling sentence left
+    that assertion green — the review's first pass here caught exactly that. A phrase
+    is now demanded of the sentence that has to carry it, which is the same
+    sentence-scoping #1880's residency node above already grades its figures with.
+    """
+    block = _comment_above("MAX_SESSIONS")
+    assert block.strip(), "MAX_SESSIONS has no comment block above it any more"
+    sentences = _sentences(_prose_of(block))
+    assert sentences, "the block above MAX_SESSIONS has no sentences in it"
+
+    for marker in CAP_PENDING_MARKERS:
+        assert marker not in " ".join(sentences), (
+            f"the block calls the cap decision pending again with {marker!r}, but "
+            f"#1782's owed-check pass {CAP_OWED_CHECK} ruled it on 2026-10-20, so a "
+            "reader who believes this sentence books work that is already done")
+
+    def _one(needle: str, what: str) -> str:
+        """The single sentence that must carry both `needle` and its claim."""
+        hits = [s for s in sentences if needle in s]
+        assert hits, (
+            f"no sentence of the block is the one about {what}, so the block does "
+            f"not say {what} anywhere a reader can attribute it: {needle!r}")
+        return hits[0]
+
+    decided = _one(CAP_OWED_CHECK, "the owed-check pass that recorded the ruling")
+    assert "#1782" in decided, (
+        "the sentence naming the pass does not name the item that decided, so the "
+        f"ruling has no owner: {decided}")
+    assert "2026-10-20" in decided, (
+        "the ruling has to arrive dated in the sentence that records it, or it "
+        f"cannot be told from the open question it replaces: {decided}")
+    # "ruled" rather than "is ruled": the tense is the next editor's to choose, and
+    # the scoping above is what makes the verb mean something — a sentence that says
+    # ruled nowhere and merely cites the pass id is exactly what fails here.
+    for way in ("ruled", "keep 1024", "no raise", "pure count",
+                "age- or activity-based expiry"):
+        assert way in decided.lower(), (
+            f"the sentence that names the ruling's pass does not say {way!r}, so "
+            f"some other phrase is carrying the clause instead: {decided}")
+
+    wire = _one("trip wire", "the condition that reopens the cap question")
+    assert "/health" in wire and "`manifest`" in wire, (
+        "the trip wire has to name the reading it is taken from — the read-only "
+        f"`GET /health` route and its `manifest` section: {wire}")
+    assert "`evictions` > 0" in wire, (
+        "the firing condition is `evictions` > 0; with the comparison dropped the "
+        f"trip wire is a field name rather than a threshold: {wire}")
+    assert "`sessions`" in wire and "near `max_sessions`" in wire, (
+        "occupancy is part of the condition, not evictions alone: `sessions` has to "
+        f"be near `max_sessions`, or one stale drop counter reads as a fired "
+        f"wire: {wire}")
+
+
+def test_the_trip_wire_names_fields_the_health_section_actually_publishes():
+    """#3092 clause 2's seam: the reading the comment prescribes has to exist.
+
+    The block now sends the next reader to a `GET /health` `manifest` reading for
+    `evictions`, `sessions` and `max_sessions`. That payload is not assembled in this
+    file's own module: `app/routers/health.py::_manifest_section` builds it, so the
+    comment is a claim about a surface the file it sits in does not control. Rename a
+    key on either side and the trip wire stops being readable, which is noticed only
+    on the day the cap has to be raised. So the three names are read out of the
+    shipped comment and asked of that real section builder, and the section's
+    `max_sessions` has to be the constant the comment prices.
+
+    What this node does NOT do is reach a serving process. That the section is
+    actually mounted on the route is pinned by
+    `tests/test_health_manifest_stats.py::test_health_reports_every_counter_the_module_keeps`,
+    which drives the backend app through `fastapi.testclient.TestClient` — an
+    in-process ASGI call against the real route table and handler, not a socket — and
+    asserts `section["max_sessions"] == cm.MAX_SESSIONS` plus the whole `stats()`
+    vocabulary on the response. The one surface that can fire the trip wire at all, a
+    `GET http://localhost:8080/health` under real traffic, is the item's owed-after-
+    landing entry and no test here can observe it; both files run together for this
+    round's verify.
+    """
+    from app.routers import health
+
+    flat = _prose_of(_comment_above("MAX_SESSIONS"))
+    section = health._manifest_section()
+    for field in ("evictions", "sessions", "max_sessions"):
+        assert f"`{field}`" in flat, (
+            f"the comment's trip wire has stopped naming `{field}`, one of the "
+            "readings it tells a reader to take")
+        assert field in section, (
+            f"the `manifest` section no longer publishes `{field}` "
+            f"({sorted(section)}), so the trip wire the comment states cannot be "
+            "read off the route it names")
+    assert section["max_sessions"] == cm.MAX_SESSIONS, section
