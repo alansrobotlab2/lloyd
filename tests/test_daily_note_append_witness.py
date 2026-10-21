@@ -1254,12 +1254,19 @@ def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
 
     The seeding is the same 45-failure day the fleet-watchdog nodes use (33 failures
     before a boot pinned to 06:00Z, 10 in the ramp beside it, 2 at 20:00Z) over 20 on
-    the predecessor, so 2.0-2.25x and the floor leg is the only trigger. The rate is
-    asserted as a SHAPE and an order of magnitude rather than a literal, because this
-    route takes the census at wall clock — `minutes_since_boot` is the real distance
-    from 06:00Z yesterday to now, at least 19 h — and that is the point of the figure
-    on a note: ~0.1 failures per 15 min beside a headline of 45 says the pool was not
-    failing when this was written.
+    the predecessor, so 2.0-2.25x and the floor leg is the only trigger. BOTH of the
+    census's clocks are held still here, exactly as `tests/test_fleet_watchdog.py`
+    holds them: the boot instant is overridden, and the census is handed `now` =
+    00:05Z today (the same value as that file's `_THROUGHPUT_NOW`), which is the clock
+    its day gate and `minutes_since_boot` are both read from. So the window is 1085
+    min and the rate is 12 * 15 / 1085 = 0.1659 → `0.17 / 15 min`: numbers this node
+    writes down, not numbers it infers from the hour it happens to run in. It used to
+    take the census at wall clock and assert the window was "at least 19 h", and that
+    was false arithmetic — the census day is YESTERDAY, so at 00:00Z the real distance
+    from 06:00Z yesterday is 18 h, and the node was red for the whole hour
+    00:00–00:59Z (#3097: red at 00:39Z, where the line said 1119 min). What the figure
+    is for has not moved: 0.17 failures per 15 min beside a headline of 45 says the
+    pool was not failing when this was written.
     """
     import asyncio
     import re
@@ -1275,14 +1282,24 @@ def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
     # suppress this node's census outright.
     monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-    twodays = (datetime.now(timezone.utc) - timedelta(days=2)).date().isoformat()
+    # ONE reading of the real date feeds the pair and the census clock below, so no
+    # midnight inside this node can split the day the seeding writes from the day the
+    # census's own gate expects.
+    today = datetime.now(timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    twodays = (today - timedelta(days=2)).isoformat()
     # The host came up at 06:00Z on the counted day, so 12 of its 45 failures are
     # at-or-after the boot and 33 are not. Pinned rather than read, because
     # `/proc/uptime` moves every second and an assertion over the real instant could
     # not state its own expected value.
     boot = datetime.fromisoformat(f"{yesterday}T06:00:00+00:00")
     monkeypatch.setattr(fw, "_host_boot_instant", lambda: boot)
+    # The census's other clock: 00:05Z today, `tests/test_fleet_watchdog.py`'s
+    # `_THROUGHPUT_NOW`, so `yesterday` is the newest COMPLETE day and the distance
+    # from the pinned boot is 18 h 05 min = 1085 min whatever hour this runs in. It is
+    # written as an instant rather than as `boot + 1085 min` so the 1085 asserted below
+    # is that subtraction's result and not its input.
+    census_now = datetime.fromisoformat(f"{today}T00:05:00+00:00")
 
     q = WorkQueue(tmp_path / "since-boot.db")
     rows = ([("run failed: no structured answer", f"00:{n:02d}") for n in range(33)]
@@ -1306,7 +1323,12 @@ def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
     conn.close()
 
     async def _one_census():
-        return await fw._census_failure_throughput(asyncio.get_running_loop(), q)
+        # The pinned clock crosses the `run_in_executor` hand-off here and is read on
+        # the executor thread; the window printed on the note below is the proof it
+        # arrived, because a wrapper that dropped the argument would measure the
+        # reading against the wall clock instead and print a different number.
+        return await fw._census_failure_throughput(asyncio.get_running_loop(), q,
+                                                   now=census_now)
 
     asyncio.run(_one_census())
 
@@ -1327,18 +1349,33 @@ def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
     assert f"12 of them since host boot {boot.isoformat()}" in line, (
         "the note carries no since-boot count with its boot instant, so a reader "
         "still cannot tell a boot-window burst from a day of pressure: " + line)
-    rate = re.search(r"= (\d+\.\d{2}) / 15 min \((\d+) min since boot\)", line)
+    # The width in the label is `_THROUGHPUT_RATE_WINDOW_MINUTES`'s business, so the
+    # pattern reads it from the constant rather than restating 15: this is the same
+    # rule `test_the_since_boot_rate_label_names_the_window_constant_not_a_literal`
+    # enforces on the census's own docstring, applied to the line that reaches a note.
+    width = fw._THROUGHPUT_RATE_WINDOW_MINUTES
+    rate = re.search(rf"= (\d+\.\d{{2}}) / {width} min \((\d+) min since boot\)", line)
     assert rate, (
         "the since-boot count reaches the note with no rate and no window width: "
         + line)
+    # 1085 stays a literal on purpose: it is this node's own expected value, and
+    # deriving it from `census_now - boot` here would grade production's subtraction
+    # against itself. The two instants above state it; nothing below recomputes it.
     elapsed = int(rate.group(2))
-    assert elapsed >= 1140, (
-        f"boot was 06:00Z yesterday and the clock is now, so the window cannot be "
-        f"shorter than 19 h; the line says {elapsed} min: " + line)
+    assert elapsed == 1085, (
+        f"the boot is pinned to 06:00Z yesterday and the census clock to 00:05Z today, "
+        f"so the window is 18 h 05 min = 1085 min; the line says {elapsed} min — which "
+        f"is the pinned clock failing to reach `_throughput_census` through "
+        f"`_census_failure_throughput` and the census reading the wall clock instead: "
+        + line)
+    expected = f"{12 * width / 1085:.2f}"
+    assert rate.group(1) == expected, (
+        f"12 of them over a 1085-min window is 12 * {width} / 1085 = "
+        f"{12 * width / 1085:.4f}, printed to two places as {expected}; the line says "
+        f"{rate.group(1)}: " + line)
     assert float(rate.group(1)) < 1.0, (
-        f"12 failures across a window of {elapsed} min is {rate.group(1)} per 15 min, "
-        "well under one — a rate that reads like live pressure over a 19-hour window "
-        "is the number this clause exists to keep small: " + line)
+        f"well under one per {width} min — a rate that reads like live pressure over "
+        "an 18-hour window is the number this clause exists to keep small: " + line)
     assert "floor rule: >= 40" in line, (
         "the fired-rule parenthetical did not survive the trip: " + line)
     assert "classes:" in line and f"failures span {yesterday}T" in line, (
@@ -1347,3 +1384,88 @@ def test_a_floor_line_with_the_since_boot_reading_lands_on_the_note(
     assert fw._state[fw._THROUGHPUT_WM_KEY] == yesterday, (
         "the census reached the note without recording the day, so the next process "
         "would post it again: " + repr(fw._state.get(fw._THROUGHPUT_WM_KEY)))
+
+
+# ── #3097 clause 2: green here is earned by passing, not by being set aside ───
+def test_no_node_in_this_file_reaches_green_by_being_skipped_or_excluded():
+    """Clause 2 as a property of the file, because a diff cannot be graded for it.
+
+    #3097 was filed against ONE red node, and the cheapest way to make a red node
+    green is never to fix it: mark it `skip`/`skipif`/`xfail`, tag it `live_vault`
+    so the gate's own `-m "not live_vault and not fault_injection"` deselects it, or
+    delete it. Each of those leaves the report line reading as a pass. Clause 2 says
+    the fix must make the test PASS, so it needs a pin that survives whoever edits
+    this file next, and the pin is the file rather than any one assertion in it.
+
+    Three checks, each failing a different way out:
+
+    1. No skip/xfail machinery anywhere in the syntax tree — the AST, so a mark
+       spelled on the decorator line and a bare `pytest.skip()` buried in a body are
+       the same finding, and a comment or docstring that merely mentions the word is
+       not.
+    2. The gate's marker expression collects EXACTLY the set of nodes the file
+       collects without it. Deselecting anything — by `live_vault`, by
+       `fault_injection`, by a future marker — makes the two sets differ.
+    3. Every `test_*` function defined in the tree is in that collected set, so a
+       node cannot hide from the gate by renaming itself out of the pattern or by
+       losing its own `test_` prefix.
+
+    What this cannot prove is stated plainly: that no node was DELETED outright is a
+    question about the diff against base, not about the file's own bytes, and the
+    gate's `vet` and `tests` rungs see that diff. What it does prove is the part a
+    later edit can quietly undo — that the 27 nodes this file collects today are the
+    same 27 the gate runs, none of them set aside.
+    """
+    import ast
+    import subprocess
+
+    path = Path(__file__).resolve()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    # Names that would take a node out of the run while leaving it in the report.
+    # `live_vault` and `fault_injection` are the gate's two deselectors, listed here
+    # as well as in the expression below so a mark is caught even if the marker
+    # expression is one day widened and this file's nodes are named in it.
+    banned = {"skip", "skipif", "xfail", "importorskip", "live_vault",
+              "fault_injection"}
+    def _mark_of(node):
+        # `attr` exists only on Attribute and `id` only on Name, so both are read
+        # through getattr with a default rather than as attribute access, which pyright
+        # cannot narrow across the isinstance union.
+        return getattr(node, "attr", None) or getattr(node, "id", None)
+
+    offenders = [f"line {n.lineno}: {_mark_of(n)}" for n in ast.walk(tree)
+                 if isinstance(n, (ast.Attribute, ast.Name))
+                 and _mark_of(n) in banned]
+    assert not offenders, (
+        "this file now carries skip/xfail/deselection machinery, which is the one way "
+        f"clause 2 of #3097 can be undone without a test failing: {offenders}")
+
+    def _collect(*extra):
+        run = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q",
+             "-p", "no:cacheprovider", *extra, str(path)],
+            cwd=str(REPO), capture_output=True, text=True, timeout=300)
+        assert run.returncode == 0, (
+            f"collect-only on this file exited {run.returncode}; stdout+stderr:\n"
+            f"{run.stdout[-1500:]}\n{run.stderr[-1500:]}")
+        return {ln.strip() for ln in run.stdout.splitlines() if "::" in ln}
+
+    plain = _collect()
+    gated = _collect("-m", "not live_vault and not fault_injection")
+    assert gated == plain, (
+        "the gate's marker expression does not run everything this file defines — "
+        f"deselected: {sorted(plain - gated)}")
+    named = "test_a_floor_line_with_the_since_boot_reading_lands_on_the_note"
+    assert any(n.endswith("::" + named) for n in gated), (
+        f"the node #3097 was filed against is not in the set the gate runs: "
+        f"{sorted(gated)[:3]}")
+
+    defined = {n.name for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name.startswith("test_")}
+    missing = {n for n in defined if not any(g.endswith("::" + n) for g in gated)}
+    assert not missing, (
+        f"{len(defined)} test functions are defined here but "
+        f"{len(gated)} nodes were collected; these are defined and not collected: "
+        f"{sorted(missing)}")

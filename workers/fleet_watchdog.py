@@ -1596,7 +1596,7 @@ def _record_throughput_day(queue: WorkQueue, day: str) -> None:
                         "watermark could not be persisted; a restart may re-post it")
 
 
-async def _census_failure_throughput(loop, queue: WorkQueue) -> None:
+async def _census_failure_throughput(loop, queue: WorkQueue, now=None) -> None:
     """Post the day's failure-throughput census once, on its own watermark.
 
     Read on every tick and posted at most once per day named: the store read is one
@@ -1607,9 +1607,22 @@ async def _census_failure_throughput(loop, queue: WorkQueue) -> None:
     non-event and the dedupe unobservable, which is the thing clause 3 of #2890 asks
     to be true of the watermark and not of the clock.
 
+    `now` is forwarded to `_throughput_census`, which defaults it to wall clock — and
+    forwarding it is the whole of the point, because that census documents `now` as the
+    clock BOTH the day gate and `minutes_since_boot` are read from, "so a test that
+    pins it pins the whole reading instead of racing the tick against midnight". The
+    sync census has had that seam since #2956; this async route, which is the one the
+    watchdog's own tick takes, did not, so the only node that crossed the full route to
+    a human's note had to assert the elapsed window against the real clock. It read
+    `>= 1140` min beside a boot pinned to 06:00Z yesterday and called that 19 h, but
+    the real floor at that arithmetic is 18 h (the census day is yesterday, so the
+    window is 18 h at 00:00Z), and the node was red for the hour 00:00–00:59Z — the
+    failure the gate reproduced at base 7fab8fb4 (#3097). Forwarding the clock is what
+    lets that node state its own expected number instead of guessing at the hour.
+
     Never raises past `_throughput_census`, which is where every store read lives.
     """
-    census = await loop.run_in_executor(None, _throughput_census, queue)
+    census = await loop.run_in_executor(None, _throughput_census, queue, now)
     if census is None:
         return
     day = census["day"]

@@ -21,6 +21,7 @@ import inspect
 import json
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -3155,3 +3156,71 @@ def test_the_docstring_that_states_the_rate_denominator_names_the_constant():
     assert "max(minutes_since_boot, 15)" not in sentence, (
         f"the denominator sentence still states the window as a bare 15, so it drifts "
         f"the day the constant moves: {sentence!r}")
+
+
+# ── #3097: the async route forwards the census clock it was handed ────────────
+# Every node above pins the clock by calling `_throughput_census` DIRECTLY, because
+# that function takes `now` and documents it as the one clock both the day gate and
+# `minutes_since_boot` are read from. The route the watchdog's tick actually takes is
+# `_census_failure_throughput`, and it did not accept or forward `now` — so the single
+# node that walks the census all the way to a human's note had to measure its elapsed
+# window against the real hour, and its floor for that window was wrong: red for every
+# run in the hour 00:00–00:59Z at base 7fab8fb4 (#3097). This node is the seam itself,
+# not the arithmetic downstream of it — the arithmetic is the witness node's job, in
+# tests/test_daily_note_append_witness.py.
+
+def _census_clock_recorder(monkeypatch):
+    """Replace the census with a spy that names the clock and thread it got, and posts nothing.
+
+    Patching the census is the only way to see the ARGUMENT rather than a number it
+    produced: every downstream reading is identical whether `now` arrived or not, since
+    `now=None` is exactly the wall-clock default. Returning None is what keeps the spy
+    from walking into the watermark and the alert path, which are pinned elsewhere.
+    Each entry is the `(now, thread)` pair the census actually received, the second
+    half being what makes the executor hop observable from inside the spy.
+    """
+    seen = []
+
+    def _spy(queue, now=None):
+        seen.append((now, threading.current_thread()))
+        return None
+
+    monkeypatch.setattr(fw, "_throughput_census", _spy)
+    return seen
+
+
+async def test_the_async_census_route_forwards_its_pinned_clock_across_the_hop(
+        monkeypatch, tmp_path):
+    """#3097: `now` survives the executor hand-off; the tick's own call stays None.
+
+    `_throughput_census` runs on a worker thread taken from `run_in_executor`, so the
+    forwarding is a thread-boundary claim and is checked as one. The spy records the
+    `(now, thread)` pair it was handed, and this node asserts three things: the pinned
+    instant is what the census received, the census ran on a thread OTHER than the one
+    awaiting the wrapper (so the node is pinning the clock the shipped route actually
+    uses and not one it bypasses), and the two-argument call `tick` makes — line 1868
+    of this module's own file — still hands over None. That last one is not
+    decoration: defaulting `now` to the pinned value would freeze the window the
+    shipped alarm reports, and the first two assertions would still pass.
+    """
+    seen = _census_clock_recorder(monkeypatch)
+    q = _throughput_queue(tmp_path / "forward.db", [])
+    awaiting = threading.current_thread()
+
+    await fw._census_failure_throughput(asyncio.get_running_loop(), q,
+                                        now=_THROUGHPUT_NOW)
+    await fw._census_failure_throughput(asyncio.get_running_loop(), q)
+
+    assert len(seen) == 2, (
+        f"the census should be reached once per call, got {len(seen)}")
+    assert seen[0][0] == _THROUGHPUT_NOW, (
+        "the pinned census clock did not reach the census across the executor "
+        f"hand-off — the async route measures `minutes_since_boot` against the wall "
+        f"clock, which is #3097: {seen[0][0]!r}")
+    assert seen[0][1] is not awaiting, (
+        "the census ran on the thread that awaited the wrapper instead of on the "
+        f"executor thread, so this node would be pinning a clock the shipped route "
+        f"never reaches: {seen[0][1].name!r}")
+    assert seen[1][0] is None, (
+        "the two-argument route the tick takes must leave the census on the wall "
+        f"clock, so a shipped alarm cannot report a frozen window: {seen[1][0]!r}")
