@@ -241,30 +241,46 @@ def _restore_constants():
     RC.MEMORY_MAX, RC.MEMORY_SWAP_MAX, RC.TASKS_MAX = before
 
 
-def _big_tree() -> str:
-    """A tree big enough that a recursive grep and find do real work: the repo's own
-    checkout, which is the largest recursive search any Bash call on this box performs, and
-    the one a real session runs most often."""
+_GREP_TOKEN = "ceiling_find"   # the string the control greps for; every planted file holds it
+
+
+def _big_tree(root: Path) -> Path:
+    """A tree big enough that a recursive grep and find do real work, planted under the
+    pytest temp root the caller was handed, and returned as the path for the control to search."""
     # NOT the repo checkout. The first version searched the checkout and the node
     # spent its whole 120 s budget with no ceiling note at all: over a working tree
     # that the running system is writing, and from the bench profile's bwrap, a
     # repo-wide recursive `find` ran past the tool timeout (0.3 s in the foreground
     # arm). A control slower than its budget proves nothing in either direction. This
     # is the shape the item names — recursive `grep -rl` and `find` doing real
-    # traversal — at a size that measures rather than outlives: 200 dirs x 20 files,
-    # 0.1 s in both arms with the ceiling armed (measured), and the grep token matches
-    # every file so nothing short-circuits the walk.
-    planted = Path("/tmp") / "lloyd-ceiling-planted-tree" / "ceiling_find"
-    if not (planted / "d0").is_dir():
-        planted.mkdir(parents=True, exist_ok=True)
-        for d in range(200):
-            deep = planted / f"d{d}"
-            deep.mkdir(exist_ok=True)
-            for i in range(20):
-                (deep / f"f{i}.txt").write_text(f"row {i} ceiling_find {i * 3}\n",
-                                                encoding="utf-8")
+    # traversal — at 200 dirs x 20 files, 0.1 s to plant and 0.01 s to walk, with the
+    # ceiling armed (measured), and every file holds `_GREP_TOKEN` so nothing
+    # short-circuits the walk.
+    #
+    # `root` is a pytest temp root the CALLER owns (`tmp_path`), and that is what bounds
+    # the tree's lifetime — the property the sentence this comment used to carry claimed
+    # without any code behind it. The tree is 4,202 inodes (itself, 200 directories,
+    # 4,000 files). Until #3107 it sat at one fixed path under `/tmp` behind a
+    # reuse-if-present guard with no teardown anywhere, so it outlived every run that
+    # measured it and stood third in `du --inodes -x -d1 /tmp` on 2026-10-21, inside the
+    # reach of the inode alarms whose own advice is to look at `/tmp` before deleting —
+    # a responder told to free inodes by removing it would have freed them for one
+    # afternoon, because the next suite run replanted it (#2891). Rooted in a
+    # `tmp_path`, the tree is collected twice over: `pytest.ini`'s
+    # `tmp_path_retention_policy = failed` deletes a passing node's directory outright,
+    # and a failing node leaves it under pytest's numbered basetemp root, which pytest
+    # itself bounds and the daily retention sweep bounds again as store 16
+    # (`PYTEST_TMP_MAX_DIRS`, `scripts/groundskeeper/retention-sweep.py`).
+    planted = root / _GREP_TOKEN
+    planted.mkdir(parents=True)
+    for d in range(200):
+        deep = planted / f"d{d}"
+        deep.mkdir()
+        for i in range(20):
+            (deep / f"f{i}.txt").write_text(f"row {i} {_GREP_TOKEN} {i * 3}\n",
+                                            encoding="utf-8")
     assert sum(1 for _ in planted.rglob("*.txt")) == 4000, planted
-    return str(planted)
+    return planted
 
 
 def _wrap_python(code, memory=None, swap=None, tasks=None):
@@ -469,7 +485,35 @@ def test_the_aggregator_publishes_the_ceiling_on_the_state_endpoint():
 
 # ── Clause 5 — benign work still works, at full scale ─────────────────────────
 
-def test_three_benign_high_fan_out_and_high_memory_controls_complete():
+def test_the_planted_tree_lives_in_the_temp_root_it_was_given_and_holds_its_shape(tmp_path):
+    """#3107: the planted traversal root is derived from the caller's pytest temp root, and
+    it holds exactly the 200 directories and 4,000 files the control is sized against.
+
+    The fixed `/tmp` path this helper planted into before #3107 was the defect: it belonged
+    to no collector, so a 4,202-inode tree survived every run and surfaced in the inode
+    rankings a responder acts on. Inside a `tmp_path`, pytest's retention owns the tree
+    (see `_big_tree`), which is what this node fails to hold if the root ever moves back
+    out — the containment assertion has teeth only because a hand-picked absolute path is
+    never inside a `tmp_path`.
+
+    The shape is checked here, not only inside the helper, because the control node never
+    reads what its walk found: `find … | wc -l` reports zero through a pipeline just as
+    happily as 4,000, so a plant that quietly produced fewer files would leave that
+    control measuring an empty directory and still printing exit 0.
+    """
+    tree = _big_tree(tmp_path)
+
+    assert tree.is_relative_to(tmp_path), f"{tree} is not inside the caller's root {tmp_path}"
+    sub_dirs = [p for p in tree.iterdir() if p.is_dir()]
+    assert len(sub_dirs) == 200, f"{tree} holds {len(sub_dirs)} sub-directories, not 200"
+    files = list(tree.rglob("*.txt"))
+    assert len(files) == 4000, f"{tree} holds {len(files)} *.txt files, not 4000"
+    untokenned = [p for p in files if _GREP_TOKEN not in p.read_text(encoding="utf-8")]
+    assert not untokenned, \
+        f"{len(untokenned)}/{len(files)} files lack the grepped token, first {untokenned[0]}"
+
+
+def test_three_benign_high_fan_out_and_high_memory_controls_complete(tmp_path):
     """Clause 5: `xargs -P 16`, a recursive search over a large tree, and a real background
     task all complete with the ceiling armed, inside the node's own wall-clock budget.
 
@@ -479,13 +523,16 @@ def test_three_benign_high_fan_out_and_high_memory_controls_complete():
     ceiling note was produced, because a control that completed only after being throttled
     would still print 0. The 16-way fan-out also has to clear the shipped `TASKS_MAX` of 1024
     with room to spare, which is the same limit the fan-out node above shows working at 48.
+
+    The recursive-search tree is planted inside this node's own `tmp_path`, so the run that
+    measures it is the run that removes it — `_big_tree` carries why that moved (#3107).
     """
-    tree = _big_tree()
+    tree = _big_tree(tmp_path)
     for label, cmd in (  # noqa: B007
             ("xargs -P 16", "seq 400 | xargs -P 16 -n 4 sh -c 'printf \"%s\\n\" \"$0\"' "
                             "| wc -l"),
-            ("recursive grep/find", f"find {tree} -name '*.txt' | wc -l; "
-                           f"grep -rl 'ceiling_find' {tree} | wc -l"),
+            ("recursive grep/find", f"find '{tree}' -name '*.txt' | wc -l; "
+                           f"grep -rl '{_GREP_TOKEN}' '{tree}' | wc -l"),
     ):
         for sandbox in (True, False):        # both arms clause 1 covers
             arm = "sandbox" if sandbox else "bench"
