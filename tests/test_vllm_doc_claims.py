@@ -4269,3 +4269,98 @@ def test_the_ninth_extract_moves_no_graded_reading(ninth_raw, ninth, cfg):
         "2026-09-25 belongs in its own round, with every figure in those bullets re-derived "
         "from `EXTRACT` the way the nodes above do, not smuggled into a commit that added a "
         "fixture for a different day")
+
+
+# ── the venv paths the docs tell a human to switch to have to be on the box ──
+# The 2026-10-21 inventory (item #3136) found SETUP.md's Revert-targets
+# paragraph and this doc's §1 both written in the present tense about
+# `.venvs/vllm-flash-next-main-0910`, which the -1012 rebuild deleted on
+# 2026-10-12, and about `.venvs/vllm-qwen38-flash-next`, the BF16 worker build,
+# which is not installed either. A rollback instruction naming a deleted venv is
+# a dead engine at the end of the instructions, so these two scopes — the §1
+# rollback prose and SETUP's Revert-targets paragraph, where a reader is told
+# what to set — are checked path by path. The changelog and the dated
+# post-mortems elsewhere in the file are history and are not in scope: the
+# 2026-09-21 entry, for one, is correct precisely because it says the 09-10
+# revert target was the thing that got wiped.
+
+VENV_PATH = re.compile(r"\.venvs/([A-Za-z0-9][A-Za-z0-9._-]*)")
+# A table's first column is the venv directory itself (`| `vllm-omni` | 8.8 G |…`),
+# so a row names a venv without the `.venvs/` prefix that the surrounding prose
+# ("The venvs on this box:") supplies. `vllm-` is the prefix every one of them
+# carries, and it is what keeps a knob table from being read as a directory list.
+TABLE_VENV_ROW = re.compile(r"^\|\s*`(vllm-[A-Za-z0-9._-]+)`")
+ABSENT_MARK = re.compile(
+    r"\b(deleted|not installed|gone|removed|absent|no longer|wiped|does not "
+    r"exist|not a directory)\b", re.I)
+# The live production tree the paths in these docs point into. `ROOT` here is the
+# checkout, which in a gate worktree has no `.venvs` at all — the same trap
+# test_flash_next_launcher.py names for `_prod`.
+VENV_ROOT = Path("/home/alansrobotlab/lloyd/.venvs")
+# The three records outside §1 that name the deleted 09-10 build as history,
+# quoted from the file: the FlashInfer recompile note (a venv switch rebuilds
+# ~64 fused_moe_120 objects), the `kv_cache_utils.py` line-number note naming
+# which venv's copy a quoted def/warning line came from, and the 2026-09-21
+# arch-review changelog entry.
+HISTORICAL_0910 = (
+    "`-main-0910` rebuilt all ~64",
+    "`-0910` revert target's copy",
+    "drifted onto the `-0910` revert target",
+)
+
+
+def _section_lines(n: int):
+    """Raw lines of `## n.` (not `_section`, which flattens whitespace and would
+    let one line's disclaimer excuse another line's dead path)."""
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"## {n}.")), None)
+    assert start is not None, f"§{n} not found"
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    return lines[start:end]
+
+
+def _revert_targets_paragraph():
+    """SETUP.md's `**Revert targets.**` paragraph, whose whole job is naming
+    paths to switch VLLM_VENV to."""
+    text = (ROOT / "SETUP.md").read_text(encoding="utf-8")
+    m = re.search(r"^\*\*Revert targets\.\*\*.*?(?=\n\n)", text, re.M | re.S)
+    assert m, "SETUP.md lost its Revert-targets paragraph"
+    return m.group(0).splitlines()
+
+
+def test_no_rollback_instruction_names_a_venv_that_is_not_installed():
+    """clause 5 (#3136): every `.venvs/…` path in the two scopes where a human is
+    told what to set is either installed or marked absent on the same line."""
+    assert VENV_ROOT.is_dir(), f"{VENV_ROOT} is not a tree to check against"
+    scopes = {"architecture/vllm.md §1": _section_lines(1),
+              "SETUP.md Revert targets": _revert_targets_paragraph()}
+    bad = []
+    for where, lines in scopes.items():
+        for ln in lines:
+            for name in VENV_PATH.findall(ln):
+                if not (VENV_ROOT / name).is_dir() and not ABSENT_MARK.search(ln):
+                    bad.append((where, name))
+    assert bad == [], (
+        f"these scopes name an uninstalled venv without saying so: {bad} — the box "
+        f"holds {sorted(p.name for p in VENV_ROOT.iterdir())}")
+
+
+def test_the_historical_0910_records_are_left_alone():
+    """clause 5's other half: the fix is a correction, not a scrub. Three records
+    name the deleted 09-10 build, each truly — the FlashInfer rebuild note (a
+    venv switch recompiles ~64 objects), the `kv_cache_utils.py` line-number note
+    naming which venv's copy a quoted line came from, and the 2026-09-21
+    arch-review entry that found the conf had drifted onto that revert target.
+    All three stay word for word. §1, the rollback prose, is the one place that
+    may name the directory only in the past tense: it now says the build was
+    deleted, which is the sentence that was missing."""
+    text = DOC.read_text(encoding="utf-8")
+    for quoted in HISTORICAL_0910:
+        assert quoted in text, f"a historical -0910 record was rewritten: {quoted}"
+    assert re.search(r"^- 2026-09-21 —", text, re.M), \
+        "the 2026-09-21 arch-review entry is no longer a changelog line"
+    s1 = [ln for ln in _section_lines(1) if "0910" in ln]
+    assert s1 and all(ABSENT_MARK.search(ln) for ln in s1), \
+        "§1 names the deleted 09-10 directory somewhere it does not say the build "\
+        "is gone — which is the reading a human reverting would take"

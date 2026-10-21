@@ -76,15 +76,16 @@ at `a98247ab4db6` for the Qwen4Exp fusions and bugfixes that followed (the
 setup script's header lists them; SETUP.md has the summary), with FlashInfer
 0.7.0.post1 and its prebuilt cubins. Each rebuild goes to a new dated venv
 path; the 09-17 build at `.venvs/vllm-flash-next-main` is now the **only**
-revert target on the box. The 09-10 venv `.venvs/vllm-flash-next-main-0910` that
-the conf's older comment still tells a human to switch `VLLM_VENV` to, and the
-BF16 worker build `.venvs/vllm-qwen38-flash-next` that the launcher still
-defaults `VLLM_VENV` to, have both been deleted: measured 2026-10-21,
-`ls -d ~/lloyd/.venvs/*vllm*` returns `-djev`, `-flash-next-main`,
-`-flash-next-main-1012` and `-omni`, and either switch now dies at the
-launcher's venv check ("vLLM venv not found at $VLLM_VENV") with the running
-engine already down (#3136). The launcher runs `vllm serve` through its module since 10-12 (the
-`openai.api_server` module is deprecated upstream).
+revert target on the box, and both the conf's comment and the launcher's own
+`VLLM_VENV` fallback name it. They did not until 2026-10-21. The comment told a
+human to switch to the 09-10 build, `.venvs/vllm-flash-next-main-0910`: deleted
+by the 10-12 rebuild. The launcher defaulted to the BF16 worker build,
+`.venvs/vllm-qwen38-flash-next`: not installed either, and never rebuilt.
+Measured 2026-10-21, `ls -d ~/lloyd/.venvs/*vllm*` returns `-djev`,
+`-flash-next-main`, `-flash-next-main-1012` and `-omni` — so either rollback
+died at the launcher's venv check ("vLLM venv not found at $VLLM_VENV") with the
+running engine already down (#3136). The launcher runs `vllm serve` through its
+module since 10-12 (the `openai.api_server` module is deprecated upstream).
 
 Two served names, deliberately: `primary` is the alias every caller in this
 repo uses, and `Qwen3.8-Flash-Next-nvfp4` is what `models.primary.expect_model`
@@ -97,12 +98,12 @@ launcher.** `agent-llm-primary.conf` carries `VLLM_VENV`, `KV_CACHE_DTYPE=fp8`,
 default is `1`, text-only, so a conf that loses those last two boots a
 perfectly healthy engine that refuses every screenshot while
 `models.primary.supports_vision: true` keeps claiming otherwise (§3.1's #1420
-assert is what catches that, not the model identity check). Its other fallbacks
-are the older BF16 worker build (`VLLM_VENV` defaults to
-`.venvs/vllm-qwen38-flash-next`, `KV_CACHE_DTYPE` to empty), so a conf that
-loses the KV lines was meant to boot a perfectly healthy engine with §3 undone —
-"meant to", because that fallback venv is now deleted (§1), which turns that
-silent regression into a boot that fails its venv check. The dtype half of it is
+assert is what catches that, not the model identity check). Its other fallback is
+`VLLM_VENV` → the 09-17 FP8 build above and `KV_CACHE_DTYPE` → empty, so a conf
+that loses the KV lines boots a live engine with §3's fp8 KV undone. Until
+#3136 the deleted worker venv made that regression unbootable, which was an
+accident and not a guard: the thing that catches it is §3.1's assert and the boot
+facts, not the venv check. The dtype half of it is
 exactly what §3.1 asserts against, and the precedent is real: on 2026-09-06 an
 automod rollback reverted the *secondary's* launcher under the same alias and
 port.

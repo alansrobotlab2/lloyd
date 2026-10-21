@@ -7,7 +7,9 @@ set -euo pipefail
 # start-qwen3.8-27b-nvfp4.sh. Only one of those runs at a time.
 #
 # Setup / download: bash setup/setup-qwen38-flash-next.sh
-# Venv:             bash setup/setup-vllm-qwen38-flash-next.sh
+# Venv:             bash setup/setup-vllm-flash-next-main.sh   (what the conf pins)
+#                   setup-vllm-qwen38-flash-next.sh builds the worker variant,
+#                   which is NOT installed — see WHAT IS ON THE BOX below.
 #
 # MODEL
 #   Qwen3.8-Flash-Next — the Qwen4 architecture preview. 125B main + 51B N-gram
@@ -72,18 +74,29 @@ set -euo pipefail
 #   Stock `pip install vllm` has the qwen4_exp model but NO offload, and without
 #   offload this checkpoint needs ~170 GiB of VRAM.
 #
-# TWO VENVS SERVE THIS SLOT (since 2026-09-10)
-#   worker  ~/lloyd/.venvs/vllm-qwen38-flash-next   setup-vllm-qwen38-flash-next.sh
-#           The build described above: 08-31 base + PR #53899's offload worker.
-#   uva     ~/lloyd/.venvs/vllm-flash-next-main     setup-vllm-flash-next-main.sh
-#           vLLM main @ dff1bde84dd6 (rebuilt 2026-09-17): UVA PLE offload
+# WHAT IS ON THE BOX (since the 2026-10-12 rebuild)
+#   serving  ~/lloyd/.venvs/vllm-flash-next-main-1012  setup-vllm-flash-next-main.sh
+#           vLLM main @ a98247ab4db6, what the supervisor conf pins as
+#           VLLM_VENV and what production boots from today.
+#   revert   ~/lloyd/.venvs/vllm-flash-next-main       setup-vllm-flash-next-main.sh
+#           vLLM main @ dff1bde84dd6 (built 2026-09-17): UVA PLE offload
 #           (#54371 — the GPU reads the pinned host table directly, so no
 #           worker process, no ptrace requirement, none of the three deadlocks
 #           below), the rewritten QSA kernels, #55309's fused PLE/QSA epilogues,
 #           and the FP8 main KV cache natively (PR #55557 merged 09-16; it was
-#           a fork overlay here 09-10..09-17). The 09-10 build is kept at
-#           ~/lloyd/.venvs/vllm-flash-next-main-0910 as the revert target.
-#   VLLM_VENV picks one. PLE_IMPL is detected from the venv's tree and decides
+#           a fork overlay 09-10..09-17). This is what VLLM_VENV falls back to,
+#           and the date in the serving path is exactly why the fallback is this
+#           undated build: a fallback naming -1012 goes stale at the next
+#           rebuild, which is how the instruction deleted by #3136 rotted.
+#   worker   ~/lloyd/.venvs/vllm-qwen38-flash-next      NOT INSTALLED
+#           The 08-31 base + PR #53899's offload worker described above. Its
+#           last copy was deleted; re-run setup-vllm-qwen38-flash-next.sh (8-17
+#           GiB, a ~20-minute FlashInfer JIT recompile) before pointing
+#           VLLM_VENV at it. Until then a fallback or a conf line naming it
+#           boots nothing — which is the state the launcher's default was in
+#           until #3136.
+#   VLLM_VENV picks one of the installed builds. PLE_IMPL is detected from the
+#   venv's tree and decides
 #   the executor flag, the ptrace preflight and the offload spelling, so a swap
 #   cannot be half-applied. Measured on this card, same flags, 2026-09-10: main
 #   decodes 254 tok/s single-stream in BF16 against 137 on the worker build;
@@ -196,7 +209,16 @@ if [[ -f "$ARM_ENV" ]]; then
   rm -f "$ARM_ENV"
 fi
 
-VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-qwen38-flash-next}"
+# Fallback for when the supervisord conf's VLLM_VENV line is gone — the failure
+# the conf's own header describes — so this is the line a rollback actually
+# runs. It is the undated FP8 build, which setup-vllm-flash-next-main.sh
+# rebuilds in place and which is the conf's named revert target; deliberately NOT
+# the dated -1012 path, because a fallback naming a dated build silently rots at
+# the next rebuild. It used to name the BF16 worker build
+# .venvs/vllm-qwen38-flash-next, which is not installed on this box: the
+# documented recovery ended at "vLLM venv not found" with nothing underneath
+# (#3136).
+VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main}"
 MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4}"
 
 # Context length. Deliberately NOT 262144 on first boot.
@@ -238,8 +260,8 @@ fi
 
 if [[ ! -x "$VLLM_VENV/bin/python" ]]; then
   echo "vLLM venv not found at $VLLM_VENV"
-  echo "Build it: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh   (worker build)"
-  echo "      or: bash $PROJECT_DIR/setup/setup-vllm-flash-next-main.sh     (vLLM main, uva)"
+  echo "Build it: bash $PROJECT_DIR/setup/setup-vllm-flash-next-main.sh     (vLLM main, uva — what the conf pins and what this script falls back to)"
+  echo "      or: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh   (worker build; not installed on this box)"
   exit 1
 fi
 
@@ -576,8 +598,9 @@ else
 fi
 if [[ -n "$KV_CACHE_DTYPE" ]]; then
   if [[ "$KV_CACHE_DTYPE" == fp8* ]] && ! grep -qs "IS_FP8" "$VLLM_VENV"/lib/python*/site-packages/vllm/models/qwen4_exp/nvidia/ops/qsa.py; then
-    echo "ERROR: KV_CACHE_DTYPE=$KV_CACHE_DTYPE but this venv's QSA kernel has no fp8 path (PR #55557)."
-    echo "  Use the uva venv: VLLM_VENV=\$HOME/lloyd/.venvs/vllm-flash-next-main (setup-vllm-flash-next-main.sh)."
+    echo "ERROR: KV_CACHE_DTYPE=$KV_CACHE_DTYPE but $VLLM_VENV's QSA kernel has no fp8 path (PR #55557)."
+    echo "  The FP8-capable build is the one the supervisord conf pins as VLLM_VENV:"
+    echo "  agent-services/supervisor/conf.d/agent-llm-primary.conf (setup-vllm-flash-next-main.sh builds it)."
     exit 1
   fi
   AB_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")

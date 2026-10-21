@@ -380,7 +380,7 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6 family, 35B, 122B |
 | `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
-| `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) |
+| `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) — **not installed**: deleted, and still the default `VLLM_VENV` in `flash-next-gdn-sm12x-patch.py` and in `start-secondary.sh`; rebuild with `setup-vllm-qwen38-flash-next.sh` before pointing anything at it |
 | `vllm-flash-next-main-1012` | main @ `a98247ab4db6` + PDL patch | **live primary** since 2026-10-12: the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache, FlashInfer 0.7.0.post1 with prebuilt cubins |
 | `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | the 09-17 build, served 2026-09-17 → 10-12; **revert target** |
 | `vllm-djev` | `0.29.1rc1.dev347+gdee37d891` + a 9-file overlay | **djev** since 2026-09-20: DiffusionGemma 26B-A4B NVFP4 structured reads on GPU 2 |
@@ -533,12 +533,16 @@ will retire that patch; it has to be re-proved on every rebuild. Pinned by
 **Revert targets.** The 09-17 build (`dff1bde84dd6`) is at
 `.venvs/vllm-flash-next-main`, untouched; reverting is one line in
 `agent-llm-primary.conf`, `VLLM_VENV=…/vllm-flash-next-main`, then `round
-restart --only agent-llm-primary`. The 09-10 build is at
-`.venvs/vllm-flash-next-main-0910` (the old wheel plus the fork overlay); its
-`bin/python -m vllm…` still works from the renamed path, but its console
-scripts (`bin/pip`, `bin/vllm`) carry the old path in their shebangs — do not
-use them. To rebuild either from nothing, check out this script at git
-`4a3ac77` (09-10) or at the commit before the 10-12 rebuild (09-17).
+restart --only agent-llm-primary`. It is also what the launcher falls back to
+when that conf line is gone, so the route survives the conf failure the conf's
+own header warns about. The 09-10 build is **gone**:
+`.venvs/vllm-flash-next-main-0910` was deleted by the 10-12 rebuild, and both
+this paragraph and the conf's 09-17 comment kept offering it in the present
+tense until 2026-10-21 (#3136) — the conf paragraph is the one a human reads
+mid-rollback. To rebuild that generation from nothing, check out this script at
+git `4a3ac77` (09-10); to rebuild the 09-17 build, check out the commit before
+the 10-12 rebuild, or just re-run `setup-vllm-flash-next-main.sh`, which
+rebuilds the surviving path in place.
 
 Serving it is the same start script with the venv pointed at it, and FP8 is a
 second knob:

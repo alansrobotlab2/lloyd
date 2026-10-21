@@ -1261,3 +1261,151 @@ def test_the_canary_harness_writes_nothing_to_the_machines_real_tmp(tmp_path, mo
         "the pinned TMPDIR is where it belongs and the trap still has to take it "
         "out: " + repr(_canary_scratch(tmp_path)))
     assert len(_canary_lines(tmp_path)) == 1
+
+
+# ── a rollback instruction has to name a venv that is on the box ────────
+# Two rollback routes for this program pointed at deleted venvs. The conf's
+# 2026-09-17 paragraph told a human to "change VLLM_VENV below to
+# .venvs/vllm-flash-next-main-0910", deleted on 2026-10-12 by the rebuild that
+# made -1012; and the launcher's own `${VLLM_VENV:-…}` fallback named the BF16
+# worker build, which is not installed either (it survives only under
+# ~/lloyd-sandbox/.venvs/). Both are read at the moment of an incident, and the
+# fallback is reached exactly when the conf's `VLLM_VENV=` line is lost — so the
+# documented recovery from a conf that lost that line ended in "vLLM venv not
+# found" with no build underneath it (#3136).
+
+REVERT_VENV = Path("/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main")
+# The path the conf used to offer. Its absence from the conf is the pin; its
+# absence from the box is why the instruction was wrong.
+GONE_0910 = "vllm-flash-next-main-0910"
+
+
+def _fallback_default() -> str:
+    """The path in the launcher's own `VLLM_VENV="${VLLM_VENV:-…}"` default."""
+    src = LAUNCHER.read_text(encoding="utf-8")
+    hits = re.findall(r'^VLLM_VENV="\$\{VLLM_VENV:-([^}"]*)\}"$', src, re.M)
+    assert len(hits) == 1, f"expected one VLLM_VENV fallback default, found {hits}"
+    return hits[0]
+
+
+def _launcher_header() -> str:
+    """The launcher's leading comment block — everything from its first comment
+    line to its first live statement. (`set -euo pipefail` sits above the block,
+    so the block does not start at line 2.)"""
+    out = []
+    for ln in LAUNCHER.read_text(encoding="utf-8").splitlines()[1:]:
+        if not out:
+            if not ln.lstrip().startswith("#"):
+                continue
+        elif ln.strip() and not ln.lstrip().startswith("#"):
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
+def test_the_conf_offers_only_a_revert_target_that_is_on_the_box():
+    """clause 1. The comment is read mid-rollback, so a deleted path in it is a
+    dead engine at the end of the instructions."""
+    conf = CONF.read_text(encoding="utf-8")
+    assert GONE_0910 not in conf, \
+        f"the conf offers {GONE_0910} as a path to switch to; that venv is gone"
+    assert re.search(r"09-10 build[^.]*\bdeleted\b", conf), \
+        "the conf must say the 09-10 build was deleted, not just omit it"
+    assert re.search(
+        r"change VLLM_VENV below to /home/alansrobotlab/lloyd/"
+        r"\.venvs/vllm-flash-next-main(?!\S)", conf), \
+        "the conf no longer names the surviving FP8 build as the revert target"
+    # Whether that target is on the box is a fact about the machine, checked the
+    # way `_dry_run` checks its venv: a box without it is not a wrong conf.
+    if not REVERT_VENV.is_dir():
+        pytest.skip(f"{REVERT_VENV} is not on this machine")
+    # The serving pin is untouched by any of this.
+    assert _conf_env()["VLLM_VENV"].endswith("/.venvs/vllm-flash-next-main-1012")
+
+
+def test_the_launcher_fallback_default_names_a_venv_that_exists():
+    """clause 2. The fallback is the older surviving FP8 build, deliberately NOT
+    the dated serving path: a default naming `-1012` would go stale at the next
+    dated rebuild, which is how the 09-10 instruction rotted in the first place.
+    """
+    default = _fallback_default()
+    assert default == "$HOME/lloyd/.venvs/vllm-flash-next-main", default
+    assert not re.search(r"-\d{4}$", default), \
+        "the fallback names a dated build, so it goes stale at the next rebuild"
+    if not Path(default.replace("$HOME", str(Path.home()))).is_dir():
+        pytest.skip(f"{default} is not on this machine")
+
+
+def test_the_header_names_the_venvs_that_are_actually_installed():
+    """clause 2's other half. The header is the other thing a human reads while
+    deciding what to set."""
+    header = _launcher_header()
+    assert GONE_0910 not in header, "the header still claims a deleted venv is kept"
+    assert "vllm-qwen38-flash-next" in header \
+        and re.search(r"not installed", header, re.I), \
+        "the header must say the worker build is not on the box"
+    assert re.search(r"^# Venv:.*setup-vllm-flash-next-main\.sh", header, re.M), \
+        "the header still points at the absent worker build's setup script as the "\
+        "venv of record"
+    for name in ("vllm-flash-next-main-1012", "vllm-flash-next-main"):
+        assert f".venvs/{name}" in header, \
+            f"the header does not name the installed FP8 build {name}"
+
+
+def test_the_fallback_default_reaches_the_a_b_config_line(tmp_path):
+    """clause 3 — the process seam: supervisord's `environment=` loses its
+    VLLM_VENV entry, the launcher falls back, and the boot gets as far as its own
+    config line instead of exiting at the venv guard."""
+    if not (REVERT_VENV / "bin" / "python").exists():
+        pytest.skip(f"{REVERT_VENV} is not on this machine")
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    # Everything the conf exports, minus the one line a rollback is assumed to
+    # have lost, so only the launcher's default can supply a venv.
+    env = {k: v for k, v in _conf_env().items() if k != "VLLM_VENV"}
+    env = {**os.environ, **env, "DRY_RUN": "1", "MODEL_DIR": str(model),
+           "ARM_ENV": str(tmp_path / "no-arm.env")}
+    r = subprocess.run(["bash", str(LAUNCHER)], capture_output=True, text=True,
+                       env=env, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"A/B config: venv={REVERT_VENV} " in r.stdout, r.stdout
+    assert "not found at" not in r.stdout + r.stderr
+
+
+def _fp8_stub_venv(tmp_path: Path) -> Path:
+    """A venv that answers the launcher's two capability probes but whose QSA op
+    has no FP8 path — the exact shape the IS_FP8 guard exists to catch."""
+    venv = tmp_path / "pre-fp8-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("#!/bin/bash\nexit 0\n")
+    (venv / "bin" / "python").chmod(0o755)
+    qsa = (venv / "lib" / "python3.12" / "site-packages" / "vllm" / "models"
+           / "qwen4_exp" / "nvidia" / "ops")
+    qsa.mkdir(parents=True)
+    (qsa / "qsa.py").write_text("IS_BF16_ONLY = True\n")
+    return venv
+
+
+def test_the_fp8_refusal_points_at_the_conf_not_a_dated_directory(tmp_path):
+    """clause 4 — the hint a human reads while the engine is down. It used to
+    print `VLLM_VENV=$HOME/lloyd/.venvs/vllm-flash-next-main`, the 09-17 build:
+    correct the day it was written, the wrong answer ever since."""
+    venv = _fp8_stub_venv(tmp_path)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        '{"quantization_config": {"quant_method": "fp8"}}')
+    r = subprocess.run(["bash", str(LAUNCHER)], capture_output=True, text=True,
+                       env={**os.environ, **_conf_env(), "DRY_RUN": "1",
+                            "VLLM_VENV": str(venv), "MODEL_DIR": str(model),
+                            "ARM_ENV": str(tmp_path / "no-arm.env")},
+                       timeout=180)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "no fp8 path" in out, out
+    assert str(venv) in out, "the refusal must name the venv actually in play"
+    assert "agent-llm-primary.conf" in out, \
+        f"the refusal names no source of truth for the FP8 build: {out}"
+    assert not re.search(r"vllm[a-z0-9.-]*-\d{4}\b", out), \
+        f"the refusal hard-codes a dated venv again: {out}"
