@@ -102,9 +102,14 @@ class Schema:
         if self.calibrated_hash != self.hash:
             raise SchemaDrift(
                 f"schema {self.name!r} was calibrated at {self.calibrated_hash} "
-                f"and now hashes to {self.hash}: re-run "
-                f"`eval/djev/replay.py --corpus ... --calibrate` before using "
-                f"its threshold")
+                f"and now hashes to {self.hash}: re-calibrate it, which is two "
+                f"steps. Replay at this seam's own request shape "
+                f"(`eval/djev/replay.py --corpus <corpus> --batch <decisions "
+                f"per canvas the seam sends>`), then hand-write the resulting "
+                f"`threshold`, `label_mass_floor`, `calibrated_on` and "
+                f"`calibrated_hash` into this schema before using its "
+                f"threshold. There is no single flag that does it: replay "
+                f"reports `best_threshold`, it does not write the schema.")
 
     def as_dict(self) -> dict:
         return {"name": self.name, "seam": self.seam, "hash": self.hash,

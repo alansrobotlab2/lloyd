@@ -1367,8 +1367,6 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 
 ## 11. Known gaps (2026-09-20, re-checked 2026-10-21)
 
-- **`SchemaDrift`'s message names `replay.py --calibrate`, which does not
-  exist.** Calibration is `--corpus <c> --batch <n>` and a hand edit (§9.3).
 - **Neither client entry point has a `samples` default**, one read or four. The
   ~40 ms headline is `samples=1`. No seam has measured whether one read is
   enough for its schema. `ask` and `ask_sync` both take `samples=None`

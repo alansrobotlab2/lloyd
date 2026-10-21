@@ -77,6 +77,33 @@ def test_the_open_gaps_no_longer_describe_the_shadow_log_leak():
         "the open gaps still carry the fixture-row complaint this item closed")
 
 
+def test_the_open_gaps_no_longer_advertise_the_drift_message_flag_gap():
+    """#3113 closed the half of this item that is prose: §11 used to carry
+    "`SchemaDrift`'s message names `replay.py --calibrate`, which does not
+    exist" as an OPEN gap, and a page that keeps advertising a gap the code no
+    longer has is what makes the next arch review re-file the item.
+
+    The changelog line that filed #3113 is history and stays, so the test pins
+    both halves: `--calibrate` must survive on this page exactly once, on the
+    changelog line that names #3113, and must appear nowhere among the open
+    gaps. Without the count the assertion is only half a rail — deleting the
+    open bullet AND the changelog line would otherwise pass it.
+    """
+    text = DOC.read_text()
+    open_part = _section(text, "## 11. Known gaps").split(CLOSED_HEADING, 1)[0]
+    assert "--calibrate" not in open_part, (
+        "§11 still lists the invented `--calibrate` flag as an open gap (#3113)")
+    assert "SchemaDrift" not in open_part, (
+        "§11's open gaps still name the SchemaDrift message #3113 fixed")
+    mentions = [ln for ln in text.splitlines() if "--calibrate" in ln]
+    assert len(mentions) == 1, (
+        f"`--calibrate` should remain on this page only as the changelog line "
+        f"that filed #3113; found {len(mentions)} mentions")
+    assert "#3113" in mentions[0], (
+        "the surviving mention is not the changelog line that filed #3113, so "
+        "the fix has no record of where the claim came from")
+
+
 def test_the_closed_record_carries_the_mechanism_the_check_and_the_residue():
     """Clause 3, second half: the replacement has to be usable, not merely
     present. Each needle is something a later reader needs and cannot re-derive:
