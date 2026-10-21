@@ -4270,6 +4270,34 @@ def test_the_tools_md_row_says_the_same_thing():
     assert "invalid_at" in row, "the row still has to say what the mark is"
 
 
+def test_the_vault_overview_row_says_counts_and_offers_no_second_mode():
+    """#3099 clause 4. `architecture/tools.md` is the human-facing half of the
+    same advertisement, and it went stale beside the schema: its
+    `vault_overview` row read "File counts per segment, or the most-linked
+    notes" while `_vault_overview` counted files and nothing else. Nothing
+    parsed that row before this node, which is why the stale half survived the
+    schema's life unchanged — so the row is asserted through `_tools_md_row`
+    (which pins the tool appearing EXACTLY once), states what the handler
+    returns by key, and is then checked against the parameterless surface the
+    MCP client is served."""
+    row = _tools_md_row("vault_overview")
+    for dead in ("most-linked", "hubs"):
+        assert dead not in row, f"the doc row still offers a {dead!r} mode: {row}"
+    assert "counts" in row and "`total_files`" in row, (
+        f"the row must state the counts it actually returns, by key: {row}")
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert cells[2] == "—", f"the Required column says {cells[2]!r}: {row}"
+
+    from agent_mcp import vault as vault_mod
+    tool = next(t for t in asyncio.run(vault_mod.list_tools())
+                if t.name == "vault_overview")
+    assert tool.input_schema["properties"] == {}, (
+        "the row's em dash and the served schema no longer agree: "
+        f"{sorted(tool.input_schema['properties'])}")
+    assert "`detail`" not in row, (
+        "the row names the parameter the schema lost")
+
+
 #: #1596's ruling, recorded 2026-09-30 from measurement: a resolved intra-entity
 #: contradiction stays **markdown-only** — the per-record `conflicts_with` trace is
 #: the representation of record, neither `EdgeStore` self-loop guard relaxes, and no

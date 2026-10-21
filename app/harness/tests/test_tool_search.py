@@ -482,3 +482,40 @@ def test_gist_keeps_conditional_guidance_or_is_excepted():
     stale = sorted(n for n in GIST_LOSS_EXCEPTIONS if n not in lost)
     assert not stale, f"no longer losing guidance, remove from GIST_LOSS_EXCEPTIONS: {stale}"
     assert all(GIST_LOSS_EXCEPTIONS[n].strip() for n in GIST_LOSS_EXCEPTIONS)
+
+
+# ── #3099: a deleted knob must not silently end a listed gist-loss ───────────
+#
+# Appended after the last node, per this file's insertion rule: no marker in the
+# regions at 145-252 or 254-348 names a #3099 line, so an insertion inside one
+# of those regions would leave its marker claiming lines it no longer reads.
+
+def test_vault_overview_is_still_a_listed_gist_loss_after_losing_its_dead_mode():
+    """#3099 clause 5, pinned on the same scan the no-rot arm uses.
+
+    `vault_overview` advertised a `detail` parameter whose `hubs` mode no code
+    read, and deleting that clause from its description shortened the text by
+    26 characters — 169 to 143. An exception in `GIST_LOSS_EXCEPTIONS` is a
+    statement about the description's SHAPE (the conditional sentence sits
+    outside the first sentence, so the catalog gist a model selects from never
+    carries it), so the shorter wording had to be re-measured, not assumed:
+    this node fails if the description ever shrinks under
+    `CATALOG_GIST_CHARS = 110` or folds the orientation sentence into its first
+    sentence, because either edit moves the guidance INSIDE the gist, the loss
+    stops, and the no-rot arm above has to have the name removed with a commit
+    that says so. `_gist_losses()` reads the literal `Tool(description=…)` out
+    of `agent_mcp/vault.py` by AST and runs the real `_gist` over it, so this
+    grades the served text and not a copy of it."""
+    lost = _gist_losses()
+    assert "vault_overview" in lost, (
+        "the counts-only description no longer loses conditional guidance, so "
+        "`vault_overview` has to come off GIST_LOSS_EXCEPTIONS — the sibling "
+        "node fails on that too, and this one says why")
+    assert "vault_overview" in GIST_LOSS_EXCEPTIONS, (
+        "the scan says the gist drops the orientation sentence; nothing here "
+        "records that as accepted")
+    desc_chars, gist_chars = lost["vault_overview"]
+    assert desc_chars == 143 and gist_chars == 64, (
+        f"measured against the counts-only wording this node was written for "
+        f"(143 description chars, 64 gist chars): {desc_chars}, {gist_chars}")
+    assert gist_chars < desc_chars, "the gist stopped being a truncation"

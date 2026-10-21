@@ -1367,6 +1367,113 @@ def test_the_vault_tool_surface_is_unchanged_by_the_deletion():
     assert got == VAULT_TOOL_NAMES, f"vault tool surface changed: {got}"
 
 
+# ── #3099: a declared parameter is a promise about the handler ───────────────
+#
+# `vault_overview` advertised a `detail` parameter with enum ["summary", "hubs"]
+# and a description promising "the most-linked notes", while `_vault_overview`
+# never read `params`: it walks `VAULT_SEGMENTS` and returns `total_files` and
+# `segments`, so `{"detail": "hubs"}` and `{}` returned byte-identical dicts and
+# the mode could not be exercised, only believed. #670's owed-check ruled on
+# 2026-10-21 to keep the tool and delete the mode, not to build the listing.
+
+def _vault_tool(name: str):
+    return next(t for t in asyncio.run(vault.list_tools()) if t.name == name)
+
+
+def test_vault_overview_declares_no_parameter_its_handler_does_not_read():
+    """#3099 clause 1. `tools/list` is served into every session and a model
+    plans from it, so each declared property claims the handler acts on it.
+    `_vault_overview` takes nothing out of `params`, so the honest schema
+    declares nothing: no `detail`, and no other parameter invented to fill the
+    gap — an empty `properties` is the shape that says so."""
+    tool = _vault_tool("vault_overview")
+    assert tool.input_schema["type"] == "object", (
+        f"the tool lost its schema entirely rather than losing one parameter: "
+        f"{tool.input_schema}")
+    props = tool.input_schema["properties"]
+    assert "detail" not in props, (
+        "the dead `detail` mode is back on the advertised surface, where every "
+        "caller would read it as a choice the handler makes")
+    assert props == {}, (
+        f"`_vault_overview` reads no params key, so a parameter here is a "
+        f"knob no code can turn: {sorted(props)}")
+    assert "required" not in tool.input_schema, (
+        "a required list would name a parameter no code reads")
+    # Positive control, in the style of #1672's `test_a_clause_the_grep_resolves_to`:
+    # the OTHER four vault tools still declare the parameter their handler reads,
+    # so an empty `properties` above is a deleted knob and not a check that
+    # cannot see any. And the five-name vault surface is what the deletion left
+    # standing, asserted here because this is the file whose edit removed the mode.
+    for name, key in (("vault_read", "path"), ("vault_write", "path"),
+                      ("vault_search", "query"), ("vault_recall", "query")):
+        declared = _vault_tool(name).input_schema["properties"]
+        assert key in declared, f"{name} lost its declared `{key}`: {sorted(declared)}"
+    assert sorted(t.name for t in asyncio.run(vault.list_tools())
+                  if t.name.startswith("vault")) == VAULT_TOOL_NAMES, (
+        "the vault surface the deletion had to leave untouched is not the five "
+        "names it found")
+
+
+def test_vault_overviews_description_promises_counts_and_nothing_else():
+    """#3099 clause 2, both directions. The description may not promise a
+    listing the handler cannot produce; and it may not LOSE the sentence that
+    makes the tool selectable, because
+    `app/harness/tests/test_tool_search.py::test_gist_keeps_conditional_guidance_or_is_excepted`
+    keeps `vault_overview` in `GIST_LOSS_EXCEPTIONS` on the strength of exactly
+    that sentence — a shorter rewrite turns that entry stale and the suite red
+    (`_gist` cuts at 110 chars, and both the old 169- and the new 143-char
+    description lose `before searching`)."""
+    desc = _vault_tool("vault_overview").description or ""
+    for dead in ("most-linked", "hubs"):
+        assert dead not in desc, f"the surface advertises a {dead!r} mode: {desc}"
+    assert "counts" in desc and "segment" in desc, (
+        f"the description no longer says what the tool returns: {desc}")
+    assert "orient before searching" in desc, (
+        "the ordering advice is the clause its gist drops, and the "
+        "GIST_LOSS_EXCEPTIONS entry says so; dropping it makes that entry a "
+        "claim about text that is no longer there")
+
+
+def test_the_dead_detail_mode_still_answers_as_the_no_argument_call(tmp_path, monkeypatch):
+    """#3099 clause 3. Deleting the advertisement changed no code, so a client
+    that still sends `detail: hubs` gets exactly what the same call with no
+    argument gets, in the same shape, and that has to stay true after this round
+    rather than be quietly replaced by a refusal. Counts are taken over a
+    three-file vault so the numbers are pinned, not whatever the live vault
+    happens to hold on the day the test runs."""
+    for seg, files in (("memory", ("a.md", "b.md")), ("knowledge", ("c.md",))):
+        (tmp_path / seg).mkdir()
+        for f in files:
+            (tmp_path / seg / f).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(vault, "VAULT", tmp_path)
+
+    plain = vault._vault_overview({})
+    assert plain == {"total_files": 3, "segments": {
+        s: {"memory": 2, "knowledge": 1}.get(s, 0) for s in vault.VAULT_SEGMENTS}}, plain
+    assert vault._vault_overview({"detail": "hubs"}) == plain, (
+        "the undeclared key now changes the answer, which is a different "
+        "contract than the one this tool has always had")
+    assert set(plain) == {"total_files", "segments"}, (
+        f"the returned shape moved: {sorted(plain)}")
+
+    # Across the boundary a client actually crosses: the registered `call_tool`
+    # seam, not the python function. The false affordance was served through
+    # `tools/list` and consumed through `tools/call`, so the "nothing changed
+    # for a caller" claim is graded on that path — where a schema-validation
+    # step rejecting an undeclared key would look exactly like this round having
+    # broken a working call.
+    called = asyncio.run(vault.call_tool("vault_overview", {"detail": "hubs"}))
+    bare = asyncio.run(vault.call_tool("vault_overview", {}))
+    assert not getattr(called, "isError", False), (
+        "an undeclared key now errors the call; the parameter was decorative, "
+        "not a gate")
+    body = "".join(c.text for c in called.content if hasattr(c, "text"))
+    assert json.loads(body) == plain, (
+        f"the tool/call path does not return what the handler returns: {body[:120]}")
+    assert body == "".join(c.text for c in bare.content if hasattr(c, "text")), (
+        "the two calls no longer answer identically at the MCP layer")
+
+
 def _recall_rerank_comment_lines() -> list[str]:
     """The contiguous `#` comment lines directly above the graph_rerank read
     inside _vault_recall."""
