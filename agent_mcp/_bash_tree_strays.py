@@ -185,23 +185,30 @@ def _saved_paths(state: dict, root: Path) -> set[str]:
     return set(entry.get("paths", [])) if isinstance(entry, dict) else set()
 
 
-def _snapshot_sync() -> "tuple[Path, set[str], 'tuple[Path, frozenset[str]] | None'] | None":
-    """The pre-call pair of snapshots: the code tree, and the runtime data root.
+def _snapshot_sync(session_id: "str | None" = None) -> (
+        "tuple[Path, set[str], tuple[Path, frozenset[str]] | None,"
+        " tuple[Path, frozenset[str]] | None] | None"):
+    """The pre-call snapshots: the code tree, and the two watched data-home directories.
 
-    The third element is why this is a 3-tuple rather than two calls. "Did THIS
-    call lay a checkout under the data root" is a question about a BEFORE, and
-    `after()` is the only place the answer gets used; a snapshot taken there
-    would already contain the folder it is asking about, and the check would
-    report nothing forever while looking exactly like a check that passes. Both
-    roots therefore have to be read at the same instant as the tree, before the
-    command runs, and ride through the harness in the same object the tool already
-    threads from `before` to `after`. It is None when the data root cannot be
-    read, which costs the data-home half and nothing else.
+    The third and fourth elements are why this is a 4-tuple rather than three separate
+    calls. "Did THIS call lay a checkout under the data root", and "did THIS call open an
+    empty database", are both questions about a BEFORE, and `after()` is the only place the
+    answer gets used; a snapshot taken there would already contain the artefact it is
+    asking about, and the check would report nothing forever while looking exactly like a
+    check that passes. All three reads therefore have to happen at the same instant as the
+    tree, before the command runs, and ride through the harness in the same object the tool
+    already threads from `before` to `after`. Each data-home element is None when its
+    directory cannot be read, which costs that directory's note and nothing else.
+
+    `session_id` is optional so a caller that only wants the tree keeps working; the
+    scratch element is None without it, which is the fail-open direction — a snapshot
+    taken without an id measures two directories rather than zero.
     """
     from app import live_strays
     root = _live_root()
     seen = live_strays.ignored(root)
-    return None if seen is None else (root, seen, _data_root_top())
+    return None if seen is None else (root, seen, _data_root_top(),
+                                      _scratch_top(session_id))
 
 
 async def before(session_id: str | None, args: dict[str, Any]) -> "tuple | None":
@@ -212,7 +219,7 @@ async def before(session_id: str | None, args: dict[str, Any]) -> "tuple | None"
     if not watched(session_id):
         return None
     try:
-        return await asyncio.to_thread(_snapshot_sync)
+        return await asyncio.to_thread(_snapshot_sync, session_id)
     except Exception:  # noqa: BLE001
         logger.warning("tree stray snapshot failed", exc_info=True)
         return None
@@ -539,6 +546,24 @@ def _after_sync(text: str, snap: "tuple[Path, set[str]]", session_id: str | None
 CHECKOUT_ENTRY = ".git"
 CHECKOUT_MAX_DEPTH = 2
 
+#: Heads the sentence naming an empty database this call just opened (#3140), beside
+#: `CHECKOUT_MARK` because the two are the data-home half's notes and a reader compares
+#: them. A test pins this exact string rather than importing it, same reason as that one.
+EMPTY_DB_MARK = "[empty database in the runtime data root]"
+
+#: The extensions that make an empty file a database rather than an empty file. A
+#: 0-byte `notes.txt` is a person's placeholder; a 0-byte `workers.db` is a
+#: store nobody wrote to, and the difference is the finding.
+EMPTY_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+
+#: The journal's kind for "this call opened this empty database into existence".
+#: Distinct from `appeared` / `removed` / `present` (a code-tree stray changing
+#: state) and from `checkout-in-data-root` (a code checkout laid under the data
+#: root) — the five are every event class this file writes, and `tests/
+#: test_bash_tree_strays.py` reads them out of the source so a sixth that
+#: collides with one of them cannot pass a difference test.
+EMPTY_DB_KIND = "empty-db-created"
+
 
 def _data_root_top() -> "tuple[Path, frozenset[str]] | None":
     """The runtime data root and the names standing in it, or None when unreadable.
@@ -548,13 +573,12 @@ def _data_root_top() -> "tuple[Path, frozenset[str]] | None":
     folder here", and a new folder is by definition a name that was not there
     before. The recursion happens in `_new_checkouts`, over the new names alone —
     usually zero, so the ordinary Bash call pays one directory read and one set
-    difference.
+    difference. The read itself is `_top_level`, now shared with `_scratch_top` so the
+    two watched directories fail the same way too.
     """
     try:
         from app.paths import DATA_ROOT
-        root = Path(DATA_ROOT)
-        with os.scandir(root) as it:
-            return root, frozenset(e.name for e in it)
+        return _top_level(Path(DATA_ROOT))
     except OSError:
         return None
 
@@ -577,6 +601,111 @@ def _holds_checkout(dirpath: Path) -> bool:
     except OSError:
         return False
     return any((Path(e.path) / CHECKOUT_ENTRY).exists() for e in kids)
+
+
+def _scratch_top(session_id: "str | None") -> "tuple[Path, frozenset[str]] | None":
+    """Names of the directory THIS session's Bash call starts in, read before it ran.
+
+    The second watched directory #3140 adds, and the one the module had never looked at:
+    `app.session_cwd.resolved_for` is where `agent_mcp/builtin_bash.py::_start_cwd` sends a
+    call that names no `cwd`, so a command written as bare `sqlite3 workers.db .tables` —
+    no path, no `cd` — lays its file here, in the session's own scratch dir. Two of the
+    four shadows this item names were laid exactly that way and stayed invisible to a
+    watcher that only read the data root's top level, because this directory is a grandchild
+    of that root (`~/lloyd-data/session-cwd/<id>`).
+
+    The path is `session_cwd.path_for(session_id)` — the mint's own convention for the id,
+    the same expression that decides the directory's name — and NOT `resolved_for`, which
+    reads the session's stored `start_cwd`. The two are equal for every session the writer
+    stamps (it lays the scratch at `path_for` and records that path), but reading the
+    convention rather than the record keeps this read working for a session whose record is
+    mid-write, and it can never be pointed at a directory a person chose: a watched
+    session's `cwd` argument is trusted, and a note that reported a person's own working
+    directory as though the harness had laid a store in it would be the wrong kind of sure.
+
+    Names only, one `scandir`, exactly like `_data_root_top`. Sizes are not read here: they
+    are read for the NEW names afterwards, which is usually none of them, so the ordinary
+    call still costs one directory read per watched directory.
+    """
+    if not session_id:
+        return None
+    from app import session_cwd
+    return _top_level(session_cwd.path_for(session_id))
+
+
+def _top_level(root: Path) -> "tuple[Path, frozenset[str]] | None":
+    """One directory's entry names, or None when the directory cannot be read.
+
+    The shared half of `_data_root_top` and `_scratch_top`. Returning None rather than an
+    empty set is the load-bearing part: an empty set would make every name in a directory
+    this call could not list look NEW, and a note invented from a failed read is worse than
+    no note. None costs that directory's note and nothing else — the other watched
+    directory and the code-tree half are read independently.
+    """
+    try:
+        with os.scandir(root) as it:
+            return root, frozenset(e.name for e in it)
+    except OSError:
+        return None
+
+
+def _new_empty_dbs(root: Path, before: frozenset[str]) -> list[str]:
+    """Top-level NEW files of `root` that are 0 bytes and named like a database.
+
+    Shape, not a command pattern: `sqlite3 x.db`, `touch x.db`, `: > x.db` and a Python
+    one-liner all produce the same artefact and the same cost, and matching the command
+    would silently stop firing on the next one (#1267's argument, restated in this file's
+    header for the write side). A new file that has BYTES in it is a job that wrote
+    something, and a new 0-byte file that does not end in a database extension is a
+    placeholder; both are left alone.
+    """
+    try:
+        with os.scandir(root) as it:
+            entries = sorted((e for e in it if e.name not in before),
+                             key=lambda e: e.name)
+    except OSError:
+        return []
+    out: list[str] = []
+    for e in entries:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            if not e.name.lower().endswith(EMPTY_DB_SUFFIXES):
+                continue
+            if e.is_symlink() or e.stat(follow_symlinks=False).st_size != 0:
+                continue
+        except OSError:
+            continue
+        out.append(e.name)
+    return out
+
+
+def _empty_db_note(found: "list[tuple[Path, list[str]]]") -> str:
+    """The paragraph for the call that opened an empty database into existence.
+
+    Three things, because those are the three each of the four shadows needed a human for:
+    the path just created, what it is (an empty database, not a store with contents), and
+    where the real stores live — the fact the author of the call was missing. The real root
+    is read from `app.paths.DATA_ROOT` at call time and NOT taken from a watched root,
+    because when the file sits in a session's scratch dir the two are different directories,
+    and telling a session that its scratch dir is where the stores live would be false in
+    the one case the leg most needs to be right about.
+
+    One paragraph over every file across every watched directory, because the explanation
+    does not change per root. Says nothing about removing the file: the data-root sweep is
+    report-only by its own docstring ("a data-root file is a person's call"), and this
+    module moved nothing out of the data root before this leg and moves nothing after it.
+    """
+    from app import paths
+    names = [n for _, ns in found for n in ns]
+    listed = "`, `".join(str(root / n) for root, ns in found for n in ns)
+    return (
+        f"\n\n{EMPTY_DB_MARK} this call created `{listed}` — "
+        f"{len(names)} empty database{'' if len(names) == 1 else 's'} of 0 bytes, which is "
+        f"not data: `sqlite3 <path>` writes the file before it reads it, so opening a store "
+        f"that is not there leaves an empty one where the next reader will find it. The real "
+        f"stores live in `{paths.DATA_ROOT}`. Nothing was written to here and nothing is "
+        f"moved — removing what this call made is this session's own call to make.")
 
 
 def _new_checkouts(root: Path, before: frozenset[str]) -> list[str]:
@@ -670,6 +799,71 @@ def _data_root_check(session_id: str | None, command: str,
     return checkout_note(root, found) if fresh else ""
 
 
+def _empty_db_check(session_id: "str | None", command: str,
+                    watched: "list[tuple[Path, frozenset[str]]]") -> str:
+    """The note for an empty database this call just opened, in either watched directory.
+
+    The third direction of the same mistake, and the one nobody was watching: a NEW
+    0-byte `.db`/`.sqlite`/`.sqlite3` is a file that exists only because `sqlite3 <path>`
+    writes the file before it reads it. Four of them sat unseen for weeks — `kg.sqlite`
+    and `_pipeline/workers.db` under the data root and two inside session scratch dirs —
+    and each bought an hourly guardian alert plus a human pass (#3109, #3117, #3118),
+    because the only thing that found them was `datawatch.data_root_shadows`, which runs
+    on the guardian's tick. An hour after the call that could have been told. This leg
+    spends one `stat` per NEW name and says it on that call instead.
+
+    One row for the call, however many watched directories it laid files in: this record
+    is the origin of a COMMAND, and splitting it by directory would make the number of
+    rows a property of how many directories happen to be watched rather than of what the
+    session did. The row's `root` is the deepest directory that contains every file it
+    names (`_origin_row`), so a single shadow keeps the row rooted exactly where it was
+    laid — `root` + `paths[0]` is the created file, and that composition is what a reader
+    downstream resolves.
+    """
+    found: list[tuple[Path, list[str]]] = []
+    for root, before in watched:
+        fresh = _new_empty_dbs(root, before)
+        if fresh:
+            found.append((root, fresh))
+    if not found:
+        return ""
+    names = [n for _, ns in found for n in ns]
+    logger.warning("session %s: Bash call opened %d empty database(s): %s",
+                   session_id, len(names),
+                   ", ".join(str(r / n) for r, ns in found for n in ns))
+    # Logged BEFORE the row is written, so a `_record` that cannot reach the journal still
+    # leaves the warning: a check that finds something and silently records nothing is the
+    # #957 defect. `_record` swallows its own write failures, so this cannot raise out of a
+    # disk problem — only a bug in here can, and `after()` catches that.
+    row_root, rels = _origin_row([r / n for r, ns in found for n in ns])
+    _record(session_id, command, row_root, rels, kind=EMPTY_DB_KIND,
+            actionable=BRACKET_ONLY)
+    return _empty_db_note(found)
+
+
+def _origin_row(created: list[Path]) -> "tuple[Path, list[str]]":
+    """The one row's root and its paths-relative-to-it, for files found across directories.
+
+    The deepest common parent, not `app.paths.DATA_ROOT`: with one file that is the watched
+    directory itself, so a call that lays a single shadow journals exactly the row this leg
+    would have journalled before a second watched directory existed — `root` + `paths[0]` is
+    the file, in both cases. With files in two directories it is the root they share, which
+    in production is the data root, because the scratch tree hangs under it.
+
+    A path with no common parent (a file on another mount, which production does not have
+    today but a relocated `SCRATCH_ROOT` could) degrades to `/` rather than raising: the row
+    still resolves, and a leg that loses the note to a `ValueError` from a path helper would
+    be failing open in the wrong direction — the note is what the session needs.
+    """
+    try:
+        # Over the PARENTS: commonpath of a lone file is the file, and a row rooted at the
+        # file it names is a row whose paths point at its own sibling.
+        root = Path(os.path.commonpath([str(p.parent) for p in created]))
+    except ValueError:
+        root = Path("/")
+    return root, [str(p.relative_to(root)) for p in created]
+
+
 async def after(text: str, snap: "tuple[Path, set[str]] | None", session_id: str | None,
                 command: Any) -> str:
     """`text`, plus the note when an ignored path appeared since `snap`."""
@@ -695,4 +889,15 @@ async def after(text: str, snap: "tuple[Path, set[str]] | None", session_id: str
             text += await asyncio.to_thread(_data_root_check, session_id, cmd, data_snap)
         except Exception:  # noqa: BLE001
             logger.warning("data-home checkout check failed", exc_info=True)
+    # The empty-database leg, last, and over BOTH watched directories at once so the two
+    # notes it can produce come out as one paragraph. Its own try for the same reason the
+    # checkout half has one: a directory that cannot be read, or a failure inside the leg,
+    # costs this note and leaves the tree note and the checkout note standing.
+    db_watch: "list[tuple[Path, frozenset[str]]]" = [
+        p for p in (data_snap, snap[3] if len(snap) > 3 else None) if p]
+    if db_watch:
+        try:
+            text += await asyncio.to_thread(_empty_db_check, session_id, cmd, db_watch)
+        except Exception:  # noqa: BLE001
+            logger.warning("data-home empty-database check failed", exc_info=True)
     return text

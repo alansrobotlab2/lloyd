@@ -54,6 +54,18 @@ def tree(tmp_path, monkeypatch):
     journal = tmp_path / "safety" / "tree-strays.jsonl"
     monkeypatch.setattr(_bash_tree_strays, "_live_root", lambda: repo)
     monkeypatch.setattr(_bash_tree_strays, "_journal_path", lambda: journal)
+    # The two roots the data-home half measures, sent somewhere that does not exist.
+    # Not part of #3140's behaviour change and not decorum: the data-home half reads
+    # them from `app.paths`/`app.session_cwd` at call time, so leaving them at
+    # production makes every node below read the LIVE data home, and an unrelated
+    # session laying a 0-byte store there while the suite runs would break the eight
+    # nodes that assert `_rows(journal) == []` — a flake owned by whichever process
+    # was writing, not by this file. `_data_root_top` returning None for an
+    # unreadable root is also the state that keeps the data-home half silent here,
+    # which is what a code-tree node wants.
+    from app import paths, session_cwd
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path / "no-runtime-data-root")
+    monkeypatch.setattr(session_cwd, "SCRATCH_ROOT", tmp_path / "session-cwd")
     return repo, journal
 
 
@@ -1496,3 +1508,342 @@ async def test_the_data_root_is_snapshot_before_the_command_for_a_reason(data_ro
         "check exists to find is invisible — which is why the snapshot is `before`'s")
     assert _bash_tree_strays._new_checkouts(data, pre[1]) == ["triage-4001"], (
         "against the pre-call set it is found, on the same state on disk")
+
+
+# ---------------------------------------------------------------------------
+# A 0-byte database, named on the call that opened it into existence (#3140)
+#
+# The same file, the same session, a third direction of the same mistake. The
+# nodes above catch a data file written into the code tree and a code checkout
+# written into the data tree; these catch an EMPTY DATABASE — a file that exists
+# only because `sqlite3 <path>` creates the file to open it. Four of them sat
+# unseen for weeks (kg.sqlite and _pipeline/workers.db under the data root, two
+# more inside session scratch dirs), and each one bought an hourly guardian alert
+# plus a human pass (#3109, #3117, #3118), because the only detector
+# (`datawatch.data_root_shadows`) runs on the guardian's tick, an hour after the
+# call that could have been told.
+#
+# The watch is on TWO directories: the data root's top level, and the session's
+# own scratch dir — which is where a call STARTS (`agent_mcp/builtin_bash.py::_start_cwd`
+# → `app.session_cwd.resolved_for`), so a bare relative `sqlite3 workers.db` lays
+# its file there and nothing in this module had ever looked at that directory.
+# ---------------------------------------------------------------------------
+
+#: As `CHECKOUT_MARK` above: a literal, deliberately not imported from the module. The
+#: mark a reader sees is the thing being pinned, and a rename in the note must be red here.
+EMPTY_DB_MARK = "[empty database in the runtime data root]"
+
+#: The code-tree half's kind, for the one node that reads two halves' rows at once.
+MARK_KIND = "appeared"
+
+
+@pytest.fixture
+def scratch(data_root, monkeypatch):
+    """The `data_root` fixture plus the scratch directory this session's Bash starts in.
+
+    `SCRATCH_ROOT` is a module attribute precisely so a test can point the convention at
+    a temp root (`app/session_cwd.py` says so at the constant), and `path_for` reads it at
+    call time — the same seam `_data_root_top` uses for `DATA_ROOT`. It is hung INSIDE the
+    fixture's data root because that is where production puts it
+    (`~/lloyd-data/session-cwd/<id>`), which also gives the pair a shared parent so a node
+    below can pin that a file laid in the scratch dir is not additionally reported as a
+    data-root file: it is two levels down, and the data-root watch is top-level only.
+
+    The resolver that decides where a call actually starts is `resolved_for`, which reads
+    the session record. The leg watches `path_for`, the mint's own path for that id, so
+    this fixture pins both to the same directory — the guarantee production holds, since
+    the writer that stamps `start_cwd` lays the scratch at `path_for` and nothing else.
+    """
+    from app import session_cwd
+    ((repo, journal), data) = data_root
+    root = data / "session-cwd"
+    path = root / session_cwd.safe_name(WORKER)
+    path.mkdir(parents=True)
+    monkeypatch.setattr(session_cwd, "SCRATCH_ROOT", root)
+    monkeypatch.setattr(session_cwd, "resolved_for",
+                        lambda sid, **kw: str(path))
+    return (repo, journal), data, path
+
+
+async def test_a_zero_byte_database_laid_in_the_data_root_is_named_on_that_call(
+        data_root, monkeypatch):
+    """Clause 1: the call that opened the file is the only place it can be said."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    text = await _run(f"cd {data} && sqlite3 kg.sqlite .tables && echo done")
+
+    assert EMPTY_DB_MARK in text, (
+        "the creating call is silent today: `_new_checkouts` enumerates the new names "
+        "and then keeps only directories, so a new FILE is seen and dropped")
+    assert str(data / "kg.sqlite") in text, "the note names the path it created"
+    assert "0 byte" in text, "and says what is wrong with it: it is empty"
+    assert f"The real stores live in `{data}`." in text, (
+        "the note has to NAME the root the real stores live in as its own clause. Asserting "
+        "`str(data) in text` instead would be satisfied by the created path itself, which "
+        "starts with the root and says nothing about where the stores are")
+    assert MARK not in text and CHECKOUT_MARK not in text, (
+        "nothing landed in the code tree and this is not a checkout: the three notes "
+        "report independently")
+
+
+async def test_a_zero_byte_database_laid_in_the_session_scratch_dir_gets_the_same_note(
+        scratch, monkeypatch):
+    """Clause 2: the directory a call starts in is now a watched directory."""
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    text = await _run("sqlite3 workers.db .tables && echo done")
+
+    assert EMPTY_DB_MARK in text, (
+        "a bare relative open happens in the session's scratch dir, which is where "
+        "`_start_cwd` sends a call that names no cwd")
+    assert str(home / "workers.db") in text, "the note names the created path"
+    assert f"The real stores live in `{data}`." in text, (
+        "and the note names the root the real stores live in, not the scratch dir it just "
+        "named — which here are two different directories, so this is the half that could "
+        "be false and the half the created-path assert cannot cover")
+
+
+async def test_one_call_opening_a_bare_relative_database_is_reported_and_journaled(
+        scratch, monkeypatch):
+    """Clause 5's end-to-end drive: one `Bash` call, its note and its row, same file.
+
+    `call_tool` is the seam: it takes the snapshot through `before()`, runs the shell, and
+    hands the result to `after()` (`agent_mcp/builtin_bash.py::call_tool`), which is what
+    makes this the real path rather than a call of the two functions by hand — and the
+    reason the row count below is 1 and not 2 is that the leg runs once per call.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    command = "sqlite3 workers.db .tables"
+    text = await _run(command)
+    laid = home / "workers.db"
+
+    assert EMPTY_DB_MARK in text, "the note, on this call"
+    rows = _rows(journal)
+    assert [r["kind"] for r in rows] == [_bash_tree_strays.EMPTY_DB_KIND], (
+        f"and exactly one row for it; the call wrote {[r['kind'] for r in rows]}")
+    assert laid.exists(), (
+        "the leg NAMES a file and does not remove it: this is a report, not a guard, "
+        "and the command's own file has to survive the sentence about it")
+    assert laid.stat().st_size == 0, "at the size the command left it"
+    assert not (data / "quarantine").exists(), (
+        "and nothing was created under the quarantine destination — moving data-home "
+        "residue is the guardian's call and this module never moves anything")
+
+
+async def test_the_origin_row_is_a_kind_the_journal_has_never_carried(scratch,
+                                                                      monkeypatch):
+    """Clause 3: one row, its kind distinct from every kind the module writes today.
+
+    The four are read out of the module's source rather than typed in, with the hyphen the
+    shipped `checkout-in-data-root` spelling carries: a set built from `\\w+` cannot see a
+    hyphenated kind, and a difference test written that way passes on a new row that
+    collides with the default `appeared`.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    command = "sqlite3 workers.db .tables"
+    await _run(command)
+
+    src = (Path(__file__).resolve().parent.parent / "agent_mcp"
+           / "_bash_tree_strays.py").read_text(encoding="utf-8")
+    # `[^=]*` and not `\w*` because `appeared` — the kind this node must exclude, and the
+    # one a collision with is easiest to make — is never written at a call site: it is
+    # `_record`'s DEFAULT, spelled `kind: str = "appeared"` in the signature. A pattern
+    # that only matches `kind="x"` finds three of the four shipped kinds and the assert
+    # below would then be red for the wrong reason, or worse, green with `appeared` unseen.
+    shipped = set(re.findall(r'kind[^=("]*=\s*"([\w-]+)"', src))
+    assert {"appeared", "removed", "present", "checkout-in-data-root"} <= shipped, (
+        f"the derivation found {sorted(shipped)}: a kind this node is meant to exclude "
+        "has stopped being spelled the way it is spelled in the code, so the set "
+        "difference below would pass on a collision")
+    rows = _rows(journal)
+    assert len(rows) == 1, (
+        f"exactly one origin row per call is half of clause 3 and indexing [0] below would "
+        f"never notice a second: the call wrote {[r['kind'] for r in rows]}")
+    row = rows[0]
+    assert row["kind"] not in shipped - {_bash_tree_strays.EMPTY_DB_KIND}, (
+        f"the new row reuses kind {row['kind']!r}; a file that mixes event classes with "
+        "no discriminator is a file a later reader guesses at")
+    assert row["kind"] == _bash_tree_strays.EMPTY_DB_KIND
+    assert row["session"] == WORKER
+    assert row["command"] == command
+    assert row["paths"] == ["workers.db"], "`paths` is relative to the row's root"
+    assert Path(row["root"], row["paths"][0]) == home / "workers.db", (
+        "and root + paths is the created file, which is what makes the row an origin "
+        "record and not just a filename")
+    assert row["actionable_by"] == _bash_tree_strays.BRACKET_ONLY, (
+        "`stray_in_tree` walks the CODE tree for runtime files, and the data-home sweep "
+        "is report-only by its own docstring — no instrument moves a data-root file, so "
+        "the row says so rather than waiting for a label")
+
+
+async def test_the_leg_keys_on_shape_and_not_on_the_write(scratch, monkeypatch):
+    """Clause 4: a file only earns the note by being new AND empty AND database-shaped."""
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+
+    text = await _run(f"printf 'SQLite format 3\\000padding' > {data}/full.db "
+                      f"&& : > {data}/notes.txt && : > {home}/empty.txt "
+                      f"&& : > {home}/out && echo done")
+    assert "done" in text, (
+        "positive control: the command ran, so the absence below is a verdict and not a "
+        "shell that failed before it created anything")
+    assert (data / "full.db").stat().st_size > 0 and not (data / "notes.txt").stat().st_size, (
+        "and the two files that had to be created are the shapes the test claims: one "
+        "database-named file WITH bytes, one empty file without the extension")
+    assert (home / "empty.txt").stat().st_size == 0 and (home / "out").exists()
+    assert EMPTY_DB_MARK not in text, (
+        "a NON-EMPTY new file at the same path is a job that wrote something, and an "
+        "empty file with no database extension is an empty file: only a 0-byte "
+        "database-shaped name is this finding")
+    assert _rows(journal) == []
+
+
+async def test_a_database_laid_without_sqlite3_is_reported_the_same_way(scratch,
+                                                                       monkeypatch):
+    """No command shape is matched: `touch` and `sqlite3` are one case.
+
+    The module's header makes not matching a command pattern its whole design argument
+    against a rule in `protected_paths`, and a leg that fired on the word `sqlite3` would
+    silently stop firing on the Python one-liner, the redirect and the tool nobody has
+    written yet — which is the third of the four shadows in #3140.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    for name, verb in (("a.db", "touch"), ("b.sqlite", ": >"), ("c.sqlite3", "printf '' >")):
+        text = await _run(f"{verb} {home / name} && echo done")
+        assert EMPTY_DB_MARK in text, f"{verb} {name}: all three extensions, no pattern"
+        assert str(home / name) in text
+    assert [r["paths"] for r in _rows(journal)] == [["a.db"], ["b.sqlite"], ["c.sqlite3"]]
+
+
+async def test_a_new_folder_holding_a_checkout_still_gets_the_checkout_note_only(
+        data_root, monkeypatch):
+    """Clause 4's other half: the two data-home notes do not overlap on one artefact."""
+    (repo, journal), data = data_root
+    _as(monkeypatch, WORKER)
+    text = await _run(f"mkdir -p {data}/triage-3140 && git -C {repo} worktree add "
+                      f"--detach {data}/triage-3140/check HEAD")
+    assert CHECKOUT_MARK in text, "the #3095 note is unchanged by the new leg"
+    assert EMPTY_DB_MARK not in text
+    assert [r["kind"] for r in _rows(journal)] == ["checkout-in-data-root"], (
+        "a directory is not an empty database however it is spelled")
+
+
+async def test_one_call_laying_one_in_each_watched_dir_journals_exactly_one_row(
+        scratch, monkeypatch):
+    """Clause 3's COUNT: two directories, one call, one row — and none for a call that
+    lays nothing.
+
+    The row is the origin of a COMMAND, so the number of rows has to be a property of what
+    the session did and never of how many directories the leg happens to watch. That is only
+    safe to write down because of how the row is rooted: `root` is the deepest directory
+    holding every file in it, which for one file is that file's own directory — so the
+    single-shadow rows a reader already knows (`root` + `paths[0]` = the created file) are
+    the same rows this call produces, just with two paths. Asserted per path below, because
+    a row whose paths do not compose with its root is a row about files nobody can find.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+
+    text = await _run("echo nothing here")
+    assert _rows(journal) == [], (
+        "a call that lays no shadow journals no row: the count below is driven by "
+        "measurement, not by the number of calls or the number of watched directories")
+
+    text = await _run(f": > {data}/kg.sqlite && : > {home}/workers.db && echo done")
+    assert text.count(EMPTY_DB_MARK) == 1, "one paragraph for the call"
+    assert str(data / "kg.sqlite") in text and str(home / "workers.db") in text
+    rows = _rows(journal)
+    assert [r["kind"] for r in rows] == [_bash_tree_strays.EMPTY_DB_KIND], (
+        f"EXACTLY one origin row for one call, across two watched directories; the call "
+        f"wrote {[r['kind'] for r in rows]}")
+    row = rows[0]
+    assert row["root"] == str(data), (
+        "the data root is the deepest directory holding both files, since the scratch tree "
+        "hangs under it — the row names their common root rather than one of their two")
+    assert sorted(row["paths"]) == sorted(["kg.sqlite", str(home.relative_to(data) / "workers.db")]), (
+        f"both files, in one row; got {row['paths']}")
+    assert sorted(Path(row["root"], p) for p in row["paths"]) == sorted(
+        [data / "kg.sqlite", home / "workers.db"]), (
+        "root + each path is the created file: the row stays resolvable for every path it "
+        "carries, which is what makes one row across two directories honest")
+
+
+async def test_the_scratch_dir_is_snapshot_before_the_command_for_the_same_reason(
+        scratch, monkeypatch):
+    """Clause 2's "snapshotted before the command", pinned the way #3095 pinned its own.
+
+    An after-only read of the scratch dir would find the file the call laid and have no
+    way to know whether this call made it or a previous one, which is the difference
+    between naming a writer and nagging about a file that has been there for a week.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    pre = _bash_tree_strays._scratch_top(WORKER)
+    assert pre is not None and "workers.db" not in pre[1], (
+        "nothing has run yet: this is the pre-call name set")
+    await _run("sqlite3 workers.db .tables")
+    post = _bash_tree_strays._scratch_top(WORKER)
+    assert post is not None, "the scratch dir is readable: the after-set exists"
+    assert "workers.db" in post[1], "the file is standing there now"
+    assert _bash_tree_strays._new_empty_dbs(home, post[1]) == [], (
+        "measured against a snapshot taken after the command, the file the check exists "
+        "to find is invisible")
+    assert _bash_tree_strays._new_empty_dbs(home, pre[1]) == ["workers.db"], (
+        "against the pre-call set it is found, on the same state on disk")
+
+
+async def test_an_unreadable_scratch_dir_costs_only_its_own_note(scratch, monkeypatch):
+    """Clause 5's fail-open: one directory that cannot be read, and everything else stands.
+
+    The command runs with an explicit `cwd` rather than from the scratch dir it would
+    normally start in, because a 0o000 directory also stops the SHELL from starting there —
+    and then this node would be measuring the runner's `spawn` error rather than the leg's
+    own read failure. The 0o000 directory is restored in a `finally` because pytest's
+    `tmp_path` teardown cannot remove a directory it cannot read, and a suite that errors
+    in teardown points at the wrong node.
+    """
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, WORKER)
+    # Something for the leg to MISS, laid while the directory is still readable: without
+    # this the node proves only that a sentence is absent from a result, which a leg that
+    # found nothing anywhere would also satisfy.
+    (home / "kg.sqlite").write_bytes(b"")
+    home.chmod(0o000)
+    try:
+        # The read itself has to be shown to fail. A world-writable-umask environment, a
+        # uid-0 suite or a future `os.access` short-circuit would leave the directory
+        # readable, and every assert below would then hold for a reason this node has
+        # nothing to say about.
+        assert _bash_tree_strays._scratch_top(WORKER) is None, (
+            "the scratch dir is supposed to be unreadable here; if it reads, the three "
+            "asserts below are measuring a leg that was never denied anything")
+        text = await _run(f"cd {repo} && : > usage.db && : > {data}/kg.sqlite "
+                          "&& echo done", cwd=str(repo))
+    finally:
+        home.chmod(0o755)
+    assert (home / "kg.sqlite").exists(), (
+        "the shadow that was there throughout: read-only and fail-open means it is still "
+        "on disk when the leg could not list its directory")
+    assert str(home / "kg.sqlite") not in text and str(home) not in text, (
+        "nothing is claimed about the directory it could not read, and the file standing "
+        "in it went unnamed — which is the cost this leg is allowed to pay")
+    assert MARK in text, "the code-tree half still reports"
+    assert EMPTY_DB_MARK in text, "and so does the other watched directory"
+    assert str(data / "kg.sqlite") in text
+    assert sorted(r["kind"] for r in _rows(journal)) == sorted(
+        [MARK_KIND, _bash_tree_strays.EMPTY_DB_KIND]), (
+        "two rows, one per half that could measure — the unreadable dir costs its own "
+        "row and nothing else")
+
+
+async def test_a_chat_session_laying_an_empty_database_is_not_measured(scratch,
+                                                                       monkeypatch):
+    """The #1530 gate is the gate for this leg too: a person's own tool call is theirs."""
+    (repo, journal), data, home = scratch
+    _as(monkeypatch, CHAT)
+    text = await _run("sqlite3 workers.db .tables")
+    assert EMPTY_DB_MARK not in text
+    assert _rows(journal) == []

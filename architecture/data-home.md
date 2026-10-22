@@ -282,11 +282,26 @@ Three layers, in the order a turn meets them:
    command shape is matched, so a redirect, `sqlite3` and a Python one-liner are one
    case. Ignored only: an untracked `??` file may be about to be committed. Caches
    (`live_strays.CACHE_PARTS`) are left out. It is a note, not a refusal, and
-   fail-open. The journal carries three kinds: `appeared` for what the call made,
-   `removed` for what it deleted, and `present` for an ignored path the call found
-   already standing there — the only origin a `Write` or `Edit` can ever have, since
-   those tools are not bracketed and the next Bash call's before-snapshot already holds
-   the file. One `present` row per tree and path, decided by
+   fail-open. The journal carries five kinds. Three are the code tree: `appeared` for what
+   the call made, `removed` for what it deleted, and `present` for an ignored path the call
+   found already standing there — the only origin a `Write` or `Edit` can ever have, since
+   those tools are not bracketed and the next Bash call's before-snapshot already holds the
+   file. Two are the data-home half, which reads two directories before the command and the
+   same two after it: `checkout-in-data-root` for a git checkout the call laid under the
+   runtime data root (#3095, above), and `empty-db-created` for a 0-byte
+   `.db`/`.sqlite`/`.sqlite3` this call opened into existence (#3140). The two watched
+   directories are the data root's top level and the session's own scratch dir, and the
+   second is the point: a call that names no `cwd` STARTS there, so a bare `sqlite3
+   workers.db` lays its file in scratch — which is how two of the four shadows this leg
+   names sat unmentioned for weeks while the hourly sweep, the only detector before #3140,
+   was looking at the root. One paragraph names every file across both directories, and the
+   leg writes ONE row for the call: its `root` is the deepest directory holding every file
+   it names, so a single shadow is rooted in the directory it was laid in and `root` +
+   `paths` is the created file either way. Neither
+   data-home kind is a refusal, and neither is acknowledged in `tree-stray-acks.json`: a
+   checkout is a standing artefact that would otherwise be re-reported on every call, while
+   an empty database is only ever new on the one call that made it. Moving either one stays
+   the sweep's report-only, human decision. One `present` row per tree and path, decided by
    `$DATA_ROOT/safety/tree-stray-acks.json` and never by the after-set alone, so the
    checkout's standing ignored paths are not journalled as incidents; it carries no note,
    because the call did not make it. Not covered: `run_in_background` commands,
