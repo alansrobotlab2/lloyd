@@ -9,6 +9,25 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
+
+# The searchable segment set is the recall's own, imported and not restated.
+# #3160: this file and `mc_ui.py` each carried a hand-maintained copy of seven
+# names, six of them members of this list and one — `agents` — a name no qmd
+# index has ever declared (it appears in both `~/.config/qmd/index.yml` and the
+# tracked `agent-services/conf/qmd-index.yml` only on `subliminal`'s `ignore:`
+# list) and no vault has ever held. qmd answers an undeclared collection with
+# HTTP 200 and `{"results": []}` instead of an error (measured on the live daemon
+# 2026-10-22), so the copy spent a search leg on nothing while leaving
+# `architecture`, `lloyd`, `autonomy`, `backlog` and `people` unreachable from
+# the Memory tab — in the query below, in the stats walk, and in the navigate
+# brief's `vault_file_count`.
+#
+# It is an import rather than a copy because the copy could not fail: adding a
+# twelfth segment here used to leave Mission Control searching eleven, and the
+# only symptom was an empty search box. A name added here that the daemon does
+# not have is now caught by
+# `tests/test_qmd_index_template.py::test_every_collection_the_memory_route_names_is_declared_by_the_template`.
 
 router = APIRouter()
 
@@ -88,12 +107,18 @@ def _split_frontmatter(text: str) -> "tuple[dict, str]":
 
 
 _VAULT = Path.home() / "obsidian"
-_VAULT_SEGMENTS = ["memory", "knowledge", "projects", "agents", "personal", "work", "skills"]
 
 # Cached stats payload. Keyed by a mtime signature over the segment dirs.
-# Cold cost is ~1.9s for the 4,135-file / ~30MB vault the seven segments held
-# on 2026-09-22 (reading every .md in full + YAML parse); ~1.8s of that predates
-# reading whole files. Warm is ~30ms and is the signature walk, not the parse.
+# Warm is the signature walk, not the parse: ~0.06s over the eleven segments on
+# 2026-10-22. The cold cost is reading every .md in full and parsing its YAML,
+# and #3160 moved it by widening the walk from the six directories the router's
+# own seven-name list actually found (2.4s, 4,753 notes, 40.3 MB) to the eleven
+# the search searches (17.0s, 8,157 notes, 107.6 MB) — both measured on the live
+# vault the same day, which is why `_build_stats_payload` runs in a thread. An
+# earlier note here sized this cache against ~1.9s for the 4,135-file / ~30MB
+# vault of 2026-09-22, and the widened walk is not sized for that any more:
+# whether 17.0s on a cold cache is itself acceptable is the ruling #3160 owes,
+# and it needs a post-restart measurement, not a diff.
 _STATS_CACHE: dict = {"sig": None, "payload": None}
 
 
@@ -121,13 +146,19 @@ def _stats_signature() -> tuple:
     return tuple(parts)
 
 
-@router.get("/api/memory/stats")
-async def memory_stats():
-    if not _VAULT.exists():
-        return JSONResponse({"docCount": 0, "tagCount": 0, "types": {}, "topTags": [], "lastRefresh": ""})
-    sig = _stats_signature()
-    if _STATS_CACHE["sig"] == sig and _STATS_CACHE["payload"] is not None:
-        return JSONResponse(_STATS_CACHE["payload"])
+def _build_stats_payload() -> dict:
+    """Every searchable segment's note count and tag tally, by reading each note.
+
+    Blocking and expensive, which is why the route below hands it to a thread:
+    measured over the live vault on 2026-10-22, 17.0s cold across the eleven
+    segments — 8,157 notes, 107.6 MB read whole and YAML-parsed — against 2.4s
+    for the six directories the seven-name copy this replaced actually found
+    (4,753 notes, 40.3 MB). An `async def` that walked the vault inline held the
+    event loop for the whole walk, so at 2.4s that was already a chat-stream
+    stall and at 17s it is one every cold cache would cause; whether 17s on a
+    cold cache is itself acceptable is the ruling #3160 owes, and it is not a
+    reason to block the loop either way.
+    """
     types: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     doc_count = 0
@@ -149,16 +180,50 @@ async def memory_stats():
         types[seg] = count
         doc_count += count
     top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:20]
-    payload = {
+    return {
         "docCount": doc_count,
         "tagCount": len(tag_counts),
         "types": types,
         "topTags": [{"tag": t, "count": c} for t, c in top_tags],
         "lastRefresh": datetime.now().isoformat(),
     }
+
+
+@router.get("/api/memory/stats")
+async def memory_stats():
+    if not _VAULT.exists():
+        return JSONResponse({"docCount": 0, "tagCount": 0, "types": {}, "topTags": [], "lastRefresh": ""})
+    sig = _stats_signature()
+    if _STATS_CACHE["sig"] == sig and _STATS_CACHE["payload"] is not None:
+        return JSONResponse(_STATS_CACHE["payload"])
+    # Off the event loop, for the reason `_build_stats_payload` gives — the same
+    # reason the search below threads its blocking HTTP call. The signature walk
+    # above stays here: ~0.06s over the eleven segments, stat() only.
+    payload = await asyncio.to_thread(_build_stats_payload)
     _STATS_CACHE["sig"] = sig
     _STATS_CACHE["payload"] = payload
     return JSONResponse(payload)
+
+
+def _search_collections(scope: str) -> list[str]:
+    """The collections this route may name in a qmd query, and nothing else.
+
+    Empty scope → the recall's set, `_VAULT_SEGMENTS` (the shape Mission Control
+    sends: `web/src/api.ts` fetches `/memory/search` with `q` and `limit` only).
+
+    A `scope` is restricted exactly the way the recall restricts its own — see
+    `agent_mcp/vault.py:1255-1261`: a collection is a scope's FIRST path
+    component (`knowledge/youtube` lives in `knowledge`, #670), a name outside
+    the segment set is dropped, and a scope whose names are all unknown searches
+    everything rather than nothing. That last fallback is the point: an unknown
+    name costs a leg and returns no rows with no error, so a retired collection or
+    a typo used to read here as "the vault has nothing on that", which is the
+    failure #3160 is about, one caller deeper.
+    """
+    if not scope:
+        return list(_VAULT_SEGMENTS)
+    segs = [s.strip().strip("/").split("/")[0] for s in scope.split(",") if s.strip()]
+    return list(dict.fromkeys(s for s in segs if s in _VAULT_SEGMENTS)) or list(_VAULT_SEGMENTS)
 
 
 @router.get("/api/memory/search")
@@ -175,7 +240,7 @@ async def memory_search(q: str = "", limit: int = 10, scope: str = ""):
     payload = {
         "searches": [{"type": "lex", "query": clean}, {"type": "vec", "query": clean}],
         "limit": limit,
-        "collections": scope.split(",") if scope else _VAULT_SEGMENTS,
+        "collections": _search_collections(scope),
     }
     try:
         # Off the event loop: a blocking HTTP call here stalls every chat stream.

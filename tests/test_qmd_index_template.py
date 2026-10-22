@@ -604,3 +604,73 @@ def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
 
     colls = yaml.safe_load(text)["collections"]
     assert len(colls) == 14, sorted(colls)
+
+
+# --- #3160: every collection the memory route names is one this file declares --
+#
+# `app/routers/memory.py` kept its own seven-name segment list, and one of the
+# seven — `agents` — is not a collection in this template at all: the string
+# appears here only on `subliminal`'s `ignore:` list. qmd answers an undeclared
+# collection with HTTP 200 and `{"results": []}` rather than an error (measured on
+# the live daemon 2026-10-22), so the divergence spent a search leg and reported
+# nothing wrong anywhere. `tests/test_qmd_query_shape.py` pins what the route asks
+# for today; this is the check that stops *any* name the route names from being a
+# name the daemon has never heard of — the same shape, forward-proof, and the one
+# a hand-synced list cannot give.
+
+def _undeclared(names, colls: dict) -> list[str]:
+    """The names for which this template declares no collection of that name."""
+    return [n for n in names if n not in colls]
+
+
+def _memory_search_collections(monkeypatch, scope: str = "") -> list[str]:
+    """The `collections` the Mission Control memory route puts on the wire.
+
+    Read out of the payload the route hands `qmd_query`, not out of a module
+    constant: a check aimed at a name the route no longer uses would pass on a
+    route that had quietly gone back to its own list. The `len(seen) == 1` assert
+    is the denominator — a route that asked qmd nothing yields an empty list, and
+    an empty list is a subset of anything.
+    """
+    import asyncio
+
+    from agent_mcp import vault
+    from app.routers import memory as mem
+
+    seen = []
+
+    def fake_query(payload, **kw):
+        seen.append(payload)
+        return {"results": []}
+
+    monkeypatch.setattr(vault, "qmd_query", fake_query)
+    asyncio.run(mem.memory_search(q="collections drift", limit=3, scope=scope))
+    assert len(seen) == 1, (
+        "the memory route named no payload at all, so this check would have no numerator")
+    return list(seen[0]["collections"])
+
+
+def test_every_collection_the_memory_route_names_is_declared_by_the_template(monkeypatch):
+    """#3160 clause 2: no name the memory search can send is a name qmd lacks.
+
+    Three shapes of the route's own doing, because the unrestricted branch is the
+    one Mission Control takes (`web/src/api.ts:1468` sends `q` and `limit` only)
+    while the scoped branches are where a caller's typo would land: the default
+    set, a scope naming one undeclared thing, and a scope naming a path inside a
+    real collection.
+    """
+    colls = yaml.safe_load(TEMPLATE.read_text())["collections"]
+    for scope in ("", "agents", "knowledge/youtube", "agents,notes"):
+        named = _memory_search_collections(monkeypatch, scope=scope)
+        assert _undeclared(named, colls) == [], (
+            f"scope={scope!r}: the memory route would send {named}, and "
+            f"{_undeclared(named, colls)} of that is not a collection this template "
+            "declares — qmd answers such a name with 200 and no rows, so the search "
+            "comes back empty with no signal anywhere (#3160)")
+
+    # The check bites. `agents` is the name this incident was about, and this file
+    # does not declare it: without this line an `_undeclared` that always returned
+    # `[]` would make the loop above unconditionally green.
+    assert _undeclared(["agents"], colls) == ["agents"], (
+        "`_undeclared` no longer flags `agents`, the one name this template must never "
+        "be asked for, so the check above proves nothing")

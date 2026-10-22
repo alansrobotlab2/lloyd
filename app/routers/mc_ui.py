@@ -25,6 +25,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
 from app.sessions_io import is_background_session_name, is_conversation_session
+# The Memory tab's file count walks the same segment set the recall searches and
+# Mission Control's memory search asks qmd for. #3160: this router used to keep
+# its own tuple of seven names — `agents` among them, which no qmd index declares
+# and no vault holds, and without `architecture`, `lloyd`, `autonomy`, `backlog`
+# or `people` — so the tab's headline number and the notes its search box could
+# reach were decided by two lists nothing read against each other.
+from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
 
 logger = logging.getLogger("lloyd-server")
 
@@ -243,7 +250,8 @@ async def get_mc_events(request: Request):
 # fixture in one tab can't crash the navigate response.
 
 _VAULT = Path.home() / "obsidian"
-_VAULT_SEGMENTS = ("memory", "knowledge", "projects", "agents", "personal", "work", "skills")
+# `_VAULT_SEGMENTS` is imported above, from `agent_mcp.vault` — one list for the
+# count here, `app/routers/memory.py`'s qmd query and its stats walk (#3160).
 
 
 def _safe(coro_or_value):

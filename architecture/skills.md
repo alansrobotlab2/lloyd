@@ -603,8 +603,8 @@ edited in the vault. `tests/test_api_contracts.py` now matches every
 `${API_BASE}/…` path in `web/src/api.ts` against the app's registered routes, so
 a client call to a route that does not exist fails the suite.
 
-`app/routers/mc_ui.py:493` counts the Mission Control tab summary through
-`iter_active_skills()` — the tab is a walker consumer too, where it used to run
+`app/routers/mc_ui.py::_summarize_skills` counts the Mission Control tab summary
+through `iter_active_skills()` — the tab is a walker consumer too, where it used to run
 its own `iterdir()` and count the retired-in-place skills as live (its own
 docstring still records that pass: 194 beside the 189 the prompt advertised).
 It is still a count only; a walk that fails surfaces as a failure, never as a

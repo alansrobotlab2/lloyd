@@ -627,7 +627,7 @@ def test_task_81_safety_bullet_states_the_code_triggers():
 
 # ── #1498: Mission Control's memory search sanitizes like the recall ─────────
 
-def _memory_search_payload(monkeypatch, q: str):
+def _memory_search_payload(monkeypatch, q: str, scope: str = ""):
     import asyncio
     import json as _json
 
@@ -639,7 +639,7 @@ def _memory_search_payload(monkeypatch, q: str):
         return {"results": []}
 
     monkeypatch.setattr(vault, "qmd_query", fake_query)
-    out = _json.loads(asyncio.run(mem.memory_search(q=q, limit=5, scope="")).body)
+    out = _json.loads(asyncio.run(mem.memory_search(q=q, limit=5, scope=scope)).body)
     return seen, out
 
 
@@ -658,3 +658,58 @@ def test_memory_search_sanitizes_its_query_the_way_the_recall_does(monkeypatch):
 def test_memory_search_with_nothing_left_after_sanitizing_asks_nothing(monkeypatch):
     seen, out = _memory_search_payload(monkeypatch, ' - + " ')
     assert seen == [] and out["results"] == []
+
+
+# ── #3160: the collections Mission Control's search names are the recall's ────
+
+def test_memory_search_names_the_recall_s_eleven_collections(monkeypatch):
+    """#3160 clause 1: an unrestricted memory search names the eleven collections
+    in `agent_mcp.vault.VAULT_SEGMENTS`, and `agents` is not among them.
+
+    An unrestricted search is not an edge case here — it is the only shape
+    Mission Control sends: `web/src/api.ts:1468` fetches
+    `/memory/search?q=...&limit=...` with no `scope`, so the empty-scope branch
+    is the live path. Until #3160 that branch named a seven-name list this file
+    restated by hand, six of whose members were in the eleven. The seventh,
+    `agents`, is declared by neither `~/.config/qmd/index.yml` nor the tracked
+    `agent-services/conf/qmd-index.yml` — the string appears in both files only
+    on `subliminal`'s `ignore:` list — and qmd answers an undeclared collection
+    with HTTP 200 and `{"results": []}` instead of an error (measured on the live
+    daemon 2026-10-22: 62 ms and no rows, against a `knowledge` control that
+    returned 5 rows reranked in 642 ms). So the copy spent one of the search's
+    legs on a name matching nothing, and the five segments it left out —
+    `architecture`, `lloyd`, `autonomy`, `backlog`, `people` — could not be
+    reached from the Memory tab's search box at all.
+    """
+    seen, _out = _memory_search_payload(monkeypatch, "guardian rollback")
+    assert len(seen) == 1, "the route asked qmd nothing, so this check has no payload to read"
+    named = seen[0]["collections"]
+    assert named == list(vault.VAULT_SEGMENTS), (
+        f"the search named {named}; the recall names {list(vault.VAULT_SEGMENTS)}")
+    assert len(named) == 11, f"{len(named)} collections named, not the recall's 11: {named}"
+    assert "agents" not in named, (
+        "`agents` is on `subliminal`'s ignore list in both index configs and is not a "
+        "vault directory: qmd cannot answer for it")
+    assert {"architecture", "lloyd", "autonomy", "backlog", "people"} <= set(named), (
+        "the five segments the hand-maintained copy omitted are the point of #3160")
+
+
+def test_memory_search_restricted_by_an_undeclared_scope_searches_everything(monkeypatch):
+    """A `scope` is caller-supplied, and until #3160 it reached qmd verbatim —
+    the same silent-zero leg, one layer deeper. It is now restricted the way the
+    recall restricts its own scope (`agent_mcp/vault.py:1255-1261`): a
+    collection is a scope's FIRST path component, a name outside
+    `VAULT_SEGMENTS` is dropped, and a scope whose names are all unknown
+    searches everything rather than nothing.
+    """
+    seen, _ = _memory_search_payload(monkeypatch, "guardian rollback", scope="agents")
+    assert seen[0]["collections"] == list(vault.VAULT_SEGMENTS), (
+        "a scope naming no real collection must fall back to the whole searchable set, "
+        "not ask qmd for a name it has")
+    seen, _ = _memory_search_payload(monkeypatch, "guardian rollback", scope="knowledge/youtube")
+    assert seen[0]["collections"] == ["knowledge"], (
+        "`knowledge/youtube` lives in the `knowledge` collection; the prefix is a filter "
+        "on the reply, not a collection name (#670)")
+    seen, _ = _memory_search_payload(monkeypatch, "guardian rollback", scope="people, backlog/")
+    assert seen[0]["collections"] == ["people", "backlog"], (
+        "a scope naming two real collections keeps both, in the order it was given")

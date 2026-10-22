@@ -494,11 +494,17 @@ the build rather than the setting is what changed.
   `qmd_fork_landing`'s verdict before #3030 widened `LANDED` to every local branch,
   linked worktrees included. §8 gained `eval/qmd_contention.py` and
   `test_qmd_contention.py`. Filed: **#3158** (the pin's drifted config, and a drift
-  report that cannot say what drifted), **#3160** (`app/routers/memory.py:91`'s separate
-  `_VAULT_SEGMENTS` names `agents`, which is not a collection — a probe against it
-  returns `{"results": []}` with HTTP 200, never an error — and omits `architecture`,
-  `lloyd`, `autonomy`, `backlog` and `people`, so Mission Control's memory search has
-  five silently dead segments), **#3161** (`qmd-watcher.sh`'s cost comment still says 15
+  report that cannot say what drifted), **#3160** (the module-level list
+  `app/routers/memory.py` kept beside its own `_VAULT_SEGMENTS` binding named
+  `agents`, which is not a collection — a probe against it returns `{"results": []}`
+  with HTTP 200, never an error — and omitted `architecture`, `lloyd`, `autonomy`,
+  `backlog` and `people`, so Mission Control's memory search had five silently dead
+  segments; the same list drove the `/api/memory/stats` walk and
+  `app/routers/mc_ui.py::_summarize_memory`'s file count, so both under-reported the
+  vault too. Fixed the day it was filed: both routers now bind
+  `agent_mcp.vault.VAULT_SEGMENTS` themselves, which is what makes §2's "the 11 the
+  recall searches" the searchable set rather than three hand-synced copies of which
+  seven were really searched), **#3161** (`qmd-watcher.sh`'s cost comment still says 15
   collections / ~15,800 files where both configs declare 14 and `documents` holds 9,042;
   #2089's fix-shape applies) and **#3119**'s rebuild, to which this pass appended today's
   occupancy. Nothing in §2 or §7 was contradicted by the tree; §7's numbers stay
