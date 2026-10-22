@@ -1120,3 +1120,166 @@ def test_a_tripwire_alarm_stays_open_while_its_marker_is_still_set(
     check2()
     assert "does not hold" not in capsys.readouterr().out, (
         "the same not-clear verdict was journalled on every tick of one incident")
+
+
+# ── the rename hazard: an all-clear must reach a section opened under a heading that no
+#    longer exists (#3124) ────────────────────────────────────────────────────────────────
+#
+# #3124 split the runtime-data alert's heading in two: a check that finds a file inside the
+# code tree keeps "Runtime data is being written into the code tree", and a check that finds
+# only 0-byte stand-ins under the data root gets a heading that says that instead. `resolve`
+# matches the daily-note heading LITERALLY, so the split orphans whatever a pre-rename
+# guardian left open: the all-clear carries the new words, walks past the old heading, and the
+# section keeps its `_(still open on the next check)_` marker — the standing claim a
+# retraction exists to remove, which is #1536's failure mode rather than a cosmetic one.
+# `RUNTIME_DATA_ALERT_TITLES` is the guardian's answer (agent-services/guardian/guardian.py);
+# these two nodes are that walk over a note it was not written for, and over a note where the
+# walk must change nothing.
+#
+# Both titles are spelled out as literals here, not imported. They are the contract's own
+# words — clause 1 and clause 2 name them — and the point of the first node is that the bytes
+# a retired guardian wrote are the bytes the new one has to reach.
+
+TREE_TITLE = "Runtime data is being written into the code tree"
+SHADOW_TITLE = "0-byte databases are shadowing Lloyd's stores under the data root"
+
+#: Shaped like the live 2026-10-21 incident that made the old heading wrong: every path it
+#: names is under `/home/alansrobotlab/lloyd-data`, and it still orders the reader to go find
+#: a writer in the tree.
+SHADOWISH_BODY = ("These exist under the data root:\n"
+                  "  /home/alansrobotlab/lloyd-data/kg.sqlite (0 bytes)\n"
+                  "\n"
+                  "Find the writer, move the data across, and remove the in-tree copy.")
+
+
+def _vault_note(n: notify.Notifier) -> Path:
+    mem = sorted((Path(n.vault_root) / "memory").glob("*.md"))
+    assert len(mem) == 1, f"expected one daily note, got {[str(m) for m in mem]}"
+    return mem[0]
+
+
+def _open_incident(tmp_path: Path, title: str, body: str) -> notify.Notifier:
+    """Raise `title` twice, so the marker the walk has to remove is notify's own.
+
+    The second alert is the hourly re-check that found the condition again: the coalescing
+    path is what appends `DAILY_STILL_OPEN` (notify.py:524-545). Handing the note a
+    hand-written marker would test the fixture rather than the machinery.
+    """
+    n = _notifier(tmp_path)
+    n.alert("error", title, body, coalesce=True)
+    n.alert("error", title, body, coalesce=True)
+    return n
+
+
+def test_an_all_clear_walks_the_heading_a_rename_left_behind(tmp_path):
+    """#3124 clause 3, the half a retitle cannot get for free: the retired heading seals.
+
+    Two readings, and the first one is what stops this node passing on a resolve that simply
+    never reached anything. (a) An all-clear carrying ONLY the new shadow heading leaves a
+    section opened under the retired heading standing open, marker and all — that orphan is
+    the hazard, so a one-title `resolve` is a failure here rather than a silent no-op.
+    (b) The walk the guardian now does on a check that measures neither condition — one
+    `resolve` per title, in both directions — seals it: the section gains a `cleared:` line,
+    the marker goes, and one incident is still one section.
+
+    The marker's removal is the assertion that matters, not the `cleared:` line's arrival: a
+    reader scanning the note for open incidents scans for the marker, and a section carrying
+    both is the note still claiming the incident is open.
+    """
+    # (a) the hazard, measured on the same fixture the walk is run on.
+    solo = _open_incident(tmp_path / "solo", TREE_TITLE, SHADOWISH_BODY)
+    assert notify.DAILY_STILL_OPEN in _vault_note(solo).read_text(encoding="utf-8"), (
+        "the fixture is not an open incident, so nothing below would prove a seal")
+    # The return value is the trap in its purest form: this call reports SUCCESS — the True is
+    # a claim about the surfaces it could reach, not about the incident, and `resolve`'s own
+    # docstring counts "held another title's alarm" as a satisfied surface. So an all-clear
+    # carrying only the new heading looks closed from the caller's side, the ledger, and the
+    # log, while the retired section keeps its marker for as long as the note is read.
+    assert solo.resolve(SHADOW_TITLE, NOTE) is True
+    left = _vault_note(solo).read_text(encoding="utf-8")
+    assert "cleared:" not in left, (
+        "a shadow-headed clear reached a section opened under the tree heading, which is not "
+        "how a literal heading match works — the fixture, not the fix, is wrong")
+    assert notify.DAILY_STILL_OPEN in left, left
+
+    # (b) the walk, over the same note.
+    n = _open_incident(tmp_path, TREE_TITLE, SHADOWISH_BODY)
+    for title in (SHADOW_TITLE, TREE_TITLE):
+        assert n.resolve(title, NOTE) is True, title
+    sealed = _vault_note(n).read_text(encoding="utf-8")
+    assert NOTE in sealed, sealed
+    assert notify.DAILY_STILL_OPEN not in sealed, (
+        "the section still tells a reader scanning for the marker that the incident is open")
+    assert sealed.count(f"{notify.DAILY_SECTION_PREFIX}{TREE_TITLE}") == 1, (
+        "the walk split one incident into two sections")
+
+
+def test_the_walk_writes_nothing_to_a_note_that_never_carried_those_headings(tmp_path):
+    """#3124 clause 3's other half: the extra resolves are idempotent, not noise.
+
+    The all-clear runs on every stray-check interval, so from now on every quiet hour the
+    guardian calls `resolve` once per title against a note holding nothing for any of them.
+    Each must leave the file byte-identical and still report True: `Guardian.alert` treats a
+    falsy resolve as a broken notifier and says so on every incident cycle, so a walk that
+    returned False for a heading with no open section would make every clean hour look
+    broken — and a walk that rewrote the note would put a `cleared:` line under an unrelated
+    incident.
+    """
+    n = _notifier(tmp_path)
+    n.alert("error", OTHER, BODY, coalesce=True)
+    note = _vault_note(n)
+    before = note.read_bytes()
+
+    for title in (SHADOW_TITLE, TREE_TITLE):
+        assert n.resolve(title, NOTE) is True, title
+
+    assert note.read_bytes() == before, (
+        "a resolve for a heading the note never carried wrote the note")
+    assert "cleared:" not in before.decode(encoding="utf-8")
+
+
+def test_a_check_that_measures_neither_condition_still_walks_every_heading(tmp_path,
+                                                                           monkeypatch):
+    """#3124 clause 3's first half, driven by the shipped `Guardian` over the shipped notifier.
+
+    `_tripwire_guardian` stubs `_runtime_data_incident` out because the tripwire nodes are
+    about a wipe, so this node puts the real method back and points both legs of the check at
+    an empty world: no file inside `policy.REPO`, nothing under the data root. That is the
+    hourly state on a healthy box, and it is where the walk's cost is paid, so this is the
+    node that answers the question the rename raises — what does the guardian now hand the
+    notifier on a check that found nothing?
+
+    One `resolve` per heading it could have opened, in the guardian's own order, each
+    reported True. The artefacts are asserted too: a walk is only free while it writes
+    nothing, and writing nothing on a box that never raised — no daily note, no ALERT.md —
+    is what makes an extra call per heading safe to repeat every check interval for as long
+    as the box is healthy.
+    """
+    import time as _time
+
+    import datawatch as DW
+    import guardian as G
+
+    g, _watch, _check, _title = _tripwire_guardian(tmp_path, monkeypatch, "data")
+    monkeypatch.setattr(g, "_runtime_data_incident",
+                        lambda *a, **k: G.Guardian._runtime_data_incident(g, *a, **k))
+    monkeypatch.setattr(DW, "DATA_ROOT", str(tmp_path / "empty-data"))
+    (tmp_path / "empty-data").mkdir()
+    monkeypatch.setattr(DW, "stray_in_tree", lambda _tree: [])
+
+    seen: list[tuple[str, bool]] = []
+    real_resolve = g.notifier.resolve
+    monkeypatch.setattr(g.notifier, "resolve",
+                        lambda title, text: (lambda ok: (seen.append((title, ok)), ok)[1])(
+                            real_resolve(title, text)))
+
+    # Nothing is asserted about the return: on this path it is `retracted`, whether any
+    # `resolve` succeeded, and the walk below is what this node is about.
+    g._runtime_data_incident(_time.time())
+    assert seen == [(t, True) for t in G.RUNTIME_DATA_ALERT_TITLES], seen
+    # The strongest form of "writes nothing": this box never raised, so there was no section
+    # to seal, and the walk must not conjure a note to put a `cleared:` line in.
+    assert not list((tmp_path / "memory").glob("*.md")), (
+        "the walk wrote a daily note on a check that measured nothing")
+    assert g.notifier.alert_file_incident() is None, (
+        "the walk opened an ALERT.md incident for a condition it did not measure")

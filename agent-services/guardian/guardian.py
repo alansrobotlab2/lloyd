@@ -159,7 +159,53 @@ def rollback_title(current: dict | None, bad: str | None, expected: str) -> str:
 #: `notify.resolve()` matches headings literally, and a retitled alarm whose
 #: retraction still says the old words leaves the stale instructions standing as the
 #: only readable record of the incident (#1536).
+#:
+#: This wording is reserved for a check that found something in the CODE TREE, and it is
+#: not renamed (#3124). Both halves of the coalesced incident used to share it, so every
+#: heading a previous guardian wrote — for a stray or for a data-root shadow — is this
+#: string, and retracting an open section needs exactly these bytes. Renaming it would
+#: strand the sections it is the only record of, which is #1536's failure standing in the
+#: daily note as a standing instruction; keeping it is free, because a stray really IS a
+#: runtime file written into the tree.
 RUNTIME_DATA_ALERT_TITLE = "Runtime data is being written into the code tree"
+
+#: The same hourly check's title when the DATA root is all it found (#3124), and the
+#: reason it exists. `datawatch.data_root_shadows` reports a regular file at 0 bytes,
+#: untouched for `INERT_MIN_AGE_SECONDS`, with no `-wal`/`-shm` beside it, whose name a
+#: populated store deeper under the same root answers with bytes. That is residue of a
+#: command run once with the wrong cwd — `sqlite3` creates the file on connect — so the
+#: shared title above was asserting two things this finding never measured: that the file
+#: is in the code tree, and that something is writing it. On 2026-10-21 it toasted hourly
+#: from 06:49 to 10:49 PT over four files all dated Oct 1-19 and every path under
+#: `/home/alansrobotlab/lloyd-data`, and the operator read the heading as a live writer in
+#: `~/lloyd` and went looking for one. The wording below is the measurement and nothing
+#: past it: it may say the file is empty and that a populated store of that name exists,
+#: and may not name who made it or where the empty one sits relative to the repo — the
+#: same rule `_WRITER_CLAIM` states for the stray alert's cause sentence (#2057).
+RUNTIME_DATA_SHADOW_ALERT_TITLE = (
+    "A 0-byte database under the data root is shadowing a populated store")
+
+#: Every heading this one incident could have been opened under, and the complete set an
+#: all-clear has to walk (#3124). `Notifier.resolve` is title-scoped and matches the
+#: heading literally, so a clearance carrying one string retracts one heading and leaves
+#: every other still claiming `_(still open on the next check)_`: the retired heading a
+#: pre-#3124 shadows-only section carries is `RUNTIME_DATA_ALERT_TITLE` byte for byte,
+#: which is why the set names both constants rather than the current condition's title
+#: alone. `resolve` writes nothing when no section of its title is open, so walking the
+#: set on an already-clear note is silent and the hourly idempotence contract holds.
+#: A future retitle adds its retired string to a tuple like this one; deleting the live
+#: entry from it is what orphans a section, and
+#: `tests/test_guardian_alert_retraction.py` holds the code-tree wording as its OWN
+#: literal so a rename cannot quietly drop a heading that is still standing somewhere.
+#:
+#: One `alert` call per check is unchanged (`_runtime_data_incident`), and the title is
+#: chosen there in this one place: `Guardian.alert` suppresses a same-title repeat inside
+#: `ALERT_REPEAT_SECONDS` keyed on the title, so a condition-dependent title means a
+#: condition that flips between hourly checks is two titles and two toasts where one
+#: coalesced call used to give one — which is why the flip is only allowed between checks,
+#: never within one.
+RUNTIME_DATA_ALERT_TITLES = (RUNTIME_DATA_ALERT_TITLE,
+                             RUNTIME_DATA_SHADOW_ALERT_TITLE)
 
 #: The one cause sentence the stray alert may print, and the only reading of its
 #: own numbers that earns it: a stray `mtime` inside the window between this
@@ -1754,7 +1800,20 @@ class Guardian:
                 shadow_body = _shadow_alert_body(shadow_root, shadows, now)
                 body = f"{body}\n\n{shadow_body}" if body else shadow_body
             retained = [n for n in strays if n in datawatch.RUNTIME_NAMES]
-            self.alert("error", RUNTIME_DATA_ALERT_TITLE, body,
+            # The heading is the CONDITION, and it is chosen here and nowhere else
+            # (#3124): a check that found a file inside `policy.REPO` says so in today's
+            # words, and one that found only a 0-byte stand-in under the data root says
+            # that instead — the shared wording told the operator to go find a writer in
+            # the code tree on a morning when every named file was under `~/lloyd-data`.
+            # `strays` is tested first, so a check carrying BOTH keeps the code-tree
+            # heading its body's first paragraph is written against, and this stays ONE
+            # call whatever the number of conditions reporting: the repeat guard is keyed
+            # on the title, so splitting the two conditions into two calls would deliver
+            # one body and log the other away (#1536, unchanged above).
+            self.alert("error",
+                       RUNTIME_DATA_ALERT_TITLE if strays
+                       else RUNTIME_DATA_SHADOW_ALERT_TITLE,
+                       body,
                        coalesce=True,
                        needs_human=bool(retained) or bool(shadows))
         elif not strays and not shadows and shadow_measured:
@@ -1821,7 +1880,17 @@ class Guardian:
                     "with no move recorded by the guardian, so the instructions above "
                     "are stale and nothing here accounts for a path that was named and "
                     "is now gone")
-            self.notifier.resolve(RUNTIME_DATA_ALERT_TITLE, cleared)
+            # One `resolve` per heading this incident could have been opened under, not
+            # one per condition the current check measured (#3124). `resolve` matches the
+            # daily-note heading literally, so an all-clear that carries only today's
+            # title seals today's sections and leaves a shadows-only section opened
+            # before the rename standing with its `_(still open on the next check)_`
+            # marker for ever — a retired heading is only retractable while some clear
+            # still says its words. The line above names both roots, so it is true
+            # beside either heading, and a title with no open section writes nothing: the
+            # hourly all-clear after the first stays as silent as it was on one title.
+            for _title in RUNTIME_DATA_ALERT_TITLES:
+                self.notifier.resolve(_title, cleared)
 
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,

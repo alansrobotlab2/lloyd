@@ -18,8 +18,11 @@ Everything here is the check's own measurement over a fixture root under `tmp_pa
 Removing the live files is a person's call under `~/lloyd-data` and no clause here
 tries it: the check reads and never moves
 (`test_running_the_check_moves_and_deletes_nothing`). The alert half — the finding
-reaching `RUNTIME_DATA_ALERT_TITLE` with `needs_human=True`, and the clearance that
-retracts it — is pinned in `tests/test_guardian_predicates.py`.
+reaching an alert with `needs_human=True`, under the heading a person reads — is pinned
+here from `test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer` onwards
+(#3124: a shadow is not a stray, and does not get the code tree's words); the incident
+cycle around it, including the clearance that retracts both headings, is in
+`tests/test_guardian_predicates.py`.
 """
 from __future__ import annotations
 
@@ -409,6 +412,93 @@ def test_running_the_check_moves_and_deletes_nothing(tmp_path):
     assert not dest.exists(), f"the check created its code-tree quarantine at {dest}"
     assert sorted(os.listdir(data)) == ["_pipeline", "kg.sqlite"], (
         "the root holds exactly the entries it started with")
+
+
+# ── #3124: what a shadows-only finding says, on the surfaces a person reads ──
+
+def test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer(tmp_path, monkeypatch):
+    """A check that measured only shadows does not say "code tree" and does not say
+    anything "is being written" — on the alert, on ALERT.md, or in the daily note.
+
+    `agent-services/guardian/guardian.py` coalesces this finding and the code-tree stray
+    finding into ONE incident under one title, and until #3124 that title was
+    `RUNTIME_DATA_ALERT_TITLE` for both. This fixture measures the shadow half alone, so
+    both claims in those words were false of it: nothing here is inside `policy.REPO`,
+    and the file is 0 bytes, untouched past `INERT_MIN_AGE_SECONDS`, with no `-wal` or
+    `-shm` beside it — the exact evidence that no writer has it open. On 2026-10-21 that
+    heading toasted hourly from 06:49 to 10:49 PT over four files every one of which was
+    under `/home/alansrobotlab/lloyd-data`, and the operator went looking for a writer in
+    `~/lloyd`.
+
+    The phrases are asserted as strings, not against a constant: the point of the clause
+    is what a reader can no longer be told, and a node that compared the title to
+    `RUNTIME_DATA_SHADOW_ALERT_TITLE` alone would keep passing if that constant were
+    renamed back to the stray wording. `needs_human` is asserted beside them because it
+    is what sends this finding to the board as `[guardian] <title>`
+    (`agent-services/guardian/notify.py`), which is the same string one hop further out —
+    the filing itself needs a live firing and is recorded as owed on the item.
+    """
+    import types
+
+    import guardian as gmod
+    import notify
+
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    shadow = _store(data / "kg.sqlite", 0)
+    _store(data / SHIPPED_KG, 4096)
+
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    monkeypatch.setattr(gmod.policy, "REPO", str(repo))
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(data))
+    # The tree is empty: this check measured one condition, not two.
+    monkeypatch.setattr(gmod.datawatch, "stray_in_tree", lambda _tree: [])
+
+    sent: list[tuple[tuple, dict]] = []
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(vault), backend_url="http://127.0.0.1:1")
+    real_alert = n.alert
+
+    def _alert(*args, **kwargs):
+        sent.append((args, kwargs))
+        return real_alert(*args, **kwargs)
+
+    n.alert = _alert
+    n.announce = lambda *a, **k: {}
+    g = gmod.Guardian.__new__(gmod.Guardian)
+    g.notifier = n
+    g.data = types.SimpleNamespace(armed=True)
+    g._alert_seen = {}
+    g.last_alert = ""
+
+    g._runtime_data_incident(NOW)
+
+    assert len(sent) == 1, f"one check, one incident, whatever it found: {sent}"
+    title = sent[0][0][1]
+    assert title == gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE, (
+        f"a shadows-only check raised under {title!r}")
+    low = title.lower()
+    assert "code tree" not in low, f"the heading names a tree this check did not find: {title!r}"
+    assert "being written" not in low, (
+        f"the heading asserts a live writer, and an inert 0-byte stand-in is the "
+        f"opposite of one: {title!r}")
+    assert sent[0][1].get("needs_human") is True, (
+        "an empty stand-in shadowing a populated store is a person's call to delete, "
+        "so it still goes to the board (#3109)")
+    assert str(shadow) in sent[0][0][2], "the finding itself must survive the retitle"
+
+    alert_md = (tmp_path / "ALERT.md").read_text(encoding="utf-8")
+    assert alert_md.splitlines()[0] == f"# {title}", (
+        "ALERT.md's H1 is written from the same title and must not carry the retired "
+        "wording")
+    notes = sorted((vault / "memory").glob("*.md"))
+    assert len(notes) == 1, f"expected one daily note, got {[str(m) for m in notes]}"
+    daily = notes[0].read_text(encoding="utf-8")
+    assert f"## Self-mod guardian: {title}" in daily, daily
+    tree_heading = "## Self-mod guardian: Runtime data is being written into the code tree"
+    assert tree_heading not in daily, (
+        "the daily note still heads a data-root shadow with the wording a stray owns")
 
 
 def test_a_missing_data_root_is_an_error_and_not_an_empty_result(tmp_path):

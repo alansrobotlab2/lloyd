@@ -187,6 +187,47 @@ def test_what_is_not_residue_still_alerts_and_alone(roots, tmp_path, monkeypatch
     assert os.path.join(str(tree), "workers.db") not in alerts[0][1]
 
 
+def test_a_stray_and_a_shadow_together_make_one_call_under_the_tree_title(
+        roots, tmp_path, monkeypatch):
+    """#3124 clause 2: a stray in the tree owns the heading, even beside a data-root
+    shadow — and the check still gets exactly one `alert` call.
+
+    The two conditions were never two alerts (`Guardian.alert` dedupes on the title
+    inside ALERT_REPEAT_SECONDS while this check runs hourly, so a second call would be
+    logged away as "(suppressed repeat)" and the finding would vanish: #1536), and
+    #3124's condition-dependent title makes that coalescing load-bearing in a new way.
+    A title chosen per condition must be chosen ONCE per check, or the tree's finding
+    loses its heading to whichever condition the code happens to test first.
+
+    So this node pins both halves: one call, and the heading is the code-tree wording
+    spelled out here rather than read from the constant — the sentence a person is sent
+    to act on, and the one every section already open in a daily note carries. The data
+    root's finding is not dropped on the way: its file is named in the same body, which
+    is the half of the coalescing that keeps the shadow from going unreported.
+    """
+    import guardian as gmod
+
+    tree, data, stray = roots
+    stray.unlink()                       # nothing in the tree is inert residue this time
+    (tree / ".t").mkdir()                # ... and this stray is not movable
+    (data / "kg.sqlite").write_bytes(b"")            # the stand-in
+    trusted = data / "_pipeline" / "vault-derived" / "kg.sqlite"
+    trusted.parent.mkdir(parents=True)
+    trusted.write_bytes(b"SQLite format 3\x00" + b"x" * 4080)
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(data))
+
+    gmod, g, news, alerts = _guardian(tmp_path, monkeypatch, tree, data, [".t"])
+    g._runtime_data_incident(NOW)
+
+    assert len(alerts) == 1, f"two conditions, one coalesced incident: {alerts}"
+    assert alerts[0][0] == "Runtime data is being written into the code tree", (
+        f"a check that found a file in the code tree lost today's heading: {alerts[0][0]}")
+    assert os.path.join(str(tree), ".t") in alerts[0][1]
+    assert str(data / "kg.sqlite") in alerts[0][1], (
+        f"the data root's shadow was dropped from the coalesced body: {alerts[0][1]}")
+    assert news == [], "nothing here is inert residue, so there is nothing to announce"
+
+
 def test_a_disarmed_guardian_moves_nothing(roots, tmp_path, monkeypatch):
     tree, data, stray = roots
     gmod, g, news, alerts = _guardian(tmp_path, monkeypatch, tree, data, ["workers.db"])
@@ -234,7 +275,11 @@ def test_an_empty_tree_with_no_move_says_no_move_was_recorded(roots, tmp_path, m
     stray.unlink()
     _, cleared, news, alerts = _cleared(tmp_path, monkeypatch, tree, data, [])
 
-    assert [t for t, _ in cleared] == [gmod.RUNTIME_DATA_ALERT_TITLE]
+    assert [t for t, _ in cleared] == list(gmod.RUNTIME_DATA_ALERT_TITLES), (
+        "an all-clear walks every heading this incident could have been opened under "
+        "(#3124) — the code-tree wording and the shadow-only wording, because `resolve` "
+        "matches headings literally and a clear carrying one leaves the other standing. "
+        f"Got {cleared}.")
     body = cleared[0][1]
     assert "no move recorded by the guardian" in body, body
     assert "nothing further to move" not in body, (
@@ -256,7 +301,9 @@ def test_the_move_that_emptied_the_tree_names_the_move(roots, tmp_path, monkeypa
     import guardian as gmod
     _, cleared, news, alerts = _cleared(tmp_path, monkeypatch, tree, data, ["workers.db"])
 
-    assert [t for t, _ in cleared] == [gmod.RUNTIME_DATA_ALERT_TITLE]
+    assert [t for t, _ in cleared] == list(gmod.RUNTIME_DATA_ALERT_TITLES), (
+        "the move-and-clear tick walks the same set of headings as the plain all-clear "
+        f"(#3124), one resolve each: {cleared}")
     body = cleared[0][1]
     assert "no move recorded" not in body, body
     assert "moved 1 inert file" in body and "(workers.db)" in body, body

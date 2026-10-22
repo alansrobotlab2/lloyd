@@ -2158,11 +2158,13 @@ def test_the_set_emptying_writes_one_cleared_line_and_stays_silent_after(
     assert len(_sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)) == 1, text
     assert "no runtime stores inside the code tree" in text, text
     # The other half of "does not repeat it": all three all-clear checks reached
-    # `resolve` for this title and each reported the note as cleared, so silence
-    # comes from an idempotent no-op and not from a swallowed error — the heartbeat
-    # reads that True, and a False every hour would read as a broken notifier.
-    assert [t for t, _ in clears] == [gmod.RUNTIME_DATA_ALERT_TITLE] * 3, clears
-    assert [ok for _, ok in clears] == [True, True, True], clears
+    # `resolve` for EVERY heading this incident could be open under (#3124) and each
+    # reported the note as cleared, so silence comes from an idempotent no-op and not
+    # from a swallowed error — the heartbeat reads that True, and a False every hour
+    # would read as a broken notifier. Two titles per check is the walk, not two
+    # retractions: only the heading with an open section writes anything.
+    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES) * 3, clears
+    assert [ok for _, ok in clears] == [True] * len(clears), clears
 
 
 def test_a_stray_finding_after_a_clear_opens_a_new_section(tmp_path, monkeypatch):
@@ -2350,8 +2352,11 @@ def test_the_cleared_line_names_the_tree_the_check_measured(tmp_path, monkeypatc
     detector.set([])
     tick()
 
-    assert clears == [(gmod.RUNTIME_DATA_ALERT_TITLE, True)], (
-        f"the clean measurement did not seal the incident: {clears}")
+    # Two entries because the all-clear walks every heading this incident could have been
+    # opened under (#3124), and only the one with an open section writes anything: the claim
+    # below is about the sealed section, which stays exactly one.
+    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    assert all(ok for _, ok in clears), clears
     line = next(ln for ln in note.read_text(encoding="utf-8").splitlines()
                 if ln.startswith(notify.DAILY_CLEARED_PREFIX))
     assert detector.repo, "the detector never received a tree, so there is nothing to name"
@@ -2390,7 +2395,10 @@ def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_pa
     assert detector.calls == 2, (
         f"the clearing check measured the tree {detector.calls - 1} times, so the two "
         "edges of one check can be reading different measurements")
-    assert clears == [(gmod.RUNTIME_DATA_ALERT_TITLE, True)], clears
+    # One detector call per check, one all-clear walk per check — and the walk carries every
+    # heading, not one per condition (#3124), so its length is not a second measurement.
+    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    assert all(ok for _, ok in clears), clears
 
     detector.fails = True
     tick()
@@ -2398,7 +2406,9 @@ def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_pa
         f"a check whose detector raised measured the tree {detector.calls - 2} times; one "
         "failed measurement is the answer, and calling again is how a check starts "
         "reporting a verdict it cannot justify")
-    assert len(clears) == 1, f"the failed check retracted a second time: {clears}"
+    # Still exactly one walk's worth of resolves: the raised check retracts nothing, so the
+    # list has not grown since the tick above (#2056's claim, unchanged by #3124's walk).
+    assert len(clears) == len(gmod.RUNTIME_DATA_ALERT_TITLES), clears
 
 
 # ── #2308: a retained stray reaches the backlog channel ──────────────────────
@@ -4294,8 +4304,9 @@ def test_the_move_recorder_sees_a_code_tree_move(tmp_path, monkeypatch):
         f"the move was not scoped to the code tree: {moved_calls[0][0]}")
 
 
-def test_a_data_root_shadow_alerts_under_the_stray_title_asking_for_a_human(tmp_path, monkeypatch):
-    """#3109 clause 5: the finding surfaces as `RUNTIME_DATA_ALERT_TITLE`, needs_human.
+def test_a_data_root_shadow_alerts_under_its_own_title_asking_for_a_human(tmp_path, monkeypatch):
+    """#3109 clause 5: the finding surfaces as an alert, needs_human, under the heading
+    that describes a shadow (`RUNTIME_DATA_SHADOW_ALERT_TITLE`, since #3124).
 
     Two channels are checked, not one. The kwargs prove the guardian asked for a human;
     `"backlog" in result` proves the board channel actually opened — #2308 is the story of
@@ -4319,7 +4330,12 @@ def test_a_data_root_shadow_alerts_under_the_stray_title_asking_for_a_human(tmp_
     assert scan.repo == str(root), (
         f"it measured {scan.repo}, not the data root the guardian is configured with")
     assert len(alerts) == 1, f"expected one alert, got {len(alerts)}"
-    assert alerts[0]["title"] == gmod.RUNTIME_DATA_ALERT_TITLE
+    # The heading follows the CONDITION, not the incident (#3124): this check found only a
+    # 0-byte stand-in under the data root, so it gets the shadow wording, and the code-tree
+    # wording stays reserved for a check that found a file inside `policy.REPO`. `tests/
+    # test_guardian_data_root_shadow.py::test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer`
+    # pins the words themselves; this node owns which condition maps to which constant.
+    assert alerts[0]["title"] == gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE, alerts[0]["title"]
     assert alerts[0]["kwargs"].get("needs_human") is True, (
         f"a data-root shadow must ask for a human: {alerts[0]['kwargs']}")
     assert alerts[0]["kwargs"].get("coalesce") is True, (
@@ -4369,7 +4385,9 @@ def test_the_shadow_alert_names_both_paths_and_the_root_it_measured(tmp_path, mo
     # instructions would be the part that vanished.
     assert "\n## " not in body and not body.startswith("##"), body
 
-    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    # Under the shadow heading: this check measured the data root alone, and #3124 is
+    # what keeps the code tree's heading off it.
+    sections = _sections(note, gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE)
     assert len(sections) == 1, sections
     assert finding["trusted"] in sections[0], (
         "the trusted store is in the alert but not in the daily note")
@@ -4395,9 +4413,12 @@ def test_a_cleared_data_root_retracts_the_open_alert(tmp_path, monkeypatch):
 
     assert len(alerts) == 1, f"a cleared root must not raise a second alert: {alerts}"
     assert clears, "the open incident was never retracted"
-    assert clears[-1][0] == gmod.RUNTIME_DATA_ALERT_TITLE
-    assert clears[-1][1] is True, "the resolve did not seal a section"
-    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    # One all-clear walk, one `resolve` per heading this incident could have been opened
+    # under (#3124) — the shadow section is the one that gets sealed, and the walk past
+    # it is what retracts a section an older guardian opened under the code-tree heading.
+    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    assert all(ok for _, ok in clears), clears
+    sections = _sections(note, gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE)
     assert len(sections) == 1, "one incident must not leave two sections"
     assert "cleared:" in sections[0]
     assert str(root) in sections[0], (
@@ -4425,7 +4446,9 @@ def test_a_clean_data_root_raises_no_alert(tmp_path, monkeypatch):
 
     assert alerts == [], f"a clean data root raised: {alerts}"
     assert scan.calls == 1, "the data root was not measured on this check"
-    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE) == [], (
+    # Both headings: a clean check has no condition to name, so it must not open a
+    # section under either (#3124 added the second heading this check could reach).
+    assert [_sections(note, t) for t in gmod.RUNTIME_DATA_ALERT_TITLES] == [[], []], (
         "a clean data root wrote a section anyway")
 
 
@@ -4453,7 +4476,9 @@ def test_a_failed_shadow_scan_claims_nothing_and_retracts_nothing(tmp_path, monk
     assert len(alerts) == 1, f"a failed scan raised anyway: {alerts}"
     assert clears == [], (
         f"a check that could not measure the data root retracted it: {clears}")
-    sections = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    # The section this incident opened is the shadow one: the raise that wrote it measured
+    # a data root and no stray (#3124).
+    sections = _sections(note, gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE)
     assert len(sections) == 1 and "cleared:" not in sections[0], (
         f"the open incident was sealed over a failed measurement: {sections}")
 

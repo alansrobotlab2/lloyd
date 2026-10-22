@@ -2072,11 +2072,20 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # 2610 → 2694. Nothing else moved them, which is the point of
     # pinning a definition head at all — a change that shifts a cited line has to say
     # so here first.
-    assert heads[guardian]["main"] == 2694, (
-        f"`main` moved off :2694 ({heads[guardian]['main']}) — if it is gone "
+    # 2694 → 2763, and `evaluate_liveness` 800 → 846 with it (#3124). Three blocks of
+    # prose and constants, no code moved: +46 lines at :159 (the shadow-only title and the
+    # set the all-clear walks — above the method, which is why THAT one moves too), +13 at
+    # :1800 (the title chosen at the one raise site) and +10 at :1880 (the walk itself). So
+    # 800 + 46 = 846, and 2694 + 46 + 13 + 10 = 2763. Re-check against the tree rather than
+    # against this arithmetic: `git diff <base> <head> -- agent-services/guardian/guardian.py
+    # | grep '^@@'` must show exactly those three hunks, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # must print 846 and 2763.
+    assert heads[guardian]["main"] == 2763, (
+        f"`main` moved off :2763 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 800, (
-        f"`evaluate_liveness` moved off :800 "
+    assert heads[guardian]["evaluate_liveness"] == 846, (
+        f"`evaluate_liveness` moved off :846 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
