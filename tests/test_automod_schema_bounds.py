@@ -247,7 +247,7 @@ def test_the_two_path_fields_have_no_post_parse_slice_to_read_off():
 
 #: Longest value each of the two undecided fields has on record, measured 2026-10-05
 #: over the `review`/`vault_review`/`vault_land` rows of a 22,916-line
-#: `~/.local/state/lloyd-automod/promotions.jsonl` — append-only state in no tree, so
+#: the `~/.local/state/lloyd-automod` promotions ledger — append-only state in no tree, so
 #: these are the figures, quoted with their measurement time. `EVIDENCE_PATH_MEASURED_MAX`
 #: is also below the longest path this repo can name (100 characters,
 #: `git ls-files | awk '{print length($0)}' | sort -n | tail -1`), which is the half a
@@ -902,3 +902,382 @@ def test_the_schema_a_worker_hands_the_finalizer_is_the_capped_object(
         f"whose caps the suite measures: {site.strip()}")
     assert _schema_is_bounded(handed) is True, (
         f"{key} reaches the finalizer with an open string in it")
+
+
+# ── a claim that a field is unmeasurable must name its query (#3147 clause 4) ──
+
+#: The wording that asserts a cap's fields cannot be sized by any store. #2444 shipped
+#: three blocks arguing exactly this — `RESULT_SCHEMA`'s "Nothing sizes them",
+#: `GROUP_TRIAGE_SCHEMA`'s "so nothing measures them", and `ARCH_REVIEW_SCHEMA`'s
+#: "Nothing measures the size either" — and #3147 measured all three against the stores
+#: they name: the digest sentence was false the day it was written (108 of the 142 runs
+#: completed by 2026-10-09 carried `verdict_source='structured'`), the group denominator
+#: was 126 rows rather than 2, and the arch one was 47 rather than 21 with the key absent
+#: rather than null. An unattributed "nothing measures it" is the shape that let three
+#: wrong numbers sit in front of the reviewers of eight schemas for a month, so from here
+#: the claim is only allowed with the command that re-derives it.
+CAP_UNMEASURED_PHRASES = (
+    "nothing measures", "nothing sizes", "no store sizes", "no ledger row sizes",
+    "unmeasurab", "too thin to measure", "store none", "cannot be measured",
+    "not measurable", "no measure",
+)
+
+#: What counts as re-derivable: a query a later reader can run and get the number back.
+#: `select … from runs` against `workers.db`, or a `jq`/`zcat`/`grep` pipeline over the
+#: automod ledger. A bare file name or a date is not a query.
+CAP_QUERY_MARKERS = ("select ", "zcat ", "jq -r", "| grep", "| jq", "grep -c")
+
+
+def _names_an_unmeasurable_claim(comment: str) -> str:
+    """The phrase in `comment` asserting unmeasurability, or "" for none."""
+    low = comment.lower()
+    return next((p for p in CAP_UNMEASURED_PHRASES if p in low), "")
+
+
+def _names_a_rederivable_query(comment: str) -> str:
+    """The query marker `comment` publishes, or "" for none."""
+    low = comment.lower()
+    return next((m for m in CAP_QUERY_MARKERS if m in low), "")
+
+
+def _norm(comment: str) -> str:
+    """A cap comment as published prose: the `#` gutters dropped and the wrapping
+    collapsed, so a figure or a phrase that straddles a line break is matched by what it
+    says and not by how it happened to be wrapped.
+    """
+    return " ".join(comment.replace("#", " ").split())
+
+
+def test_a_cap_comment_claiming_a_field_unmeasurable_names_the_query_that_measures_it():
+    """Clause 4: over all eight bounded-grammar blocks, a block that says a capped field
+    is unmeasurable has to carry the query that re-derives the claim, read off the same
+    `_comment_above_in` walk `test_the_comment_above_each_of_the_eight_names_a_cap_and_the_runaway`
+    uses. A claim with no command is a measurement nobody can re-run, which is the exact
+    failure #3147 was filed to clear: three such claims, three wrong denominators.
+    """
+    bad = []
+    for key, marker, module_qual in EIGHT_MARKERS:
+        comment = _comment_above_in(module_qual, marker)
+        assert comment, f"no comment above {marker} to grade"
+        phrase = _names_an_unmeasurable_claim(comment)
+        if not phrase:
+            continue
+        if not _names_a_rederivable_query(comment):
+            bad.append(f"{key}: claims {phrase!r} with no query to re-derive it")
+
+    # The detectors themselves, proved on two lines that are in no file. A loop over
+    # blocks that all pass is indistinguishable from a loop that cannot fail, and
+    # `test_the_three_retired_unmeasurability_sentences_are_what_this_node_refuses` covers
+    # only the claim half of the rule.
+    claim_line = "# The 7 rows on record store none of these strings, so nothing measures them"
+    query_line = "#   select count(*) from runs where source='youtube-digest' -> 7"
+    assert _names_an_unmeasurable_claim(claim_line) == "nothing measures", (
+        "the claim detector no longer catches the wording this node exists for, so "
+        "CAP_UNMEASURABLE_MARKERS has rotted and the loop above grades nothing")
+    assert _names_a_rederivable_query(claim_line) == "", (
+        "the manufactured offender carries a query marker, so it proves nothing")
+    assert _names_a_rederivable_query(query_line) == "select ", (
+        "the query detector no longer catches a plain `select`, so a block carrying a "
+        "claim and a query is being refused for no reason and a block carrying neither is "
+        "being waved through")
+    assert not (_names_an_unmeasurable_claim(claim_line)
+                and not _names_a_rederivable_query(claim_line + "\n" + query_line)), (
+        "a claim WITH a published query is still refused, so this node bans the claim "
+        "itself rather than the unattributed claim — and would force every measured block "
+        "to delete its honest sentence")
+
+    assert not bad, (
+        "cap comment asserts a field unmeasurable and publishes no command:\n  "
+        + "\n  ".join(bad))
+
+
+def test_the_three_retired_unmeasurability_sentences_are_what_this_node_refuses():
+    """The can-fail half, on the real text: the three sentences this round replaced,
+    quoted as they stood in `6181984e`. Each asserts unmeasurability and names no query,
+    so the node above would have refused all three — which is the only evidence that the
+    node has teeth rather than passing because nothing ever claims unmeasurability.
+    """
+    retired = (
+        "# (#1706). Nothing sizes them: no `youtube-digest` run in `workers.db` stores a\n"
+        "# structured verdict (measured over all 136 rows on 2026-10-09 — `response_json`\n"
+        "# holds the text block and `meta_json` the parsed fields, never a finalizer\n"
+        "# object) and the ledger has no digest event kind; owed-check #2444/2 rules on that.",
+        "# `harness.finalizer.max_tokens` (8192). The 2 `backlog_group_triage` rows on\n"
+        "# record store none of these strings, so nothing measures them: the per-item cap\n"
+        "# mirrors the measured single-item field and the umbrella takes the same ceilings\n"
+        "# rather than inventing numbers. Owed-check #2444/2 rules on that non-measurement.",
+        "# Nothing measures the size either — all 21 `arch_review` rows in\n"
+        "# ~/.local/state/lloyd-automod/promotions.jsonl carry `detail: null`, so no\n"
+        "# summary string is on record there and the cap comes from the reader's own\n"
+        "# number. That non-measurement is what owed-check #2444/2 is asked to rule on.",
+    )
+    for text in retired:
+        assert _names_an_unmeasurable_claim(text), text.splitlines()[0]
+        assert _names_a_rederivable_query(text) == "", (
+            f"the retired sentence now reads as re-derivable, so the node above has "
+            f"stopped refusing the class it was written for: {text.splitlines()[0]}")
+
+
+# ── the witness slice the ledger-side figures come from (#3147 clause 5) ──────
+
+#: Every `backlog_group_triage`, `umbrella: true` `backlog_triage` and `arch_review` row
+#: of the `~/.local/state/lloyd-automod` promotions ledger and its two folded archives, raw
+#: lines as the store wrote them, measured 2026-10-22: 272 rows, 126 + 75 + 71. The live
+#: store is 28,487,117 bytes that day, 27× the WITNESS_MAX_BYTES = 1_048_576 ceiling
+#: `scripts/automod/backlog.py` puts on what a comment may demand, so no node here opens
+#: it whole. Same division of labour as `WITNESS` above, and the same reason the slice
+#: lives in `tests/fixtures/`: the gate runs with HOME at the round home, where neither
+#: `~/.local/state/lloyd-automod` nor `~/obsidian` is there, and a node that opened only
+#: an absolute store path would skip — a skipping node pins nothing.
+CAP_LEDGER_WITNESS = Path(__file__).parent / "fixtures" / \
+    "cap_comment_ledger_rows_2026-10-22-item3147.jsonl"
+
+#: One row per `youtube-digest` run in `workers.db`, carrying only the fields the two
+#: queries in `RESULT_SCHEMA`'s block read, plus that run's `NOTE:` line from
+#: `runs.response_json` — the projection no node may rebuild from the live store, whose
+#: two columns together are 1.6 MB of `response_json` plus 0.3 MB of `meta_json`.
+DIGEST_FIELD_WITNESS = Path(__file__).parent / "fixtures" / \
+    "workers_youtube_digest_capped_fields_2026-10-22-item3147.jsonl"
+
+
+def _witness_rows(path) -> list[dict]:
+    rows = [json.loads(line) for line in
+            Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows, f"empty witness: {path}"
+    return rows
+
+
+def _cap_ledger_rows():
+    rows = _witness_rows(CAP_LEDGER_WITNESS)
+    group = [r for r in rows if r.get("event") == "backlog_group_triage"]
+    umbrella = [r for r in rows
+                if r.get("event") == "backlog_triage" and r.get("umbrella")]
+    arch = [r for r in rows if r.get("event") == "arch_review"]
+    return rows, group, umbrella, arch
+
+
+    """Clause 5: the counts and maxima `GROUP_TRIAGE_SCHEMA` and `ARCH_REVIEW_SCHEMA`
+    publish are re-derived here from the committed bytes, and nowhere else — 272 rows in
+    the slice, 126 `backlog_group_triage` of them, 75 with `umbrella: true`, 71
+    `arch_review`, and 0 of the 126 with an `items`, `check`, `evidence` or `acceptance`
+    entry in its `lens` map, which is why a group verdict cannot size the ceilings it
+    carries. The umbrella rows give max check 428 and max acceptance 628; their `evidence`
+    maxes at exactly 1000 because `record_group_verdict` writes `evidence[:1000]`, so that
+    figure is the slice and is asserted as the slice, not as a measurement of
+    TRIAGE_EVIDENCE_MAX. `arch_review` rows carry neither `summary` nor `detail`.
+
+    A `lens` map of field lengths, and not the ledger's own strings, is the one thing that
+    changed between the first and second version of this witness: raw ledger lines put
+    the markdown review log #718 retired inside one umbrella row's `check`, and
+    `tests/test_skill_verdicts.py::test_no_surface_names_a_markdown_review_log_as_reading_material`
+    refuses any tracked file naming that retired ledger — correctly, since a phantom path
+    quoted even to be denied is a path a later grep-and-follow run walks. Lengths and
+    key-presence measure every figure the blocks publish and copy no prose, so the guard
+    is not traded away to keep the witness.
+    """
+    rows, group, umbrella, arch = _cap_ledger_rows()
+    assert len(rows) == 272, len(rows)
+    assert len(group) == 126, len(group)
+    assert len(umbrella) == 75, len(umbrella)
+    assert len(arch) == 71, len(arch)
+    assert all(isinstance(r.get("lens"), dict) for r in rows), (
+        "a row carries no `lens` map, so this witness has stopped measuring the fields the "
+        "blocks publish")
+    payload = [r for r in group if any(k in r["lens"] for k in
+                                       ("check", "evidence", "acceptance", "items"))]
+    assert not payload, (
+        f"{len(payload)} group rows carry one of the three strings, so the scoped "
+        "denominator in GROUP_TRIAGE_SCHEMA's block is wrong again")
+    assert max(r["lens"]["check"] for r in umbrella) == 428
+    assert max(r["lens"]["acceptance"] for r in umbrella) == 628
+    assert max(r["lens"]["evidence"] for r in umbrella) == 1000, (
+        "the umbrella evidence maximum moved off exactly 1000 — that figure is "
+        "`record_group_verdict`'s `evidence[:1000]` slice, so a new value means the slice "
+        "moved and TRIAGE_EVIDENCE_MAX is measurable again")
+    assert not [r for r in arch if "summary" in r["lens"] or "detail" in r["lens"]], (
+        "an arch_review row carries prose the block says the ledger never stores")
+    assert sum(1 for r in arch if str(r["created_at"]) < "2026-10-10") == 47, (
+        "the count of arch_review rows already on record when #2444 landed moved off 47, "
+        "so the note on its 21-row denominator needs the new number")
+    assert CAP_LEDGER_WITNESS.stat().st_size < 1_048_576, (
+        f"the witness is {CAP_LEDGER_WITNESS.stat().st_size} bytes, over the "
+        "WITNESS_MAX_BYTES = 1_048_576 ceiling a demanded extract must sit under")
+    # And the store it stands in for stays shut: a node that opened the live ledger could
+    # be counting rows the slice does not hold, and every figure above would stop meaning
+    # the committed thing. The store is NAMED in prose by both cap comments and several
+    # docstrings, so what is refused is a call site, not the words.
+    # The matcher's own source names the stores and the operators in one expression, so it
+    # matches itself; ` in line` is the guard idiom and appears on no other line.
+    store_words = ("lloyd-automod", "workers.db")
+    openers = ("open(", "read_text", "read_bytes", "connect(", "Path(", "glob(")
+    calls = [line.strip()[:110] for line in Path(__file__).read_text().splitlines()
+             if " in line" not in line
+             and any(w in line for w in store_words)
+             and any(o in line for o in openers)]
+    assert not calls, (
+        "this file opens the live ledger or the live workers.db, so the figures the cap "
+        "comments publish may have come from there and not from the committed witness"
+        ":\n  " + "\n  ".join(calls))
+
+
+def test_the_ledger_witness_holds_the_rows_the_cap_comments_count():
+    """The slice's own shape, pinned before any figure is read out of it: 272 rows, 126
+    `backlog_group_triage`, 75 `umbrella: true` `backlog_triage`, 71 `arch_review`, 47 of
+    those last dated before 2026-10-10 (so #2444's 21-row denominator was under-counted the
+    day it was written), and 30,285 bytes — under the WITNESS_MAX_BYTES = 1_048_576
+    ceiling a demanded extract must sit against, which is the whole reason a slice exists
+    for a 28,487,117-byte store.
+
+    Each row carries `event`, `umbrella`, `cluster_id`, `created_at` and a `lens` map of
+    the capped fields' LENGTHS, and no prose: one umbrella row's `check` quotes the
+    markdown review log #718 retired, and
+    `test_no_surface_names_a_markdown_review_log_as_reading_material` refuses any tracked
+    file that names it — a phantom path quoted even to be denied is one a later
+    grep-and-follow run walks. Lengths measure every figure the blocks publish, so the
+    guard costs nothing.
+    """
+    rows, group, umbrella, arch = _cap_ledger_rows()
+    assert len(rows) == 272, len(rows)
+    assert len(group) == 126, len(group)
+    assert len(umbrella) == 75, len(umbrella)
+    assert len(arch) == 71, len(arch)
+    assert all(isinstance(r.get("lens"), dict) for r in rows), (
+        "a row carries no `lens` map, so the witness has stopped measuring the fields")
+    assert sum(1 for r in arch if str(r["created_at"]) < "2026-10-10") == 47
+    assert CAP_LEDGER_WITNESS.stat().st_size == 30_285, (
+        f"the witness is {CAP_LEDGER_WITNESS.stat().st_size} bytes, not the 30,285 its "
+        "own block publishes")
+    assert CAP_LEDGER_WITNESS.stat().st_size < 1_048_576, (
+        "the witness passed WITNESS_MAX_BYTES: a slice that outgrows the ceiling is the "
+        "round ordering the store whole under another name")
+    # The store it stands in for stays shut — a node reading it live could be counting
+    # rows the slice does not hold. The store is NAMED in prose by both cap comments, so
+    # what is refused is a call site, not the words.
+    store_words = ("lloyd-automod", "workers.db")
+    openers = ("open(", "read_text", "read_bytes", "connect(", "Path(", "glob(")
+    calls = [line.strip()[:110] for line in Path(__file__).read_text().splitlines()
+             if " in line" not in line
+             and any(w in line for w in store_words)
+             and any(o in line for o in openers)]
+    assert not calls, (
+        "this file opens the live ledger or the live workers.db, so the published figures "
+        "may have come from there and not the committed witness:\n  "
+        + "\n  ".join(calls))
+
+
+def test_the_ledger_cap_comments_publish_only_numbers_the_witness_bytes_hold():
+    """The tie clause 5 asks for: every figure the two ledger-side blocks publish is
+    checked against the committed rows, so neither block can keep a number the bytes do
+    not hold. Both blocks are read through `_norm`, which drops the `#` gutters and
+    collapses the wrapping, because a figure that straddles a line break is still
+    published — a raw `in comment` over the comment's own newlines would refuse numbers
+    for reasons of typography. What is deliberately NOT asserted here is that the retired
+    sentences are gone by string: both blocks quote the sentence they replaced (that is
+    how a reader learns which number was wrong), and the retired 21 and 2 cannot come
+    back as the live figures because 71 and 126 are pinned above them.
+    """
+    rows, group, umbrella, arch = _cap_ledger_rows()
+    derived = {
+        "rows in the slice": len(rows),
+        "group rows": len(group),
+        "umbrella rows": len(umbrella),
+        "arch rows": len(arch),
+        "max check": max(r["lens"]["check"] for r in umbrella),
+        "max acceptance": max(r["lens"]["acceptance"] for r in umbrella),
+        "max evidence (the [:1000] slice)": max(r["lens"]["evidence"] for r in umbrella),
+    }
+    published = {
+        "GROUP_TRIAGE": {"rows in the slice": 272, "group rows": 126,
+                         "umbrella rows": 75, "max check": 428,
+                         "max acceptance": 628,
+                         "max evidence (the [:1000] slice)": 1000},
+        "ARCH_REVIEW": {"arch rows": 71},
+    }
+    markers = {"GROUP_TRIAGE": ("GROUP_TRIAGE_SCHEMA: dict", "scripts.automod.backlog"),
+               "ARCH_REVIEW": ("ARCH_REVIEW_SCHEMA: dict",
+                               "workers.sources.arch_review")}
+    for key, wanted in published.items():
+        marker, module_qual = markers[key]
+        comment = _comment_above_in(module_qual, marker)
+        assert comment, f"no comment above {marker} to grade"
+        norm = _norm(comment)
+        for name, value in wanted.items():
+            assert derived[name] == value, (
+                f"{name} re-derives as {derived[name]} from the committed rows, but "
+                f"{key}'s block publishes {value}")
+            assert str(value) in norm, (
+                f"{key}'s block no longer publishes {name} = {value}")
+        assert "2026-10-22" in norm, (
+            f"{key}'s block publishes figures with no measurement date, so the next pass "
+            f"cannot tell a figure that moved from a figure that was wrong")
+        assert CAP_LEDGER_WITNESS.name in norm, (
+            f"{key}'s block does not name the committed bytes its figures come from")
+
+
+# ── the digest block's figures come off committed rows too (#3147 clauses 1-2) ──
+
+def _digest_note_field(line: str) -> str:
+    """What `_shape`'s `one("NOTE")` keeps of a `NOTE:` line, step for step: the text
+    after the label, whitespace-collapsed, then `.strip("`'\"")`, then `.strip("() ")`.
+    """
+    text = " ".join(str(line[len("NOTE:"):]).split()).strip().strip("`'\"")
+    return text.strip("() ")
+
+
+def test_the_digest_cap_block_publishes_only_numbers_the_committed_rows_hold():
+    """Clauses 1 and 2, measured off `DIGEST_FIELD_WITNESS` — 372 rows, one per
+    `youtube-digest` run on 2026-10-22: `meta_json.eval.idea` is non-null on 236 of them
+    and maxes at 314 against DIGEST_IDEA_MAX (400) with 0 at or over; 318 runs carry a
+    `NOTE:` line whose content after the label maxes at 152 and whose stored form maxes at
+    151, both against DIGEST_NOTE_MAX (400) with 0 at or over; 221 runs report
+    `verdict_source='structured'` with an empty `structured_error`, so the schema path is
+    the live path; 0 runs have a non-null `$.eval.verdict_source`, the path that reads as
+    "still nothing"; and `duplicate_of`/`filed` are int or None on every run, never a
+    string, which is what makes DIGEST_ID_MAX unable to bind. The block's retired opening
+    is refused by name, and `Nothing sizes them` must not return.
+    """
+    rows = _witness_rows(DIGEST_FIELD_WITNESS)
+    assert len(rows) == 372, len(rows)
+    ideas = [r["idea"] for r in rows if isinstance(r["idea"], str)]
+    assert (len(ideas), max(map(len, ideas))) == (236, 314), (
+        len(ideas), max(map(len, ideas)))
+    assert sum(1 for s in ideas if len(s) >= 400) == 0
+    notes = [r["note_line"] for r in rows if isinstance(r["note_line"], str)]
+    assert (len(notes), max(len(l) - len("NOTE:") for l in notes)) == (318, 152), (
+        len(notes), max(len(l) - len("NOTE:") for l in notes))
+    stored = [_digest_note_field(l) for l in notes]
+    assert (max(map(len, stored)), sum(1 for s in stored if len(s) >= 400)) == (151, 0), (
+        max(map(len, stored)), sum(1 for s in stored if len(s) >= 400))
+    live = sum(1 for r in rows if r["verdict_source"] == "structured"
+               and not (r["structured_error"] or ""))
+    assert live == 221, live
+    assert sum(1 for r in rows if r["verdict_source"] == "structured") == 221, (
+        "a structured run carries a structured_error, so 221 is not the schema-path count")
+    assert sum(1 for r in rows if r["verdict_source"] is not None) == 221, (
+        "verdict_source takes a value other than structured/None")
+    assert sum(1 for r in rows if r["eval_verdict_source"] is not None) == 0, (
+        "$.eval.verdict_source is no longer always NULL, so the block's explanation of "
+        "how the retired sentence survived needs re-reading")
+    ids = [(r["duplicate_of"], r["filed"]) for r in rows]
+    assert all(v is None or isinstance(v, int) for pair in ids for v in pair), (
+        "an id field came back as a string, so DIGEST_ID_MAX is bindable and the block's "
+        "'cannot bind' sentence is now false")
+    assert sum(1 for a, b in ids if isinstance(a, int) and isinstance(b, int)) == 1
+    assert sum(1 for a, b in ids if isinstance(a, int) and b is None) == 80
+    assert sum(1 for a, b in ids if a is None and isinstance(b, int)) == 47
+    assert sum(1 for a, b in ids if a is None and b is None) == 244
+
+    comment = _comment_above_in("workers.sources.youtube_digest", "RESULT_SCHEMA: dict")
+    assert comment, "no comment above RESULT_SCHEMA to grade"
+    assert "Nothing sizes them" not in comment, (
+        "the unattributed unmeasurability claim is back")
+    for figure, name in ((236, "idea denominator"), (314, "idea maximum"),
+                         (400, "DIGEST_IDEA_MAX"), (318, "note denominator"),
+                         (152, "note maximum"), (151, "stored note maximum"),
+                         (221, "schema-path runs"), (372, "run count"),
+                         ("2026-10-22", "measurement date"),
+                         (DIGEST_FIELD_WITNESS.name, "the committed rows")):
+        assert str(figure) in comment, f"the block no longer publishes {name} = {figure}"
+    assert "$.verdict_source" in comment and "$.eval.verdict_source" in comment, (
+        "the block no longer names both JSON paths, which is the distinction that made "
+        "the retired sentence wrong")

@@ -1,0 +1,272 @@
+{"created_at": "2026-10-11T19:59:03Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-12T03:12:35Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-12T04:37:21Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-12T05:28:37Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-12T21:35:13Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-13T03:42:55Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-13T07:07:47Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-13T12:40:02Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-13T22:09:50Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-14T04:20:33Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-14T09:06:16Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-14T14:55:50Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-16T10:19:24Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-18T10:48:07Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-18T11:56:46Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-19T05:29:36Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-19T22:55:56Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-20T00:34:04Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-20T13:23:40Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-20T16:12:29Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-21T08:33:57Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-21T19:01:39Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-21T19:34:20Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-21T20:27:54Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-11T16:15:08Z", "event": "backlog_triage", "lens": {"acceptance": 377, "check": 199, "evidence": 838}, "umbrella": true}
+{"cluster_id": "c-6047a94c", "created_at": "2026-09-11T16:15:08Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T16:44:06Z", "event": "backlog_triage", "lens": {"acceptance": 178, "check": 218, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-235c2d68", "created_at": "2026-09-11T16:44:06Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T16:58:51Z", "event": "backlog_triage", "lens": {"acceptance": 215, "check": 194, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-53524c49", "created_at": "2026-09-11T16:58:51Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T17:34:01Z", "event": "backlog_triage", "lens": {"acceptance": 257, "check": 128, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-62c96388", "created_at": "2026-09-11T17:34:01Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T17:56:41Z", "event": "backlog_triage", "lens": {"acceptance": 424, "check": 278, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-e5f29bac", "created_at": "2026-09-11T17:56:41Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T18:02:43Z", "event": "backlog_triage", "lens": {"acceptance": 226, "check": 245, "evidence": 703}, "umbrella": true}
+{"cluster_id": "c-0cd7a98d", "created_at": "2026-09-11T18:02:43Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T18:15:59Z", "event": "backlog_triage", "lens": {"acceptance": 404, "check": 294, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-3cd52c73", "created_at": "2026-09-11T18:15:59Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T18:32:10Z", "event": "backlog_triage", "lens": {"acceptance": 360, "check": 202, "evidence": 805}, "umbrella": true}
+{"cluster_id": "c-58a74054", "created_at": "2026-09-11T18:32:10Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T18:46:51Z", "event": "backlog_triage", "lens": {"acceptance": 272, "check": 217, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-b107e8a3", "created_at": "2026-09-11T18:46:51Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T19:02:48Z", "event": "backlog_triage", "lens": {"acceptance": 399, "check": 237, "evidence": 996}, "umbrella": true}
+{"cluster_id": "c-202d6fbb", "created_at": "2026-09-11T19:02:48Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T19:24:50Z", "event": "backlog_triage", "lens": {"acceptance": 229, "check": 234, "evidence": 718}, "umbrella": true}
+{"cluster_id": "c-6dd48fea", "created_at": "2026-09-11T19:24:50Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T19:38:04Z", "event": "backlog_triage", "lens": {"acceptance": 237, "check": 216, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-7f241877", "created_at": "2026-09-11T19:38:04Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T19:48:41Z", "event": "backlog_triage", "lens": {"acceptance": 346, "check": 255, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-0393ebbf", "created_at": "2026-09-11T19:48:41Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T20:06:11Z", "event": "backlog_triage", "lens": {"acceptance": 387, "check": 219, "evidence": 678}, "umbrella": true}
+{"cluster_id": "c-34c466c6", "created_at": "2026-09-11T20:06:11Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T20:21:56Z", "event": "backlog_triage", "lens": {"acceptance": 628, "check": 269, "evidence": 918}, "umbrella": true}
+{"cluster_id": "c-9cd0a85e", "created_at": "2026-09-11T20:21:56Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T20:36:23Z", "event": "backlog_triage", "lens": {"acceptance": 319, "check": 211, "evidence": 646}, "umbrella": true}
+{"cluster_id": "c-de7696fa", "created_at": "2026-09-11T20:36:23Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T20:51:29Z", "event": "backlog_triage", "lens": {"acceptance": 336, "check": 124, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-c3dbcdbc", "created_at": "2026-09-11T20:51:29Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T21:06:14Z", "event": "backlog_triage", "lens": {"acceptance": 445, "check": 137, "evidence": 749}, "umbrella": true}
+{"cluster_id": "c-ab199d6b", "created_at": "2026-09-11T21:06:14Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T21:20:06Z", "event": "backlog_triage", "lens": {"acceptance": 378, "check": 206, "evidence": 936}, "umbrella": true}
+{"cluster_id": "c-956f318e", "created_at": "2026-09-11T21:20:06Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T21:36:12Z", "event": "backlog_triage", "lens": {"acceptance": 242, "check": 252, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-983e929d", "created_at": "2026-09-11T21:36:12Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T22:52:41Z", "event": "backlog_triage", "lens": {"acceptance": 116, "check": 240, "evidence": 689}, "umbrella": true}
+{"cluster_id": "c-e20d58ec", "created_at": "2026-09-11T22:52:41Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T23:13:08Z", "event": "backlog_triage", "lens": {"acceptance": 394, "check": 278, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-6b1142a9", "created_at": "2026-09-11T23:13:08Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T23:25:22Z", "event": "backlog_triage", "lens": {"acceptance": 357, "check": 280, "evidence": 878}, "umbrella": true}
+{"cluster_id": "c-7eab7dfa", "created_at": "2026-09-11T23:25:22Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T23:40:19Z", "event": "backlog_triage", "lens": {"acceptance": 233, "check": 272, "evidence": 719}, "umbrella": true}
+{"cluster_id": "c-5a1c06f2", "created_at": "2026-09-11T23:40:19Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-11T23:56:18Z", "event": "backlog_triage", "lens": {"acceptance": 278, "check": 323, "evidence": 655}, "umbrella": true}
+{"cluster_id": "c-a5ea1971", "created_at": "2026-09-11T23:56:18Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-1cd3f3b3", "created_at": "2026-09-12T00:11:42Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T00:27:00Z", "event": "backlog_triage", "lens": {"acceptance": 300, "check": 183, "evidence": 737}, "umbrella": true}
+{"cluster_id": "c-aa63afce", "created_at": "2026-09-12T00:27:00Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T00:52:47Z", "event": "backlog_triage", "lens": {"acceptance": 230, "check": 279, "evidence": 883}, "umbrella": true}
+{"cluster_id": "c-6b3e0b7a", "created_at": "2026-09-12T00:52:47Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T00:54:33Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-12T01:01:30Z", "event": "arch_review", "lens": {}}
+{"cluster_id": "c-6dca0a8f", "created_at": "2026-09-12T01:01:59Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-7d494a5a", "created_at": "2026-09-12T01:13:34Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T01:37:40Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-12T01:40:47Z", "event": "backlog_triage", "lens": {"acceptance": 400, "check": 310, "evidence": 889}, "umbrella": true}
+{"cluster_id": "c-2af70a82", "created_at": "2026-09-12T01:40:47Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T01:45:10Z", "event": "backlog_triage", "lens": {"acceptance": 351, "check": 208, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-b9622fe2", "created_at": "2026-09-12T01:45:10Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T01:50:58Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-12T02:00:00Z", "event": "backlog_triage", "lens": {"acceptance": 426, "check": 335, "evidence": 839}, "umbrella": true}
+{"cluster_id": "c-a5919d90", "created_at": "2026-09-12T02:00:00Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-8f332da3", "created_at": "2026-09-12T02:16:37Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-46613142", "created_at": "2026-09-12T02:32:08Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-93987f7f", "created_at": "2026-09-12T02:47:07Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T03:11:38Z", "event": "backlog_triage", "lens": {"acceptance": 287, "check": 399, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-c64f85d3", "created_at": "2026-09-12T03:11:38Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-309c77fd", "created_at": "2026-09-12T03:22:26Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-5a07b90a", "created_at": "2026-09-12T03:35:16Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T03:53:25Z", "event": "backlog_triage", "lens": {"acceptance": 403, "check": 202, "evidence": 902}, "umbrella": true}
+{"cluster_id": "c-1157f7f8", "created_at": "2026-09-12T03:53:25Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-f0131ae7", "created_at": "2026-09-12T04:26:53Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-0f7a617e", "created_at": "2026-09-12T04:35:46Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-779987be", "created_at": "2026-09-12T04:50:21Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-660efcf0", "created_at": "2026-09-12T05:07:53Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-fac39844", "created_at": "2026-09-12T05:20:54Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-5688fbb1", "created_at": "2026-09-12T05:39:13Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-08e650bc", "created_at": "2026-09-12T05:53:27Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T06:08:35Z", "event": "backlog_triage", "lens": {"acceptance": 304, "check": 254, "evidence": 977}, "umbrella": true}
+{"cluster_id": "c-e1cc37b0", "created_at": "2026-09-12T06:08:35Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T06:25:08Z", "event": "backlog_triage", "lens": {"acceptance": 390, "check": 268, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-152f4f0d", "created_at": "2026-09-12T06:25:08Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T13:25:24Z", "event": "backlog_triage", "lens": {"acceptance": 245, "check": 175, "evidence": 771}, "umbrella": true}
+{"cluster_id": "c-0cb70837", "created_at": "2026-09-12T13:25:24Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T13:39:49Z", "event": "backlog_triage", "lens": {"acceptance": 148, "check": 393, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-eddaf64c", "created_at": "2026-09-12T13:39:49Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T13:55:56Z", "event": "backlog_triage", "lens": {"acceptance": 274, "check": 376, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-7a9f4633", "created_at": "2026-09-12T13:55:56Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T14:11:45Z", "event": "backlog_triage", "lens": {"acceptance": 489, "check": 428, "evidence": 736}, "umbrella": true}
+{"cluster_id": "c-1a3d0bb9", "created_at": "2026-09-12T14:11:45Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T14:26:35Z", "event": "backlog_triage", "lens": {"acceptance": 198, "check": 236, "evidence": 938}, "umbrella": true}
+{"cluster_id": "c-5efb6642", "created_at": "2026-09-12T14:26:35Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T14:42:32Z", "event": "backlog_triage", "lens": {"acceptance": 318, "check": 257, "evidence": 869}, "umbrella": true}
+{"cluster_id": "c-5168c192", "created_at": "2026-09-12T14:42:32Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T14:58:32Z", "event": "backlog_triage", "lens": {"acceptance": 335, "check": 218, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-2b731175", "created_at": "2026-09-12T14:58:32Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T15:14:46Z", "event": "backlog_triage", "lens": {"acceptance": 387, "check": 239, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-eea63c40", "created_at": "2026-09-12T15:14:46Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T15:28:58Z", "event": "backlog_triage", "lens": {"acceptance": 387, "check": 347, "evidence": 947}, "umbrella": true}
+{"cluster_id": "c-7e87a786", "created_at": "2026-09-12T15:28:58Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T15:44:19Z", "event": "backlog_triage", "lens": {"acceptance": 555, "check": 275, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-8e6f874b", "created_at": "2026-09-12T15:44:19Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T16:00:29Z", "event": "backlog_triage", "lens": {"acceptance": 418, "check": 273, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-97f55f13", "created_at": "2026-09-12T16:00:29Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-c5958336", "created_at": "2026-09-12T16:26:05Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-d3e6980a", "created_at": "2026-09-12T16:30:44Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T16:47:32Z", "event": "backlog_triage", "lens": {"acceptance": 277, "check": 168, "evidence": 728}, "umbrella": true}
+{"cluster_id": "c-7b7817b2", "created_at": "2026-09-12T16:47:32Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T17:02:43Z", "event": "backlog_triage", "lens": {"acceptance": 231, "check": 271, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-dc704f40", "created_at": "2026-09-12T17:02:43Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T17:19:00Z", "event": "backlog_triage", "lens": {"acceptance": 320, "check": 219, "evidence": 840}, "umbrella": true}
+{"cluster_id": "c-1e1cca58", "created_at": "2026-09-12T17:19:00Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T17:33:26Z", "event": "backlog_triage", "lens": {"acceptance": 170, "check": 206, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-73dfd12f", "created_at": "2026-09-12T17:33:26Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-ca0e8b3b", "created_at": "2026-09-12T17:47:24Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T18:05:37Z", "event": "backlog_triage", "lens": {"acceptance": 285, "check": 331, "evidence": 766}, "umbrella": true}
+{"cluster_id": "c-63eaeae9", "created_at": "2026-09-12T18:05:37Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-6f4a006a", "created_at": "2026-09-12T18:19:49Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-eadbe3b7", "created_at": "2026-09-12T18:49:30Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-a177c558", "created_at": "2026-09-12T19:04:43Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-4108b537", "created_at": "2026-09-12T19:20:40Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T19:36:11Z", "event": "backlog_triage", "lens": {"acceptance": 255, "check": 254, "evidence": 884}, "umbrella": true}
+{"cluster_id": "c-9af4e84a", "created_at": "2026-09-12T19:36:11Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T19:52:28Z", "event": "backlog_triage", "lens": {"acceptance": 345, "check": 201, "evidence": 793}, "umbrella": true}
+{"cluster_id": "c-4424d5db", "created_at": "2026-09-12T19:52:28Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-f5e29ede", "created_at": "2026-09-12T20:07:38Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T20:23:19Z", "event": "backlog_triage", "lens": {"acceptance": 168, "check": 185, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-6b01e6c4", "created_at": "2026-09-12T20:23:19Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-12T20:48:47Z", "event": "backlog_triage", "lens": {"acceptance": 343, "check": 421, "evidence": 953}, "umbrella": true}
+{"cluster_id": "c-de299f0b", "created_at": "2026-09-12T20:48:47Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T02:07:05Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-13T02:21:07Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-13T02:33:44Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-13T02:56:39Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-13T09:52:26Z", "event": "backlog_triage", "lens": {"acceptance": 0, "check": 267, "evidence": 809}, "umbrella": true}
+{"cluster_id": "c-0279c3a4", "created_at": "2026-09-13T09:52:26Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T10:10:07Z", "event": "backlog_triage", "lens": {"acceptance": 345, "check": 347, "evidence": 923}, "umbrella": true}
+{"cluster_id": "c-d9fed08a", "created_at": "2026-09-13T10:10:07Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T10:26:32Z", "event": "backlog_triage", "lens": {"acceptance": 282, "check": 235, "evidence": 701}, "umbrella": true}
+{"cluster_id": "c-6b73a0eb", "created_at": "2026-09-13T10:26:32Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T10:42:24Z", "event": "backlog_triage", "lens": {"acceptance": 538, "check": 397, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-5af147c6", "created_at": "2026-09-13T10:42:24Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-73efb549", "created_at": "2026-09-13T10:53:25Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-fc25033a", "created_at": "2026-09-13T11:10:21Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T11:23:29Z", "event": "backlog_triage", "lens": {"acceptance": 242, "check": 232, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-33f04163", "created_at": "2026-09-13T11:23:29Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-189b55bd", "created_at": "2026-09-13T11:40:34Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T11:55:51Z", "event": "backlog_triage", "lens": {"acceptance": 292, "check": 308, "evidence": 949}, "umbrella": true}
+{"cluster_id": "c-fc3aabb0", "created_at": "2026-09-13T11:55:51Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-b58d6549", "created_at": "2026-09-13T12:08:56Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-13T12:25:35Z", "event": "backlog_triage", "lens": {"acceptance": 245, "check": 263, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-0757e0f1", "created_at": "2026-09-13T12:25:35Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-84146357", "created_at": "2026-09-13T12:42:08Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-4c289744", "created_at": "2026-09-13T12:55:36Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T02:23:35Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-14T03:34:09Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-14T03:54:50Z", "event": "backlog_triage", "lens": {"acceptance": 178, "check": 181, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-257a8723", "created_at": "2026-09-14T03:54:50Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-a7639fdb", "created_at": "2026-09-14T03:59:30Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T04:11:01Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-14T04:43:20Z", "event": "backlog_triage", "lens": {"acceptance": 409, "check": 240, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-0b2d6966", "created_at": "2026-09-14T04:43:20Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-3e3feb88", "created_at": "2026-09-14T04:59:13Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-1d2d0a9f", "created_at": "2026-09-14T05:50:09Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T06:02:40Z", "event": "backlog_triage", "lens": {"acceptance": 315, "check": 221, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-5409e465", "created_at": "2026-09-14T06:02:40Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T06:27:15Z", "event": "backlog_triage", "lens": {"acceptance": 219, "check": 216, "evidence": 630}, "umbrella": true}
+{"cluster_id": "c-e74bafe0", "created_at": "2026-09-14T06:27:15Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-223628f4", "created_at": "2026-09-14T06:33:20Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T06:53:32Z", "event": "backlog_triage", "lens": {"acceptance": 239, "check": 210, "evidence": 821}, "umbrella": true}
+{"cluster_id": "c-883cf744", "created_at": "2026-09-14T06:53:32Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-061bb2d9", "created_at": "2026-09-14T07:10:52Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T07:19:12Z", "event": "backlog_triage", "lens": {"acceptance": 486, "check": 255, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-061bb2d9", "created_at": "2026-09-14T07:19:12Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T12:32:41Z", "event": "backlog_triage", "lens": {"acceptance": 256, "check": 373, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-4192981b", "created_at": "2026-09-14T12:32:41Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-a17ceb81", "created_at": "2026-09-14T17:29:21Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-933cb7e5", "created_at": "2026-09-14T21:11:07Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-14T22:11:47Z", "event": "backlog_triage", "lens": {"acceptance": 483, "check": 239, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-ad3a24f6", "created_at": "2026-09-14T22:11:47Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-76b5c98b", "created_at": "2026-09-15T00:23:11Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-ed097866", "created_at": "2026-09-15T08:13:50Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-24df517f", "created_at": "2026-09-15T11:12:06Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-15T16:21:28Z", "event": "backlog_triage", "lens": {"acceptance": 284, "check": 298, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-1e564554", "created_at": "2026-09-15T16:21:28Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-be39283e", "created_at": "2026-09-16T06:29:51Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-c460e157", "created_at": "2026-09-16T06:35:18Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-e86ce5f3", "created_at": "2026-09-16T06:38:08Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-f59f6890", "created_at": "2026-09-16T07:28:21Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-66c40bbe", "created_at": "2026-09-16T08:44:39Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-60a5d39b", "created_at": "2026-09-16T08:50:36Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-6f4c1368", "created_at": "2026-09-16T14:50:02Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-16T17:14:43Z", "event": "backlog_triage", "lens": {"acceptance": 184, "check": 168, "evidence": 416}, "umbrella": true}
+{"cluster_id": "hand-timezone", "created_at": "2026-09-16T17:14:43Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-16T17:14:45Z", "event": "backlog_triage", "lens": {"acceptance": 149, "check": 233, "evidence": 426}, "umbrella": true}
+{"cluster_id": "hand-frontmatter", "created_at": "2026-09-16T17:14:45Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-16T17:14:48Z", "event": "backlog_triage", "lens": {"acceptance": 142, "check": 181, "evidence": 405}, "umbrella": true}
+{"cluster_id": "hand-healthcheck", "created_at": "2026-09-16T17:14:48Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-86946c0f", "created_at": "2026-09-16T17:52:26Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-18T02:56:36Z", "event": "backlog_triage", "lens": {"acceptance": 261, "check": 233, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-2774568f", "created_at": "2026-09-18T02:56:36Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-18T10:23:32Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-18T11:40:59Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-19T04:10:26Z", "event": "arch_review", "lens": {}}
+{"cluster_id": "c-619caeef", "created_at": "2026-09-19T21:36:17Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-19T22:43:21Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-20T00:14:37Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-20T13:07:52Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-20T14:58:02Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-21T07:40:12Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-21T09:24:02Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-21T16:12:43Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-21T16:28:04Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-22T13:06:46Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-22T13:45:44Z", "event": "arch_review", "lens": {}}
+{"cluster_id": "c-3a6a04ad", "created_at": "2026-09-22T15:30:42Z", "event": "backlog_group_triage", "lens": {}}
+{"cluster_id": "c-7bb9e879", "created_at": "2026-09-23T17:17:17Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-23T20:11:11Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-23T20:53:24Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-24T10:51:35Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-24T11:56:38Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-25T01:43:45Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-25T01:58:55Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-25T19:02:58Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-25T19:19:49Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-26T03:01:32Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-26T03:10:53Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-26T19:32:29Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-26T21:55:27Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-27T03:32:45Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-27T03:42:06Z", "event": "arch_review", "lens": {}}
+{"cluster_id": "c-77e3ca87", "created_at": "2026-09-27T05:05:40Z", "event": "backlog_group_triage", "lens": {}}
+{"created_at": "2026-09-27T21:45:58Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-27T22:57:58Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-28T04:09:50Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-28T04:24:55Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-28T22:42:39Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-29T00:22:51Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-29T04:28:07Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-09-29T05:12:13Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-01T07:14:10Z", "event": "arch_review", "lens": {}}
+{"created_at": "2026-10-07T15:45:54Z", "event": "backlog_triage", "lens": {"acceptance": 283, "check": 414, "evidence": 1000}, "umbrella": true}
+{"cluster_id": "c-0f0390f1", "created_at": "2026-10-07T15:45:54Z", "event": "backlog_group_triage", "lens": {}}

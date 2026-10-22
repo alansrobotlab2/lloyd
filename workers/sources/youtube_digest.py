@@ -176,10 +176,49 @@ _MIN_PAPER_NOTE_BYTES = 2500
 # `harness.finalizer.max_tokens` (8192), which moves a degenerate draw onto the bounded
 # branch — "generation diverged at N tokens … not a budget" (`DIVERGENCE_MARKER`) plus
 # its one re-draw — instead of the unbounded branch's advice to raise that knob
-# (#1706). Nothing sizes them: no `youtube-digest` run in `workers.db` stores a
-# structured verdict (measured over all 136 rows on 2026-10-09 — `response_json` holds
-# the text block and `meta_json` the parsed fields, never a finalizer object) and the
-# ledger has no digest event kind; owed-check #2444/2 rules on that.
+# (#1706). What sizes them is `workers.db`, and the JSON path is what the sentence this
+# replaces got wrong: a run's structured-ness is `meta_json`'s TOP-level
+# `verdict_source`, not a stored finalizer object, so
+# `select count(*) from runs where source='youtube-digest'
+#    and json_extract(meta_json,'$.verdict_source')='structured'
+#    and (json_extract(meta_json,'$.structured_error') is null
+#         or json_extract(meta_json,'$.structured_error')='')` → 221 of 372 runs,
+# measured 2026-10-22. The schema path is therefore the live path, and
+# `select max(length(json_extract(meta_json,'$.eval.idea'))), count(*) from runs
+#    where source='youtube-digest' and json_extract(meta_json,'$.eval.idea') is not null`
+# → 314 over 236 runs against DIGEST_IDEA_MAX (400), 0 of the 236 at or over it. The
+# other half is not in `meta_json` at all — `$.eval` has no `note` key — so `note` is
+# sized off the `NOTE:` line of `runs.response_json`, counted by
+# `select count(*) from runs where source='youtube-digest' and response_json like
+#    '%NOTE:%'`
+# → 318 of the 372 runs (317 earlier the same day, which is the denominator #3147 was
+# filed with; the pattern is `%NOTE:%` and not `NOTE:%` because the label is not at the
+# start of that column, and the prefix form returns 0). SQL slices no lines, so the
+# maxima come off the `note_line` field of the committed projection named below: the
+# line's content after its label reaches 152 characters and the value `_shape`'s
+# `one("NOTE")` keeps (that content, whitespace-collapsed and stripped of `()`) reaches
+# 151, both
+# against DIGEST_NOTE_MAX (400) with 0 at or over; the raw line including the label is
+# two characters longer, 157, which is why #2444 and #3147 quote different numbers for
+# one corpus. `$.eval.verdict_source`, the path that would have been guessed here,
+# is NULL on all 372 — which is how "no `youtube-digest` run stores a structured verdict"
+# stood in this block for a month although it was false the day it was written: 108 of
+# the 142 runs completed by 2026-10-09 already carried `structured`, the first landing
+# 2026-09-24. DIGEST_ID_MAX is inert on its own two leaves rather than unmeasured:
+# `$.eval.duplicate_of` and `$.eval.filed` return integers or NULL and never a string (1
+# run both, 80 the first alone, 47 the second alone, 244 neither), so a `maxLength` there
+# is grammar for a value this store never writes. Every figure above is a corpus that
+# grows nightly — the note denominator moved 317 to 318 inside 2026-10-22 itself — so
+# what is pinned is the projection behind them,
+# `tests/fixtures/workers_youtube_digest_capped_fields_2026-10-22-item3147.jsonl`: one row
+# per `youtube-digest` run (372 on 2026-10-22) carrying `verdict_source`,
+# `structured_error`, `idea`, `duplicate_of`, `filed` and that run's `NOTE:` line, from
+# which `tests/test_automod_schema_bounds.py` re-derives each number in this block — the
+# live rows are 1.6 MB of `response_json` and 0.3 MB of `meta_json` and a test may not
+# read the running store. What is still true of the ledger is the narrow claim only: it
+# has no
+# digest event kind, 0 rows named `digest` or `youtube` over it and its two folded
+# archives on 2026-10-22 (#2444/2, #3147).
 RESULT_SCHEMA: dict = {
     "type": "object",
     "title": "youtube_digest_result",

@@ -667,10 +667,23 @@ ARCH_REVIEW_MAX = 900
 # advice to raise that budget (#1706). One clamp, not two: the 800-char ceiling on the
 # raw turn this comment first cited named a constant that exists nowhere in the tree
 # (#2444 review), and nothing else trims the string before the slice.
-# Nothing measures the size either — all 21 `arch_review` rows in
-# ~/.local/state/lloyd-automod/promotions.jsonl carry `detail: null`, so no summary
-# string is on record there and the cap comes from the reader's own number. That
-# non-measurement is what owed-check #2444/2 is asked to rule on.
+# No ledger row sizes the string either, and that is now a scoped count with the query
+# that gets it: 71 `arch_review` rows exist on 2026-10-22 across
+# the `~/.local/state/lloyd-automod` promotions ledger and its two folded archives (24 live,
+# 46 + 1 folded) — `zcat promotions-archive-2026*.jsonl.gz | jq -r
+# 'select(.event=="arch_review") | .event' | wc -l` for the archives and the same `jq`
+# without `zcat` on the live file for the 24, where a bare `grep -c arch_review` reads
+# 100 live and 105 folded because other rows name this source inside their own fields.
+# 0 of the 71 carry a `summary` key and 0 carry a `detail` key — absent, not null — so
+# the ledger records this reader's counts and never its prose, and this cap,
+# ARCH_REVIEW_MAX (900), comes from the reader's own `[:600]` slice. That replaces "all
+# 21 `arch_review` rows … carry `detail: null`", which got the denominator wrong in both
+# directions — 47 rows dated before 2026-10-10 were already on record when #2444 landed,
+# and none of them carried the key either way (#2444/2, #3147). Those 71 rows are
+# committed byte-identical at
+# `tests/fixtures/cap_comment_ledger_rows_2026-10-22-item3147.jsonl`, the witness the
+# `GROUP_TRIAGE_SCHEMA` block of `scripts/automod/backlog.py` names too, and
+# `tests/test_automod_schema_bounds.py` re-derives 71 and 0 from those bytes.
 ARCH_REVIEW_SCHEMA: dict = {
     "type": "object",
     "title": "arch_review_result",

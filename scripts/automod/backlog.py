@@ -599,7 +599,7 @@ CLAUSE_OUTCOMES = ("met", "not_met", "deferred")
 # as decoration).
 #
 # Each figure is a field's longest on-record value, measured 2026-10-08 over the live
-# ledger `~/.local/state/lloyd-automod/promotions.jsonl` (22,493 rows, 31,604,542
+# ledger the `~/.local/state/lloyd-automod` promotions ledger (22,493 rows, 31,604,542
 # bytes) — over the byte ceiling on a rule's witness, so nothing is extracted from it
 # and the maxima are re-derived in place. "hit" is rows at that maximum, the ratio
 # owed-check #2444/1 re-sizes by.
@@ -1108,14 +1108,14 @@ GROUP_VERDICTS = ("fold", "duplicate_of", "keep") + tuple(sorted(RETIRING))
 # of the item, not a conclusion about its premise.
 FOLDED = "folded"
 
-# Bounded grammar (#2444): `items[].evidence` at GROUP_EVIDENCE_MAX (900), the
-# umbrella's `check`/`evidence`/`acceptance` at the same TRIAGE_* ceilings its
-# single-item twin uses, `acceptance_clauses` at CLAUSE_TEXT_MAX (900) — a degenerate
-# cluster pass reports a divergence at a token count instead of advice to raise
-# `harness.finalizer.max_tokens` (8192). The 2 `backlog_group_triage` rows on record
-# store none of these strings, so nothing measures them: the per-item cap mirrors the
-# measured single-item field and the umbrella takes the same ceilings rather than
-# inventing numbers. Owed-check #2444/2 rules on that non-measurement.
+# Bounded grammar (#2444): `items[].evidence` at GROUP_EVIDENCE_MAX (900), the umbrella's `check`/`evidence`/`acceptance` at the same TRIAGE_* ceilings its single-item twin uses, `acceptance_clauses` at CLAUSE_TEXT_MAX (900) — a degenerate cluster pass reports a divergence at a token count instead of advice to raise `harness.finalizer.max_tokens` (8192).
+# What sizes them is the automod promotions ledger, measured 2026-10-22 and committed as a 272-row slice (30,285 bytes against the live store's 28,487,117) at `tests/fixtures/cap_comment_ledger_rows_2026-10-22-item3147.jsonl`:
+# `jq -r 'select(.event=="backlog_triage" and .umbrella) | .lens | .check, .acceptance' <that file>` → 75 `umbrella: true` `backlog_triage` rows, max `check` 428 against TRIAGE_CHECK_MAX (600), max `acceptance` 628 against TRIAGE_ACCEPTANCE_MAX (4500), 0 of the 75 at or over either.
+# `backlog_group_triage` is a live event kind — not the 2 rows this block first cited: the same file gives `jq -r 'select(.event=="backlog_group_triage") | .cluster_id' | wc -l` → 126 of them (0 in the live store that day, the 126 in its folded monthly archives, where a bare `grep -c` over-reads 129 + 1 because the name sits inside other rows' fields too).
+# 0 of those 126 carry a `check`, an `evidence` or an `acceptance` at all, so a group verdict sizes nothing it carries; and that query cannot size TRIAGE_EVIDENCE_MAX either, because the umbrella rows' `evidence` maxes at exactly 1000 — `record_group_verdict`'s `evidence[:1000]` slice, a stored ceiling and not an observed maximum.
+# So the umbrella's `evidence` ceiling and GROUP_EVIDENCE_MAX (900) stay the single-item `evidence` cap, which IS measured (max 1000 over `backlog_triage` rows): inherited, not invented. The slice keeps `event`, `umbrella`, `cluster_id`, `created_at` and a `lens` map of the five capped fields' lengths — lengths and key-presence, never the ledger's prose.
+# That is also why the slice is a slice: the WITNESS_MAX_BYTES ceiling of 1048576 bytes caps what a comment may demand of that store, so no node opens it whole.
+# `tests/test_automod_schema_bounds.py` re-derives 272, 126, 75, 0, 428, 628 and 1000 from the committed bytes alone (#2444/2, #3147).
 GROUP_TRIAGE_SCHEMA: dict = {
     "type": "object",
     "title": "backlog_group_triage_verdict",
