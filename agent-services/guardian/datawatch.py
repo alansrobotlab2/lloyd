@@ -70,6 +70,32 @@ RUNTIME_NAMES = ("sessions", "event_logs", "logs", "autonomy-runs", "_pipeline",
                  "data/tool_overrides.yaml", "voice_profiles", "eval/baselines",
                  "agent-services/logs", "None")
 
+#: How long a top-level folder must have been under watch before losing it is an
+#: event (#3153), and the other half of the pair `RUNTIME_NAMES` is: that list names
+#: the folders age can never excuse, this bounds the folders it can. A folder this
+#: watcher first sighted more recently than this is a folder it watched ARRIVE between
+#: two of its own measurements, and no store this root has ever declared was created
+#: between two ticks — so its disappearance is a job cleaning up, not a wipe, and
+#: `DataWatch._excuse_vanished` says so instead of halting promotions.
+#:
+#: WHY A LIFETIME AND NOT A NAME. The 2026-10-20 trips were a scratch worktree and
+#: #3095 excused that by the `.git` inside it; the same shape without a `.git` (a job
+#: that runs `mkdir ~/lloyd-data/<job>-<id>`, works, and deletes on success) has no
+#: byte that says scratch, and `VaultWatch.tick` measures every tick, so any job that
+#: outlives one gap is in the baseline before it is deleted. Names are free text, which
+#: is why #2160 rules out a pattern; "the watcher saw this folder come into being" is a
+#: reading over the open set instead. See `vaultwatch.Snapshot.first_seen`.
+#:
+#: THE NUMBER IS A PERSON'S, NOT THIS CONSTANT'S. It has to be at least the longest
+#: legitimate scratch job, and only post-landing traffic shows that — it is recorded on
+#: backlog #3153 as an owed ruling. Two things it is NOT free to become: below
+#: `vaultwatch.WINDOW_SECONDS` (900.0), because then the stamp it is compared against
+#: would be capped by the history ring it is read out of, which the horizon node in
+#: `tests/test_guardian_datawatch.py` pins; and above a span in which a real store could
+#: plausibly be created and then vanish unnoticed, which is the reason it is a day and
+#: not a month.
+SCRATCH_HORIZON_SECONDS = 24 * 3600.0
+
 #: Top-level entries a real `~/lloyd` checkout carries that are not runtime
 #: data. `architecture/data-home.md` names the rebuildable-cache half of this
 #: set ("code, build output or a rebuildable cache, not data": `.venvs/`,
@@ -623,7 +649,9 @@ class DataWatch(V.VaultWatch):
 
     def _excuse_vanished(self, name: str, count: int,
                          before: V.Snapshot) -> "str | None":
-        """A top-level folder this root measured as a git checkout is scratch, not store.
+        """A top-level folder this root measured as a git checkout, or watched come
+        into being, is scratch rather than store. Two exemptions, one floor, and the
+        vault has none of them.
 
         WHY IT IS ALLOWED HERE AND NOT FOR THE VAULT. The data root is the one
         watched root a session is TOLD to write into, and since 2026-10-20 it is
@@ -655,14 +683,59 @@ class DataWatch(V.VaultWatch):
         That list NARROWS the exemption, which is the opposite direction of failure
         from the allowlist #2160 forbids: it can only ever make the tripwire
         stricter, and every store on it was named before this rule existed.
+
+        WHY A LIFETIME ALSO EXCUSES (#3153). The checkout flag above is one bit wide:
+        it covers the 2026-10-20 folder because that one held a `.git`, and nothing
+        else. A job that runs `mkdir ~/lloyd-data/<job>-<id>`, writes a few thousand
+        files, and deletes them on success leaves no such entry, so the folder rule
+        still read its clean-up as a wiped store and still halted promotions — measured
+        2026-10-22 by running the real watcher over that exact shape. What distinguishes
+        it is not in the folder's bytes at all, it is in the watcher's own record:
+        `Snapshot.first_seen` says which measurement first saw this name, and a folder
+        the watcher watched come into being between two measurements is not one of the
+        stores this root has always had. So the second exemption reads the age of that
+        sighting against `SCRATCH_HORIZON_SECONDS`, which is why it is behind the
+        checkout branch and not in front of it — where both would excuse a folder, the
+        journal should carry the stronger of the two reasons.
+
+        WHY AN ABSENT STAMP IS NOT A YOUNG FOLDER. `VaultWatch._stamp_births` records a
+        sighting only for a name the previous measurement did not have, and records
+        nothing at all at arming. So a folder that was already here when the guardian
+        started has no entry, the same entry a state file from before this field
+        carries for every folder, and both read as no exemption. The exemption is
+        granted by a measurement this watcher made, and the absence of that measurement
+        is not evidence of anything (#3153, and the same schema-addition rule
+        `checkouts` follows above).
         """
         if name in RUNTIME_NAMES:
             return None
-        if name not in before.checkouts:
+        if name in before.checkouts:
+            return (f"top-level folder {name!r} ({count} files) went missing; not a trip — "
+                    f"the last measurement saw a {V.CHECKOUT_ENTRY} entry inside it, so it "
+                    f"was a git checkout and not one of this root's stores (#3095)")
+        # The non-checkout half of the same shape (#3153), bounded by the lifetime the
+        # watcher measured rather than by anything the folder is called. An absent stamp
+        # is not a young folder: it is a folder this watcher never saw arrive, which
+        # includes every folder on a root whose state predates this field.
+        born = before.first_seen.get(name)
+        if born is None:
             return None
-        return (f"top-level folder {name!r} ({count} files) went missing; not a trip — "
-                f"the last measurement saw a {V.CHECKOUT_ENTRY} entry inside it, so it "
-                f"was a git checkout and not one of this root's stores (#3095)")
+        age = before.ts - born
+        # A negative age is a record that cannot be true — a state file edited by hand,
+        # or the boot clock jump of the shape 2026-10-18 produced — and the reading of an
+        # impossible record is the trip, not a pass.
+        if not 0.0 <= age < SCRATCH_HORIZON_SECONDS:
+            return None
+        # Says nothing about WHICH of the folder rule's two states this is — the hook is
+        # called for a vanished folder and an emptied one alike, and `evaluate`'s own
+        # reason carries that word.
+        return (f"top-level folder {name!r} ({count} files) is no longer counted; "
+                f"not a trip — "
+                f"this watcher first saw the folder {age:.0f}s before that measurement, "
+                f"inside the {SCRATCH_HORIZON_SECONDS / 3600.0:g} h scratch horizon, so "
+                f"it came into being and went away while the watcher was running, and no "
+                f"store of this root's was ever created between two measurements "
+                f"(#3153)")
 
     def judge(self, snap: V.Snapshot | None,
               excused: "list[str] | None" = None) -> str | None:

@@ -327,6 +327,35 @@ def test_the_guardian_acts_on_a_data_wipe_once(guardian):
     assert acted["workers"] == 1
 
 
+def test_the_guardian_neither_halts_nor_pauses_for_a_folder_it_saw_being_born(guardian):
+    """#3153: the excuse has to reach the fleet, not only the watcher.
+
+    `check_data` is where a verdict becomes a paused worker pool and a promotion halt,
+    so a node proving `tick()` answers None is not enough — this drives the real
+    Guardian over the #3153 shape (a non-checkout folder created after the baseline,
+    then deleted) across that boundary. 40 files, not 3,000: under `DROP_MIN`, so the
+    untouched whole-tree rule stays out of the way and the folder rule is what is being
+    judged. The node above is the positive control — a wiped store still pauses and
+    halts in exactly this fixture.
+    """
+    import shutil
+
+    g, root, acted = guardian
+    g.check_data()                                        # arms the watch
+
+    job = root / "triage-job-1234"
+    job.mkdir()
+    for i in range(40):
+        (job / f"f{i}.txt").write_text("", encoding="utf-8")
+    g.check_data()                                        # the birth measurement
+    shutil.rmtree(job)
+    g.check_data()
+
+    assert acted["workers"] == 0 and acted["pause_actors"] == [], acted
+    assert not g.state.is_halted(), "a scratch clean-up halted promotions"
+    assert acted["alerts"] == [], acted["alerts"]
+
+
 def test_the_guardian_names_runtime_data_that_came_back_into_the_tree(guardian):
     g, _, acted = guardian
     g.check_data()  # arms the watch

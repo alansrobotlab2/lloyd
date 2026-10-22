@@ -448,3 +448,211 @@ def test_a_plain_clone_counts_as_a_checkout_too(tmp_path):
     assert snap.checkouts == ("scratch",), (
         "a leftover clone is the same incident with a different verb: 3,200 files in "
         "a watched root, deleted by whoever put them there")
+
+
+# ── #3153: a scratch folder the watcher saw come into being ──────────────────
+#
+# #3095 excuses a folder the last measurement saw a `.git` inside. The rest of the
+# 2026-10-20 shape holds no `.git`: a job runs `mkdir ~/lloyd-data/<job>-<id>`, writes
+# a few thousand files, and deletes them when it succeeds. Nothing about such a
+# folder's bytes says scratch, and `VaultWatch.tick` measures on EVERY tick
+# (`policy.TICK_SECONDS` is 5.0, and `guardian.check_data` ticks it unconditionally),
+# so any job that outlives one gap is in the baseline before it is deleted — the trip
+# is the expected outcome of that shape, not a coincidence. What does say scratch is
+# `Snapshot.first_seen`: this watcher measured the folder ARRIVE between two of its
+# own measurements, and no store this root has ever declared was created between two
+# ticks. That is a reading over the open set, which is why it is admissible where
+# #2160 rules a name list out, and it leaves `RUNTIME_NAMES` as the floor it is today.
+
+#: The name the #3153 triage repro used, kept so the repro and the node below can be
+#: run against the same string.
+JOB = "triage-job-1234"
+
+
+def _job(root: Path, name: str = JOB, files: int = 30) -> Path:
+    """A non-checkout scratch folder: files, and no `.git` anywhere in it."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        (d / f"f{i}.txt").write_text(f"{i}\n", encoding="utf-8")
+    return d
+
+
+def _born(root: Path, w: D.DataWatch, **kw) -> str:
+    """Make a scratch folder AFTER the baseline and tick, so the watcher sees it born."""
+    name = _job(root, **kw).name
+    assert w.tick(now=w.history[-1].ts + 30.0)[0] is None
+    assert w.history[-1].first_seen[name] == w.history[-1].ts, (
+        "the reading the excuse depends on: the tick that first saw this folder is "
+        "recorded on the snapshot, not guessed from its mtime")
+    return name
+
+
+def test_a_scratch_folder_born_after_the_baseline_does_not_trip(tmp_path, capsys):
+    """The #3153 acceptance shape: create the folder, work in it, delete it, no `.git`.
+
+    Before this change the verdict is the one the 2026-10-20 critical alert carried,
+    and `guardian.check_data` turns it into `set_halted("data tripwire: …")` plus a
+    paused worker pool. Now it is None, and the skip is journalled — a rule that
+    silently waves through a 3,000-file folder is a rule nobody can audit.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    w = _watch(root, tmp_path)
+
+    _born(root, w)
+    shutil.rmtree(root / JOB)
+    reason, _snap = w.tick(now=w.history[-1].ts + 30.0)
+    assert reason is None, (
+        "`top-level folder 'triage-job-1234' (3000 files) vanished` was a job's own "
+        "working directory being cleaned up, and it halted promotions")
+
+    out = capsys.readouterr().out
+    assert JOB in out, "not tripping is half of it; it still has to be said"
+    rows = (tmp_path / "state" / VW.EXCUSED_LOG).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1, rows
+    row = json.loads(rows[0])
+    assert row["watch"] == "data" and JOB in row["excused"], row
+    for said in ("#3153", "(30 files)", "horizon"):
+        assert said in row["excused"], (said, row["excused"])
+
+
+def test_a_scratch_folder_emptied_is_excused_as_well_as_one_deleted(tmp_path):
+    """The other clean-up verb: `rm` the files and leave the directory standing.
+
+    `evaluate` judges an emptied top-level folder and a vanished one through the same
+    hook, so the excuse has to reach both or it covers half the walk-back and the trip
+    comes back for the other half. Both halves are read here: the rule's own verdict on
+    this pair of measurements is the `emptied` one, and it is the recorded sighting that
+    stops it — which is also why the reason says only "no longer counted" instead of
+    borrowing a word from whichever state it happens to be answering for.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    w = _watch(root, tmp_path)
+    name = _born(root, w, name="job-88")
+
+    for f in sorted((root / name).iterdir()):
+        f.unlink()
+    after = VW.measure(str(root), skip_top=D.CACHE_DIRS)
+    # The same pair of measurements through the same rule with the exemption hook left
+    # out — `evaluate`'s default, which is what the vault runs — so the state being
+    # excused is named rather than assumed.
+    assert VW.evaluate(w.history, after, what="data") == \
+        "top-level folder 'job-88' (30 files) emptied"
+
+    excused: list[str] = []
+    assert w.judge(after, excused) is None
+    assert any(name in e and "#3153" in e for e in excused), excused
+
+
+def test_an_aged_folder_that_vanishes_still_trips_with_the_folder_rule(tmp_path):
+    """Detection is preserved: the same folder, alive past the horizon, is a store.
+
+    Nothing about the folder changed except how long the watcher has been able to see
+    it, and that is the whole of the argument — a folder that has outlasted the
+    horizon outlasts any job, so its loss is the event this tripwire exists to raise.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    w = _watch(root, tmp_path)
+    name = _born(root, w, name="recovered")
+
+    aged = w.history[-1].first_seen[name] + D.SCRATCH_HORIZON_SECONDS
+    assert w.tick(now=aged)[0] is None, "living past the horizon is not itself an event"
+
+    shutil.rmtree(root / name)
+    reason, _snap = w.tick(now=aged + 30.0)
+    assert reason == "top-level folder 'recovered' (30 files) vanished", reason
+    assert not (tmp_path / "state" / VW.EXCUSED_LOG).exists(), (
+        "and nothing was waved through on the way there")
+
+
+def test_the_checkout_exemption_still_wins_whatever_the_folder_s_age(tmp_path):
+    """#3095 is not narrowed here: a checkout is excused by what it CONTAINED, at any age.
+
+    The ordering is the audit trail. A folder that both rules could excuse has to be
+    journalled under the stronger evidence — a `.git` is a fact about the bytes, an age
+    is an inference about the name's history — so the checkout branch answers first and
+    its reason keeps naming `.git` and nothing about being newly seen.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    _worktree(root, "triage-3087/check")
+    w = _watch(root, tmp_path)
+
+    assert w.tick(now=w.history[-1].ts + D.SCRATCH_HORIZON_SECONDS + 3_600.0)[0] is None
+    shutil.rmtree(root / "triage-3087")
+    excused: list[str] = []
+    assert w.judge(VW.measure(str(root), skip_top=D.CACHE_DIRS), excused) is None
+    assert len(excused) == 1 and "#3095" in excused[0], excused
+    assert "#3153" not in excused[0], (
+        "the age branch answered for a folder the checkout rule already covered")
+
+
+def test_a_runtime_name_is_never_excused_by_age_however_young_it_is(tmp_path):
+    """`RUNTIME_NAMES` stays the floor: the list may only ever make this stricter.
+
+    `logs/` created after the baseline is as young as a folder can be and still cannot
+    be waved through. This is the direction of failure #2160 allows — a narrowing
+    reading of an exemption, never a widening one — and the reason the age rule sits
+    BEHIND the floor rather than in front of it.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    w = _watch(root, tmp_path)
+
+    _fill(root / "logs", 30)                                  # a RUNTIME_NAME, born now
+    assert w.tick(now=w.history[-1].ts + 30.0)[0] is None
+    assert w.history[-1].first_seen["logs"] == w.history[-1].ts, (
+        "the reading says young; the floor says store, and the floor wins")
+
+    shutil.rmtree(root / "logs")
+    reason, _snap = w.tick(now=w.history[-1].ts + 30.0)
+    assert reason == "top-level folder 'logs' (30 files) vanished", reason
+    assert not (tmp_path / "state" / VW.EXCUSED_LOG).exists()
+
+
+def test_a_folder_the_watcher_never_saw_being_born_is_not_excused(tmp_path):
+    """No stamp, or an impossible one: the answer is the trip, both times.
+
+    The live `data_watch.json` was written before `first_seen` existed, so "absent" is
+    the state every real root starts in, and a future-dated stamp is a corrupt record
+    or a clock jump. Neither may read as scratch: the exemption is granted by evidence
+    the watcher measured, and the absence of that evidence is not evidence of anything.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", 40_000)                # the drop rule stays out of the way
+    w = _watch(root, tmp_path)
+    gone = {"ts": 2_000.0, "total": 40_031, "inode": 7,
+            "top": {".": 1, "sessions": 40_000, "job-9": 30}}
+    missing = {"ts": 2_030.0, "total": 40_001, "inode": 7,
+               "top": {".": 1, "sessions": 40_000}}
+    verdict = "top-level folder 'job-9' (30 files) vanished"
+
+    assert _snap(gone).first_seen == {}, "a baseline with no births recorded loads as such"
+    w.history = [_snap(gone)]
+    excused: list[str] = []
+    assert w.judge(_snap(missing), excused) == verdict
+    assert excused == []
+
+    w.history = [_snap({**gone, "first_seen": {"job-9": 9_000.0}})]      # born tomorrow
+    assert w.judge(_snap(missing), []) == verdict
+
+
+def test_the_horizon_outlasts_the_history_ring_it_cannot_be_read_from():
+    """Why the stamp is persisted at all, and what is NOT this node's to pin.
+
+    `VaultWatch.tick` trims `history` to `WINDOW_SECONDS` plus one older entry, so a
+    horizon read off the ring could never exceed 900 s — which is the caveat on the
+    item, and why the stamp rides in the persisted baseline instead. The NUMBER,
+    though, belongs to a person: it has to be at least the longest legitimate scratch
+    job, and only post-landing traffic shows that (the owed ruling may raise it, which
+    will need this line changed with it).
+    """
+    assert D.SCRATCH_HORIZON_SECONDS > VW.WINDOW_SECONDS, (
+        "a horizon inside the ring makes the persisted stamp decoration: the excuse "
+        "would be capped at the window it was read from")
+    assert D.SCRATCH_HORIZON_SECONDS >= 24 * 3600.0, (
+        "a job that runs overnight has to be able to clean up after itself without "
+        "halting the fleet")

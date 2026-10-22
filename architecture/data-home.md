@@ -210,13 +210,33 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
   - and, inherited from `vaultwatch.evaluate`, a top-level folder of 20 or more
     files that is simply **gone**.
 
-  One folder is exempt from that last bullet, and the exemption is a property,
-  never a name: a top-level folder the last measurement recorded as holding a
+  Two properties exempt a folder from that last bullet, and neither is a name.
+  The first: a top-level folder the last measurement recorded as holding a
   code checkout — a `.git` file or directory at depth 1 or 2 below the root, the
   shape `git worktree add` leaves — is not data, and deleting it is not data
   loss. `vaultwatch.measure` records the flag on the `Snapshot` because the
   folder is already gone by the time anyone could ask it, and
-  `DataWatch._excuse_vanished` reads that flag. A name cannot be the test
+  `DataWatch._excuse_vanished` reads that flag.
+
+  The second is a lifetime, and it exists because most scratch is not a
+  checkout: `DataWatch` also lets go a top-level folder it **watched come into
+  being**, one this watcher first sighted less than
+  `DataWatch.SCRATCH_HORIZON_SECONDS` (24 h as written) before the measurement
+  that found it gone (#3153). The reading is `Snapshot.first_seen`, stamped per
+  folder by `VaultWatch._stamp_births` and carried in the persisted baseline,
+  because nothing else can answer the question — the folder is deleted by the
+  time anyone asks, `mtime` is rewritten by whoever writes into it, and a
+  folder's birth time is not readable from this interpreter at all. Same
+  argument as the checkout rule, same reason: no store this root has ever
+  declared was created between two of the watcher's own measurements, and the
+  name a job gives its working directory is free text. `RUNTIME_NAMES` is still
+  the floor, so a folder that root knows as a store is never excused for being
+  young; the checkout rule is asked first, so the stronger of two reasons is the
+  one journalled; and a folder the watcher never saw appear — including every
+  folder on a state file written before the field existed — is never excused.
+  `VaultWatch` records the same stamps for the vault and acts on none of them.
+
+  Either way a name cannot be the test
   (#3095, upholding #2160's ruling): the scratch folders are `triage-<id>` and
   `check-<pid>`, an open set, and a hand-maintained allowlist cannot close a
   property over an open set. The depth bound is what keeps the exemption honest —

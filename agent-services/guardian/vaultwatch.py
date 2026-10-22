@@ -143,16 +143,29 @@ class Snapshot:
     #: still load, and a watcher that failed to start over an unknown key would
     #: turn a schema addition into the outage it is watching for.
     checkouts: tuple[str, ...] = ()
+    #: ts at which THIS watcher first sighted each counted top-level folder (#3153),
+    #: keyed by the same names as `top` and absent for a folder that was already there
+    #: when the watcher armed. `checkouts` above records what a folder CONTAINED and for
+    #: the same reason — a folder being judged has already gone — and this is the next
+    #: dimension of it: the only thing that said scratch about a non-checkout folder was
+    #: that it arrived between two of this watcher's own measurements. `mtime` cannot
+    #: stand in, because the job working inside the folder rewrites that, and a deleted
+    #: path has no readable birth time on this filesystem from here. Defaulted for the
+    #: same reason as `checkouts`: the live `data_watch.json` has no such key.
+    first_seen: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"ts": self.ts, "total": self.total, "top": self.top,
-                "inode": self.inode, "checkouts": list(self.checkouts)}
+                "inode": self.inode, "checkouts": list(self.checkouts),
+                "first_seen": dict(self.first_seen)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Snapshot":
         return cls(ts=float(d.get("ts") or 0), total=int(d.get("total") or 0),
                    top=dict(d.get("top") or {}), inode=d.get("inode"),
-                   checkouts=tuple(d.get("checkouts") or ()))
+                   checkouts=tuple(d.get("checkouts") or ()),
+                   first_seen={str(k): float(v)
+                               for k, v in (d.get("first_seen") or {}).items()})
 
 
 def measure(root: str, now: float | None = None, *,
@@ -391,7 +404,39 @@ class VaultWatch:
                         # came from, and losing them here would quietly restore
                         # the false trip for any folder named in `skip_top`'s
                         # shadow. #3095.
-                        checkouts=tuple(c for c in snap.checkouts if c not in dropped))
+                        checkouts=tuple(c for c in snap.checkouts if c not in dropped),
+                        # The same rule for the same kind of fact (#3153): a stamp for
+                        # a folder this measurement no longer counts is a fact about
+                        # nothing, and the stamps of the folders that REMAINED must
+                        # survive or they lose the only record of how long they have
+                        # been watched.
+                        first_seen={n: ts for n, ts in snap.first_seen.items()
+                                    if n not in dropped})
+
+    def _stamp_births(self, snap: Snapshot | None) -> None:
+        """Record, per counted top-level folder, when this watcher first saw it (#3153).
+
+        Carried forward rather than recomputed, and carried on the snapshot rather than
+        derived from `history`: by the tick a folder is judged it is already gone, and
+        the ring `tick` keeps is `WINDOW_SECONDS` plus one entry, so anything read off it
+        is capped at 900 s. A folder is stamped at the measurement that first saw it and
+        never again — an advancing stamp would make every folder young forever — and the
+        arming measurement stamps nothing, because a folder that was already there when
+        the watcher started is not evidence that it came into being. That is the
+        fail-closed half: `DataWatch._excuse_vanished` excuses only a folder this
+        watcher watched appear, and a state file from before this field is read as
+        "nobody saw anything", never as "everything is new". (#2160.)
+
+        Mutated in place, and only while the snapshot is this tick's own: `trip` reads
+        `history` for the marker body before the reason is returned, and a folder that
+        vanished would otherwise be journalled with a stamp nobody can explain.
+        """
+        if snap is None or not self.history:
+            return
+        prev = self.history[-1]
+        seen = dict(prev.first_seen)
+        seen.update({name: snap.ts for name in snap.top if name not in prev.top})
+        snap.first_seen = {name: ts for name, ts in seen.items() if name in snap.top}
 
     def _persist(self, snap: Snapshot) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +498,7 @@ class VaultWatch:
         # ran in another process (#3095).
         self._reload_if_rebaselined()
         snap = measure(self.root, now, skip_top=self.skip_top)
+        self._stamp_births(snap)
         if self.tripped():
             return None, snap
         excused: list[str] = []

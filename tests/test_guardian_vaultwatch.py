@@ -1041,3 +1041,122 @@ def test_a_clear_that_ran_while_the_watcher_was_never_tripped_still_reloads(tmp_
         "judgement can see")
     assert w.history[0].ts == other_ts, (
         "and what it adopted is the operator's measurement, not its own earlier one")
+
+
+# ── #3153: when a top-level folder came into being, as the watcher saw it ──────
+#
+# The 2026-10-20 fleet halts were a scratch `git worktree`, and #3095 excused that
+# one by what the measurement saw inside the folder. A scratch directory that is NOT
+# a checkout has no `.git` — a job runs `mkdir ~/lloyd-data/<job>-<id>`, writes a few
+# thousand files, deletes them on success — so nothing about its bytes says scratch
+# and the folder rule counts the clean-up as a wiped store. What does say scratch is
+# time: `VaultWatch.tick` measures every tick, so a folder the watcher watched ARRIVE
+# between two measurements cannot be one of the stores this root has always had.
+# `Snapshot.first_seen` is that observation. It has to be carried on the snapshot and
+# persisted with the baseline, because on the tick a folder is judged the folder is
+# already gone, and `mtime` is the wrong instrument anyway — the job writing into the
+# folder rewrites it.
+
+def _job_folder(root: Path, name: str = "job-4471", files: int = 30) -> Path:
+    """A top-level folder of files and nothing else: not a checkout, not a store."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        (d / f"f{i}.json").write_text("{}", encoding="utf-8")
+    return d
+
+
+def test_a_snapshot_records_when_the_watcher_first_sighted_a_folder(tmp_path):
+    """The stamp exists, is per folder, never advances, and outlives a restart.
+
+    All four on one node because the excuse that reads it is only un-spoofable if all
+    four hold: a stamp that crept forward with each measurement would make every
+    folder young forever, and one that lived only in memory would let a guardian
+    restart turn a long-lived folder into a scratch one.
+    """
+    v = _vault(tmp_path / "vault", files=400)
+    state = tmp_path / "state"
+    w = VW.VaultWatch(str(v), state)
+    assert w.tick(now=1000.0)[0] is None
+    assert w.history[-1].first_seen == {}, (
+        "the arming measurement records no births, and that is the fail-closed side: "
+        "a folder that was already there is not evidence that it came into being, so a "
+        "watcher that started today cannot call a long-lived store young")
+
+    _job_folder(v)
+    assert w.tick(now=1010.0)[0] is None
+    assert w.history[-1].first_seen == {"job-4471": 1010.0}, (
+        "one stamp per top-level folder, at the tick that first saw it; the four note "
+        "folders were in the arming measurement and stay unstamped, and `.` is root "
+        "files rather than a folder")
+
+    for now in (1020.0, 1030.0):
+        assert w.tick(now=now)[0] is None
+    assert w.history[-1].first_seen["job-4471"] == 1010.0, (
+        "the stamp does not advance while the folder keeps existing")
+
+    assert w.tick(now=1090.0)[0] is None               # past PERSIST_EVERY_SECONDS
+    stored = json.loads((state / VW.STATE_FILE).read_text(encoding="utf-8"))["last_good"]
+    assert stored["first_seen"] == {"job-4471": 1010.0}
+    again = VW.VaultWatch(str(v), state)
+    assert again.history[-1].first_seen == {"job-4471": 1010.0}, (
+        "persisted with the baseline, so a restart cannot make a folder look younger "
+        "than the interval it has actually been watched for")
+
+
+def test_a_baseline_read_without_a_newly_skipped_folder_keeps_the_other_stamps(tmp_path):
+    """`_without_skipped` rewrites a stored baseline, and the stamps ride with it.
+
+    The #2001 node above pins the bucket count and the total across the same rewrite.
+    The stamps are the part that fails quietly: dropping the whole map would leave the
+    folders that REMAINED looking never-born, which is the safe direction, but keeping
+    a stamp for the folder that just left the count is a fact about a folder nothing
+    counts any more. `checkouts` had the same comment for the same reason (#3095).
+    """
+    v = _scratch_vault(tmp_path / "vault")
+    state = tmp_path / "state"
+    state.mkdir()
+    old = VW.measure(str(v), now=1000.0)
+    assert old.top["_pipeline"] == 63
+    (state / VW.STATE_FILE).write_text(json.dumps({
+        "root": str(v),
+        "last_good": {**old.to_dict(),
+                      "first_seen": {"_pipeline": 900.0, "backlog": 1000.0}}}),
+        encoding="utf-8")
+
+    w = VW.VaultWatch(str(v), state)
+    assert "_pipeline" not in w.history[-1].top
+    assert w.history[-1].first_seen == {"backlog": 1000.0}, (
+        "the skipped folder's stamp goes with its bucket, and the stamps of the "
+        "folders still being counted survive the rewrite")
+
+
+def test_the_vault_still_excuses_no_folder_however_young_it_was(tmp_path):
+    """The vault's verdict is byte-identical, including for the shape the data root lets go.
+
+    The mechanism is shared and the judgement is not. `~/obsidian` is the watched root
+    that has actually been deleted twice and pushed to the cloud in the gap, and only a
+    watcher that can PROVE a folder is scratch may say so — which for the vault is
+    nothing, per #3095's ruling, and stays nothing.
+    """
+    v = _vault(tmp_path / "vault", files=400)
+    state = tmp_path / "state"
+    w = VW.VaultWatch(str(v), state)
+    assert w.tick(now=1000.0)[0] is None
+    _job_folder(v)
+    assert w.tick(now=1010.0)[0] is None
+    assert w.history[-1].first_seen["job-4471"] == 1010.0, (
+        "the stamp IS recorded for the vault: it is the reading that is shared")
+    bore = w.history[-1]
+
+    shutil.rmtree(v / "job-4471")
+    why, _snap = w.tick(now=1020.0)
+    assert why == "top-level folder 'job-4471' (30 files) vanished", (
+        "and the vault acts on none of it. The same folder, one tick old, is excused "
+        "at the data root by `DataWatch._excuse_vanished` and trips here")
+    assert not (state / VW.EXCUSED_LOG).exists(), (
+        "and no excused row either: a folder the vault never excuses cannot be "
+        "journalled as one")
+    assert w._excuse_vanished("job-4471", 30, bore) is None, (
+        "the hook itself, asked about the one folder whose birth this watcher "
+        "measured, still answers that nothing is excusable at the vault")
