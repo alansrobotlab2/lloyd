@@ -108,14 +108,28 @@ LLM_TIMEOUT_SECONDS = 90
 # 1. feed source, by the rank table. On that day 20 of 33 graded GitHub items fell
 #    below the floor against 1 of 7 graded videos, so a call spent on a commit was
 #    far likelier to be discarded than one spent on a video.
-# 2. the stage-1 `keyword_score`, hardest match first — the same number that
-#    decided the item was worth asking, so the cap bites the marginal admits. It is
-#    second rather than first because today it carries no ordering information at
-#    the top of the scale: it is `max(topic weight)` and all 42 survivors score
-#    exactly 1.0, which is why ordering by it alone is a measured no-op (it refuses
-#    the same two videos). Weights are Alan's call — ruled 2026-09-27 on #1380 — so
-#    this key reads them rather than inventing replacements, and the day they are
-#    re-scaled the budget follows them without a second change here.
+# 2. the stage-1 `keyword_score` of the STRIPPED copy, hardest match first — the
+#    tuple below ranks keyword_score(f"{item.title} {item.summary}", profile). It is
+#    NOT the number that decided the item was worth asking, and #2314 owed 3 (#3144,
+#    2026-10-22) rules the two stay different rather than reconciling them: eligibility
+#    in `stage2_score` reads keyword_score(gate_match_text(item), profile), the widest
+#    gate copy with its URLs ablated (#2314/#2463). The disagreement runs both ways. A
+#    survivor kept only by its `gate_description` is eligible at 1.0 and scores 0.0 in
+#    this key, so it is asked after every peer the stripped copy does score. The reverse
+#    shape is a row whose only keyword sits inside an address: 0.0 on the gate, 1.0 here
+#    — and stage 1 gates on that same function, so it drops such a row before this
+#    ranking ever runs it, which leaves the row that ranks first one that is never
+#    asked. Neither direction costs a call, because eligibility is what gates the call:
+#    the split costs order, not budget. "The cap bites the marginal admits" therefore
+#    holds only where the two copies agree, which is every GitHub row and every YouTube
+#    row written before #2241; both pairs of numbers are pinned by tests, not by this
+#    paragraph. This component is second rather than first because today it carries no
+#    ordering information at the top of the scale: it is `max(topic
+#    weight)` and all 42 survivors score exactly 1.0, which is why ordering by it alone
+#    is a measured no-op (it refuses the same two videos). Weights are Alan's call —
+#    ruled 2026-09-27 on #1380 — so this key reads them rather than inventing
+#    replacements, and the day they are re-scaled the budget follows them without a
+#    second change here.
 # 3. the caller's position, last, purely to make the order total and stable.
 #
 # What this does NOT do: it never changes what an item past the cap may do. Those
@@ -140,6 +154,23 @@ def stage2_allocation_order(items: List[FeedItem], profile: dict) -> List[int]:
     never candidates for a call wherever they land, and the caller's own order is
     preserved by `stage2_score` on the way out — the allocation decides who is
     asked, never the shape of the day file the writer reads back.
+
+    This ranking reads a different text from the one that decides whether to ask at
+    all, and #2314 owed 3 (#3144, 2026-10-22) rules the split stays rather than
+    reconciling it: eligibility in `stage2_score` reads
+    keyword_score(gate_match_text(item), profile) — the widest gate copy, URLs ablated
+    (#2314/#2463) — while the tuple below ranks the stripped copy,
+    keyword_score(f"{item.title} {item.summary}", profile), the text the keyword fallback
+    scores, the prompt shows and the writer publishes. So a survivor kept only by its
+    `gate_description` is eligible at 1.0 and ranks 0.0 here, behind every peer the
+    stripped copy does score, while a keyword that survives only inside an address scores
+    1.0 here on a row the gate rates 0.0 — and `stage1_filter` gates on that same
+    function, so such a row is dropped before it is ever ranked. Both pairs are pinned as
+    numbers in tests/test_intel_pipeline_scorer.py, not by this paragraph, and neither
+    spends a slot: eligibility is what gates the call, so the split costs order, not
+    budget. Who is ASKED follows the gate; who is ASKED FIRST follows the published copy.
+    The two reads are named by their call sites rather than by line number — the sentence
+    this one replaces cited a line and outlived it.
     """
     def rank(index: int):
         item = items[index]
@@ -593,12 +624,19 @@ def stage2_score(
         # What moves is only WHO IS ASKED. `keyword_score` stays `max(topic weight)`, so a
         # topic weighted at or below the threshold still buys no call whichever copy its
         # keyword sat in — the off switch #2092 documents stays a property of the profile.
-        # What stays on the stripped `summary`: the prompt (`_score_prompt`), the fallback's
-        # own score, project matching, the allocation ranking above, and everything the
-        # writer publishes; the ruling on those three is owed on #2314, not taken here. A
-        # row with no pre-strip copy — every GitHub row, and every YouTube row written before
-        # #2241 — has `stage1_text() == text`, so for those the decision is identical to the
-        # one this line made before the change.
+        # What stays on the stripped `summary`: the prompt (`_score_prompt`), the
+        # fallback's own score and project matching, plus everything the writer publishes;
+        # the ruling on those three is owed on #2314, not taken here. The allocation
+        # ranking above is no longer on that list: #3144 settles #2314 owed 3 by ruling
+        # that the rank keeps reading f"{item.title} {item.summary}" deliberately, so
+        # this line and that key are two different numbers wherever the two copies
+        # differ — 1.0 here and 0.0 there on a gate-only keep, 0.0 here and 1.0 there on
+        # a row whose only keyword is an address, which `stage1_filter` drops for reading
+        # that same ablated text — and tests/test_intel_pipeline_scorer.py pins the
+        # ordering and both pairs of numbers. A row with no pre-strip copy — every GitHub
+        # row, and every YouTube row written before #2241 — has `stage1_text() == text`,
+        # so for those the decision is identical to the one this line made before the
+        # change.
         #
         # Since #2463 the copy it reads is `gate_match_text(item)` — `stage1_text()` with
         # its URL substrings taken out — and it is the SAME function stage 1 gates on, so

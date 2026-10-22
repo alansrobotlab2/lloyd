@@ -3250,6 +3250,196 @@ def test_the_allocation_key_is_not_keyword_score_alone(redirect_paths):
     assert scoring_mod.stage2_score.last_cap_refused == 1
 
 
+# ── #3144 (#2314 owed 3): the allocation rank and the eligibility read are two texts ──
+#
+# The prose above `SOURCE_ALLOCATION_RANK` called the rank component "the same number
+# that decided the item was worth asking". Since #2314 that sentence has been false in
+# both directions — eligibility reads `gate_match_text(item)`, the rank reads
+# `f"{item.title} {item.summary}"` — and #3144 rules the split stays rather than
+# reconciling it. A reader cannot check a comment that merges two reads by reading it:
+# the pair has to be run. So the prose is pinned by its own source text, and each
+# direction of the split is pinned by the two numbers it produces.
+
+SCORING_TEXT = Path(scoring_mod.__file__).read_text()
+
+
+def _eligibility_comment_block() -> str:
+    """The contiguous `#` comment run directly above the eligibility read.
+
+    Located from the read itself rather than by line number, so an edit above it moves
+    the block with it instead of silently returning nothing — the failure the prose
+    being pinned here is an example of.
+    """
+    marker = "kw_score = keyword_score(gate_match_text(item), profile)"
+    lines = SCORING_TEXT.splitlines()
+    at = next((i for i, line in enumerate(lines) if line.strip() == marker), None)
+    assert at is not None, f"scoring.py no longer has the line `{marker}`"
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    block = "\n".join(lines[start:at])
+    assert block, f"`{marker}` has no comment block above it"
+    return block
+
+
+def _allocation_header_item(number: int) -> str:
+    """One numbered component of the `SOURCE_ALLOCATION_RANK` header block."""
+    lines = SCORING_TEXT.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith(f"# {number}. ")), None)
+    assert start is not None, f"header item {number} is not in scoring.py"
+    end = start + 1
+    while end < len(lines) and lines[end].startswith("#") \
+            and not re.match(r"# \d+\. ", lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def test_no_prose_calls_the_allocation_number_the_number_that_decided_eligibility():
+    """Clause 1: the equality claim is gone, and the owed list lost the rank.
+
+    Two halves, both read from `scoring.py`'s own bytes. First, the phrase itself:
+    `grep -n 'same number that' scoring.py` returned exactly one hit (the header item
+    above `SOURCE_ALLOCATION_RANK`), so the whole file must be free of it. Second, the
+    forward pointer above the eligibility read, which used to list "the allocation
+    ranking above" among the readers still owed a ruling on #2314 and to call them "those
+    three" while naming four: it now leaves exactly the prompt, the fallback's own score
+    and project matching owed, and records the rank's ruling with its own item id.
+    """
+    assert "same number" not in SCORING_TEXT, (
+        "a comment in scoring.py again calls one read 'the same number' as the other; "
+        "eligibility and the allocation rank read two different texts")
+
+    block = _eligibility_comment_block()
+    owed, found, ruled = block.partition("the ruling on those three is owed on #2314")
+    assert found, (
+        "the eligibility block no longer says which readers stay owed on #2314, so the "
+        f"list below cannot be checked against it:\n{block}")
+
+    for reader in ("`_score_prompt`", "fallback's own score", "project matching"):
+        assert reader in owed, f"{reader} is no longer named as an owed reader"
+    assert "allocation" not in owed.lower(), (
+        "the allocation ranking is listed among the readers still owed a ruling on "
+        "#2314, which #3144 settled")
+    assert "no longer on that list" in ruled, ruled
+    for marker in ("#3144", "owed 3", "allocation", 'f"{item.title} {item.summary}"'):
+        assert marker in ruled, (
+            f"the eligibility block does not record the rank's ruling ({marker} missing)")
+
+
+def test_both_allocation_prose_sites_name_the_two_texts_and_call_the_split_a_ruling():
+    """Clause 2: header item 2 and the function's own docstring both name both texts.
+
+    `stage2_allocation_order.__doc__` is read rather than the function's source because
+    the rank tuple below the docstring contains the stripped expression itself: grading
+    the function body could not fail without the docstring existing.
+    """
+    header = _allocation_header_item(2)
+    doc = scoring_mod.stage2_allocation_order.__doc__ or ""
+    assert header.strip(), "the header block has no item 2"
+    assert doc.strip(), "stage2_allocation_order has no docstring"
+
+    for name, site in (("SOURCE_ALLOCATION_RANK header item 2", header),
+                       ("stage2_allocation_order's docstring", doc)):
+        assert "gate_match_text(item)" in site, (
+            f"{name} does not name the text eligibility reads")
+        assert 'f"{item.title} {item.summary}"' in site, (
+            f"{name} does not name the text the rank reads")
+        assert "#2314 owed 3" in site, (
+            f"{name} does not record which owed entry rules the split")
+        assert "rule" in site.lower(), (
+            f"{name} does not say the split is a ruling rather than an accident")
+        assert "same number" not in site.lower(), (
+            f"{name} again merges the two reads into one number")
+
+
+def test_a_survivor_kept_only_by_its_gate_description_is_ranked_last_of_its_source(
+        redirect_paths):
+    """Clause 3: the rank's own text is what puts a gate-only keep behind its peer.
+
+    Two YouTube survivors of the one weight-1.0 topic in `TIE_WEIGHT_PROFILE_MD`, so the
+    source component ties at 0 and only the keyword component can order them. Both are
+    eligible at 1.0 — `gate_match_text` carries the keyword for both, which is what
+    #2314 widened it for — but the rank scores `gate_only` at 0.0 because its keyword sat
+    only in `gate_description`, which the strip removed from `summary`. So the ordering
+    spends a 1-call budget on `stripped`, and the cap lands on the item that was just as
+    worth asking: the split is a rule about who is asked first, and this is that rule's
+    consequence across the `stage2_score` loop that consumes the order.
+    """
+    (redirect_paths / "obsidian" / "interests.md").write_text(TIE_WEIGHT_PROFILE_MD)
+    profile = profile_mod.load_profile()
+    assert len(profile["topics"]) == 1, profile["topics"]
+    assert float(profile["topics"][0]["weight"]) == 1.0
+
+    stripped = _item("yt-stripped-match", title="vllm release notes",
+                     summary="A release note for the server.")
+    gate_only = _item("yt-gate-only", title="A paper",
+                      summary="A paper about a serving benchmark.",
+                      gate_description="The paper benchmarks vllm throughput.")
+
+    assert [i.id for i in scoring_mod.stage1_filter([gate_only, stripped], profile)] \
+        == ["yt-gate-only", "yt-stripped-match"], "both rows must reach stage 2"
+    for item in (gate_only, stripped):
+        assert profile_mod.keyword_score(
+            scoring_mod.gate_match_text(item), profile) == 1.0, item.id
+
+    assert profile_mod.keyword_score(
+        f"{gate_only.title} {gate_only.summary}", profile) == 0.0, gate_only.id
+    assert profile_mod.keyword_score(
+        f"{stripped.title} {stripped.summary}", profile) == 1.0, stripped.id
+
+    order = scoring_mod.stage2_allocation_order([gate_only, stripped], profile)
+    assert order == [1, 0], (
+        "the gate-only keep scores 0.0 on the rank and must be allocated AFTER the "
+        "stripped-match survivor, not before it: "
+        f"{[[gate_only, stripped][i].id for i in order]}")
+
+    asked = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score([gate_only, stripped], profile,
+                                      llm_call=asked, max_llm_calls=1)
+    assert [s.grade_source for s in scored] == ["call_cap", "model"], (
+        f"the ordering above decides the 1-call budget: "
+        f"{[(s.id, s.grade_source) for s in scored]}")
+    assert len(asked.asked) == 1 and "Item title: vllm release notes" in asked.asked[0], (
+        f"the stripped-match survivor is the one asked: {asked.asked}")
+    assert scoring_mod.stage2_score.last_cap_refused == 1
+
+
+def test_a_keyword_only_inside_an_address_ranks_on_the_stripped_copy_and_not_on_the_gate(
+        redirect_paths):
+    """Clause 4: the opposite divergence, as two numbers rather than as prose.
+
+    `#2463` ablates URL substrings out of the gate copy and nothing else, so the keyword
+    here is present in exactly one of the two reads: the rank scores it 1.0 and the
+    eligibility read scores it 0.0. The two numbers are the clause; the three assertions
+    after them say what that shape costs, which is nothing at all — stage 1 gates on the
+    same ablated text and drops the row, and handed to `stage2_score` directly it is
+    never a candidate for a call, so it spends no slot and no call even though it ranks
+    first among its source peers.
+    """
+    (redirect_paths / "obsidian" / "interests.md").write_text(TIE_WEIGHT_PROFILE_MD)
+    profile = profile_mod.load_profile()
+    row = _item("kw-in-url", title="Benchmarks",
+                summary="Details at https://vllm.io/run")
+
+    assert profile_mod.keyword_score(
+        scoring_mod.gate_match_text(row), profile) == 0.0, "the gate must not see it"
+    assert profile_mod.keyword_score(
+        f"{row.title} {row.summary}", profile) == 1.0, "the rank must see it"
+
+    assert scoring_mod.stage1_filter([row], profile) == [], (
+        "stage 1 gates on the same ablated text, so this row is never ranked at all")
+
+    asked = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score([row], profile, llm_call=asked, max_llm_calls=1)
+    assert scored[0].grade_source == models_mod.GRADE_KEYWORD, (
+        f"a row scoring 0.0 on the eligibility read is never a candidate for a call: "
+        f"{scored[0].grade_source}")
+    assert asked.asked == [], "an ineligible row must not consume a call"
+    assert scoring_mod.stage2_score.last_cap_refused == 0, (
+        "an ineligible row must not consume a slot either")
+
+
 def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
     """Clause 4, across the process boundary the block is printed in.
 
