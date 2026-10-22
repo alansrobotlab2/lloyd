@@ -120,7 +120,11 @@ def test_the_worker_prompt_is_measurably_smaller(tmp_path, monkeypatch):
 def test_build_system_prompt_accepts_and_uses_platform(monkeypatch):
     seen: list[tuple] = []
 
-    def _fake(overlay=None, *, soul=None, files=("MEMORY.md", "USER.md")):
+    # `**kw` is for #3168: `build_system_prompt` now also passes `epoch=`, the sink
+    # the memory reads stamp their digests into. What this node grades is which
+    # FILES the platform selects — `seen` collects exactly that — so the stub has to
+    # accept the new keyword without recording it.
+    def _fake(overlay=None, *, soul=None, files=("MEMORY.md", "USER.md"), **kw):
         seen.append(files)
         return "MEM"
     monkeypatch.setattr(prompt_builder, "_load_memories", _fake)

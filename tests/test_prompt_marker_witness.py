@@ -124,9 +124,14 @@ def test_presence_is_computed_on_the_string_that_is_returned(turn_vault, caplog,
     captured: dict = {}
     real_note = cm.note_components
 
-    def note(session_id, components):
+    # `**kw` forwards what #3168 added to the real `note_components`: the builder
+    # now also passes `memory_epoch=`, and this stub's whole job is to capture the
+    # COMPONENT dict and hand the rest to the real function untouched. Swallowing
+    # the epoch here instead of forwarding it would make the probe read a build
+    # that recorded nothing.
+    def note(session_id, components, **kw):
         captured.update(components)
-        return real_note(session_id, components)
+        return real_note(session_id, components, **kw)
 
     monkeypatch.setattr(cm, "note_components", note)
     prompt = pb.build_system_prompt(session_id="probe")

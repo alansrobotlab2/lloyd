@@ -45,7 +45,14 @@ def vault(tmp_path, monkeypatch):
     (mem / "MEMORY.md").write_text("fact one\nfact two\n")
     (mem / "USER.md").write_text("Alan likes tests\n")
     monkeypatch.setattr(pb, "_CANON_MEMORIES_DIR", mem)
-    monkeypatch.setattr(pb, "_load_soul", lambda overlay=None: "SOUL")
+    # `**kw` is for #3168: `build_system_prompt` now hands `_load_soul` the memory
+    # epoch sink (`epoch=`) so the SOUL.md read can stamp the bytes it took, and
+    # clause 1 is why the stamp sits in the loader — a member the build read has to
+    # be recorded by the code that read it, not guessed at by a caller. This stub
+    # returns a constant and says nothing about how SOUL.md is loaded, so widening
+    # its signature is all the change costs; the prompt bytes this file compares
+    # byte-for-byte are unaffected by the sink.
+    monkeypatch.setattr(pb, "_load_soul", lambda overlay=None, **kw: "SOUL")
     monkeypatch.delenv("LLOYD_OVERLAY_DIR", raising=False)
     from app import paths
     monkeypatch.setattr(paths, "SESSIONS_DIR", tmp_path / "sessions")

@@ -553,10 +553,21 @@ def test_no_written_line_carries_component_text(tmp_path, monkeypatch):
         "parameters": {"type": "object", "properties": {
             "summary": {"type": "string", "default": user_sent}}}}}]
 
+    mem_sent = "MEMORY-BODY-1cc9"
     cm.note_components("sentinel-test", {
         "SOUL.md": f"# Identity\n{sys_sent}\n",
         "memories": "# MEMORY.md\n\nsecond component body\n",
-    })
+    }, memory_epoch=[
+        # #3168 clause 3: the memory epoch is the field most likely to become a
+        # copy of the thing it describes, because the caller holds the loaded
+        # strings. It carries digests and byte counts and nothing else, so a
+        # sentinel smuggled into an epoch entry has to be absent from the store
+        # exactly as a sentinel in a component is.
+        {"name": "MEMORY.md", "sha256": cm.digest_text(mem_sent),
+         "bytes": len(mem_sent), "mtime_ns": 1, "size": len(mem_sent),
+         "mtime_ns_after": 1, "size_after": len(mem_sent), "torn": False,
+         "text": mem_sent},
+    ])
     cm.record_request(base_url="http://stub:8096", model="m", session_id="sentinel-test",
                       iteration=1, send_site="tests/test_component_manifest.py",
                       payload={"model": "m",
@@ -568,11 +579,25 @@ def test_no_written_line_carries_component_text(tmp_path, monkeypatch):
     written = "\n".join(p.read_text(encoding="utf-8")
                         for p in store.rglob("*") if p.is_file())
     assert written, "the store wrote nothing, so this test would pass vacuously"
-    for sentinel in (sys_sent, user_sent):
+    # `mem_sent` is in this tuple because the epoch entry above is the #3168 half of
+    # the node: a sentinel that is smuggled but never asserted would leave the block
+    # unable to fail, which is a weaker instrument than the one that already covers
+    # the components it sits beside.
+    for sentinel in (sys_sent, user_sent, mem_sent):
         assert sentinel not in written
     assert "EMAIL-BODY" not in written and "SOUL-SENTINEL" not in written
+    assert "MEMORY-BODY" not in written
 
     line = _lines(store)[0]
+    # The other way this block can fail: a filter that "solved" the leak by dropping
+    # the epoch entry would keep the sentinel out of the store and quietly delete the
+    # instrument clause 1 asks for. So the entry must have SURVIVED the retention
+    # filter — identified by the digest of the very text its `text` key leaked.
+    epoch_rows = line["memory_epoch"]
+    assert [row["name"] for row in epoch_rows] == ["MEMORY.md"], epoch_rows
+    assert epoch_rows[0]["sha256"] == cm.digest_text(mem_sent), epoch_rows[0]
+    assert epoch_rows[0]["bytes"] == len(mem_sent)
+    assert "text" not in epoch_rows[0], sorted(epoch_rows[0])
     # The non-content half is kept verbatim, so it has to be *provably* the
     # non-content half: nothing message- or tool-shaped may appear in it.
     assert set(line["params"]) <= {"model", "stream", "stream_options", "temperature",

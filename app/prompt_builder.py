@@ -12,6 +12,7 @@ import datetime
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("lloyd.prompt")
 
@@ -524,6 +525,9 @@ def build_system_prompt(
     `memories_text` — when not None, used verbatim as the memory body instead
     of reading MEMORY.md/USER.md (`""` means no memory block). This is how a
     session's frozen snapshot (`app/memory_snapshot.py`) reaches the prompt.
+    The memory epoch (#3168) then carries `SOUL.md` alone, because this build
+    did not read the other two: an epoch entry records a read, never a claim
+    about a file's present state.
 
     `session_state` — the layout (`SESSION_STATE_LAYOUTS`); None reads
     `harness.prompt_layout.session_state`, whose value in force belongs to
@@ -535,17 +539,26 @@ def build_system_prompt(
     """
     overlay = _resolve_overlay(overlay_dir)
     components: dict[str, str] = {}
+    # #3168: the sink the three memory reads below stamp their epoch into, keyed by
+    # member name and therefore in READ ORDER — SOUL.md first, then the members
+    # `_memory_files_for(platform)` selects. None when there is no session to carry
+    # it to or the manifest store is off, in which case the reads are exactly what
+    # they were before this existed. See `_memory_epoch_sink` for what a tear here
+    # costs, which is the reason the epoch is worth capturing at all.
+    memory_epoch = _memory_epoch_sink(session_id=session_id)
 
     # SOUL.md is the whole identity frame. The anti-compliance rules used to be
     # prepended from a Python constant on top of SOUL.md's own copy, so the same
     # six rules arrived twice per turn in two wordings that had already diverged,
     # and only the vault copy was reachable by the promotion path (#465).
-    soul = _load_soul(overlay)
+    soul = _load_soul(overlay, epoch=memory_epoch)
     if soul:
         components["SOUL.md"] = soul
 
     if memories_text is None:
-        memories = _load_memories(overlay, soul=soul, files=_memory_files_for(platform))
+        memories = _load_memories(overlay, soul=soul,
+                                  files=_memory_files_for(platform),
+                                  epoch=memory_epoch)
     else:
         memories = memories_text or None
     if memories:
@@ -715,7 +728,15 @@ def build_system_prompt(
         # imports `app.sessions_io` inside its body — this module is imported by
         # CLI scripts that never bring up the app package. Never raises.
         from app.component_manifest import note_components
-        note_components(session_id, components)
+        # The epoch rides the same one-way handoff the components do (#3168), and it
+        # crosses as digests and `stat` readings only: `note_components` narrows
+        # every entry through its own allow-list, so no text from the frame that
+        # holds the three loaded strings can reach the store by this route. A None
+        # sink means nothing was captured and must stay None, because a manifest
+        # entry of `[]` would be a claim that a build read no memory member.
+        note_components(session_id, components,
+                        memory_epoch=(list(memory_epoch.values())
+                                      if memory_epoch is not None else None))
         # #2176: the third instrument on this assembly, and the only one of the three
         # that needs the JOINED string rather than the component dict — presence in a
         # prompt is a property of the bytes the model is handed, so the witness sits
@@ -733,12 +754,117 @@ def build_system_prompt(
     return prompt
 
 
-def _load_soul(overlay: Path | None = None) -> str | None:
-    """Load SOUL.md content, stripping any YAML frontmatter."""
+def _manifest_memory_epoch_enabled() -> bool:
+    """Whether the request manifest is recording, and so whether to capture epochs.
+
+    Imported inside the body for the same reason `_load_memories`' caller imports
+    `note_components` there rather than at module scope: this module is imported by
+    CLI scripts that never bring up the app package. Any doubt at all — no module,
+    no config, a raising `enabled()` — reads as False, because the epoch is an
+    instrument and an instrument that costs a prompt build is a defect.
+    """
+    try:
+        from app.component_manifest import enabled
+
+        return bool(enabled())
+    except Exception:  # noqa: BLE001 — no manifest, no epoch, the prompt stands
+        return False
+
+
+def _stat_pair(path: Path) -> "tuple[int, int] | None":
+    """`(mtime_ns, size)` for a memory-surface member, or None if it cannot be stated.
+
+    None is a reading, not a failure: a member whose `stat` cannot be taken has no
+    mtime, which the epoch entry leaves absent rather than inventing as zero — a
+    zero mtime would read as a real timestamp to every later reader.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _memory_epoch_sink(*, session_id: str) -> "dict[str, dict[str, Any]] | None":
+    """The sink a build writes its memory epoch into, or None when nothing records.
+
+    `build_system_prompt` reads the memory surface three times — SOUL.md, then
+    MEMORY.md, then USER.md — through three separate `read_text` calls with no lock
+    between them, and `harness.prompt_layout.freeze_memory` is false, so a vault
+    write can land in the gap. Each file is individually pristine (the vault route
+    writes through `atomic_write_text` + `os.replace`), so the assembled prompt is
+    never corrupt and nothing could tell that its SOUL.md came from one instant and
+    its MEMORY.md from the next. Worse than a stale byte: the string SOUL.md holds
+    is what `_memory_duplicate_share` compares MEMORY.md against, so a tear there
+    changes WHICH LINES get dropped from the prompt, not merely which bytes were
+    served. The sink is how #3168 makes that countable, one entry per member.
+    """
+    if not session_id:
+        # The epoch reaches a manifest line through `note_components`, which is
+        # called once per turn and only when there is a session to key it by. With
+        # no session id nothing can carry the epoch anywhere, so capturing it would
+        # be three `stat` calls and three digests thrown away.
+        return None
+    return {} if _manifest_memory_epoch_enabled() else None
+
+
+def _note_memory_epoch(sink: "dict[str, dict[str, Any]] | None", path: Path,
+                       name: str, raw: str,
+                       before: "tuple[int, int] | None") -> None:
+    """Record one member's epoch entry in `sink`. Never raises, never changes a read.
+
+    `before` is `stat` taken before the read that produced `raw` (see
+    `_stat_pair`); `after` is the same pair taken now. When the two differ the
+    member was replaced while it was being read, and the entry says `torn: true` —
+    that flag is the only mechanical evidence a torn read ever existed, because the
+    bytes themselves arrived whole either way.
+
+    The digest is taken over the RAW text as read, before the strip and the
+    frontmatter cut `_load_soul` applies: the epoch answers "which bytes were on
+    disk", and a digest of the post-processed component would not move when a file
+    changed in a way the component digest cannot see. `sha256` and the two `stat`
+    readings are all that leaves this function — the text goes nowhere, which is
+    what `tests/test_component_manifest.py::test_no_written_line_carries_component_text`
+    holds, and why the entry goes through `component_manifest`'s allow-list rather
+    than a dict of this module's choosing.
+    """
+    if sink is None:
+        return
+    try:
+        from app.component_manifest import digest_text
+
+        after = _stat_pair(path)
+        entry: dict[str, Any] = {
+            "name": name,
+            "sha256": digest_text(raw),
+            "bytes": len(raw.encode("utf-8", "replace")),
+            "torn": before != after,
+        }
+        if before is not None:
+            entry["mtime_ns"], entry["size"] = before
+        if after is not None:
+            entry["mtime_ns_after"], entry["size_after"] = after
+        sink[name] = entry
+    except Exception as exc:  # noqa: BLE001 — the epoch loses, the prompt does not
+        logger.debug("memory epoch capture failed for %s (%s: %s)",
+                     name, type(exc).__name__, exc)
+
+
+def _load_soul(overlay: Path | None = None, *,
+               epoch: "dict[str, dict[str, Any]] | None" = None) -> str | None:
+    """Load SOUL.md content, stripping any YAML frontmatter.
+
+    `epoch` is #3168's sink (see `_memory_epoch_sink`): when given, this member's
+    entry is written into it before any processing, from the bytes as read.
+    """
     path = overlay / "SOUL.md" if (overlay and (overlay / "SOUL.md").exists()) else _CANON_SOUL_PATH
     if not path.exists():
         return None
-    content = path.read_text(encoding="utf-8").strip()
+    before = _stat_pair(path) if epoch is not None else None
+    raw = path.read_text(encoding="utf-8")
+    if epoch is not None:
+        _note_memory_epoch(epoch, path, "SOUL.md", raw, before)
+    content = raw.strip()
     if content.startswith("---"):
         end = content.find("\n---\n", 3)
         if end != -1:
@@ -832,6 +958,7 @@ def _memory_files_for(platform: str) -> tuple[str, ...]:
 def _load_memories(
     overlay: Path | None = None, *, soul: str | None = None,
     files: tuple[str, ...] = ("MEMORY.md", "USER.md"),
+    epoch: "dict[str, dict[str, Any]] | None" = None,
 ) -> str | None:
     """Load the memory files — overlay dir takes priority, canonical as fallback.
 
@@ -853,11 +980,28 @@ def _load_memories(
     """
     parts = []
     for filename in files:
-        raw = None
+        # One source per member, resolved once, so the `stat` that opens the epoch
+        # entry is a `stat` of the file this loop is about to read rather than of a
+        # second guess at it. Which file that is stays the documented rule it was:
+        # the overlay dir if it holds the name, the canonical vault dir otherwise.
+        src: Path | None = None
         if overlay and (overlay / filename).exists():
-            raw = (overlay / filename).read_text(encoding="utf-8")
+            src = overlay / filename
         elif (_CANON_MEMORIES_DIR / filename).exists():
-            raw = (_CANON_MEMORIES_DIR / filename).read_text(encoding="utf-8")
+            src = _CANON_MEMORIES_DIR / filename
+        if src is None:
+            continue
+        before = _stat_pair(src) if epoch is not None else None
+        raw: str | None = src.read_text(encoding="utf-8")
+        if epoch is not None:
+            # Recorded before the strip, the duplicate-run cut and the render
+            # bound below, all of which rewrite the member: the epoch is about the
+            # bytes that were on disk at this instant. A member that exists but
+            # holds nothing still gets an entry and then contributes nothing — a
+            # memory file truncated to empty is precisely the identity event this
+            # instrument exists to catch, and silently skipping its entry would
+            # make it read as a file that was never loaded.
+            _note_memory_epoch(epoch, src, filename, raw, before)
         content = raw.strip() if raw is not None else None
         if not content:
             continue

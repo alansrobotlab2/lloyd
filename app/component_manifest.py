@@ -464,7 +464,7 @@ def _digest_pair(value: Any) -> "dict[str, Any] | None":
       digests on the way in (#1880), which is what keeps the process-lifetime
       registry free of component text *and* moves the hashing off the token
       stream: `note_components` runs once per user turn
-      (`app/prompt_builder.py:590`) while `record_request` runs once per
+      (`app/prompt_builder.py:737`, the `note_components` call inside `build_system_prompt`) while `record_request` runs once per
       iteration, so this is work moved backwards, not work added.
 
     A pair is passed through with its values coerced, never re-digested: the row
@@ -481,6 +481,101 @@ def _digest_pair(value: Any) -> "dict[str, Any] | None":
         except (TypeError, ValueError):
             return None
     return None
+
+
+# ── the memory epoch (#3168) ───────────────────────────────────────────────
+#
+# SOUL.md, MEMORY.md and USER.md are three files read by three separate
+# `read_text` calls with no lock between them (`_load_soul` at
+# `prompt_builder._load_soul` (`app/prompt_builder.py:853`), then the per-member loop in
+# `prompt_builder._load_memories` (`app/prompt_builder.py:994-995`), and
+# `harness.prompt_layout.freeze_memory` is false, so a write can land between two
+# of those reads. Each FILE is pristine — the vault route writes through
+# `atomic_write_text` + `os.replace` — so no reader of the assembled prompt can
+# tell that its SOUL.md came from instant A and its MEMORY.md from instant B. The
+# epoch is what makes that observable: per member, the digest of the bytes as
+# actually read plus the file's own two `stat` readings, taken before and after
+# that read.
+#
+# The keys an entry may carry are an ALLOW-list, not a filter on a known-bad set.
+# The caller handing this over is the same frame that holds the three loaded
+# strings, and a retention clause saying "digests and byte counts only" cannot
+# rest on the good intentions of the caller: whatever else arrives is dropped
+# here, so the most a future edit can widen this field to is a longer number,
+# never a paragraph of vault text.
+# `tests/test_component_manifest.py::test_no_written_line_carries_component_text`
+# is the node that would notice a widening, and
+# `tests/test_component_manifest_memory_epoch.py::test_a_rogue_epoch_entry_cannot_bring_memory_text`
+# is the one that tries.
+
+#: `mtime_ns`/`size` are `stat` taken BEFORE the read and `mtime_ns_after`/
+#: `size_after` the same pair taken AFTER it; `torn` says the two readings
+#: differ, i.e. the member was replaced while it was being read. `bytes` is the
+#: byte count the sha256 was taken over — the text as read — so a member whose
+#: on-disk size and read length disagree says so without either number having to
+#: be recomputed by a later reader.
+_EPOCH_KEYS = ("name", "sha256", "bytes", "mtime_ns", "size",
+               "mtime_ns_after", "size_after", "torn")
+_EPOCH_INT_KEYS = frozenset({"bytes", "mtime_ns", "size",
+                             "mtime_ns_after", "size_after"})
+#: A member's name is a filename. The bound is not cosmetic: it is what keeps
+#: `name` from being the hole in an otherwise closed allow-list.
+_EPOCH_NAME_MAX = 64
+
+
+def _epoch_digest(value: Any) -> str:
+    """A memory member's digest as `sha256:<hex>`, or an explicit non-digest.
+
+    Strict rather than permissive, and the strictness is the retention guard: any
+    string that is not exactly a sha256 is replaced by a marker naming its type,
+    so a caller that passed the file body where a digest belongs cannot put that
+    body in the store under this key. `_digest_pair` can afford to be permissive
+    because it re-digests what it is handed; this one cannot, because the entry's
+    whole point is that the digest was taken over the bytes *as read*.
+    """
+    text = str(value)
+    body = text[7:] if text.startswith("sha256:") else text
+    if len(body) == 64 and all(c in "0123456789abcdef" for c in body):
+        return "sha256:" + body
+    _bump("hash_errors")
+    return f"unhashable:{type(value).__name__}"
+
+
+def _memory_epoch_row(value: Any) -> "dict[str, Any] | None":
+    """One memory-surface member's epoch entry, restricted to `_EPOCH_KEYS`.
+
+    Input is the shape `prompt_builder` builds — a dict with the member's name,
+    the digest and byte count of the text it read, and the two `stat` readings —
+    and output is the same dictionary narrowed to keys this module is willing to
+    store, with types coerced. A missing key stays absent rather than becoming a
+    zero: a member whose `stat` failed is a member with no mtime, which is a
+    different fact from a member whose mtime was zero. Returns None for anything
+    that is not a mapping at all, and the caller drops the row.
+    """
+    if not isinstance(value, dict):
+        return None
+    row: dict[str, Any] = {}
+    for key in _EPOCH_KEYS:
+        if key not in value:
+            continue
+        raw = value[key]
+        if key == "torn":
+            row[key] = bool(raw)
+        elif key == "sha256":
+            row[key] = _epoch_digest(raw)
+        elif key == "name":
+            row[key] = str(raw)[:_EPOCH_NAME_MAX]
+        elif key in _EPOCH_INT_KEYS:
+            if raw is None:
+                row[key] = None
+                continue
+            try:
+                row[key] = int(raw)
+            except (TypeError, ValueError):
+                continue
+        else:  # pragma: no cover — every key in `_EPOCH_KEYS` is handled above
+            continue
+    return row or None
 
 
 # ── per-session component registry ────────────────────────────────────────
@@ -504,11 +599,24 @@ _registry_lock = threading.Lock()
 
 
 def note_components(session_id: str, components: "dict[str, str] | None", *,
-                    prefetch_text: str | None = None) -> None:
+                    prefetch_text: str | None = None,
+                    memory_epoch: "list[dict[str, Any]] | None" = None) -> None:
     """Remember the component digests for `session_id`. Never raises.
 
     Called from `prompt_builder` with the same ordered dict that produced the
     system prompt, and from the chat router with the prefetched context block.
+
+    `memory_epoch` (#3168) is the third thing that can be noted here, and the only
+    one that is not a prompt component: one entry per memory-surface member
+    `build_system_prompt` actually read for this request's platform, each carrying
+    the digest of the bytes as read and the two `stat` readings around that read.
+    It arrives as a list and is narrowed through `_memory_epoch_row` on the way in,
+    so what the registry holds — and therefore what every later line of this
+    session can carry — is digests, byte counts, mtimes and sizes. `None` means
+    "not noted this call", which is how `note_prefetch` and every other caller keep
+    an epoch an earlier call recorded; an empty list means "the builder read no
+    member", and is kept, because the difference between that and an unrecorded
+    epoch is a fact a reader wants.
 
     Both halves are digested **here** and only the `{sha256, bytes}` pair is kept.
     The prefetch was first (#1782): the block is vault text, and the registry is a
@@ -531,7 +639,7 @@ def note_components(session_id: str, components: "dict[str, str] | None", *,
     pin for both halves: the pair in the registry, and the identical object on the
     line. An empty prefetch block still stays absent rather than becoming a hash of
     `""`, as the negative node there shows. Hashing moves off the token stream, not
-    onto it: this runs once per user turn (`app/prompt_builder.py:590`),
+    onto it: this runs once per user turn (`app/prompt_builder.py:737`, the `note_components` call inside `build_system_prompt`),
     `record_request` once per iteration.
     """
     if not session_id or not enabled():
@@ -551,6 +659,15 @@ def note_components(session_id: str, components: "dict[str, str] | None", *,
                 entry["prefetch"] = ("" if not body
                                      else {"sha256": digest_text(body),
                                            "bytes": _size(body)})
+            if memory_epoch is not None:
+                # Narrowed here, not at emit time: the registry is process-lifetime,
+                # and an entry that once held memory text would keep holding it for
+                # every later line of the session whether or not the line's own
+                # builder was ever asked for text.
+                entry["memory_epoch"] = [row for row in
+                                         (_memory_epoch_row(item)
+                                          for item in (memory_epoch or []))
+                                         if row]
             entry["at"] = time.time()
             _registry.move_to_end(session_id)
             while len(_registry) > MAX_SESSIONS:
@@ -1137,6 +1254,15 @@ def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
         # time so the text need not stay resident. Copied, because the caller
         # hands the line to a serializer and the registry keeps its own entry.
         line["prefetch"] = dict(prefetch)
+    epoch = entry.get("memory_epoch")
+    if epoch is not None:
+        # #3168: which memory-surface files this session's system prompt was built
+        # from, as digests and `stat` readings. Emitted when the list is EMPTY as
+        # well as when it is full: "the builder ran and read no memory member" (a
+        # frozen-snapshot turn whose SOUL.md is absent) and "this line predates
+        # #3168, or came from a send site with no registry entry" are different
+        # facts, and `memory_epoch_report` has to be able to tell them apart.
+        line["memory_epoch"] = [dict(row) for row in epoch]
     return line
 
 
@@ -1178,6 +1304,250 @@ def read_manifest(request_id: str, *, store: "Path | str | None" = None,
         except OSError:
             continue
     return None
+
+
+# ── the memory-epoch reader (#3168) ───────────────────────────────────────
+
+
+def _user_message_count(line: dict[str, Any]) -> int:
+    """How many `user`-role messages the payload carried — the derived turn index.
+
+    The reason this is the turn key is arithmetic, not taste: a line has
+    `session_id`, `iteration` and `ts` and NO turn id, and the only writer of
+    `memory_epoch` is `note_components`, which runs once per user turn
+    (`app/prompt_builder.py:737`, inside `build_system_prompt`) while `record_request`
+    runs once per iteration.
+    A user turn appends exactly one `user` message and then spends its iterations
+    appending tool results, so this count is constant across a turn and rises by
+    one at the next one. `tests/test_component_manifest_memory_epoch.py::test_one_user_turn_spanning_many_iterations_counts_as_one_turn`
+    pins the arithmetic against the shape the 2026-10-22 store actually holds.
+    """
+    return sum(1 for row in line.get("messages") or []
+               if isinstance(row, dict) and row.get("role") == "user")
+
+
+def _epoch_turn_row(state: dict[str, Any]) -> dict[str, Any]:
+    """A finished per-session accumulator, as the row this function reports.
+
+    `turns_without_turn_index` counts the lines that gave NEITHER boundary signal
+    (no `user` message to count, no integer `iteration` to compare), so the turn
+    count beside it can be read for what it is where those lines are numerous: a
+    floor, not a census.
+    """
+    return {
+        "session_id": state["session_id"],
+        "lines": state["lines"],
+        "lines_without_epoch": state["lines_without_epoch"],
+        "lines_without_turn_index": state["lines_without_turn_index"],
+        "turns": state["turns"],
+        "epoch_changes": state["epoch_changes"],
+        "torn_turns": state["torn_turns"],
+        "intra_turn_movement": state["intra_turn_movement"],
+        "torn_members": dict(sorted(state["torn_members"].items())),
+        "epoch": state["epoch"],
+    }
+
+
+def _fold_epoch_line(state: dict[str, Any], line: dict[str, Any]) -> None:
+    """Fold one manifest line into a session's accumulator, opening a turn if needed.
+
+    A turn boundary is one of: the count of user messages moving in either
+    direction (a new turn appends one; compaction rewrites history and can drop
+    the count, and pre- and post-compaction lines are not one turn), or
+    `iteration` restarting or moving backwards. Everything else is another
+    iteration of the turn already open.
+
+    Both signals are allowed to be ABSENT, and the difference is kept rather than
+    smoothed to zero: a line whose payload carries no `messages` list has no user
+    count, and a line whose `iteration` is None (a send site that never passes one)
+    has no iteration — a real shape in the store, which is how 1,306 of the 7,987
+    lines in the 2026-10-22 file read. Folding those into a turn they cannot prove
+    is the false zero this function exists to avoid, so such a line counts in
+    `lines_without_turn_index` and the turn count is then a floor.
+    """
+    messages = line.get("messages")
+    user_count = (_user_message_count(line) if isinstance(messages, list)
+                  else None)
+    iteration = line.get("iteration")
+    if not isinstance(iteration, int):
+        iteration = None
+    boundary = (state["turns"] == 0
+                or user_count != state["prev_user_count"]
+                or (iteration is not None and state["prev_iteration"] is not None
+                    and iteration <= state["prev_iteration"]))
+    if boundary:
+        _close_epoch_turn(state)
+        state["turns"] += 1
+        state["turn_epoch"] = set()
+        state["turn_torn"] = set()
+    state["prev_user_count"] = user_count
+    state["prev_iteration"] = iteration
+    state["lines"] += 1
+    if user_count is None and iteration is None:
+        state["lines_without_turn_index"] += 1
+
+    epoch = line.get("memory_epoch")
+    if not isinstance(epoch, list):
+        state["lines_without_epoch"] += 1
+        return
+    # An epoch of `[]` — the builder ran and read no memory member — is a recorded
+    # reading and compares like any other, so it gets a key of its own (`"[]"`)
+    # rather than being folded into the no-epoch case above.
+    key = canonical_json(epoch)
+    state["turn_epoch"].add(key)
+    if state["epoch"] is None:
+        # The session's baseline, fixed by the FIRST epoch line in arrival order —
+        # not by the first turn that happened to close, and not by a `min()` over a
+        # set. Clause 4 says "differs from that session's first turn's epoch", and
+        # the epoch a session STARTED on is the only thing a later reader can agree
+        # on with the one that wrote the line; a turn that moved off its own opening
+        # epoch has to be able to count as moved even when it is the first turn.
+        state["epoch"] = key
+    for row in epoch:
+        if isinstance(row, dict) and row.get("torn") and row.get("name"):
+            state["turn_torn"].add(str(row["name"]))
+
+
+def _close_epoch_turn(state: dict[str, Any]) -> None:
+    """Settle the turn that was open: its epoch delta against the session's first.
+
+    One turn can carry several distinct epochs — `note_components` is re-run by a
+    mid-turn rebuild — and that is the loudest finding this instrument can produce:
+    two manifest lines of ONE turn describing two memory surfaces is the
+    mixed-identity serve #3168 was built to count. It is reported as
+    `intra_turn_movement`, and it also counts as an epoch change, because a turn
+    that moved is not a turn that held still.
+    """
+    keys: set = state.pop("turn_epoch", set())
+    torn: set = state.pop("turn_torn", set())
+    if not keys and not torn:
+        return
+    if torn:
+        # One increment per member per TURN, from the turn's set rather than from
+        # each line that carried it: five iterations of one torn read is one torn
+        # read, and a `torn_members` count that aged per line would disagree with
+        # `torn_turns` beside it about how many times anything happened.
+        state["torn_turns"] += 1
+        for name in sorted(torn):
+            state["torn_members"][name] = state["torn_members"].get(name, 0) + 1
+    if not keys:
+        return
+    if len(keys) > 1:
+        state["intra_turn_movement"] += 1
+    if state["epoch"] is not None and keys != {state["epoch"]}:
+        # `keys != {baseline}` rather than "the representative differs": a turn
+        # holding the baseline AND something else has moved, and reporting it as
+        # still, while its own `intra_turn_movement` ticked, would be two fields
+        # contradicting each other about one turn.
+        state["epoch_changes"] += 1
+
+
+def memory_epoch_report(*, store: "Path | str | None" = None,
+                        since: str = "", until: str = "",
+                        session_id: str = "") -> dict[str, Any]:
+    """Turn-granularity counts of memory-surface movement, read off the store.
+
+    The question #3168 exists to make answerable: has any production turn ever been
+    answered from a mixed identity? Per session it reports how many TURNS the lines
+    describe, how many of them were served from an epoch other than the session's
+    first (`epoch_changes`), how many carried a member the store saw replaced
+    mid-read (`torn_turns`, with `torn_members` naming which), and how many turns
+    had their epoch move between their own lines (`intra_turn_movement`).
+
+    Turn granularity is the whole difficulty, and it is why this is a fold and not
+    a count of lines. The five sessions that straddled the only memory-surface
+    write of 2026-10-20…22 were 24, 38, 47, 86 and 111 `turn_start` lines long and
+    each of them was ONE user turn: `build_system_prompt` runs once per turn and
+    every iteration of that turn repeats its component dict. A per-line count of a
+    changed epoch would read zero for exactly the long automod rounds the instrument
+    was built for, so `_user_message_count` derives the turn from the payload
+    instead — see its docstring for why the arithmetic holds.
+
+    Rows are per session, sorted by id. A line with no `memory_epoch` at all is
+    counted in `lines_without_epoch` rather than guessed at: every line written
+    before this landed is one, which is the same permanent blind spot the item
+    records about the 40-day pre-landing window, now bounded by a number instead of
+    by prose. `since`/`until` are inclusive `YYYY-MM-DD` day-file bounds and
+    `session_id` narrows to one session; with no bounds this reads every dated file
+    the store still holds, which the retention window already bounds.
+
+    A line with no `session_id` is not a session and is not folded into one: it
+    goes to `lines_without_session` instead. Measured on the live store's
+    2026-10-22 file, 1,306 of its 7,987 lines are of this shape — one-shot
+    `app/secondary_models.py` and `app/inner_voice/observer.py` calls keyed by the
+    empty string, `iteration: null`, `components_captured: send_site`. Folding them
+    together would have printed them as ONE session of ONE turn, which is a number
+    about nothing, and an epoch can never reach them anyway: the registry that
+    carries the epoch is keyed by session id, so `_memory_epoch_sink` returns None
+    without one.
+    """
+    root = Path(store) if store else store_root()
+    manifests = root / "manifests"
+    sessions: dict[str, dict[str, Any]] = {}
+    lines_without_session = 0
+    if manifests.is_dir():
+        for path in sorted(manifests.glob("*.ndjson")):
+            day = path.stem
+            if since and day < since:
+                continue
+            if until and day > until:
+                continue
+            try:
+                fh = open(path, encoding="utf-8")
+            except OSError:
+                continue
+            with fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        line = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if not isinstance(line, dict):
+                        continue
+                    sid = str(line.get("session_id") or "")
+                    if not sid:
+                        lines_without_session += 1
+                        continue
+                    if session_id and sid != session_id:
+                        continue
+                    state = sessions.get(sid)
+                    if state is None:
+                        state = sessions[sid] = {
+                            "session_id": sid, "lines": 0,
+                            "lines_without_epoch": 0,
+                            "lines_without_turn_index": 0, "turns": 0,
+                            "epoch_changes": 0, "torn_turns": 0,
+                            "intra_turn_movement": 0,
+                            "torn_members": {}, "epoch": None,
+                            "prev_user_count": None, "prev_iteration": None,
+                            "turn_epoch": set(), "turn_torn": set(),
+                        }
+                    _fold_epoch_line(state, line)
+    for state in sessions.values():
+        _close_epoch_turn(state)
+    rows = [_epoch_turn_row(state) for state in
+            sorted(sessions.values(), key=lambda s: s["session_id"])]
+    totals = {
+        "sessions": len(rows),
+        "lines_without_session": lines_without_session,
+        "sessions_measurable": sum(1 for r in rows if r["epoch"] is not None),
+        "sessions_with_epoch_change": sum(1 for r in rows if r["epoch_changes"]),
+        "sessions_with_torn_read": sum(1 for r in rows if r["torn_turns"]),
+        "sessions_with_intra_turn_movement":
+            sum(1 for r in rows if r["intra_turn_movement"]),
+        "lines": sum(r["lines"] for r in rows),
+        "lines_without_epoch": sum(r["lines_without_epoch"] for r in rows),
+        "lines_without_turn_index": sum(r["lines_without_turn_index"] for r in rows),
+        "turns": sum(r["turns"] for r in rows),
+        "epoch_changes": sum(r["epoch_changes"] for r in rows),
+        "torn_turns": sum(r["torn_turns"] for r in rows),
+        "intra_turn_movement": sum(r["intra_turn_movement"] for r in rows),
+    }
+    return {"store": str(root), "since": since, "until": until,
+            "schema": SCHEMA, "sessions": rows, "totals": totals}
 
 
 # Deliberately absent: `load_blob` and `rebuild_request`. The store holds no

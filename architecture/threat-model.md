@@ -84,7 +84,7 @@ prompt cannot be access control — is for.
 |---|---|---|---|---|
 | B1 | external text → turn context | fetched pages, API bodies, transcripts, search results | the model's judgement, plus a destination table | `agent_mcp/egress.py`, `agent_mcp/http_tools.py` |
 | B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1840` |
-| B3 | loaded memory → every system prompt | `MEMORY.md`, `USER.md`, the identity file | whatever the last writer did | `app/prompt_builder.py:799`, `app/prompt_surface.py` |
+| B3 | loaded memory → every system prompt | `MEMORY.md`, `USER.md`, the identity file | whatever the last writer did | `app/prompt_builder.py:925`, `app/prompt_surface.py` |
 | B4 | skill body → instruction | a `SKILL.md` delivered as a dispatch marker | the skill's own name and its front matter | `app/harness/skill_dispatch.py:276` |
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
 | B6 | model output → shell | an argv string | the deny table, twice | `app/harness/safety.py:417`, `agent_mcp/main.py:531` |
