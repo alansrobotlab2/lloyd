@@ -486,11 +486,11 @@ def _digest_pair(value: Any) -> "dict[str, Any] | None":
 # ── the memory epoch (#3168) ───────────────────────────────────────────────
 #
 # SOUL.md, MEMORY.md and USER.md are three files read by three separate
-# `read_text` calls with no lock between them (`_load_soul` at
-# `prompt_builder._load_soul` (`app/prompt_builder.py:853`), then the per-member loop in
-# `prompt_builder._load_memories` (`app/prompt_builder.py:994-995`), and
-# `harness.prompt_layout.freeze_memory` is false, so a write can land between two
-# of those reads. Each FILE is pristine — the vault route writes through
+# `read_text` calls with no lock between them — `prompt_builder._load_soul`
+# (`app/prompt_builder.py:853`) takes the first, then the per-member loop in
+# `prompt_builder._load_memories` (`app/prompt_builder.py:994-995`) takes the
+# others — and `harness.prompt_layout.freeze_memory` is false, so a write can land
+# between two of those reads. Each FILE is pristine — the vault route writes through
 # `atomic_write_text` + `os.replace` — so no reader of the assembled prompt can
 # tell that its SOUL.md came from instant A and its MEMORY.md from instant B. The
 # epoch is what makes that observable: per member, the digest of the bytes as

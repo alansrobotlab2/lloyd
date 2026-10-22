@@ -24,9 +24,12 @@ This file pins what makes that countable:
   (`test_the_entry_carries_the_stat_reading_from_both_sides_of_the_read`,
   `test_a_member_replaced_mid_read_is_stamped_torn`,
   `test_a_torn_read_reaches_the_store_marked_torn`);
-* **clause 3** — the entries carry digests and numbers and no memory text, even
-  against a caller that tried
-  (`test_a_rogue_epoch_entry_cannot_bring_memory_text`; the sentinel node in
+* **clause 3** — the entries carry digests and numbers and no memory text, against a
+  caller that smuggles one by hand
+  (`test_a_rogue_epoch_entry_cannot_bring_memory_text`), and across the real route
+  too: a build over a memory surface that holds text, read
+  back out of the written store
+  (`test_a_real_build_leaves_no_memory_text_in_the_store`; the sentinel node in
   `tests/test_component_manifest.py` is the other half of this clause);
 * **clause 4** — `memory_epoch_report` counts per session at TURN granularity, so
   111 iteration lines of one user turn are one turn, and it reports both the turns
@@ -35,6 +38,8 @@ This file pins what makes that countable:
   likely to want to check by name:
   `test_one_user_turn_spanning_many_iterations_counts_as_one_turn` (the 111-lines-
   are-one-turn case itself, plus the epoch-change-per-session-not-per-line count),
+  `test_a_turn_boundary_that_iteration_never_restarts_at_is_still_a_boundary` (the
+  same fold with only the user-message term able to see the boundary),
   `test_a_session_whose_epoch_never_moved_reports_zero_not_noise`,
   `test_the_reader_names_the_torn_member_and_counts_its_turn_once`,
   `test_an_epoch_that_moves_inside_one_turn_is_reported_as_movement`,
@@ -411,6 +416,63 @@ def test_a_rogue_epoch_entry_cannot_bring_memory_text(tmp_path):
     assert cm.stats()["hash_errors"] >= 1
 
 
+def test_a_real_build_leaves_no_memory_text_in_the_store(tmp_path):
+    """Clause 3 across the route production actually takes: files → build → store.
+
+    The node above smuggles an entry into `note_components` by hand, and the
+    sentinel node in `tests/test_component_manifest.py` smuggles one through a
+    component dict. Neither one runs `build_system_prompt` over a memory surface
+    that holds text worth stealing and then reads the bytes that came out the far
+    end, which is the only route where a leak could be introduced by the capture
+    itself rather than by a caller. So the three sentinels here are the live bodies
+    of the three members, and the assertions run on the written day files.
+
+    The sentinels are asserted PRESENT on the memory surface first: a store that
+    wrote nothing and a store that was correctly filtered are the same zero hits,
+    and this is the half of the node that tells them apart. Then both directions of
+    failure are pinned — the text absent from every file the store holds, and the
+    entries still present with the digest of exactly that text, because a filter
+    that dropped an epoch entry would pass the absence and delete the field clause 1
+    asks for.
+    """
+    overlay = _surface(tmp_path)
+    _build("retention", overlay)
+    _record("retention")
+    assert cm.flush(timeout=5.0), "the writer did not drain, so the store may be empty"
+
+    sentinels = ("SOUL-EPOCH-SENTINEL-3d41",
+                 "MEMORY-EPOCH-SENTINEL-9ab2",
+                 "USER-EPOCH-SENTINEL-7c55")
+    members = ("SOUL.md", "MEMORY.md", "USER.md")
+    on_disk = "\n".join((overlay / name).read_text(encoding="utf-8")
+                        for name in members)
+    for sentinel in sentinels:
+        assert sentinel in on_disk, (
+            "that sentinel never reached the memory surface, so its absence from "
+            "the store below would be a reading of nothing")
+
+    store = tmp_path / "manifest-store"
+    day_files = sorted((store / "manifests").glob("*.ndjson"))
+    assert day_files, "the store wrote nothing, so this node would pass vacuously"
+    written = "\n".join(p.read_text(encoding="utf-8")
+                        for p in store.rglob("*") if p.is_file())
+    for sentinel in sentinels:
+        assert sentinel not in written, (
+            f"{sentinel} is memory-surface text that reached the store")
+
+    stored = [json.loads(raw) for path in day_files
+              for raw in path.read_text(encoding="utf-8").splitlines() if raw.strip()]
+    epoch = {row["name"]: row for row in stored[0]["memory_epoch"]}
+    assert sorted(epoch) == sorted(members), (
+        "the entries have to SURVIVE the filter that kept the text out — dropping "
+        "them would pass every absence above and destroy clause 1's field")
+    for name in members:
+        assert epoch[name]["sha256"] == cm.digest_text(
+            (overlay / name).read_text(encoding="utf-8")), name
+        assert epoch[name]["bytes"] == len(
+            (overlay / name).read_text(encoding="utf-8").encode("utf-8")), name
+
+
 # ── clause 4: the reader counts turns, not lines ──────────────────────────
 
 
@@ -441,6 +503,41 @@ def test_one_user_turn_spanning_many_iterations_counts_as_one_turn(tmp_path):
     row = rep["sessions"][0]
     assert row["turns"] == 2 and row["epoch_changes"] == 1
     assert row["torn_turns"] == 0 and row["lines_without_epoch"] == 0
+
+
+def test_a_turn_boundary_that_iteration_never_restarts_at_is_still_a_boundary(tmp_path):
+    """The user-message count alone, isolated from the iteration signal.
+
+    `_fold_epoch_line` accepts TWO boundary signals, and every other node here that
+    opens a second turn also restarts `iteration` at 1 — so deleting the
+    user-message-count term would leave all of them green: the fold would still find
+    each boundary by the other signal and the report would not change. This node is
+    the mutation test for that term. Its shape is not invented: read over the live
+    store's 2026-10-22 file, the session `20261021_170535_autocode_c6be` opens its
+    turns at iterations 1, 4, 14, 24, 31 and 34 while its user-message count climbs
+    1, 2, 3, 5, 6, 8 — one long-running session whose `iteration` rises straight
+    through every boundary, so the count is the only thing that can see them.
+
+    `lines_without_turn_index == 0` is asserted because the other way to reach
+    `turns == 1` is a fold that recognised neither signal and filed the lines as
+    unsignalled; that failure belongs to the floor node, and this node would read as
+    consistent while reporting one turn where five lines describe two.
+    """
+    _write_lines(tmp_path / "manifest-store", "2026-10-22", [
+        _line(session_id="monotonic", iteration=1, turns=1, epoch=_epoch("A")),
+        _line(session_id="monotonic", iteration=2, turns=1, epoch=_epoch("A")),
+        _line(session_id="monotonic", iteration=3, turns=1, epoch=_epoch("A")),
+        _line(session_id="monotonic", iteration=4, turns=2, epoch=_epoch("B")),
+        _line(session_id="monotonic", iteration=5, turns=2, epoch=_epoch("B")),
+    ])
+    rep = cm.memory_epoch_report(store=tmp_path / "manifest-store",
+                                 session_id="monotonic")
+    row = rep["sessions"][0]
+    assert (row["lines"], row["turns"]) == (5, 2), row
+    assert row["lines_without_turn_index"] == 0, row
+    assert row["epoch_changes"] == 1, (
+        "turn two was served from a different memory surface, and only the "
+        "user-message count could tell it apart from turn one")
 
 
 def test_a_session_whose_epoch_never_moved_reports_zero_not_noise(tmp_path):
