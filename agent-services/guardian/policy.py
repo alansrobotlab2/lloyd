@@ -331,8 +331,48 @@ def quarantine_dir(repo: str = REPO, data_root: str = DATA_ROOT):
     return str(__import__("pathlib").Path(data_root) / relative)
 
 
+def vault_root(repo: str = REPO) -> str:
+    """The vault THIS process may write, resolved the way the rest of the tree resolves it.
+
+    The literal this replaces named one absolute vault and no caller could move it,
+    while everything the watchdog *measures* was already movable: `vaultwatch.VAULT_ROOT`
+    and `vaultwatch.snapshot_repo()` read `LLOYD_VAULT_ROOT` and
+    `LLOYD_VAULT_BACKUP_REPO`, and `scripts/backup/backup-vault.sh` and
+    `app/data_root.py::vault_root()` resolve the same names. Two knobs with one of them
+    stuck is how `memory/2026-10-21.md` came to carry three `## Self-mod guardian: Vault
+    snapshots are not arriving` sections naming a fixture repository under
+    `~/lloyd-work/.t/`: the automod gate's review-prefetch checkout ran the poller, and
+    the live vault's daily note was the only human-facing sink that process could reach
+    (#3149). Making the sink follow the same environment the measurement already follows
+    is what bounds which process may write where: an alert can now only ever land in the
+    vault its own caller resolved, so a throwaway checkout, a gate prefetch tree or a
+    pytest tmp home writes its own `memory/` and leaves the live one alone.
+
+    The resolver is asked first — `app/data_root.py::vault_root()` through
+    `_data_root_module`, the same load-by-path `kg_db_path` and `quarantine_dir` use,
+    because this file runs from the pinned snapshot under `/usr/bin/python3`, where
+    `app.paths` is not importable and the venv is not there. The env-then-`HOME`
+    fallback is second. Unlike `KG_DB_SOURCE` no `source` marker comes back, and that is
+    deliberate rather than an oversight: the fallback restates the resolver's own body
+    byte for byte, so there is no layout the two branches could name differently, which
+    is the only thing a source marker has ever distinguished (#1525).
+    """
+    import os
+    from pathlib import Path
+
+    resolver = _data_root_module(repo)
+    if resolver is not None:
+        resolve = getattr(resolver, "vault_root", None)
+        if resolve is not None:
+            try:
+                return str(resolve())
+            except Exception:  # noqa: BLE001 - a watchdog that cannot start is worse
+                pass
+    return str(Path(os.environ.get("LLOYD_VAULT_ROOT") or (Path.home() / "obsidian")))
+
+
 KG_DB, KG_DB_SOURCE = kg_db_path()
-VAULT_ROOT = "/home/alansrobotlab/obsidian"
+VAULT_ROOT = vault_root()
 
 # ── Vault tripwire (every tick, not only while observing) ──────────────────
 # `vaultwatch.py` owns the thresholds; these name what the guardian acts on.

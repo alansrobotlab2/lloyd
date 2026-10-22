@@ -1632,6 +1632,25 @@ class Guardian:
         except Exception as exc:  # noqa: BLE001
             log(f"vaultwatch snapshot check failed (continuing): {exc}")
             return
+        if not state.get("owned", True):
+            # A repository outside `vaultwatch.snapshot_owner_dir()` is not the vault's
+            # off-vault copy, so its age is not a fact about this vault and this title
+            # is not a sentence about it. `memory/2026-10-21.md` carries three sections
+            # that said otherwise — three hours of a stale HEAD in
+            # `~/lloyd-work/.t/nonexistent-vault.git`, ordered at a reader to run
+            # `restore-vault.sh`, because one caller could set `LLOYD_VAULT_BACKUP_REPO`
+            # while the alert sink it wrote to was a fixed literal. The literal has
+            # since followed the environment (#3149 clause 1); this is the half that
+            # bounds the subject as well as the destination (#3149 clause 3).
+            #
+            # Journalled, not silent: an override pointing somewhere else is a
+            # misconfiguration worth one line, and muting the page is not the same as
+            # muting the record. A stale HEAD in the repo the backup stream DOES own
+            # still alerts below, with its sha, its age and the bound it crossed.
+            log(f"vault snapshot check: {repo} is not under "
+                f"{vaultwatch.snapshot_owner_dir()}, so it is not the vault's backup; "
+                "no alert raised")
+            return
         if state["fresh"]:
             return
         self.alert(

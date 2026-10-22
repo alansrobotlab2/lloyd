@@ -45,7 +45,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-VAULT_ROOT = os.environ.get("LLOYD_VAULT_ROOT", "/home/alansrobotlab/obsidian")
+#: The vault this process reads AND writes, resolved the one way the tree resolves a
+#: vault: `$LLOYD_VAULT_ROOT` when it is set, else `$HOME/obsidian` — the two branches
+#: `app/data_root.py::vault_root()`, `scripts/backup/backup-vault.sh` and
+#: `policy.vault_root()` take. The literal this replaces differed in two ways: it named
+#: a home no other reader names, and as the second argument of `os.environ.get` it let a
+#: set-but-empty `LLOYD_VAULT_ROOT` resolve to `""`, which `or` now routes to `$HOME`
+#: (#3149).
+VAULT_ROOT = os.environ.get("LLOYD_VAULT_ROOT") or str(Path.home() / "obsidian")
 GUARDIAN_STATE = Path(os.environ.get("LLOYD_GUARDIAN_STATE",
                                      Path.home() / ".local" / "state" / "lloyd-guardian"))
 STATE_FILE = "vault_watch.json"
@@ -91,6 +98,15 @@ SKIP_DIRS = frozenset({CHECKOUT_ENTRY})
 #: exactly like a check that passed.
 SNAPSHOT_REPO_REL = ".local/state/lloyd-vault-backup/vault.git"
 SNAPSHOT_REPO = Path.home() / SNAPSHOT_REPO_REL
+#: The directory the vault's backup stream OWNS: `backup-vault.sh` writes its repo
+#: inside it, `lloyd-vault-backup.timer` fires that writer, and `restore-vault.sh`
+#: reads from it. Derived from `SNAPSHOT_REPO_REL` rather than restated, because the
+#: layout is spelled once here — the same reason `app.data_root.KG_DB_RELATIVE`
+#: exists (#1525). `snapshot_repo_is_owned` weighs a resolved repo against it, which
+#: is what stops a repository parked anywhere else — a fixture under the
+#: throwaway-checkout root, a gate prefetch tree — from ever being reported to a
+#: human as the vault's only off-vault copy (#3149).
+SNAPSHOT_OWNER_DIR_REL = Path(SNAPSHOT_REPO_REL).parent
 #: Same bounded age #1416 landed for the data root
 #: (`policy.SNAPSHOT_MAX_AGE_SECONDS`, `datawatch.snapshot_state`): the timer
 #: fires every 15 minutes, so 3 h is twelve missed cycles, and a check that
@@ -510,8 +526,50 @@ def sync_gate(root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE) -> tuple
 
 def snapshot_repo() -> str:
     """The vault's backup repository, from the same `LLOYD_VAULT_BACKUP_REPO`
-    override `backup-vault.sh` takes, so both name one repo without a config."""
+    override `backup-vault.sh` takes, so both name one repo without a config.
+
+    The override is the knob `backup-vault.sh` reads, which is what lets a test or a
+    restore point the writer and this reading at one repository — and it is also the
+    knob that, set to a fixture path by a caller who set nothing else, put three
+    `## Self-mod guardian: Vault snapshots are not arriving` sections into the live
+    daily note on 2026-10-21 naming `nonexistent-vault.git` under the throwaway
+    checkout root. `snapshot_repo_is_owned` is the other half of that pair: an
+    override moves the reading, and ownership decides whether the reading may be
+    taken to a human (#3149).
+    """
     return os.environ.get("LLOYD_VAULT_BACKUP_REPO") or str(SNAPSHOT_REPO)
+
+
+def snapshot_owner_dir() -> Path:
+    """The directory the vault's backup stream owns, resolved for THIS process.
+
+    Read at call time rather than from the import-time `SNAPSHOT_REPO`, because the
+    whole point of `SNAPSHOT_OWNER_DIR_REL` being a `$HOME` relative is that a process
+    with a different `$HOME` owns a different directory: that is what makes a scratch
+    home's fixture alert land in that home and nowhere else (#3149).
+    """
+    return Path.home() / SNAPSHOT_OWNER_DIR_REL
+
+
+def snapshot_repo_is_owned(repo: str | Path, owner_dir: Path | None = None) -> bool:
+    """Is `repo` inside the directory the vault's backup stream owns?
+
+    `relative_to` and not a string prefix: `…/lloyd-vault-backup-evil/x.git` starts
+    with `…/lloyd-vault-backup` and is not in it, and a confinement check that can be
+    walked past by naming a directory is the same class of guard #2110 names. Both
+    sides are resolved first, so a symlinked or `..`-laden override is weighed on the
+    directory it actually lands on.
+
+    Called by `snapshot_age_state`, which is the one read behind both the guardian's
+    alert and the operator's CLI, so neither can be handed a foreign repository by a
+    caller that set one environment variable and not the other.
+    """
+    owner = Path(owner_dir) if owner_dir is not None else snapshot_owner_dir()
+    try:
+        Path(repo).expanduser().resolve().relative_to(owner.resolve())
+        return True
+    except (ValueError, OSError, RuntimeError):
+        return False
 
 
 def _age_phrase(age: float) -> str:
@@ -523,6 +581,20 @@ def _age_phrase(age: float) -> str:
     if age < 86400.0:
         return f"{hours} h {minutes % 60} m"
     return f"{int(age // 86400.0)} d {hours % 24} h"
+
+
+def _not_owner_clause(owner: Path) -> str:
+    """The sentence appended to a reading taken outside the owner directory.
+
+    Appended, never substituted: the age that was measured is still printed, because
+    the operator's `snapshot-age` CLI reads this same string and a person who pointed
+    the override at a repo and got back only a refusal would learn nothing about the
+    repo they named. What the clause adds is whose repository it is NOT.
+    """
+    return ("; and this override is not the vault's backup owner — it sits outside "
+            f"{owner}, the directory `backup-vault.sh` writes and "
+            "`lloyd-vault-backup.timer` fires — so this reading is not the vault's "
+            "only copy outside the vault, and no human-facing alert is raised on it")
 
 
 def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AGE_SECONDS,
@@ -540,10 +612,22 @@ def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AG
     fresh.
 
     `repo=None` takes `snapshot_repo()`.
+
+    `owned` is a second axis, and deliberately not folded into `fresh`. A repository
+    outside `snapshot_owner_dir()` is not the vault's off-vault copy whatever its HEAD
+    says, and `fresh=False` is the guardian's page: folding the two would let a
+    caller's fixture repo demand a person's attention (#3149's incident), while
+    dropping the measurement would leave the operator's CLI with nothing to print. So
+    the age is still measured and still printed, the sentence says whose repository it
+    is not, and only a repository the backup stream owns may raise an alert — which is
+    the same shape `datawatch.snapshot_state` reaches for its root marker (#1416):
+    measure, then say whether this tree is the tree the check is allowed to speak for.
     """
     path = repo if repo is not None else snapshot_repo()
+    owned = snapshot_repo_is_owned(path)
     state: dict[str, Any] = {"repo": path, "sha": None, "committed_at": None,
-                             "age": None, "max_age": max_age, "fresh": False}
+                             "age": None, "max_age": max_age, "fresh": False,
+                             "owned": owned}
     try:
         out = subprocess.run(["git", "--git-dir", path, "log", "-1", "--format=%H %ct"],
                              capture_output=True, text=True, timeout=20)
@@ -556,12 +640,16 @@ def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AG
     if state["committed_at"] is None:
         state["text"] = (f"{path} has no readable HEAD commit, so no vault snapshot is known "
                          f"to be newer than the {max_age / 3600.0:g} h limit")
+        if not owned:
+            state["text"] += _not_owner_clause(snapshot_owner_dir())
         return state
     state["age"] = (time.time() if now is None else now) - state["committed_at"]
     state["fresh"] = state["age"] <= max_age
     state["text"] = (f"{path} commit {state['sha'][:8]} is {_age_phrase(state['age'])} old"
                      + ("" if state["fresh"]
                         else f", past the {max_age / 3600.0:g} h limit"))
+    if not owned:
+        state["text"] += _not_owner_clause(snapshot_owner_dir())
     return state
 
 

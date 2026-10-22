@@ -201,6 +201,22 @@ def _machine(tmp_path: Path, target: str | None = None) -> tuple[dict, Path]:
     automod = _lkg_path(tmp_path).parent
     automod.mkdir(parents=True, exist_ok=True)
     _seed_target(tmp_path, target if target is not None else _head(ROOT))
+    # A home with no vault is not a machine the guardian ever runs on, and since #3149
+    # it is no longer a home this fixture may pretend to be: the vault is resolved from
+    # `$HOME` now (`policy.vault_root()`), the same way `.local/state/lloyd-guardian`
+    # below is, so redirecting `HOME` while leaving `obsidian/` absent is precisely the
+    # second, invented failure this docstring promises a node will never meet. Both
+    # places that run this entry point for real have one — `guardian-stage.sh` execs
+    # `selftest.py --profile staging` under the unit's own environment, whose
+    # `~/obsidian` is the live vault, and the gate's isolated child is handed
+    # `W.ensure_round_home`, which symlinks `~/obsidian` across rather than omitting it.
+    # A plain directory and not a link into the real vault: the check here is
+    # `vault tripwire judges and measures`, which only needs `vaultwatch.measure` to
+    # stat and walk a root, and pointing a fixture at the live vault would re-open, in
+    # the middle of the round that closes it, the write path #3149 exists to bound.
+    (home / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
+    (home / "obsidian" / "memory" / "selftest.md").write_text("# selftest vault\n",
+                                                              encoding="utf-8")
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(home),

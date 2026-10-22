@@ -236,7 +236,7 @@ def test_a_trip_still_halts_everything_and_now_arrives_named(guardian, monkeypat
 FOUR_HOURS = 4 * 3600.0
 
 
-def _backup_repo(dirs: Path, *, age_seconds: float) -> tuple[Path, str]:
+def _backup_repo(dirs: Path, name: str = "vault", *, age_seconds: float) -> tuple[Path, str]:
     """A backup-shaped bare repo whose HEAD commit is `age_seconds` old, and its sha.
 
     Shaped like what `backup-vault.sh` writes — a bare repo driven by
@@ -252,7 +252,7 @@ def _backup_repo(dirs: Path, *, age_seconds: float) -> tuple[Path, str]:
         assert r.returncode == 0, f"{args}: {r.stdout}{r.stderr}"
         return r.stdout.strip()
 
-    repo, work = dirs / "vault.git", dirs / "vaultwork"
+    repo, work = dirs / f"{name}.git", dirs / f"{name}-worktree"
     work.mkdir(parents=True)
     (work / "note.md").write_text("a note\n")
     git("init", "--quiet", "--bare", str(repo))
@@ -266,13 +266,59 @@ def _backup_repo(dirs: Path, *, age_seconds: float) -> tuple[Path, str]:
     return repo, git("--git-dir", str(repo), "log", "-1", "--format=%H")
 
 
-def _snapshot_repo_is(monkeypatch, repo: Path) -> None:
-    """Point the check at a planted repo through the override both sides already
-    share, rather than by patching the function under test:
-    `vaultwatch.snapshot_repo()` reads `LLOYD_VAULT_BACKUP_REPO`, and so does
-    `backup-vault.sh`, which is what keeps the check and the writer naming one
-    repository without a config file."""
+#: The owner directory's path relative to a home, spelled by the module under test so
+#: a node that plants a repository "in the owner position" is naming the same layout
+#: `backup-vault.sh` writes and `lloyd-vault-backup.timer` fires, not a guess at it.
+OWNER_REL = str(VW.SNAPSHOT_OWNER_DIR_REL)
+
+
+def _owner_dir(tmp_path: Path, monkeypatch) -> Path:
+    """The owner directory this test owns: present, scratch, and named by the code.
+
+    Redirected by replacing `vaultwatch.snapshot_owner_dir` rather than by setting
+    `HOME`, which is the same choice
+    `test_owner_check_does_not_silence_a_stale_vault_snapshot_alert` below makes and for
+    the same reason it has to be: the gate runs this file under a child whose `HOME` it
+    set itself (`scripts/automod/gate.py::_child_env`), and an `expanduser`-backed
+    `HOME` swapped mid-test is not what the reading then resolves — a node that moved
+    `$HOME` and asserted on the alert that follows was measuring the fixture, which is
+    the exact mistake #3149's own trap clause warns about. What the code asks is
+    "is this repository under THIS process's owner directory", so the node states the
+    owner directory. Its `$HOME/.local/state/lloyd-vault-backup` SHAPE is not left
+    unpinned: `SNAPSHOT_OWNER_DIR_REL` is the constant `SNAPSHOT_REPO` is built from,
+    and `test_a_directory_that_only_shares_the_owner_name_is_not_the_owner` pins what
+    lies inside it.
+    """
+    owner = tmp_path / "owner" / OWNER_REL
+    owner.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(VW, "snapshot_owner_dir", lambda: owner)
+    return owner
+
+
+def _snapshot_override(monkeypatch, owner: Path, repo: Path) -> None:
+    """Point the reading's override at `repo`, which sits in `owner`.
+
+    The override is the one `backup-vault.sh` shares, so the check and the writer name
+    one repository without a config file. It is the ONLY knob these nodes move: the
+    2026-10-21 emitter set exactly this one variable, and its one-variable override
+    carried `~/lloyd-work/.t/nonexistent-vault.git` into three sections of the live
+    daily note.
+    """
     monkeypatch.setenv("LLOYD_VAULT_BACKUP_REPO", str(repo))
+
+
+def _owner_backup_repo(tmp_path: Path, monkeypatch, name: str, *,
+                       age_seconds: float) -> tuple[Path, str]:
+    """Plant a repo IN the owner position and point the override at it: `(repo, sha)`.
+
+    The owner position is what makes a stale HEAD here an alert rather than a
+    fixture — #3132's alarm has to keep firing there (#3149 clause 4), and the same
+    HEAD age one directory away must not (#3149 clause 3).
+    """
+    owner = _owner_dir(tmp_path, monkeypatch)
+    repo, sha = _backup_repo(owner, name, age_seconds=age_seconds)
+    _snapshot_override(monkeypatch, owner, repo)
+    return repo, sha
 
 
 def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp_path,
@@ -284,15 +330,20 @@ def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp
     stream; the vault tick is the surface that can. The same node holds the
     throttle, because the tick runs every 5 s and a standing condition that
     re-alerts every 5 s is an alarm nobody reads (#3132).
+
+    Both repositories sit IN the owner directory (`$HOME/.local/state/
+    lloyd-vault-backup`), which is where #3149 leaves this alarm: an owner check in
+    front of the alert is only safe to add if a stale HEAD at the owner's own path
+    still pages, so this is the node that says so. Its counterpart,
+    `test_a_repo_outside_the_owner_directory_raises_no_vault_snapshot_alert`, holds
+    the same HEAD age one directory away and expects silence.
     """
     g, _, acted = guardian
-    fresh, _fresh_sha = _backup_repo(tmp_path / "fresh", age_seconds=60.0)
-    _snapshot_repo_is(monkeypatch, fresh)
+    fresh, _fresh_sha = _owner_backup_repo(tmp_path, monkeypatch, "fresh", age_seconds=60.0)
     g.check_vault()
     assert not acted["alerts"], acted["alerts"]          # a snapshot a minute old is fine
 
-    stale, sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
-    _snapshot_repo_is(monkeypatch, stale)
+    stale, sha = _owner_backup_repo(tmp_path, monkeypatch, "stale", age_seconds=FOUR_HOURS)
     g._vault_snapshots_checked_at = 0.0
     g.check_vault()
     [(level, title, body)] = acted["alerts"]
@@ -312,8 +363,7 @@ def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp
     assert len(acted["alerts"]) == 2                     # a stall standing for an
     assert g._vault_snapshots_checked_at > 0.0           # hour keeps being reported
 
-    later, _s2 = _backup_repo(tmp_path / "later", age_seconds=60.0)
-    _snapshot_repo_is(monkeypatch, later)                # the timer is delivering again
+    later, _s2 = _owner_backup_repo(tmp_path, monkeypatch, "later", age_seconds=60.0)  # delivering again
     g._vault_snapshots_checked_at = 0.0
     g.check_vault()
     assert len(acted["alerts"]) == 2                     # quiet from here on
@@ -328,8 +378,7 @@ def test_the_vault_snapshot_alert_is_quiet_while_the_vault_tripwire_is_set(guard
     is how an alert gets ignored — the data root's twin mutes the same way
     (`tests/test_data_home.py:371`)."""
     g, _, acted = guardian
-    stale, _sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
-    _snapshot_repo_is(monkeypatch, stale)
+    stale, _sha = _owner_backup_repo(tmp_path, monkeypatch, "stale", age_seconds=FOUR_HOURS)
     g.vault.marker.write_text(json.dumps({"reason": "200 of 401 vault files disappeared"}),
                               encoding="utf-8")
     assert g.vault.tripped()
@@ -349,22 +398,28 @@ def test_a_backup_repo_with_no_readable_head_alerts_as_the_worst_age(guardian, t
     cannot separate an alive store from a dead one, and `git log` answering
     `fatal: not a git repository` for a path that does not resolve must not read
     as green. Both shapes are checked — a repo the timer never created, and a
-    bare repo with no commit — because both are a vault with no off-vault copy."""
+    bare repo with no commit — because both are a vault with no off-vault copy.
+
+    Both sit in the owner directory, because that is the only place their silence
+    would mean anything: a missing repo is the worst age THERE is, so #3149's owner
+    check may not turn it into a shrug. The same shape outside the owner directory is
+    `test_a_repo_outside_the_owner_directory_raises_no_vault_snapshot_alert`."""
     g, _, acted = guardian
-    _snapshot_repo_is(monkeypatch, tmp_path / "never-created.git")
+    owner = _owner_dir(tmp_path, monkeypatch)
+    missing = owner / "never-created.git"
+    _snapshot_override(monkeypatch, owner, missing)
     g._vault_snapshots_checked_at = 0.0
     g.check_vault()
     [(level, title, body)] = acted["alerts"]
     assert (level, title) == ("error", G.VAULT_SNAPSHOT_ALERT_TITLE), acted["alerts"]
     assert "no readable HEAD commit" in body, body
-    assert str(tmp_path / "never-created.git") in body, body
+    assert str(missing) in body, body
+    assert "not the vault's backup owner" not in body, body   # it IS the owner's repo
 
     g._alert_seen.clear()                                # the alert's own repeat window
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    subprocess.run(["git", "init", "--quiet", "--bare", str(empty / "vault.git")],
+    subprocess.run(["git", "init", "--quiet", "--bare", str(owner / "no-commits.git")],
                    check=True, capture_output=True)
-    _snapshot_repo_is(monkeypatch, empty / "vault.git")
+    _snapshot_override(monkeypatch, owner, owner / "no-commits.git")
     g._vault_snapshots_checked_at = 0.0
     g.check_vault()
     assert len(acted["alerts"]) == 2, acted["alerts"]
@@ -376,9 +431,15 @@ def test_a_broken_snapshot_reading_cannot_stop_the_vault_tripwire(guardian, tmp_
     code inside it: a `git` that hangs the box, a module that fails to import, a
     repo on a mount that went away. The tripwire is the reason — it stops sync
     within one tick of a wipe, and a check bolted above it may not cost that. The
-    reading here raises on purpose, and the wipe below still has to trip."""
+    reading here raises on purpose, and the wipe below still has to trip.
+
+    The override points INSIDE the owner directory so that the raised exception is the
+    only thing that can keep this tick quiet: pointed anywhere else it would be
+    silenced by #3149's owner check and the node would pass without ever reaching the
+    `except` it is about."""
     g, vault, acted = guardian
-    _snapshot_repo_is(monkeypatch, tmp_path / "gone.git")
+    owner = _owner_dir(tmp_path, monkeypatch)
+    _snapshot_override(monkeypatch, owner, owner / "gone.git")
 
     def unreadable(*_a, **_k):
         raise RuntimeError("simulated git failure")
@@ -401,8 +462,7 @@ def test_the_vault_snapshot_check_runs_from_the_tick_even_while_paused(guardian,
     actions for minutes at a time. Driving `tick()` is what pins that the reading
     happens in the part of the loop that always runs (#3132)."""
     g, _, acted = guardian
-    stale, _sha = _backup_repo(tmp_path / "stale", age_seconds=FOUR_HOURS)
-    _snapshot_repo_is(monkeypatch, stale)
+    stale, _sha = _owner_backup_repo(tmp_path, monkeypatch, "stale", age_seconds=FOUR_HOURS)
     monkeypatch.setattr(g, "collect", lambda: {"now": time.time(), "supervisord": "ok",
                                                "procs": {}, "probes": {}})
     monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 600.0)
@@ -423,6 +483,102 @@ def test_the_vault_snapshot_check_runs_from_the_tick_even_while_paused(guardian,
     monkeypatch.setattr(subprocess, "run", stubbed)
     assert g.tick() == "paused"
     assert [a[1] for a in acted["alerts"]] == [G.VAULT_SNAPSHOT_ALERT_TITLE], acted["alerts"]
+
+
+def test_a_repo_outside_the_owner_directory_raises_no_vault_snapshot_alert(guardian,
+                                                                          tmp_path,
+                                                                          monkeypatch):
+    """#3149 clause 3: the stale-snapshot alert may only name a repo the backup owns.
+
+    The 2026-10-21 emitter is rebuilt here as it ran: a real stale HEAD in a repo
+    parked under a throwaway-checkout root (`~/lloyd-work/.t/`-shaped, and named
+    `nonexistent-vault.git`, the basename that reached the live daily note), reached
+    through the one knob that caller turned — `LLOYD_VAULT_BACKUP_REPO`, with the
+    other knob left wherever the process happened to have it.
+
+    What those three sections prove is that the reading itself cannot be trusted with
+    a page. It measured a genuine 4-hour-old HEAD and reported it accurately, and the
+    repository it measured was a fixture. So silence is the property here, while the
+    age stays measured and stays printed — the operator's `snapshot-age` CLI reads the
+    same string and a person who pointed the override at a repo deserves an answer
+    about that repo — with the sentence naming whose repository it is NOT.
+
+    The last block is what makes this node able to fail: the identical HEAD age placed
+    IN the owner directory pages on the same guardian, so the silence above is the
+    owner check and not a throttled tick, a tripped vault, or a plant that planted
+    nothing.
+    """
+    g, _, acted = guardian
+    owner = _owner_dir(tmp_path, monkeypatch)
+    throwaway = tmp_path / "lloyd-work" / ".t"
+    stale, _sha = _backup_repo(throwaway, "nonexistent-vault", age_seconds=FOUR_HOURS)
+    _snapshot_override(monkeypatch, owner, stale)
+
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert not acted["alerts"], acted["alerts"]
+
+    state = VW.snapshot_age_state(str(stale), VW.SNAPSHOT_MAX_AGE_SECONDS)
+    assert state["owned"] is False, state
+    assert state["fresh"] is False, state                 # the age is still measured
+    assert "4 h 0 m old" in state["text"], state["text"]
+    assert "not the vault's backup owner" in state["text"], state["text"]
+    assert str(VW.snapshot_owner_dir()) in state["text"], state["text"]
+
+    g.check_vault()                                       # a standing condition stays
+    assert not acted["alerts"], acted["alerts"]           # quiet, not once-per-throttle
+
+    _owner_backup_repo(tmp_path, monkeypatch, "stale", age_seconds=FOUR_HOURS)
+    g._alert_seen.clear()
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert [a[1] for a in acted["alerts"]] == [G.VAULT_SNAPSHOT_ALERT_TITLE], acted["alerts"]
+
+
+def test_a_directory_that_only_shares_the_owner_name_is_not_the_owner(tmp_path):
+    """The check is `relative_to`, so a sibling whose name merely starts with the
+    owner's buys nothing.
+
+    A confinement test written as a string prefix is a confinement test that can be
+    walked past by naming a directory, which is the class of guard #2110 names:
+    `lloyd-vault-backup-evil` begins with `lloyd-vault-backup` and is not in it. The
+    first line below is the positive control — a repo genuinely inside the owner
+    directory it is weighed against — so the three assertions differ only in the
+    characters a prefix would have ignored.
+    """
+    owner = tmp_path / OWNER_REL
+    assert VW.snapshot_repo_is_owned(owner / "vault.git", owner) is True
+    assert VW.snapshot_repo_is_owned(tmp_path / f"{OWNER_REL}-evil" / "x.git",
+                                     owner) is False
+    assert VW.snapshot_repo_is_owned(tmp_path / "lloyd-work" / ".t" / "vault.git",
+                                     owner) is False
+
+
+def test_a_stale_head_in_the_owner_repo_still_alerts_with_its_numbers(guardian, tmp_path,
+                                                                     monkeypatch):
+    """#3149 clause 4: the owner check may not weaken the alarm #3132 exists to run.
+
+    #3132 was filed because `lloyd-vault-backup.timer` sat enabled and firing while
+    370 runs each exited 128 and the vault's only off-vault copy did not move for four
+    days. Any check placed in front of that page buys back exactly that silence if it
+    can be tripped by something other than a foreign repository, so this node pins the
+    alarm still firing at the owner's own path with the three numbers a person needs:
+    the sha it is standing on, its age, and the bound it crossed."""
+    g, _, acted = guardian
+    repo, sha = _owner_backup_repo(tmp_path, monkeypatch, "vault", age_seconds=FOUR_HOURS)
+
+    state = VW.snapshot_age_state(str(repo), VW.SNAPSHOT_MAX_AGE_SECONDS)
+    assert state["owned"] is True, state                  # the owner's own repo
+    assert state["fresh"] is False, state
+
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    [(level, title, body)] = acted["alerts"]
+    assert (level, title) == ("error", G.VAULT_SNAPSHOT_ALERT_TITLE), acted["alerts"]
+    assert sha[:8] in body, body                          # its sha
+    assert "4 h 0 m old" in body, body                    # its age
+    assert "past the 3 h limit" in body, body             # the bound it crossed
+    assert "not the vault's backup owner" not in body, body
 
 
 def test_the_poller_names_the_state_function_and_the_cli_stays_a_human_surface():
