@@ -1,7 +1,7 @@
 ---
 title: qmd — the vault search engine, Lloyd's fork, and how it runs
 status: implemented
-date: 2026-09-25
+date: 2026-10-22
 ---
 
 # qmd — the vault search engine, Lloyd's fork, and how it runs
@@ -32,7 +32,12 @@ every measured change — is `architecture/retrieval.md`.
   rebuilding `dist/` in `~/lloyd/qmd` and restarting the daemon.
   `python -m scripts.qmd_fork_landing --fork <a cp -a copy>` answers whether a fork
   sha is in that state (never point it at the live checkout: the build rewrites
-  the served `dist/`).
+  the served `dist/`). Since #3030 the word is wider than HEAD: the `unpushed` leg
+  walks `refs/heads` and asks `rev-list --count refs/heads/<b> --not --remotes` per
+  branch, so a commit reachable from no remote fails the fork **even on a branch
+  checked out in a linked worktree** — the 2026-09-21 shape, where the check printed
+  `LANDED: branch lloyd @ ea2187e…` while `lloyd-perf` @ `feabdff` stood beside it
+  with no upstream (round SM_20260921_120120, finding 3).
 - **Editing `src/` changes nothing live.** The daemon serves `dist/`, and a node
   process keeps what it loaded until it restarts.
 
@@ -184,11 +189,17 @@ The reply carries `results` (`file` as `qmd://collection/path`, encoded; `title`
 `GET /health` carries uptime, rerank counters and `vecIndex` (vectors, full builds,
 incremental refreshes). Callers in Lloyd:
 
-Every request Lloyd's processes send goes through one door,
+Every **query** request Lloyd's processes send goes through one door,
 `agent_mcp/vault.py::qmd_query`: it posts the caller's payload unchanged, folds the
 reply's `meta` into `app/qmd_health.py`, and decodes each result's `file`. A
 payload with no `rerank` key counts as a rerank request, as it is to qmd (the
-REST handler skips only on `rerank: false`). Callers:
+REST handler skips only on `rerank: false`). The door is the `/query` door, and
+only that one: two processes do open sockets against the daemon to ask what it *is*
+rather than what it found — `app/doc_corpus.py::health_url_for` derives a `/health`
+URL out of the recall's own URL so a probe cannot answer about :8181 while the recall
+was served by the pin on :8182, and `scripts/maintenance/qmd_index_maintenance.py`'s
+`DAEMON_PROBE_URL` is `…/mcp` — and neither is folded into `qmd_health`, because
+neither carries a `meta`. Callers:
 
 - `agent_mcp/vault.py` — the recall doc leg (`recall_doc_leg_shape`), `vault_search`,
   entity lookups, through `_qmd_post` (rows shaped for the recall);
@@ -228,9 +239,24 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   embedded anyway). It also reports vec0 occupancy (live rows over allocated
   slots, from the sqlite-vec shadow tables) with a `need_capacity` verdict the
   orphan ratio cannot give, and the footprint as main + `-wal` + `-shm` (#844).
-  Neither cleanup nor VACUUM reclaims a dead vec0 slot; the verdict is report-only,
-  and the rebuild it points at is a hand side-copy-and-swap like the 09-21
-  model switch. That rebuild is a route of the same script that only a person
+  Neither cleanup nor VACUUM reclaims a dead vec0 slot, and the job rebuilds
+  nothing itself — but "the verdict is report-only" stopped being true on
+  2026-09-30: since #1897 `_exit_code` (:1637-1649) returns 1 whenever
+  `need_capacity` fires, so the nightly goes red every night from there until a
+  person performs the hand side-copy-and-swap. What *is* notice-only is the
+  lead-time signal #3072 put in front of it (2026-10-20): `capacity_approaching()`
+  (:1445-1463) is true for `CAPACITY_OCCUPANCY_TRIGGER` (0.25) ≤ occupancy <
+  `CAPACITY_APPROACHING_OCCUPANCY` (**0.50**), same dead-MiB floor, disjoint from
+  the red band by construction, and deliberately unread by `_exit_code`. It exists
+  because the red trigger is the first notice a person otherwise gets of a
+  side-copy rebuild measured at 37 minutes: occupancy walked 0.822 (2026-10-06, the
+  morning after the swap) → 0.3285 (10-20) → **0.3128 with 536 MiB dead and
+  `capacity_approaching: true` in the nightly of 2026-10-22** — read it back with
+  `scripts/maintenance/qmd_index_maintenance.py --dry-run`, whose report carries
+  `vec0.occupancy` and the `capacity_approaching` key — i.e. 0.0134–0.0189
+  occupancy/night and roughly twelve nights of warning inside the band. The band
+  is firing now and the rebuild is owed (#3119).
+  That rebuild is a route of the same script that only a person
   invokes (#1992): `--rebuild-side-copy <name>` copies the live config to
   `~/.config/qmd/<name>.yml`, runs `update` and `embed` with `--index <name>`
   (so the database is `~/.cache/qmd/<name>.sqlite`), and verifies: the side copy
@@ -369,10 +395,19 @@ serves it from a second daemon on its own port with production's program
 environment, so an eval measures a frozen corpus. The snapshot carries every
 collection (`/query` filters on `documents.collection`); the pin's
 `~/.config/qmd/evalpin.yml` only shapes `store_collections` and names the
-models. Since #1485 (2026-09-25) it is a copy of `index.yml` (it was
-`collections: {}`), `PinnedCorpus` refuses a snapshot missing a collection
-production's recall names, and `pin_config_report` records any drift between the
-two files in the pin's provenance. A pin shares GPU 0 with
+models. #1485 (2026-09-25) made it a copy of `index.yml` (it was `collections:
+{}` before that), and **it is no longer one**: #2728's operator leg rewrote the live
+file on 2026-10-15 (subliminal → `pattern: "*.md"` plus an `ignore:` list) and the
+pin's copy was not re-synced, so `evalpin.yml:28` still carries the pre-#2180 vault-wide
+glob. Measured 2026-10-22, `pin_config_report` returns `collections_match: false` with
+`missing_collections: []` and `embed_match: true` — mtimes tell the same story,
+`index.yml` 2026-10-15 against `evalpin.yml` 2026-09-25. That report is *recorded, not
+enforced*, and `PinnedCorpus`'s refusal fires only on a **missing** collection, so a pin
+run proceeds and books the drift into its own provenance as a boolean; it matters because
+`store_collections` is what qmd scopes and resolves paths against, and because the `eval/`
+arms build their own configs from this same file (`eval/embed_side_index.py:66`,
+`eval/contextual_full_corpus.py:58`). Re-syncing it, and naming the differing key instead
+of a flag, is #3158. A pin shares GPU 0 with
 production; the regression runner's pins ran 42% of wall time on 2026-09-21 and
 slowed production's reranks ~1.8×. Experiments use their own index name and port
 (`reap_stale` matches only its own), and prepared snapshots (a re-embedded or
@@ -420,9 +455,41 @@ the build rather than the setting is what changed.
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`
+- `eval/qmd_contention.py` — the join that prices GPU-0 contention by parsing the daemon's own `/query` lines (§2's log) against the regression runner's windows
+- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`, `test_qmd_contention.py`
 
 ## Review log
+
+- **2026-10-22 — `stale`.** Full pass against the tree, both live configs and the running
+  daemon (`vecIndex.vectors` 62,938, `rerank.fallbacks` 0, `[::1]:8181` only — an
+  IPv4-literal `curl` still returns 000). The mechanisms all still run and the fork is
+  unchanged (`lloyd` @ `079c9c9`, level with `origin/lloyd`, clean tree, no `src/` newer
+  than the served `dist/`), and the 14 collections, the 11 `VAULT_SEGMENTS`, the three
+  models, BM25 1.5/4.0/1.0, the five `QMD_*` knobs plus `QMD_FUSION_DEPTH=100`, watcher
+  2/10/60 s, cleanup 04:45 with its timer enabled and active, `EMBED_PENDING_MAX_RATIO`
+  0.25, the WAL gates 0.5 and 16 MiB, the keep- and release-list seeds and §8's paths all
+  re-read true. Four sentences were not current. **§5** said the vec0 capacity verdict
+  "is report-only": true until 2026-09-30, but #1897 made `_exit_code` return 1 on a
+  fired `need_capacity`, and #3072 (2026-10-20) added the `capacity_approaching` band
+  0.25 ≤ occ < 0.50 that is the notice-only half — the band is firing today (0.3128,
+  536 MiB dead), so §5 now says which verdict reds the run and which one warns. **§6**
+  said the pin's `evalpin.yml` "is a copy of `index.yml`": it stopped being one on
+  2026-10-15 when #2728 narrowed subliminal in the live file alone, measured
+  `collections_match: false` (#3158). **§4** said "every request" crosses
+  `qmd_query`: the door is `/query` only, and `app/doc_corpus.py` and the maintenance
+  script both hold sockets on `/health` and `/mcp` by design. **§1** described
+  `qmd_fork_landing`'s verdict before #3030 widened `LANDED` to every local branch,
+  linked worktrees included. §8 gained `eval/qmd_contention.py` and
+  `test_qmd_contention.py`. Filed: **#3158** (the pin's drifted config, and a drift
+  report that cannot say what drifted), **#3160** (`app/routers/memory.py:91`'s separate
+  `_VAULT_SEGMENTS` names `agents`, which is not a collection — a probe against it
+  returns `{"results": []}` with HTTP 200, never an error — and omits `architecture`,
+  `lloyd`, `autonomy`, `backlog` and `people`, so Mission Control's memory search has
+  five silently dead segments), **#3161** (`qmd-watcher.sh`'s cost comment still says 15
+  collections / ~15,800 files where both configs declare 14 and `documents` holds 9,042;
+  #2089's fix-shape applies) and **#3119**'s rebuild, to which this pass appended today's
+  occupancy. Nothing in §2 or §7 was contradicted by the tree; §7's numbers stay
+  2026-09-21-dated and are read as such.
 
 - **2026-10-14 — §5 only: the WAL reset #2709 added.** One new bullet, describing
   `checkpoint_live_wal()` in `scripts/maintenance/qmd_index_maintenance.py` — where it
