@@ -302,6 +302,94 @@ def test_the_unit_sets_neither_egress_override_so_the_arms_stay_the_driver_forke
     assert "env = dict(os.environ)" in body and 'env[ARM_ENV_VAR] = "1"' in body, body
 
 
+def test_widening_the_childs_environment_brought_no_arm_flag_and_no_working_directory():
+    """#3169 clause 4: binding the aggregator child to the checkout moved NO flag with it.
+
+    The fix is `aggregator_binding()` (its own section at the foot of `eval/egress_arms.py`),
+    which every launch of that child goes through, and it is the first thing in months to
+    put a key into the aggregator's environment that `start_on_arm_aggregator` did not choose
+    — a `PYTHONPATH` naming this checkout, without which `python -m agent_mcp.main` answers
+    `ModuleNotFoundError` and the 2026-10-19 06:27:12 fire refused. Two properties have to
+    survive that, and neither is visible from the child's side:
+
+    * the environment handed to the child is still the parent's plus the arm's own entries —
+      the `LLOYD_EGRESS_ENFORCE=1` that decides the arm, `LLOYD_MCP_PORT`, and the run-root
+      `LLOYD_DATA`. `agent_mcp.egress` reads the flag out of ITS OWN process environment
+      (`agent_mcp/egress.py:226`, and the scoping rule is `eval/egress_arms.py`'s module
+      docstring at :14-17), so a child that lost the flag would measure the ON arm
+      as an unenforcing server, and the pair of arms would come back identical.
+    * `aggregator_binding` sets `cwd`, which is exactly the knob a reader of this unit would
+      expect to see moved up into `WorkingDirectory=` — it must not be. The comment at
+      `agent-services/systemd/lloyd-egress-window.service:143` states that with NO
+      `WorkingDirectory=` set, every path token has to be absolute (the paragraph above it,
+      :133-143, gives the two reasons for the same rule on the `ExecStartPost` line); setting
+      it would make that comment false and quietly re-anchor any
+      relative token added later onto a tree the unit never names, so the fix stays scoped to
+      the one child that needs it, and this node is what keeps it there.
+
+    The child side of the first property — what the process ACTUALLY receives — is pinned by
+    `tests/test_run_egress_arms.py::test_the_enforce_on_arm_is_served_by_a_private_aggregator_the_window_started`,
+    which reads the values back out of the child's own record; this node is the half that can
+    only be answered of the unit and the launch site.
+    """
+    unit = SERVICE.read_text(encoding="utf-8")
+    parsed = _parse(unit)
+    assert not [k for k in _env_keys(parsed) if k == "LLOYD_EGRESS_ENFORCE"], _env_keys(parsed)
+    # A setting line, not a mention: the unit's own comment at :143 discusses
+    # `WorkingDirectory=` at length, and a node that refused the WORD would fail on the file
+    # as written. `EnvironmentFile=` is matched the same way, with its own comment lines.
+    setting = re.compile(r"^\s*(EnvironmentFile|WorkingDirectory)\s*=", re.M)
+    assert not setting.search(unit), (
+        "the binding belongs on the aggregator child: a WorkingDirectory= here would make "
+        "the unit's own comment at :143 false, and an EnvironmentFile= is the other door to "
+        "the same leak")
+
+    # The binding lives in its own module now — `eval/run_egress_arms.sh` has to import it
+    # without importing the driver — so this asserts the two halves where they live: the
+    # DRIVER's launch body hands the child through `aggregator_binding`, and that FUNCTION
+    # names cwd+PYTHONPATH and no flag.
+    arms = DRIVER.read_text(encoding="utf-8")
+    launch = re.search(r"async def start_on_arm_aggregator\(.*?\n(?=\nasync def |\ndef |"
+                       r"\nclass |\n#: )", arms, re.S)
+    assert launch is not None, "start_on_arm_aggregator moved; re-find it before trusting this"
+    spawn = launch.group(0)
+    assert "create_subprocess_exec(*argv, **aggregator_binding(env))" in spawn, spawn
+    assert "LLOYD_EGRESS_ENFORCE" not in spawn, (
+        f"the launch body must not grow its own flag: {spawn}")
+
+    binding_mod = (REPO / "eval" / "aggregator_binding.py").read_text(encoding="utf-8")
+    fn = re.search(r"def aggregator_binding\((?:.|\n)*?\n(?=\ndef |\nclass |$)",
+                   binding_mod)
+    assert fn is not None, (
+        "the launch site no longer builds the child's cwd+env through aggregator_binding; "
+        "re-find it before trusting this node — a second binding site is how a flag leaks")
+    scope = fn.group(0)
+    for carried in ("cwd", "PYTHONPATH", "env"):
+        assert carried in scope, f"{carried} left the child's binding: {scope}"
+    # An ASSIGNMENT test, not a mention test: the function's own docstring names the three
+    # arm entries to say it leaves them alone, and a node that refused the WORDS would fail
+    # on the file as written. What must be absent is anyone in this module WRITING one of
+    # them — it is imported by the wrapper's pre-flight, and a process that only asks
+    # whether an import resolves must not be able to arm anything by asking.
+    for flag in ("LLOYD_EGRESS_ENFORCE", "ARM_ENV_VAR", "LLOYD_MCP_PORT", "LLOYD_DATA"):
+        assert not re.search(r"[\w\]]\s*\[\s*[\"']?" + flag + r"[\"']?\s*\]\s*=", binding_mod), (
+            f"{flag} is assigned inside eval/aggregator_binding.py: the arm entries belong "
+            "in the driver's env build, not in the binding the pre-flight also imports")
+    # AST, not a substring: this module's own docstring says the phrase `import egress_arms`
+    # while explaining why it must not. What has to hold is about its IMPORTS — the module the
+    # wrapper's pre-flight loads alone must load nothing from the repo, or a partial tree
+    # gets a refusal that blames the aggregator for a missing repo module.
+    imported = sorted({n.module or "" for n in ast.walk(ast.parse(binding_mod))
+                       if isinstance(n, ast.ImportFrom)}
+                      | {a.name for n in ast.walk(ast.parse(binding_mod))
+                         if isinstance(n, ast.Import) for a in n.names})
+    assert not [m for m in imported
+                if m.split(".")[0] in {"egress_arms", "persistence_arms", "run_injection_canary",
+                                       "app", "agent_mcp", "workers"}], (
+        f"eval/aggregator_binding.py imports repo modules {imported}, so the wrapper's "
+        "pre-flight can fail in a tree that has nothing wrong with its aggregator (#3169)")
+
+
 # ── clause 2: the run root is a directory the unit creates, not the live data root ─────
 
 def test_the_run_root_is_a_fixed_dir_under_lloyd_data_created_before_the_window():

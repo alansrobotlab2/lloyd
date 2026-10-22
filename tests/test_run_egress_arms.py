@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -45,6 +46,7 @@ for _p in (str(ROOT), str(ROOT / "eval"), str(ROOT / "tests")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import aggregator_binding as AB  # noqa: E402  # the child binding and its pre-flight (#3169)
 import egress_arms as EA  # noqa: E402
 import persistence_arms as PA  # noqa: E402
 from agent_mcp import egress as EG  # noqa: E402
@@ -78,7 +80,11 @@ rows = [{"scenario": key, "rep": rep} for key in
 RI.append_rows(rows, path=RI.rows_path(), arm=arm)
 '''
 #: The stub aggregator: bind the port the window named, record the environment it was
-#: launched with, then answer `/state` with the arm the test asked for.
+#: launched with — including the two things that decide whether `import agent_mcp` works
+#: inside it, its cwd and its inherited `PYTHONPATH` — then answer `/state` with the arm
+#: the test asked for. `AGG_IMPORT` makes it attempt that import for real and RECORD the
+#: outcome rather than die on it, so a node reads the answer the shipped child would have
+#: got while the window still gets its `/state`.
 AGGREGATOR_SCRIPT = '''
 import json, os, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,10 +93,24 @@ port = int(os.environ["LLOYD_MCP_PORT"])
 enforce = (os.environ.get("AGG_ENFORCE", "true").strip().lower() != "false")
 if os.environ.get("AGG_EXIT"):
     sys.exit(int(os.environ["AGG_EXIT"]))
+rec = {"pid": os.getpid(), "port": port,
+       "enforce_flag": os.environ.get("LLOYD_EGRESS_ENFORCE"),
+       "data_root": os.environ.get("LLOYD_DATA"),
+       "cwd": os.getcwd(),
+       "python_path": os.environ.get("PYTHONPATH")}
+if os.environ.get("AGG_IMPORT"):
+    # The question the 2026-10-19 06:27:12 fire answered with a ModuleNotFoundError,
+    # asked of THIS process: does `agent_mcp` resolve in the cwd and environment the
+    # window actually handed me? Recorded, not raised: a node that failed on a ready-wait
+    # timeout instead would not say which half of the binding was missing.
+    try:
+        import agent_mcp.main  # noqa: F401
+        rec["import_rc"] = 0
+    except BaseException as exc:
+        rec["import_rc"] = 1
+        rec["import_err"] = f"{type(exc).__name__}: {exc}"
 with open(os.environ["AGG_MARKER"], "w", encoding="utf-8") as fh:
-    json.dump({"pid": os.getpid(), "port": port,
-               "enforce_flag": os.environ.get("LLOYD_EGRESS_ENFORCE"),
-               "data_root": os.environ.get("LLOYD_DATA")}, fh)
+    json.dump(rec, fh)
 
 
 class H(BaseHTTPRequestHandler):
@@ -246,7 +266,7 @@ def write_stubs(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def window_env(tmp_path: Path, stub: Stub, db: Path, *, agg_enforce="true",
-               agg_exit=None, canary_sleep=0.0) -> dict:
+               agg_exit=None, canary_sleep=0.0, agg_import=False) -> dict:
     """The environment a window runs with: scratch store, scratch rows, both stubs."""
     canary, agg = write_stubs(tmp_path)
     env = dict(os.environ)
@@ -272,15 +292,30 @@ def window_env(tmp_path: Path, stub: Stub, db: Path, *, agg_enforce="true",
     })
     if agg_exit:
         env["AGG_EXIT"] = str(agg_exit)
+    if agg_import:
+        env["AGG_IMPORT"] = "1"
     env.pop("LLOYD_CANARY_REPORT", None)
     env.pop("LLOYD_EGRESS_ENFORCE", None)   # the window's flag goes to ITS child only
     env.pop("LLOYD_MCP_PORT", None)
+    # Hermetic, not tidiness: `agent_mcp` is not installed into any interpreter here
+    # (`ls ~/lloyd/.venvs/lloyd/lib/python3.12/site-packages` holds no `agent_mcp` and no
+    # `.pth` pointing at the checkout), so `import agent_mcp` in a child resolves ONLY
+    # through a cwd or a PYTHONPATH. A PYTHONPATH inherited from whoever launched pytest
+    # would hand the child a repo entry the driver never gave it, and every assertion
+    # about the binding below would pass on the borrowed value.
+    env.pop("PYTHONPATH", None)
     return env
 
 
-def run_window(tmp_path: Path, *args, env: dict) -> subprocess.CompletedProcess:
-    """One real `bash` invocation of the shipped entrypoint."""
-    return subprocess.run(["bash", str(WRAPPER), *map(str, args)], cwd=str(ROOT),
+def run_window(tmp_path: Path, *args, env: dict,
+               cwd: "str | Path" = ROOT) -> subprocess.CompletedProcess:
+    """One real `bash` invocation of the shipped entrypoint, from `cwd`.
+
+    `cwd` defaults to the checkout because that is where an operator stands; passing
+    another directory is how a node asks the systemd question — the unit sets no
+    `WorkingDirectory=`, so the fire begins outside the tree entirely.
+    """
+    return subprocess.run(["bash", str(WRAPPER), *map(str, args)], cwd=str(cwd),
                           env=env, capture_output=True, text=True, timeout=180)
 
 
@@ -417,6 +452,15 @@ def test_the_enforce_on_arm_is_served_by_a_private_aggregator_the_window_started
     DECIDING process, the caller's port, and a run-local `LLOYD_DATA` — plus that the ON
     arm's episodes were pointed at that endpoint with `--mcp-url`, and that the child
     was stopped on teardown.
+
+    #3169 clause 1 rides along on the two entries the 2026-10-19 06:27:12 fire was missing
+    from the child's own record: the cwd it was given and the `PYTHONPATH` it inherited,
+    which together are all that `python -m agent_mcp.main` resolves through. Of the two,
+    the `PYTHONPATH` one is the assertion that can fail without the fix: this node starts
+    the wrapper from the checkout, so an unbound child inherits the repo as its cwd and
+    the `cwd` assertion below would still hold — which is exactly why
+    `test_the_aggregator_child_imports_agent_mcp_from_a_foreign_executor_cwd` re-runs the
+    same spawn from a directory that is not the repo.
     """
     db = make_db(tmp_path)
     stub = Stub(db=db)
@@ -431,6 +475,12 @@ def test_the_enforce_on_arm_is_served_by_a_private_aggregator_the_window_started
         assert rec["enforce_flag"] == "1", rec
         assert rec["port"] == port, rec
         assert rec["data_root"] == str(root), rec
+        assert rec["cwd"] == str(ROOT), (
+            f"the aggregator must be bound to the checkout, not inherit wherever the "
+            f"window happened to start: {rec}")
+        assert str(ROOT) in (rec["python_path"] or "").split(os.pathsep), (
+            f"`agent_mcp` is not installed into any interpreter, so a child without the "
+            f"checkout on PYTHONPATH cannot import it: {rec}")
         assert "LLOYD_EGRESS_ENFORCE" not in env, (
             "the flag belongs to the child; the window's own environment must not "
             "claim the arm the endpoint is the one stamping")
@@ -697,3 +747,211 @@ def test_the_leak_check_reports_even_from_a_window_that_refused_earlier(tmp_path
         assert hold_watermark(db) is False, out.stderr
     finally:
         stub.close()
+
+
+# ── #3169: the aggregator child has to be able to import its own package ───
+#
+# `lloyd-egress-window.service` sets no `WorkingDirectory=`, so systemd runs the wrapper
+# outside the checkout, and the ON arm's `python -m agent_mcp.main` resolves `agent_mcp`
+# through nothing but the cwd and PYTHONPATH of the process that runs it. On
+# 2026-10-19 06:27:12 it answered `ModuleNotFoundError: No module named 'agent_mcp'`
+# (journalctl, exit 1) after the window had already spent 16.652 s of wall clock on the pool
+# pause and the drain, and the ON arm has no row to this day. `window_env` therefore strips
+# `PYTHONPATH`, so nothing below can pass on a path entry inherited from the test runner.
+
+def unimportable_tree(tmp_path: Path, *, with_package=False) -> Path:
+    """A checkout whose wrapper runs and whose aggregator cannot be imported: the wrapper
+    and `aggregator_binding.py` copied into an empty directory, plus `agent_mcp/` or not.
+
+    What this stands in for is any tree where `python -m agent_mcp.main` cannot resolve,
+    which on 2026-10-19 was caused by the cwd and is caused here by the directory itself —
+    the mechanism the pre-flight has to catch is the same either way, and the pre-flight
+    asks its question of a real interpreter, so a fake is not available. `with_package=True`
+    brings `agent_mcp` back, and the paired node needs it: a refusal that fires on every
+    tree is not a gate, it is an outage.
+
+    Exactly two files come along, and that IS the point of the split. The wrapper's
+    pre-flight imports `aggregator_binding` and nothing else; `egress_arms`, the module that
+    actually spawns, pulls `persistence_arms` → `workers.pool`, so a pre-flight phrased as
+    `import egress_arms` would fail in a partial tree for a missing repo module and print a
+    refusal blaming the aggregator. Copying the driver in would recreate that confound, so
+    the two copies differ in one thing only: whether `agent_mcp/` sits beside the eval dir.
+    """
+    root = tmp_path / "tree"
+    (root / "eval").mkdir(parents=True)
+    for name in ("run_egress_arms.sh", "aggregator_binding.py"):
+        shutil.copy2(ROOT / "eval" / name, root / "eval")
+    if with_package:
+        # A TWO-MODULE stub, not a copy of the real package: the real `agent_mcp.main` pulls
+        # `app.*`, which pulls the rest of the repo, so a copy of `agent_mcp/` alone fails to
+        # import for a reason this node is not about. What the pre-flight answers is
+        # RESOLUTION — can that interpreter, in that cwd and environment, find the name the
+        # child is asked to run — and a stub package answers exactly that. That the real
+        # package imports under the real binding is node 2's claim
+        # (`test_the_aggregator_child_imports_agent_mcp_from_a_foreign_executor_cwd`), asked
+        # of the driver's actual child.
+        (root / "agent_mcp").mkdir()
+        (root / "agent_mcp" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "agent_mcp" / "main.py").write_text("", encoding="utf-8")
+    return root
+
+
+def run_sh(wrapper: Path, tmp_path: Path, *args, env: dict,
+           cwd: "str | Path") -> subprocess.CompletedProcess:
+    """`run_window` against an arbitrary wrapper file — the copy's, not the checkout's."""
+    return subprocess.run(["bash", str(wrapper), *map(str, args)], cwd=str(cwd),
+                          env=env, capture_output=True, text=True, timeout=300)
+
+
+def test_the_aggregator_child_imports_agent_mcp_from_a_foreign_executor_cwd(tmp_path):
+    """#3169 clause 2: the window's own spawn, from a cwd that is not the checkout.
+
+    `cwd=tmp_path`, which is stricter than the unit's `%h` for the reason
+    `tests/test_persistence_window_unit.py::test_the_post_start_command_resolves_from_the_directory_systemd_starts_it_in` gives for its `cwd="/"`: if the launch
+    resolves from a temp directory it resolves from a home directory too. The pre-existing
+    ON-arm node could never see this because `run_window` starts the wrapper from `ROOT`,
+    so an unbound child inherited the repo as its cwd and everything still worked — which is
+    also why the same node is not evidence for the `PYTHONPATH` half of the fix.
+
+    The child is the driver's real child (`create_subprocess_exec` with whatever binding it
+    applies now), and the `AGG_IMPORT` stub answers the import question inside that process
+    and records the result, so `import_rc` is the exit status of `import agent_mcp.main` as
+    the shipped aggregator would have experienced it — the number the 2026-10-19 journal
+    line is missing.
+    """
+    db = make_db(tmp_path)
+    stub = Stub(db=db)
+    port = free_port()
+    try:
+        env = window_env(tmp_path, stub, db, agg_import=True)
+        out = run_window(tmp_path, 1, "--on-port", port, env=env, cwd=tmp_path)
+        assert out.returncode == 0, out.stderr
+        rec = agg_record(tmp_path)
+        assert rec, "the ON arm's aggregator never started"
+        assert rec["import_rc"] == 0, (
+            f"the aggregator child could not import the package it is: {rec}")
+        assert rec["cwd"] == str(ROOT), rec
+        assert str(ROOT) in (rec["python_path"] or "").split(os.pathsep), rec
+        assert hold_watermark(db) is False, "the window left dispatch paused"
+    finally:
+        stub.close()
+
+
+def test_the_binding_the_window_hands_the_child_is_what_makes_the_import_resolve(tmp_path):
+    """#3169 clause 2's control pair: one argv, launched bound and unbound.
+
+    The bound half splats the dict `AB.aggregator_binding` produces — the same object
+    `start_on_arm_aggregator` splats into `create_subprocess_exec` — so this node moves with
+    the binding instead of drifting from it, and the unbound half re-runs the identical argv
+    from `cwd="/"` with no `PYTHONPATH`, which is the 2026-10-19 shape on the record. With
+    only the first half the node would pass on a `PYTHONPATH` someone exported, and with
+    only the second it would prove nothing about the fix.
+    """
+    base = dict(os.environ)
+    base.pop("PYTHONPATH", None)
+    # The one duplication the fix carries — the pre-flight module cannot name the driver's
+    # default command by importing the driver — is pinned rather than trusted.
+    assert AB.default_mcp_cmd() == EA.DEFAULT_MCP_CMD, (
+        "eval/aggregator_binding.py and eval/egress_arms.py disagree about what the child is "
+        "asked to run, so the pre-flight is checking a command this window never launches")
+    bound = AB.aggregator_binding(base)
+    assert bound["cwd"] == str(ROOT), bound["cwd"]
+    assert str(ROOT) in bound["env"]["PYTHONPATH"].split(os.pathsep), bound["env"]
+    ok = subprocess.run([sys.executable, "-c", "import agent_mcp.main"],
+                        capture_output=True, text=True, timeout=300, **bound)
+    assert ok.returncode == 0, ok.stderr
+    unbound = subprocess.run([sys.executable, "-c", "import agent_mcp.main"], cwd="/",
+                             env=base, capture_output=True, text=True, timeout=300)
+    assert unbound.returncode != 0 and "ModuleNotFoundError" in unbound.stderr, (
+        "the control stopped being the failure this binding exists for: if `agent_mcp` "
+        "resolves from `/` with no PYTHONPATH then the fire was never broken this way, "
+        f"and the fix needs re-thinking — got rc={unbound.returncode} "
+        f"stderr={unbound.stderr[-300:]!r}")
+
+
+def test_an_unimportable_tree_is_refused_before_the_pool_is_paused(tmp_path):
+    """#3169 clause 3: a tree the aggregator cannot import is refused in the wrapper.
+
+    The fire's cost is the point. `eval/egress_arms.py`'s own teardown hands dispatch back,
+    so the 2026-10-19 refusal was safe — but it was 16.652 s of wall clock (journalctl) and
+    a pool pause in front of nothing, and every Monday since has repeated it. So the pause
+    POST the stub backend records is what "before" means here, measured on the stub rather
+    than on a stdout string: a refused window must leave `stub.posts` with nothing that
+    paused anything, and no `[egress-arms] rep` line either, because the driver never
+    started.
+
+    The paired control is the same copied tree with `agent_mcp` present and `LLOYD_MCP_CMD`
+    left at the shipped `-m` form: its pre-flight passes, the driver runs, and its stub sees
+    the pause POST and hands the hold back. Without that half this node cannot tell a gate
+    from an outage, and clause 3's own trap is a check that refuses every fire, cleanly,
+    forever.
+    """
+    def refused_run(root: Path) -> "tuple[subprocess.CompletedProcess, Stub, Path]":
+        db_root = tmp_path / f"db-{root.name}"
+        db_root.mkdir(parents=True, exist_ok=True)
+        db = make_db(db_root)
+        stub = Stub(db=db)
+        try:
+            env = window_env(tmp_path, stub, db)
+            env.pop(EA.MCP_CMD_ENV, None)   # the shipped `-m agent_mcp.main`, not the stub
+            env[EA.RUN_ROOT_ENV] = str(root / "run-root")
+            out = run_sh(root / "eval" / "run_egress_arms.sh", tmp_path,
+                         1, "--on-port", free_port(), env=env, cwd=root)
+            return out, stub, db
+        except Exception:
+            stub.close()
+            raise
+
+    broken = refused_run(unimportable_tree(tmp_path / "broken"))
+    out, stub, db = broken
+    try:
+        assert out.returncode == 2, (out.returncode, out.stderr[-400:])
+        assert "agent_mcp" in out.stderr, out.stderr
+        assert "[egress-arms] rep" not in out.stdout, out.stdout
+        assert not any(p.get("paused") is True for p in stub.posts), stub.posts
+        assert hold_watermark(db) is False, out.stderr
+    finally:
+        stub.close()
+
+    healthy = refused_run(unimportable_tree(tmp_path / "whole", with_package=True))
+    out2, stub2, db2 = healthy
+    try:
+        # What the healthy leg proves is exactly one thing: the pre-flight let it through.
+        # The copy carries no driver — `exec $PYTHON $ROOT/eval/egress_arms.py` fails two
+        # lines later, and it is meant to, because a driver dropped into a stripped tree
+        # would fail on `workers.pool` and the confound the split exists to avoid would be
+        # back. So the claim here is the ABSENCE of the refusal, not a zero exit; that the
+        # window then runs end to end is the pre-existing ON-arm node's claim, in the real
+        # checkout.
+        assert "refusing before the pool pause" not in out2.stderr, out2.stderr[-500:]
+        assert "agent_mcp" not in out2.stderr, out2.stderr[-500:]
+        assert not any(p.get("paused") is True for p in stub2.posts), stub2.posts
+    finally:
+        stub2.close()
+
+
+def test_the_import_pre_flight_never_asks_the_question_of_the_wrappers_cwd(tmp_path,
+                                                                          monkeypatch):
+    """#3169 clause 3's trap, pinned directly: the check passes with the caller outside.
+
+    `aggregator_import_check()` is the function the wrapper calls. Asking it here from a
+    temp cwd, with no `PYTHONPATH` in the environment, is the systemd ground — the unit sets
+    no `WorkingDirectory=`, so the wrapper's own cwd is nowhere near the checkout — and the
+    answer must still be `(0, "")`. An implementation that probed from the caller's cwd (the
+    shape the item's original clause 2 described) returns a nonzero rc here, and on the live
+    box that bug is worse than the one being fixed: every fire would refuse, cleanly, forever.
+
+    The second half is the same call pointed at an argv that imports nothing — the absolute
+    script shape `eval/persistence_arms.py:119` ships — which must return `(0, "")` even
+    though the module under probe would fail. A pre-flight that checks a package the launch
+    never imports is not testing the launch.
+    """
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv(EA.MCP_CMD_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    rc, tail = AB.aggregator_import_check()
+    assert rc == 0, f"the pre-flight refused a healthy checkout: {tail}"
+    stub_argv = [sys.executable, str(tmp_path / "stub-aggregator.py")]
+    assert AB.import_needed_by(stub_argv) is None
+    assert AB.aggregator_import_check(stub_argv) == (0, "")
+    assert AB.import_needed_by(EA.DEFAULT_MCP_CMD) == "agent_mcp.main"

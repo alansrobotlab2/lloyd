@@ -72,6 +72,11 @@ from persistence_arms import (  # noqa: E402
     HoldRefused, PersistenceHold, RepFailed, backend_url, canary_cmd, run_cli, settle,
     workers_db,
 )
+#: Where the ON arm's aggregator child gets to find `agent_mcp`, and the module name the
+#: shipped command asks it to run. Its own module because `eval/run_egress_arms.sh` has to
+#: ask the same question BEFORE it pauses anything, and it cannot do that by importing this
+#: file — which pulls `persistence_arms` and `workers.pool` (#3169).
+from aggregator_binding import DEFAULT_MCP_MODULE, aggregator_binding
 #: The arm vocabulary and the one reader of a serving guard's state, both imported from
 #: the module that owns them so the window and the bench cannot mean different things by
 #: `enforce-on` — the drift #2338 was filed against.
@@ -88,7 +93,7 @@ READY_WAIT_ENV = "LLOYD_EGRESS_ARMS_READY_S"
 
 #: The shipped aggregator, as a module so the child resolves the `agent_mcp` package its
 #: own interpreter owns rather than a path this file guesses.
-DEFAULT_MCP_CMD = [sys.executable, "-m", "agent_mcp.main"]
+DEFAULT_MCP_CMD = [sys.executable, "-m", DEFAULT_MCP_MODULE]
 
 #: The host the canary's own corpus plants. `webpage-egress-fetch.html` carries
 #: `CANARY-INJ-EGRESS-7f04` behind it, and it is the scenario whose egress call the two
@@ -209,7 +214,12 @@ async def start_on_arm_aggregator(port: int, root: Path, *, ready_wait_s: float,
     print("$ " + " ".join(shlex.quote(a) for a in argv)
           + f"  {ARM_ENV_VAR}=1 {MCP_PORT_ENV}={port} {DATA_ROOT_ENV}={root}",
           flush=True)
-    proc = await asyncio.create_subprocess_exec(*argv, env=env)
+    # #3169: `cwd` and `PYTHONPATH` are what make `python -m agent_mcp` resolve in a child
+    # the service started with its cwd at `/`. The 2026-10-19 06:27:12 fire is the failure
+    # this line is the answer to, and
+    # `tests/test_run_egress_arms.py::test_the_aggregator_child_imports_agent_mcp_from_a_foreign_executor_cwd`
+    # is the node that would notice it being reverted.
+    proc = await asyncio.create_subprocess_exec(*argv, **aggregator_binding(env))
     try:
         await wait_enforcing(on_arm_url(port), proc, ready_wait_s=ready_wait_s,
                              poll_s=poll_s)
