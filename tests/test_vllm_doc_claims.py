@@ -313,15 +313,18 @@ def test_the_counting_day_may_be_full_of_worker_turns(reading, derived):
     """Clause 4: the day need not be free of bench/worker turns, the by-kind list
     is called what it is, and no figure is hand-written to fill the gap.
 
-    `by_kind` is built over `missing` (`scripts/vllm_prefix_miss_window.py:225-229`), so it
-    is a breakdown of the turns that missed and says nothing about the 443-turn mix; calling
-    it a turn mix would be a false statement in derived prose, which is the worst kind this
-    page has. The mix IS computable from the extract — its turn rows carry the kind — which
-    is what makes the ban below a check rather than a wish: for every kind whose turn count
-    differs from its miss count, writing `kind <turn count>` could only have come from
-    outside `derive`. Where the two coincide (`deepresearch` missed on all 4 of its turns)
-    the pairing is genuinely ambiguous and is left alone: a test cannot ban a number that is
-    also a legal one, and pretending otherwise would be an invention from the other side.
+    `by_kind` is built over `missing` (derive's `by_kind` loop in
+    `scripts/vllm_prefix_miss_window.py`, named by symbol because a line range in a comment
+    has no rail and no owner, and this harness grows code above that loop with every new
+    day), so it is a breakdown of the turns that missed and says nothing about the
+    443-turn mix; calling it a turn mix would be a false statement in derived prose, which
+    is the worst kind this page has. The mix IS computable from the extract — its turn rows
+    carry the kind — which is what makes the ban below a check rather than a wish: for every
+    kind whose turn count differs from its miss count, writing `kind <turn count>` could only
+    have come from outside `derive`. Where the two coincide (`deepresearch` missed on all 4 of
+    its turns) the pairing is genuinely ambiguous and is left alone: a test cannot ban a
+    number that is also a legal one, and pretending otherwise would be an invention from the
+    other side.
     """
     ex = json.loads(EXTRACT.read_text(encoding="utf-8"))
     assert re.search(r"need not be free of bench[^\n]{0,40}worker|bench and worker turns",
@@ -346,6 +349,56 @@ def test_the_counting_day_may_be_full_of_worker_turns(reading, derived):
             "a figure `derive` returns, so it can only have been hand-written")
     assert not re.search(r"\d+ chat sessions?", reading, re.I), \
         "a chat-session count is not derivable (turn rows carry no session id)"
+
+
+# ── #3139: this file cites `vllm_prefix_miss_window.py` by symbol, never by line.
+#
+# The node above used to give the `by_kind` loop's position as lines 225-229 of that script.
+# By the time it was read the loop was 62 lines lower down and that range had fallen inside
+# `two_request_throughput`'s cold-admission prose, so the docstring was confidently pointing
+# at a different function — the same drift `architecture/vllm.md` §8 warns about, in a file
+# whose line numbers move whenever a fixture or a figure is added above them.
+#: A citation of the window script by LINE NUMBER — the form this file bans itself.
+_WINDOW_LINE_CITE = re.compile(r"scripts/vllm_prefix_miss_window\.py:[0-9]")
+
+
+def test_the_by_kind_reference_names_the_loop_by_symbol_not_by_line():
+    """Clause 1 (#3139): the prose that explains why `by_kind` is a miss breakdown and
+    not the day's turn mix identifies the loop by symbol, so it cannot silently end up
+    describing some other function.
+
+    The claim lives in that node's docstring, and a docstring carries no rail, so this
+    node reads its `__doc__` back. Restoring the old line range fails it, and so does
+    naming the file without naming `derive`'s loop.
+    """
+    doc = test_the_counting_day_may_be_full_of_worker_turns.__doc__
+    assert doc is not None, "the node whose attribution this pins lost its docstring"
+    assert "by_kind" in doc and "derive" in doc, (
+        "the breakdown must be attributed to derive's `by_kind` loop by name — the line "
+        "range it used to quote is 62 lines away from the loop it named")
+    assert "scripts/vllm_prefix_miss_window.py" in doc, \
+        "the file still has to be named, or `derive` is a symbol in the air"
+    assert not _WINDOW_LINE_CITE.search(doc), \
+        "that docstring cites the window script by line number again — the range was never " \
+        "the thing the sentence was about, it was only where the loop happened to sit"
+
+
+def test_this_file_never_cites_the_window_script_by_line_number():
+    """Clause 2 (#3139): the ban covers the whole module, not just the one docstring, so
+    the next cite typed anywhere in it reddens here.
+
+    This is a derivation harness over committed extracts: adding a fixture moves every
+    line number below it, which is exactly how the one this item fixed went stale — and
+    unlike a doc claim, nothing outside this file would ever have noticed.
+    `architecture/vllm.md` is deliberately NOT checked here: §10's cites are pinned by
+    line by `test_criterion_a_names_the_population_it_counted` and by the SHA of the
+    counted reading, and correcting them is #3139's owed half, not this change.
+    """
+    src = Path(__file__).resolve().read_text(encoding="utf-8")
+    hits = [ln.strip() for ln in src.splitlines() if _WINDOW_LINE_CITE.search(ln)]
+    assert hits == [], (
+        f"{len(hits)} line-number cite(s) of the window script are back in this file: "
+        f"{hits[:2]} — name the symbol instead (`derive`'s `by_kind` loop)")
 
 
 # ── #1810: (a)'s mints say what the code does, and the population ruling is on
