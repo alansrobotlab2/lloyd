@@ -1193,15 +1193,43 @@ module that lost a tool without saying which one:
 curl -s http://127.0.0.1:8500/health | python3 -m json.tool   # tools, modules, per-module
 ```
 
-The names with their annotations come from `tools/list` on the same server,
+The names with their annotations also come from `tools/list` on the same server,
 which since #1053 needs `X-Lloyd-Aggregator-Token: $(cat ~/.local/state/lloyd/aggregator-token)`
-on the request header. That is the only route that can see the Thunderbird
-bridge's 40 rows at all, so a regeneration that skips it drops or freezes them
-(#3127).
+on the request header. **Neither route is the only one that sees the Thunderbird
+bridge's rows, and this one is not the richer of the two.** The dump below prints all 40
+whenever the bridge is reachable, because `agent_mcp/thunderbird.py` opens its *own*
+`node mcp-bridge.cjs` stdio session inside the module (`_get_pool`, :367-390), so any
+process that imports `agent_mcp.main` reaches the bridge: #1053 gated the HTTP routes
+only (`OPEN_PATHS = frozenset({"/health"})`, `agent_mcp/aggregator_auth.py:95`), and an
+offline dump never crosses HTTP. Measured 2026-10-21 with Thunderbird up, the two
+routes print the same 147 names — 147 vs 147, zero names in either direction — so
+`tools/list` is the cross-check that the running server *serves* what the tree
+dispatches, not the only way to enumerate it.
 
-Offline, or in a worktree (Thunderbird will read zero there), this prints every
-tool with its module, its marks and its required arguments. §6 is this output
-plus a hand-written "Does" column. The last line emits the two counts
+What the two routes differ on is the **columns**, and it is the wire that is poorer: a
+`tools/list` tool object carries `name`, `description`, `inputSchema` and `annotations`
+(plus a `_meta` holding `lloyd/timeoutSeconds` on the 5 tools that override it), so the
+module attribution (which lives in `main._dispatch`) and the three marks that
+`agent_mcp/annotations.py` computes rather than advertises — `FX` (`side_effecting`),
+`RX` (`REPEAT_EXPECTED`), `PM` (`PLAN_MODE_ALWAYS_ALLOWED`) — are not on the wire. The
+offline dump is therefore the only source carrying every column §6 has, and the
+regeneration that reaches only for `tools/list` loses them (#3127).
+
+The bridge's rows really are absent in two conditions, and in both of them it is the
+*bridge* being unreachable, not the route being blind. **Inside an automod worktree**:
+`agent-services/.gitignore:72` carries the ignore pattern services/thunderbird-mcp/,
+which is relative to that file and so keeps the bridge's whole directory out of the
+checkout (`git ls-files agent-services/services/thunderbird-mcp/` → 0 files), and
+`BRIDGE_PATH` (`agent_mcp/thunderbird.py:55`) hangs off `app/paths.py:7`
+`LLOYD_HOME = Path(__file__).resolve().parent.parent` — the worktree root — so
+`_get_pool` raises `FileNotFoundError` (:378) and `_discover` logs "bridge unavailable
+… exporting no tools" and caches `[]` (:419-421). **With Thunderbird not running**,
+which is the degrade path §6's Modules table already states ("Zero tools, and still
+`ok`, when Thunderbird is not running"). In both cases the aggregator in `~/lloyd` still
+serves all 40 rows, and the block at the end of this section reads them.
+
+Offline, this prints every tool with its module, its marks and its required arguments.
+§6 is this output plus a hand-written "Does" column. The last line emits the two counts
 (`TOTALS`, then the tool count and the module count), which are the figures this
 page states in four places of prose: the front-matter `summary:` and the count
 line in the intro give both, the intro's "mounts 29 Python modules" and the §1
@@ -1234,6 +1262,69 @@ EOF
 `tests/test_tools_md_inventory_parity.py` runs that block and holds its totals
 against the same dispatch table it compares §6 to, so a regeneration that stops
 printing the number is caught rather than quietly copied.
+
+When the bridge is invisible to the tree you are standing in — an automod worktree, or
+Thunderbird closed — the aggregator in `~/lloyd` still holds all 40 rows, and this is
+the command that reads them. It prints the same four columns in the same order as the
+dump above, so the two compare name for name: the module column carries `thunderbird`
+for the bridge's rows (the names `thunderbird.py:TOOL_NAME_MAP` maps are tracked even
+though the bridge itself is not) and `-` for every other row, because the wire
+attributes no module; `RO`/`DX`/`ID`/`OW` come off the wire and `RX`/`FX`/`PM` are
+recomputed here from the same `agent_mcp/annotations.py` the dump above uses. The
+substitute-interpreter caveat applies: `.venvs/` is gitignored, so inside a worktree run
+it with the round's own interpreter. Compare the two dumps under **one** collation —
+
+    diff <(offline-dump    | cut -f2- | LC_ALL=C sort) \
+         <(this-block | cut -f2- | LC_ALL=C sort)
+
+— because this box's default `en_US.UTF-8` collation is punctuation-insensitive and
+sorts `_BackgroundTaskDrain` first while Python's `sorted()` puts `Bash` first, which
+between two otherwise identical 147-name dumps reads as 134 phantom differences.
+
+```bash
+PYTHONPATH=. .venvs/lloyd/bin/python - <<'EOF'
+import json, pathlib, urllib.request
+from agent_mcp import annotations as A, thunderbird as TB
+BRIDGE = set(TB.TOOL_NAME_MAP.values())   # the names the gitignored bridge serves
+tok = pathlib.Path("~/.local/state/lloyd/aggregator-token").expanduser()
+req = urllib.request.Request(
+    "http://127.0.0.1:8500/mcp",
+    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode(),
+    headers={"Content-Type": "application/json", "Accept": "application/json",
+             "X-Lloyd-Aggregator-Token": tok.read_text().strip()})
+tools = json.load(urllib.request.urlopen(req, timeout=60))["result"]["tools"]
+for t in sorted(tools, key=lambda t: t["name"]):
+    a, n = t.get("annotations") or {}, t["name"]
+    marks = [k for k, on in (("RO", a.get("readOnlyHint")), ("DX", a.get("destructiveHint")),
+             ("ID", a.get("idempotentHint") and not a.get("readOnlyHint")),
+             ("OW", a.get("openWorldHint")), ("RX", n in A.REPEAT_EXPECTED),
+             ("FX", A.side_effecting(n)), ("PM", n in A.PLAN_MODE_ALWAYS_ALLOWED)) if on]
+    reqd = (t.get("inputSchema") or {}).get("required") or []
+    print("thunderbird" if n in BRIDGE else "-", n, " ".join(marks), ",".join(reqd),
+          sep="\t")
+print(f"TOTALS\ttools={len(tools)}\tbridge={sum(t['name'] in BRIDGE for t in tools)}")
+EOF
+```
+
+Nothing provisions that token. `_publish()` writes it **create-exclusive** —
+`os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)`
+(`agent_mcp/aggregator_auth.py:140`) — from the first process that looks for it, so the
+file is present on any box where the aggregator or the backend has ever booted and
+nowhere else: on a machine where neither has run there is no token to read, and the
+credential has to come from `LLOYD_MCP_TOKEN` / `LLOYD_MCP_TOKEN_FILE` (:79-80)
+instead. The credential gate is first and loud: `require_credential()` wraps the whole
+aggregator app (`agent_mcp/main.py:1148`), so a request with no header is a 401 whose
+body carries `{"code": "AGGREGATOR_UNAUTHENTICATED"}` (`AUTH_ERROR_CODE`, :77) whatever
+it asks for. Behind it the streamable-HTTP mount still imposes its own rule, and it is
+on the presence of an `Accept` header, not on its content: with a valid token,
+`Accept: application/json` and curl's default `Accept: */*` are both served, while the
+same POST with **no `Accept` header at all** — what a bare `urllib.request` sends — is
+answered `406 Not Acceptable` — all three measured 2026-10-21 against the live
+aggregator. Hence the explicit `Accept` line in the command above: it is what makes the
+block portable across HTTP clients, not a hint about which media type is wanted.
+`tests/test_tools_md_regeneration_claims.py` parses this section against the code it
+cites and runs the block above against a stub aggregator, so a route description that
+stops being executable is caught in the suite rather than at a reader's keyboard.
 
 ## Review log
 
