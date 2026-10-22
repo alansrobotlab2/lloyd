@@ -24,12 +24,20 @@ VAULT="$HOME/obsidian"
 # skipped as TRIVIAL and no vault write follows the export at all.
 SESSIONS="${LLOYD_DATA:-$HOME/lloyd-data}/_pipeline/vault-derived/sessions"
 DEBOUNCE_SEC=2
-# A no-op `qmd update` is not cheap: it re-hashes all ~15,800 files across all
-# 15 collections to discover that one of them changed, and that costs 7.5s
-# (measured 2026-09-19, live index). The debounce alone does not bound how
-# often that runs -- it only waits for a quiet gap, and with the automod loop
-# at depth 4 writing backlog activity logs continuously there is a fresh gap
-# every few seconds. 213 cycles were logged in one evening.
+# A no-op `qmd update` is not cheap: it re-hashes every file of every collection
+# `index.yml` declares before it discovers that one of them changed. No count is
+# stated here, because one goes stale -- the size this block used to quote was
+# unreproducible within three weeks of being stamped (#3161). Two commands
+# measure what the walk covers instead, and they are the only things that can:
+#   sqlite3 ~/.cache/qmd/index.sqlite "select count(*) from documents where active=1"
+# for the indexed documents, and each collection's own `pattern`/`ignore` in
+# `index.yml` for the files it re-hashes. The one timed figure this file has is
+# 7.5 s for such a walk, measured once on 2026-09-19 against the live index;
+# read that as the day's observation it is, not as today's cost -- #3161 owes a
+# re-measurement. The debounce alone does not bound how often that runs -- it
+# only waits for a quiet gap, and with the automod loop at depth 4 writing
+# backlog activity logs continuously there is a fresh gap every few seconds.
+# 213 cycles were logged in one evening.
 #
 # COOLDOWN_SEC is the floor between two walks: after a cycle, events are
 # consumed without triggering work until it expires. Worst-case staleness is
