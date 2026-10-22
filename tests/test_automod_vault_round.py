@@ -7006,28 +7006,48 @@ def test_grader_outages_are_re_offered_three_deep_and_the_fourth_refuses_the_lan
 # and `next_run` gone with it — and the ledger row said only the path. Two
 # `vault_land` rows dated 2026-10-05 name an `autonomy/*` path reverted that way,
 # and the loss is durable for exactly the tasks that never run again.
+#
+# #3146 widens the preserved set from three to four: `updated` joins
+# `last_run`/`last_attempt`/`next_run`, because keeping the three while restoring
+# HEAD's older `updated` is what leaves `app/autonomy.py:117` and `:4534` reading a
+# stale age witness off a task whose run already finished.
 # ===========================================================================
 
 T0 = "2026-10-01T00:00:00Z"
 T1 = "2026-10-08T17:53:20.337968+00:00"
 T1_NEXT = "2026-10-08T21:53:20.337968+00:00"
 
-#: HEAD's copy of the task: the three stamps at T0, and `# task` as the body.
+#: #3146: `updated` joins the preserved set because `app/autonomy.py:117` and
+#: `app/autonomy.py:4534` age a task off that field alone. It is held distinct from
+#: `T1` on purpose: dispatch stamps it on its own (`app/autonomy.py:4563`,
+#: `status="in_progress", updated=now_iso`), so in the live tree it is a different
+#: instant from the completion, and a distinct value is what lets the ledger node
+#: below tell `updated` and `last_run` apart instead of accepting either.
+T1_UPDATED = "2026-10-08T17:53:19.000000+00:00"
+
+#: HEAD's copy of the task: all four stamps at T0, and `# task` as the body.
 TASK_T0 = ("---\nid: 1\nstatus: up_next\n"
            f"last_run: '{T0}'\nlast_attempt: '{T0}'\nnext_run: '{T0}'\n"
+           f"updated: '{T0}'\n"
            "---\n# task\n")
 
 
 def _task_file(last_run: str, last_attempt: str, next_run: str,
+               updated: "str | None",
                body: str = "# task, edited by the round") -> str:
-    """A worktree copy of the task with each stamp written as the given YAML scalar.
+    """A worktree copy of the task with each of the four stamps written as given.
 
     The scalars are passed as raw text — quoted, bare, or nonsense — because the
-    spelling is what decides whether a stamp can be ordered against HEAD's.
+    spelling is what decides whether a stamp can be ordered against HEAD's. Pass
+    `updated=None` for the one-side-missing shape: a worktree copy carrying no
+    `updated:` line at all, the state 3 of the 49 live task files is in (46 carry
+    the field — `grep -l "^updated:" autonomy/*.md | wc -l`).
     """
-    return ("---\nid: 1\nstatus: up_next\n"
-            f"last_run: {last_run}\nlast_attempt: {last_attempt}\n"
-            f"next_run: {next_run}\n---\n" + body + "\n")
+    stamp_lines = (f"last_run: {last_run}\nlast_attempt: {last_attempt}\n"
+                   f"next_run: {next_run}\n")
+    if updated is not None:
+        stamp_lines += f"updated: {updated}\n"
+    return "---\nid: 1\nstatus: up_next\n" + stamp_lines + "---\n" + body + "\n"
 
 
 def _commit_task_at_head(vault, text: str) -> str:
@@ -7057,17 +7077,19 @@ def _broken_backlog(vault):
 
 
 def test_a_refused_land_keeps_run_stamps_that_are_newer_than_head(vault):
-    """Clause 1: HEAD's bytes come back, except three lines that must not.
+    """Clause 1: HEAD's bytes come back, except four lines that must not.
 
-    HEAD holds the three stamps at 2026-10-01; the worktree holds a round edit
-    and the same three at 2026-10-08, which is exactly the shape
+    HEAD holds all four stamps at 2026-10-01; the worktree holds a round edit and
+    all four advanced to 2026-10-08, `updated` to an instant 1.34 s before the
+    completion's because dispatch stamps it on its own. That is exactly the shape
     `autonomy/24-data-pipeline.md` was in when this was triaged (an uncommitted
     13:31:18 -> 17:53:20 advance). After the refusal the file is HEAD's, line for
-    line, and the only lines that differ are the three stamps carrying T1.
+    line, and the only lines that differ are the four stamp lines.
     """
     head_bytes = _commit_task_at_head(vault, TASK_T0)
     (vault / "autonomy" / "1-task.md").write_text(
-        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'"), encoding="utf-8")
+        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'", f"'{T1_UPDATED}'"),
+        encoding="utf-8")
     _broken_backlog(vault)
     row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
 
@@ -7078,42 +7100,61 @@ def test_a_refused_land_keeps_run_stamps_that_are_newer_than_head(vault):
     changed = {line.split(":")[0]: line
                for line in (b for a, b in zip(head_lines, after_lines) if a != b)}
     assert set(changed) == set(V.RUN_STAMP_FIELDS), (
-        f"only the three stamps may come back newer, and these did: {sorted(changed)}")
+        f"only the four stamps may come back newer, and these did: {sorted(changed)}")
     assert changed["last_run"] == f"last_run: '{T1}'"
     assert changed["last_attempt"] == f"last_attempt: '{T1}'"
     assert changed["next_run"] == f"next_run: '{T1_NEXT}'"
+    assert "updated" in changed, (
+        "#3146: `updated` is the field `app/autonomy.py:117` and `:4534` age a task "
+        "off, so letting it fall back to HEAD's while the other three come back is "
+        f"the bug itself. Changed lines: {sorted(changed)}")
+    assert changed["updated"] == f"updated: '{T1_UPDATED}'", changed["updated"]
     fm = V._front_matter_map(after)
     assert fm["last_run"] == T1 and fm["next_run"] == T1_NEXT, fm
+    assert fm["updated"] == T1_UPDATED, fm
     assert row["ok"] is False and row["reverted"][0].startswith("autonomy/1-task.md"), (
         "the refusal that kept the stamps has to be the row that says so", row["reverted"])
 
 
 @pytest.mark.parametrize("stamps,kept", [
-    # Every stamp older than HEAD's: the worktree is behind, HEAD wins.
+    # Every stamp older than HEAD's: the worktree is behind, HEAD wins. `updated`
+    # older with it, so #3146's field loses to HEAD exactly as the other three do.
     (dict(last_run="'2026-09-30T00:00:00Z'", last_attempt="'2026-09-30T00:00:00Z'",
-           next_run="'2026-09-30T05:00:00Z'"), []),
+           next_run="'2026-09-30T05:00:00Z'", updated="'2026-09-30T00:00:00Z'"), []),
     # Byte-identical stamps: nothing was advanced, so nothing is kept.
-    (dict(last_run=f"'{T0}'", last_attempt=f"'{T0}'", next_run=f"'{T0}'"), []),
+    (dict(last_run=f"'{T0}'", last_attempt=f"'{T0}'", next_run=f"'{T0}'",
+          updated=f"'{T0}'"), []),
     # Naive worktree stamps beside HEAD's offset-bearing ones: later in wall
     # clock terms, but unorderable, and assuming UTC is not proof.
     (dict(last_run="2026-10-08T17:53:20", last_attempt="2026-10-08T17:53:20",
-          next_run="2026-10-08T21:53:20"), []),
+          next_run="2026-10-08T21:53:20", updated="2026-10-08T17:53:19"), []),
     (dict(last_run="'not-a-date'", last_attempt="'not-a-date'",
-           next_run="'not-a-date'"), []),
-    # One unorderable field does not excuse the other two: the rule is per field.
+          next_run="'not-a-date'", updated="'not-a-date'"), []),
+    # One unorderable field does not excuse the others: the rule is per field. Here
+    # the fifth field is the undecided one — the worktree carries no `updated:` line
+    # at all, the shape of a task file written before `updated` was a stamp.
     (dict(last_run="2026-10-08T17:53:20", last_attempt=f"'{T1}'",
-          next_run=f"'{T1_NEXT}'"), ["last_attempt", "next_run"]),
+          next_run=f"'{T1_NEXT}'", updated=None), ["last_attempt", "next_run"]),
+    # #3146: `updated` alone beat HEAD's, the other three byte-equal. It is kept on
+    # its own, which is the whole of the item — a refused land must not restore a
+    # stale age witness onto a run that already stamped it.
+    (dict(last_run=f"'{T0}'", last_attempt=f"'{T0}'", next_run=f"'{T0}'",
+          updated=f"'{T1_UPDATED}'"), ["updated"]),
 ], ids=["all-older", "all-equal", "naive-beside-aware", "unparseable",
-        "per-field-not-all-or-nothing"])
+        "per-field-not-all-or-nothing", "only-updated-advanced"])
 def test_a_stamp_that_cannot_be_proved_newer_stays_at_head(vault, stamps, kept):
-    """Clause 2: no proof, no preservation — and a revert that never raises.
+    """Clause 2 (#2437) and clause 3 (#3146): no proof, no preservation, no raise.
 
-    The four cases that keep nothing put the file back byte for byte; the fifth
-    keeps only the two stamps it can order, and `last_run` still says T0.
+    The five cases that keep nothing put the file back byte for byte — `updated`
+    undecidable in each of its five shapes (older, byte-equal, naive beside HEAD's
+    offset-bearing one, unparseable, absent from the worktree) stays at HEAD's. The
+    per-field case keeps the two stamps it can order and `last_run` still says T0,
+    and the last case keeps `updated` alone.
     """
     head_bytes = _commit_task_at_head(vault, TASK_T0)
     (vault / "autonomy/1-task.md").write_text(
-        _task_file(stamps["last_run"], stamps["last_attempt"], stamps["next_run"]),
+        _task_file(stamps["last_run"], stamps["last_attempt"], stamps["next_run"],
+                   stamps["updated"]),
         encoding="utf-8")
     _broken_backlog(vault)
     _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
@@ -7131,10 +7172,101 @@ def test_a_stamp_that_cannot_be_proved_newer_stays_at_head(vault, stamps, kept):
         f"last_run: '{T0}'", "the naive stamp was kept without proof"
 
 
-def test_a_path_that_preserves_nothing_reverts_exactly_as_today(vault):
-    """Clause 3: no stamps involved means today's behaviour, byte for byte.
+def test_an_updated_line_head_never_held_is_not_invented_by_the_revert(vault):
+    """Clause 3's other one-sided shape, for #3146's field specifically.
 
-    Three paths in one refused land: a tracked task with none of the three
+    HEAD's task file predates `updated` — `last_run`/`last_attempt`/`next_run` only,
+    the shape 3 of the 49 live task files is in — while the worktree's completion
+    wrote one. A missing HEAD instant is no order, so `updated` is unproved and stays
+    absent; and even under a proof, `_restore_run_stamps` will not splice a line into
+    front matter that never held the field. The three proved stamps still come back,
+    and the revert raises nothing.
+    """
+    head = ("---\nid: 1\nstatus: up_next\n"
+            f"last_run: '{T0}'\nlast_attempt: '{T0}'\nnext_run: '{T0}'\n"
+            "---\n# task\n")
+    head_bytes = _commit_task_at_head(vault, head)
+    (vault / "autonomy/1-task.md").write_text(
+        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'", f"'{T1_UPDATED}'"),
+        encoding="utf-8")
+    _broken_backlog(vault)
+    row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
+
+    after = (vault / "autonomy/1-task.md").read_text(encoding="utf-8")
+    after_lines = after.splitlines()
+    assert len(after_lines) == len(head_bytes.splitlines()), (
+        "keeping an `updated` HEAD never held would add a line the round did not "
+        f"write: {after!r}")
+    assert not any(l.startswith("updated:") for l in after_lines), after
+    assert f"last_run: '{T1}'" in after, (
+        "the three proved stamps still have to come back beside it")
+    assert row["ok"] is False and row["reverted"][0].startswith("autonomy/1-task.md"), (
+        "the row names the three it kept, and only those three: "
+        f"{row['reverted']}")
+
+
+def test_the_reverted_file_is_the_age_witness_the_scheduler_then_reads(vault,
+                                                                        monkeypatch):
+    """The boundary this item exists for: the revert on one side, `app.autonomy` on the other.
+
+    `revert_paths` writes a file; `app/autonomy.py:117` and `app/autonomy.py:4534`
+    read it, and both read `updated` as the age of a run. HEAD holds a task at
+    `status: in_progress` whose `updated` is 10 days old — the shape a run's own
+    pre-flight commit leaves in the vault — and the worktree holds the same status
+    with `updated` one hour old, the dispatch stamp of a run that is going right
+    now. `timeout_seconds: 7200` is the window both readers compare that age to.
+    After the refusal the recovery pass must find nothing stuck, because the file it
+    reads carries the hour-old stamp. With three preserved fields it read HEAD's
+    10-day-old one, called a live run stuck, pushed it to `up_next`, and the guard
+    at `:4534` — which reads `updated` and nothing else — stopped refusing a second
+    run of it. That is the #38 interleaving.
+    """
+    import datetime
+
+    from app import autonomy
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    stale = (now - datetime.timedelta(days=10)).isoformat()
+    live = (now - datetime.timedelta(hours=1)).isoformat()
+
+    def _copy(stamp: str, body: str) -> str:
+        """The live task's shape: dispatch fields untouched, only stamps and body move.
+
+        Built here rather than with `_task_file` because that helper writes
+        `status: up_next`, and a moved `status` would be a second, unrelated refusal
+        reason — this node wants the refusal to come from the broken backlog alone.
+        """
+        return ("---\nid: 1\nname: task\nstatus: in_progress\ntimeout_seconds: 7200\n"
+                f"last_run: '{stamp}'\nlast_attempt: '{stamp}'\n"
+                f"next_run: '{stamp}'\nupdated: '{stamp}'\n---\n" + body + "\n")
+
+    _commit_task_at_head(vault, _copy(stale, "# task"))
+    (vault / "autonomy/1-task.md").write_text(
+        _copy(live, "# task, edited by the round"), encoding="utf-8")
+    _broken_backlog(vault)
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", vault / "autonomy")
+
+    assert _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])["ok"] is False
+    assert autonomy.recover_stuck_tasks() == [], (
+        "#3146: the reverted file gave `app/autonomy.py:117` HEAD's stale `updated`, "
+        "so a run that is still going read as stuck and was pushed to `up_next`")
+    assert "status: in_progress" in (vault / "autonomy/1-task.md").read_text(
+        encoding="utf-8"), "a recovery that fired would have rewritten the status"
+
+    # The other consumer, `run_task`'s `in_progress` guard at `:4534`, reads the
+    # same field through the same parser: the age it computes has to sit inside the
+    # task's own window, which is what keeps refusing the second run.
+    fm = V._front_matter_map((vault / "autonomy/1-task.md").read_text(encoding="utf-8"))
+    updated = autonomy._parse_iso(fm.get("updated"))
+    age = (now - updated).total_seconds()
+    assert updated is not None and age < int(fm["timeout_seconds"]), (
+        f"`:4534` would stop refusing a second run off this file: age={age:.0f}s")
+
+
+def test_a_path_that_preserves_nothing_reverts_exactly_as_today(vault):
+    """Clause 3 (#2437): no stamps involved means today's behaviour, byte for byte.
+
+    Three paths in one refused land: a tracked task with none of the four
     fields, the file whose broken front matter caused the refusal, and a file the
     round created. The first is HEAD's again, the third is gone, and every
     `reverted` entry is the bare path — the shape
@@ -7157,15 +7289,18 @@ def test_a_path_that_preserves_nothing_reverts_exactly_as_today(vault):
 
 
 def test_the_refusal_row_names_the_path_and_every_stamp_it_kept(vault):
-    """Clause 4: the ledger says what survived, not only what was destroyed.
+    """Clause 4 (#2437/#3146): the ledger says what survived, not only what went.
 
-    One path kept three stamps, one kept nothing: the first appears naming the
-    path, each field and the value kept, the second as the bare path, so the row
-    that records a refusal can be read without diffing the vault afterwards.
+    One path kept four stamps, one kept nothing: the first appears naming the
+    path, each field and the value kept — `updated=<value>` among them, because a
+    row that named only three would describe a tree the reader cannot reproduce —
+    the second as the bare path, so the row that records a refusal can be read
+    without diffing the vault afterwards.
     """
     _commit_task_at_head(vault, TASK_T0)
     (vault / "autonomy/1-task.md").write_text(
-        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'"), encoding="utf-8")
+        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'", f"'{T1_UPDATED}'"),
+        encoding="utf-8")
     _broken_backlog(vault)
     row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
 
@@ -7175,6 +7310,7 @@ def test_the_refusal_row_names_the_path_and_every_stamp_it_kept(vault):
     assert f"last_run={T1}" in kept, kept
     assert f"last_attempt={T1}" in kept, kept
     assert f"next_run={T1_NEXT}" in kept, kept
+    assert f"updated={T1_UPDATED}" in kept, kept
     assert bare == "backlog/9-item.md", bare
 
 

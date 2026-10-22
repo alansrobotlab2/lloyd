@@ -659,15 +659,15 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
 # Module scope, not function-local, because the annotations below name the type.
 import datetime
 
-#: #2437: the three front-matter fields a run's completion writes into its own task
-#: file — `app/autonomy.py` stamps `last_run`/`last_attempt` at every completion and
-#: `next_run` from `_next_run_after`. They are deliberately NOT in
-#: `SCHEDULE_STATE_FIELDS`: that set's own comment calls them "scheduler OUTPUT"
-#: whose gating "would deny every completion stamp", so the dispatch rail above
-#: refuses a round that moves a `status` and says nothing about a completion whose
-#: stamps are sitting uncommitted in the worktree. Saying nothing is what lost
-#: them: the revert checked HEAD out over the run that had just finished.
-RUN_STAMP_FIELDS: tuple[str, ...] = ("last_run", "last_attempt", "next_run")
+#: #2437/#3146: the four front-matter fields a run writes into its own task file —
+#: `app/autonomy.py` stamps `last_run`/`last_attempt`/`updated` at every completion
+#: and `next_run` from `_next_run_after`. None is in `SCHEDULE_STATE_FIELDS`: that
+#: set's own comment calls them "scheduler OUTPUT" whose gating "would deny every
+#: completion stamp", so the rail above says nothing about stamps left uncommitted,
+#: and the revert used to check HEAD out over them. #3146 adds `updated` because two
+#: readers age a task off that field: `app/autonomy.py:117` falls back to `last_run`
+#: only when it is absent, and `app/autonomy.py:4534` reads `updated` and nothing else.
+RUN_STAMP_FIELDS: tuple[str, ...] = ("last_run", "last_attempt", "next_run", "updated")
 
 
 def _stamp_instant(value) -> "datetime.datetime | None":
@@ -880,12 +880,12 @@ def _kept_when_untracked(p: str) -> bool:
 def revert_paths(paths: list[str]) -> list[str]:
     """Put the round's paths back: tracked ones to HEAD, new ones removed.
 
-    #2437: "back to HEAD" no longer means "every byte". A tracked path returns to
-    HEAD's bytes except a `last_run`, `last_attempt` or `next_run` the worktree
-    holds strictly newer than HEAD's — those belong to the run that completed
-    while the round was landing, and a refusal of the round's edit is no claim on
-    them. An untracked path the round created is still unlinked whole: a created
-    file cannot both keep a completion's stamp and stop arming the task the
+    #2437/#3146: "back to HEAD" no longer means "every byte". A tracked path comes
+    back to HEAD's bytes except a `last_run`, `last_attempt`, `next_run` or `updated`
+    the worktree holds strictly newer than HEAD's — those belong to the run that
+    completed while the round was landing, and a refusal of the round's edit is no
+    claim on them. An untracked path the round created is still unlinked whole: a
+    created file cannot both keep a completion's stamp and stop arming the task the
     refusal exists to stop, which is owed ruling 3 on #2437 rather than a call to
     make here.
 
