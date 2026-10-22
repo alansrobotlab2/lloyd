@@ -31,10 +31,26 @@ DEBOUNCE_SEC=2
 # measure what the walk covers instead, and they are the only things that can:
 #   sqlite3 ~/.cache/qmd/index.sqlite "select count(*) from documents where active=1"
 # for the indexed documents, and each collection's own `pattern`/`ignore` in
-# `index.yml` for the files it re-hashes. The one timed figure this file has is
-# 7.5 s for such a walk, measured once on 2026-09-19 against the live index;
-# read that as the day's observation it is, not as today's cost -- #3161 owes a
-# re-measurement. The debounce alone does not bound how often that runs -- it
+# `index.yml` for the files it re-hashes. The figure this file used to quote was
+# 7.5 s for such a walk, measured once on 2026-09-19 against the live index; read
+# that as the day's observation it was, not as today's cost. The watcher's own
+# supervisor log, measured on 2026-10-22: median 2 s, mean 1.8 s, max 39 s.
+# That log is the derivation, and it is re-runnable: `stdout_logfile` in
+# agent-services/supervisor/conf.d/agent-qmd-watcher.conf names the file, one
+# walk is the gap from an `HH:MM:SS Change detected` stamp to the next
+# `HH:MM:SS Index updated`, and the window is every such pair since that file's
+# last 10 MB rotation. The stamps carry no date, and that costs the pairing twice,
+# so the derivation drops two kinds of pair first: a negative gap is a walk that
+# crossed midnight, and a pair straddling a `Watching` restart banner is a gap
+# between two processes rather than one walk. The missing date also means
+# 2026-10-22 is the day these were computed, not the span they cover, and the next
+# rotation discards this window -- the derivation is the part meant to outlive it,
+# and running it on whatever the log holds then is how the next reader gets
+# today's figure. What the floor below insures against is that 39 s tail, not the
+# 2 s median: at the median a minute is a 30x margin, and the window held exactly
+# one cycle of 39 s.
+#
+# The debounce alone does not bound how often that runs -- it
 # only waits for a quiet gap, and with the automod loop at depth 4 writing
 # backlog activity logs continuously there is a fresh gap every few seconds.
 # 213 cycles were logged in one evening.

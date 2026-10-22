@@ -221,10 +221,16 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
 ## 5. Keeping it healthy
 
 - **Watcher** (`agent-qmd-watcher`, `agent-services/scripts/qmd-watcher.sh`):
-  inotify on the vault and the session export tree, a 2 s debounce (capped at
-  10 s) and a 60 s cooldown between `qmd update` + `embed` runs — a no-op `update` re-hashes every
-  file (~7.5 s), so the debounce alone did not bound it while the automod loop
-  writes continuously.
+  inotify on the vault and the session export tree, a 2 s debounce (capped at 10 s)
+  and a 60 s cooldown between `qmd update` + `embed` runs. A no-op `update` re-hashes
+  every file its collections cover before it finds the one that changed, and the walk
+  is dated rather than remembered: 7.5 s as measured on 2026-09-19, then median 2 s,
+  mean 1.8 s and max 39 s read off the watcher's own supervisor log on 2026-10-22. It
+  is the 39 s tail, not the 2 s median, that the minute of cooldown is insurance
+  against, and neither figure is today's cost on its own — the script's cost block
+  states the derivation, so the next reader can produce today's instead. The debounce
+  alone bounded nothing: it only waits for a quiet gap, and the automod loop writes
+  continuously.
 - **Nightly cleanup** (`lloyd-qmd-cleanup.timer`, 04:45): `qmd cleanup` prunes
   orphaned vectors, drops inactive document records and orphaned content hashes,
   **empties `llm_cache`** and vacuums — the unit's own log for 2026-09-22 reads

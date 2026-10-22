@@ -24,6 +24,12 @@ DAEMON_CONF = ROOT / "agent-services/supervisor/conf.d/agent-qmd-daemon.conf"
 WATCHER = ROOT / "agent-services/scripts/qmd-watcher.sh"
 CLEANUP_UNIT = ROOT / "agent-services/systemd/lloyd-qmd-cleanup.service"
 MAINTENANCE = ROOT / "scripts/maintenance/qmd_index_maintenance.py"
+#: The architecture page's §5 states the same no-op walk cost the watcher's cost block
+#: justifies the cooldown with. `tests/test_qmd_doc_claims.py` reads this file for other
+#: sections and never once for that bullet, which is how it rotted into a present-tense
+#: figure the script had already dated — so the node that reads it lives here, beside
+#: the block it has to agree with.
+ARCH_QMD = ROOT / "architecture/qmd.md"
 
 
 def _code_lines(path: Path) -> list[str]:
@@ -167,6 +173,25 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: paraphrase so the script and its test cannot drift into telling a reader two
 #: different commands.
 CORPUS_QUERY = "select count(*) from documents where active=1"
+
+# --- #3165: the walk now has TWO dated figures, and the newer one is the current one --
+#
+# #3161 left `7.5 s` standing alone as the sole timed claim about a no-op walk, with a
+# pointer saying another item owed a fresh measurement. The measurement exists: read off
+# the watcher's own supervisor log on 2026-10-22, a walk is a median of 2 s, a mean of
+# 1.8 s and a maximum of 39 s. The cost block now carries that beside the 2026-09-19
+# figure and the pointer is gone. No cycle count is pinned here or in the block: the
+# log is live, so two passes an hour apart do not agree on `n`, and a figure that
+# only reproduces alongside a number nobody can re-obtain is the same #3161 defect
+# with an extra step. The window the figures cover, why the date is the day of
+# computation rather than the span, and which pairs the derivation throws away are
+# the script's job — and the nodes below demand it said all three.
+WALK_DATE = "2026-10-22"
+
+#: The three figures, spelled exactly as the cost block must spell them, on the block's
+#: date line. Kept as one tuple because clause 1's whole demand is co-location: median,
+#: mean and max beside the date, on one physical line.
+WALK_FIGURES = ("median 2 s", "mean 1.8 s", "max 39 s")
 
 
 def _stale_in(text: str) -> str | None:
@@ -351,3 +376,200 @@ def test_the_watcher_cost_block_dates_its_seven_and_a_half_seconds():
         "the 7.5 s figure is quoted on a line that never says it was measured")
     assert not re.search(r"(?:that|it)\s+costs\s+7\.5", block), (
         "the block is back to asserting 7.5 s as the current cost")
+
+    # --- #3165: the block carries a SECOND timed line, and that one is the current cost.
+    #
+    # Held to the same one-line discipline as the 7.5 s, for the same reason: a figure
+    # whose date sits in the previous sentence is a figure the next reader quotes
+    # without it, which is how `architecture/qmd.md` came to state 7.5 s as though it
+    # were today's price.
+    at2 = block.find(WALK_DATE)
+    assert at2 != -1, (
+        f"the cost block no longer states the {WALK_DATE} walk measurement, so its only "
+        "timed figure is the 2026-09-19 one again — the state #3161's owed entry existed "
+        "to retire, and the reason this item was filed")
+    assert block.find("7.5") < at2, (
+        "the dated line moved above the 7.5 s line. The asserts above read the FIRST "
+        "'7.5' in the block and demand 2026-09-19 on that same line, so inserting here "
+        "silently attributes that date to whatever moved in front of it")
+    stated = block.splitlines()[block[:at2].count("\n")]
+    for figure in WALK_FIGURES:
+        assert figure in stated, (
+            f"{figure} is off the {WALK_DATE} line, which asks for the date and all "
+            f"three figures together; that line is {stated!r}")
+    assert "supervisor log" in stated, (
+        f"the {WALK_DATE} line gives figures without saying what they were measured "
+        "from, which is how a sample becomes a constant")
+
+
+def _flat(block: str) -> str:
+    """A comment block or bullet as one line.
+
+    Both surfaces wrap at about 80 columns, so a phrase one of them uses can sit across
+    two lines and a raw substring test reports it absent — the exact shape
+    `tests/test_qmd_doc_claims.py` documents for `architecture/qmd.md` at its own
+    `OLD_SUBLIMINAL_CLAIM`, and the reason it has its own copy of this helper.
+    """
+    return " ".join(ln.lstrip().lstrip("#").strip() for ln in block.splitlines())
+
+
+def _line_with(text: str, needle: str, what: str) -> str:
+    """The single physical line of `text` holding `needle`, asserted to exist."""
+    at = text.find(needle)
+    assert at != -1, f"{what} is gone from the text it was supposed to be in"
+    return text.splitlines()[text[:at].count("\n")]
+
+
+def _watcher_bullet() -> str:
+    """§5's `**Watcher**` bullet of `architecture/qmd.md`, found by its label.
+
+    Selected rather than sliced by line number, because the number moves every time the
+    page grows, and asserted to be exactly one: two bullets claiming the label would
+    make "the page says" mean nothing.
+    """
+    text = ARCH_QMD.read_text(encoding="utf-8")
+    bullets = [b for b in text.split("\n- ") if b.lstrip().startswith("**Watcher**")]
+    assert len(bullets) == 1, (
+        f"{len(bullets)} bullets of architecture/qmd.md open with **Watcher**, so the "
+        "node below is not reading a defined object")
+    return bullets[0]
+
+
+def test_the_watcher_cost_block_no_longer_defers_its_figure_to_another_item():
+    """#3165 clause 2: the block stops owing its own number to another item.
+
+    The item's verification is `git grep -n 'owes a re-measurement' -- agent-services/`,
+    and that command is a false green: the sentence it bans WRAPS, ending
+    `... not as today's cost -- #3161 owes a` at one line break and resuming
+    `# re-measurement.` at the next, so a line-oriented grep could not have matched the
+    phrase on the UN-edited tree either — it exits 1 at the base commit 461f6b4b. Two
+    substring asserts over the script are therefore the real check: no `owes a`, no
+    `re-measurement`, wrapped or not. The grep is run too, so the node still fails on a
+    tree where the pointer comes back unwrapped. It is scoped to this script and not to
+    `agent-services/`, because the one other `re-measurement` in that tree is
+    `agent-services/voice/addressee.py`'s note about djev thresholds, which is a
+    different sentence about a different thing.
+    """
+    text = WATCHER.read_text()
+
+    assert "owes a" not in text, (
+        "the cost block is deferring its figure to another item again")
+    assert "re-measurement" not in text, (
+        "the pointer that owed the measurement is back — check the wrapped spelling "
+        "before trusting the grep that cannot see it")
+    run = subprocess.run(
+        ["git", "grep", "-n", "-e", "owes a re-measurement", "--", "agent-services/"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert run.returncode == 1, (
+        f"`git grep -n 'owes a re-measurement' -- agent-services/` matched "
+        f"(rc={run.returncode}): {run.stdout.strip()}")
+
+
+def test_the_watcher_cost_block_states_how_the_dated_figures_were_derived():
+    """#3165 clause 4: the new figures come with a derivation a reader can run.
+
+    A date on its own is the #3161 defect wearing a new number. The supervisor log's
+    stamps are time-only and the file rotates at 10 MB, so these figures describe a
+    rolling window rather than a day, and the one thing that survives the rotation is
+    the method. Six things, each pinned as words the block has to use: the source (the
+    watcher's own supervisor log), where to find it (`stdout_logfile` in the watcher's
+    supervisor drop-in), what one walk is (a `Change detected` stamp to the next `Index
+    updated` stamp), how wide the window is (since the last 10 MB rotation), which
+    pairs the method discards (a negative gap, and one straddling a restart banner),
+    and what the date means (the day of computation, not the span). The last two are
+    not pedantry: a reader who follows the comment but not the dropped-pair rule turns
+    a walk that crossed midnight into a negative cycle and a restart into a gap
+    between two processes, and gets a different figure from the same file; and a
+    reader who takes `2026-10-22` for the span takes a multi-day sample for a single
+    day's cost, which is the reading that made 7.5 s look like a constant.
+    """
+    block = _flat(_cooldown_cost_block(WATCHER.read_text()))
+
+    assert "watcher's own supervisor log" in block, (
+        "the figures no longer name the log they came from")
+    assert "stdout_logfile" in block and "agent-qmd-watcher.conf" in block, (
+        "the block says 'supervisor log' but no longer says which file that is, so "
+        "there is nothing for the next reader to open")
+    assert "Change detected" in block and "Index updated" in block, (
+        "the derivation no longer says which two stamps a walk is measured between")
+    assert "10 MB rotation" in block, (
+        "the window is unstated, which leaves the figures looking like an all-time "
+        "average rather than what the log happens to still hold")
+    assert "restart banner" in block and "negative" in block, (
+        "the derivation no longer names the pairs it drops. The stamps are time-only, "
+        "so a walk that crossed midnight comes out negative and a pair straddling a "
+        "restart is a gap between two processes: a reader following the comment alone "
+        "would pair them anyway and publish a different figure from the same file")
+    assert "day these were computed" in block, (
+        "the block no longer says 2026-10-22 is the day of computation, so the span the "
+        "figures cover is a guess")
+
+
+def test_the_architecture_page_dates_the_walk_the_script_dates():
+    """#3165 clause 5: two surfaces, one account of what a no-op walk costs.
+
+    The seam is prose in one file against prose in another, joined by no code and by no
+    test until now: the script's cost block justifies the cooldown, `architecture/qmd.md`
+    §5 tells whoever is diagnosing a stale index the same cost, and the page said
+    `(~7.5 s)` in the present tense while the script had already dated that figure to
+    2026-09-19. SM_20261022_163807's review graded that present-tense framing `partial`
+    on #3161, and the reason it could survive a suite of green is that nothing read the
+    bullet.
+
+    So the page is graded against the SCRIPT'S line, not against a figure typed twice in
+    this file: the three numbers are taken out of the cost block and demanded back in the
+    bullet, which is what makes a future re-measurement in one file fail the other. Each
+    of those comparisons runs against the block's own line first, because demanding a
+    figure the block no longer states is demanding nothing. Presence in the bullet is not
+    attribution either: a date parked anywhere in a ten-line bullet leaves the sentence
+    quoting the figures free to read as today's cost, and reading it that way is what this
+    page did before this diff — so each figure set is finally demanded inside the SENTENCE
+    that carries the date belonging to it.
+    """
+    block = _cooldown_cost_block(WATCHER.read_text())
+    dated = _line_with(block, WALK_DATE, "the dated walk figure")
+    bullet = _flat(_watcher_bullet())
+
+    assert "~7.5" not in ARCH_QMD.read_text(encoding="utf-8"), (
+        "architecture/qmd.md is back to an undated `(~7.5 s)`, which is the "
+        "present-tense framing this node exists to retire")
+    assert "7.5 s" in bullet and "2026-09-19" in bullet, (
+        "the page no longer carries the 2026-09-19 figure, so the two accounts have "
+        "diverged in the other direction")
+    for figure in WALK_FIGURES:
+        assert figure in dated, (
+            f"the cost block no longer states {figure}, so comparing the page to it "
+            "would be comparing it to nothing")
+        assert figure in bullet, (
+            f"the launcher states {figure} and architecture/qmd.md does not: two "
+            "costs for one walk again")
+    # Presence in the bullet is not attribution. A date parked anywhere in a ten-line
+    # bullet leaves the sentence quoting the figures free to read as today's cost, and
+    # reading it that way is exactly what this page did before this diff, so each date
+    # is demanded in the SAME sentence as the figures it dates — the one-line rule the
+    # node above holds the script's cost block to, applied across a sentence wrap.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", bullet) if s.strip()]
+    dated_sent = [s for s in sentences if WALK_DATE in s]
+    assert dated_sent, (
+        f"architecture/qmd.md quotes the walk without {WALK_DATE} anywhere in the "
+        "bullet, which is how the figures read as today's cost")
+    assert "median" in dated_sent[0] and "max" in dated_sent[0], (
+        f"{WALK_DATE} is in the page but not in the sentence stating the figures it "
+        f"dates — that sentence is {dated_sent[0]!r}")
+    old_sent = [s for s in sentences if "7.5 s" in s]
+    assert old_sent, "the page stopped stating the 7.5 s figure altogether"
+    assert "2026-09-19" in old_sent[0], (
+        "the page quotes 7.5 s in a sentence that never says when it was measured, "
+        "which is the present-tense framing SM_20261022_163807 graded `partial`")
+    # Negative control on the splitter, so the rule above is about a sentence and not
+    # about a bullet: a date standing in its own sentence must not count as sitting
+    # beside the figures. Without this the sentence asserts would pass on a page that
+    # says the date nowhere near them, which is the green that hid the original rot.
+    control = [s for s in re.split(
+        r"(?<=[.!?])\s+",
+        f"The walk costs median 2 s, mean 1.8 s and max 39 s. Sampled {WALK_DATE}.")
+        if WALK_DATE in s]
+    assert control and "median" not in control[0], (
+        f"the sentence split merged a standalone date into the figures' sentence "
+        f"({control!r}), so the co-location asserts above are a bullet-wide substring "
+        "test and nothing more")
