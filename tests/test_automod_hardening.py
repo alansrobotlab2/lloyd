@@ -37,6 +37,19 @@ import rollback as rb  # noqa: E402
 
 from scripts.automod import state as S  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _qmd_config_dir_is_a_tmp_dir(tmp_path, monkeypatch):
+    """#3158: taking a pin now GENERATES `<name>.yml` in the qmd config dir, so a
+    test that drives `PinnedCorpus.__enter__` without naming a config dir would
+    generate into the operator's real `~/.config/qmd` — a test writing the live
+    machine's corpus config. Redirect the module to a per-test directory (a test
+    that names its own still wins, since its `setenv` runs after this fixture);
+    with no `index.yml` inside, the sync records a refusal and writes nothing,
+    which is the behaviour these tests were written against.
+    """
+    monkeypatch.setenv("QMD_CONFIG_DIR", str(tmp_path))
+
+
 
 def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args],

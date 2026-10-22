@@ -4663,7 +4663,8 @@ def test_a_config_where_no_root_contains_another_yields_an_empty_overlap_list(tm
 
 
 def _overlap_run(monkeypatch, tmp_path, config: str,
-                 rows: list[tuple[str, str, str, int]]) -> dict:
+                 rows: list[tuple[str, str, str, int]],
+                 pin: str | None = None) -> dict:
     """Run main() over a fixture config pair and a fixture index, and return the
     report plus the bytes the run was not allowed to change.
 
@@ -4675,6 +4676,11 @@ def _overlap_run(monkeypatch, tmp_path, config: str,
     cfg, idx = _overlap_env(tmp_path, rows, config=config)
     tmpl = tmp_path / "qmd-index.yml"
     tmpl.write_text(config)
+    if pin is not None:
+        # The eval pin's copy sits beside the live file it is generated from, so
+        # moving `LIVE_CONFIG` below moves the derived pin path with it — which is
+        # the point of deriving it (#3158).
+        (tmp_path / m.PIN_CONFIG_NAME).write_text(pin)
     idx_dir = idx.parent
     idx_before, cfg_before = idx.read_bytes(), cfg.read_bytes()
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", tmpl)
@@ -6214,3 +6220,205 @@ def test_a_failed_unlink_of_a_released_path_is_an_error_line_not_a_lost_report(
     assert (tmp_path / "reflection"
             / f"{m.REPORT_PREFIX}{datetime.now():%Y-%m-%d}.json").is_file(), (
         "the report has to survive a run whose deletes all failed")
+
+
+# --- #3158: the eval pin's copy of the live config is in the compared set ------
+#
+# The nightly published `in_sync: true, drift_count: 0` on 2026-10-22 while
+# `~/.config/qmd/evalpin.yml` carried the pre-#2180 vault-wide `subliminal`
+# pattern it had held since 2026-09-25 — 27 days — because "the two files agree"
+# was a claim about the tracked template and the daemon's file, and the pin's copy
+# was in nobody's compared set. That file is not a cosmetic duplicate: qmd
+# rebuilds the pin's `store_collections` from it on every `serve --index evalpin`
+# whose parsed config hash differs, so a drifted copy hands every automod
+# regression verdict a corpus production no longer has.
+#
+# The pair is `pin -> live`, not `pin -> template`: `evalpin.sync_pin_config`
+# generates the pin's file from the LIVE one. A remedy that named the template
+# would tell an operator to copy a file that has nothing to do with the drift.
+
+#: `WIDE` as the PIN's copy against `NARROW` as the live file: the state of
+#: 2026-10-22, one collection, one field, the two `pattern` values as written.
+PIN_DRIFT_ROWS = [("subliminal", "a.md", "h1", 1)]
+
+
+def _pin_pair(tmp_path: Path, live: str, pin: str) -> tuple[Path, Path, Path]:
+    """(template, live, pin) — the three files, with the pin's copy sitting where
+    `config_drift` derives it: beside the live file, under its own name."""
+    t, l = _pair(tmp_path, live, live)      # template agrees with live here
+    p = tmp_path / m.PIN_CONFIG_NAME
+    p.write_text(pin)
+    return t, l, p
+
+
+def test_a_drifted_pin_copy_yields_a_row_naming_the_field_and_both_values(tmp_path):
+    """Clause 3: the drift has to arrive as one of the report's own rows.
+
+    The row is the same shape the check has emitted for a template/live pattern
+    drift since #2543 — `kind: pattern`, one per differing field — so a reader who
+    already knows how to read this report needs no new legend, and the two values
+    are both named because a row saying only `subliminal differs` is the diff
+    someone still has to go and run.
+    """
+    t, l, p = _pin_pair(tmp_path, NARROW, WIDE)
+
+    out = m.config_drift(t, l)
+
+    row = _by_name([d for d in out["drift"] if d.get("pair") == "pin/live"])["subliminal"]
+    assert row["kind"] == "pattern", out["drift"]
+    assert row["pin_pattern"] == "**/*.md", row
+    assert row["live_pattern"] == "*.md", row
+    assert out["in_sync"] is False and out["drift_count"] == 1, out["drift"]
+    assert out["pin"] == str(p), out["pin"]
+
+
+def test_a_drifted_pin_row_names_the_pin_remedy_not_the_re_sync(tmp_path):
+    """The remedy matters more than the row. The documented reconcile for this
+    report is `cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`, and
+    running it against a pin drift changes a tracked file and leaves the drifted
+    one exactly as drifted — so a pin row recommends retaking the pin, and a row
+    whose remedy would revert a ruling is the #2750 mistake wearing a new label."""
+    t, l, _p = _pin_pair(tmp_path, NARROW, WIDE)
+
+    row = [d for d in m.config_drift(t, l)["drift"] if d.get("pair") == "pin/live"][0]
+
+    assert row["recommend"] == m.RECOMMEND_RETAKE_PIN, row
+    assert m.RETAKE_PIN_COMMAND.endswith(m.PIN_CONFIG_NAME), m.RETAKE_PIN_COMMAND
+    assert m.RESYNC_COMMAND not in m.RETAKE_PIN_COMMAND, (
+        "the pin remedy and the template re-sync are the same command")
+
+
+def test_an_in_sync_pin_records_the_file_it_compared(tmp_path):
+    """Clause 3's other half, and the half that would otherwise be invisible: a
+    clean run has to show WHICH files it called clean. `in_sync: true` with no
+    third path in the report is the 2026-10-22 artifact again — indistinguishable
+    from a run that never looked at the pin."""
+    t, l, p = _pin_pair(tmp_path, NARROW, NARROW)
+
+    out = m.config_drift(t, l)
+
+    assert out["comparable"] is True and out["pin_comparable"] is True, out
+    assert out["in_sync"] is True and out["drift_count"] == 0, out["drift"]
+    assert out["pin"] == str(p), out["pin"]
+    assert "#3158" in m.config_drift.__doc__, (
+        "the function no longer says the pin is in its compared set")
+
+
+def test_an_absent_pin_copy_is_a_note_and_not_a_row_per_collection(tmp_path):
+    """A host with no pin yet is not a host with one drifted collection per
+    collection: absence is one note, the way an absent template is one note.
+    Counting a missing file as N differences would make every clean machine red,
+    which is how an instrument gets ignored."""
+    t, l, p = _pin_pair(tmp_path, NARROW, NARROW)
+    p.unlink()
+
+    out = m.config_drift(t, l)
+
+    assert "pin_note" in out and "pin_comparable" not in out, out
+    assert out["drift"] == [] and out["in_sync"] is True, out["drift"]
+    assert out["pin"] == str(p), "the report still has to name the file it could not read"
+
+
+def test_a_pin_declaring_no_collection_is_named_collection_by_collection(tmp_path):
+    """The #1485 shape — a pin config with `collections: {}` — is the drift with
+    the worst consequence (every `store_collections` row gone, every scoped query
+    returning zero rows) and the one the old boolean described as a single false.
+    Now it is one row per collection production has, each naming the live path the
+    pin failed to carry."""
+    t, l, _p = _pin_pair(tmp_path, NARROW, "collections: {}\n")
+
+    rows = [d for d in m.config_drift(t, l)["drift"] if d.get("pair") == "pin/live"]
+
+    # Sorted by collection, and one row for EVERY collection production has —
+    # `NARROW` declares two, and a report that named only the first would leave a
+    # reader fixing half the file.
+    assert [d["collection"] for d in rows] == ["memory", "subliminal"], rows
+    assert [d["kind"] for d in rows] == ["pin_missing", "pin_missing"], rows
+    assert rows[1]["live_path"] == "/home/me/obsidian", rows[1]
+    assert rows[0]["pin_path"] is None, rows[0]
+
+
+def test_a_pin_only_collection_is_named_rather_than_vanishing(tmp_path):
+    """A collection the pin declares and production does not is the other
+    direction, and it is the one a count of missing collections cannot see at all:
+    `set(live) - set(pin)` is empty, so the report would say nothing about a pin
+    serving a corpus production has never indexed."""
+    t, l, _p = _pin_pair(tmp_path, NARROW, WIDE + "  scratch:\n"
+                        "    path: /tmp/scratch\n    pattern: \"**/*.md\"\n")
+
+    rows = {d["collection"]: d for d in m.config_drift(t, l)["drift"]
+            if d.get("pair") == "pin/live"}
+
+    assert rows["scratch"]["kind"] == "pin_only", rows
+    assert rows["scratch"]["pin_path"] == "/tmp/scratch", rows["scratch"]
+
+
+def test_a_pin_copy_that_will_not_parse_stops_the_comparison_rather_than_scoring_it(tmp_path):
+    """Half-written YAML is the state in which an absent-key reading would report
+    every collection as missing: `yaml.safe_load` returns None, `.get("collections")`
+    on the raw text would be empty, and an empty block agrees with nothing — so the
+    run has to say it could not read the file."""
+    t, l, _p = _pin_pair(tmp_path, NARROW, "collections: [this is not a mapping\n")
+
+    out = m.config_drift(t, l)
+
+    assert "pin_note" in out and "pin_comparable" not in out, out
+    assert out["drift"] == [], out["drift"]
+
+
+def test_the_pin_rows_do_not_move_the_exit_code(tmp_path, monkeypatch):
+    """Report-only, on purpose: #2233's ruling for this job is that a config or
+    corpus FINDING never moves the exit code, and whether a pin drift deserves to
+    is a question this item owes a ruling on, not one a round decides by shipping
+    it. So the drift has to be legible in the published artifact on a run that
+    still exits 0."""
+    result = _overlap_run(monkeypatch, tmp_path, NARROW, PIN_DRIFT_ROWS, pin=WIDE)
+
+    assert result["rc"] == 0, "a pin drift moved this job's exit code"
+    cd = result["report"]["config_drift"]
+    assert cd["in_sync"] is False and cd["drift_count"] == 1, cd
+    assert cd["drift"][0]["collection"] == "subliminal", cd["drift"]
+    assert cd["drift"][0]["pin_pattern"] == "**/*.md", cd["drift"][0]
+
+
+def test_the_published_run_names_the_pin_and_its_remedy(tmp_path, monkeypatch, capsys):
+    """The screen an operator reads, since that is where a drift gets acted on or
+    ignored. A row printed as `subliminal [pattern] template=... live=...` would
+    accuse the TRACKED template of a difference that lives in the pin's copy, and
+    the printed re-sync command would then be the wrong command to run."""
+    _overlap_run(monkeypatch, tmp_path, NARROW, PIN_DRIFT_ROWS, pin=WIDE)
+    printed = capsys.readouterr().out
+
+    assert "subliminal [pattern]" in printed, printed
+    assert "pin=**/*.md" in printed and "live=*.md" in printed, printed
+    assert "template=**/*.md" not in printed, printed
+    assert m.RETAKE_PIN_COMMAND in printed, printed
+    assert m.RESYNC_COMMAND not in printed, printed
+
+
+def test_the_published_run_says_the_pin_agrees_and_names_it(tmp_path, monkeypatch, capsys):
+    """The green case, printed: the file named even when it agrees, because a line
+    that appears only when something is wrong cannot be told apart from a check
+    that never looked — the reasoning this report already applies twice over, to
+    strays (#1598) and to the overlap row (#2180)."""
+    _overlap_run(monkeypatch, tmp_path, NARROW, PIN_DRIFT_ROWS, pin=NARROW)
+    printed = capsys.readouterr().out
+
+    assert "template and live collections agree" in printed, printed
+    assert "evalpin.yml" in printed, printed
+
+
+def test_the_pin_config_name_matches_the_pin_that_writes_it():
+    """The seam this check depends on, across two jobs that never call each other.
+
+    The nightly derives a filename by convention (`LLOYD_EVALPIN_INDEX` + ".yml"
+    in the qmd config dir) and the pin job is the only thing that writes it. Both
+    sides read the same environment variable, and nothing but this assertion stops
+    one of them renaming the other's file out from under the comparison — a
+    renamed pin would put this check back to reading a file that does not exist and
+    reporting one quiet note about it forever.
+    """
+    from scripts.automod import evalpin
+
+    assert m.PIN_CONFIG_NAME == f"{evalpin.PIN_INDEX_NAME}.yml", m.PIN_CONFIG_NAME
+    assert m.RETAKE_PIN_COMMAND.endswith(m.PIN_CONFIG_NAME), m.RETAKE_PIN_COMMAND

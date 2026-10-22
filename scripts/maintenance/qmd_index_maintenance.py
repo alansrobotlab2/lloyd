@@ -83,8 +83,13 @@ SAFETY CONTRACT — this runs unattended:
     under-reported the index by half.
   * Every run also compares the tracked qmd collection template with the config
     the daemon actually reads, and records it as `config_drift` in the dated
-    report (#1298). Drift is a report entry and never an exit code: the job that
-    fixes embeddings must not start failing over a stale tracked copy.
+    report (#1298). Since #3158 the same run compares a THIRD file, the eval
+    pin's `<name>.yml`, against the live one it is generated from — those rows
+    carry `pair: pin/live` and recommend `retake_pin`, because the template
+    re-sync cannot reconcile that pair — and a run whose pin agrees names the
+    pin's path, so a clean report shows what it called clean. Drift is a report
+    entry and never an exit code: the job that fixes embeddings must not start
+    failing over a stale tracked copy.
   * Every run also measures whether one configured collection's root contains
     another's, as `collection_overlap` (#2180). Two files agreeing is not the same
     property as one collection swallowing the others' directories: `subliminal` is
@@ -235,6 +240,24 @@ NARROW_REMEDY_TARGET = "~/.config/qmd/index.yml"
 #: re-sync would be the revert.
 RECOMMEND_RESYNC = "live_to_template"
 RECOMMEND_NARROW = "template_to_live"
+#: The eval pin's qmd config — the THIRD file declaring these collections
+#: (#3158), and the one this check did not read: the pin's copy sat at the
+#: pre-#2180 vault-wide `subliminal` pattern from 2026-09-25 to 2026-10-22 while
+#: this job published `in_sync: true`, because only the template and the live
+#: file were in its compared set. Named by the convention that WRITES it
+#: (`scripts/automod/evalpin.py`: `PIN_INDEX_NAME` + ".yml" under the qmd config
+#: dir), and `test_the_pin_config_name_matches_the_pin_that_writes_it` pins the
+#: two spellings together — a pin renamed on this side alone would silently put
+#: the check back to comparing nothing.
+PIN_CONFIG_NAME = os.environ.get("LLOYD_EVALPIN_INDEX", "evalpin") + ".yml"
+#: A drifted pin copy is not reconciled by the template re-sync above: the pin's
+#: file is generated from the LIVE file by `evalpin.sync_pin_config` every time a
+#: pin is taken, so the remedy is to take a pin (or copy the live file onto it),
+#: never to copy the template anywhere.
+RECOMMEND_RETAKE_PIN = "retake_pin"
+RETAKE_PIN_COMMAND = f"cp ~/.config/qmd/index.yml ~/.config/qmd/{PIN_CONFIG_NAME}"
+RETAKE_PIN_DIRECTION = ("live -> pin config (`evalpin.sync_pin_config` regenerates it "
+                        "on the next pin; retaking a pin is what reconciles this)")
 
 # Prune when orphans exceed this share of all vectors. The threshold was set
 # when a cleanup cost a daemon stop; it no longer does, and the nightly
@@ -1985,8 +2008,46 @@ def _narrow_rulings(path: Path, tmpl: dict[str, dict]) -> dict[str, dict]:
     return out
 
 
-def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> dict:
-    """Compare the committed template with the config the daemon actually reads.
+def _field_drift_rows(name: str, left: dict, right: dict,
+                      left_label: str, right_label: str) -> list[dict]:
+    """The rows for one collection declared on BOTH sides of a config comparison.
+
+    Every compared field is judged on its own line, so a collection whose path
+    moved *and* whose pattern was narrowed gets two rows. One row per field is
+    what lets each row's two values be true: a single row could name one field
+    and hide the other's difference. `path` and `pattern` are compared as their
+    scalars — so a `**/*.md` narrowed to `*.md` on one side is one `kind:
+    pattern` row naming both values, which is the #2543 finding — and `ignore`
+    as a sorted set, so entries re-ordered on one side agree.
+
+    The value keys carry the two sides' labels, because the same rows serve two
+    pairs: `template`/`live`, and since #3158 the eval pin's copy against
+    `live`. One builder is what makes clause 3's "the same per-collection drift
+    rows" true by construction instead of by two loops agreeing.
+    """
+    rows: list[dict] = []
+    if left.get("path") != right.get("path"):
+        rows.append({"collection": name, "kind": "path_differs",
+                     f"{left_label}_path": left.get("path"),
+                     f"{right_label}_path": right.get("path")})
+    if left.get("pattern") != right.get("pattern"):
+        rows.append({"collection": name, "kind": "pattern",
+                     f"{left_label}_pattern": left.get("pattern"),
+                     f"{right_label}_pattern": right.get("pattern")})
+    l_ignore, r_ignore = _ignore_of(left), _ignore_of(right)
+    if l_ignore != r_ignore:
+        rows.append({"collection": name, "kind": "ignore",
+                     f"{left_label}_ignore": l_ignore,
+                     f"{right_label}_ignore": r_ignore})
+    return rows
+
+
+def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG,
+                 pin: Path | None = None) -> dict:
+    """Compare the committed template with the config the daemon actually reads,
+    and the eval pin's copy of that config with the live file it is generated
+    from (#3158 — the pin's copy was in nobody's compared set while it carried the
+    pre-#2180 `subliminal` pattern for 27 days).
 
     Both files define the same set of qmd collections by hand, and only by hand:
     SETUP.md:619 installs template -> live and SETUP.md:631-635 re-syncs live ->
@@ -2024,13 +2085,20 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
     body will not read: it is named in `malformed` and skipped, never scored as
     agreement.
     """
+    # Derived from the live file's own directory unless a caller names one, so a
+    # test (or a host) that moves `live` moves the pin's copy with it and the
+    # comparison stays the pair that actually sits side by side.
+    pin_path = Path(pin) if pin is not None else Path(live).parent / PIN_CONFIG_NAME
     out: dict = {
         "template": str(template),
         "live": str(live),
+        "pin": str(pin_path),
         "drift": [],
         "drift_count": 0,
         "resync_command": RESYNC_COMMAND,
         "resync_direction": RESYNC_DIRECTION,
+        "retake_pin_command": RETAKE_PIN_COMMAND,
+        "retake_pin_direction": RETAKE_PIN_DIRECTION,
     }
     tmpl, tmpl_note, tmpl_bad = _qmd_collections(template)
     livec, live_note, live_bad = _qmd_collections(live)
@@ -2075,35 +2143,71 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
                  "live_path": livec[name].get("path")}
             )
         else:
-            # Every compared field is judged on its own line, so a collection
-            # whose path moved *and* whose pattern was narrowed gets two rows.
-            # One row per field is what lets each row's two values be true: a
-            # single row could name one field and hide the other's difference.
-            if tmpl[name].get("path") != livec[name].get("path"):
+            rows = _field_drift_rows(name, tmpl[name], livec[name],
+                                     "template", "live")
+            # Only `pattern` can be a narrowing ruling: a path that moved or an
+            # `ignore` list that changed is not what a template comment rules on,
+            # so those rows keep the re-sync (#2750).
+            ruling = narrow.get(name)
+            if ruling:
+                for row in rows:
+                    if row["kind"] == "pattern":
+                        row["recommend"] = RECOMMEND_NARROW
+                        row["ruling_item"] = ruling["ruling_item"]
+                        row["replaced_glob"] = ruling["replaced_glob"]
+            out["drift"].extend(rows)
+
+    # The eval pin's copy of the live config, judged field-for-field the same way
+    # (#3158). This file was in nobody's compared set: `subliminal` sat at the
+    # pre-#2180 vault-wide pattern in it from 2026-09-25 to 2026-10-22 while this
+    # check published `in_sync: true`, because "the two files agree" was a claim
+    # about the template and the live file only. It is not cosmetic — qmd rebuilds
+    # the PIN's `store_collections` from this file on every
+    # `serve --index evalpin` whose parsed config hash differs, so a drifted copy
+    # serves the pin a corpus production no longer has, and every automod
+    # regression verdict is scored against that corpus.
+    pinc, pin_note, pin_bad = _qmd_collections(pin_path)
+    if pin_note:
+        # Nothing to compare is a note, exactly as an absent template is: the
+        # absence of a pin's config is not drift, and a row per collection would
+        # report the file's non-existence as a hundred differences.
+        out["pin_note"] = pin_note
+    else:
+        out["pin_comparable"] = True
+        if pin_bad:
+            out.setdefault("malformed", {})["pin"] = pin_bad
+        for name in sorted(set(livec) | set(pinc)):
+            # Presence is judged first for the same reason it is above, and the
+            # row's `recommend` is named here rather than left to the tail
+            # `setdefault`: a pin copy is never reconciled by copying the
+            # TEMPLATE anywhere.
+            if name not in pinc:
+                # The #1485 shape — a pin declaring no collection at all — now
+                # named collection by collection instead of as a count.
                 out["drift"].append(
-                    {"collection": name, "kind": "path_differs",
-                     "template_path": tmpl[name].get("path"),
+                    {"collection": name, "kind": "pin_missing", "pair": "pin/live",
+                     "recommend": RECOMMEND_RETAKE_PIN,
+                     "pin_path": None, "live_path": livec[name].get("path")}
+                )
+            elif name not in livec:
+                out["drift"].append(
+                    {"collection": name, "kind": "pin_only", "pair": "pin/live",
+                     "recommend": RECOMMEND_RETAKE_PIN,
+                     "pin_path": pinc[name].get("path"), "live_path": None}
+                )
+            elif name in live_bad or name in pin_bad:
+                out["drift"].append(
+                    {"collection": name, "kind": "uncomparable_body",
+                     "pair": "pin/live", "recommend": RECOMMEND_RETAKE_PIN,
+                     "pin_path": pinc[name].get("path"),
                      "live_path": livec[name].get("path")}
                 )
-            if tmpl[name].get("pattern") != livec[name].get("pattern"):
-                row = {"collection": name, "kind": "pattern",
-                       "template_pattern": tmpl[name].get("pattern"),
-                       "live_pattern": livec[name].get("pattern")}
-                # Only `pattern` can be a narrowing ruling: a path that moved or
-                # an `ignore` list that changed is not what a template comment
-                # rules on, so those rows keep the re-sync (#2750).
-                ruling = narrow.get(name)
-                if ruling:
-                    row["recommend"] = RECOMMEND_NARROW
-                    row["ruling_item"] = ruling["ruling_item"]
-                    row["replaced_glob"] = ruling["replaced_glob"]
-                out["drift"].append(row)
-            t_ignore, l_ignore = _ignore_of(tmpl[name]), _ignore_of(livec[name])
-            if t_ignore != l_ignore:
-                out["drift"].append(
-                    {"collection": name, "kind": "ignore",
-                     "template_ignore": t_ignore, "live_ignore": l_ignore}
-                )
+            else:
+                for row in _field_drift_rows(name, pinc[name], livec[name],
+                                             "pin", "live"):
+                    row["pair"] = "pin/live"
+                    row["recommend"] = RECOMMEND_RETAKE_PIN
+                    out["drift"].append(row)
 
     # Every row says which way to reconcile it, including the rows whose answer
     # is the documented re-sync (#2750 clause 5): the printed advice is gone by
@@ -2133,9 +2237,15 @@ def _drift_pair(row: dict) -> tuple:
     answer; a row that carries none (`template_only` for a collection the daemon
     dropped, `uncomparable_body` for an unreadable body) prints None twice, which
     is what it means.
+
+    Which of the two files is the non-live side follows the row's own `pair`
+    (#3158 adds the pin/live pair), so a pin row's `pin_pattern` is read rather
+    than reported as the None its row genuinely does not carry. A row with no
+    `pair` is a template row, which is every row this function saw before then.
     """
+    left = "pin" if row.get("pair") == "pin/live" else "template"
     for field in DRIFT_FIELDS:
-        tk, lk = f"template_{field}", f"live_{field}"
+        tk, lk = f"{left}_{field}", f"live_{field}"
         if tk in row or lk in row:
             return row.get(tk), row.get(lk)
     return None, None
@@ -3150,16 +3260,26 @@ def _emit(r: dict, as_json: bool) -> None:
             print(f"  qmd config drift  {cd['drift_count']} collection difference(s)")
             resync_rows: list[dict] = []
             narrow_rows: list[dict] = []
+            pin_rows: list[dict] = []
             for d in cd["drift"]:
                 # Read the row's own field: a `pattern` row carries
                 # template_pattern/live_pattern, and printing `template_path`
                 # for it would print None twice for a difference the operator
                 # can now actually fix.
                 tv, lv = _drift_pair(d)
+                # Name the pair, because since #3158 two pairs are reported here
+                # and a row reading `subliminal [pattern] template=... live=...`
+                # would accuse the TRACKED template of a difference that is in
+                # the eval pin's copy — the remedy for which is the opposite one.
+                other = "pin" if d.get("pair") == "pin/live" else "template"
                 print(f"    · {d['collection']} [{d['kind']}] "
-                      f"template={tv} live={lv}")
-                (narrow_rows if d.get("recommend") == RECOMMEND_NARROW
-                 else resync_rows).append(d)
+                      f"{other}={tv} live={lv}")
+                if d.get("recommend") == RECOMMEND_RETAKE_PIN:
+                    pin_rows.append(d)
+                elif d.get("recommend") == RECOMMEND_NARROW:
+                    narrow_rows.append(d)
+                else:
+                    resync_rows.append(d)
             if resync_rows:
                 # The documented re-sync, under the rows whose truth really is the
                 # daemon's file. It used to print for ANY nonzero drift, which for
@@ -3172,8 +3292,25 @@ def _emit(r: dict, as_json: bool) -> None:
             for d in narrow_rows:
                 for line in _narrow_remedy_lines(d):
                     print(line)
+            if pin_rows:
+                # Deliberately NOT the re-sync above: copying the template onto
+                # anything cannot fix a pin copy, and the file that has to change
+                # is generated from the live one (#3158). Naming the command that
+                # WOULD reconcile it is the difference between a row an operator
+                # closes and a row they leave because the advice was wrong.
+                print(f"    pin config ({cd.get('retake_pin_direction')}):")
+                print(f"      {cd.get('retake_pin_command')}")
         else:
             print("  qmd config        template and live collections agree")
+            # The third file, named even when it agrees: a check that shows its
+            # face only when it is red cannot be told apart from one that never
+            # ran, the reasoning #1598 and #2180 already applied twice in this
+            # report — and this is the file whose absence from the compared set
+            # let 27 days of drift read as `in_sync: true` (#3158).
+            if cd.get("pin_comparable"):
+                print(f"  qmd pin config     agrees with live ({cd.get('pin')})")
+            elif cd.get("pin_note"):
+                print(f"  qmd pin config     not compared: {cd['pin_note']}")
     # Printed on every run that measured it, agreement or no agreement (#2180): the
     # sentence above is what the finding hid behind, so the two belong on one screen.
     # A run with nothing to report still prints the row — a line that appears only

@@ -278,3 +278,348 @@ def test_pin_config_report(tmp_path):
     r = evalpin.pin_config_report("evalpin", config_dir=tmp_path)
     assert r["embed_match"] and not r["collections_match"]
     assert r["missing_collections"] == ["sessions"]
+
+
+
+# --- #3158: the pin's qmd config is generated at pin time, and drift is named --
+#
+# Before this, `~/.config/qmd/evalpin.yml` was a hand-kept copy of
+# `~/.config/qmd/index.yml` whose own header asked for `cp index.yml evalpin.yml`
+# after any edit to the live file. Nothing noticed the copy had not been re-synced
+# since 2026-09-25 while the live file's `subliminal` pattern was narrowed on
+# 2026-10-15: `pin_config_report` returned one boolean, `collections_match: false`,
+# and the only refusal in the path — `missing_collections` — is computed from the
+# snapshot's document counts, never from this compare. The drift is not cosmetic:
+# qmd's `syncConfigToDb` (qmd/src/store.ts:1463-1470) rebuilds the PIN's
+# `store_collections` from the pin's YAML on every `serve --index evalpin` whose
+# parsed config hash differs, so the drifted copy re-widened `subliminal` to the
+# whole vault inside the frozen snapshot — and `eval/embed_side_index.py:66` hands
+# that same text to every eval arm as its base config.
+
+#: The live pair of 2026-10-22, transcribed: the live leg of #2180's narrowing
+#: (`subliminal` one level, its `ignore:` list kept), `memory` unchanged, one
+#: embed model shared by both files. The two `pattern` strings below are the two
+#: values the drift report has to name, so they are written out, not generated.
+LIVE_YML_2026_10_22 = """\
+serve:
+  port: 8139
+embed:
+  max_context: 8192
+collections:
+  subliminal:
+    path: /home/me/obsidian
+    pattern: "*.md"
+    ignore:
+      - agents/**
+      - templates/**
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+models:
+  embed: E
+  rerank: R
+  generate: G
+"""
+
+#: The same file as the live one, with that narrowing undone in the PIN's copy —
+#: exactly the state `~/.config/qmd/` sat in on 2026-10-22.
+DRIFTED_PIN_YML_2026_10_22 = LIVE_YML_2026_10_22.replace(
+    '    pattern: "*.md"\n    ignore:', '    pattern: "**/*.md"\n    ignore:')
+
+
+def test_config_drift_fixture_differsexactly_where_the_live_pair_differed():
+    """Guard on the two fixtures above. Every assertion below it is about the
+    2026-10-22 state, so if a fixture were transcribed wrong the tests would be
+    pinning a state that never existed. One collection, one field, differing in
+    the direction the live file moved.
+    """
+    import yaml
+    live = yaml.safe_load(LIVE_YML_2026_10_22)["collections"]
+    pin = yaml.safe_load(DRIFTED_PIN_YML_2026_10_22)["collections"]
+    assert live["subliminal"]["pattern"] == "*.md"
+    assert pin["subliminal"]["pattern"] == "**/*.md"
+    assert [n for n in live if live[n] != pin[n]] == ["subliminal"]
+
+
+def test_sync_pin_config_regenerates_a_drifted_copy_from_index_yml(tmp_path):
+    """Clause 1: the hand copy stops being a thing a person has to remember.
+
+    #1485's convention was `cp index.yml evalpin.yml`, re-run by hand after any
+    edit to `index.yml`, with the header re-added by hand — and the copy that
+    convention produced is the fixture above. A byte-copy onto the file would fix
+    that file; generating it from `index.yml` at pin time removes the dependency.
+    The live file is the source and never the thing that changes, and the header
+    survives because it is the file's only explanation of why an empty
+    `collections:` block once emptied `store_collections`.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(DRIFTED_PIN_YML_2026_10_22)
+
+    report = evalpin.sync_pin_config("evalpin", config_dir=tmp_path)
+
+    import yaml
+    assert (yaml.safe_load((tmp_path / "evalpin.yml").read_text())
+            == yaml.safe_load(LIVE_YML_2026_10_22)), "the two must PARSE equal"
+    assert report["collections_match"] is True, report
+    assert report["collections_drift"] == [], report
+    assert report["missing_collections"] == [], report
+    assert report["embed_match"] is True, report
+    assert report["synced_from"] == str(tmp_path / "index.yml"), report
+    assert "GENERATED" in (tmp_path / "evalpin.yml").read_text(), (
+        "the generated file lost the comment saying which job owns it")
+    assert (tmp_path / "index.yml").read_text() == LIVE_YML_2026_10_22, (
+        "the live file the pin is generated FROM was edited")
+
+
+def test_sync_pin_config_overwrites_a_hand_edit_to_the_pin(tmp_path):
+    """The class this retires is not "someone forgot to re-sync" but "the pin's
+    config is a file someone can edit". A one-field experiment aimed at the pin —
+    widening a pattern to see what the corpus would return — is exactly what
+    `evalpin.yml:4-6` says the byte-copy exists to make impossible, and it now
+    survives one pin run at most.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(
+        LIVE_YML_2026_10_22.replace("    path: /home/me/obsidian/memory\n",
+                                    "    path: /tmp/scratch\n"))
+    assert (tmp_path / "evalpin.yml").read_text() != LIVE_YML_2026_10_22
+
+    evalpin.sync_pin_config("evalpin", config_dir=tmp_path)
+
+    import yaml
+    got = yaml.safe_load((tmp_path / "evalpin.yml").read_text())["collections"]
+    assert got["memory"]["path"] == "/home/me/obsidian/memory", got
+
+
+def test_sync_pin_config_refuses_without_a_live_config_rather_than_pinning_nothing(tmp_path):
+    """With no readable `index.yml` there is no idea what production indexes, and
+    generating an empty collection block is #1485's shape: qmd answers a query
+    scoped to a collection missing from `store_collections` with ZERO ROWS, which
+    reads as "the corpus does not contain that" about a corpus that was never
+    generated. So the step refuses to WRITE, leaves the file it found exactly as it
+    found it, and names the reason — see
+    `test_a_pin_run_records_the_config_refusal_and_still_serves` for why that is a
+    recorded field and not a raised `PinError`.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "evalpin.yml").write_text(DRIFTED_PIN_YML_2026_10_22)
+
+    r = evalpin.sync_pin_config("evalpin", config_dir=tmp_path)
+
+    assert "index.yml" in r["sync_refused"], r
+    assert r["synced_from"] == str(tmp_path / "index.yml"), r
+    assert (tmp_path / "evalpin.yml").read_text() == DRIFTED_PIN_YML_2026_10_22, (
+        "a refused sync still wrote the file")
+
+
+def test_sync_pin_config_refuses_a_live_config_declaring_no_collections(tmp_path):
+    """The other half of the same refusal: a live file that parses but declares
+    nothing — a truncation, a half-finished edit — would generate a pin that
+    indexes nothing and still report `collections_match: true`, because both sides
+    would be empty and therefore agree. Agreement between two empties is not the
+    property anyone is asking about, so the write is refused for the same reason
+    and for the same reason it is recorded rather than raised.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text("models:\n  embed: E\n")
+    (tmp_path / "evalpin.yml").write_text(DRIFTED_PIN_YML_2026_10_22)
+
+    r = evalpin.sync_pin_config("evalpin", config_dir=tmp_path)
+
+    assert "declares no collections" in r["sync_refused"], r
+    assert (tmp_path / "evalpin.yml").read_text() == DRIFTED_PIN_YML_2026_10_22
+    assert r["collections_match"] is False, (
+        "the untouched drifted copy must not read as a match")
+
+
+def test_a_pin_run_records_the_config_refusal_and_still_serves(tmp_path, monkeypatch):
+    """The refusal is a field, not an exception, and this is why rather than a
+    preference. `PinnedCorpus.__enter__` has one job — hand back a daemon serving a
+    frozen snapshot — and three of this module's existing tests drive it to a PORT
+    CONFLICT or a DEAD DAEMON with no qmd config dir in reach. A `PinError` raised
+    here would arrive at them as a different failure than the one they pin, and a
+    guard that rewrites what unrelated failures look like is worse than the drift it
+    guards. So the pin proceeds, and the provenance says in as many words that its
+    config could not be generated.
+    """
+    import sys
+    from scripts.automod import evalpin
+
+    cli = tmp_path / "qmd.js"
+    cli.write_text("// not qmd")   # no index.yml anywhere beside it
+    entered: list = []
+
+    monkeypatch.setattr(evalpin, "production_daemon", lambda conf=None: ([str(cli)], {}, "test"))
+    monkeypatch.setattr(evalpin, "reap_stale", lambda port, name: [])
+    monkeypatch.setattr(evalpin, "port_free", lambda port: True)
+    monkeypatch.setattr(evalpin, "_probe", lambda port, timeout=5.0: True)
+    monkeypatch.setattr(evalpin, "pin_command",
+                        lambda argv, port, name: entered.append(name) or [
+                            sys.executable, "-c", "import time; time.sleep(30)", str(cli)])
+    monkeypatch.setattr(evalpin, "snapshot",
+                        lambda name: {"index": str(tmp_path / "pin.sqlite"),
+                                      "collections": {"subliminal": 5}})
+    monkeypatch.setattr(evalpin, "production_payload", lambda q: {"collections": []})
+    monkeypatch.setenv("QMD_CONFIG_DIR", str(tmp_path))
+
+    with evalpin.PinnedCorpus(workdir=tmp_path / "work") as pin:
+        pass
+
+    assert entered == ["evalpin"], "the daemon was never spawned"
+    assert "sync_refused" in pin.provenance["pin_config"], pin.provenance["pin_config"]
+    assert not (tmp_path / "evalpin.yml").exists(), "a refused sync created a config"
+
+
+def test_taking_a_pin_generates_the_config_before_the_daemon_is_spawned(tmp_path, monkeypatch):
+    """Clause 1 across the process boundary, which is where the ordering matters.
+
+    `PinnedCorpus.__enter__` snapshots, then spawns `qmd serve --index evalpin`
+    against that snapshot — and the spawned daemon is what reads the pin's YAML and
+    rewrites `store_collections` from it. Generate after the spawn and the daemon
+    has already served the drifted corpus this round measures against, so the
+    assertion is taken inside `pin_command`, at the last point before the `Popen`
+    whose child reads the file.
+    """
+    import sys
+    import yaml
+    from scripts.automod import evalpin
+
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(DRIFTED_PIN_YML_2026_10_22)
+    cli = tmp_path / "qmd.js"
+    cli.write_text("// not qmd")
+    seen: list = []
+
+    def fake_pin_command(argv, port, name):
+        seen.append(yaml.safe_load((tmp_path / f"{name}.yml").read_text())["collections"])
+        return [sys.executable, "-c", "import time; time.sleep(30)", str(cli)]
+
+    monkeypatch.setattr(evalpin, "production_daemon", lambda conf=None: ([str(cli)], {}, "test"))
+    monkeypatch.setattr(evalpin, "reap_stale", lambda port, name: [])
+    monkeypatch.setattr(evalpin, "port_free", lambda port: True)
+    monkeypatch.setattr(evalpin, "_probe", lambda port, timeout=5.0: True)
+    monkeypatch.setattr(evalpin, "pin_command", fake_pin_command)
+    monkeypatch.setattr(evalpin, "snapshot",
+                        lambda name: {"index": str(tmp_path / "pin.sqlite"),
+                                      "collections": {"subliminal": 5, "memory": 2}})
+    # Production's recall names the fixture's two collections, so the #1485
+    # refusal below is not what stops the run before the spawn is reached.
+    monkeypatch.setattr(evalpin, "production_payload",
+                        lambda q: {"collections": ["subliminal", "memory"]})
+    monkeypatch.setenv("QMD_CONFIG_DIR", str(tmp_path))
+
+    with evalpin.PinnedCorpus(workdir=tmp_path / "work") as pin:
+        pass
+
+    assert len(seen) == 1, "the daemon was never reached"
+    assert seen[0]["subliminal"]["pattern"] == "*.md", (
+        "the spawned daemon read the drifted copy: it rewrote the snapshot's "
+        "store_collections to the vault-wide glob before this run's first query")
+    assert pin.provenance["pin_config"]["collections_match"] is True, (
+        "provenance must record the config the daemon was actually served")
+    assert pin.provenance["pin_config"]["synced_from"] == str(tmp_path / "index.yml")
+
+
+def test_pin_config_report_names_the_drifted_field_and_both_values(tmp_path):
+    """Clause 2: a bare boolean recorded into provenance nobody reads.
+
+    `collections_match: false` could not tell a collection the pin never declared
+    — the #1485 shape, which empties `store_collections` — from one collection
+    whose `pattern` was narrowed on the live side and not in the copy. The second
+    is a corpus difference the pin measures silently, so it is named
+    collection-and-field with both values, the shape
+    `scripts/maintenance/qmd_index_maintenance.py` has used for a pattern drift
+    since #2543.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(DRIFTED_PIN_YML_2026_10_22)
+
+    r = evalpin.pin_config_report("evalpin", config_dir=tmp_path)
+
+    assert r["collections_match"] is False
+    assert r["missing_collections"] == [], "nothing was dropped here"
+    assert r["collections_drift"] == [{
+        "collection": "subliminal", "field": "pattern",
+        "pin": "**/*.md", "live": "*.md",
+    }], r["collections_drift"]
+    assert r["embed_match"] is True
+    for row in r["collections_drift"]:
+        assert set(row) == {"collection", "field", "pin", "live"}, row
+
+
+def test_pin_config_report_separates_a_dropped_collection_from_a_changed_one(tmp_path):
+    """Both kinds at once, because the distinction IS the severity: the dropped
+    collection is the one `PinnedCorpus.__enter__` refuses the run over, the
+    changed one is the one nothing refused for 27 days. One list would let a reader
+    apply the wrong remedy to either, so `missing_collections` keeps its meaning
+    unchanged and the changed field goes in its own rows.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(
+        LIVE_YML_2026_10_22
+        .replace('    pattern: "*.md"\n    ignore:',
+                 '    pattern: "**/*.md"\n    ignore:')
+        .replace("  memory:\n    path: /home/me/obsidian/memory\n"
+                 '    pattern: "**/*.md"\n', ""))
+
+    r = evalpin.pin_config_report("evalpin", config_dir=tmp_path)
+
+    assert r["missing_collections"] == ["memory"], r
+    assert [(d["collection"], d["field"]) for d in r["collections_drift"]] == [
+        ("subliminal", "pattern")], r
+    assert r["collections_drift"][0]["pin"] == "**/*.md", r
+
+
+def test_pin_config_report_names_a_path_change_and_an_ignore_change(tmp_path):
+    """`pattern` is the field that drifted on this box, but it is not the only one
+    a copy can fall behind on: an `ignore:` list that differs changes which
+    documents are in the corpus as surely as a `pattern` does, and a `path` that
+    moved changes which tree is read at all. One row per differing field, so a
+    collection that moved AND narrowed yields two rows whose values are each true.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text(
+        LIVE_YML_2026_10_22
+        .replace("    path: /home/me/obsidian\n", "    path: /home/me/vault\n")
+        .replace("      - agents/**\n", ""))
+
+    got = evalpin.pin_config_report("evalpin", config_dir=tmp_path)["collections_drift"]
+
+    assert {(d["collection"], d["field"]) for d in got} == {
+        ("subliminal", "path"), ("subliminal", "ignore")}, got
+    ignore = next(d for d in got if d["field"] == "ignore")
+    assert ignore["pin"] == ["templates/**"], ignore
+    assert ignore["live"] == ["agents/**", "templates/**"], ignore
+
+
+def test_pin_config_report_of_a_pin_declaring_nothing_names_every_live_collection(tmp_path):
+    """The #1485 shape — `collections: {}` — is named collection by collection now
+    instead of as one boolean, and `missing_collections` still lists exactly the
+    set `PinnedCorpus.__enter__` refuses on. No field rows: nothing is declared on
+    both sides, so there is no field to compare.
+    """
+    from scripts.automod import evalpin
+    (tmp_path / "index.yml").write_text(LIVE_YML_2026_10_22)
+    (tmp_path / "evalpin.yml").write_text("collections: {}\nmodels:\n  embed: E\n")
+
+    r = evalpin.pin_config_report("evalpin", config_dir=tmp_path)
+
+    assert r["missing_collections"] == ["memory", "subliminal"], r
+    assert r["collections_drift"] == [], r
+
+
+def test_pin_config_report_survives_an_unreadable_file_the_way_it_always_did(tmp_path):
+    """The report has never raised — a pin with no config file gets an `error` key
+    and keeps its provenance — and the new compare must not be the thing that
+    changes that. `collections_drift` is absent when nothing could be read, so a
+    reader never sees an empty list and concludes the two configs agree.
+    """
+    from scripts.automod import evalpin
+    r = evalpin.pin_config_report("nope", config_dir=tmp_path)
+    assert "error" in r, r
+    assert "collections_drift" not in r and "missing_collections" not in r, r

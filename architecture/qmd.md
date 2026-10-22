@@ -396,18 +396,31 @@ environment, so an eval measures a frozen corpus. The snapshot carries every
 collection (`/query` filters on `documents.collection`); the pin's
 `~/.config/qmd/evalpin.yml` only shapes `store_collections` and names the
 models. #1485 (2026-09-25) made it a copy of `index.yml` (it was `collections:
-{}` before that), and **it is no longer one**: #2728's operator leg rewrote the live
-file on 2026-10-15 (subliminal → `pattern: "*.md"` plus an `ignore:` list) and the
-pin's copy was not re-synced, so `evalpin.yml:28` still carries the pre-#2180 vault-wide
-glob. Measured 2026-10-22, `pin_config_report` returns `collections_match: false` with
-`missing_collections: []` and `embed_match: true` — mtimes tell the same story,
-`index.yml` 2026-10-15 against `evalpin.yml` 2026-09-25. That report is *recorded, not
-enforced*, and `PinnedCorpus`'s refusal fires only on a **missing** collection, so a pin
-run proceeds and books the drift into its own provenance as a boolean; it matters because
-`store_collections` is what qmd scopes and resolves paths against, and because the `eval/`
-arms build their own configs from this same file (`eval/embed_side_index.py:66`,
-`eval/contextual_full_corpus.py:58`). Re-syncing it, and naming the differing key instead
-of a flag, is #3158. A pin shares GPU 0 with
+{}` before that), and **a hand-kept copy is what it was, not what it is**: since #3158
+`evalpin.sync_pin_config` regenerates it from `index.yml` on every pin — the live bytes
+copied verbatim under a header naming the job that owns the file — so nobody re-copies
+it by hand and an edit aimed at the pin survives one pin run at most. It was not a
+generated file for 27 days: #2728's operator leg narrowed subliminal to
+`pattern: "*.md"` in the live file on 2026-10-15, the copy kept the pre-#2180 vault-wide
+glob, and the pair measured `collections_match: false` / `missing_collections: []` /
+`embed_match: true` on 2026-10-22 with mtimes 2026-10-15 against 2026-09-25. That is
+precisely what the copy exists to prevent, because `store_collections` is what qmd
+scopes and resolves paths against, `syncConfigToDb` (`qmd/src/store.ts:1463-1470`)
+rebuilds it from this file on every `serve --index evalpin` whose parsed config hash
+differs, and the `eval/` arms build their own configs from this same text
+(`eval/embed_side_index.py:66`, `eval/contextual_full_corpus.py:58`). Two things name
+the drift now that one boolean never did. `pin_config_report` returns
+`collections_drift`, one row per collection-and-field naming both values —
+`{"collection": "subliminal", "field": "pattern", "pin": "**/*.md", "live": "*.md"}` —
+while `missing_collections` keeps its meaning and stays the only thing `PinnedCorpus`
+refuses on (the config step records a `sync_refused` reason rather than raising, so a
+pin with no readable `index.yml` still serves, with the refusal in its provenance). And
+the nightly `config_drift` (`scripts/maintenance/qmd_index_maintenance.py`) compares the
+pin's copy against the live file with the same per-collection rows it emits for the
+tracked template, tagged `pair: pin/live` and recommending `retake_pin`, since the
+template re-sync cannot reconcile that pair; until #3158 that job published
+`in_sync: true` over exactly this drift because the pin's file was in nobody's compared
+set. Report-only like template drift, and it never moves that job's exit code. A pin shares GPU 0 with
 production; the regression runner's pins ran 42% of wall time on 2026-09-21 and
 slowed production's reranks ~1.8×. Experiments use their own index name and port
 (`reap_stale` matches only its own), and prepared snapshots (a re-embedded or
