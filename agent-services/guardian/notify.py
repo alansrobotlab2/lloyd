@@ -126,9 +126,32 @@ ALERT_CLEARED_PREFIX = "cleared:"
 #: directive, so closing the incident never destroys the evidence of it.
 ALERT_CLEARED_BANNER = ("CLEARED — the incident described below is closed. Its "
                         "text is kept quoted for the record: do not act on it.")
-#: A header key line of ALERT.md (`level: …`, `written: …`, `cleared: …`). The
-#: retraction finds the file's title and its own marker through this and
-#: nothing else, so an alert body can never impersonate a header key.
+#: Header key naming the incident this file's one slot no longer holds (#3120).
+#: `alert()` overwrites a single incident with one `write_text`, so an alert of
+#: a different title necessarily buries whatever stood there — and until this
+#: key existed it buried it without a trace: the 2026-10-20 `critical`
+#: `Lloyd data root damaged — promotions halted` alarm left the file unsealed,
+#: under a later `error` alert, taking the halt and its lift with it. The value
+#: carries the buried alarm's own `level=` and `written=` INSIDE the key, never
+#: as a second `written:` line (one readable stamp per file is
+#: `tests/test_guardian_alert_stamp.py`'s rule), and ends `open` or `cleared`:
+#: the two burials a reader has to be able to tell apart are an unsealed alarm
+#: that went missing and a tombstone whose incident really did close.
+ALERT_DISPLACED_PREFIX = "displaced:"
+#: How much of a displaced tombstone's `cleared:` text the LEDGER row keeps
+#: (#3120). It is `_ledger`'s own bound on an alert body — `body[:2000]` — so a
+#: row about a displacement can never be wider than a row about an alert, and the
+#: cap is a number this module already enforces rather than one invented for the
+#: branch. Nothing about the file depends on it: the seal's text is already gone
+#: from ALERT.md whatever its length, so keeping the head of a long retraction
+#: note — the clause that says HOW the incident was closed — costs nothing the
+#: alert path does not already pay.
+_DISPLACED_NOTE_CHARS = 2000
+#: A header key line of ALERT.md (`level: …`, `written: …`, `cleared: …`,
+#: `displaced: …`). The retraction finds the file's title and its own marker
+#: through this and nothing else, so an alert body can never impersonate a
+#: header key — and a key this module adds is readable by every existing reader
+#: the moment it is written, which is why it is spelled in this shape.
 _ALERT_HEADER_KEY = re.compile(r"^[a-z_]+: ")
 
 
@@ -378,8 +401,52 @@ class Notifier:
             return False
 
     def _alert_file(self, level: str, title: str, text: str) -> bool:
+        """Put this incident into ALERT.md's ONE slot, naming whatever it buries (#3120).
+
+        One file, one incident, one `write_text`, last writer wins: that is
+        #775's contract and this method still keeps it — refusing an overwrite
+        would leave a stale alarm reading as live, which is the defect #1967
+        closed. What it did NOT do before #3120 was anything about what the
+        overwrite covered. There is no level comparison anywhere in this write
+        path, so an `info` alert buries an open `critical` alarm exactly as the
+        `error` watchdog alert did on 2026-10-21: the `critical`
+        `Lloyd data root damaged — promotions halted` alarm left the file
+        unsealed, un-retracted and unnamed, and with it the halt it asserted
+        (raised 2026-10-20T21:24:14Z, adjudicated a false positive and lifted
+        21:28:35Z) stopped existing on the surface an agent reads first. The
+        retraction route cannot cover this: `_alert_file_retract` is
+        title-scoped by #1967's own design and `guardian.py`'s tripwire sweep
+        concedes it has no index to a section another incident displaced.
+
+        So the outgoing incident is named BEFORE it is overwritten, in one
+        `displaced:` header key carrying its own `level=` and `written=` INLINE
+        — a second `written:` line would give the file two alarms a reader could
+        age, which `tests/test_guardian_alert_stamp.py` exists to forbid — and
+        ending `open` or `cleared`, because an unsealed alarm that went missing
+        and a tombstone whose incident really did close are different facts. The
+        burial also goes to the ledger as one `alert_displaced` row, which is
+        where the whole chain survives (the in-file key is one generation deep by
+        construction, and `promotions.jsonl` is archived monthly rather than
+        deleted). It is NOT logged as another `alert`:
+        `app/failure_ledger.py:367` builds per-title onset history out of those
+        rows, and a displacement is not a firing.
+
+        The key is conditional and the ledger row follows the write: a file with
+        nothing to bury keeps the byte layout #1912 pinned byte for byte, and a
+        write that failed records nothing it cannot stand behind. A predecessor
+        no reader can attribute (`_alert_file_split` answers None) yields no
+        trace either — inventing a title for bytes that are no one's incident is
+        the same fabrication `_alert_file_retract` refuses. A re-alert of the
+        incident already in the slot buries nobody and logs nothing, but CARRIES
+        the key it is holding: that burial happened one check earlier, and the
+        2026-10-21 displacement was itself produced by exactly such a re-alert, so
+        dropping the key on a same-title write would erase a real burial's in-file
+        trace within an hour of it — see `_alert_file_key`'s three answers, pinned
+        by `test_the_burial_trace_survives_the_burying_incident_s_own_realert`.
+        """
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
+            key_line, outgoing = self._alert_file_key(title)
             # `astimezone()` with no argument attaches the machine's zone to the
             # LOCAL reading: the digits, microseconds included, are untouched and
             # only the zone is named (#1912 — the same shape speak.py's `%z` got
@@ -388,14 +455,113 @@ class Notifier:
             # and this repo's own comments held both of them seven hours apart:
             # `scripts/side_effect_traffic_census.py::parse_stamp` reads a naive
             # stamp as local, `app/skill_telemetry.py` reads one as UTC.
+            written = datetime.now().astimezone().isoformat()
+            # A header key, so it lands in the block `_alert_file_split` reads
+            # before the first blank line — the only block `_alert_file_retract`
+            # copies and the only one a reader's parser sees. Below the blank it
+            # would be alarm prose again, and the first retraction would quote it.
+            displaced = f"\n{key_line}" if key_line else ""
             (self.state_dir / ALERT_FILE_NAME).write_text(
                 f"# {title}\n\nlevel: {level}\n"
-                f"written: {datetime.now().astimezone().isoformat()}\n\n{text}\n",
+                f"written: {written}{displaced}\n\n{text}\n",
                 encoding="utf-8",
             )
-            return True
         except Exception:
             return False
+        if outgoing:
+            self._alert_file_displaced(outgoing, title)
+        return True
+
+    def _alert_file_key(self, title: str) -> tuple[str, dict | None]:
+        """(the `displaced:` line this write must carry, the incident it buries).
+
+        Three answers, and the difference between the last two is the whole
+        reason this is one call and not a boolean:
+
+        `("", None)` — the slot holds nothing: no file, or bytes this format
+        cannot name. Nothing is buried and there is no earlier trace to keep.
+
+        `(existing, None)` — the SAME incident is re-alerting, which is the
+        ordinary hourly shape of a `coalesce=True` watchdog and buries nobody, so
+        nothing is logged. But the key the file already carries is carried
+        FORWARD: the burial it records happened one check earlier, and the
+        displacement this item is about was itself produced by exactly such a
+        re-alert — an unsealed `critical` alarm buried by the second hourly
+        `error` copy of one standing incident. Dropping the line whenever the
+        incident re-asserts would erase the in-file trace of a real burial within
+        one check of it, which is the half the ledger is not for.
+
+        `(new_line, outgoing)` — a DIFFERENT title holds the slot, so this write
+        buries it. The key is REWRITTEN to name this burial — the file carries
+        one generation, the chain lives in the ledger — and `outgoing` is what the
+        caller logs.
+
+        Read through `_alert_file_split`, the parser a reader uses, so a
+        predecessor written by another process — or edited by a person — yields
+        the same fields; the H1 minus its `"# "` marker is `alert_file_incident`'s
+        own extraction, so "same incident?" cannot be answered two ways by the two
+        readers. `level` and `written` fall back to `unknown` rather than being
+        dropped: a burial with no stamp is still a burial, and a missing field
+        would read as "nothing was here".
+        """
+        try:
+            raw = (self.state_dir / ALERT_FILE_NAME).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return "", None
+        split = self._alert_file_split(raw)
+        if not split:
+            return "", None
+        carried, level, written, cleared = "", "unknown", "unknown", ""
+        for key in split[1]:
+            if key.startswith(f"{ALERT_DISPLACED_PREFIX} "):
+                carried = key
+            elif key.startswith("level: "):
+                level = key[len("level: "):].strip() or "unknown"
+            elif key.startswith("written: "):
+                written = key[len("written: "):].strip() or "unknown"
+            elif key.startswith(f"{ALERT_CLEARED_PREFIX} "):
+                cleared = key[len(ALERT_CLEARED_PREFIX):].strip()
+        held = split[0][len("# "):]
+        if held == title:
+            return carried, None
+        buried = {"title": held, "level": level, "written": written,
+                  "cleared": cleared, "sealed": bool(cleared)}
+        return (f"{ALERT_DISPLACED_PREFIX} {held} level={level} "
+                f"written={written} {'cleared' if cleared else 'open'}", buried)
+
+    def _alert_file_displaced(self, outgoing: dict, incoming_title: str) -> None:
+        """Record the burial durably: the in-file key is overwritten by the next one.
+
+        One `alert_displaced` row per displacement, never another `alert` row —
+        see `_alert_file`'s reason. `written` is the BURIED alarm's own stamp and
+        `created_at`/`ts` are when the burial happened, so the row answers both
+        questions a later reader asks: how old was the alarm that vanished, and
+        when did it vanish. `cleared` carries the seal's text when the buried
+        incident had been closed, because that text lives nowhere else — the
+        `alert` row logged when it fired holds its own body, but the retraction
+        note is written only into ALERT.md, which is exactly the line this
+        overwrite destroys.
+
+        Best-effort in both directions, on the rule `_backlog_task` states for
+        this class of helper: never raise from an alert, and never RE-ALERT about
+        an alert — a displacement that could not be logged is reported by the
+        `displaced:` key in the file, which is the primary trace and needs no
+        ledger to be read. The lazy `import gstate` is `_ledger`'s, for `_ledger`'s
+        reason: this module's callers reach the ledger through it, and the drill
+        stubs that name.
+        """
+        try:
+            entry = {"event": "alert_displaced",
+                     "level": outgoing["level"], "title": outgoing["title"],
+                     "written": outgoing["written"],
+                     "sealed": outgoing["sealed"],
+                     "displaced_by": incoming_title}
+            if outgoing["sealed"]:
+                entry["cleared"] = outgoing["cleared"][:_DISPLACED_NOTE_CHARS]
+            import gstate
+            gstate.append_event(self.ledger, entry)
+        except Exception:
+            pass
 
     def _alert_file_retract(self, title: str, note_text: str) -> bool:
         """Seal the incident ALERT.md is holding, when this title's cause clears (#1967).

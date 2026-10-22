@@ -449,7 +449,16 @@ Two entry points, and picking the wrong one is the trap:
   (`promotions.jsonl`), `ALERT.md` in the guardian state dir, the journal
   (`systemd-cat -t lloyd-guardian`), a desktop toast, the spoken line, a
   vault note under `~/obsidian/memory/<date>.md`, plus a backlog task when
-  the level is critical or a trigger is named. They fail differently on
+  the level is critical or a trigger is named. `ALERT.md` holds **one**
+  incident — last writer wins, and the write path compares no level — so an
+  alert of a different title buries whatever stood there, and when it does it
+  now says so: a `displaced:` header key names the buried title with its own
+  `level=` and `written=` inline and ends `open` or `cleared`, and the burial is
+  one `alert_displaced` row on the same `promotions.jsonl` (#3120, #3109).
+  Sealing the incident in the slot is the other, separate route: `resolve()` is
+  title-scoped (#1967) and seals only the incident the file is holding when it
+  is called, so an incident that has already been buried can never be sealed by
+  it — which is why displacement needs its own trace. They fail differently on
   purpose: the ledger works when the network is down, the journal when the
   state dir is unreadable, the toast when nobody is looking at a browser,
   speech when nobody is looking at the *screen*, and the vault note tomorrow
