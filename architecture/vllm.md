@@ -267,10 +267,10 @@ Three numbering schemes on this box, and only two of them agree:
 
 | `nvidia-smi` | PCI | `/dev/nvidiaN` | Card | Serves |
 |---|---|---|---|---|
-| 0 | 01:00.0 | `/dev/nvidia3` | RTX 3090 | Qwen3-TTS, the voice worker, qmd |
-| 1 | 41:00.0 | `/dev/nvidia2` | RTX PRO 6000 | **this engine** |
+| 0 | 01:00.0 | `/dev/nvidia3` | RTX 3090 | Qwen3-TTS (`agent-tts`), the voice worker (`lloyd-agent-worker`), qmd (`agent-qmd-daemon`) |
+| 1 | 41:00.0 | `/dev/nvidia2` | RTX PRO 6000 | **this engine** (`agent-llm-primary`, pinned in its launcher, not its conf) |
 | 2 | 42:00.0 | `/dev/nvidia4` | RTX 3090 | djev (`agent-djev.conf`, `GPU=2`) |
-| 3 | 61:00.0 | `/dev/nvidia0` | RTX 3090 | the omni TTS (pinned by GPU UUID, not index) |
+| 3 | 61:00.0 | `/dev/nvidia0` | RTX 3090 | the omni TTS (`agent-tts-omni`, pinned by GPU UUID, not index) |
 | 4 | 62:00.0 | `/dev/nvidia1` | RTX 3090 | nothing pins it |
 
 The node column is `/proc/driver/nvidia/gpus/<pci>/information`'s `Device
@@ -279,9 +279,16 @@ Minor:`, read on the box 2026-10-21. Rows 2–4 are new here and were overdue:
 left this one at three, so it still read index 2's bus id as `61:00.0` (now
 index 3) and still gave index 2 "the llama.cpp secondary" — a tenant that has
 been off since 2026-09-20 (`secondary_enabled: false`, §1.1) and is djev now.
-`tests/test_infrastructure_gpu_inventory.py` pins the §2.3 table and §GPUs at
-five rows and deliberately excludes this one by header; #3137 asks it to cover
-this table too, so the correction is not another hand-copy.
+That file used to pin the §2.3 table and §GPUs at five rows and exclude *this*
+one by header, which is the hole #3137 closed. It now harvests this table by its
+own `nvidia-smi`/PCI header and holds it to the tree: one row per card, this PCI
+column against §2.3's copy of the same bus ids, every tenant named here against
+the pin that program's own conf or launcher sets, a card no conf pins against a
+row that says so in words, and no tenant whose switch is off in `config.yaml` at
+all — which is what "the llama.cpp secondary" was. The node column is the one
+column no in-tree check can hold: outside this table, `/dev/nvidiaN` appears
+nowhere in the tree, so it stays a hand reading of `/proc` and #3137 leaves it
+owed to a person rather than pinned to the live box.
 
 `-i <n>` is nvidia-smi enumeration, i.e. PCI bus order — the same order the
 engine launchers pin with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so the clamp table
