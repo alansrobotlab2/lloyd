@@ -1598,6 +1598,49 @@ def test_both_budget_settings_cite_both_measured_anchors():
             "are the only reason the value is what it is")
 
 
+def test_the_generation_budget_cites_both_measured_arm_b_runs():
+    """Clauses 1-4 of #3170: arm B's generation step is cited to its own measurements.
+
+    `generate_theories_live`'s docstring used to assert the opposite of the record — that
+    it was "the one live budget still without a measurement", that "no #2258 run ever
+    reached this step", and that "every smoke run died in arm A" (written by `f027def5`,
+    2026-10-12, before either probe ran). Both #2258 arm-B smoke runs contradict all
+    three: `smoke-b2.jsonl` run-20261013T124552Z and `smoke-b3.jsonl` run-20261018T220131Z
+    each carry a `kind: theories` row holding 3 disjoint non-empty theories with
+    `generated_before_evidence: true`, written 49 s and 47 s after their own run-id start
+    stamps — `run_id` is built from `datetime.now` at run start, so a row's `ts` minus its
+    run's stamp IS the generation span, and the span the two rows support is 47–49 s, not
+    the ~60 s the item carried as its upper bound. Like `investigate_live`'s, this
+    docstring IS the artefact: `git grep` over eval and tests held neither run id before
+    this round, so the node reads `generate_theories_live.__doc__` as prose rather than
+    the module's whole text, which would pass on one lucky mention somewhere and leave the
+    setting itself unexplained. It re-pins the two things the round promised not to
+    change: the retired sentence may not come back, and the shipped 6-turn default stands
+    because the measurement says 6 suffices — #3170 raises nothing.
+    """
+    doc = replay.generate_theories_live.__doc__ or ""
+    anchors = {
+        "run-20261013T124552Z": "the smoke-b2 run whose arm-B theories row is the witness",
+        "run-20261018T220131Z": "the smoke-b3 run that repeats it",
+        "3 disjoint": "how many theories each of those rows carries",
+        "generated_before_evidence: true": "the flag proving the theories preceded evidence",
+        "47–49 s": "the generation span measured across the two runs"}
+    missing = [f"{figure} ({what})" for figure, what in anchors.items() if figure not in doc]
+    assert not missing, (
+        "generate_theories_live's docstring does not cite: "
+        f"{'; '.join(missing)} — those two runs are the only reason 6 turns is a measured "
+        "budget rather than a guess")
+
+    assert "without a measurement" not in doc, (
+        "the retired #3170 claim is back in generate_theories_live's docstring: both arm-B "
+        "smoke runs reached the generation step, so the budget is not unmeasured")
+
+    default = inspect.signature(replay.generate_theories_live).parameters["max_turns"].default
+    assert default == 6, (
+        f"generate_theories_live's max_turns moved to {default}: the measurement says the "
+        "shipped 6 already suffices, so #3170 raises nothing")
+
+
 def test_the_refusal_to_record_an_empty_cause_survives_the_raised_budgets(tmp_path):
     """Clause 3: more turns and more tokens bought no licence to record a guess.
 

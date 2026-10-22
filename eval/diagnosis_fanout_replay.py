@@ -1186,12 +1186,22 @@ async def generate_theories_live(case: dict, *, max_turns: int = 6) -> list[str]
     line — because a theory generated after reading a log is anchored to it,
     which is the failure class the whole technique exists to fight.
 
-    The 6-turn budget is left alone deliberately, and it is the one live budget
-    still without a measurement. Reading nothing is why 6 is plausible here and
-    was implausible for `investigate_live`, but no #2258 run ever reached this
-    step to check it — every smoke run died in arm A — so 6 stays as shipped until
-    the owed probe (#2624) says otherwise. Raising an unmeasured budget would buy
-    nothing and hide whether arm B's generation step has the same problem.
+    The 6-turn budget is measured, and it is left exactly as shipped because the
+    measurement says it holds. Both #2258 arm-B smoke runs reached this step
+    under this default (`run_case_b` calls `generate(case)` with no override):
+    `smoke-b2.jsonl` run-20261013T124552Z and `smoke-b3.jsonl`
+    run-20261018T220131Z each hold a `kind: theories` row carrying 3 disjoint
+    non-empty theories with `generated_before_evidence: true` — b2 names
+    `T1_suite_interference`, `T2_diff_broke_the_deferral_contract` and
+    `T3_wrong_thing_was_measured`; b3 fills slots c1/c2/c0 — so the step produced
+    a full answer where the old note claimed no run had ever got here. Generation
+    took 47–49 s: `run_id` is stamped at run start, so the span is the row's own
+    `ts` minus its run id — b2 12:45:52Z → 12:46:41Z = 49 s, b3 22:01:31Z →
+    22:02:18Z = 47 s. Reading nothing is why that is cheap here and why
+    `investigate_live` needed the 60 turns it now carries: this step has no
+    evidence to gather, only a symptom to reason from. The rows record no
+    `num_turns`, so 6 stays a shipped default that returned a usable answer
+    twice, not a measured ceiling.
     """
     prompt = (
         f"Incident: {case.get('input')}\n\n"
