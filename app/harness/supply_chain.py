@@ -905,7 +905,8 @@ def set_default_registry(registry: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The dispatch check — the fifth check inside safety.check_bash_command
+# The dispatch check `check_install_provenance` — the sixth check inside
+# safety.check_bash_command
 # ---------------------------------------------------------------------------
 
 @dataclass

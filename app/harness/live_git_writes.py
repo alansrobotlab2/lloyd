@@ -1,8 +1,9 @@
 """Refuse a HEAD-moving `git` write in the live checkout from an unattended session.
 
-Sixth lane of `safety.check_bash_command`, added for backlog **#2604**, which
-found `architecture/arch-review.md` §2 rail 4 claiming "the source commits onto
-live, the model never runs `git`" while `policy.tool_tier("Bash", "git -C
+Seventh lane of `safety.check_bash_command` (`check_live_git_writes`), added for
+backlog **#2604**, which found `architecture/arch-review.md` §2 rail 4 claiming
+"the source commits onto live, the model never runs `git`" while
+`policy.tool_tier("Bash", "git -C
 /home/alansrobotlab/lloyd commit -m x -- architecture/foo.md")` answered **1** —
 the same tier as the `git status` the same review prompt orders the turn to run.
 The sentence was a prompt rule wearing a rail's clothes. It is a rail now, for the
@@ -72,7 +73,7 @@ Two deliberate asymmetries with the neighbouring lanes:
     `check_service_control` would let it pass. `attended_session` says what counts
     as evidence and why `classify_session`'s "attended" cannot be reused as-is.
   * **`cwd=None` means the aggregator's directory**, the same convention as the
-    other five lanes, not the turn's real working directory. A bare `git commit`
+    other six lanes, not the turn's real working directory. A bare `git commit`
     is therefore refused only when the caller named the live directory or a `cd`
     got there. A Bash tool call with no `cwd` argument in production runs the
     MCP aggregator, which is not the live checkout — so this is not the hole it

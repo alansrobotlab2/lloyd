@@ -23,6 +23,7 @@ the one wrong sentence cannot sweep them into the rewrite.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -459,7 +460,6 @@ def _prose(rel: str, func: str | None = None) -> str:
     branch, and the line-wrapping #1786's triage recorded (`today's output`
     straddling two lines) makes a one-line grep a false zero.
     """
-    import ast
     tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
     if func is None:
         got = ast.get_docstring(tree)
@@ -1465,3 +1465,457 @@ def test_the_config_paragraph_dates_the_share_the_two_flags_cover():
         "which the paragraph names as goal_card's switch")
     assert (CONFIG.get("harness") or {}).get("todo_anchor_interval_iterations"), (
         "the cadence key the paragraph cites is not in config.yaml either")
+
+
+# ---------------------------------------------------------------------------
+# `check_bash_command`'s lane chain: the prose that numbers it (#3131)
+# ---------------------------------------------------------------------------
+
+#: The Bash guard rail every write-protection surface routes through. Its
+#: docstring is the only description of the chain a reader gets, and the one it
+#: had said "Five checks, one definition" while the body chained seven lanes and
+#: the prose called two of them "the fifth" — so a reader deciding where the next
+#: lane goes was counting from a wrong list, and `architecture/vault-protection.md`
+#: §2.6's "the third check" rested on that same sequence.
+#:
+#: Positions are therefore pinned to the body, never to a number. `#2604` learned
+#: that lesson the hard way (`architecture/guard-coverage.md` §4.5: a `len(lines)
+#: == 2` assertion went red on a change that left the prose exactly as described,
+#: and the sibling comment in `safety.py` says the guard is asserted "in names
+#: rather than in lines, so the count itself is nobody's to maintain"), so every
+#: assertion below reads derived names at derived positions. A lane joining the
+#: chain costs the prose one line and costs this file nothing.
+
+APP_HARNESS_SAFETY = "app/harness/safety.py"
+SAFETY_TEXT = (ROOT / APP_HARNESS_SAFETY).read_text(encoding="utf-8")
+
+#: The chain's regex-table lane. The body loops over this instead of calling a
+#: `check_*`, so the derivation has to know its name to give that lane one.
+TABLE_LANE = "_HARD_DENY_PATTERNS"
+
+ORDINAL_WORDS = ("first", "second", "third", "fourth", "fifth", "sixth",
+                 "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
+                 "thirteenth")
+CARDINAL_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight",
+                  "nine", "ten", "eleven", "twelve", "thirteen")
+#: What an ordinal word claims: `first` is position 1, `twelfth` is position 12.
+ORDINAL_VALUE = {word: i + 1 for i, word in enumerate(ORDINAL_WORDS)}
+#: What a cardinal claims, for the counts-of-the-rest phrasing.
+CARDINAL_VALUE = {word: i + 1 for i, word in enumerate(CARDINAL_WORDS)}
+
+_ORDINAL_ALT = "|".join(ORDINAL_WORDS)
+_CARDINAL_ALT = "|".join(CARDINAL_WORDS)
+
+#: Any ordinal word. Inside `check_bash_command` an ordinal may only mean a lane
+#: position, so each one has to resolve to a lane. Prose in this function that
+#: means something else by "first" (the supply-chain sentence said "first
+#: released under 90 days ago") has to be reworded — that is the bargain, since
+#: an unresolvable ordinal is exactly what let two lanes share the word "fifth".
+ORDINAL_RE = re.compile(rf"\b({_ORDINAL_ALT})\b", re.I)
+#: A stated size of the chain — the rot itself, and the reason the docstring
+#: counts nothing: "# Five checks" survived two lanes of growth because no test
+#: could be red about it.
+STATED_SIZE_RE = re.compile(rf"\b({_CARDINAL_ALT})\s+(?:checks?|lanes?)\b", re.I)
+#: "the other five lanes": a count of the chain's rest, which rots identically.
+OTHER_COUNT_RE = re.compile(
+    rf"\bother\s+({_CARDINAL_ALT})\s+(?:checks?|lanes?)\b", re.I)
+#: The shape prose states a position in: "the fifth check inside
+#: safety.check_bash_command", "Sixth lane of `safety.check_bash_command`",
+#: "`check_bash_write_denied`, fifth in `check_bash_command`". The ordinal must sit
+#: next to the function name, which is what makes the claim checkable; the optional
+#: `#` is a banner comment's continuation — supply_chain.py's header wraps, and a
+#: matcher blind to a line break would report correct prose as a missing claim.
+CHAIN_PROSE_RE = re.compile(
+    rf"\b({_ORDINAL_ALT})\s+(?:(?:check|lane)s?\s+)?(?:in|inside|of|within)\s+"
+    r"(?:#\s*)?"
+    rf"`?(?:safety\.)?check_bash_command`?", re.I)
+#: One item of the docstring's enumeration: a line opening `5. `+backticked name.
+ENUM_ITEM_RE = re.compile(r"^\s*(\d+)\.\s+`([A-Za-z_][A-Za-z0-9_]*)`", re.M)
+#: The two phrasings clause 3 forbids in this file: a comparison against a
+#: literal length of the derived list, and a hand-written list of lanes.
+LEN_LANES_EQ_RE = re.compile(r"len\(\s*(?:lanes|chain)\s*\)\s*[=!]=\s*\d+")
+LITERAL_LANE_LIST_RE = re.compile(r"\blanes\s*=\s*\[")
+
+#: How far an ordinal looks for the lane it means, in characters: wide enough to
+#: span a wrapped line or two, narrow enough that a distant name is not mistaken
+#: for the subject. A sentence that puts its lane further away than this is one a
+#: reader cannot resolve either, and it is reported as naming nothing.
+SUBJECT_WINDOW = 320
+
+#: Where a lane's position may be stated. `tests/` is deliberately out: an
+#: ordinal in a test's own docstring is about that test's cases, not this chain.
+CHAIN_PROSE_GLOBS = ("app/**/*.py", "architecture/*.md")
+
+
+def _chain_fn(text: str) -> ast.FunctionDef:
+    tree = ast.parse(text)
+    node = next((n for n in tree.body
+                 if isinstance(n, ast.FunctionDef)
+                 and n.name == "check_bash_command"), None)
+    assert node is not None, (
+        f"{APP_HARNESS_SAFETY} no longer defines check_bash_command at module "
+        "scope, so there is no call order here to read prose against")
+    return node
+
+
+def _chain_lanes(text: str = SAFETY_TEXT) -> list[str]:
+    """The lanes `check_bash_command` runs, in the order its own body runs them.
+
+    Derived, never listed: every `check_*` call in the body in source order, with
+    the `_HARD_DENY_PATTERNS` loop standing in for the regex-table lane. A lane
+    that joins the chain joins this list with no edit to this file, which is the
+    whole reason to derive it — the count comes out of the body and is never
+    typed in here.
+    """
+    events: list[tuple[int, int, str]] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Name) and child.id == TABLE_LANE:
+                events.append((child.lineno, child.col_offset, child.id))
+            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                  and child.func.id.startswith("check_")):
+                events.append((child.lineno, child.col_offset, child.func.id))
+            walk(child)
+
+    walk(_chain_fn(text))
+    lanes: list[str] = []
+    for _line, _col, name in sorted(events):
+        if name not in lanes:
+            lanes.append(name)
+    return lanes
+
+
+def _chain_import_order(text: str = SAFETY_TEXT) -> list[str]:
+    """The same order read a second, independent way: the body's own
+    `from app.harness.<module> import <checker>` lines, by where they sit.
+
+    Two readings that must agree is what stops an empty derivation from reading
+    as a pass. The AST walk and a textual scan of the imports fail differently, so
+    a parser that found nothing disagrees with one that found the imports, and the
+    disagreement — not the assertion — is the bug.
+    """
+    body = ast.get_source_segment(text, _chain_fn(text)) or ""
+    found: list[tuple[int, str]] = []
+    table_at = body.find(TABLE_LANE)
+    if table_at >= 0:
+        found.append((table_at, TABLE_LANE))
+    for m in re.finditer(r"from\s+app\.harness\.\w+\s+import\s+(\w+)", body):
+        found.append((m.start(), m.group(1)))
+    return [name for _, name in sorted(found)]
+
+
+def _lane_owners(text: str = SAFETY_TEXT,
+                 lanes: list[str] | None = None) -> dict[str, set[str]]:
+    """`app.harness.<module>` short name -> the lanes that module supplies.
+
+    `protected_paths` supplies two, so a sentence naming only that module names no
+    lane, and `_subject` refuses to pick one.
+    """
+    lanes = _chain_lanes(text) if lanes is None else lanes
+    owners: dict[str, set[str]] = {}
+    for child in ast.walk(_chain_fn(text)):
+        if (isinstance(child, ast.ImportFrom)
+                and (child.module or "").startswith("app.harness.")):
+            short = child.module.rsplit(".", 1)[-1]
+            owners.setdefault(short, set()).update(
+                a.name for a in child.names if a.name in lanes)
+    return {module: names for module, names in owners.items() if names}
+
+
+CHAIN_LANES = _chain_lanes()
+CHAIN_OWNERS = _lane_owners()
+
+
+def _subject(text: str, at: int, lanes: list[str],
+             owners: dict[str, set[str]]) -> str | None:
+    """The lane the ordinal at `at` sits nearest to naming.
+
+    A lane's own function name, or the module that supplies exactly one lane
+    (by path or as a bare backticked module name) — never a module supplying two,
+    because then the sentence has not named a lane. Returns the lane name, `None`
+    when nothing resolvable sits inside `SUBJECT_WINDOW`, and `AMBIGUOUS` when two
+    lanes are equally near.
+    """
+    lo, hi = max(0, at - SUBJECT_WINDOW), min(len(text), at + SUBJECT_WINDOW)
+    window = text[lo:hi]
+    hits: list[tuple[int, str]] = []
+    for lane in lanes:
+        for m in re.finditer(rf"\b{re.escape(lane)}\b", window):
+            hits.append((abs(at - (lo + m.start())), lane))
+    for module, supplied in owners.items():
+        if len(supplied) != 1:
+            continue
+        lane = next(iter(supplied))
+        for pattern in (rf"(?:app/harness/)?{re.escape(module)}\.py",
+                        rf"`{re.escape(module)}`"):
+            for m in re.finditer(pattern, window):
+                hits.append((abs(at - (lo + m.start())), lane))
+    if not hits:
+        return None
+    hits.sort()
+    if len(hits) > 1 and hits[0][0] == hits[1][0] and hits[0][1] != hits[1][1]:
+        return "AMBIGUOUS"
+    return hits[0][1]
+
+
+def _quoted(text: str, at: int, width: int = 70) -> str:
+    lo, hi = max(0, at - width), min(len(text), at + width)
+    return " ".join(text[lo:hi].split())
+
+
+def _safety_prose_violations(text: str = SAFETY_TEXT) -> list[str]:
+    """Every way `check_bash_command`'s own prose can disagree with its body.
+
+    Three defects, all of them the ones #3131 was filed against: a count of the
+    chain, which goes stale the day a lane joins; a count of the *rest* of the
+    chain, same failure; and an ordinal that either names no lane or names one the
+    body does not run at that position — the doubled "fifth" was the second case
+    and the dangling one the first.
+    """
+    lanes = _chain_lanes(text)
+    owners = _lane_owners(text, lanes)
+    body = ast.get_source_segment(text, _chain_fn(text)) or ""
+    out: list[str] = []
+    stated = STATED_SIZE_RE.search(body)
+    if stated:
+        out.append(
+            f"states the chain's size as {stated.group(0)!r}. A lane joins this "
+            "function by being called in it, so the enumeration is the thing to "
+            "write and a count is the thing not to write: 'Five checks' sat here "
+            "through two lanes of growth because nothing could be red about it")
+    rest = OTHER_COUNT_RE.search(body)
+    if rest:
+        out.append(
+            f"counts the rest of the chain as {rest.group(0)!r}. Say 'the other "
+            "lanes': the number is what rotted here once already")
+    for m in ORDINAL_RE.finditer(body):
+        word = m.group(1).lower()
+        subject = _subject(body, m.start(), lanes, owners)
+        where = _quoted(body, m.start())
+        if subject is None:
+            out.append(
+                f"{m.group(1)!r} in {where!r} names no lane within "
+                f"{SUBJECT_WINDOW} characters. An ordinal a reader cannot resolve "
+                "is how two checks came to share one word")
+        elif subject == "AMBIGUOUS":
+            out.append(
+                f"{m.group(1)!r} in {where!r} sits an equal distance from two "
+                "lanes, so it names neither")
+        else:
+            position = lanes.index(subject) + 1
+            if position != ORDINAL_VALUE[word]:
+                out.append(
+                    f"{m.group(1)!r} in {where!r} names {subject}, which the body "
+                    f"runs at position {position}")
+    return out
+
+
+def _chain_prose_violations(rel: str, text: str) -> list[str]:
+    """The same rule one file out: a stated position must be the derived one.
+
+    Applies to the harness modules and the architecture docs. A sentence claiming
+    a position has to name the lane or its module, or it is claiming something a
+    reader cannot check; and a module that supplies a lane may count the others
+    only as the derivation says.
+    """
+    out: list[str] = []
+    for m in CHAIN_PROSE_RE.finditer(text):
+        word = m.group(1).lower()
+        subject = _subject(text, m.start(), CHAIN_LANES, CHAIN_OWNERS)
+        where = _quoted(text, m.start(), 90)
+        if subject is None or subject == "AMBIGUOUS":
+            out.append(
+                f"{rel}: {m.group(0)!r} in {where!r} names no lane. The sentence "
+                "has to name the checker or the module supplying it")
+            continue
+        position = CHAIN_LANES.index(subject) + 1
+        if position != ORDINAL_VALUE[word]:
+            out.append(
+                f"{rel}: {m.group(0)!r} in {where!r} says {word}, but "
+                f"{subject} is what `check_bash_command` runs at position "
+                f"{position}")
+    if rel.startswith("app/harness/") and rel.endswith(".py"):
+        supplied = CHAIN_OWNERS.get(rel.rsplit("/", 1)[-1][:-3], set())
+        if supplied:
+            want = len(CHAIN_LANES) - len(supplied)
+            for m in OTHER_COUNT_RE.finditer(text):
+                got = CARDINAL_VALUE[m.group(1).lower()]
+                if got != want:
+                    out.append(
+                        f"{rel}: {m.group(0)!r} counts {got} lanes besides this "
+                        f"one; the chain runs {want} others")
+    return out
+
+
+def test_check_bash_command_docstring_enumerates_the_lanes_the_body_chains():
+    """#3131 clause 1: the docstring enumerates the chain in the body's order.
+
+    The two derivations have to agree before the docstring is read at all, since
+    a docstring asserted against a derivation that silently returned nothing
+    would pass on the empty list. Then the enumeration's numbers must run 1..n
+    over the derived list and its names must be the derived names in the derived
+    order — the docstring's claim about the order checked against the only order
+    that exists, which is the body's.
+    """
+    lanes = _chain_lanes()
+    assert lanes, "the derivation found no lane in check_bash_command at all"
+    assert lanes == _chain_import_order(), (
+        f"the two readings of the chain disagree: the body's call order is "
+        f"{lanes} and its import lines read {_chain_import_order()}. The "
+        "derivation, not the prose, has to be fixed first")
+    doc = ast.get_docstring(_chain_fn(SAFETY_TEXT)) or ""
+    assert not STATED_SIZE_RE.search(doc), (
+        f"the docstring states the chain's size as "
+        f"{STATED_SIZE_RE.search(doc).group(0)!r} — the retired 'Five checks' "
+        "phrasing, which is wrong the day a lane joins")
+    items = [(int(num), name) for num, name in ENUM_ITEM_RE.findall(doc)]
+    assert items, (
+        "check_bash_command's docstring states no ordered enumeration "
+        "(a line opening `N. `+backticked lane), so a reader has to count the "
+        "body to learn the chain")
+    assert [num for num, _ in items] == list(range(1, len(lanes) + 1)), (
+        f"the enumeration is numbered {[num for num, _ in items]} while the body "
+        f"runs {len(lanes)} lanes: renumber it from the body, not from memory")
+    assert [name for _, name in items] == lanes, (
+        f"the docstring enumerates {[n for _, n in items]} but the body chains "
+        f"{lanes}")
+
+
+def test_no_lane_ordinal_in_safety_py_disagrees_with_the_body_that_runs_it():
+    """#3131 clause 2: inside `check_bash_command`, no ordinal names two checks.
+
+    Every ordinal word in the function — docstring and the inline comment above
+    each call — resolves to the nearest lane and to that lane's derived position.
+    Nothing here asserts which position any lane holds: `check_bash_write_denied`
+    is fifth, `check_install_provenance` sixth and `check_live_git_writes`
+    seventh because the body runs them there, and a lane inserted earlier would
+    move all three without moving a line of this file.
+    """
+    problems = _safety_prose_violations()
+    assert problems == [], "safety.py's prose disagrees with its body:\n" + "\n".join(
+        f"- {p}" for p in problems)
+
+
+def test_lane_prose_outside_safety_py_states_the_derived_position():
+    """#3131 clause 4: a position stated elsewhere in the repo is the derived one.
+
+    `app/harness/supply_chain.py` and `app/harness/live_git_writes.py` state their
+    own lane's place in the chain in their headers, and the architecture docs do
+    the same in prose; the assertion is that each still states it, and states the
+    position the body derives. That is what keeps the three that were already
+    right (`vault-protection.md`'s "third check" and "fifth", `automod.md`'s
+    "fourth check") worded as they are: they need no edit, and they stop being
+    editable by hand the moment they are read this way.
+    """
+    problems: list[str] = []
+    stated_in: set[str] = set()
+    for path in sorted({p for glob in CHAIN_PROSE_GLOBS
+                        for p in ROOT.glob(glob)}):
+        rel = str(path.relative_to(ROOT))
+        text = path.read_text(encoding="utf-8")
+        problems += _chain_prose_violations(rel, text)
+        if CHAIN_PROSE_RE.search(text):
+            stated_in.add(rel)
+    assert problems == [], (
+        "lane positions stated outside safety.py disagree with the body:\n"
+        + "\n".join(f"- {p}" for p in problems))
+    assert stated_in, "no file states a position in the chain: the scan found " \
+                      "nothing to check, which is not the same as passing"
+    for rel in ("app/harness/supply_chain.py", "app/harness/live_git_writes.py",
+                "architecture/vault-protection.md", "architecture/automod.md",
+                "architecture/arch-review.md"):
+        assert rel in stated_in, (
+            f"{rel} no longer states a lane's position in check_bash_command. "
+            "If its position genuinely moved, say so in the prose; deleting the "
+            "sentence is how a chain loses its map")
+
+
+def test_the_chain_pin_derives_positions_and_holds_no_lane_count():
+    """#3131 clause 3: this file compares derived names and positions only.
+
+    A literal length of the derived list would re-import the bug the item is
+    about: `tests/unit/test_harness_safety.py` records that a new refusal placed
+    earlier re-labels commands the other lanes already refuse, so lanes do move,
+    and a pin that said "seven" would go red on a correct eighth lane and be
+    edited to "eight" — which is the docstring's failure, repeated in a test. So
+    the ban is asserted over this file's own text, and demonstrated against the
+    shapes it refuses, each spelled as two adjacent literals because writing
+    either whole here is the thing being banned.
+    """
+    here = Path(__file__).resolve().read_text(encoding="utf-8")
+    for pattern, shape in ((LEN_LANES_EQ_RE, "len(lanes)" " == <a number>"),
+                           (LITERAL_LANE_LIST_RE,
+                            "lanes" " = [<a hand-written list>]")):
+        hit = pattern.search(here)
+        assert not hit, (
+            f"the chain pin states a size literally ({hit.group(0)!r} — the "
+            f"{shape} shape), so adding or removing a lane with matching prose "
+            "would go red here. Read the position off _chain_lanes() instead")
+    assert LEN_LANES_EQ_RE.search("len(lanes)" " == 7")
+    assert LITERAL_LANE_LIST_RE.search("lanes" " = ['check_protected_delete']")
+    assert "_chain_lanes(" in here, (
+        "the chain's positions are no longer read from the derivation")
+
+
+def test_the_chain_pin_fires_on_the_defects_it_was_written_for():
+    """The premise of #3131, manufactured, so the pins above are known to fail.
+
+    Each case puts one filed sentence back into the shipped text and asks the same
+    checker that grades the real file to reject it: the ordinal naming the wrong
+    lane, the stated count, the stale position in a sibling module's header, the
+    stale count of the other lanes, and the stale position in `arch-review.md`.
+    Every substitution asserts it changed something first, so a mutant whose
+    anchor had quietly been reworded could not read as a pass.
+    """
+    def mutated(text: str, old: str, new: str) -> str:
+        assert old in text, (
+            f"the mutation anchor {old!r} is not in the tree any more, so this "
+            "case is no longer testing anything")
+        return text.replace(old, new)
+
+    wrong_lane = mutated(
+        SAFETY_TEXT, "# Fifth: the write deny-set (`check_bash_write_denied`)",
+        "# Fifth: the write deny-set (`check_service_control`)")
+    assert _safety_prose_violations(wrong_lane), (
+        "an ordinal naming the lane one position earlier than the body runs it "
+        "reads as clean")
+
+    stated_count = mutated(
+        SAFETY_TEXT, "One definition, one chain:",
+        "Five checks, one definition:")
+    assert _safety_prose_violations(stated_count), (
+        "'Five checks, one definition' — the sentence this item was filed "
+        "against — is not caught as a stated size")
+
+    dangling = mutated(
+        SAFETY_TEXT, "# Fifth: the write deny-set (`check_bash_write_denied`)",
+        "# Fifth: the write deny-set.")
+    assert _safety_prose_violations(dangling), (
+        "an ordinal left with no lane to name reads as clean: it is the shape of "
+        "'and the fifth refuses a command whose write target'")
+
+    sibling = ROOT / "app" / "harness" / "supply_chain.py"
+    stale_header = mutated(
+        sibling.read_text(encoding="utf-8"),
+        "the sixth check inside\n# safety.check_bash_command",
+        "the fifth check inside\n# safety.check_bash_command")
+    assert _chain_prose_violations("app/harness/supply_chain.py", stale_header), (
+        "the header that shipped calling supply_chain the fifth check is not "
+        "caught as a wrong position")
+
+    live = ROOT / "app" / "harness" / "live_git_writes.py"
+    stale_rest = mutated(live.read_text(encoding="utf-8"),
+                         "other six lanes", "other five lanes")
+    assert _chain_prose_violations("app/harness/live_git_writes.py", stale_rest), (
+        "'the other five lanes' — the count of the chain's rest filed in #3131 — "
+        "is not caught")
+
+    review = ROOT / "architecture" / "arch-review.md"
+    stale_doc = mutated(
+        review.read_text(encoding="utf-8"),
+        "the seventh lane of `check_bash_command`",
+        "the sixth lane of `check_bash_command`")
+    assert _chain_prose_violations("architecture/arch-review.md", stale_doc), (
+        "'the sixth lane of check_bash_command' — the wording filed in #3131 — "
+        "is not caught")

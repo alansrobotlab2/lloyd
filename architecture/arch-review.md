@@ -373,7 +373,7 @@ Kill switch: `workers.sources.arch-review.enabled`.
   prose still says five retired docs are tracked, and #916 closed without
   fixing it). #2604 landed the same day, so "the mechanism is unchanged" held
   only for that pass: §2 rail 4 is a rail now
-  (`app/harness/live_git_writes.py`, the sixth lane of `check_bash_command`) and
+  (`app/harness/live_git_writes.py`, the seventh lane of `check_bash_command`) and
   the run event carries `live_head_moved`, which is what makes the sentence true
   of the property it was written for rather than of the prompt.
 - 2026-10-12 — **#2603 landed**, which closes the §2 rail 2 defect that entry

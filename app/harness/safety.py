@@ -420,29 +420,48 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     """Return (label, excerpt) if `command` matches a hard-deny pattern,
     else None.
 
-    Five checks, one definition. The fourth, `service_control`, needs the
-    session: a background session (worker, autonomy, bench — by id shape,
-    a `task:*` subagent by its parent through `parent_of`) may not restart
-    or stop an engine or a service; a chat session may. Callers that do not
-    know the session pass none and that check is skipped. The fifth,
-    `supply_chain`, also needs the session: a background turn may not install a
-    distribution that is new to the repo's dependency set and fails a registry
-    fact — unpublished, first released under 90 days ago, or fewer than two
-    releases — because the slop-squat attack builds, runs and passes tests, so
-    no other rung can see it (#688). A chat session may; `LLOYD_DEP_OVERRIDE="<why>"`
-    carried on the command lets a background turn through with a printed reason.
-    The regex table above catches the
-    catastrophic-anywhere shapes; `protected_paths` parses the command and
-    refuses a delete, move or `git clean` that takes out the vault, the lloyd
-    tree or $HOME wholesale — the spellings the regex table let through on
-    2026-09-10 and 2026-09-12; `sync_registration` refuses anything that
-    changes the Obsidian Sync registration, which Lloyd deleted twice on
-    2026-09-14; and the fifth refuses a command whose write target — a
-    redirect, a mover's destination, a `sed -i` file, a path an interpreter
-    opens for writing — lands inside the write deny-set `agent_mcp/builtin_fs.py`
-    already refuses `Write` and `Edit` on (#1049 left this lane open; #1620 shut
-    it). `cwd` is where the command starts; `None` means the aggregator's own
-    directory, which is also where a relative write target resolves.
+    One definition, one chain: the lanes below run in the numbered order, and the
+    order is load-bearing — `tests/unit/test_harness_safety.py` pins which lane
+    answers each true positive, so a refusal placed earlier re-labels commands a
+    later lane already refused. Nothing counts the chain here on purpose: a lane
+    joins this function by being called in it, and
+    `tests/test_harness_doc_claims.py` reads this body's own call order and
+    re-reads every position this file claims, and every position
+    `app/harness/supply_chain.py`, `app/harness/live_git_writes.py` and the
+    architecture docs claim, against it. The enumeration below is therefore the
+    thing that goes red when the order moves, and nobody has a number to keep
+    current.
+
+      1. `_HARD_DENY_PATTERNS` — the regex table: the catastrophic-anywhere
+         shapes.
+      2. `check_protected_delete` — parses the command and refuses a delete, move
+         or `git clean` that takes out the vault, the lloyd tree or $HOME
+         wholesale, which are the spellings the regex table let through on
+         2026-09-10 and 2026-09-12.
+      3. `check_sync_registration` — refuses anything that changes the Obsidian
+         Sync registration, which Lloyd deleted twice on 2026-09-14.
+      4. `check_service_control` — needs the session: a background session
+         (worker, autonomy, bench — by id shape, a `task:*` subagent by its parent
+         through `parent_of`) may not restart or stop an engine or a service; a
+         chat session may. Callers that do not know the session pass none and that
+         lane is skipped.
+      5. `check_bash_write_denied` — refuses a command whose write target — a
+         redirect, a mover's destination, a `sed -i` file, a path an interpreter
+         opens for writing — lands inside the write deny-set
+         `agent_mcp/builtin_fs.py` already refuses `Write` and `Edit` on (#1049
+         left this lane open; #1620 shut it). `cwd` is where the command starts;
+         `None` means the aggregator's own directory, which is also where a
+         relative write target resolves.
+      6. `check_install_provenance` — also needs the session: a background turn
+         may not install a distribution that is new to the repo's dependency set
+         and fails a registry fact — unpublished, released less than 90 days ago,
+         or with fewer than two releases — because the slop-squat attack builds,
+         runs and passes tests, so no other rung can see it (#688). A chat session
+         may; `LLOYD_DEP_OVERRIDE="<why>"` carried on the command lets a
+         background turn through with a printed reason.
+      7. `check_live_git_writes` — refuses a `git` write that moves `HEAD` in the
+         checkout the running system boots from, from an unattended session
+         (#2604).
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
@@ -481,13 +500,14 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"service control: {why}", excerpt)
-    # Fifth: the write deny-set. Ordering is not cosmetic — the paired
-    # corpus (`tests/unit/test_harness_safety.py`) pins which check answers each
-    # true positive, so a new refusal placed earlier would re-label commands the
-    # other four already refuse. Nothing here is reached by a command the others
-    # already deny, and the checker below is the Bash half of the one predicate
-    # `agent_mcp/builtin_fs.py` consults for `Write` and `Edit`, grant contextvar
-    # included, so `allow_protected_writes` lifts both lanes or neither.
+    # Fifth: the write deny-set (`check_bash_write_denied`). Ordering is not
+    # cosmetic — the paired corpus (`tests/unit/test_harness_safety.py`) pins which
+    # check answers each true positive, so a new refusal placed earlier would
+    # re-label commands the other lanes already refuse. Nothing here is reached by
+    # a command the others already deny, and the checker below is the Bash half of
+    # the one predicate `agent_mcp/builtin_fs.py` consults for `Write` and `Edit`,
+    # grant contextvar included, so `allow_protected_writes` lifts both lanes or
+    # neither.
     from app.harness.protected_paths import check_bash_write_denied
     why = check_bash_write_denied(command, cwd)
     if why:
@@ -496,9 +516,10 @@ def check_bash_command(command: str, cwd: str | None = None, *,
             excerpt = excerpt[:80] + "..."
         return (f"protected write: {why}", excerpt)
 
-    # Last: where the package came from. Returns a refusal only for a
-    # background session, and only on a measured registry fact — an
-    # unreachable registry is never a denial (see app/harness/supply_chain.py).
+    # Sixth: where the package came from (`check_install_provenance`). Returns a
+    # refusal only for a background session, and only on a measured registry
+    # fact — an unreachable registry is never a denial (see
+    # app/harness/supply_chain.py).
     from app.harness.supply_chain import check_install_provenance
     provenance = check_install_provenance(command, session_id, parent_of=parent_of)
     if provenance.refusal:
@@ -507,8 +528,9 @@ def check_bash_command(command: str, cwd: str | None = None, *,
             excerpt = excerpt[:80] + "..."
         return (f"install provenance: {provenance.refusal}", excerpt)
 
-    # Sixth: mutating a checkout in the production tree from an unattended
-    # session (#2604). Every lane above asks what a command writes and where; this
+    # Seventh: mutating a checkout in the production tree from an unattended
+    # session (#2604) — `check_live_git_writes`. Every lane above asks what a
+    # command writes and where; this
     # one asks whether the caller may move `HEAD` in the tree the running system
     # boots from, which no path check can answer — `git commit` *cleans up* the
     # dirt that would otherwise be its own witness, so the arch-review source's
