@@ -309,3 +309,99 @@ def test_catalog_reminder_stays_under_its_token_ceiling(descriptions):
         f"catalog reminder now costs {tokens} tokens — at or past the ~5k "
         f"ceiling that motivated truncation"
     )
+
+
+# ---------------------------------------------------------------------------
+# #3129: `autonomy_run_task` has to describe the call it actually makes
+# ---------------------------------------------------------------------------
+
+#: The registered text at this round's base `68fe6c2c`, verbatim. Typed here
+#: rather than read back out of the registry, because a control whose text came
+#: from the surface it is grading cannot fail. Its last sentence told the
+#: caller "The run happens in the background" while `_handle_run`
+#: (`agent_mcp/autonomy.py`) does `result = await run_task(task_id)` and
+#: returns its JSON — so the call holds the turn for the whole run, bounded by
+#: `MCPPool.timeout_for` handing an undeclared tool the 660 s
+#: `CALL_TIMEOUT_SECONDS` while the task's own `timeout_seconds` defaults to
+#: 1800 s.
+STALE_RUN_TASK_DESCRIPTION = (
+    "Use only to fire an existing autonomy task now; to change what it does "
+    "use autonomy_write_task. Run an autonomy task immediately, outside its "
+    "schedule. The run happens in the background; use autonomy_get_task to "
+    "see the result.")
+
+#: The three things the registered text now has to say, as substrings. "waits
+#: for the run to finish" is what the awaited `run_task` does; "not cancelled"
+#: is the consequence a caller must plan for when the call ceiling fires before
+#: the await returns; `autonomy_get_task` is where the record of a run that
+#: outlived its own call is read, and the only place it is read.
+RUN_TASK_FACTS = (
+    "waits for the run to finish",
+    "not cancelled",
+    "autonomy_get_task",
+)
+
+
+def _run_task_misstatements(desc: str) -> list[str]:
+    """Every way `autonomy_run_task`'s description can mislead about the call.
+
+    A predicate rather than bare assertions so the node below can show it
+    rejecting the sentence #3129 removed and not only accept the one it wrote:
+    an absence check whose pattern matches nothing anywhere is a green light
+    fixed on permanently.
+    """
+    gaps = []
+    if "background" in desc.lower():
+        gaps.append("still tells the caller the run happens in the background")
+    gaps.extend(f"the description never says {needle!r}"
+                for needle in RUN_TASK_FACTS if needle not in desc)
+    return gaps
+
+
+def test_autonomy_run_task_describes_the_call_it_awaits(descriptions):
+    """Clauses 1 and 2: the schema may not advertise a run that is not.
+
+    `_handle_run` awaits `run_task` inside `run_trigger("mcp")` and returns its
+    JSON, with no spawn and no task id handed back, so the call occupies the
+    caller's turn until the run ends. A model told "background" plans a
+    fire-and-forget, and a second call made on that belief meets the
+    in-progress guard's "already in_progress …; not starting a second run",
+    which reads as a broken task rather than as the caller's own duplicate.
+    """
+    desc = descriptions["autonomy_run_task"]
+    assert not _run_task_misstatements(desc), _run_task_misstatements(desc)
+
+    # Can this node fail? The retired text, through the same reader. If it
+    # stopped flagging, the green above would be reporting a correction no
+    # sentence could have violated.
+    assert _run_task_misstatements(STALE_RUN_TASK_DESCRIPTION) == [
+        "still tells the caller the run happens in the background",
+        "the description never says 'waits for the run to finish'",
+        "the description never says 'not cancelled'",
+    ], _run_task_misstatements(STALE_RUN_TASK_DESCRIPTION)
+
+
+def test_autonomy_run_task_gist_names_the_record_tool(descriptions):
+    """Clause 4: the pointer to the run's record survives the catalog's cap.
+
+    `_gist` keeps the first sentence and hard-cuts at `CATALOG_GIST_CHARS`, so
+    guidance below that fold is not available when the model is choosing. #361's
+    convention is that the trigger sentence carries the condition and the
+    alternative; for this tool the alternative that matters first is
+    `autonomy_get_task`, the only reader of a run whose call was cut off.
+    """
+    from app.harness.tool_search import _gist
+
+    gist = _gist(descriptions["autonomy_run_task"])
+    assert not gist.endswith("…"), f"gist hard-capped mid-clause: {gist!r}"
+    assert CONDITIONAL.search(gist), f"gist lost the trigger condition: {gist!r}"
+    assert re.search(r"\bautonomy_get_task\b", gist), (
+        f"gist lost the record tool: {gist!r}")
+
+    # Shown able to fail: the retired first sentence named only
+    # `autonomy_write_task`, so on the old text this node was red — the record
+    # tool sat below the fold, in the sentence that was also the false one.
+    stale_gist = _gist(STALE_RUN_TASK_DESCRIPTION)
+    assert not re.search(r"\bautonomy_get_task\b", stale_gist), (
+        "the control no longer differs from the shipped text on the one thing "
+        f"this node checks, so its green is unearned: {stale_gist!r}")

@@ -647,7 +647,7 @@ async def list_tools():
             },
             "required": ["key", "value"],
         }),
-        Tool(name="autonomy_run_task", description="Use only to fire an existing autonomy task now; to change what it does use autonomy_write_task. Run an autonomy task immediately, outside its schedule. The run happens in the background; use autonomy_get_task to see the result.", inputSchema={
+        Tool(name="autonomy_run_task", description="Use only to fire an existing autonomy task now; autonomy_get_task reads a run, autonomy_write_task changes it. The call waits for the run to finish, so it holds your turn; if the MCP ceiling cuts the call off, the run is not cancelled and only autonomy_get_task shows its outcome.", inputSchema={
             "type": "object",
             "properties": {"id": {"type": "integer", "description": "Task ID to run"}},
             "required": ["id"],

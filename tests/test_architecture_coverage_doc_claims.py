@@ -7198,3 +7198,170 @@ def test_the_subliminal_page_states_the_read_rule_the_prefetch_code_enforces(
         "no longer happens"], (
         "the retired-claim check does not catch the sentence that filed this item, so "
         "it would not catch its return")
+
+
+# --------------------------------------------------------------------------- #
+# tools.md §6 `autonomy_run_task`: the row states the blocking call once, and no
+# row on the page argues with the schema it inventories (#3129)
+# --------------------------------------------------------------------------- #
+
+#: The §6 row at this round's base `68fe6c2c`, verbatim, without its leading
+#: cells. Typed here rather than extracted from the page, because a node whose
+#: needle is read out of the doc it grades cannot fail. Its parenthetical did
+#: nothing but cancel the tool's own registered description — §10's first rule
+#: is that the name and description are all a model reads before it calls, so a
+#: row whose job is to contradict the schema is a note that the schema is the
+#: thing to fix, which is what #3129 changed in the same diff.
+STALE_RUN_TASK_ROW = (
+    'Run a task now, inside the aggregator. The call blocks until the run ends '
+    '(its own description says "background", which is wrong)')
+
+#: What the row now has to say for itself. "waits for the run to finish" is the
+#: single statement of the blocking behaviour — the handler awaits `run_task`
+#: and returns its JSON — and `autonomy_get_task` is where the outcome of a run
+#: that outlived its own call is read.
+RUN_TASK_ROW_NEEDLES = (
+    "waits for the run to finish",
+    "autonomy_get_task",
+)
+
+#: The phrase the contradicting parenthetical was built from. Graded over the
+#: tool rows rather than the page: "which is wrong" is legitimate prose about
+#: something else, and only a row may not say it about a schema.
+CONTRADICTING_PARENTHETICAL = "which is wrong"
+
+
+def _tool_rows(text: str) -> list[str]:
+    """Every table row in tools.md whose first cell is a backticked name.
+
+    That is the shape §6's per-module tool tables take (202 such rows today), so
+    the parenthetical sweep below runs over the inventory rather than over the
+    page's prose.
+    """
+    return [ln for ln in text.splitlines()
+            if ln.startswith("| `") and ln.count("|") >= 3]
+
+
+def _autonomy_run_task_row(text: str) -> str:
+    """§6's `#### autonomy` row for `autonomy_run_task` — exactly one of them."""
+    rows = [ln for ln in _tool_rows(text)
+            if ln.startswith("| `autonomy_run_task` |")]
+    assert len(rows) == 1, (
+        f"{len(rows)} rows begin with '| `autonomy_run_task` |'; the node below "
+        "grades one, and a second spelling is drift rather than emphasis")
+    return rows[0]
+
+
+def _row_contradictions(row: str) -> list[str]:
+    """Every way §6's `autonomy_run_task` row can fail the claim it now makes.
+
+    A predicate rather than bare assertions so the node can show it rejecting
+    the row #3129 replaced, not only accept the one it wrote.
+    """
+    gaps = []
+    if STALE_RUN_TASK_ROW in row:
+        gaps.append("still carries the parenthetical that cancels the schema")
+    if CONTRADICTING_PARENTHETICAL in row:
+        gaps.append("still carries a '(which is wrong)' parenthetical")
+    if "background" in row.lower():
+        gaps.append("still states the run as backgrounded")
+    gaps.extend(f"the row does not state {needle!r}"
+                for needle in RUN_TASK_ROW_NEEDLES if needle not in row)
+    return gaps
+
+
+def test_the_tools_page_states_the_blocking_run_row_without_cancelling_the_schema():
+    """Clause 3: one row, the blocking behaviour stated once, no contradiction.
+
+    The row used to end with a parenthetical saying the tool's own description
+    called the run "background" when it was not. Half of that was true and
+    the other half was a permanent note that `agent_mcp/autonomy.py` was lying
+    — and a model reads the description, not this table, when it chooses a tool,
+    so the doc could not repair the harm. #3129 fixed the registered description
+    and the row together, so the page states the behaviour and stops.
+    """
+    text = _text("tools.md")
+    row = _autonomy_run_task_row(text)
+    assert row.startswith("| `autonomy_run_task` | FX | `id` |"), (
+        f"the row's classification cells moved out from under this node: {row}")
+    gaps = _row_contradictions(_flat(row))
+    assert not gaps, gaps
+
+    # The same phrase may say something true in prose, so the sweep is scoped to
+    # rows — and that scoping has to be shown to have something to read.
+    rows = _tool_rows(text)
+    assert len(rows) > 50, (
+        f"the row extractor found {len(rows)} rows; it is the whole mechanism of "
+        "the sweep below, so a shrunk set means the sweep reads nothing")
+    offending = [ln for ln in rows if CONTRADICTING_PARENTHETICAL in ln]
+    assert offending == [], (
+        f"a tool row still contradicts its own schema: {offending}")
+
+    # Can these checks fail? The row exactly as `68fe6c2c` left it, through both
+    # readers. Without this the green above could be a pattern over an empty set.
+    assert _row_contradictions(_flat(STALE_RUN_TASK_ROW)) == [
+        "still carries the parenthetical that cancels the schema",
+        "still carries a '(which is wrong)' parenthetical",
+        "still states the run as backgrounded",
+        "the row does not state 'waits for the run to finish'",
+        "the row does not state 'autonomy_get_task'",
+    ], _row_contradictions(_flat(STALE_RUN_TASK_ROW))
+    stale_row = f"| `autonomy_run_task` | FX | `id` | {STALE_RUN_TASK_ROW} |"
+    assert [ln for ln in _tool_rows(stale_row)
+            if CONTRADICTING_PARENTHETICAL in ln] == [stale_row], (
+        "the row extractor would not have seen a row carrying the parenthetical, "
+        "so the sweep above would be reading nothing")
+
+
+# --------------------------------------------------------------------------- #
+# tools.md §4's per-call-timeout paragraph names the method that actually
+# clamps a declared budget (#3129, stale citation fixed while in the same doc)
+# --------------------------------------------------------------------------- #
+
+#: The two spellings, so the node can show its absence check firing on the one
+#: the page carried: `MCPPool` has no `_call_timeout` at this base — the method
+#: is `timeout_for` (`app/harness/mcp_pool.py:606-620`).
+DEAD_TIMEOUT_METHOD = "MCPPool._call_timeout"
+LIVE_TIMEOUT_METHOD = "MCPPool.timeout_for"
+
+
+def _timeout_paragraph(text: str) -> str:
+    """The §4 "Invoke." block — the one paragraph stating the per-call bound.
+
+    Block-scoped and asserted unique for the same reason the prefetch node above
+    is: a check that silently matched two paragraphs would be grading a claim
+    nobody decided to grade.
+    """
+    units = [re.sub(r"\s+", " ", u).strip() for u in re.split(r"\n\s*\n", text)]
+    hits = [u for u in units if "The call bound is `CALL_TIMEOUT_SECONDS`" in u]
+    assert len(hits) == 1, (
+        f"{len(hits)} blocks state the per-call bound; this node grades the one "
+        "§4 paragraph that does")
+    return hits[0]
+
+
+def test_the_tools_page_names_the_method_that_clamps_a_declared_call_budget():
+    """#3129's drive-by: a citation of a method that does not exist sends a
+    reader to a class with no such member.
+
+    The §4 paragraph credited the clamping to `MCPPool._call_timeout`. The live
+    method is `MCPPool.timeout_for`, and the item's own body carried the same
+    dead name and a range starting mid-docstring, which is how both survived a
+    review pass: nothing in the tree is checked against a prose symbol, so the
+    only thing that fails is the reader's next grep.
+    """
+    para = _timeout_paragraph(_text("tools.md"))
+    assert LIVE_TIMEOUT_METHOD in para, (
+        f"§4 no longer names {LIVE_TIMEOUT_METHOD}: {para[:200]}…")
+    assert DEAD_TIMEOUT_METHOD not in para, (
+        f"§4 still cites the dead {DEAD_TIMEOUT_METHOD}")
+    # The claim is about behaviour, not just spelling: the method has to be the
+    # one that clamps, so a rename that moved the logic elsewhere is caught.
+    src = (ROOT / "app" / "harness" / "mcp_pool.py").read_text(encoding="utf-8")
+    assert "def timeout_for(" in src and DEAD_TIMEOUT_METHOD not in src, (
+        "the doc's live name is not the tree's live name")
+    # Shown able to fail, on the sentence as it was written.
+    assert DEAD_TIMEOUT_METHOD in _flat(
+        "The call bound is `CALL_TIMEOUT_SECONDS` 660 s, and while "
+        "`harness.mcp_pool.per_tool_timeouts` is true, "
+        "`MCPPool._call_timeout` uses the lesser of it and 660 s.")

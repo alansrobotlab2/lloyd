@@ -270,8 +270,8 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    and the HTTP read timeout sits 30 s above it — but that is a **ceiling**, not
    the bound for every tool: a budget declared in `annotations.TIMEOUT_SECONDS`
    rides to the pool as `Tool._meta["lloyd/timeoutSeconds"]` and, while
-   `harness.mcp_pool.per_tool_timeouts` is true, `MCPPool._call_timeout` uses
-   the lesser of it and 660 s (`mcp_pool.py:611-620`). Today five tools declare
+   `harness.mcp_pool.per_tool_timeouts` is true, `MCPPool.timeout_for` uses
+   the lesser of it and 660 s (`mcp_pool.py:606-620`). Today five tools declare
    one — `Bash` 630 s, `http_fetch`/`http_search` 120 s, `http_request` 180 s,
    `automod_gate_wait` 600 s — so a hung web fetch dies at its own budget
    instead of at the fleet ceiling. It re-sends after a transport
@@ -580,7 +580,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `autonomy_delete_task` | DX ID | `id` | Archive a task back to `draft` (the default), or delete its file with `archive=false` |
 | `autonomy_config` | RO | — | Read `_config.md`: the whole front matter with no key, one setting with a key. Documentary — no code outside this tool pair reads the file (#1672) |
 | `autonomy_config_set` | FX | `key`, `value` | Set one key in `_config.md`. Was the `value` half of `autonomy_config` (#1326); rewrites the front matter and leaves the body below it byte-identical, and says in the reply whether the key it wrote is applied by anything (#1672) |
-| `autonomy_run_task` | FX | `id` | Run a task now, inside the aggregator. The call blocks until the run ends (its own description says "background", which is wrong) |
+| `autonomy_run_task` | FX | `id` | Run a task now, inside the aggregator: the call waits for the run to finish and returns its result, so it occupies the turn for the task's whole run time; a call cut off at the MCP ceiling does not stop the run, and that run's outcome is then read from `autonomy_get_task` |
 | `autonomy_health` | RO | — | Fleet health over N days: failures, timeouts, empty runs, GPU-hours |
 
 #### `autoresearch` (2)
