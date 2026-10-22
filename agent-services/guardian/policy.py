@@ -127,7 +127,37 @@ RESTART_ORDER = ("lloyd-mc:lloyd-mcp", "lloyd-mc:lloyd-backend")
 RECOVERABLE_INFRA = ("agent-tts",)
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
-BACKEND_HEALTH_URL = "http://127.0.0.1:8080/health"
+#: The name a caller overrides the backend's address with. It joins
+#: `LLOYD_VAULT_ROOT` and `LLOYD_GUARDIAN_STATE` rather than inventing a third style:
+#: everything else a guardian measurement is built from already moves with the
+#: environment, and the two sinks that did not (#3149's daily note, this one's pause
+#: POST) are the two that wrote into, or halted, the live system from a copy.
+#:
+#: No unit sets it, so the deployed watchdog keeps the loopback literal byte for byte;
+#: the value exists for the process that is NOT the watchdog. Verify:
+#: `git grep -n LLOYD_BACKEND_URL -- agent-services/systemd/ agent-services/bin/`.
+BACKEND_URL_ENV = "LLOYD_BACKEND_URL"
+BACKEND_HEALTH_URL_FALLBACK = "http://127.0.0.1:8080/health"
+
+
+def backend_health_url() -> str:
+    """The backend's health URL: `$LLOYD_BACKEND_URL` when set, else loopback :8080.
+
+    The override is accepted either whole (`http://host:port/health`) or as a bare base
+    (`http://host:port`), because the two other ways this tree names a backend —
+    `--backend-url`, which is a health URL, and the `base_url` `guardian.py:404` derives
+    from it by `rsplit("/health", 1)` — are those two shapes respectively. A caller
+    should not have to know which of the two a constant wants.
+    """
+    import os
+
+    over = (os.environ.get(BACKEND_URL_ENV) or "").strip().rstrip("/")
+    if not over:
+        return BACKEND_HEALTH_URL_FALLBACK
+    return over if over.endswith("/health") else over + "/health"
+
+
+BACKEND_HEALTH_URL = backend_health_url()
 MCP_HEALTH_URL = "http://127.0.0.1:8500/health"
 # The synthesiser. Not a /health of the same shape: this one answers
 # `{"status": "healthy"}` where backend and aggregator answer `"ok"`, and
@@ -379,7 +409,15 @@ VAULT_ROOT = vault_root()
 # Sync is stopped first because it is the one writer that turns a local wipe
 # into a remote one — it did exactly that on 2026-09-10 and 2026-09-12.
 OBSIDIAN_SYNC_PROGRAM = "agent-obsidian-sync"
-WORKERS_PAUSE_URL = "http://127.0.0.1:8080/api/workers/pause"
+#: The ROUTE, not a URL. The literal this replaced named an address no caller could
+#: move, so a copy of the guardian running anywhere — a round worktree, a gate review
+#: prefetch tree, a pytest process — halted the LIVE fleet on a tripwire it had measured
+#: against its own sandbox: `pause_journal` id 21, actor `guardian-vault-trip`, held
+#: dispatch for 7 h 01 m on 2026-10-21 while the deployed guardian's journal and
+#: `vault-incidents/` show no such trip. The URL is built per process by
+#: `workers_pause_url`, and a process that is not the watchdog is refused outright by
+#: `deployed_watchdog_refusal` (#3154).
+WORKERS_PAUSE_PATH = "/api/workers/pause"
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 import os as _os
@@ -391,6 +429,58 @@ AUTOMOD_STATE = _Path(
 GUARDIAN_STATE = _Path(
     _os.environ.get("LLOYD_GUARDIAN_STATE", _Path.home() / ".local/state/lloyd-guardian")
 )
+#: The one directory inside the guardian state dir that `guardian-stage.sh` promotes code
+#: into — its `DST="$HOME/.local/state/lloyd-guardian/bin"`, line 31 — and the directory
+#: `lloyd-guardian.service:29`'s `ExecStart` runs its `guardian.py` from.
+#: `deployed_watchdog_refusal` below asks whether a module came from here.
+WATCHDOG_BIN_DIR = "bin"
+
+
+def workers_pause_url(backend_health_url: "str | None" = None) -> str:
+    """The pause sink for THIS process, from the backend base it already resolved.
+
+    `guardian.py:397` has held `args.backend_url` since before this existed, and the file
+    already derives other backend URLs from it by the same `rsplit("/health", 1)`.
+    `_pause_workers` was the one caller that skipped the value and posted to a module
+    literal, so the resolution half of #3154 is this function reading a field that was
+    already plumbed — not a new knob.
+
+    With nothing set — the deployed shape, since no unit sets `LLOYD_BACKEND_URL` and the
+    argparse default is `BACKEND_HEALTH_URL` — the result is byte-identical to the literal
+    this replaces.
+    """
+    base = (backend_health_url or BACKEND_HEALTH_URL).rsplit("/health", 1)[0].rstrip("/")
+    return base + WORKERS_PAUSE_PATH
+
+
+def deployed_watchdog_refusal(module_file: "str | None" = None,
+                              state_dir: "_Path | str | None" = None) -> "str | None":
+    """None when the caller's `guardian.py` IS the promoted watchdog; else why not.
+
+    Why a *location* check rather than a `HOME` or state-dir check, which is what the
+    2026-10-21 halt defeats: `scripts/automod/worktree.py:65` symlinks every home entry
+    except `HOME_LINK_SKIP = {lloyd, lloyd-data}` into the live account, so a round's
+    `<home>/.local/state/lloyd-guardian` IS the deployed state dir, and the review-prefetch
+    rung runs with the real `HOME` anyway. Both of those answers say "owner" for the
+    process that halted the fleet for 7 h 01 m. What does separate them is which copy of
+    `guardian.py` the interpreter loaded, because `lloyd-guardian.service:29` runs
+    `/usr/bin/python3 %h/.local/state/lloyd-guardian/bin/guardian.py` — a promoted
+    snapshot that `guardian-stage.sh` compiles and self-tests before it installs — while a
+    gate worktree, a prefetch tree, a repo checkout or a pytest import loads the module
+    from wherever that tree happens to be.
+
+    Returns a refusal string rather than raising, because the trip paths record what
+    `actions["workers"]` said into a human-facing marker; a raise would take the vault
+    evidence and the promotion halt with it. The alert a *real* trip sends is unchanged.
+    """
+    here = _Path(module_file if module_file is not None else __file__).resolve()
+    bin_dir = (_Path(state_dir) if state_dir is not None else GUARDIAN_STATE) \
+        .expanduser() / WATCHDOG_BIN_DIR
+    if here.is_relative_to(bin_dir.resolve()):
+        return None
+    return (f"pause refused: this process's guardian module is {here}, which is not the "
+            f"watchdog under {bin_dir}; only the promoted snapshot posts to "
+            f"{workers_pause_url()}")
 # Where `snapshot-data.sh` writes the hourly read-only snapshots of DATA_ROOT:
 # the same resolution as the script's `${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}`,
 # because the alert that sends a person to look for a restore point has to name

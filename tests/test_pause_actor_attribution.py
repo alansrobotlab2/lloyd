@@ -53,6 +53,7 @@ import asyncio
 import importlib.util
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -483,7 +484,10 @@ def _guardian_module():
     Lazily and under its real name on purpose: `guardian.py` puts its own directory
     on `sys.path` to reach `policy`, so loading a second copy under a synthetic name
     would put a second `policy` in `sys.modules` and a node patching the guardian's
-    `policy.WORKERS_PAUSE_URL` would be patching a module the code never reads.
+    `policy.GUARDIAN_STATE` would be patching a module the code never reads. Which is
+    also why the pause sink's two inputs (#3154) have to be steered through the
+    environment or through a copy of this file, never by a patch on this module's
+    globals.
     """
     assert GUARDIAN_DIR.is_dir(), f"{GUARDIAN_DIR} is gone — the guardian moved"
     if str(GUARDIAN_DIR) not in sys.path:
@@ -510,17 +514,72 @@ def _post_bytes(client, raw: bytes, content_type: str = "application/json"):
     return client.post(PAUSE_URL, content=raw, headers={"content-type": content_type})
 
 
-def _pause_the_guardian_posts(monkeypatch, actor: str) -> dict:
+def _watchdog_shape(monkeypatch, tmp_path: Path, name: str):
+    """Load a real copy of `guardian.py` as the promoted watchdog and return it.
+
+    Writes the copy into `<tmp_path>/<name>/bin/` — the one directory
+    `guardian-stage.sh` promotes into and the directory `lloyd-guardian.service`'s
+    `ExecStart` runs from — points `policy.GUARDIAN_STATE` at that state dir, registers
+    the copy under `sys.modules["guardian"]`, and hands back the copy module. Run the
+    copy's OWN `Guardian` off it: the ownership check compares the calling module's
+    `__file__` with the module `import guardian` answers to, and both are the copy only
+    if the method itself is the copy's.
+
+    Two of the check's inputs are real and neither verdict is stubbed: the module came
+    from a file under a `bin/` inside the state dir it resolves, and it is the module
+    `import guardian` answers to. What is not real is that this pytest process is the
+    deployed watchdog — it cannot be, and `tests/test_guardian_pause_owner.py` crosses
+    that actual boundary with a subprocess. What is never stubbed is the verdict: a copy
+    that does not sit under `bin/` is refused by the same call with nothing set at all.
+
+    A helper that left the copy a NON-owner would capture zero requests here, and every
+    node in this file would report a green that means "refused", not "posted the right
+    body" — clause 4's whole claim is that the deployed shape still pauses the fleet.
+    """
+    import importlib.util
+
+    state = tmp_path / name
+    bin_dir = state / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    copy_path = bin_dir / "guardian.py"
+    copy_path.write_bytes(GUARDIAN_DIR.joinpath("guardian.py").read_bytes())
+    spec = importlib.util.spec_from_file_location("guardian", copy_path)
+    assert spec is not None and spec.loader is not None
+    copy_mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "guardian", copy_mod)
+    # Set before the loader runs, so the copy's `policy.GUARDIAN_STATE` is this state
+    # dir from its first line; monkeypatch's teardown restores the module attribute.
+    monkeypatch.setattr(_policy_module(), "GUARDIAN_STATE", state)
+    spec.loader.exec_module(copy_mod)
+    return copy_mod
+
+
+def _policy_module():
+    """The one `policy` module the guardian code reads, imported lazily.
+
+    Lazily because `sys.path` gets `GUARDIAN_DIR` from `_guardian_module()`: importing
+    `policy` at this file's top would depend on the import order of two sibling
+    test files, and a second `policy` in `sys.modules` is exactly the failure
+    `_guardian_module`'s docstring warns about.
+    """
+    _guardian_module()
+    import policy
+    return policy
+
+
+def _pause_the_guardian_posts(monkeypatch, actor: str, tmp_path: Path,
+                              name: str = "watchdog-state") -> dict:
     """Run the REAL `Guardian._pause_workers` and keep the `Request` it built.
 
     The method is called on a `Guardian.__new__` object — the partial-construction
     pattern the class documents for itself (`guardian.py`, the comment above
-    `__init__`, kept for `tests/test_guardian_rollback.py`). `_pause_workers` reads
-    no instance state and no argument but `actor` and `policy.WORKERS_PAUSE_URL`, so
-    this is the shipped method over the shipped serialiser with only the socket
-    faked — which is what makes the bytes below the bytes a trip puts on the wire.
+    `__init__`, kept for `tests/test_guardian_rollback.py`). Since #3154
+    `_pause_workers` reads three things: `actor`, `self.backend_url` (set on the partial
+    object below, exactly as `__init__` would set it from `--backend-url`) and the answer
+    of the ownership check, which `_watchdog_shape` makes truthful. Only the socket is
+    faked, so the bytes below are the bytes a trip puts on the wire.
     """
-    G = _guardian_module()
+    G = _watchdog_shape(monkeypatch, tmp_path, name)
     calls: list[tuple[object, object]] = []
 
     def fake_urlopen(request, timeout=None):
@@ -528,11 +587,16 @@ def _pause_the_guardian_posts(monkeypatch, actor: str) -> dict:
         return _FakedHTTPResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    reported = G.Guardian._pause_workers(G.Guardian.__new__(G.Guardian), actor)
+    subject = G.Guardian.__new__(G.Guardian)
+    subject.backend_url = G.policy.BACKEND_HEALTH_URL
+    reported = G.Guardian._pause_workers(subject, actor)
 
     assert len(calls) == 1, (
         f"_pause_workers made {len(calls)} attempts, not one — the capture is empty "
-        "or double-counted, and nothing below it can be believed")
+        "or double-counted, and nothing below it can be believed. Since #3154 an empty "
+        "capture also means the ownership check refused the call, which is what "
+        "tests/test_guardian_pause_owner.py asserts on purpose; here the copy was put "
+        "under `bin/` by `_watchdog_shape` precisely so it must not")
     request, timeout = calls[0]
     assert request.get_method() == "POST", (
         f"a trip that PAUSES by {request.get_method()}ting is not this route")
@@ -578,7 +642,8 @@ def _guardian_pause_helper() -> ast.FunctionDef:
     return fns[0]
 
 
-def test_the_guardians_pause_helper_posts_a_body_that_names_a_holder(monkeypatch):
+def test_the_guardians_pause_helper_posts_a_body_that_names_a_holder(monkeypatch,
+        tmp_path):
     """Clause 1: the bytes the guardian's REAL helper puts on the wire parse to a
     pause that names a holder, and the trips are named by the guardian itself.
 
@@ -591,7 +656,7 @@ def test_the_guardians_pause_helper_posts_a_body_that_names_a_holder(monkeypatch
         actor = getattr(G, const, None)
         assert isinstance(actor, str) and actor, (
             f"guardian.{const} is gone or empty — the {trip} trip stopped naming itself")
-        sent = _pause_the_guardian_posts(monkeypatch, actor)
+        sent = _pause_the_guardian_posts(monkeypatch, actor, tmp_path)
         body = sent["body"]
         assert body.get("paused") is True, (
             f"the {trip} trip does not pause the fleet: {body}")
@@ -691,7 +756,7 @@ def test_a_guardian_pause_names_no_kind_so_the_next_boot_cannot_write_it_off(
 
     trips = {}
     for trip, const in (("vault", "VAULT_TRIP_ACTOR"), ("data", "DATA_TRIP_ACTOR")):
-        sent = _pause_the_guardian_posts(monkeypatch, getattr(G, const))
+        sent = _pause_the_guardian_posts(monkeypatch, getattr(G, const), tmp_path)
         assert "holder_kind" not in sent["body"], (
             f"the {trip} trip now sends holder_kind={sent['body']['holder_kind']!r}; "
             f"a machine hold is auto-released {MACHINE_LEASE_STALE_SECONDS}s after its "
@@ -750,7 +815,7 @@ def test_the_two_guardian_trips_journal_their_own_trip_at_the_route(
     named = {}
     for trip, const in (("vault", "VAULT_TRIP_ACTOR"), ("data", "DATA_TRIP_ACTOR")):
         actor = getattr(G, const)
-        sent = _pause_the_guardian_posts(monkeypatch, actor)
+        sent = _pause_the_guardian_posts(monkeypatch, actor, tmp_path)
         client, pool = _route_client(monkeypatch, tmp_path, db=f"{trip}.db")
         res = _post_bytes(client, sent["raw"], sent["content_type"])
         assert res.status_code == 200, res.text
@@ -777,3 +842,188 @@ def test_the_two_guardian_trips_journal_their_own_trip_at_the_route(
 # ── the pytest-side sanity check on both defaults lives in
 #    tests/test_workers_router.py (clause 3), where `_pause_client` is.
 
+
+# ── #3154: which process may aim at the fleet ────────────────────────────────
+#
+# `pause_journal` id 21, actor `guardian-vault-trip`, taken `2026-10-21T10:21:48` and
+# released by `mission-control` 7 h 01 m later: dispatch stood still that long on a trip
+# the deployed unit's journal never logged and whose `vault-incidents/` evidence directory
+# does not exist. The trip was real — measured against a sandbox by a COPY of
+# `guardian.py` running out of a gate tree — and the POST that halted everything went to a
+# literal URL no caller could move. #3149 bounded the alert a copy could WRITE; this is
+# the same asymmetry on the sink a copy can STOP, which is the worse of the two.
+
+
+def test_the_pause_sink_is_built_from_the_process_own_backend_base(monkeypatch):
+    """Clause 1: the URL is derived from the backend base the process already resolved,
+    and with nothing overridden it is byte-identical to the literal it replaced.
+
+    The point of building it is not tidiness. `guardian.py:397` has held
+    `args.backend_url` — the value `:404`, `:437` and `:446` derive other backend URLs
+    from — and `_pause_workers` ignored it for a module constant, so the only way a
+    caller could aim a trip at a different pool was to edit the shipped file. Now the
+    base moves the way `LLOYD_VAULT_ROOT` and `LLOYD_GUARDIAN_STATE` move.
+    """
+    import policy
+
+    assert not hasattr(policy, "WORKERS_PAUSE_URL"), (
+        "the module-level URL literal is back, and with it the address no caller could "
+        "move: a copy of the guardian would again halt whatever pool it reaches")
+    assert policy.WORKERS_PAUSE_PATH == "/api/workers/pause", (
+        "the route changed, so every caller that derives its sink from `backend_url` is "
+        "now POSTing somewhere else — including the guardian on this box")
+
+    assert policy.BACKEND_HEALTH_URL == "http://127.0.0.1:8080/health", (
+        "with no override the resolved health URL is not the deployed one, so the "
+        "watchdog's own probes moved as well as its sink")
+    assert policy.workers_pause_url() == "http://127.0.0.1:8080/api/workers/pause", (
+        "the deployed shape no longer posts to the URL the literal held")
+    # Both shapes the tree already uses for a backend: `--backend-url` is a health URL,
+    # and `base_url` (`guardian.py:404`) is what `rsplit("/health", 1)` leaves behind.
+    assert policy.workers_pause_url("http://127.0.0.1:9999/health") == (
+        "http://127.0.0.1:9999/api/workers/pause")
+    assert policy.workers_pause_url("http://127.0.0.1:9999") == (
+        "http://127.0.0.1:9999/api/workers/pause")
+    assert policy.workers_pause_url("http://127.0.0.1:9999/health/") == (
+        "http://127.0.0.1:9999/api/workers/pause")
+
+    monkeypatch.setenv("LLOYD_BACKEND_URL", "http://127.0.0.1:7777")
+    assert policy.backend_health_url() == "http://127.0.0.1:7777/health", (
+        "`LLOYD_BACKEND_URL` does not reach the resolver the constant is bound from, so "
+        "a scratch-HOME process would still be aimed at the live pool")
+    monkeypatch.setenv("LLOYD_BACKEND_URL", "http://127.0.0.1:7777/health")
+    assert policy.backend_health_url() == "http://127.0.0.1:7777/health", (
+        "a whole health URL in the override was mangled — the value the watchdog would "
+        "probe is not the value the caller wrote")
+
+
+def test_a_copy_of_the_guardian_that_is_not_the_watchdog_refuses_the_pause(
+        monkeypatch, tmp_path):
+    """Clause 2: a non-owner returns a refusal naming what it weighed, and opens no
+    socket.
+
+    The recorder is an `urlopen` that would have SUCCEEDED. That is deliberate and it is
+    also a rail: no node in this file may un-patch `urlopen` against `127.0.0.1:8080`,
+    because a stray real POST from the tests rung would halt the live fleet and journal
+    itself as a `person` — the kind nothing auto-releases (`app/routers/workers.py`). The
+    positive control below is the same helper run in the owner shape, so a green here is
+    evidence about the guard and not about a recorder nothing could reach.
+    """
+    import policy
+
+    G = _guardian_module()                       # the repo-tree copy: a non-owner
+    calls: list[object] = []
+
+    def recording_urlopen(request, timeout=None):
+        calls.append(request)
+        return _FakedHTTPResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", recording_urlopen)
+    subject = G.Guardian.__new__(G.Guardian)
+    subject.backend_url = "http://127.0.0.1:8080/health"
+    out = G.Guardian._pause_workers(subject, G.VAULT_TRIP_ACTOR)
+
+    assert calls == [], (
+        f"a non-owner's pause reached {getattr(calls[0], 'full_url', '?')} — the guard "
+        "is not in the path, which is the 2026-10-21 halt")
+    assert isinstance(out, str) and out.startswith("pause refused:"), (
+        f"a copy got back {out!r} instead of a refusal; the trip's marker would read as "
+        "though the fleet were held")
+    assert str(Path(G.__file__).resolve()) in out, (
+        f"the refusal does not name the module it refused ({out!r}) — a reader has to be "
+        "able to tell the deployed watchdog from the copy that ran")
+    assert str(policy.GUARDIAN_STATE) in out, (
+        f"the refusal does not name the state dir it weighed against ({out!r})")
+
+    owner = _watchdog_shape(monkeypatch, tmp_path, "owner-control")
+    assert not policy.deployed_watchdog_refusal(str(Path(owner.__file__).resolve())), (
+        "the control copy is not an owner either, so the empty recorder above proves "
+        "nothing about the guard")
+    posted = _pause_the_guardian_posts(monkeypatch, G.VAULT_TRIP_ACTOR, tmp_path)
+    assert posted["reported"].startswith("paused (HTTP "), (
+        f"the owner control did not pause the pool either ({posted['reported']!r})")
+
+
+def test_a_data_trip_from_a_copy_takes_no_hold_and_says_so_in_its_marker(
+        monkeypatch, tmp_path):
+    """Clause 3: the data-root trip driven from a copy in a scratch TREE takes no hold,
+    and the marker it writes records the refusal rather than a pause.
+
+    The copy is planted the way the 2026-10-21 emitter was found — a gate prefetch tree
+    under the throwaway-checkout root, a scratch home, no override of anything — and
+    `_pause_workers` is NOT stubbed, unlike the fixture `tests/test_data_home.py` uses.
+    The recorder is the one named in the clause and it must stay empty; the marker is
+    read back off disk, because `actions["workers"]` is what the next reader of the
+    incident sees, and a marker claiming a halt that never took place is how a 7-hour
+    hold gets mistaken for a guarded one.
+    """
+    import types
+
+    import policy
+
+    tdh = _load("tests/test_data_home.py", "data_home_copy_driver")
+
+    home = tmp_path / "home"
+    root = tdh._data_root(home / "lloyd-data")
+    (home / "obsidian").mkdir()
+    monkeypatch.setattr(policy, "VAULT_ROOT", str(home / "obsidian"))
+    monkeypatch.setattr(policy, "DATA_ROOT", str(root))
+    monkeypatch.setattr(policy, "LOG_FILES", ())
+    monkeypatch.setattr(policy, "REPO", str(home / "lloyd"))
+    monkeypatch.setattr(policy, "DATA_SNAPSHOTS", str(home / "snaps"))
+    tdh._snap_store(home / "snaps", 60.0)
+    (home / "lloyd").mkdir()
+    # The state dir is a scratch one: a copy whose state dir happened to BE the
+    # deployed dir is #3154's other lesson (`worktree.py:65` symlinks `.local` into the
+    # live account), and the location check below is what still refuses it.
+    monkeypatch.setattr(policy, "GUARDIAN_STATE", home / ".local/state/lloyd-guardian")
+
+    copy_dir = tmp_path / "lloyd-work" / "review-prefetch" / "agent-services" / "guardian"
+    copy_dir.mkdir(parents=True)
+    shutil.copy2(GUARDIAN_DIR / "guardian.py", copy_dir / "guardian.py")
+    spec = importlib.util.spec_from_file_location(
+        "guardian_prefetch_copy", copy_dir / "guardian.py")
+    assert spec is not None and spec.loader is not None
+    copy = importlib.util.module_from_spec(spec)
+    added = str(copy_dir)
+    try:
+        spec.loader.exec_module(copy)
+    finally:
+        sys.path[:] = [p for p in sys.path if p != added]
+
+    args = types.SimpleNamespace(
+        repo=str(home / "lloyd"), state=str(home / "state"),
+        guardian_state=str(home / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:8080/health",
+        mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0)
+    g = copy.Guardian(args)
+    alerts: list = []
+    monkeypatch.setattr(g, "_stop_sync", lambda: "n/a")
+    monkeypatch.setattr(g, "alert", lambda level, title, body, **kw:
+                        alerts.append((level, title, body)))
+
+    recorder: list[object] = []
+
+    def recording_urlopen(request, timeout=None):
+        recorder.append(request)
+        return _FakedHTTPResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", recording_urlopen)
+    g.check_data()                                  # arms the watch
+    shutil.rmtree(root / "sessions")                # 400 of ~402 files gone
+    g.check_data()
+
+    assert alerts, "the copy's data trip did not even alert — nothing below is measured"
+    assert recorder == [], (
+        f"a copy's data trip paused the pool at "
+        f"{getattr(recorder[0], 'full_url', '?')} — the guard is not in the path")
+    marker = json.loads(Path(g.data.marker).read_text(encoding="utf-8"))
+    recorded = marker["actions"]["workers"]
+    assert recorded.startswith("pause refused:"), (
+        f"the marker says {recorded!r}: a copy's halt would be recorded as a held fleet")
+    assert not recorded.startswith("paused ("), (
+        f"the marker claims a pause (`{recorded}`) that no POST ever took")
+    assert marker["actions"]["promotions"] == "halted", (
+        "the refusal took the promotion halt with it — it must not: the halt is local "
+        "state, and losing it would make a copy's trip less safe, not more")

@@ -2032,10 +2032,30 @@ class Guardian:
         `datawatch.py` prints none at all — each trip ends with a person restoring
         the root and clearing the watch. Naming a kind here would therefore have the
         next boot resume dispatch in the middle of the incident it is halted for.
+
+        Two more things happen before the socket is opened (#3154). This module must BE
+        the promoted watchdog: a copy of this file under a round worktree, a gate review
+        prefetch tree or a repo checkout measures its tripwire against a sandbox and used
+        to halt the live pool with whatever body it posted, which is how dispatch stood
+        still for 7 h 01 m on 2026-10-21 under an actor the deployed unit's journal has
+        never seen and with no `vault-incidents/` directory to explain it. The refusal
+        string is what the trip's marker records under `actions["workers"]`, so the
+        incident says for itself that no halt took place — and a refusal does not take
+        the promotion halt or the evidence with it. And the URL comes from
+        `self.backend_url`, which `__init__` has held since before this existed and which
+        `:404`, `:437` and `:446` already derive other backend URLs from, instead of from
+        a module literal no caller could move. With nothing overridden the result is the
+        same loopback URL that literal held; the body, this method's `holder_kind`
+        omission, and everything the trip does afterwards are unchanged.
         """
         import urllib.request
+        refusal = policy.deployed_watchdog_refusal(__file__)
+        if refusal:
+            log(f"worker pause refused (actor={actor}): {refusal}")
+            return refusal
         body = json.dumps({"paused": True, "actor": actor}, separators=(",", ":"))
-        req = urllib.request.Request(policy.WORKERS_PAUSE_URL, method="POST",
+        req = urllib.request.Request(policy.workers_pause_url(self.backend_url),
+                                     method="POST",
                                      data=body.encode(),
                                      headers={"Content-Type": "application/json"})
         try:

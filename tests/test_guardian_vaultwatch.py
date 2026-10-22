@@ -46,6 +46,81 @@ def _vault(root: Path, files: int = 400) -> Path:
 
 # ── the judgement ────────────────────────────────────────────────────────────
 
+# ── #3154: the owner of the pause sink ───────────────────────────────────────
+#
+# The trip below is the deployed guardian's own behaviour, with the pause going over a
+# real socket to a real server: `pause_journal` id 21 held dispatch for 7 h 01 m on
+# 2026-10-21 on a trip the deployed unit's journal never logged, because a COPY of
+# `guardian.py` under a gate tree posted to a URL literal no caller could move. The two
+# facts that make a copy a non-owner are the module's own path and the guardian state
+# dir, so the nodes here arrange both instead of patching the check away — clause 4's
+# claim is that the owner still pauses the fleet, and a node that stubbed the guard
+# cannot tell an owner from a refusal.
+
+
+def _recording_backend(tmp_path: Path):
+    """A one-shot HTTP server that records what it was POSTed, as a context manager.
+
+    A real socket rather than a faked `urlopen`, because clause 4 is about bytes that
+    leave the process: `holder_kind` has to be absent ON THE WIRE, and the assertion
+    that matters most — that a pause reached a backend at all — is a backend's answer.
+    It binds port 0 and hands back the URL, so a node can point a sink at it without
+    ever aiming a test POST at `127.0.0.1:8080`, which is the live fleet.
+    """
+    import http.server
+    import threading
+
+    hits: list[dict] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            hits.append({"path": self.path, "method": "POST",
+                         "body": self.rfile.read(n).decode(),
+                         "content_type": self.headers.get("Content-Type")})
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):  # silence: a suite run is not a server log
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    host, port = srv.server_address[:2]
+    return srv, hits, f"http://{host}:{port}"
+
+
+def _owner_guardian(args, monkeypatch, tmp_path: Path, name: str = "watchdog"):
+    """A `Guardian` built from a copy of this tree's `guardian.py` IN the deployed shape.
+
+    The copy's file goes to `<tmp>/<name>/bin/guardian.py` — the directory
+    `guardian-stage.sh:31` promotes into and `lloyd-guardian.service:29`'s `ExecStart`
+    runs from — and `policy.GUARDIAN_STATE` is pointed at that state dir, so
+    `policy.deployed_watchdog_refusal` answers "owner" for it (#3154). Everything else
+    about it is the shipped class: no patched helper, no patched check.
+    """
+    import importlib.util
+
+    state = tmp_path / name
+    (state / "bin").mkdir(parents=True, exist_ok=True)
+    dst = state / "bin" / "guardian.py"
+    dst.write_bytes((GUARDIAN_DIR / "guardian.py").read_bytes())
+    monkeypatch.setattr(policy, "GUARDIAN_STATE", state)
+    spec = importlib.util.spec_from_file_location("guardian_watchdog_copy", dst)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    added = str(state / "bin")
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        # The copy's own `sys.path.insert(0, <its dir>)` runs at import; leaving a tmp
+        # directory ahead of the real one would let a later `import guardian` in this
+        # process load a file under a deleted temp root.
+        sys.path[:] = [p for p in sys.path if p != added]
+    return mod, mod.Guardian(args)
+
+
 def test_evaluate_trips_on_each_wipe_shape_and_not_on_churn():
     base = VW.Snapshot(ts=0, total=5000, top={"backlog": 1100, "skills": 700, "images": 7}, inode=9)
     ok = VW.Snapshot(ts=5, total=4970, top={"backlog": 1090, "skills": 690, "images": 7}, inode=9)
@@ -156,83 +231,6 @@ def test_evidence_is_captured(guardian):
     assert out and (Path(out) / "ps.txt").read_text().strip()
 
 
-def test_a_trip_still_halts_everything_and_now_arrives_named(guardian, monkeypatch):
-    """A vault trip keeps every action it ever took (#2846 clause 5), and this is the
-    only node that sees what the trip actually PUT on the wire.
-
-    The fixture stubs `_pause_workers`, as every node here needs, so the shipped
-    helper's bytes were invisible to this file. This node restores the real method over
-    a faked `urlopen` and leaves everything else exactly as the trip found it: the
-    attribution was the one thing allowed to move, so anything else changing here is a
-    regression, and the pause line the human reads is a real HTTP status only because
-    the real helper produced it.
-    """
-    import urllib.request
-
-    g, vault, acted = guardian
-    monkeypatch.setattr(g, "_pause_workers",
-                        types.MethodType(G.Guardian._pause_workers, g))
-    posts = []
-
-    class _Answer:
-        status = 200      # JSONResponse's default, which is what the pause route answers
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    def _capture(request, timeout=None):
-        posts.append(request)
-        return _Answer()
-
-    monkeypatch.setattr(urllib.request, "urlopen", _capture)
-
-    g.check_vault()                                   # arm the tripwire
-    for folder in ("backlog", "skills", "memory", "knowledge"):
-        shutil.rmtree(vault / folder)
-    g.check_vault()                                   # the mass deletion
-
-    # `acted["workers"]` counts the STUB this node replaced, so the request count is
-    # the evidence that exactly one hold was taken — and it is the better evidence,
-    # because the name in it came from the tripwire rather than from this file.
-    assert len(posts) == 1, f"a vault trip put {len(posts)} pause requests on the wire"
-    assert posts[0].get_method() == "POST" and posts[0].full_url.endswith(
-        "/api/workers/pause"), posts[0].full_url
-    sent = json.loads(posts[0].data)
-    assert sent == {"paused": True, "actor": G.VAULT_TRIP_ACTOR}, (
-        f"a vault trip pauses the fleet with {sent}: it must name the vault trip, and a "
-        "`holder_kind` key here would make the hold a machine lease that the next "
-        "backend restart writes off while the incident is still open")
-    assert acted["sync"] == 1, acted
-    assert g.state.is_halted(), "a wipe that stops sync no longer halts promotions"
-    marker = json.loads(g.vault.marker.read_text())
-    assert "disappeared" in marker["reason"]
-    assert marker["actions"]["sync"] == "stopped"
-    assert marker["actions"]["promotions"] == "halted"
-    assert marker["actions"]["workers"].startswith("paused (HTTP "), marker["actions"]
-    assert (Path(marker["actions"]["evidence"]) / "ps.txt").read_text().strip(), (
-        "the trip's process-table evidence came back empty")
-    [(level, title, body)] = acted["alerts"]
-    assert level == "critical" and "sync stopped" in title
-    assert "paused (HTTP 200)" in body, (
-        "the alert no longer quotes the pause it took, so whoever reads it cannot tell "
-        "a held fleet from a backend that refused the hold")
-    assert "restore-vault.sh" in body and "clear" in body
-
-
-# ── is the vault's own backup repo still moving? (backlog #3132) ──────────────
-#
-# #3078 gave the vault's git snapshot a bound (`SNAPSHOT_MAX_AGE_SECONDS`, 3 h,
-# twelve missed 15-minute cycles) and a reading (`snapshot_age_state`), and left
-# both with no caller: the data root's twin has been ticked by the guardian since
-# #1416, the vault's was a function, a CLI and a set of tests. That is how
-# 2026-10-16→10-20 read healthy — `lloyd-vault-backup.timer` enabled and firing,
-# 370 runs each exiting 128, and the only out-of-vault copy of the vault not
-# moving for four days. What follows is the poller, pinned the way the data
-# root's is pinned in `tests/test_data_home.py:345-417`.
-
 FOUR_HOURS = 4 * 3600.0
 
 
@@ -319,6 +317,140 @@ def _owner_backup_repo(tmp_path: Path, monkeypatch, name: str, *,
     repo, sha = _backup_repo(owner, name, age_seconds=age_seconds)
     _snapshot_override(monkeypatch, owner, repo)
     return repo, sha
+
+
+def test_the_deployed_shape_still_halts_everything_and_posts_its_body(
+        tmp_path, monkeypatch):
+    """Clause 4/5: the owner's trip is unchanged, byte for byte, and this node is where
+    the wire proves it — a real socket, a real server, no faked `urlopen`.
+
+    A vault trip keeps every action it ever took (#2846 clause 5) and still pauses the
+    pool: `guardian.py` resolves under its state dir's `bin/`, the sink is aimed at a
+    test server on a free port (never `127.0.0.1:8080`, which is the live fleet), and the
+    server records exactly one POST carrying `{paused: true, actor:
+    guardian-vault-trip}` and NO `holder_kind` key — that omission is load-bearing and
+    documented at `guardian.py` above the helper: naming a kind would let the next backend
+    restart resume dispatch in the middle of the incident.
+
+    The owner shape is ARRANGED, not patched: the copy's file and the state dir are the
+    two facts `policy.deployed_watchdog_refusal` weighs, so a node that overrode the
+    check would be reporting that the guard passed while never having consulted it. The
+    marker side is read back from disk because the alert body is a rendering: `actions`
+    is what the next reader of the trip marker gets.
+    """
+    vault = _vault(tmp_path / "obsidian")
+    monkeypatch.setattr(policy, "VAULT_ROOT", str(vault))
+    monkeypatch.setattr(policy, "LOG_FILES", ())
+    srv, hits, base = _recording_backend(tmp_path)
+    try:
+        args = types.SimpleNamespace(
+            repo=str(tmp_path), state=str(tmp_path / "state"),
+            guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+            backend_url=base + "/health", mcp_url="http://127.0.0.1:2/health",
+            programs="lloyd-mc:lloyd-backend", interval=5.0,
+        )
+        _mod, g = _owner_guardian(args, monkeypatch, tmp_path)
+        alerts: list = []
+        monkeypatch.setattr(g, "_stop_sync", lambda: "stopped")
+        monkeypatch.setattr(g, "alert",
+                            lambda level, title, body, **kw:
+                            alerts.append((level, title, body)))
+        monkeypatch.setattr(g, "ensure_chronic", lambda: None)
+        monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+
+        g.check_vault()                                # arm the tripwire
+        for folder in ("backlog", "skills", "memory", "knowledge"):
+            shutil.rmtree(vault / folder)
+        g.check_vault()
+
+        assert len(hits) == 1, (
+            f"the owner's trip produced {len(hits)} pause POST(s), not exactly one")
+        assert hits[0]["path"] == policy.WORKERS_PAUSE_PATH, (
+            f"the pause went to {hits[0]['path']}, not {policy.WORKERS_PAUSE_PATH}")
+        posted = json.loads(hits[0]["body"])
+        assert posted == {"paused": True, "actor": "guardian-vault-trip"}, (
+            f"the owner posted {posted}: the body changed, or the actor or a "
+            "`holder_kind` appeared in it")
+        assert "holder_kind" not in posted, (
+            "a `holder_kind` is back in the trip's body, so the next backend restart "
+            "would resume dispatch mid-incident")
+
+        marker = json.loads(g.vault.marker.read_text(encoding="utf-8"))
+        assert marker["actions"]["workers"].startswith("paused (HTTP "), (
+            f"the trip marker records {marker['actions']['workers']!r}, not a pause the "
+            "backend answered — a reader would see a halt that did not happen")
+        assert marker["actions"]["promotions"] == "halted", marker["actions"]
+        assert "sync stopped" in alerts[0][1], alerts[0][1]
+        assert f"Worker pool: {marker['actions']['workers']}" in alerts[0][2], (
+            "the alert no longer quotes the pause it took, so whoever reads it cannot "
+            "tell a held fleet from a backend that refused the hold")
+        assert "Promotions: halted" in alerts[0][2], alerts[0][2]
+        assert "restore-vault.sh" in alerts[0][2] and "clear" in alerts[0][2], (
+            "#2846's recovery sentence left the trip alert: the reader is told an "
+            "incident happened but not how to undo it")
+        # Clause 5: everything else the trip does is where it was.
+        assert (Path(marker["actions"]["evidence"]) / "ps.txt").read_text().strip(), (
+            "the trip no longer captures the process table")
+    finally:
+        srv.shutdown()
+
+
+def test_the_trip_prints_the_same_resume_line_and_selftest_still_passes(
+        tmp_path, monkeypatch, capfd):
+    """Clause 5, the other two surfaces a confinement check could have moved.
+
+    `vaultwatch.py clear` prints the curl a HUMAN runs to lift a real halt. It is a
+    literal, not derived from the guardian's sink, and it has to stay that way: a person
+    reading it has the vault checkout, not the round's environment. And `selftest.py`'s
+    `vault tripwire judges and measures` node is what `guardian-stage.sh` gates promotion
+    on, so a check that made it fail would keep a fixed watchdog from ever being staged —
+    the exact failure #3149's round hit on the note sink. It is run as a subprocess here
+    because that node only fails or passes in a real interpreter with a real home.
+    """
+    # A subprocess against a scratch vault, because `VW.main` builds its `VaultWatch`
+    # from the module defaults — which in-process would be the LIVE vault and the live
+    # state dir, and clearing the deployed tripwire from a test is exactly the write
+    # this item's class is about. The CLI resolves both from the environment, so a
+    # confined run is the human surface, honestly confined.
+    vault = _vault(tmp_path / "obsidian")
+    state = tmp_path / "gstate"
+    w = VW.VaultWatch(str(vault), state)
+    w.trip("400 of 401 vault files disappeared", None, {"workers": "paused (HTTP 200)"})
+    env = dict(os.environ,
+               LLOYD_VAULT_ROOT=str(vault), LLOYD_GUARDIAN_STATE=str(state))
+    cleared = subprocess.run([sys.executable, str(GUARDIAN_DIR / "vaultwatch.py"),
+                              "clear"], capture_output=True, text=True, timeout=60,
+                             env=env, check=False)
+    assert cleared.returncode == 0, cleared
+    printed = cleared.stdout
+    resume_curl = ("curl -X POST localhost:8080/api/workers/pause "
+                   "-H 'content-type: application/json' "
+                   "-d '" + '{"paused": false}' + "'")
+    assert resume_curl in printed, (
+        f"`clear` no longer prints the resume curl a human needs: {printed!r}")
+
+    scratch = tmp_path / "scratch-home"
+    (scratch / "obsidian" / "memory").mkdir(parents=True)
+    (scratch / "obsidian" / "memory" / "note.md").write_text("# note\n",
+                                                            encoding="utf-8")
+    env = dict(os.environ,
+               HOME=str(scratch),
+               LLOYD_GUARDIAN_STATE=str(scratch / ".local/state/lloyd-guardian"),
+               LLOYD_AUTOMOD_STATE=str(scratch / ".local/state/lloyd-automod"),
+               LLOYD_DATA=str(tmp_path / "data"),
+               LLOYD_SUPERVISOR_SOCK=str(tmp_path / "no-supervisor.sock"),
+               LLOYD_VOICE_ALERTS="0", LLOYD_DESKTOP_ALERTS="0",
+               LLOYD_JOURNAL_ALERTS="0")
+    out = subprocess.run([sys.executable, str(GUARDIAN_DIR / "selftest.py"),
+                          "--profile", "staging"],
+                         capture_output=True, text=True, timeout=120, env=env,
+                         check=False)
+    line = [ln for ln in out.stdout.splitlines()
+            if "vault tripwire judges and measures" in ln]
+    assert line, f"the selftest printed no vault-tripwire line at all: {out.stdout!r}"
+    assert "[ok ]" in line[0], (
+        f"`guardian-stage.sh` would now refuse a candidate over #3154's owner check: "
+        f"{line[0]}")
 
 
 def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp_path,

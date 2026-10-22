@@ -2081,14 +2081,14 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # | grep '^@@'` must show exactly those three hunks, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # must print 846 and the current `main` head below.
-    # 2763 → 2782, `evaluate_liveness` still 846 (#3149): one hunk, +19 lines at :1632
-    # inside `_vault_snapshot_stream` — the owner check that stops a repository outside
-    # `$HOME/.local/state/lloyd-vault-backup` raising this alert — which is below
-    # `evaluate_liveness` and above `main`, so only `main` moves. Same re-check as above:
-    # `git diff <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` shows
-    # that one hunk and nothing else.
-    assert heads[guardian]["main"] == 2782, (
-        f"`main` moved off :2782 ({heads[guardian]['main']}) — if it is gone "
+    # 2763 → 2782 was #3149 (one hunk inside `_vault_snapshot_stream`); 2782 → 2802 is
+    # #3154: one hunk, +20 lines at :2032 inside `_pause_workers` — the owner check and
+    # the resolved sink — which is again below `evaluate_liveness` and above `main`, so
+    # again only `main` moves. Same re-check as above: `git diff <base> <head> --
+    # agent-services/guardian/guardian.py | grep '^@@'` shows that one hunk and nothing
+    # else.
+    assert heads[guardian]["main"] == 2802, (
+        f"`main` moved off :2802 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 846, (
         f"`evaluate_liveness` moved off :846 "
