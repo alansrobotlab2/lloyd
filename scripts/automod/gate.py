@@ -89,6 +89,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import statistics
 from collections import Counter
 import subprocess
 import tempfile
@@ -115,7 +116,47 @@ PYTEST_MIN_COLLECTED = 1000
 # hold, or the rung's own guarantee ("the suite still passes") is satisfied by
 # a suite that did nothing.
 PYTEST_MIN_PASSED = 1000
+# The FLOOR of the tests rung's skip ceiling, not the ceiling it applies (#3143).
+# What the rung now refuses is `max(this, base_skips + PYTEST_SKIP_HEADROOM)`,
+# computed per run by `_skip_ceiling`, because the absolute figure had stopped
+# describing the suite: the ledger read 39 skips against this 40 on 2026-10-22,
+# a margin of one, and it had already moved 32/33 -> 38 -> 39 with no round at
+# fault — the counted set is a property of the tree (the dashboard pins skip
+# whenever a worktree has no vite), so a fixed rail refuses rounds for a fact
+# nobody changed. Refusing on that is the #2637 failure all over again, and every
+# past near-miss was answered by a bigger literal, which is the lottery #2205
+# named. Raising the FIGURE remains a human ruling (#2214, `dbfddc60` is still
+# unlanded); deriving the margin from the base tree is not, and it cannot drift
+# upward on its own — see `_skip_base_median` for why a median of five green
+# rounds has to be dragged before the rail moves at all.
+#
+# The name and the exact spelling of this assignment are load-bearing for two
+# readers that match on text rather than on behaviour: the nodes in
+# tests/test_gate_parallel_tests.py and tests/test_skip_inventory.py that grep
+# this file for `PYTEST_MAX_SKIPPED = 40`, and the vacuity guard's
+# site_needle/symbol in scripts/maintenance/guard_vacuity.py — whose 10**12
+# mutant only diverges because `_skip_ceiling` reads THIS global at call time, so
+# a derived ceiling built on a copy of the number would silently blind the guard.
 PYTEST_MAX_SKIPPED = 40
+#: How far above the measured baseline the ceiling may sit (#3143). Eight is
+#: roughly the width of one dashboard pin block (the ten
+#: `tests/test_dashboard_responsive.py` pins that skip when a tree has no
+#: `web/node_modules`) plus one, so a dependency going missing is a finding the
+#: rung prints rather than a round it refuses, and a round that ADDS nine skips is
+#: still refused. It is headroom, not a licence: the base is a median, so three of
+#: the five newest green rounds must actually take the room before the rail moves.
+PYTEST_SKIP_HEADROOM = 8
+#: How many green full runs the base is the median of, and how many round
+#: directories the probe may read at all. Five because a median of five cannot be
+#: dragged by one odd round and cannot be dragged down by one partial run (those
+#: rows are excluded outright — a partial rung reports `tests_skipped: 0` for the
+#: whole suite, which would pull the base under the floor). The scan cap exists
+#: because the rounds store held 1994 directories on 2026-10-22 and this runs on
+#: the gate's hot path: sixty newest directories holding fewer than five green
+#: full `tests` rungs is a ledger that has stopped saying anything, and then the
+#: floor is the right answer.
+PYTEST_SKIP_BASE_SAMPLES = 5
+PYTEST_SKIP_BASE_SCAN_CAP = 60
 UV_BIN = Path.home() / ".local" / "bin" / "uv"
 
 
@@ -202,10 +243,12 @@ def _pin_findings(out: str) -> list[str]:
     A pin that did not RUN is not a pin that passed, and the reason
     `tests/test_dashboard_responsive.py` could report `6 skipped` with exit 0 for
     months is that nothing between a line in pytest's output and the rung's
-    `12757 passed, 1 xfailed, 31 skipped` looked at it. The suite-wide
-    `PYTEST_MAX_SKIPPED` ceiling (40) is already sitting at 31 by ledger, so six
-    more skips are permanently inside the budget, and the partial-run branch
-    applies no floor at all. Surfacing the finding costs one clause of the detail.
+    `12757 passed, 1 xfailed, 31 skipped` looked at it. However it is derived —
+    #3143 derives the rail as the base tree's own count plus a headroom over the
+    floor — the skip limit is a WHOLE-SUITE total: the ledger reported 39 skips on
+    2026-10-22, which yields a rail of 47, so ten unexecuted pins sit inside the
+    budget by construction, and the partial-run branch applies no floor at all.
+    Surfacing the finding costs one clause of the detail.
     """
     if not out:
         return []
@@ -1503,6 +1546,129 @@ class _ReviewPrefetch:
             self._abandoned = True
             snap, self._snapshot = self._snapshot, None
             return snap, self._session_id
+
+
+# --------------------------------------------------------------------------- #
+# The derived skip ceiling (#3143). Read the ledger, derive the rail.
+# --------------------------------------------------------------------------- #
+
+def _green_full_tests_data(path: Path) -> dict | None:
+    """One round's `gate.json` `tests` rung as a base row, or None if it is not one.
+
+    A row has to be GREEN (`ok` true on the rung's own verdict) and FULL: the
+    detail must not begin `REUSED` — a re-gate's carried-over verdict, which
+    reports some earlier run's counts under this round's name — and `data` must
+    carry no `partial` key. That last filter is not hygiene, it is the difference
+    between a base and a lie: the partial branch of `_tests_pass` runs only the
+    changed test files, so its `tests_skipped` is one file's skips in a field the
+    whole-suite rail reads. `SM_20261021_222704` reports `tests_skipped: 0` that
+    way while its detail says `15 passed, 0 skipped`; one such row in a sample of
+    five is enough to pull a base of 39 down to 31, which tightens the rail on the
+    very rounds it exists to protect.
+
+    Anything unreadable is a None, deliberately. A corrupt, half-written or absent
+    report is a ledger with no row in it, and the answer to "no rows" is the floor;
+    a probe that raised would take the ladder down over a file the retention sweep
+    is allowed to leave behind.
+    """
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    for rung in report.get("rungs") or []:
+        if not isinstance(rung, dict) or rung.get("name") != "tests":
+            continue
+        if not rung.get("ok"):
+            return None
+        if str(rung.get("detail") or "").startswith("REUSED"):
+            return None
+        data = rung.get("data")
+        if not isinstance(data, dict) or "partial" in data:
+            return None
+        return data
+    return None
+
+
+def _skip_base_median(exclude_round: str | None = None) -> int | None:
+    """The median `tests_skipped` of the newest green full runs, or None.
+
+    Walks `state.ROUNDS_DIR` newest-first and stops at `PYTEST_SKIP_BASE_SAMPLES`
+    rows, having read at most `PYTEST_SKIP_BASE_SCAN_CAP` directories. The store is
+    read as a module attribute of `scripts.automod.state`, the way
+    `base_probe_excerpts_path` reads it, so a test moves the ledger by moving
+    `ROUNDS_DIR` and this has no idea it was moved.
+
+    Newest-first by directory NAME, not mtime: the round id is its own UTC
+    timestamp (`SM_%Y%m%d_%H%M%S`), so a name sort is one pass over `iterdir()`
+    where an mtime sort is a `stat()` per directory — on the 1994 directories the
+    store held on 2026-10-22, in the gate's own hot path, that is the entire cost
+    of the probe. `exclude_round` drops the round being gated: on a re-gate its own
+    previous report is sitting there, and a round must not grade its own skip count
+    into the baseline that decides whether it is allowed to skip.
+
+    The median is `int()`-cast because the ceiling is a count, and the median of an
+    even sample (fewer rows than the sample size, which is what a young or thinned
+    ledger gives) is the mean of two middle values. Truncating is the one direction
+    that cannot widen the rail on a thin sample.
+    """
+    rounds_dir = S.ROUNDS_DIR
+    if not rounds_dir.is_dir():
+        return None
+    try:
+        dirs = sorted((d for d in rounds_dir.iterdir() if d.is_dir()),
+                      key=lambda d: d.name, reverse=True)
+    except OSError:
+        return None
+    rows: list[int] = []
+    for d in dirs[:max(0, int(PYTEST_SKIP_BASE_SCAN_CAP))]:
+        if exclude_round and d.name == exclude_round:
+            continue
+        data = _green_full_tests_data(d / "gate.json")
+        if data is None:
+            continue
+        value = data.get("tests_skipped")
+        if isinstance(value, int) and not isinstance(value, bool):
+            rows.append(value)
+            if len(rows) >= max(1, int(PYTEST_SKIP_BASE_SAMPLES)):
+                break
+    if not rows:
+        return None
+    return int(statistics.median(rows))
+
+
+def _skip_ceiling(exclude_round: str | None = None) -> tuple[int, int | None]:
+    """`(ceiling, base_skips)` for one run of the `tests` rung (#3143).
+
+    `max(PYTEST_MAX_SKIPPED, base_skips + PYTEST_SKIP_HEADROOM)`, where
+    `base_skips` is `_skip_base_median()` — so with the ledger of 2026-10-22
+    (five newest green full rounds at 39 skips) the rail is 47, and with no
+    ledger to read it is exactly `PYTEST_MAX_SKIPPED`, 40, which is the shape
+    every unit test takes: `tests/conftest.py` points `LLOYD_AUTOMOD_STATE` at a
+    scratch directory before `scripts.automod.state` is imported, so no test
+    reads the machine's ledger and no test can widen the rail it is asserting
+    against. That is also why the two constants are read HERE rather than baked
+    into an expression at import: the vacuity guard patches
+    `PYTEST_MAX_SKIPPED` to 10**12 on the live module and only diverges if the
+    rung asks the module for the number when it needs it.
+    """
+    base = _skip_base_median(exclude_round=exclude_round)
+    if base is None:
+        return PYTEST_MAX_SKIPPED, None
+    return max(PYTEST_MAX_SKIPPED, base + PYTEST_SKIP_HEADROOM), base
+
+
+def _skip_ceiling_note(ceiling: int, base: int | None) -> str:
+    """The clause that makes the margin readable from one round's report (#3143).
+
+    All three numbers, in every rung detail, including the ones where the base is
+    missing: a reader looking at `gate.json` a week from now has to be able to
+    tell a rail that was derived from one that silently fell back to the floor,
+    and `(base none, …)` is the only spelling that says which happened.
+    """
+    return (f"skip ceiling {ceiling} (base {'none' if base is None else base}, "
+            f"headroom {PYTEST_SKIP_HEADROOM}, floor {PYTEST_MAX_SKIPPED})")
 
 
 class Gate:
@@ -2971,9 +3137,21 @@ class Gate:
                            f"(floor {PYTEST_MIN_PASSED}) of {counts['collected']} "
                            f"collected, {counts['tests_skipped']} skipped — the suite "
                            "was collected but not run"), {**counts, **extra}
-        if counts["tests_skipped"] > PYTEST_MAX_SKIPPED:
+        # The rail is derived for this run (#3143): the base tree's own skip count
+        # plus a fixed headroom, floored at the absolute `PYTEST_MAX_SKIPPED`. Read
+        # here, after the collected and passed floors have had their say, so a run
+        # that never started pytest does not pay for a ledger probe. Both numbers
+        # ride into `data`, and the pair names itself in the detail below, because
+        # the store the base is read from moves — a `gate.json` has to keep saying
+        # what rail it was judged against a week after the sweep ate those rounds.
+        ceiling, base = _skip_ceiling(self.round_id)
+        counts["skip_ceiling"], counts["skip_base"] = ceiling, base
+        counts["skip_headroom"], counts["skip_floor"] = (
+            PYTEST_SKIP_HEADROOM, PYTEST_MAX_SKIPPED)
+        ceiling_note = _skip_ceiling_note(ceiling, base)
+        if counts["tests_skipped"] > ceiling:
             return False, (f"{counts['tests_skipped']} tests skipped "
-                           f"(limit {PYTEST_MAX_SKIPPED}) — a round that skips its way "
+                           f"(limit {ceiling}) — a round that skips its way "
                            "to green is not a round that passed"), {**counts, **extra}
         removed = [p for p in self.report.changed_paths
                    if TP.is_test_path(p, self.worktree) and not (self.worktree / p).exists()]
@@ -2987,6 +3165,13 @@ class Gate:
         return True, (lead + f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
                       f"{counts['tests_skipped']} skipped"
                       + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")
+                      # #3143: the margin, on the line, on every green round — the
+                      # whole point of deriving the rail is that a reader can see
+                      # how much of it a round used without re-probing a ledger
+                      # that has since been swept. Placed before the flinch clause
+                      # and the pin findings, which are the parts a long detail has
+                      # to be able to lose to the 2000-char cap (#2726).
+                      + f"; {ceiling_note}"
                       + (f"; {len(flinched)} failed only under parallel load and passed "
                          f"serially: {_name_ids(flinched)}" if flinched else "")
                       # #1691: the counts say how many tests ran; they cannot say that

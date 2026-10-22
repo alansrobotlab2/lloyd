@@ -206,13 +206,26 @@ destroyed data — `eval_trend_stats`'s `--strict` exit codes — the contract w
 |---|---|---|
 | `PYTEST_MIN_COLLECTED` | 1000 | a conftest import failure collecting everything and running none of it |
 | `PYTEST_MIN_PASSED` | 1000 | collected ≠ run |
-| `PYTEST_MAX_SKIPPED` | 40 | *"a round that skips its way to green is not a round that passed"* |
+| `PYTEST_MAX_SKIPPED` | 40 (the **floor**) | *"a round that skips its way to green is not a round that passed"* |
 
-The skip cap is the one to respect when a round's fix converts failures into
+The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
+PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the five newest
+green **full** `tests` rungs in the rounds store (not `REUSED`, no `partial` key)
+and the headroom 8, so the ledger of 2026-10-22 yielded a rail of 47. The absolute
+figure had stopped describing the suite — the ledger read 39 skips against 40, a
+margin of one, and the counted set moves with the tree, because the dashboard pins
+skip whenever a worktree has no `web/node_modules`. A fixed rail therefore refused
+rounds for a fact no diff had changed. With no readable ledger the rail is exactly
+40, which is also what every unit test sees: `tests/conftest.py` points
+`LLOYD_AUTOMOD_STATE` at scratch before `scripts.automod.state` is imported.
+
+The skip cap is still the one to respect when a round's fix converts failures into
 skips. That is exactly the move it exists to catch, and the correct response is
 almost never to raise it — it is to ask whether those tests can ever pass again,
 and retire the ones that cannot. Raising the number should be the last resort and
-should say in a comment what it is hiding.
+should say in a comment what it is hiding, and raising the **figure** stays a human
+ruling (#2214, whose `PYTEST_MAX_SKIPPED = 55` commit `dbfddc60` is still unlanded):
+#3143 derived the margin, it did not move the floor.
 
 ## Marks and selection
 
@@ -341,8 +354,11 @@ tree has no vite, and before this the only thing that ever created one was the g
 `frontend` rung, which returns early for a diff that did not touch `web/`. So every
 non-frontend round skipped ten tests, the suite crossed `PYTEST_MAX_SKIPPED = 40`
 (44-45 observed on 2026-10-05), and the `tests` rung failed rounds for a reason no diff
-could answer. The ceiling is unchanged at 40 — the fix is that the pins run, not that
-the ceiling rises, which is the route #2214 asks a human to promote instead. What the
+could answer. That fix left the ceiling at 40: the fix was that the pins run, not that
+the ceiling rises, which remains the route #2214 asks a human to promote. (#3143 later
+made the rail the base tree's count plus a headroom over that same 40 — it moved the
+margin, not the figure, and this paragraph's point stands: an unavailable dependency
+must be made to run, not counted into a wider rail.) What the
 hook must never do is turn an unavailable dependency into a failure: on a box where
 nobody ran `npm install`, the ten nodes keep skipping with the reason they always
 named, the `DASHBOARD_PINS_NOT_EXECUTED` finding is still printed, and the run exits 0.
