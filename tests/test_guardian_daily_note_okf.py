@@ -363,3 +363,139 @@ def test_the_snapshot_the_unit_actually_runs_will_carry_the_builder(tmp_path):
         f"watchdog: {out.stderr[-400:]}")
     n_compiled = int(out.stdout.split()[-2])
     assert n_compiled == len(staged), f"{out.stdout!r} vs {len(staged)} source modules"
+
+
+# ── #3150: another writer's append must not close a coalesced section ───────
+#
+# `memory/2026-10-21.md` carries FOUR sections under one title (`Runtime data is
+# being written into the code tree`) for ONE incident, and `memory/2026-10-16.md`
+# carries four under `/tmp is running out of inodes`, on a family that has been
+# `coalesce=True` since 2026-09-29. Both notes had a foreign line appended after
+# the open marker between the checks: session capture's `### Session …` block, or
+# `app/discord_notify.py`'s folded one-line alarm. `_daily_open_at` asked whether
+# the body — which for the last section ran to EOF — still ENDED with the marker,
+# so the appended line made the incident look closed and `_vault_note` took its
+# append branch and re-pasted the whole body again, every check.
+#
+# The fold's own contract is the standard this pair holds the section to: the
+# alarm LINE says "this alarm writes at most one line a day here" and keeps it.
+# A section is one body per incident per day, and these two nodes are what make
+# that a property rather than a run of luck.
+
+#: One line exactly as the daily-note fold appends it (`app/discord_notify.py`):
+#: column zero, appended to the end of the file, by a writer that knows nothing
+#: about guardian sections.
+FOLDED_ALARM_LINE = ("- 04:07 PDT [tmpwatch] /tmp is running out of inodes: 81% "
+                     "[daily-note fold: this alarm writes at most one line a day "
+                     "here]")
+
+#: A note that session capture opened first — the state every real daily note is
+#: in before the guardian reaches it, and the reason a foreign append is the
+#: normal case rather than a corner.
+DAY_HEADER = ("---\nsegment: memory\ntags:\n- memory\n- daily-notes\ntype: note\n"
+              "timestamp: '2026-09-30T00:07:00'\n---\n\n"
+              "# 2026-09-30 Daily Notes\n\n## Sessions\n\n- 00:07 — captured a session\n")
+
+
+def _append_like_session_capture(note: Path, text: str) -> None:
+    """Append to the day's note the way the OTHER writer does: `open(note, "a")`.
+
+    Not `write_text(note.read_text() + text)`: the route under test is a second
+    process adding bytes at the end of a file the guardian wrote, and the bug was
+    precisely in what the guardian concluded from finding those bytes there.
+    """
+    with open(note, "a", encoding="utf-8") as f:
+        f.write(text)
+
+
+def test_an_open_section_stays_open_after_another_writer_appends(tmp_path):
+    """#3150 clause 1: an appended line does not make an open incident look closed.
+
+    Three states of one section, judged by the shipped probe itself:
+    open as written; open after the fold appended a line after its marker; open
+    again once a LATER guardian section exists, which bounds this one's window at
+    the next heading rather than at EOF. The second is the case that answered None
+    on the live note, and the third is the half that only holds if the marker is
+    read against the section's own text: that window ends with the appended line,
+    so an endswith test fails there too.
+
+    The returned range must also stop at the marker, not swallow the foreign line:
+    it is the range both `_vault_note` and `resolve` rewrite, so a range that ran
+    to the end of the window would be a clobber with a smaller section count.
+    """
+    n = _notifier(tmp_path)
+    note = n._daily_note()
+    note.write_text(DAY_HEADER)
+    assert n._vault_note(TITLE, "first saying", coalesce=True) is True
+
+    written = note.read_text()
+    as_written = n._daily_open_at(written, TITLE)
+    assert as_written is not None, (
+        "a coalesced section was not open on arrival, so every assertion below is "
+        f"vacuous — the note the writer produced:\n{written}")
+    assert written[as_written[0]:as_written[1]].rstrip().endswith(
+        notify.DAILY_STILL_OPEN), written[as_written[0]:as_written[1]]
+
+    _append_like_session_capture(note, FOLDED_ALARM_LINE + "\n")
+    text = note.read_text()
+    span = n._daily_open_at(text, TITLE)
+    assert span is not None, (
+        "clause 1: one appended non-guardian line made the open incident read as "
+        f"closed, which is what made the next check re-paste the section:\n{text}")
+    start, end = span
+    assert text[start:end].rstrip().endswith(notify.DAILY_STILL_OPEN), repr(text[start:end])
+    assert FOLDED_ALARM_LINE not in text[start:end], (
+        "the returned range swallowed the other writer's line; it is the range "
+        "`_vault_note` and `resolve` rewrite, so that is a clobber")
+
+    # And the same answer with a second section after it, which moves this
+    # section's window off EOF onto the next heading.
+    assert n._vault_note("A later, distinct incident", "later body", coalesce=True) is True
+    text = note.read_text()
+    span = n._daily_open_at(text, TITLE)
+    assert span is not None, (
+        "clause 1, the bounded-window half: a later guardian section, not the "
+        f"appended line, ended this one's window:\n{text}")
+    assert text[span[0]:span[1]].rstrip().endswith(notify.DAILY_STILL_OPEN)
+    assert FOLDED_ALARM_LINE not in text[span[0]:span[1]]
+
+
+def test_replaying_the_2026_10_21_sequence_leaves_one_section_and_the_foreign_line(
+        tmp_path):
+    """#3150 clause 2: one incident, one section, nothing of the other writer's lost.
+
+    The day's real sequence through the shipped writer: the alert opens a section,
+    the daily-note fold appends its one line, the next check of the SAME incident
+    arrives. Pre-fix the third call appended a whole second section — that is where
+    the four copies on `memory/2026-10-21.md` came from. Post-fix it refreshes the
+    one section, and the fold's line is still on the page afterwards, byte for byte.
+
+    The foreign line's SURVIVAL is asserted as part of the clause, not as an
+    afterthought: the refresh rewrites `body[start:end]`, and a fix that widened
+    `end` back to the section's end would drive the heading count down by eating
+    session capture's work. The prefix check is the same guard one level up — the
+    bytes that were in the file before the call are still there, unprepended.
+    """
+    n = _notifier(tmp_path)
+    note = n._daily_note()
+    note.write_text(DAY_HEADER)
+
+    assert n._vault_note(TITLE, "first saying", coalesce=True) is True
+    _append_like_session_capture(note, FOLDED_ALARM_LINE + "\n")
+    assert n._vault_note(TITLE, "second saying", coalesce=True) is True
+
+    text = note.read_text()
+    headings = text.count(f"{notify.DAILY_SECTION_PREFIX}{TITLE}")
+    assert text.startswith(DAY_HEADER), (
+        "the refresh rewrote or prepended the bytes another writer owns")
+    assert headings == 1, (
+        f"clause 2: one incident outlived a check and got {headings} sections:\n{text}")
+    assert text.count(notify.DAILY_STILL_OPEN) == 1, (
+        f"two open markers for one incident:\n{text}")
+    assert "second saying" in text and "first saying" not in text, (
+        "the refresh did not replace the section's own body:\n" + text)
+    assert text.count(FOLDED_ALARM_LINE) == 1, (
+        f"the other writer's line was clobbered or duplicated:\n{text}")
+    assert text.index(FOLDED_ALARM_LINE) > text.index(notify.DAILY_STILL_OPEN), (
+        "the appended line moved inside the refreshed section instead of staying "
+        "where its author put it:\n" + text)

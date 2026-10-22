@@ -80,6 +80,30 @@ DAILY_SCAN_DAYS = 3
 #: open section, so only dated notes are consulted outside the window.
 DATED_NOTE_STEM = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+
+def _open_marker_span(text: str, body_start: int, window_end: int):
+    """(body_start, end-of-marker-line) when `[body_start:window_end]` still is open.
+
+    The LAST line inside the window that is `DAILY_STILL_OPEN` on its own is the
+    section's own status line: `_vault_note` emits the body and then the marker, so
+    whatever sits after it arrived from another writer, and a body quoting the string
+    is not this incident's state. The end returned is just past that line, never the
+    window's end, so a caller rewriting the returned range leaves the appended text
+    standing where its author put it. None means the window holds no marker line,
+    which is what a sealed — or a non-coalescing — section looks like.
+
+    A module function, not a method: `_daily_open_at`'s only dependency stays
+    `_daily_sections`, which is the one pair the read-only probes and test shims
+    hand to each other.
+    """
+    offset = body_start
+    found = -1
+    for line in text[body_start:window_end].splitlines(keepends=True):
+        if line.strip() == DAILY_STILL_OPEN:
+            found = offset + len(line)
+        offset += len(line)
+    return (body_start, found) if found >= 0 else None
+
 # ── ALERT.md's incident format (#1967) ────────────────────────────────────
 #
 # The state-dir alarm file is the surface an agent reads FIRST during an
@@ -561,7 +585,13 @@ class Notifier:
 
         This replaces the open marker with one `cleared:` line, so a reader who does
         reach the stale instructions finds the contradiction at the foot of the same
-        section rather than in a file they were never sent to. It writes nothing when
+        section rather than in a file they were never sent to. The loop below runs
+        until `_daily_open_at` answers None, so EVERY open section for `title` in the
+        note is sealed, not just the newest one: a day whose note carries several
+        copies of one incident — which is what the pre-#3150 openness test produced
+        whenever another writer appended after the marker — used to keep its older
+        markers standing below the single `cleared:` line, leaving the only surviving
+        record of a finished incident an instruction to do work. It writes nothing when
         no incident is open for `title`, which is what makes the second, third and
         hundredth all-clear check silent. No other channel is touched: a clear is not
         an alert, so no toast, no speech, no backlog task — and the ledger still holds
@@ -735,17 +765,40 @@ class Notifier:
         return out
 
     def _daily_open_at(self, text: str, title: str):
-        """(body_start, body_end) of `title`'s most recent OPEN section, else None.
+        """(body_start, marker_end) of `title`'s newest OPEN section, else None.
 
-        Open means the body still ends with `DAILY_STILL_OPEN`. Newest-match matters:
-        after an incident was cleared and a second one opened, the closed one is a
-        historical record and the new one is the live incident.
+        Open means `DAILY_STILL_OPEN` still stands on a line of its own inside the
+        section's OWN window — the span `_daily_sections` cut for it, which runs to
+        the next `## Self-mod guardian:` heading, or to EOF for the last one. It does
+        not have to be the last thing IN that window. Other writers reach the same
+        daily note — session capture's `### Session … Auto-captured` block, and
+        `app/discord_notify.py`'s folded one-line alarm — and an incident whose
+        marker such an append walked past is still the same open incident.
+
+        Requiring the marker at the very end of the window is what made a day's note
+        re-paste one incident's section four times (#3150, `memory/2026-10-21.md` and
+        `memory/2026-10-16.md`): the appended line moved the end, this probe answered
+        None, and `_vault_note` took its append branch and pasted the whole body
+        again — every check, on a note it had just been told is not empty.
+
+        The end returned is the end of the marker LINE, not of the window, so a
+        caller rewriting `text[start:end]` rewrites only the section's own text and
+        every byte another writer left after the marker stays in `text[end:]`.
+
+        Newest OPEN match, an older closed section never stopping the walk: after an
+        incident was cleared and a second one opened, the closed one is a historical
+        record and the newer open one is the live incident; and `resolve` calls this
+        in a loop until it answers None, so returning early on a closed newest
+        section left every older standing marker in the file unsealed — three
+        `_(still open on the next check)_` lines below the `cleared:` line that
+        supposedly ended the incident in `memory/2026-10-21.md`.
         """
         for sect in reversed(self._daily_sections(text)):
             if sect[0] != title:
                 continue
-            body = text[sect[1]:sect[2]]
-            return (sect[1], sect[2]) if body.rstrip().endswith(DAILY_STILL_OPEN) else None
+            span = _open_marker_span(text, sect[1], sect[2])
+            if span is not None:
+                return span
         return None
 
     def _backlog_task(self, title: str, text: str, commit: str, tag: str) -> bool:

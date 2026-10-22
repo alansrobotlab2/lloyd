@@ -1283,3 +1283,126 @@ def test_a_check_that_measures_neither_condition_still_walks_every_heading(tmp_p
         "the walk wrote a daily note on a check that measured nothing")
     assert g.notifier.alert_file_incident() is None, (
         "the walk opened an ALERT.md incident for a condition it did not measure")
+
+
+# ── #3150: a retraction reaches every open copy, and a seal is permanent ─────
+#
+# `resolve`'s loop asks `_daily_open_at` for the next open section until it answers
+# None. Pre-#3150 that probe returned at the NEWEST section matching the title,
+# marker or no marker, so a note holding several copies of one incident — which is
+# what the broken openness test produced whenever another writer appended — sealed
+# only the newest copy and left the older ones standing. `memory/2026-10-21.md` is
+# the artefact: its `cleared:` line sits under one copy while three
+# `_(still open on the next check)_` markers survive above it, hours after the
+# incident closed. The #1536 docstring's own reason for this method — "no surviving
+# record of a finished incident is an instruction to do work" — was failing silently.
+
+#: What the other writer appended between two copies on the real note. Kept out of
+#: the sealed text on purpose: `resolve` rewrites `sealed[start:end]`, so this is the
+#: line a seal could eat while still producing the right marker count.
+FOLDED_ALARM_LINE = ("- 04:07 PDT [tmpwatch] /tmp is running out of inodes: 81% "
+                     "[daily-note fold: this alarm writes at most one line a day "
+                     "here]")
+
+
+def _sections_of(text: str, title: str) -> list[str]:
+    """Each `## Self-mod guardian: {title}` window in `text`, by the shipped parser.
+
+    `Notifier._daily_sections`, not a re-typed split, so the windows asserted below
+    are the ones the notifier itself reads.
+    """
+    return [text[a:b] for (t, a, b) in notify.Notifier._daily_sections(text) if t == title]
+
+
+def _copies_of_one_open_incident(tmp_path: Path, copies: int = 3) -> tuple:
+    """One open section, repeated `copies` times with the fold's line between them.
+
+    The byte shape `memory/2026-10-21.md` holds. It is NOT written by calling
+    `_vault_note` `copies` times: the fixed writer refreshes in place, which is the
+    whole point of #3150, so the duplicates have to come from the note. They are
+    therefore the shipped writer's OWN bytes — one real `_vault_note` call, then that
+    block repeated with a foreign line between each pair — not a hand-typed format
+    this file could get wrong and move on from.
+    """
+    n = _notifier(tmp_path)
+    assert n._vault_note(TITLE, BODY, coalesce=True) is True
+    note = _vault_note(n)
+    written = note.read_text(encoding="utf-8")
+    head, _, section = written.partition(notify.DAILY_SECTION_PREFIX)
+    block = notify.DAILY_SECTION_PREFIX + section      # ends at the marker's newline
+    gap = f"\n{FOLDED_ALARM_LINE}\n\n"
+    note.write_text(head + gap.join([block] * copies), encoding="utf-8")
+    return n, note
+
+
+def test_a_retraction_seals_every_open_copy_of_one_title(tmp_path):
+    """#3150 clause 3: one all-clear seals the whole title, not just its newest copy.
+
+    Three open sections for one title and one `resolve`: after it, no open marker
+    survives anywhere in the file, and each of the three sections carries its own
+    `cleared:` line inside its own window — the reader who lands on the oldest copy
+    still finds the contradiction at the foot of the section they are reading, which
+    is the contract #1536 opened with.
+
+    The fold's line is asserted as well: it sits inside the first two windows, and a
+    seal whose `end` ran to the window's end would delete it while still reporting
+    the file as closed.
+    """
+    n, note = _copies_of_one_open_incident(tmp_path)
+    before = note.read_text(encoding="utf-8")
+    assert before.count(notify.DAILY_STILL_OPEN) == 3, (
+        f"fixture: three standing markers are the state being sealed, got:\n{before}")
+    assert len(_sections_of(before, TITLE)) == 3, before
+
+    assert n.resolve(TITLE, NOTE) is True
+
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN not in text, (
+        "clause 3: a `cleared:` line stands in this note, so every standing marker "
+        f"below it is an instruction nobody should follow:\n{text}")
+    secs = _sections_of(text, TITLE)
+    assert len(secs) == 3, f"the seal collapsed or duplicated sections:\n{text}"
+    for i, sec in enumerate(secs):
+        assert f"\n{notify.DAILY_CLEARED_PREFIX} " in sec, (
+            f"section {i} was sealed without a retraction inside its own window:\n{sec}")
+    assert text.count(FOLDED_ALARM_LINE) == 2, (
+        f"the seal rewrote the other writer's line:\n{text}")
+    assert secs[0].count(FOLDED_ALARM_LINE) == 1 and secs[2].count(FOLDED_ALARM_LINE) == 0
+
+
+def test_a_sealed_section_is_never_refreshed_by_the_next_alert(tmp_path):
+    """#3150 clause 4: a `cleared:` section is history; a new finding opens a new one.
+
+    The other half of the seal. Coalescing may not turn a title into a mute: after a
+    clear, the next alert for the SAME title has to be a new heading, or a second
+    incident hides inside the first one's sealed section — worse than the repetition
+    #1536 removed. The probe is pinned on both sides of that: the sealed note answers
+    None (a `cleared:` line is not an open marker), and the new alert lands as
+    section two while section one keeps its body, its retraction and its count.
+    """
+    n = _notifier(tmp_path)
+    note = n._daily_note()
+    assert n._vault_note(TITLE, BODY, coalesce=True) is True
+    assert n._daily_open_at(note.read_text(encoding="utf-8"), TITLE) is not None, (
+        "precondition: nothing was open, so a seal that wrote nothing would leave "
+        "the byte-identity below true of a note that was never written to")
+
+    assert n.resolve(TITLE, NOTE) is True
+    sealed = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN not in sealed, sealed
+    assert n._daily_open_at(sealed, TITLE) is None, (
+        "clause 4: the probe still calls a sealed section open, so the next alert "
+        f"would rewrite history instead of reporting a new incident:\n{sealed}")
+
+    assert n._vault_note(TITLE, "a second, separate finding", coalesce=True) is True
+    text = note.read_text(encoding="utf-8")
+    secs = _sections_of(text, TITLE)
+    assert len(secs) == 2, (
+        f"clause 4: a fresh incident after a clear wrote {len(secs)} sections "
+        f"instead of one:\n{text}")
+    assert f"\n{notify.DAILY_CLEARED_PREFIX} " in secs[0], secs[0]
+    assert BODY in secs[0] and "a second, separate finding" not in secs[0], secs[0]
+    assert "a second, separate finding" in secs[1], secs[1]
+    assert secs[1].count(notify.DAILY_STILL_OPEN) == 1, secs[1]
+    assert text.count(f"\n{notify.DAILY_CLEARED_PREFIX} ") == 1, (
+        f"the new alert retracted the incident it was reporting:\n{text}")
