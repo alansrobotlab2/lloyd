@@ -92,7 +92,7 @@ prompt cannot be access control — is for.
 | B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:712`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
 | B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1363` |
-| B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py:441`, `scripts/automod/gate.py:3532` |
+| B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py::check_scope`, `scripts/automod/gate.py:3532` |
 | B12 | scheduler → a worker turn | a queue row, and the turn it becomes | the queue's own due-gates | `workers/queue.py`, `claim_next()` |
 | B13 | a run's output → a durable store | loaded memory, facts, the entity store, eval baselines, `-latest` pointers | the job that owns the file, with no cross-job reader | `app/memory_flush.py`, `app/kg_store.py` |
 | B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `server.py:241`, `server.py:181` |
@@ -139,7 +139,7 @@ appears in this table: those threats are in the next one.
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |
 | T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:340` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
-| T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py:441` |
+| T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py::check_scope` |
 | T-24 | B11 | E | A round edits its own gate to let itself through | `scripts/automod/gate.py:3532` |
 | T-25 | B11 | T | An agent-authored change weakens a guard and the suite stays green | `scripts/automod/gate.py:2648` |
 | T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:846` |

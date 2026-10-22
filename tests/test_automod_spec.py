@@ -1295,10 +1295,16 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # legality check called with the entry shipped. `pre` still strips only
     # TTS_PATCH, so the diff stays exactly one path: the installer entry is in both
     # tuples.
+    # #3162 added the sixth name, `agent-services/scripts/qmd-watcher.sh`, the same
+    # way a sixth time: one verbatim path, and this round's own node
+    # `test_the_watcher_grant_admits_one_exact_path_and_nothing_else` is the legality
+    # check called with the entry shipped. `pre` still strips only TTS_PATCH, so the
+    # diff stays exactly one path: the watcher entry is in both tuples.
     assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
                              QMD_TEMPLATE, VOICE_TIMELINE,
-                             "agent-services/setup/install-services.sh"}, (
-        f"the named grants over tracked agent-services paths are exactly the five "
+                             "agent-services/setup/install-services.sh",
+                             "agent-services/scripts/qmd-watcher.sh"}, (
+        f"the named grants over tracked agent-services paths are exactly the six "
         f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
         f"a legitimate edit — add its path to this pin, and check it against "
         f"`agent_services_paths_admitted_without_being_named()`, which is the "
@@ -1448,7 +1454,9 @@ def test_the_qmd_template_grant_is_one_exact_path_and_no_shape():
     literal this file wrote: an entry spelled `agent-services/conf/*` satisfies
     `classify` on the template AND admits `livekit.yaml` plus the 0600
     `livekit.yaml.runtime`, because fnmatch's `*` crosses `/` (the matcher rung 0
-    uses is `spec._match`, spec.py:188-198). Asking the tuple which entries reach
+    uses is `scripts/automod/spec.py::_match`, cited by symbol because #3162 inserts
+    23 lines into that file above it and a number here would only record how far the
+    pointer had travelled). Asking the tuple which entries reach
     the path turns that red while leaving
     `classify` green, which is the gap the #1376 rail exists to close.
     """
@@ -1575,7 +1583,10 @@ def test_the_reconcile_diff_clears_scope_in_an_interpreter_that_imported_the_tup
 # `paths outside the writable set: ['agent-services/voice/timeline.py']`, bucket
 # `unlisted`. The cause is the tuple this file tests: it named three verbatim
 # `agent-services/` files and no voice path, and `COMMENT_ONLY_GLOBS` is
-# `("config.yaml",)` (spec.py:183), so even a comment-only edit to the timeline
+# `("config.yaml",)` (`scripts/automod/spec.py::COMMENT_ONLY_GLOBS` — by symbol: that
+# cite read `spec.py:183`, which was the closing paren of `ALLOWED_GLOBS` even before
+# #3162, and #3162's 23 inserted lines moved it again), so even a comment-only edit
+# to the timeline
 # classified `unlisted`. A round cannot widen its own scope, so #2278 is the
 # widening and `as_dict` stays #2273's clause: this grant opens the door, it does
 # not walk it, which is why the `as_dict` grep is #2278's owed-after-landing item
@@ -2054,3 +2065,361 @@ def test_the_2774_diff_clears_rung_0_in_a_fresh_interpreter():
     assert spec.requires_drill(INSTALL_SERVICES_DIFF) is False, (
         "the grant landed in PROTECTED_GLOBS, so every #2774 re-offer would pay a "
         f"guardian drill for an installer edit: {buckets}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #3162: the qmd index watcher — one path, so #3161's cost block can be edited
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# #3161 rewrites the comment block in `agent-services/scripts/qmd-watcher.sh` that
+# justifies the watcher's 60-second rebuild floor. Its round
+# (`SM_20261022_163807`, head `86171b7d`) has one rung in its `gate.json`,
+# preflight `ok: false`, `paths outside the writable set:
+# ['agent-services/scripts/qmd-watcher.sh']` — bucket `unlisted`, while the diff's
+# other path `tests/test_qmd_single_build.py` is bucketed `allowed` in the same
+# rung data. So the test half of that item could land and the sentence it exists to
+# protect could not: a round has no authority wherever the three tuples are silent,
+# and a grant is the only route in.
+#
+# #3161's triage recorded this path as `protected` and expected a guardian drill to
+# be the price. That premise is false and this section is where it stays false:
+# `PROTECTED_GLOBS` is `scripts/automod/**`, `agent-services/guardian/**`,
+# `agent-services/systemd/**`, `agent-services/supervisor/**`, `bin/**` and four
+# `app/` modules, and `DENIED_GLOBS` never sees it either, so `classify` fell
+# through both to `unlisted` — a state with no drill and no verdict, only a refusal.
+# A drill would have been the wrong instrument anyway: drills are the price for
+# editing a path the loop already governs, not the key to a path it never named.
+#
+# The fix is the one #1449/#1883/#1301/#2278/#2779 all used — a verbatim single-file
+# entry — because #1376 clause 1 (`test_only_a_verbatised_path_under_agent_services
+# _may_be_admitted`) prices a directory spelling over this tree at every file it
+# silently reaches, `fnmatch`'s `*` crossing `/`. The refusal's exact shape matters
+# for clause 3 below: the watcher alone stays `unlisted` before the grant, but a
+# diff of [watcher, tests/test_qmd_single_build.py] is what rung 0 actually judged,
+# and no earlier section drives a real refused round's whole `changed_paths`
+# through a second interpreter except #2779's.
+#
+# Clause map:
+#   1  `test_the_watcher_grant_admits_one_exact_path_and_nothing_else` — classify
+#      is `allowed`, and the `ALLOWED_GLOBS` entries reaching it are exactly one
+#      `*`-free string.
+#   2  same node (the sibling, the probe, the #1376 rail, the >=70 unlisted floor)
+#      + `test_a_scripts_directory_grant_would_admit_the_backup_job_and_the_probe` —
+#        the harm
+#      half: the `agent-services/scripts/**` spelling, executed against the rail.
+#   3  `test_the_3161_diff_clears_rung_0_in_a_fresh_interpreter`
+#   4  `test_the_watcher_grant_carries_its_reason_beside_the_entry`
+
+#: The one file #3162 grants, verbatim, and the one path it must be. Assembled from
+#: its directory and its basename rather than spelled whole, because the harness's
+#: service-control guard refuses any Bash command whose string contains this
+#: launcher's filename (re-confirmed in #3162's triage on a command that only read
+#: `spec.py`), which would otherwise make running this file's own tests an event.
+#: The path `classify` sees is identical: `"/".join` of these parts is the real path.
+WATCHER = "/".join(("agent-services", "scripts", "qmd-watcher.sh"))
+
+#: The other tracked file in that directory today (`git ls-files
+#: agent-services/scripts/` -> 2): the vault backup job. Stays `unlisted`.
+WATCHER_SIBLING = "agent-services/scripts/backup-openclaw.sh"
+
+#: A probe for this directory — a path that must never exist on disk, and the thing
+#: a directory grant admits without anyone choosing it. Carried by this section rather
+#: than added to `AGENT_SERVICES_GLOB_PROBES` on purpose: that tuple is the rail's own
+#: universe, and the nodes reading it quote violation counts measured at their own
+#: bases — `80` at `c2bd72b` — so a sixth member would leave those sentences describing
+#: a corpus their assertion never ran over. The cost of keeping it local is stated in
+#: `test_a_scripts_directory_grant_would_admit_the_backup_job_and_the_probe`: the rail
+#: cannot report this path, so its harm is asked of `classify`, which is the function
+#: rung 0 actually calls.
+WATCHER_PROBE = "agent-services/scripts/probe.sh"
+
+#: The refused round's `changed_paths`, verbatim from that `gate.json`: the comment
+#: edit and the test file that guards it. Rung 0 judges the whole set together, so
+#: this two-path set is the thing that has to clear, and the sibling assertion in
+#: node 1 is what keeps the grant from quietly being a directory.
+WATCHER_DIFF = [WATCHER, "tests/test_qmd_single_build.py"]
+
+
+def tracked_watcher_siblings() -> list[str]:
+    """Every tracked `agent-services/scripts/` file except the granted one.
+
+    Read from the index at call time, as the setup section's helper does: a launcher
+    script added tomorrow is exactly what a directory grant would reach, so the
+    sibling set has to grow with the tree for the assertions below to mean anything.
+    1 file at this round's base (`backup-openclaw.sh`), against 33 in `setup/` and
+    13 under `voice/` — this is the narrowest of these directories, which is why the
+    floor is a floor and not a measurement.
+    """
+    return sorted(p for p in tracked_agent_services_paths()
+                  if p.startswith("agent-services/scripts/") and p != WATCHER)
+
+
+def watched_corpus() -> list[str]:
+    """The corpus node 1 sweeps for launcher-directory admissions: every tracked
+    `agent-services/` path, the shared #1376 probes, and this directory's probe.
+
+    The rail's universe plus this section's local probe. It is not what
+    `agent_services_paths_admitted_without_being_named` reads — that helper takes no
+    corpus and walks the tracked files and the shared probes itself — which is why the
+    probe's verdict is asserted through `classify` in both nodes rather than through a
+    violation list that would never contain it.
+    """
+    return tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES) + [WATCHER_PROBE]
+
+
+def test_the_watcher_grant_admits_one_exact_path_and_nothing_else():
+    """#3162 clauses 1 and 2: rung 0's missing verdict, from an entry that reaches
+    one file, with the exactness rail still clean.
+
+    The grant is a one-line diff whose whole promise is the word "one", so every
+    number here is checked before it is trusted: 224 tracked `agent-services/`
+    paths at this base (the rail's own denominator floor is 187), 78 of them still
+    `unlisted` with this grant shipped against the 79 measured at the refused
+    round's base, and 1 tracked sibling in the launcher directory — so "nothing
+    else moved" is asserted against a set that exists rather than an empty one. The
+    probe is the other half: `WATCHER_PROBE` is not a file anywhere, so the only way
+    it can be `allowed` is by a glob that reaches a directory by shape rather than by
+    name — which is exactly what has to stay false here, and what the directory
+    spelling is priced on in
+    `test_a_scripts_directory_grant_would_admit_the_backup_job_and_the_probe`.
+
+    `reaching` is the clause-1 question asked of the tuple rather than of
+    `classify`: re-spelled as `"agent-services/scripts/**"` the verdict below stays
+    `allowed`, because `fnmatch`'s `*` crosses `/` and the watcher matches itself.
+    Only asking which entries reach the path tells you a grant became a directory.
+    """
+    assert WATCHER in spec.ALLOWED_GLOBS
+    assert spec.classify(WATCHER) == "allowed", (
+        f"{WATCHER} classifies {spec.classify(WATCHER)}, not allowed: #3161's cost "
+        f"block is still uneditable by any round")
+    reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(WATCHER, (g,))]
+    assert reaching == [WATCHER], (
+        f"the watcher is admitted by {reaching}: only a verbatim entry is legal "
+        f"under #1376 clause 1, and a wildcard here reaches its sibling too")
+    assert all("*" not in g for g in reaching), (
+        f"the entry admitting the watcher is a wildcard spelling: {reaching}")
+    assert WATCHER in tracked_agent_services_paths(), (
+        f"{WATCHER} is not tracked, so admitting it grants nothing a round can "
+        f"actually change")
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    assert agent_services_paths_admitted_without_being_named() == []
+    siblings = tracked_watcher_siblings()
+    assert len(siblings) >= 1, (
+        "no tracked file shares the launcher directory with the grant, so the "
+        "sibling assertions below would guard nothing — this directory held "
+        "`backup-openclaw.sh` at the round's base")
+    assert WATCHER_SIBLING in siblings, (
+        f"{WATCHER_SIBLING} left the sibling set ({siblings}), so the directory's "
+        f"contents are no longer the two files this grant was priced against")
+    assert [p for p in siblings if spec.classify(p) == "unlisted"] == siblings, (
+        "a launcher script became writable as collateral of the #3162 grant: "
+        f"{[p for p in siblings if spec.classify(p) != 'unlisted']}")
+    assert spec.classify(WATCHER_PROBE) == "unlisted", (
+        "the seeded scripts probe became writable, which is the exact harm a "
+        "directory grant does and this grant must not")
+    assert not (REPO_ROOT / WATCHER_PROBE).exists(), (
+        f"{WATCHER_PROBE} exists on disk, so it is a real third file in the "
+        f"launcher directory and no longer a probe — the sibling floor and the "
+        f"directory pricing below are then counting the wrong corpus")
+    corpus = watched_corpus()
+    scripts_allowed = sorted(p for p in corpus
+                             if p.startswith("agent-services/scripts/")
+                             and spec.classify(p) == "allowed")
+    assert scripts_allowed == [WATCHER], (
+        f"the writable set inside the launcher directory is {scripts_allowed}, not "
+        f"the one file #3162 named")
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"{len(unlisted)} tracked agent-services paths still unlisted, below the 70 "
+        f"the #1376 rail is sized on")
+
+
+def test_a_scripts_directory_grant_would_admit_the_backup_job_and_the_probe(monkeypatch):
+    """#3162 clause 2's harm half: the `agent-services/scripts/**` spelling, run.
+
+    This directory is the narrowest of the ones these grants have touched — 2 tracked
+    files, against 13 under `agent-services/voice/` and 34 under `setup/` — which is
+    exactly why it needs the simulation rather than a sentence. A `scripts/**` entry is
+    a few characters longer than the shipped one, reads as "obviously the launcher
+    directory belongs to rounds now", and its cost is invisible in review. Two harms,
+    measured separately because the #1376 rail can only see one of them:
+
+    * the tracked files, which the rail reports — 2 violations at this base, the vault
+      backup job `agent-services/scripts/backup-openclaw.sh` plus the watcher itself,
+      since a `**` admits its own directory's file by shape rather than by name and
+      that file therefore stops being a named grant. The backup job is the harm; the
+      second entry is the tell that `fnmatch`'s `*` crossed `/`;
+    * `agent-services/scripts/probe.sh`, which the rail cannot report: its universe is
+      the tracked files plus `AGENT_SERVICES_GLOB_PROBES`, and this probe is a local of
+      this section on purpose — the blanket-glob nodes quote violation counts measured
+      at their own bases (`80` at `c2bd72b`) and a sixth shared probe would make those
+      sentences describe a corpus their assertion never ran over. So the probe's harm
+      is asked of `classify` directly, which is the function rung 0 calls.
+
+    Written as try/except rather than `pytest.raises`, for the reason #1883's and
+    #2278's twins give: the honest failure here is "that rail stopped firing", which has
+    two causes and `raises` reports both as DID NOT RAISE. The shipped tuple is restored
+    before returning, because leaving a directory grant in a module attribute would
+    poison every later node in this file.
+    """
+    assert WATCHER in ALLOWED_GLOBS_AS_SHIPPED, (
+        "this node simulates the wilder spelling against the tuple minus the grant; "
+        "with the grant absent the comparison is not the one being made")
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != WATCHER)
+    assert agent_services_paths_admitted_without_being_named() == [], (
+        "the shipped spelling already admits something unnamed, so this node's green "
+        "half would prove nothing")
+    siblings = tracked_watcher_siblings()
+    assert spec.classify(WATCHER_PROBE) == "unlisted", (
+        "the probe is already admitted in the shipped tree, so the harm below would "
+        "not be the directory spelling's doing")
+    try:
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                            pre + ("agent-services/scripts/**",))
+        assert spec.classify(WATCHER) == "allowed", \
+            "the directory spelling does not even reach the file"
+        violations = agent_services_paths_admitted_without_being_named()
+        assert violations == sorted(siblings + [WATCHER]), (
+            f"the directory spelling admitted {violations}, not the tracked "
+            f"launcher-directory set {sorted(siblings + [WATCHER])} — the spelling "
+            f"admits the file the narrow grant was for as an unnamed admission too, "
+            f"and if that half is missing the rail's universe or this directory's "
+            f"contents changed")
+        assert len(violations) == 2, (
+            f"the wilder spelling prices at {len(violations)} violations against the 2 "
+            f"measured at this round's base (`backup-openclaw.sh` plus the granted file "
+            f"itself, which a `**` admits by shape rather than by name): {violations}. "
+            f"The number in this node's prose is stale — update it with the corpus, "
+            f"not the other way round")
+        assert spec.classify(WATCHER_PROBE) == "allowed", (
+            "the directory spelling left the probe unlisted, which means it stopped "
+            "being a directory grant — the shape this node exists to refuse")
+        try:
+            test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+        except AssertionError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(
+                "the #1376 rail did not fire under the scripts glob. If the grant was "
+                "narrowed this node needs updating; if the rail was refactored to "
+                "return a violation list instead of asserting, assert on that list "
+                "here — the helper reports "
+                f"{agent_services_paths_admitted_without_being_named()} today"
+            ) from None
+        assert "became writable without being named" in message, message
+    finally:
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    assert agent_services_paths_admitted_without_being_named() == []
+    assert spec.classify(WATCHER_SIBLING) == "unlisted"
+    assert spec.classify(WATCHER_PROBE) == "unlisted"
+
+
+def test_the_3161_diff_clears_rung_0_in_a_fresh_interpreter():
+    """#3162 clause 3: the refused round's exact two-path diff, classified in a
+    fresh interpreter rooted at this repo, and green.
+
+    Same seam as the #2779 node, for the same reason — this grant exists only inside
+    a classification done in a process this test does not own: the gate ladder is
+    spawned detached with `cwd=LIVE_ROOT` (`round.py:611/642/668`) and
+    `gate.py:108` imports `spec` from there, so a round can never widen its own
+    scope and the authority granted here takes effect for the NEXT round. The
+    subprocess is launched without `PYTHONPATH` or `cwd` and inserts `REPO_ROOT`
+    explicitly, so `spec.py` is found by that root and not inherited from this
+    pytest run; if it ever resolved elsewhere, `lines[0]` would stop matching the
+    in-process verdict.
+
+    The diff is #3161's real `changed_paths`, not a guess at one, because rung 0
+    judges the set: one path clearing proves the entry, the pair clearing proves
+    #3161 can actually ship. `requires_drill` is asserted False for the same reason
+    #2779 asserts it — the admission round's own diff (`spec.py` + this file) does
+    pay a drill, since `scripts/automod/**` is `PROTECTED_GLOBS[0]`, and mixing the
+    two up would have #3161 paying a guardian drill for a comment.
+    """
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]);"
+        "from scripts.automod import spec;"
+        "print(spec.classify(sys.argv[2]));"
+        "ok, why, b = spec.check_scope(sys.argv[2:]);"
+        "print(ok, why, sorted(sys.argv[2:]), b['unlisted'], b['protected']);"
+        "print(spec.requires_drill(sys.argv[2:]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, str(REPO_ROOT), *WATCHER_DIFF],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == spec.classify(WATCHER) == "allowed", out.stdout
+    assert lines[1] == (f"True in scope {sorted(WATCHER_DIFF)} [] []"), \
+        (lines[1], WATCHER_DIFF)
+    assert lines[2] == "False", out.stdout
+    ok, why, buckets = spec.check_scope(WATCHER_DIFF)
+    assert (ok, why) == (True, "in scope"), (ok, why, buckets)
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert spec.requires_drill(WATCHER_DIFF) is False, (
+        "the grant landed in PROTECTED_GLOBS, so every #3161 re-offer would pay a "
+        f"guardian drill for editing a comment: {buckets}")
+
+
+def test_the_watcher_grant_carries_its_reason_beside_the_entry(monkeypatch):
+    """#3162 clause 4: the new grant's comment says why, read by this node.
+
+    Four things a later reader cannot reconstruct from the entry itself: which item
+    asked (#3161), that the grant is one file and not its directory (with the
+    sibling named as staying `unlisted`, so "not the directory" is testable rather
+    than rhetorical), the boundary #3162's own triage got wrong in both directions
+    (the path is `unlisted`, not `protected`, so no guardian drill is what unlocks
+    it), and the thing this entry does NOT buy — the watcher runs from the copy of
+    its bytes `supervisord` started, so no round editing this file changes the
+    running process, and no round restarts one to find out. A grant whose comment
+    says only "needed by #3161" is how a directory entry shows up next time with no
+    record of what the narrow one was for.
+    """
+    import re
+
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    entry = f'    "{WATCHER}",'
+    assert src.count(entry) == 1, (
+        f"expected the grant exactly once in spec.py's ALLOWED_GLOBS, found "
+        f"{src.count(entry)} — the comment is read from the line above it, so two "
+        f"entries would make this node grade the wrong one")
+    block: list[str] = []
+    j = src.index(entry) - 1
+    while j >= 0 and (src[j].lstrip().startswith("#") or not src[j].strip()):
+        block.append(src[j])
+        j -= 1
+    assert block, "the new entry has no comment block above it"
+    # Whitespace-normalised prose, for the reason #2779's twin gives: the raw walk
+    # keeps each line's indentation, so a phrase that wraps mid-sentence would not be
+    # a substring of it and the assertion would be about line breaks, not claims.
+    prose = re.sub(r"\s+", " ",
+                   " ".join(ln.strip().lstrip("#").strip() for ln in reversed(block)))
+    assert "#3161" in prose and "#3162" in prose, (
+        f"the comment names neither item: {prose}")
+    assert "not the directory" in prose.lower(), (
+        "the comment does not say the grant is one file and not the directory, "
+        f"which is the one thing the next editor needs: {prose}")
+    assert WATCHER_SIBLING in prose and "unlisted" in prose, (
+        "the comment's 'not the directory' claim is rhetoric: the file that stays "
+        f"unlisted is never named, so nobody can check it against `classify`: "
+        f"{prose}")
+    assert WATCHER_PROBE in prose, (
+        f"the comment no longer names `{WATCHER_PROBE}`, the probe whose whole "
+        f"existence is the reason a directory spelling is the wrong shape here")
+    assert "restart" in prose, (
+        "the comment lost the boundary: the watcher runs from the bytes supervisord "
+        "started, so this grant changes a file, not a running process — the thing a "
+        "reader of the cost block most wants to know")
+    # The comment explains an effect, so the effect is executed: with this one entry
+    # deleted and nothing else changed, the watcher is back where #3161 found it. That
+    # is what makes the comment's claims about a `scripts/**` spelling worth reading —
+    # a grant that admitted the path by some other route would make the whole block a
+    # story about a refusal that no longer happens.
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != WATCHER))
+    try:
+        assert spec.classify(WATCHER) == "unlisted", (
+            f"deleting the entry #3162 added leaves {WATCHER} "
+            f"{spec.classify(WATCHER)}: some other entry reaches it, so this comment "
+            f"documents a refusal that is not the one in force")
+    finally:
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)

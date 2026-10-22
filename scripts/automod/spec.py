@@ -177,6 +177,30 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # at exactly that many unnamed admissions. tests/test_automod_spec.py's #2779
     # section pins both halves, including the comment you are reading.
     "agent-services/setup/install-services.sh",
+    # #3162 / #3161 (2026-10-22): the qmd index watcher, one verbatim file and NOT
+    # the directory. The round that needed it wrote #3161's cost-block rewrite and
+    # its `gate.json` records the only rung that ran — preflight, `paths outside
+    # the writable set: ['agent-services/scripts/qmd-watcher.sh']`, bucket
+    # `unlisted`, while the diff's other path, `tests/test_qmd_single_build.py`,
+    # was already `allowed`. Admitted for the reason the five entries above do not
+    # share: #3161's first three clauses are prose inside this file — the block above
+    # `COOLDOWN_SEC` justifies a 60-second rebuild floor by quoting a corpus size (all
+    # files, every collection, 7.5s) measured on 2026-09-19, and a reader cannot check
+    # a number like that against a script, which is what #3161 asks be fixed. What is
+    # NOT admitted is the directory: `git ls-files agent-services/scripts/` is 2 files,
+    # so `agent-services/scripts/backup-openclaw.sh` — the vault backup job — stays
+    # `unlisted`. #1376 clause 1 reports a `scripts/**` spelling as 2 admissions
+    # nothing named (this file and that one), and `classify` additionally makes the
+    # directory's probe `agent-services/scripts/probe.sh` writable — a path that is not
+    # a file, is untracked so the rail cannot report it, and must never have to be one.
+    # Whether a round should hold class authority over the
+    # supervisor-owned launchers in that directory at all is a separate scope ruling,
+    # not this line. What this entry also does not buy: the watcher runs from the copy
+    # of these bytes `supervisord` started, so editing the block here changes no
+    # running process until that service restarts — and a round never restarts one.
+    # tests/test_automod_spec.py's #3162 section pins both halves, including the
+    # comment you are reading.
+    "agent-services/scripts/qmd-watcher.sh",
     "web/src/**",
     "web/index.html",
     "web/public/**",
