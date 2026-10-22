@@ -500,10 +500,15 @@ def _doc_satisfied_by(exps: list[str], got: str) -> bool:
 #: those five ids, 0.6667 without — 0.0388 of the document leg, every night.
 #:
 #: Which collections exist is a fact about the DEPLOYMENT, not about this repo, so it
-#: is read from the index the run scores rather than kept in a list here. The tracked
-#: template `agent-services/conf/qmd-index.yml` declares 15 collections where the
-#: live config declares 14 (#1599's reconciliation), which is exactly why a list in
-#: this file could only ever be someone's guess about a machine.
+#: is read from the index the run scores — its live `store_collections` — rather than
+#: kept as a list in this file. The history is why that rule was written: the tracked
+#: template `agent-services/conf/qmd-index.yml` declared 15 of them on 2026-09-27, the
+#: day #1599 wrote this, where the live config declared 14 — and a list kept here could
+#: only ever have been a guess about a machine. #1652 (72112b77, 2026-09-28) cut it to 14
+#: by dropping the dead `facts` collection, and measured 2026-10-22 both configs declare
+#: 14 with an identical name set while the deployed index holds those same 14 rows. The
+#: drift is gone and the mechanism is what #1599 settled: the deployed set is read from
+#: the index being scored, because no config in this repo is the deployment.
 
 def indexed_paths(collections: list[dict]) -> list[str]:
     """Every path string a deployed collection could return, normalised, as one pool.

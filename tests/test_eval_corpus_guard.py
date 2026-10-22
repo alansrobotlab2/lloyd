@@ -4407,3 +4407,234 @@ def test_the_3076_upper_bound_guard_is_anchored_read_only_and_launches_nothing()
         assert path.is_absolute() and path.is_relative_to(ACCOUNT_HOME), (
             path, ACCOUNT_HOME, "not anchored at the account home, so at the gate this "
             "guard would be certifying a mirror of the file it is certifying")
+
+
+# ── #3166: the #1599 block in `eval/run_eval.py` stated a drift that ended ─────
+#
+# The block said, in the present tense, that the tracked template declared fifteen
+# collections where the live config declared fourteen. That disagreement died at
+# `72112b77` (#1652, 2026-09-28) — the day AFTER #1599 wrote the sentence — so the
+# file has been asserting a drift the nightly reports as zero for three weeks:
+# `~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-2026-10-22.json` records
+# `config_drift.drift_count = 0` with `drift: []`, and the template and the live
+# config parse to one identical set of fourteen names.
+#
+# Nothing could catch it, which is why it survived. `_suite_sweep()` in
+# `tests/test_qmd_single_build.py` greps `-- tests/` only, and its collection-count
+# phrase check is file-scoped on purpose — its own docstring says a suite-wide ban
+# "would collide with a guard that is doing its job", namely the rail at
+# `tests/test_qmd_index_template.py:163` that writes the forbidden literal into an
+# assertion in order to forbid it — while `test_qmd_index_template.py:176` pins only
+# the template's own count. So `eval/` was never swept, and a stale claim about a
+# machine read as documentation. These nodes are the missing sweep for that
+# directory. They read the block out of the file instead of trusting a line number,
+# because line numbers move the moment anyone adds a sentence — the same reason
+# #3161's sibling pins cut the watcher's comment positionally.
+
+#: The retired figure, assembled from two pieces so this file cannot be its own hit.
+#: `STALE_COLLECTION_COUNT` in `tests/test_qmd_single_build.py` is assembled for the
+#: identical reason, and here it matters more: the acceptance check is a `git grep`
+#: over `eval/`, a directory this diff edits.
+STALE_COLLECTION_COUNT = "15" + " collections"
+
+#: The last commit that changed anything executable in `eval/run_eval.py`
+#: (`eval: publish and difference-test one retrieval rate per entity leg (#2621)`,
+#: 2026-10-12). A comment-only edit leaves every non-comment line exactly where that
+#: sha left them; a code change moves this anchor deliberately, in the shape
+#: `NON_COMMENT_SURFACE_ANCHOR` already takes in `tests/test_automod_code_rules.py`.
+RUN_EVAL_CODE_ANCHOR = "7bf6db35"
+
+#: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
+#: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
+#: "unchanged" has to mean byte-for-byte or the assertion is a wish: the first is the
+#: line the item names by number, the second the measurement whose date a rewrap could
+#: silently break.
+DATED_BLOCK_LINES = (
+    "#: `store_collections` held 14 rows on 2026-09-27, every one rooted in `~/obsidian`,",
+    "#: five basenames. Measured cost on `nightly-20260927`: `doc_hit_rate` 0.6279 with",
+)
+
+
+def _collection_history_block() -> tuple[list[str], str]:
+    """The contiguous `#:` block sitting directly above `indexed_paths`, as raw lines
+    and as one joined prose string.
+
+    Cut positionally — walk up from the unique `def indexed_paths(` — rather than by
+    keyword, so rewording the history cannot step around the nodes below it. The blank
+    lines PEP 8 requires before a `def` are stepped over and nothing else is, so an
+    executable line inserted between the prose and the function stops the walk and the
+    assert beside it fires, rather than a statement being swept into a block that is then
+    asserted to be all comments. The length floor is the shape of a guard that has quietly
+    stopped guarding: three asserts against `""` all pass, so a deleted block would read
+    as green.
+
+    The prose string strips the `#:` marker from every line before joining, because the
+    sentence the clause-3 assert needs spans four of them — and stripping the marker
+    rather than `lstrip("#")` matters, since a leftover `": "` at each line start breaks
+    exactly the phrase a reader would quote.
+    """
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.startswith("def indexed_paths(")]
+    assert len(hits) == 1, f"expected exactly one `def indexed_paths(`, got {hits}"
+    above = hits[0]
+    start = above
+    while start > 0 and not lines[start - 1].strip():
+        start -= 1
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert start < above and lines[start].startswith("#:"), (
+        "no `#:` block sits above `indexed_paths`, so the cut found nothing to read")
+    block = [ln for ln in lines[start:above] if ln.strip()]
+    size = sum(len(ln) for ln in block)
+    assert size > 400, (
+        f"the #1599 collection block is down to {size} chars: the prose these nodes "
+        "exist to read is gone, and an assertion against it would pass by absence")
+    prose = re.sub(r"\s+", " ", " ".join(ln.removeprefix("#:").strip() for ln in block))
+    return block, prose
+
+
+def test_no_eval_file_states_the_stale_collection_count():
+    """#3166 clause 1: nothing under `eval/` still says the tracked template declares
+    the count #1652 retired.
+
+    Run as the item states its own verification — `git grep -n --fixed-strings` over
+    `eval/` — so the node goes red on exactly the commit the item's check would. It runs
+    the command rather than scanning one path because that is how the sibling round got
+    told its scan was too narrow: a node reading only its own file is green over a tree
+    whose harness still carries the claim. Exit status 1 is grep's "no match", which is
+    the outcome wanted, hence `(0, 1)` instead of `check=True`; anything louder is
+    reported rather than read as clean. The figure is assembled above because a rail that
+    quotes its own quarry can only ever report itself.
+    """
+    run = subprocess.run(
+        ["git", "grep", "-n", "--fixed-strings", "-e", STALE_COLLECTION_COUNT, "--", "eval/"],
+        cwd=ROOT, capture_output=True, text=True)
+
+    assert run.returncode in (0, 1), (
+        f"git grep could not sweep eval/ (rc={run.returncode}): {run.stderr.strip()}")
+    hits = [ln for ln in run.stdout.splitlines() if ln.strip()]
+    assert hits == [], (
+        f"eval/ is stating a collection count that describes no config on this box, "
+        f"while the nightly that owns the comparison reports zero drift: {hits}")
+
+
+def test_the_collection_drift_is_kept_as_dated_history():
+    """#3166 clause 2: the sentence was re-stamped, not deleted — the retired count
+    survives with the day it was true, and the drop is attributed to the change that did it.
+
+    Three co-occurrences, each asserted on ONE raw line rather than across the block,
+    because that is the only shape that stops a dated figure drifting back into an
+    undated one: SM_20261022_163807's review graded a `partial` on precisely this split,
+    and the sibling node in `tests/test_qmd_single_build.py` demands the same of the
+    watcher's timed figure. A window of a few hundred characters would let an edit
+    scatter the tokens over a paragraph and still read as attributed.
+    """
+    raw, prose = _collection_history_block()
+
+    dated = [ln for ln in raw if re.search(r"\b15\b", ln)]
+    assert len(dated) == 1, (
+        f"the block states the retired count on {len(dated)} lines and exactly one is "
+        f"expected — a date can only ride on a line that carries the number: {dated}")
+    assert "2026-09-27" in dated[0], (
+        f"the retired count is quoted on a line that never says when it was true, which "
+        f"is the present-tense reading #3166 exists to remove: {dated[0]!r}")
+
+    dropped = [ln for ln in raw if "#1652" in ln]
+    assert len(dropped) == 1, (
+        f"expected exactly one line attributing the drop, got {dropped}")
+    assert re.search(r"\b14\b", dropped[0]), (
+        f"#1652 is named without the count it cut the template to, leaving the reader to "
+        f"infer the outcome: {dropped[0]!r}")
+    assert "2026-09-28" in dropped[0] and "72112b77" in dropped[0], (
+        f"the drop is attributed to neither a day nor a commit, so it cannot be "
+        f"re-checked: {dropped[0]!r}")
+
+    assert re.search(r"both configs declare 14", prose), (
+        "the block no longer says the two configs agree today — which is the fact that "
+        "makes the rest read as history rather than as an open question")
+
+
+def test_the_block_still_says_where_the_deployed_collections_are_read_from():
+    """#3166 clause 3: #1599's mechanism outlives the history note written into it.
+
+    The drift was never the point of the block; it was the demonstration. So the text has
+    to keep naming the table it reads (`store_collections`) and keep the conclusion that
+    the deployed set comes from the index the run scores rather than from a list in this
+    file. A rewrite leaving only "it used to be fifteen, now it is fourteen" would hand
+    the next reader a dated anecdote with no rule attached — which is what this clause
+    exists to prevent. Checked on the joined prose because the conclusion is one sentence
+    across four lines, and a line-scoped assert would fail on the wrap, not on the
+    meaning.
+    """
+    _raw, prose = _collection_history_block()
+
+    assert "store_collections" in prose, (
+        "the block no longer names the table the deployed collection set is read out of")
+    assert "Which collections exist" in prose, (
+        "the block no longer frames the question it answers, so the answer below it has "
+        "no subject")
+    assert "read from the index the run scores" in prose, (
+        "the block no longer says the deployed set comes from the index this run scores")
+    assert "rather than kept as a list in this file" in prose, (
+        "the block no longer forbids the list it replaced — and a reader who thinks a "
+        "list is acceptable here is the reader who reintroduces the drift")
+
+
+def test_the_re_stamped_history_is_module_comment_and_the_dated_lines_survive():
+    """#3166 clause 4, first half: the re-stamp is comment, and it swallowed nothing.
+
+    Every line the extraction returned must start with `#:`, which it would not if a
+    rewrite had turned the history into a module-level string or pushed a sentence into
+    `indexed_paths`' docstring — the cut walks up from that `def`, so either move trips
+    it. Then the two already-dated lines are pinned verbatim, because #3166's scope was
+    one sentence and the line recording when `store_collections` was counted is the one a
+    future reader follows to date the figure. Last, the two functions the clause names are
+    still module-level functions: a comment edit that ate one of them would leave the
+    template test green and break the harness at import.
+    """
+    import ast
+
+    raw, _prose = _collection_history_block()
+
+    not_comment = [ln for ln in raw if not ln.startswith("#:")]
+    assert not_comment == [], f"non-comment lines inside the collection block: {not_comment}"
+    for ln in DATED_BLOCK_LINES:
+        assert ln in raw, f"the block no longer carries this line byte-identical: {ln!r}"
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    missing = {"indexed_paths", "gold_docs_unreturnable"} - names
+    assert not missing, f"{sorted(missing)} is no longer a module-level function"
+
+
+def test_the_re_stamp_moved_no_executable_line_of_the_eval_harness():
+    """#3166 clause 4, second half: `run_eval.py`'s executable surface is byte-identical
+    to the anchor's, so the run scores exactly what it scored before the prose changed.
+
+    #2809's comment-only rail (`NON_COMMENT_SURFACE_ANCHOR`,
+    `tests/test_automod_code_rules.py`) applied to a Python file. The projection drops
+    every line whose *stripped* form is a comment — `lstrip()`, where the .toml original
+    could use `startswith("#")`, because this file has comments indented inside function
+    bodies and those are prose too — and keeps everything else, so `indexed_paths` and
+    `gold_docs_unreturnable` are compared as bytes instead of as a promise. Changing this
+    harness's code is legitimate and moves the anchor on purpose, in the commit that
+    changes it; a prose round moving it as a side effect is the thing under guard.
+    """
+    shown = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{RUN_EVAL_CODE_ANCHOR}:eval/run_eval.py"],
+        capture_output=True, text=True)
+    assert shown.returncode == 0, (
+        f"`{RUN_EVAL_CODE_ANCHOR}` does not resolve in this tree: {shown.stderr.strip()}")
+
+    def _executable(text: str) -> list[str]:
+        return [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+
+    before = _executable(shown.stdout)
+    after = _executable(SCRIPT.read_text(encoding="utf-8"))
+    assert before, f"{RUN_EVAL_CODE_ANCHOR} shipped an empty eval/run_eval.py"
+    moved = [(i, b, a) for i, (b, a) in enumerate(zip(before, after)) if b != a]
+    assert not moved and len(before) == len(after), (
+        f"the executable surface differs from {RUN_EVAL_CODE_ANCHOR}: "
+        f"{moved[:3] or f'{len(after)} lines vs {len(before)}'} — #3166 was comment-only, "
+        "and if the harness genuinely changed, move RUN_EVAL_CODE_ANCHOR in the commit "
+        "that changed it")
