@@ -17,14 +17,20 @@ Nothing here can touch the live vault: `protected_shell_ro_paths()` resolves its
 `~/…` templates against `$HOME` on every call, so the `scratch_home` fixture
 pointing `$HOME` at a `tmp_path` directory moves every bind into `tmp_path`, and
 `test_every_bind_names_a_path_under_the_scratch_home` is the rail that says so.
-The real bwrap is used, skipped only if this box cannot build a namespace at all
-— a skipped substrate test would otherwise read as a passing one.
+The real bwrap is used, skipped only if this box cannot build a namespace at all —
+and a skip of that kind is NOT allowed to read as a pass: `tests/substrate_accounting.py`
+counts which substrate nodes entered a body and
+`test_the_substrate_nodes_that_never_ran_are_reported` FAILS the run over them
+(#3133). The skip is quiet only for a run that declares the substrate missing
+through `LLOYD_PATH_SUBSTRATE_AVAILABLE`.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,13 +47,27 @@ from agent_mcp import _path_sandbox as P            # noqa: E402
 from agent_mcp import _task_registry as TR          # noqa: E402
 from agent_mcp import builtin_bash as B             # noqa: E402
 from app.harness import protected_paths as PP       # noqa: E402
+import substrate_accounting as SA                   # noqa: E402
 
-_HAS_BWRAP = shutil.which("bwrap") is not None
-needs_bwrap = pytest.mark.skipif(not _HAS_BWRAP,
-                                 reason="bubblewrap is not installed on this box")
+#: THE one substrate gate of this file (#3133 clause 4). Its dead companion —
+#: `_HAS_BWRAP` / `needs_bwrap`, a `shutil.which("bwrap")` marker that no node ever
+#: applied — is gone: a marker that detects a box state the file does not key on is
+#: decoration, and the two together read as two guards where there is one.
+#:
+#: The probe is called ONCE, and both halves of the marker quote that one answer. The
+#: old form called `P.available()` twice, and the two calls could disagree: the cache
+#: is 60 s (`agent_mcp/_path_sandbox.py`, `_PROBE_RETRY_S`) and `scratch_home` resets
+#: it, so a marker could skip on one verdict and print the reason off another.
+_SUBSTRATE_OK, _SUBSTRATE_WHY = P.available()
+SUBSTRATE = SA.SubstrateLedger()
+SUBSTRATE.note_probe(_SUBSTRATE_WHY)
 skipif_no_bwrap = pytest.mark.skipif(
-    not P.available()[0],
-    reason=f"bwrap cannot build a namespace here: {P.available()[1]}")
+    not _SUBSTRATE_OK,
+    reason=f"bwrap cannot build a namespace here: {_SUBSTRATE_WHY}")
+# The finding's denominator, read off this file's source before anything runs, so it
+# still exists on the box where every gated node skipped.
+SUBSTRATE.expect_gated_from_source(__file__)
+measured = SUBSTRATE.measured
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +105,20 @@ def scratch_home(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HOME", str(home))
     P.reset_probe_cache()
+    # The bytes every corpus node re-reads. Read here rather than at the start of each
+    # vector's node (#3133 clause 2 splits the corpus into one node per vector): a
+    # per-node "before" snapshot would accept a file an EARLIER vector already
+    # clobbered, which is the very bug the corpus exists to refuse.
+    # `USER.md` is deliberately the dirtied one: `git -C … checkout -- lloyd/USER.md`
+    # in the corpus has work to do, so a refusal that leaves it dirty is a witness
+    # rather than a no-op that would have exited 0 anyway.
+    original = {name: (mem / name).read_bytes()
+                for name in ("SOUL.md", "USER.md", "MEMORY.md")}
+    assert b"DIRTY-BY-A-ROUND" in original["USER.md"], \
+        "the scratch vault must be dirty, or the git vector proves nothing"
     yield SimpleNamespace(home=home, mem=mem, vault=vault,
-                          seed=home / "seed.txt", work=home / "work")
+                          seed=home / "seed.txt", work=home / "work",
+                          original=original)
     P.reset_probe_cache()
 
 
@@ -180,6 +212,7 @@ def test_an_absent_protected_entry_costs_the_profile_a_bind_only(scratch_home):
 
 
 @skipif_no_bwrap
+@measured
 def test_the_profile_still_builds_and_runs_with_an_entry_absent(scratch_home):
     """The same fact executed: with `~/.openclaw` absent, a real bwrap spawn
     under the profile still runs the command."""
@@ -189,6 +222,7 @@ def test_the_profile_still_builds_and_runs_with_an_entry_absent(scratch_home):
 
 
 @skipif_no_bwrap
+@measured
 def test_every_bind_names_a_path_under_the_scratch_home(scratch_home):
     """The rail against this file measuring the live vault instead of a copy."""
     root = os.path.realpath(str(scratch_home.home))
@@ -256,31 +290,49 @@ CORPUS = [
 
 #: Vector label -> the program it needs, for the ones whose refusal is only
 #: meaningful if that program is the one that ran.
-def _corpus_vectors(scratch_home):
-    """`(label, command, expected_texts, needs_program)` per corpus vector."""
+def _bind(row, scratch_home):
+    """One `CORPUS` row against one scratch home: `(label, command, expects, needs)`.
+
+    The row is the data, the home is the fixture: the parametrize list is built at
+    import, so the `{mem}`-style templates can only be resolved once a node has a
+    `tmp_path` to point at.
+    """
     subs = {"mem": str(scratch_home.mem), "vault": str(scratch_home.vault),
             "seed": str(scratch_home.seed)}
-    out = []
-    for row in CORPUS:
-        label, cmd, expect = row[:3]
-        out.append((label, cmd.format(**subs),
-                    (expect,) if isinstance(expect, str) else tuple(expect),
-                    row[3] if len(row) > 3 else None))
-    return out
+    label, cmd, expect = row[:3]
+    return (label, cmd.format(**subs),
+            (expect,) if isinstance(expect, str) else tuple(expect),
+            row[3] if len(row) > 3 else None)
+
+
+def _corpus_vectors(scratch_home):
+    """`(label, command, expected_texts, needs_program)` per corpus vector."""
+    return [_bind(row, scratch_home) for row in CORPUS]
 
 
 def test_the_corpus_carries_every_shape_the_item_names(scratch_home):
     """The corpus's own floor: at least twelve vectors, and the shapes the item
     names are each in it. This is a claim about the LIST only — that they are
-    refused is `test_every_corpus_vector_is_refused_and_the_bytes_are_unchanged`,
-    which executes them, and that the predicate is blind to them is
+    refused is `test_a_corpus_vector_is_refused_and_its_bytes_are_unchanged`, one
+    node per vector, and that the predicate is blind to them is
     `test_the_string_predicate_is_still_blind_to_the_shapes_the_substrate_refuses`.
     Ungated on purpose: a box with no bwrap still pins the floor here."""
-    labels = [row[0] for row in _corpus_vectors(scratch_home)]
+    vectors = _corpus_vectors(scratch_home)
+    labels = [row[0] for row in vectors]
+    # One vector must be one NODE: a list of fifteen that collapses back into a
+    # single executing node is clause 2 un-fixed. Here the check is that the ids those
+    # nodes get are distinct; that the COLLECTED run really has one node per vector is
+    # `tests/test_path_sandbox_skip_accounting.py::test_the_corpus_is_fifteen_nodes_not_one`.
+    ids = [_vector_id(row) for row in CORPUS]
+    assert len(set(ids)) == len(ids), \
+        f"two vectors share the pytest id {sorted(i for i in ids if ids.count(i) > 1)}: " \
+        "one of them would be silently overwritten at collection"
     # The count the item states, asserted as a number: `>= 12` was true of any
     # list this file could build, and an off-by-one here is the whole clause.
     assert len(labels) == 15, \
-        f"{len(labels)} vectors: the item's twelve-plus floor, the three shapes "        f"added for the deny-set files, and the git checkout it rules on "        f"separately. Update deliberately, never to fit: {labels}"
+        f"{len(labels)} vectors: the item's twelve-plus floor, the three shapes added " \
+        f"for the deny-set files, and the git checkout it rules on separately. Update " \
+        f"deliberately, never to fit: {labels}"
     for named in ("truncate -s 0", "rm <single file>", "find … -delete",
                   "perl -ni -e", "ln -sfn", "cat > USER.md", "tee -a MEMORY.md",
                   "python3 open(…, 'w')",
@@ -289,33 +341,52 @@ def test_the_corpus_carries_every_shape_the_item_names(scratch_home):
                                 f"None for today and must be in the corpus"
 
 
+def _vector_id(row) -> str:
+    """An ascii, whitespace-free pytest id for one corpus row.
+
+    The labels carry spaces, `…` and `'` for the reader; node ids carrying those are
+    awkward to select and are what the gate's serial-retry parser has to survive
+    (`scripts/automod/gate.py::_split_node_ids`), so a vector is named by a slug here
+    and by the label in its failure text.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", row[0]).strip("-.")
+
+
 @skipif_no_bwrap
-def test_every_corpus_vector_is_refused_and_the_bytes_are_unchanged(scratch_home):
-    before = {name: (scratch_home.mem / name).read_bytes()
-              for name in ("SOUL.md", "USER.md", "MEMORY.md")}
-    failures = []
-    for label, cmd, expects, needs in _corpus_vectors(scratch_home):
-        if needs and shutil.which(needs) is None:
-            pytest.skip(f"{label} needs {needs!r} installed; without it the "
-                        "refusal is a 127 from the shell, not the kernel's")
-        rc, out = _run(cmd, str(scratch_home.home))
-        if rc == 0:
-            failures.append(f"{label}: exited 0 — the write went through")
-        elif not any(e in out for e in expects):
-            failures.append(f"{label}: rc={rc} but none of {expects} in "
-                            f"{out[:160]!r}")
-    assert not failures, "vectors the substrate let through:\n" + \
-                         "\n".join(failures)
+@measured
+@pytest.mark.parametrize("vector", CORPUS, ids=_vector_id)
+def test_a_corpus_vector_is_refused_and_its_bytes_are_unchanged(scratch_home,
+                                                                vector):
+    """ONE VECTOR, executed for real, refused by the kernel (#3133 clause 2).
+
+    This used to be one node looping over all fifteen with a `pytest.skip` INSIDE the
+    loop. One missing program (`perl`) therefore discarded the verdicts of the
+    fourteen vectors that had already run: the node reported SKIPPED, exit 0, and a
+    write that went through in an earlier vector was never seen by anybody. The
+    dependency skip belongs on the vector that has it, which is what a node per
+    vector makes it.
+    """
+    label, template, expects, needs = _bind(vector, scratch_home)
+    if needs and shutil.which(needs) is None:
+        pytest.skip(f"{label} needs {needs!r} installed; without it the "
+                    "refusal is a 127 from the shell, not the kernel's")
+    rc, out = _run(template, str(scratch_home.home))
+    assert rc != 0, f"{label}: exited 0 — the substrate let the write through"
+    assert any(e in out for e in expects), \
+        f"{label}: rc={rc} but none of {expects} in {out[:160]!r}"
     after = {name: (scratch_home.mem / name).read_bytes()
              for name in ("SOUL.md", "USER.md", "MEMORY.md")}
-    assert after == before, \
-        f"protected bytes changed under a read-only bind: {before} -> {after}"
+    assert after == scratch_home.original, (
+        f"{label}: protected bytes changed under a read-only bind: "
+        f"{scratch_home.original} -> {after}")
     # `git checkout --` had work to do: USER.md is the file the round dirtied
     # after the seed commit, and the kernel — not git's own goodwill — refused it.
-    assert b"DIRTY-BY-A-ROUND" in after["USER.md"]
+    assert b"DIRTY-BY-A-ROUND" in after["USER.md"], \
+        f"{label}: USER.md lost the dirt that made the git vector meaningful"
 
 
 @skipif_no_bwrap
+@measured
 def test_the_two_scheduled_vault_writes_stay_writable(scratch_home):
     """The #2108 pair, pinned as survivors of the file-only bind: dream's
     weekly stamp writes `~/obsidian/lloyd/.consolidate-lock`, and
@@ -342,10 +413,30 @@ def test_the_string_predicate_is_still_blind_to_the_shapes_the_substrate_refuses
     the proof: these twelve real-path spellings are the residual the 2026-10-03
     triage measured as returning `None` on the hook lane, and they still do.
     They are refused by the mount, so a future run must not "fix" them here —
-    and must not quietly add a pattern and call this test obsolete."""
+    and must not quietly add a pattern and call this test obsolete.
+
+    The control below is not decoration (#3133 clause 3). Twelve `None`s are also
+    what a matcher that returns `None` for EVERYTHING gives, and this file was the
+    one place in the suite that could be satisfied by a dead deny-list: the same
+    landing that shipped this pin fixed the previous suite for exactly that class
+    (a 0-hit grep needs a positive control). `tests/test_safety_gate_discrimination.py`
+    seeds a permissive mutation into `_HARD_DENY_PATTERNS` at SUITE level, so the
+    gap was confined to this node — which is where it is closed."""
     from app.harness.safety import check_bash_command
 
     real = os.path.expanduser("~")
+
+    # POSITIVE CONTROL, asserted FIRST: a command this matcher does deny, denied.
+    # Read the pair together — a blindness pin with nothing denied beside it proves
+    # only that the function under test never answers.
+    controls = [f"rm -rf {real}", f"rm -rf {real}/obsidian"]
+    unspeaking = [cmd for cmd in controls
+                  if check_bash_command(cmd, cwd="/tmp") is None]
+    assert not unspeaking, \
+        "the control commands must be DENIED by `check_bash_command`: a matcher " \
+        "that returns None for these returns None for the twelve below as well, " \
+        "and this node would pass on a dead deny-list " \
+        f"(silent for: {unspeaking})"
     shapes = [
         f"truncate -s 0 {real}/obsidian/lloyd/SOUL.md",
         f"rm {real}/obsidian/lloyd/SOUL.md",
@@ -390,6 +481,7 @@ def test_the_profile_is_neither_whole_root_read_only_nor_the_bench_profile():
 
 
 @skipif_no_bwrap
+@measured
 def test_writing_mkdir_git_commit_and_loopback_tcp_all_still_work(scratch_home):
     work = scratch_home.work
     checks = {
@@ -421,6 +513,7 @@ def test_writing_mkdir_git_commit_and_loopback_tcp_all_still_work(scratch_home):
 
 
 @skipif_no_bwrap
+@measured
 def test_the_temp_directory_is_the_host_one_not_a_mask(scratch_home):
     """`supervisorctl -c …/supervisord.conf` reaches its server at
     `/tmp/agent-supervisor.sock`, and the bench profile's `--tmpfs /tmp` is what
@@ -472,6 +565,7 @@ def _survivors(marker: str, seconds: float = 6.0) -> "list[tuple[str, str]]":
 
 
 @skipif_no_bwrap
+@measured
 def test_a_foreground_timeout_leaves_no_live_member_of_the_spawned_group(scratch_home):
     # 6000 ms, not 1500: `timeout` under `_SECONDS_CEILING_MS` (5000) is read as
     # SECONDS by the #1994 rescue, so `timeout: 1500` means twenty-five minutes
@@ -485,6 +579,7 @@ def test_a_foreground_timeout_leaves_no_live_member_of_the_spawned_group(scratch
 
 
 @skipif_no_bwrap
+@measured
 def test_a_cancelled_turn_leaves_no_live_member_of_the_spawned_group(scratch_home):
     async def scenario():
         task = asyncio.ensure_future(
@@ -504,6 +599,7 @@ def test_a_cancelled_turn_leaves_no_live_member_of_the_spawned_group(scratch_hom
 
 
 @skipif_no_bwrap
+@measured
 def test_run_in_background_still_returns_a_task_id_and_an_output_file(scratch_home,
                                                                       tmp_path,
                                                                       monkeypatch):
@@ -533,6 +629,7 @@ def test_run_in_background_still_returns_a_task_id_and_an_output_file(scratch_ho
 
 
 @skipif_no_bwrap
+@measured
 def test_a_foreground_command_reports_the_substrate_in_its_environment(scratch_home):
     out = asyncio.run(B._bash({"command": "echo marker=$LLOYD_PATH_SANDBOX"}))
     assert "marker=enforced" in out, out
@@ -600,3 +697,93 @@ def test_the_state_route_carries_the_protected_path_sandbox_key():
     assert "protected_path_sandbox" in payload, sorted(payload)
     st = payload["protected_path_sandbox"]
     assert set(st) >= {"enforcing", "fallback", "bwrap"}, st
+
+
+# ---------------------------------------------------------------------------
+# the one gate this file keys on, and the dead companion it no longer has
+# ---------------------------------------------------------------------------
+
+def test_the_substrate_nodes_key_on_one_gate_that_quotes_the_probe():
+    """One gate, and its skip reason is the probe's own words (#3133 clause 4).
+
+    `_HAS_BWRAP` / `needs_bwrap` are gone: a `shutil.which("bwrap")` marker that no
+    node applied was decoration claiming to detect a box state the file does not key
+    on, and a pair of markers reads as two guards where there is one. What is left has
+    to be one gate, keyed on ONE probe answer read at import, whose reason carries the
+    explanation that answer came with.
+
+    The comparison is against the value the file froze at import
+    (`_SUBSTRATE_OK` / `_SUBSTRATE_WHY`), not against a fresh `P.available()` call — the
+    gate is frozen by design, and a 60 s-cached probe re-asked here could answer
+    differently from the one the markers were built on, which would make this node fail
+    on a box that was behaving exactly as specified. That the frozen answer IS the
+    probe's, and that one probe feeds every marker in the file, is the structural claim
+    `tests/test_path_sandbox_skip_accounting.py::test_the_pin_file_has_one_substrate_gate_and_no_dead_marker`
+    makes off the source; that a probe reporting a broken namespace puts its own words
+    into every gated node's reason is
+    `tests/test_path_sandbox_skip_accounting.py::test_an_unavailable_substrate_probe_is_a_failure_naming_the_count`,
+    which forces that probe on a box where the real one answers fine.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    assigned = {t.id for node in tree.body if isinstance(node, ast.Assign)
+                for t in node.targets if isinstance(t, ast.Name)}
+    assert "_HAS_BWRAP" not in assigned, \
+        "the dead `shutil.which` boolean is back, and nothing applies it"
+    assert "needs_bwrap" not in assigned, \
+        "the dead `needs_bwrap` marker is back, and no node carries it"
+
+    assert SUBSTRATE.gated, "the ledger found no node gated by the substrate marker"
+    module = sys.modules[__name__]
+    for name in sorted(SUBSTRATE.gated):
+        marks = [m for m in getattr(module, name).pytestmark
+                 if getattr(m, "name", None) == "skipif"]
+        assert len(marks) == 1, \
+            f"{name} carries {len(marks)} skipif markers; this file has exactly one " \
+            "substrate gate, and a second gate is a second box state to explain"
+        cond = marks[0].args[0] if marks[0].args else marks[0].kwargs.get("condition")
+        assert bool(cond) is (not _SUBSTRATE_OK), \
+            f"{name}'s gate does not key on the one probe answer this file read at " \
+            f"import (`available()` said {str(_SUBSTRATE_OK)!r}): {bool(cond)!r}"
+        reason = marks[0].kwargs.get("reason", "")
+        assert reason == f"bwrap cannot build a namespace here: {_SUBSTRATE_WHY}", \
+            f"{name}'s gate reason is not the explanation the probe gave " \
+            f"{_SUBSTRATE_WHY!r}: {reason!r}"
+
+
+# ---------------------------------------------------------------------------
+# THE LEDGER'S VOICE — the last node in the file, on purpose
+# ---------------------------------------------------------------------------
+#
+# pytest runs a module's nodes in source order, so the node below speaks AFTER every
+# gated node has either entered its body or skipped. Put it anywhere earlier and the
+# healthy box fails: nothing would have executed yet, so the ledger would report every
+# gated node as not run. `tests/test_path_sandbox_skip_accounting.py` pins that this
+# node stays last.
+
+def test_the_substrate_nodes_that_never_ran_are_reported(request):
+    """A substrate node that never executed is a FAILED run, not a skip (#3133 clause 1).
+
+    This node carries no substrate gate of its own — that is the whole mechanism. On a
+    box where the probe fails at import, the ten gated functions (twenty-three nodes,
+    counting the fifteen corpus vectors) used to skip and the file exited 0, because
+    the only thing standing against that was the suite-wide skip budget:
+    `PYTEST_MAX_SKIPPED = 40` against a recorded baseline of 31, and no floor at all on
+    the gate's partial-run branch. The ledger counts entry into a body; this node turns
+    the ones that never entered into an `AssertionError` naming the count, the total and
+    the probe's own explanation.
+
+    It goes quiet — SKIPPED, not passed — ONLY for a run that declared the substrate
+    missing through `LLOYD_PATH_SUBSTRATE_AVAILABLE`
+    (`tests/substrate_accounting.DECLARED_ENV`), the seam #1691 established for the
+    frontend pins. Nothing in this repo sets it: an ordinary round, a reviewer's
+    snapshot and this box are all undeclared, and undeclared is the loud state. On a
+    healthy run it PASSES, saying out of the ledger how many substrate nodes entered
+    their bodies, so the file's green means the count and not the absence of one.
+    """
+    outcome, message = SUBSTRATE.verdict(request.session)
+    if outcome == "skip":
+        pytest.skip(message)
+    if outcome == "fail":
+        raise AssertionError(message)
+    print(message)
+
