@@ -1056,7 +1056,7 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
   const pool = health.implement_pool
   const paused = pool && pool.ready >= pool.bound
   return (
-    <div className="mt-2 space-y-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+    <div className="mt-2 space-y-0.5 break-words font-mono text-[10px] tabular-nums text-muted-foreground">
       {d && (
         <div>
           draft {d.total} · folded {d.grouped} · quarantined {d.quarantined} · needs-human {d.needs_human} · held {d.held ?? 0} · parked {d.parked ?? 0} · triaged {d.triaged} · triageable {d.pool}
@@ -1088,8 +1088,15 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
           )}
         </div>
       )}
+      {/* An `owed_outside` line is a backlog body line: `needs` carries the
+          command a person is being asked to run, so one unbreakable path token
+          in it is wider than this card's content box. `break-words` is inherited
+          and so covers every line in the block; it is repeated here because this
+          is the only line whose text is board prose rather than a number the
+          dashboard formats itself — and because #3141's red tree was exactly one
+          such token painting past the card. */}
       {health.owed?.outside.map((o) => (
-        <div key={`${o.item_id}-${o.what}`} className="text-amber-400/90">
+        <div key={`${o.item_id}-${o.what}`} className="break-words text-amber-400/90">
           #{o.item_id}: {o.needs || o.what}
         </div>
       ))}

@@ -8,9 +8,11 @@ columns) widened the track and every card sharing it.
 
 WHAT THIS FILE PROVES: that the declarations holding these fixes in place are
 still on the elements that need them, read out of the component's own source —
-#1685's two (Panel's released floor, the worker stat row's column claim) and
+#1685's two (Panel's released floor, the worker stat row's column claim),
 #2398's one (TaskLine's note span, which a scheduler-written `blocked` reason of
-322 px was flooring the whole `Automation & work` card open).
+322 px was flooring the whole `Automation & work` card open) and #3141's one
+(BacklogHealthLines' wrap rule, which an owed hand-off line holding a shell
+command was painting past the same card).
 
 WHAT IT DELIBERATELY DOES NOT PROVE: that the page does not overflow. No test
 here renders the dashboard. That measurement is
@@ -119,4 +121,81 @@ def test_task_line_note_is_not_floored_at_its_own_text():
     assert "sm:truncate" in classes, (
         f"TaskLine's note span is {classes}: without the `sm` ellipsis every "
         "desktop row with a reason stops being one line"
+    )
+
+
+def backlog_health_block_classes() -> list[str]:
+    """The class list on BacklogHealthLines' own root div, read out of the component.
+
+    Anchored on the function rather than on a class name: the class list is the
+    thing under test, and #3141's regression was exactly a change to it.
+    """
+    body = re.search(r"function BacklogHealthLines\([\s\S]*?\n\}", SOURCE)
+    assert body, "BacklogHealthLines() is gone from DashboardPage.tsx; update this test"
+    root = re.search(r'<div className="([^"]*)">', body.group(0))
+    assert root, "BacklogHealthLines no longer opens with a <div className=...>"
+    return root.group(1).split()
+
+
+def owed_hand_off_classes() -> list[str]:
+    """The class list on one owed hand-off line — the `health.owed.outside.map`
+    inside that block.
+
+    What the line prints is `#{item_id}: {needs || what}`: a backlog body line,
+    here the command a person is being asked to run. Neither its length nor its
+    whitespace is bounded by anything in the frontend.
+    """
+    line = re.search(
+        r'health\.owed\?\.outside\.map\(\s*\(o\)\s*=>\s*\(\s*<div [^>]*?'
+        r'className="([^"]*)"',
+        SOURCE,
+    )
+    assert line, "the owed hand-off line is gone; update this test"
+    return line.group(1).split()
+
+
+def test_owed_hand_off_prose_breaks_inside_the_health_card():
+    """#3141's red tree: `test_desktop_cards_keep_their_track_widths` failing
+    `'Automation & work' card clips its content at 235px` on the 1280 px pin.
+
+    The mechanism is #2398's one step further down the tree, and it wants a
+    different declaration. `Panel`'s `min-w-0` (#1685) already releases the grid
+    floor, so this block is laid out AT the card's width rather than flooring it:
+    a 209 px content box inside the 235 px card, and a block-level box whose
+    content is wider than that simply paints past its own box. A read-only probe
+    over the served page measured the `BacklogHealthLines` container and its owed
+    line both at scrollWidth 264 px against that clientWidth of 209 px — one
+    unbreakable path token out of a `needs` command — and the card's scrollWidth
+    is exactly what the pin reads.
+
+    The declaration that fixes that is `break-words`, not `min-w-0`:
+    `overflow-wrap: break-word` breaks a word that does not fit its line box,
+    which is the state here, and it changes no intrinsic size — which is why the
+    same class could not help #1742's flex labels, whose floor had to be released
+    first (see `tests/test_dashboard_label_contract.py`). It is inherited, so the
+    copy on the block wraps every line in it; the owed line carries its own
+    because it is the only one of them whose text is board prose rather than a
+    number the dashboard formats itself.
+
+    Source-level, and deliberately so: the shipped seed
+    `tests/fixtures/dashboard_long_labels.json` loads `backlog.health` as null, so
+    no seeded node in the responsive suite exercises this line at all, and the
+    live-data pin only goes red while somebody has an owed-by-hand ask open on the
+    board. This node holds the rule with zero owed entries too.
+    """
+    block = backlog_health_block_classes()
+    owed = owed_hand_off_classes()
+    assert "break-words" in block, (
+        f"BacklogHealthLines' root div is {block}: an owed hand-off line is a "
+        "backlog body line carrying a command, and one path token wider than the "
+        "card's content box paints past the card (#3141)"
+    )
+    assert "break-words" in owed, (
+        f"the owed hand-off line is {owed}: its text is the unbounded half of this "
+        "block, so it has to break even if the block's own rule is dropped"
+    )
+    assert "whitespace-nowrap" not in block and "whitespace-nowrap" not in owed, (
+        f"the backlog health block is {block} with owed lines {owed}: `nowrap` "
+        "reunites the line into one unbreakable run, and `break-words` is then "
+        "left with no line box to break inside"
     )
