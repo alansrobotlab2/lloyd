@@ -271,6 +271,23 @@ the transcript scratch home from backlog #566:
     The pairing is not repaired — inventing a take row to balance a count is the
     fabrication this store was added to make impossible.
 
+20. `~/lloyd-data/logs/services/flash-next-canary-toolcalls-<arm>.jsonl` — the per-arm
+    tool-call captures the canary fold's decision leg writes (#3188). One file per arm
+    LABEL, so the store's file count grows with the number of distinct labels an operator
+    has ever typed as much as with the number of arms: `capture` appends a row per prompt,
+    `report` appends one row per comparison, and nothing in the fold ever removes either.
+    DELETE a capture file past CANARY_TOOLCALLS_MAX_AGE_DAYS (14) on its own mtime — the
+    instant that arm's last row landed, which is the only age a whole-file delete has here,
+    because the delete removes an arm's recording and not a row of it. Fourteen, not the
+    30 the other delete stores take and not the ceiling store's 90: a capture is only ever
+    read by the `report` of an arm inside the SAME window (pairing across windows is
+    refused by `same_prompt_pairs`, the #2683 law applied to windows), so its useful life
+    is a window plus the operator's read of it, and 14 is the shortest window in this file
+    — the promotions ledger's (#2043). The glob is `flash-next-canary-toolcalls-*`, which
+    is what makes the prose canary's own `flash-next-canary.jsonl` beside it matched by no
+    rule here; symlinks are skipped and never followed, store 7's rule; an absent directory
+    is reported and NEVER created (#2354: the probe's `append_rows` owns the mkdir).
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -3498,9 +3515,10 @@ def _injection_canary_line(p: dict) -> str:
 
 # Store 19: the ceiling's per-Bash-call sample rows (#2924) — the 21st line the report
 # prints, after the injection-canary corpus (#2862) at the 20th, and the second store this
-# sweep bounds on a horizon it does not own. (The numbered list in the module docstring stops at
-# nineteen because #2862 never added its own store there either; the section comment is
-# where each of these two stores' rationale lives, and `#1835`'s count guards read the
+# sweep bounds on a horizon it does not own. (Neither this store nor #2862's is in the numbered
+# list in the module docstring — that list runs 1-19 and then 20, which is #3188's capture
+# store below; the two rounds that added the stores printed here never added their entries. The
+# section comment is where each store's rationale lives, and `#1835`'s count guards read the
 # printed lines, not that list.)
 # ---------------------------------------------------------------------------
 #
@@ -3664,6 +3682,135 @@ def _ceiling_samples_line(p: dict) -> str:
             f"{p['bytes']} B out)" + tail)
 
 
+# ---------------------------------------------------------------------------
+# Store 20 (the 22nd line the report prints, and printed LAST): the canary fold's
+# per-arm tool-call captures (#3188).
+# ---------------------------------------------------------------------------
+#
+# `agent-services/bin/flash-next-canary-step.sh` runs `eval/tool_call_equivalence_probe.py`
+# once per arm. `capture` appends one row per corpus prompt to
+# `<data root>/logs/services/flash-next-canary-toolcalls-<arm-label>.jsonl` and `report`
+# appends one row per comparison to the calling arm's file; the fold redirects the leg's
+# stdout to `/dev/null` and always exits 0, so neither mode has a cleanup path and a boot
+# that gets re-armed appends to the same name forever.
+#
+# What makes it unbounded rather than merely growing is the file NAME: the last segment is
+# the arm label, and the label is whatever string an operator typed as `$2`
+# (`flash-next-run-arm.sh`'s usage comment lists `kv-<value>` as a legal shape). So the
+# store gains a file for every distinct label the box has ever used, and one file grows
+# rows for every re-arm of a label — two axes, and neither one's writer prunes.
+#
+# Why whole files and not rows: a capture answers exactly one question — did two arms
+# inside ONE window decide differently — and `same_prompt_pairs` in
+# `eval/tool_call_equivalence_probe.py` REFUSES to pair records from different windows
+# (the #2683 law applied to windows rather than models). A file whose newest row is older
+# than the horizon can therefore never be paired again by anything, so the deletion loses
+# no answer that was still obtainable. That is also why the horizon is 14 and not the 30
+# the other delete stores take: the useful life of a capture is one boot plus the operator's
+# read of it, and 14 is the shortest window in this file (the promotions ledger's, #2043).
+#
+# Age is the file's own mtime — the instant that arm's last row landed. It is NOT read row
+# by row, because the delete here removes an arm's whole recording, which is the unit the
+# pairing works in. The glob is `flash-next-canary-toolcalls-*`: the prose canary's own
+# `flash-next-canary.jsonl` sits in the same directory, is not this store's, and matches no
+# rule here. Symlinks are skipped and never followed (store 7's rule), and the directory is
+# never created — `append_rows` in the probe owns that mkdir (#2354).
+CANARY_TOOLCALLS_DIR = DATA_ROOT / "logs" / "services"
+CANARY_TOOLCALLS_GLOB = "flash-next-canary-toolcalls-*.jsonl"
+
+#: Days after which an arm's capture file is stale. See the block above: the number is
+#: the promotions ledger's (#2043), the shortest window in this file, because a capture
+#: outlives its use the moment its window closes.
+CANARY_TOOLCALLS_MAX_AGE_DAYS = 14
+
+
+def sweep_canary_toolcalls(apply: bool, now: float, *, root: Path | None = None,
+                           max_age_days: int | None = None) -> dict:
+    """Delete per-arm tool-call captures past the horizon. Store 20.
+
+    Aged on each file's own mtime — the instant that arm's last capture row landed — and
+    deleting WHOLE files, because the unit the store is read in is one arm's recording:
+    `same_prompt_pairs` refuses to pair records across windows, so a file older than the
+    horizon can never answer the question it was written for.
+
+    Three rules this shares with the file stores above rather than inventing:
+
+    * an absent directory is reported and NEVER created (#2354 — the probe's
+      `append_rows` owns the mkdir, and a sweep that created the store would report a
+      box that has never run an arm as one that has run none);
+    * a symlink is skipped and never followed, and never counted as deleted (store 7);
+    * `apply=False` decides every byte from the same read and unlinks nothing
+      (#2005/#2006/#2008).
+
+    The glob is prefixed, so the prose canary's `flash-next-canary.jsonl` beside it is
+    not this store's and is never a candidate. `root`/`max_age_days` are injection points
+    for the offline tests, which is also why the constant is a module-level name the test
+    fixture can redirect.
+    """
+    out = {"apply": apply, "present": False, "files": 0, "stale": 0, "deleted": 0,
+           "kept": 0, "bytes": 0, "held_link": 0, "refused": 0,
+           "horizon_days": CANARY_TOOLCALLS_MAX_AGE_DAYS if max_age_days is None
+           else int(max_age_days)}
+    store = Path(root) if root is not None else CANARY_TOOLCALLS_DIR
+    if not store.is_dir():
+        return out
+    out["present"] = True
+    cutoff = now - out["horizon_days"] * 86400
+    for f in sorted(store.glob(CANARY_TOOLCALLS_GLOB)):
+        try:
+            st = f.lstat()          # lstat, not stat: a symlink's own metadata is the
+        except OSError:              # only metadata this rung is allowed to read
+            continue
+        out["files"] += 1
+        if f.is_symlink():
+            out["held_link"] += 1
+            continue
+        if st.st_mtime >= cutoff:
+            out["kept"] += 1
+            continue
+        out["stale"] += 1
+        if not apply:                # dry run: the bytes this delete WOULD take, counted
+            out["bytes"] += st.st_size
+            continue                 # from the same read the applied run decides from
+        try:
+            f.unlink()
+        except OSError:              # a file that would not unlink is named on the line,
+            out["refused"] += 1      # and its bytes are not claimed as freed
+            continue
+        out["deleted"] += 1
+        out["bytes"] += st.st_size
+    return out
+
+
+def _canary_toolcalls_line(p: dict) -> str:
+    """The report line for store 20, on the facts-quarantine store's (#2559) verb pair.
+
+    Dry run ends `N would delete, X KiB candidate` and an applied run `N deleted, X KiB
+    freed`. Both words are in the historical suffix selector, which is what keeps this line
+    counted by the positive rule AND by the old one — a line that ended only in a
+    parenthesised count is how #1835's store count went silently wrong for nine commits —
+    and neither verb is ever borrowed for the other mode, because a dry run that says
+    `deleted` is the wording #1574's `0 deleted` complaint is about.
+
+    The facts that are not a count come first: the absent directory (a box that has never
+    run the leg, and one this sweep must never create), and a held symlink, named rather
+    than silently skipped (store 7's rule).
+    """
+    label = f"  canary tool-call captures >{p['horizon_days']}d"
+    head = ("no capture dir yet" if not p["present"] else
+            f"of {p['files']} capture file(s)"
+            + (f", {p['held_link']} symlink held (never followed)"
+               if p["held_link"] else ""))
+    tail = ""
+    if p["refused"]:
+        tail = f" ({p['refused']} would not unlink, left in place)"
+    n = p["deleted"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    return (f"{label}: {head} — {n} {verb}, "
+            f"{p['bytes'] / 1024:.0f} KiB {unit}{tail}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -3730,6 +3877,10 @@ def main() -> int:
     # do goes through the ledger's graft-and-refuse helper, because the row writer appends
     # under no lock while this is in flight.
     ceiling = sweep_ceiling_samples(args.apply, now)
+    # The canary fold's per-arm tool-call captures (#3188). Run in both modes and decided
+    # from the same read in both, like every store here; `apply` is what separates a line
+    # that names stale files from one that unlinks them.
+    canary_toolcalls = sweep_canary_toolcalls(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -3837,6 +3988,13 @@ def main() -> int:
     # the last line because appending a store here keeps items 1-20 of task 79's
     # enumeration where the positional guard reads them (#2862's reason, inherited).
     print(_ceiling_samples_line(ceiling))
+    # Store 20 (#3188), printed LAST and outside the refusal guard like the two lines above
+    # it: it is a data-root store that DELETES, and the guard that stops a round's worktree
+    # from deleting the live repo's refs has nothing to say about a directory `resolve_data_root`
+    # has already decided this tree may reach (#1415). Appending rather than inserting keeps
+    # items 1-21 of task 79's enumeration where the positional guard reads them — #2862's
+    # reason, inherited, and the reason this line is the 22nd.
+    print(_canary_toolcalls_line(canary_toolcalls))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

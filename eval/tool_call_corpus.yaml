@@ -1,0 +1,152 @@
+# The decision corpus for the canary fold's tool-call leg (#3188, owed from #2843).
+#
+# YAML, not JSON, and that is not a style choice: `.gitignore:42` ignores `*.json` tree-wide, so
+# a committed JSON corpus would be invisible to the very `git add` that is meant to archive it —
+# the same reason the prose corpus beside this directory is `corpus.yaml`. Loaded with
+# `yaml.safe_load`, the way `engine_output_probe.py:167-170` loads its own.
+schema: 1
+kind: tool_call_canary_corpus
+made: '2026-10-23'
+params:
+  temperature: 0
+  tool_choice: auto
+  max_tokens: 64
+note:
+- 'The decision corpus for the canary fold''s tool-call leg (#3188, owed from #2843).'
+- 'The prose corpus `eval/engine_output/corpus.yaml` cannot carry this: its probes post to'
+- '`/v1/completions`, which has no `tools` field at all, and clause 1 of #3188 keeps that'
+- file byte-unchanged — four prose prompts in it (`tool_bash_disk`, `tool_read_file`,
+- '`tool_fetch`, `tool_none_needed`) name a tool in the prompt TEXT and are answered in'
+- prose, because nothing sends the schema. So the `tools` arrays live here, one per
+- prompt, and `eval/tool_call_equivalence_probe.py` sends each prompt as one chat message
+- with its own `tools` array at temperature 0.
+- ''
+- 'Four prompts, one per decision shape the quant/KV-dtype question can split on:'
+- which path a read names, which command a shell gets, which key a structured call picks,
+- and whether a call is made at all. Each `text` is a real turn Lloyd has had, reduced to
+- the one sentence that carries the request, so the answer is short enough for
+- '`max_tokens` to hold a whole call and the window stays minutes rather than an hour.'
+- ''
+- Changing any `text` or any `tools` array changes the corpus sha a capture records, so a
+- reader cannot pair two windows that were asked different questions — the refusal
+- '`eval/engine_output_probe.py` raises on a cross-corpus compare, written by #2683 after a'
+- sha-less record pair sat in the canary log for four days, is enforced here too.
+- ''
+- 'Verified against the live engine by the owed arm, not by this commit: no arm has run'
+- since 2026-10-12 and every route to an engine boot is gated. Offline, these prompts are
+- answered by the stub in `tests/test_tool_call_equivalence_probe.py`.
+- Each prompt carries `expect_tool_call`, because a decline is only a finding where a
+- 'call was asked for: the last prompt asks for the word `idle`, so prose IS the'
+- correct answer there and a tool call against it is the finding instead
+- (`call_when_none_asked`).
+prompts:
+- id: tc_read_named_path
+  expect_tool_call: true
+  text: Read the round-state module and tell me what fields it writes.
+  tools:
+  - type: function
+    function:
+      name: Read
+      description: Read a file from the local filesystem.
+      parameters:
+        type: object
+        properties:
+          file_path:
+            type: string
+            description: Absolute path to the file
+          offset:
+            type: integer
+            description: 1-based start line
+          limit:
+            type: integer
+            description: Max lines to return
+        required:
+        - file_path
+  - type: function
+    function:
+      name: Grep
+      description: Search file content with ripgrep.
+      parameters:
+        type: object
+        properties:
+          pattern:
+            type: string
+            description: Regex pattern
+          path:
+            type: string
+            description: Search root
+        required:
+        - pattern
+- id: tc_bash_test_command
+  expect_tool_call: true
+  text: Run the vault-round tests from the round worktree and report the tail.
+  tools:
+  - type: function
+    function:
+      name: Bash
+      description: Execute a bash command.
+      parameters:
+        type: object
+        properties:
+          command:
+            type: string
+            description: Shell command to run
+          cwd:
+            type: string
+            description: Absolute working directory
+          timeout:
+            type: integer
+            description: Max ms before kill
+        required:
+        - command
+- id: tc_structured_key
+  expect_tool_call: true
+  text: Look up whether item 2846 is settled in the promotions ledger.
+  tools:
+  - type: function
+    function:
+      name: fact_get
+      description: Read what is known about one entity.
+      parameters:
+        type: object
+        properties:
+          entity:
+            type: string
+            description: Entity name
+          category:
+            type: string
+            description: Fact category
+          limit_per_category:
+            type: integer
+        required:
+        - entity
+  - type: function
+    function:
+      name: vault_search
+      description: Search the obsidian vault by topic.
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: Natural-language query
+          max_results:
+            type: integer
+        required:
+        - query
+- id: tc_no_call_expected
+  expect_tool_call: false
+  text: Say the single word idle and nothing else.
+  tools:
+  - type: function
+    function:
+      name: Bash
+      description: Execute a bash command.
+      parameters:
+        type: object
+        properties:
+          command:
+            type: string
+            description: Shell command to run
+        required:
+        - command

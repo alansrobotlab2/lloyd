@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -670,6 +671,11 @@ CANARY_PAYLOAD_CLEAN = {
 def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
                 emit_record: bool = True, skip_bench: bool = False,
                 cmp_payload: dict | None = CANARY_PAYLOAD_DIVERGED,
+                real_tool_probe: bool = False, window: str = "W-TEST",
+                tool_probe_seam: bool = True,
+                tool_capture_rc: int = 0, tool_capture_line: str = "",
+                tool_report_rc: int = 0, tool_report_line: str = "",
+                tool_stub: bool = True, label: str = "fp8kv", engine=None,
                 ) -> "subprocess.CompletedProcess":
     """Run the extracted canary block under `set -euo pipefail` — STRICTER than
     the arm script's own `set -uo pipefail` — against a fake root whose python is
@@ -715,11 +721,53 @@ def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
         payload.write_text("not json at all\n", encoding="utf-8")
     else:
         payload.write_text(json.dumps(cmp_payload), encoding="utf-8")
+    # `engine` is the seam's REAL-INSTRUMENT mode. The fake root's default seam path becomes a
+    # shim onto the REAL `eval/tool_call_equivalence_probe.py`, and the fake `python` below execs
+    # the REAL interpreter, so what runs is the module production runs and the only thing stood
+    # in for is the engine — a loopback HTTP server the real httpx client posts to. A bash stub
+    # echoing a fixture string cannot fail for a rendering change, a capture-file bug, or an argv
+    # the real module rejects; this can.
+    if engine is not None:
+        (root / "eval").mkdir(parents=True, exist_ok=True)
+        (root / "eval/tool_call_equivalence_probe.py").write_text(
+            "#!" + sys.executable + "\n"
+            "import runpy, sys\n"
+            "sys.argv = sys.argv[:1] + sys.argv[1:] + "
+            + repr(["--base-url=" + engine.base_url]) + "\n"
+            "runpy.run_path(" + repr(str(ROOT / "eval/tool_call_equivalence_probe.py"))
+            + ", run_name='__main__')\n",
+            encoding="utf-8")
     stub = root / ".venvs/lloyd/bin/python"
     stub.write_text("""#!/usr/bin/env bash
 set -uo pipefail
+if [[ "$1" == *tool_call_equivalence_probe.py ]]; then
+  # #3188's tool-call leg, answered on its OWN argv shape: the fold invokes
+  # `<python> <probe path> capture|report --label X`, so the path is `$1` and the subcommand
+  # is `$2` — the prose leg's verbs are `run` and `compare`, so they never reach here.
+  # (A branch keyed on the path in `$2` looks equivalent and is dead: `$2` is the subcommand
+  # in both legs, and a dead branch makes every tool-leg node assert a `probe-failed` line it
+  # did not ask for.) A missing probe file is answered the way python answers it, because a
+  # leg whose instrument is absent is a state some nodes are about.
+  echo "tool-probe argv: $*" >> "$STUB_TOOL_ARGV"
+  [[ -n "${STUB_ORDER_LOG:-}" ]] && echo "tool-$2" >> "$STUB_ORDER_LOG"
+  # Real-instrument mode: the argv goes to the real interpreter, which runs the shim the seam
+  # path holds. Everything below is canned-line mode and is unreachable on this path.
+  if [[ "$STUB_TOOL_EXEC" == "1" ]]; then exec "$STUB_REAL_PYTHON" "$@"; fi
+  if [[ ! -f "$1" ]]; then
+    echo "python3: can't open file '$1': [Errno 2] No such file or directory" >&2
+    exit 2
+  fi
+  case "$2" in
+    capture) echo "$STUB_TOOL_CAPTURE_LINE"; exit "$STUB_TOOL_CAPTURE_RC" ;;
+    report)  echo "$STUB_TOOL_REPORT_LINE";  exit "$STUB_TOOL_REPORT_RC" ;;
+  esac
+  exit 9
+fi
 case "$2" in
   run)
+    # Order markers: which leg the fold ran first is clause 2's claim, and the only honest
+    # witness of a sequence is a log written by the things in the sequence.
+    [[ -n "${STUB_ORDER_LOG:-}" ]] && echo "prose-run" >> "$STUB_ORDER_LOG"
     # A real `run` that refuses writes NOTHING: main() raises ProbeRefused before
     # write_record, so it prints no `wrote` line. Emitting one while exiting 2
     # would hand the block a record for an arm that has none.
@@ -730,6 +778,7 @@ case "$2" in
     exit "$STUB_RUN_RC"
     ;;
   compare)
+    [[ -n "${STUB_ORDER_LOG:-}" ]] && echo "prose-compare" >> "$STUB_ORDER_LOG"
     echo "reference $4: stub vllm 0.11.2 kv fp8 pool 555776"
     echo "current   /tmp/arm-record.json: stub vllm 0.11.2 kv fp8 pool 555776"
     echo "3 of 21 prompts past their idle floor"
@@ -748,6 +797,15 @@ esac
 exit 9
 """, encoding="utf-8")
     stub.chmod(0o755)
+    if real_tool_probe and tool_stub:
+        # A placeholder at the seam's default path. The fold performs NO existence test of its
+        # own: it reads `ENGINE_TOOL_PROBE` with a default and hands the path to the
+        # interpreter, so the rc 2 the absent-instrument node asserts comes from THIS fake
+        # root's python stub printing python's own missing-file message — an emulation the stub
+        # makes deliberately, not a branch in the fold. (`grep -n ENGINE_TOOL_PROBE` in the
+        # fold names a default and two invocations, and no test.)
+        (root / "eval/tool_call_equivalence_probe.py").write_text("# stub leg\n",
+                                                                  encoding="utf-8")
     body = _canary_block()
     if skip_bench:
         # To the END of the arm script, bench call included: with SKIP_BENCH=1 the
@@ -764,7 +822,7 @@ exit 9
     script.write_text(
         "set -euo pipefail\n"
         f'ROOT="{root}"\n'
-        'LABEL=fp8kv\n'
+        f'LABEL={label}\n'
         + body + '\necho "=== arm $LABEL done ==="\n',
         encoding="utf-8")
     return subprocess.run(
@@ -774,7 +832,31 @@ exit 9
              "LLOYD_DATA": str(tmp_path / "lloyd-data"),
              "TMPDIR": str(tmp_path / "tmpdir"),
              "SKIP_BENCH": "1" if skip_bench else "0",
-             "STUB_EMIT_RECORD": "1" if emit_record else "0"})
+             "STUB_EMIT_RECORD": "1" if emit_record else "0",
+             # Pinned, not inherited-empty. An empty CANARY_WINDOW is NOT a fallback to an
+             # inferred window: `window_id()` (eval/tool_call_equivalence_probe.py:191-199)
+             # returns "", and an empty window filters NOTHING — every arm in the capture
+             # directory would be paired with every other regardless of which boot produced it,
+             # which is the #2683 law with its guard deleted. Pinning a value is what makes the
+             # filter observable; its own node is
+             # `test_two_arms_in_different_windows_are_never_paired`.
+             "CANARY_WINDOW": window,
+             # The leg's probe file exists in the fake root when a node asks for the leg; the
+             # SEAM is a separate knob, because the seam is the claim. With `tool_probe_seam`
+             # off, nothing names the instrument and the fold has to fall back to its own
+             # default — which is the only way to observe that the default resolves under the
+             # same `$ROOT` `ARM_TEST_ROOT` governs rather than under an absolute path.
+             **({"ENGINE_TOOL_PROBE": str(root / "eval/tool_call_equivalence_probe.py")}
+                if (real_tool_probe and tool_probe_seam) else {}),
+             "STUB_ORDER_LOG": str(root / "stub-order.txt"),
+             "STUB_TOOL_EXEC": "1" if engine is not None else "0",
+             "STUB_REAL_PYTHON": sys.executable,
+             "STUB_TOOL_ARGV": str(root / "tool-probe-argv.txt"),
+             "STUB_TOOL_CAPTURE_RC": str(tool_capture_rc),
+             "STUB_TOOL_CAPTURE_LINE": tool_capture_line,
+             "STUB_TOOL_REPORT_RC": str(tool_report_rc),
+             "STUB_TOOL_REPORT_LINE": tool_report_line,
+             })
 
 
 def _canary_scratch(tmp_path: Path) -> list[str]:
@@ -1409,3 +1491,359 @@ def test_the_fp8_refusal_points_at_the_conf_not_a_dated_directory(tmp_path):
         f"the refusal names no source of truth for the FP8 build: {out}"
     assert not re.search(r"vllm[a-z0-9.-]*-\d{4}\b", out), \
         f"the refusal hard-codes a dated venv again: {out}"
+
+
+# ── #3188 clauses 2 and 3: the tool-call leg in the fold ───────────────────────────
+
+#: The line the real probe's `render_report` prints for a window holding two arms, six
+#: same-prompt pairs, one of which differs only in the `file_path` argument. Built here in
+#: the shape the probe builds it, because the fold's contract is to surface THAT line.
+CANARY_TOOL_LINE = (
+    "tool-equivalence: window=W-TEST arms=fp8kv+nvfp4 pairs=6 "
+    "protocol_invalid=0 different_tool=0 args_differ=1 canonically_equal=5 "
+    "split=[tc_read_named_path:Read]")
+
+CANARY_TOOL_CAPTURE_LINE = (
+    "tool-call capture: arm=fp8kv window=W-TEST prompts=6 findings=0 "
+    "out=/home/alansrobotlab/lloyd-data/logs/services/"
+    "flash-next-canary-toolcalls-fp8kv.jsonl")
+
+
+def test_the_fold_asks_the_engine_what_it_decided_after_it_asks_what_it_said(tmp_path):
+    """#3188 clause 2, in the same bash harness as the prose leg: order, seam, and a
+    line that names the prompt that split.
+
+    ORDER FIRST, because it is the clause's word ("after the prose canary"). The witness is
+    `STUB_ORDER_LOG`, which the stub itself writes from each leg's branch — a log written by
+    the things in the sequence, not by the thing that ran them: no reading of the fold's text
+    could tell me the legs were not issued in the other order.
+
+    THE SEAM SECOND, and with nothing exported to set it: `tool_probe_seam=False` means the
+    fold resolves the instrument from its own default, so the argv the leg passed is the only
+    evidence that the default is `$ROOT`-relative and that the `$ROOT` it lands in is the one
+    this test owns — which is what `ARM_TEST_ROOT` is for, and why the leg obeys a fake root
+    instead of the live tree.
+
+    THEN THE LINE, verbatim, in stdout and in the persisted row — and what that claim is NOT:
+    `CANARY_TOOL_LINE` is a fixture this harness's bash stub echoes, so the node pins the fold
+    SURFACING whatever its leg printed, not the shape of the line the probe produces. That is a
+    different boundary, pinned by
+    `test_the_fold_drives_the_real_probe_end_to_end_through_the_seam`. The reason the surfaced
+    form matters at all: the prose canary's verdict is a tier and a count, and a per-tier count on
+    its own is what made the 2026-10-12 `past-floor` row useless for 11 days.
+    """
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=0, real_tool_probe=True,
+                    tool_probe_seam=False, window="W-TEST",
+                    tool_capture_line=CANARY_TOOL_CAPTURE_LINE,
+                    tool_report_line=CANARY_TOOL_LINE)
+    assert r.returncode == 0, r.stderr
+    order = (tmp_path / "fakeroot" / "stub-order.txt").read_text().split()
+    assert order == ["prose-run", "prose-compare", "tool-capture", "tool-report"], order
+
+    argv = (tmp_path / "fakeroot" / "tool-probe-argv.txt").read_text(encoding="utf-8")
+    expected = str(tmp_path / "fakeroot" / "eval/tool_call_equivalence_probe.py")
+    assert expected in argv, (
+        "the tool leg did not resolve its instrument under the test's $ROOT: " + argv)
+    assert "capture --label fp8kv" in argv, argv
+    assert "report --label fp8kv" in argv, argv
+
+    assert CANARY_TOOL_LINE in r.stdout, r.stdout
+    verdict = _canary_verdicts(tmp_path)[0]
+    assert verdict["tool_line"] == CANARY_TOOL_LINE, verdict
+    assert verdict["tool_capture_rc"] == 0 and verdict["tool_report_rc"] == 0, verdict
+    assert verdict["decision"] == "within-floor", (
+        f"the prose verdict must survive the new leg beside it: {verdict}")
+
+
+@pytest.mark.parametrize("capture_rc,report_rc", [
+    (0, 0), (1, 1), (2, 1), (1, 2), (2, 2), (9, 9),
+], ids=["both-clean", "finding-and-finding", "finding-after-instrument",
+        "instrument-after-finding", "both-instrument", "unexpected-code"])
+def test_no_tool_leg_exit_code_costs_an_arm(tmp_path, capture_rc, report_rc):
+    """#3188 clause 3: the leg is non-fatal on the prose probe's exact codes.
+
+    Six cases, and the two axes are crossed on purpose: `capture` can say 1 (a finding about
+    the engine: it called when no call was asked for) while `report` says 2 (the instrument
+    could not decide: only one arm in the window), and either order of severity ends the same
+    way. 9 is in the list because an instrument that crashes must not be able to cost an arm
+    either — clause 3's whole claim is about exit codes the fold did not anticipate.
+
+    The arm's fate is the assertion: rc 0, the prose verdict still computed, and the two tool
+    rcs persisted as numbers rather than folded into the prose decision. A leg that could
+    abort here would silently delete the bf16-vs-fp8 arms this wiring exists to compare — and
+    it is the same shape as `test_the_canary_reports_every_probe_status_and_never_aborts_the_arm`
+    above, which is the clause's own words.
+    """
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=0, real_tool_probe=True,
+                    tool_capture_rc=capture_rc, tool_capture_line=CANARY_TOOL_CAPTURE_LINE,
+                    tool_report_rc=report_rc, tool_report_line=CANARY_TOOL_LINE)
+    assert r.returncode == 0, (capture_rc, report_rc, r.stderr[-600:])
+    verdict = _canary_verdicts(tmp_path)[0]
+    assert verdict["decision"] == "within-floor", (capture_rc, report_rc, verdict)
+    assert verdict["run_rc"] == 0 and verdict["compare_rc"] == 0, verdict
+    assert verdict["tool_capture_rc"] == capture_rc, verdict
+    assert verdict["tool_report_rc"] == report_rc, verdict
+    # The line still surfaces whatever the code: a decision nobody can read is the failure
+    # this whole item was filed over.
+    assert CANARY_TOOL_LINE in r.stdout, (capture_rc, report_rc, r.stdout[-600:])
+
+
+def test_a_fold_with_no_tool_probe_at_all_still_completes_the_arm(tmp_path):
+    """The seam's own job: an absent instrument is a fact the fold reports, not a crash.
+
+    Neither `ENGINE_TOOL_PROBE` nor a file at the default path exists — the state of every
+    checkout before this round, and the state of a checkout that later deletes the module. The
+    leg must then say so, record rc 2 for both subcommands, and leave the prose canary exactly
+    where it was. This node is also why the seam is a variable and not a literal path: a leg
+    that hardcoded its module could not be absent at all.
+
+    The wording the fold uses here is `probe-failed(exit 2)` with the instrument's own first
+    line beside it, which is the same wording an instrument that *ran* and said
+    cannot-decide gets — distinguishable only by rc, and both are 2. That is deliberate: what
+    the fold must never do is decide, from either, that the arm is bad.
+    """
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=0)
+    assert r.returncode == 0, r.stderr
+    assert "tool-call capture: probe-failed(exit 2)" in r.stdout, r.stdout
+    assert "tool-equivalence: probe-failed(exit 2)" in r.stdout, r.stdout
+    assert "tool_call_equivalence_probe.py" in r.stdout, (
+        "the failure line must name the instrument that is missing: " + r.stdout[-500:])
+    assert "engine-output canary: arm fp8kv within-floor" in r.stdout, r.stdout
+    verdict = _canary_verdicts(tmp_path)[0]
+    assert verdict["tool_capture_rc"] == 2 and verdict["tool_report_rc"] == 2, verdict
+    assert verdict["decision"] == "within-floor", verdict
+
+
+def test_the_fold_is_executable_because_its_routes_never_used_the_shell():
+    """#3188 clause 2's file mode, restored after a rebase cost it.
+
+    `git ls-tree` is the only place this fact lives: a worktree file can be 644 while git
+    still records 100755, and the reverse is what bit this round — a resume that rebased the
+    branch carried the fold back to 100644, which no import-based test would ever notice.
+    Both arm routes invoke it as `bash "$CANARY_STEP"`, so an exec bit is not what runs it
+    today; it is what runs it for whoever types the path, and 755 is the mode every other
+    script in `agent-services/bin/` carries. Pin the recorded mode, not the working-copy
+    permission, because the recorded mode is what a landing promotes.
+    """
+    mode = subprocess.run(["git", "ls-tree", "HEAD", "agent-services/bin/flash-next-canary-step.sh"],
+                          cwd=str(ROOT), capture_output=True, text=True,
+                          check=True).stdout.split()[0]
+    assert mode == "100755", (
+        "the fold's recorded mode is " + mode + "; it must stay 100755 like every other "
+        "launcher in agent-services/bin/")
+
+
+# ── #3188: the fold driving the REAL instrument through the seam ─────────────────────
+
+#: The path the second arm answers with on ONE prompt: same key, same shape, a different
+#: value — the only difference that must split a pair on the decision and on nothing else.
+OTHER_STASH_PATH = "/home/alansrobotlab/stash/bge-reranker-fp8/config.json"
+
+
+class StubChatEngine:
+    """A loopback chat-completions server, so the REAL httpx client has something to post to.
+
+    `tests/test_tool_call_equivalence_probe.py`'s `StubEngine` is a client STAND-IN passed in
+    through `client_factory`, which is right for a node about the probe and useless for a node
+    about the fold: the fold spawns a process, so only a real socket can carry that leg. The
+    answer is keyed on the prompt text the request actually carried, which is what makes an
+    off-by-one in the probe's message construction visible rather than invisible.
+    """
+
+    def __init__(self, replies: dict[str, list[tuple[str, str]]]):
+        import http.server
+        import threading
+
+        self.replies = replies
+        self.bodies: list[dict] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length))
+                outer.bodies.append(body)
+                text = " ".join(str(m.get("content") or "")
+                                for m in (body.get("messages") or []))
+                calls = outer.replies.get(text, [])
+                payload = json.dumps({
+                    "id": "chatcmpl-stub", "model": "stub-engine-1",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "tool_calls" if calls else "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "" if calls else "idle",
+                            "tool_calls": [
+                                {"id": f"call_{i}", "type": "function",
+                                 "function": {"name": nm, "arguments": raw}}
+                                for i, (nm, raw) in enumerate(calls)]},
+                    }],
+                }).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):      # a test log is not an operator surface
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return "http://127.0.0.1:%d" % self._server.server_address[1]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+        return False
+
+
+def _tool_answers(path: str, override: tuple[str, str] | None = None) -> dict:
+    """`{prompt text: [(tool, raw arguments)]}` over the committed corpus, one prompt swapped.
+
+    Built from the corpus rather than restated, so editing a prompt moves this instead of
+    stranding the leg on a stale fixture. `override` is the (prompt text, argument value) pair
+    that makes one arm differ on exactly ONE prompt, which is what lets the report name a
+    single split pair instead of every pair in the window.
+    """
+    import eval.tool_call_equivalence_probe as tcp
+    from tests.test_tool_call_equivalence_probe import CORPUS
+
+    answers = {}
+    for spec in tcp.load_corpus(CORPUS)["prompts"]:
+        # A well-behaved engine: it calls on the prompts that ask for a call and declines the
+        # corpus's negative control. Answering the control with a call would be a per-arm
+        # FINDING, which is a different node's subject.
+        if not spec.get("expect_tool_call", True):
+            answers[spec["text"]] = []
+            continue
+        tool = spec["tools"][0]["function"]["name"]
+        answers[spec["text"]] = [(tool, json.dumps({"file_path": path,
+                                                   "tool_name": tool}))]
+    if override is not None:
+        text, value = override
+        tool = answers[text][0][0]
+        answers[text] = [(tool, json.dumps({"file_path": value, "tool_name": tool}))]
+    return answers
+
+
+def _corpus_prompts() -> list[dict]:
+    import eval.tool_call_equivalence_probe as tcp
+    from tests.test_tool_call_equivalence_probe import CORPUS
+
+    return tcp.load_corpus(CORPUS)["prompts"]
+
+
+def test_the_fold_drives_the_real_probe_end_to_end_through_the_seam(tmp_path):
+    """The review's `advisory seam unverified`, closed across the boundary it named.
+
+    Every other node in this file answers the leg with a bash stub echoing a fixture string,
+    which cannot fail for a rendering change, a capture-file bug, or an argv the real module
+    rejects — the fold and the real probe had never run each other. Here the seam path holds a
+    shim onto the REAL `eval/tool_call_equivalence_probe.py`, the fake `python` execs the REAL
+    interpreter, and only the engine is stood in for, by a loopback server the real httpx
+    client posts to. Two arms in ONE window differing on exactly one prompt's argument value is
+    clause 4's shape, and the string asserted below is `render_report`'s own output.
+
+    The first arm's run must also yield the honest one-arm refusal at rc 2 and the second a
+    FINDING at rc 1, with the fold exiting 0 across both: clause 3's two codes, produced by the
+    instrument rather than canned by a stub.
+    """
+    specs = _corpus_prompts()
+    ids = [s["id"] for s in specs]
+    split_spec = specs[0]
+    tool = split_spec["tools"][0]["function"]["name"]
+    shared = "/home/alansrobotlab/lloyd/CHANGELOG.md"
+
+    with StubChatEngine(_tool_answers(shared)) as arm_a, \
+            StubChatEngine(_tool_answers(
+                shared, override=(split_spec["text"], OTHER_STASH_PATH))) as arm_b:
+        first = _canary_run(tmp_path, run_rc=0, cmp_rc=0, engine=arm_a, window="W-FOLD")
+        assert first.returncode == 0, first.stderr[-800:]
+        solo = _canary_verdicts(tmp_path)[0]
+        assert "cannot-decide" in solo["tool_line"], solo
+        assert solo["tool_report_rc"] == 2, f"one arm in a window is not a pair: {solo}"
+
+        second = _canary_run(tmp_path, run_rc=0, cmp_rc=0, engine=arm_b,
+                             window="W-FOLD", label="nvfp4")
+    assert second.returncode == 0, second.stderr[-800:]
+
+    # Every same-prompt pair in the window is counted, including the corpus's negative control,
+    # where BOTH arms declined: `classify` calls two refusals `protocol_invalid` — there is no
+    # decision to compare — and that refusal is itself the honest reading, not a row to hide.
+    # So pairs is the whole corpus, and the one prompt arm B answered on a different path is
+    # `args_differ`, with the remaining tool-requesting prompts `canonically_equal`.
+    pair = _canary_verdicts(tmp_path)[1]
+    head, _, split = pair["tool_line"].partition(" split=")
+    n_declined = len([s for s in specs if not s.get("expect_tool_call", True)])
+    assert head == (f"tool-equivalence: window=W-FOLD arms=fp8kv+nvfp4 pairs={len(ids)} "
+                    f"protocol_invalid={n_declined} different_tool=0 args_differ=1 "
+                    f"canonically_equal={len(ids) - n_declined - 1}"), pair["tool_line"]
+    assert split == f"[{split_spec['id']}:{tool}]", (
+        "the one pair differing only in its path must be named by prompt id and tool name: "
+        + pair["tool_line"])
+    assert pair["tool_report_rc"] == 1, f"a split IS a finding about the engine: {pair}"
+    assert "=== arm nvfp4 done ===" in second.stdout, second.stdout[-400:]
+
+    # Clause 4's conjunction, in the ONE artifact an operator reads: this same verdict row
+    # carries the prose canary's decision AND the decision leg's split. The prose leg says
+    # within-floor (rc 0 on compare) while the tool leg names a pair whose arguments differ —
+    # the two arms printed the same prose and decided differently, which is the whole reason
+    # the leg exists, and no prose canary alone could ever have said it.
+    assert pair["decision"] == "within-floor", pair
+    assert pair["compare_rc"] == 0, pair
+    assert "arm nvfp4 within-floor" in second.stdout, second.stdout[-600:]
+    assert "tool-equivalence: window=W-FOLD" in second.stdout, second.stdout[-600:]
+
+    services = tmp_path / "lloyd-data" / "logs" / "services"
+    assert sorted(p.name for p in services.glob("flash-next-canary-toolcalls-*.jsonl")) == [
+        "flash-next-canary-toolcalls-fp8kv.jsonl",
+        "flash-next-canary-toolcalls-nvfp4.jsonl"]
+    body = (services / "flash-next-canary-toolcalls-nvfp4.jsonl").read_text(encoding="utf-8")
+    assert OTHER_STASH_PATH in body, "the RAW argument string is what a pair is compared on"
+    assert split_spec["text"] not in body, "the capture copied prompt text in"
+
+
+def test_the_fold_leg_writes_the_record_the_probe_owes_per_prompt(tmp_path):
+    """The artifact the fold's leg produces, checked against what the engine answered.
+
+    The prose canary's rows have always come from the real probe; this leg's came from a bash
+    stub, everywhere. So this node reads the file rather than the line: one row per prompt of
+    the committed corpus, in corpus order, naming the tool the engine answered with and the arm
+    and window the fold passed — plus the request the engine actually received, which no bash
+    stub could ever have attested to: a `tools` array and temperature 0 on every post.
+    """
+    specs = _corpus_prompts()
+    ids = [s["id"] for s in specs]
+    # Each prompt of the committed corpus names its OWN tool (`Read`, `Bash`, `fact_get`), so
+    # the expected name is per prompt, not one name for the whole corpus.
+    by_id = {s["id"]: s["tools"][0]["function"]["name"] for s in specs}
+
+    with StubChatEngine(_tool_answers("/home/alansrobotlab/lloyd/CHANGELOG.md")) as engine:
+        r = _canary_run(tmp_path, run_rc=0, cmp_rc=0, engine=engine, window="W-ONE")
+    assert r.returncode == 0, r.stderr[-800:]
+
+    capture = (tmp_path / "lloyd-data" / "logs" / "services"
+               / "flash-next-canary-toolcalls-fp8kv.jsonl")
+    rows = [json.loads(l) for l in capture.read_text(encoding="utf-8").splitlines()]
+    assert [w["prompt"] for w in rows] == ids, "one row per prompt, in corpus order"
+    assert all(w["arm"] == "fp8kv" and w["window"] == "W-ONE" for w in rows), rows[0]
+    called = [w for w in rows if w["n_tool_calls"]]
+    assert [w["prompt"] for w in called] == [i for i, s in zip(ids, specs)
+                                             if s.get("expect_tool_call", True)], called[0]
+    assert all(w["tool_calls"][0]["name"] == by_id[w["prompt"]] for w in called), called[0]
+    assert all(w["flags"] == [] for w in called), (
+        "a well-behaved answer to a prompt that ASKED for a call must carry no finding flag")
+    assert len(engine.bodies) == len(ids), len(engine.bodies)
+    assert all(b["temperature"] == 0 and b.get("tools") for b in engine.bodies), (
+        "the request the fold caused is not the one clause 1 specifies")

@@ -178,6 +178,15 @@ def rs(tmp_path, monkeypatch):
         # redirects the whole store; `_rewrite_live_ledger` writes its temp file beside it,
         # so the graft lands in tmp too.
         ("CEILING_SAMPLES_FILE", "ceiling/ceiling-samples.jsonl", False),
+        # #3188's per-arm tool-call captures. The production root is
+        # `<data root>/logs/services` — two segments — but the mkdir below has no
+        # `parents=True`, so a two-segment name here would raise FileNotFoundError out of
+        # the fixture and take every node in this file with it. The redirected root is
+        # therefore the single segment `services`. It IS created, because the store is a
+        # directory this sweep globs and may unlink from: the absent case is a real state
+        # (a box that has never run the leg) and belongs to its own node, not to the
+        # census every other node reads this fixture's empty directory into.
+        ("CANARY_TOOLCALLS_DIR", "services", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1013,7 +1022,13 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # the live distribution rather than counting the wrong directory.
                           # A `_FILE` and not a `_DIR` because the writer's resolver names
                           # the one file it appends to, exactly like store 15's turns file.
-                          "CEILING_SAMPLES_FILE"}, \
+                          "CEILING_SAMPLES_FILE",
+                          # #3188's capture store is a writable DATA_ROOT directory this
+                          # sweep DELETES files from, which is the exact shape this guard
+                          # exists for: a `CANARY_TOOLCALLS_DIR = Path.home() / ...` added
+                          # beside the others would have an `--apply` unlinking captures
+                          # from outside every root this file holds it to.
+                          "CANARY_TOOLCALLS_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         if name == "INJECTION_CANARY_DIR":
@@ -1854,7 +1869,8 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
 
 def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4 of #2418, carried by #2472, widened by #2615, #2862 and #2924: the skill says 21,
+    """Clause 4 of #2418, carried by #2472, widened by #2615, #2862, #2924 and #3188: the
+    skill says 22,
     and its table's
     rows are the report's lines.
 
@@ -1867,7 +1883,7 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the 21 lines
+    side of the comparison is now the `_store_report` fixture — the 22 lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1880,11 +1896,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 21, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 22, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "21 unbounded-growth stores" in text, (
-        "the skill's description states a store count other than 21")
-    assert "21 in all" in text, "the skill's body states a store count other than 21"
+    assert "22 unbounded-growth stores" in text, (
+        "the skill's description states a store count other than 22")
+    assert "22 in all" in text, "the skill's body states a store count other than 22"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1973,8 +1989,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "eighteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports eighteen stores by design")
+    assert "nineteen store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports nineteen stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2089,7 +2105,7 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # that says "twenty stores are bounded" would otherwise raise
                       # `unrecognised store-count numeral` at the guard instead of being
                       # graded against the twenty the sweep prints.
-                      "twenty": 20, "21": 21, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twenty": 20, "21": 21, "22": 22, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2133,8 +2149,9 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472, widened by #2615, #2862 and #2924: the 21 lines
-    `main()` prints are 21 stores, and the three the loop leaves outside the data root are among them.
+    """#1835 clause 1, carried by #2472, widened by #2615, #2862, #2924 and #3188: the 22
+    lines `main()` prints are 22 stores, and the three the loop leaves outside the data root
+    are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -2143,9 +2160,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 21, (
-        f"the sweep prints {len(_store_report)} store lines, not the 21 its report "
-        f"has had since #2862 added the injection-canary corpus: {_store_report}")
+    assert len(_store_report) == 22, (
+        f"the sweep prints {len(_store_report)} store lines, not the 22 its report "
+        f"has had since #3188 added the canary tool-call captures: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2255,16 +2272,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_nineteen_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees seventeen store
-    lines while the skill says 21 — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees nineteen store
+    lines while the skill says 22 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "21", which makes every sandbox run look like it lost three stores) or the
+    (just "22", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2273,7 +2290,7 @@ def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints seventeen store lines plus one refusal
+    the rule. A refused run therefore still prints nineteen store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2284,7 +2301,7 @@ def test_a_run_outside_the_production_checkout_reports_seventeen_stores_and_one_
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 18, f"a refusal run should report eighteen stores: {report}"
+    assert len(report) == 19, f"a refusal run should report nineteen stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2420,7 +2437,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the seventeen lines below be
+    branch delete it never asked about — which is what lets the nineteen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2496,7 +2513,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 21, (
+    assert len(items) == len(_store_report) == 22, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2525,11 +2542,14 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert "~/lloyd-work" in items[16][1] and "dirs" in items[16][1], items[16]
     assert "automod/*" in items[17][1] and "branches" in items[17][1], items[17]
     assert items[16][0] == 17 and items[17][0] == 18 and items[18][0] == 19, items[16:]
-    # #2924 adds the ceiling sample store as item 21, printed LAST after #2862's canary
-    # at 20. Appending rather than inserting is what keeps every positional pin above
-    # pointing at the store it always named.
+    # #2924 adds the ceiling sample store as item 21, printed after #2862's canary at 20,
+    # and #3188's capture store takes the last slot as item 22. Appending rather than
+    # inserting is what keeps every positional pin above pointing at the store it always
+    # named — which is why a store whose shape resembles the loop's three is still appended.
     assert "ceiling" in items[20][1] and "rows" in items[20][1], items[20]
     assert items[20][0] == 21, items[20]
+    assert "canary" in items[21][1] and "captures" in items[21][1], items[21]
+    assert items[21][0] == 22, items[21]
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
     # both files plus the constant that decides its window, so the description says
@@ -3685,8 +3705,8 @@ def test_the_registration_outcome_is_its_own_count_and_one_state_prints_one_line
     scratch rail and `_branch_line` already read it, and a pending delete that only shows
     up AFTER it happened cannot inform the mode whose whole job is showing an operator
     what they are about to approve. The count is a value inside the reclaimed split, not
-    a twelfth automod line: a new line would move this file's 21-line production census
-    and its 18-line refused census for no operator gain.
+    a twelfth automod line: a new line would move this file's 22-line production census
+    and its 19-line refused census for no operator gain.
     """
     _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
     now = time.time()
@@ -7042,10 +7062,20 @@ def test_the_tool_quality_count_path_has_no_way_to_change_the_store(rs):
         assert tool not in reachable, f"the counting path can reach {tool}; it is reported-only"
     assert "OSError" in code.co_names, (
         "no OSError handler means an absent or unreadable store raises out of the report")
-    tail = Path(_SCRIPT).read_text().split("# Store 17:", 1)[1]
+    # The scan is store 17's SECTION, not everything below its header. Reading "to end of
+    # file" was a fine proxy while store 17 was the last store in the module; #3188 appended
+    # store 20 after it, and a deletion inside store 20 is a store that DELETES by contract —
+    # so the unbounded version started accusing this store of a crime its own docstring
+    # forbids. Bounding at the next store header keeps the claim's teeth exactly where it had
+    # them: a prune added inside store 17's block still trips this line.
+    body = Path(_SCRIPT).read_text().split("# Store 17:", 1)[1]
+    tail = re.split(r"^# Store 1[89]:|^# Store 2\d:", body, maxsplit=1,
+                    flags=re.MULTILINE)[0]
+    assert "def sweep_tool_quality" in tail, (
+        "the scan bounded itself before store 17's own function, so it is checking nothing")
     for spelling in (".unlink(", "rmtree(", ".remove(", ".prune_store("):
         assert spelling not in tail, (
-            f"{spelling} appears below the store's own header; the count-only claim is dead")
+            f"{spelling} appears in the store's own section; the count-only claim is dead")
 
 
 def test_the_tool_quality_window_and_dated_rule_come_from_the_writer(rs):
@@ -7315,8 +7345,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "21 unbounded-growth stores" in front, front[:200]
-    assert "21 in all" in text, "the skill's body states a count other than 21"
+    assert "22 unbounded-growth stores" in front, front[:200]
+    assert "22 in all" in text, "the skill's body states a count other than 22"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8390,39 +8420,39 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_second_last_and_the_refused_run_prints_eighteen(
+def test_the_injection_canary_store_prints_second_last_and_the_refused_run_prints_nineteen(
         rs, monkeypatch, capsys):
-    """#2862 clause 4, re-pointed by #2924: a refused run prints eighteen lines and a
-    production run prints 21, with the canary line SECOND-LAST in both.
+    """#2862 clause 4, re-pointed by #2924 and #3188: a refused run prints nineteen lines
+    and a production run prints 22, with the canary line THIRD-LAST in both.
 
-    Second-last is not a demotion, it is the pin that the append order is intact.
+    Third-last is not a demotion, it is the pin that the append order is intact.
     `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
-    enumeration to the printed lines POSITIONALLY, so a store is added at the END and
-    items 1-20 keep the rule they always had; #2924's ceiling sample store took the last
-    slot, which moved the canary from -1 to -2 here and nowhere else. A store inserted in
-    the middle would silently re-point every item at its neighbour's rule, which is the
-    class of drift this file exists to catch — and the positional assert below is what
-    would name it.
+    enumeration to the printed lines POSITIONALLY, so a store is added at the END and the
+    items above it keep the rule they always had: #2924's ceiling sample store took the last
+    slot, which moved the canary from -1 to -2, and #3188's capture store then took the last
+    slot, moving it to -3. A store inserted in the middle would silently re-point every item
+    at its neighbour's rule, which is the class of drift this file exists to catch — and the
+    positional assert below is what would name it.
 
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 18 (21 minus the three automod
-    rungs that collapse into one refusal line) and not 17, and why the line still appears
+    says nothing about it. That is why the count is 19 (22 minus the three automod
+    rungs that collapse into one refusal line) and not 18, and why the line still appears
     after the refusal. The ceiling store answers to `DATA_ROOT` and survives the same
-    guard for the same reason; `test_the_ceiling_sample_store_prints_last_and_survives_the_refusal`
+    guard for the same reason; `test_the_ceiling_sample_store_prints_second_last_and_survives_the_refusal`
     pins that line's own position.
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 21, f"a production run prints 21 store lines: {lines}"
-    assert lines[-2].split(":")[0].strip().startswith("injection-canary corpus"), lines[-2]
+    assert len(lines) == 22, f"a production run prints 22 store lines: {lines}"
+    assert lines[-3].split(":")[0].strip().startswith("injection-canary corpus"), lines[-3]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 18, (
-        f"a refused run prints seventeen store lines plus the refusal: {refused}")
-    assert refused[-2].split(":")[0].strip().startswith("injection-canary corpus"), refused[-2]
+    assert len(refused) == 19, (
+        f"a refused run prints nineteen store lines plus the refusal: {refused}")
+    assert refused[-3].split(":")[0].strip().startswith("injection-canary corpus"), refused[-3]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -8634,24 +8664,221 @@ def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, mo
     assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
 
 
-def test_the_ceiling_sample_store_prints_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_ceiling_sample_store_prints_second_last_and_survives_the_refusal(rs, monkeypatch,
                                                                        capsys):
     """Where the line prints, in both kinds of run.
 
-    Last, because task 79's enumeration is matched to the printed lines POSITIONALLY —
-    appending keeps items 1-20 on their own rules, which is #2862's reason and now #2924's.
+    Second-to-last since #3188 appended a store below it, and last before that: task 79's
+    enumeration is matched to the printed lines POSITIONALLY, so appending keeps items 1-20
+    on their own rules — #2862's reason, #2924's and now #3188's.
     And printed outside the production-checkout refusal, because the store is a data-root
     file: a run from a round's worktree declines the loop's three refs and still bounds this
     one, so a box that only ever runs the sweep from a gate cannot let the store grow past
     the horizon while its report says nothing about it. That is the same argument that put
-    the canary line after the refusal, and it is why the refused run has 18 lines rather than
-    17.
+    the canary line after the refusal, and it is why the refused run has 19 lines rather
+    than 18.
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 21, f"a production run prints 21 store lines: {report}"
-    assert report[-1].split(":")[0].strip().startswith("ceiling sample rows"), report[-1]
+    assert len(report) == 22, f"a production run prints 22 store lines: {report}"
+    assert report[-2].split(":")[0].strip().startswith("ceiling sample rows"), report[-2]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 18, f"a refused run prints eighteen store lines: {refused}"
-    assert refused[-1].split(":")[0].strip().startswith("ceiling sample rows"), refused[-1]
+    assert len(refused) == 19, f"a refused run prints nineteen store lines: {refused}"
+    assert refused[-2].split(":")[0].strip().startswith("ceiling sample rows"), refused[-2]
+
+
+# ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
+#
+# `eval/tool_call_equivalence_probe.py capture` appends one row per corpus prompt to
+# `$LLOYD_DATA/logs/services/flash-next-canary-toolcalls-<arm-label>.jsonl`, once per arm,
+# and `report` appends one row per comparison into the calling arm's file. The fold sends
+# the leg's stdout to /dev/null and always exits 0, so nothing in the arm path removes a
+# capture: the store grows by ROWS (re-arming one label appends to its file) and by FILES (a
+# new arm label is a new file, and the label is free-form operator text —
+# `flash-next-run-arm.sh`'s own usage comment lists `kv-<value>` as a legal shape).
+#
+# The horizon is 14 days and not this file's uniform 30 because a capture answers exactly
+# one question — did two arms inside ONE window decide differently — and `same_prompt_pairs`
+# in the probe refuses to pair records across windows. A file older than the horizon can no
+# longer answer anything that is still obtainable, so deleting it loses no answer.
+
+_CANARY_CAPTURE_PREFIX = "flash-next-canary-toolcalls-"
+
+
+def _capture(rs, label: str, *, rows: int = 2, days: float = 0.0) -> Path:
+    """One arm's capture file inside the fixture's redirected store, aged `days` old."""
+    store = Path(rs.CANARY_TOOLCALLS_DIR)
+    store.mkdir(parents=True, exist_ok=True)
+    f = store / f"{_CANARY_CAPTURE_PREFIX}{label}.jsonl"
+    with f.open("w", encoding="utf-8") as fh:
+        for i in range(rows):
+            fh.write(json.dumps({
+                "prompt_id": f"p{i:02d}", "arm": label, "mode": "capture",
+                "window": "W-TEST", "tool": "write_file",
+                "args": json.dumps({"path": "/tmp/x", "content": "y"}),
+                "ts": "2026-10-23T00:00:00Z"}) + "\n")
+    if days:
+        old = time.time() - days * 86400
+        os.utime(f, (old, old))
+    return f
+
+
+def test_the_capture_store_dry_runs_over_aged_captures_and_leaves_every_byte(rs):
+    """The read-half: the report names the stale captures it will not touch.
+
+    The dry run is the line an operator approves `--apply` against, so it has to name what
+    it is about to remove, and it has to decide from the same read an applied run decides
+    from (#2005/#2006/#2008). Both halves are asserted: the stale count the line reports,
+    and that the bytes are still on disk afterwards — a dry run that reported a delete it had
+    already performed is the failure #2008 is named for.
+    """
+    aged = _capture(rs, "kv-bfloat16", days=40)
+    live = _capture(rs, "kv-float8", days=1)
+    before = (aged.read_bytes(), live.read_bytes())
+
+    p = rs.sweep_canary_toolcalls(False, time.time())
+    line = rs._canary_toolcalls_line(p)
+
+    assert p["files"] == 2 and p["stale"] == 1, p
+    assert p["bytes"] == len(before[0]), p
+    assert "1 would delete" in line, line
+    assert "candidate" in line, f"a dry run must not claim bytes freed: {line}"
+    assert (aged.read_bytes(), live.read_bytes()) == before, "a dry run deleted a capture"
+
+
+def test_the_capture_store_deletes_aged_captures_under_apply_and_keeps_the_rest(rs):
+    """The delete-half, and the reason the glob is prefixed rather than `*.jsonl`.
+
+    Four survivors, one per wrong deletion this store could make:
+    * a capture INSIDE the window — the horizon is the bound, not the sweep's existence;
+    * `flash-next-canary.jsonl`, the PROSE canary's own log in the same directory. It is not
+      this store and matches no rule here; an un-prefixed `*.jsonl` glob would have deleted
+      the file the 2026-10-12 bf16 arm's `past-floor` verdict lives in;
+    * a `.jsonl` whose name does not start with the capture prefix at all, which is the same
+      rule stated as a second name so a rename of the prefix cannot pass this node silently;
+    * the in-window capture's own BYTES: this store unlinks whole files and rewrites none.
+    """
+    aged = _capture(rs, "kv-bfloat16", days=40)
+    live = _capture(rs, "kv-float8", days=1)
+    prose = Path(rs.CANARY_TOOLCALLS_DIR) / "flash-next-canary.jsonl"
+    prose.write_text('{"arm": "kv-bfloat16", "verdict": "past-floor"}\n', encoding="utf-8")
+    alien = Path(rs.CANARY_TOOLCALLS_DIR) / "other-service.jsonl"
+    alien.write_text("not the canary\n", encoding="utf-8")
+    live_bytes = live.read_bytes()
+
+    p = rs.sweep_canary_toolcalls(True, time.time())
+    line = rs._canary_toolcalls_line(p)
+
+    assert p["stale"] == 1 and p["deleted"] == 1, p
+    assert "1 deleted" in line and "freed" in line, line
+    assert not aged.exists(), f"the stale capture survived --apply: {sorted(q.name for q in Path(rs.CANARY_TOOLCALLS_DIR).iterdir())}"
+    assert live.exists() and live.read_bytes() == live_bytes, "an in-window capture changed"
+    assert prose.exists() and alien.exists(), "a prefixed glob deleted a file it does not own"
+
+
+def test_the_capture_store_reports_an_absent_root_and_never_creates_it(rs):
+    """A box that has never run the leg: reported, and left exactly that way (#2354).
+
+    `append_rows` in the probe owns the `mkdir`, and it matters that this sweep does not. A
+    `logs/services` this run created would make the NEXT report read as a store holding zero
+    captures rather than a leg that never ran — the difference between an arm that produced
+    nothing and an arm nobody booted, which is the one distinction the fold's own report line
+    is written to keep.
+    """
+    # The `rs` fixture creates the redirected root (every census node reads an empty store,
+    # not an absent one), so the absent case is injected: the same code path, a root that is
+    # not there — which is the state of a box that has never booted an arm with this leg.
+    store = Path(rs.CANARY_TOOLCALLS_DIR).parent / "no-services-dir"
+    assert not store.exists(), "something created the root this node is about"
+
+    p = rs.sweep_canary_toolcalls(True, time.time(), root=store)
+    line = rs._canary_toolcalls_line(p)
+
+    assert p["present"] is False and p["stale"] == 0, p
+    assert "no capture dir yet" in line, line
+    assert not store.exists(), "the sweep created the store it reported as absent"
+
+
+def test_the_capture_store_holds_a_symlink_and_never_follows_it(rs):
+    """Store 7's rule, applied to a directory this sweep unlinks from.
+
+    The link's target is deliberately named so it does NOT match the capture glob — a
+    `logs/services/operator-notes.jsonl` that happens to sit in the same directory. That is
+    what makes this node about following rather than about ageing: the only glob match is the
+    link, so the only way the sweep could reach the target is through it, and the assertion
+    that the target survives byte for byte is the assertion that it did not. The horizon is
+    forced to 0 so the link is unambiguously due and still not followed, and the count that
+    proves it is `deleted: 0` — a rung that unlinked the link itself would also report 1.
+    """
+    store = Path(rs.CANARY_TOOLCALLS_DIR)
+    store.mkdir(parents=True, exist_ok=True)
+    target = store / "operator-notes.jsonl"
+    target.write_text("not a capture, not this store's\n", encoding="utf-8")
+    link = store / f"{_CANARY_CAPTURE_PREFIX}linked.jsonl"
+    link.symlink_to(target.name)
+    target_bytes = target.read_bytes()
+
+    p = rs.sweep_canary_toolcalls(True, time.time(), max_age_days=0)
+    line = rs._canary_toolcalls_line(p)
+
+    assert p["files"] == 1 and p["stale"] == 0, p
+    assert p["held_link"] == 1 and p["deleted"] == 0, p
+    assert "symlink held" in line, line
+    assert link.is_symlink(), "the link itself was removed"
+    assert target.exists() and target.read_bytes() == target_bytes, (
+        "the sweep followed a symlink and deleted through it")
+
+
+def test_the_capture_store_horizon_is_the_shortest_window_in_the_file(rs):
+    """Why 14 and not 30, held as a value rather than a paragraph.
+
+    A capture pairs only inside one window, so a file's useful life is one boot plus the
+    operator's read of it. 14 is the promotions ledger's window (#2043) and the shortest
+    delete horizon in this file; asserting it is STILL inside the file-store horizon is what
+    stops the number drifting to 30 by imitation — an unnoticed widening would keep a store
+    this sweep exists to bound for twice as long while every line about it kept printing.
+    """
+    assert rs.CANARY_TOOLCALLS_MAX_AGE_DAYS == 14, rs.CANARY_TOOLCALLS_MAX_AGE_DAYS
+    # The `rs` fixture redirects the constant to `tmp_path/services`, so the production ROOT
+    # can only be pinned through the source line that builds it — the route
+    # `test_the_ceiling_sample_store_is_derived_from_data_root` cannot take because its store
+    # is a file whose name survives the redirect. Pinning the exact join is what catches a
+    # `Path.home() / "lloyd-data" / ...` or a literal `/home/…` copy: both keep every node
+    # above green while pointing an `--apply` at a tree no data-root rule governs, which is
+    # the class `test_every_writable_data_root_store_honours_the_resolution_owns` exists for,
+    # and that guard proves only that the NAME is redirected.
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert 'CANARY_TOOLCALLS_DIR = DATA_ROOT / "logs" / "services"' in src, (
+        "the capture store's root is not derived from DATA_ROOT by that exact join, so the "
+        "root an `--apply` unlinks files in is not the root `resolve_data_root` decided")
+    assert "CANARY_TOOLCALLS_MAX_AGE_DAYS = _" not in src.split("def sweep_canary_toolcalls")[0], (
+        "the horizon became a borrowed constant, so a change to another store's window would "
+        "silently widen this one")
+    assert rs.CANARY_TOOLCALLS_GLOB == f"{_CANARY_CAPTURE_PREFIX}*.jsonl", \
+        rs.CANARY_TOOLCALLS_GLOB
+    assert rs.CANARY_TOOLCALLS_MAX_AGE_DAYS <= rs.TASK_LOG_MAX_AGE_DAYS, (
+        "the capture horizon is no longer inside the file-store horizon, so the rationale "
+        "behind 14 — the shortest delete window in this file — is stale")
+
+
+def test_the_capture_store_prints_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+    """Clause 5's report-half: the 22nd line, printed LAST, in both kinds of run.
+
+    Last, because task 79's enumeration is matched to the printed lines POSITIONALLY:
+    appending keeps items 1-21 on the rules each already names, which is #2862's reason,
+    #2924's, and now this store's. And outside the production-checkout refusal, because it is
+    a DATA_ROOT store that deletes — `resolve_data_root` has already decided which tree an
+    `--apply` may reach (#1415), and the guard that stops a round's worktree from deleting
+    the live repo's refs has nothing to say about a log directory. A box whose sweep only
+    ever runs from a gate therefore still bounds it, which is the whole point of registering
+    the store at all: an arm kept off production cannot leave its captures unbounded.
+    """
+    _capture(rs, "kv-bfloat16", days=40)
+    report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
+    assert len(report) == 22, f"a production run prints 22 store lines: {report}"
+    assert report[-1].split(":")[0].strip().startswith("canary tool-call captures"), report[-1]
+
+    refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
+    assert len(refused) == 19, f"a refused run prints nineteen store lines: {refused}"
+    assert refused[-1].split(":")[0].strip().startswith("canary tool-call captures"), refused[-1]
