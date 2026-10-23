@@ -2018,34 +2018,107 @@ def test_the_census_definition_is_not_the_tier_predicate_and_not_durable_externa
 
 
 @pytest.mark.asyncio
-async def test_the_pilot_source_is_no_longer_co_present_and_the_report_still_lists_the_rest():
-    """Clause 1 + (b): the pilot left the named list; nobody else did, and the table
-    still says so.
+async def test_the_reverted_video_turn_is_co_present_by_decision_and_the_report_still_lists_the_rest():
+    """#3201 clause 4: the pilot's row is REPUBLISHED, not deleted.
 
-    The pilot's own row is the item's deliverable, so it is asserted against the
-    LIVE compile and not the fixture — a fixture edit could otherwise make the
-    pilot look fixed while the dispatcher still pairs the two halves. The other
-    twelve rows are the point of reporting rather than whitelisting: they stay in
-    the list, by name, until somebody splits them.
+    This node used to assert `row["co_present"] is False` for `youtube-digest`, which is
+    the state the #2932 split bought. #3201 took the split back out of the live video
+    path, so the honest row is `True`, and the point of republishing it here rather than
+    re-recording a fixture and moving on is that the co-presence must be **named as a
+    decision** in the file that measures it. The measurement that justified the revert
+    (backlog #3201, 2026-10-23T17:35Z): the pilot ran 85 failed / 47 success — 64%
+    failure against a 16% pre-split baseline — because stage A ends on its RESULT schema
+    block without re-emitting the `## NOTE_DOCUMENT` fence, and 79 rows carry
+    `meta_json.handoff_refusal` = `handoff_missing_field:note_document`, 21 of them in
+    the 24 h before that reading. Adherence 36 dispatches to 79 refusals = 0.31.
+
+    So: one dispatch context holds `Write`/`vault_write` beside `http_fetch`/`http_search`
+    again, until a two-stage re-attempt shows >=0.95 adherence over >=20 runs
+    (`youtube_digest.HANDOFF_REATTEMPT_BAR`). The risk the split closed is NOT closed by
+    this node — it is reopened, here, by name. Asserted against the LIVE compile, as it
+    always was: a fixture edit alone must not be able to state either verdict.
+
+    The twelve OTHER co-present sources are the reason this is a report and not a
+    whitelist. They are asserted against the committed fixture's own list, so a census
+    that quietly stopped naming the unsplit fleet fails here instead of reading clean.
     """
     live = _co_census()
+    committed = json.loads(CO_FIXTURE.read_text())
 
     row = live["sources"][youtube_digest.NAME]
-    assert row["co_present"] is False, (
-        f"the pilot still holds both halves: durable={row['durable_writes']} "
-        f"egress={row['egress_reads']}")
-    assert not (_durable_write_names(_reach_after(
-        youtube_digest.reader_run_options()))) or not _egress_names(_reach_after(
+    single = row["envelopes"]["video-single-turn"]
+    assert row["co_present"] is True, (
+        f"the census says the reverted video turn is NOT co-present "
+        f"(durable={single['durable_writes']} egress={single['egress_reads']}): either "
+        "the revert lost the note write, or this node's premise moved — re-measure it, "
+        "do not flip the flag")
+    assert single["durable_writes"] and single["egress_reads"], (
+        f"the label this item reverted to is not the co-present shape: {single}")
+    assert youtube_digest.NAME in committed["co_present_sources"], (
+        "the committed report does not name this source as co-present, so a reader of "
+        "the fixture would conclude the split is still live")
+    # The stage the split left behind is still split-shaped: nothing here quietly
+    # un-denied stage A while the pilot's machinery stayed defined.
+    assert not _durable_write_names(_reach_after(
         youtube_digest.reader_run_options())), (
-        "one of stage A's two compiled envelopes still pairs the halves")
+        "stage A's compiled envelope gained a durable writer, so the machinery kept "
+        "for the re-attempt is no longer the machinery #2932 built")
 
     others = [s for s in live["co_present_sources"] if s != youtube_digest.NAME]
-    assert others, (
-        "no source besides the pilot is listed: the census has begun suppressing the "
-        "unsplit fleet instead of reporting it")
+    assert others == [s for s in committed["co_present_sources"]
+                      if s != youtube_digest.NAME], (
+        f"the live list of unsplit co-present sources disagrees with the report: "
+        f"live={others}")
+    assert len(others) == 12, (
+        f"expected the 12 co-present sources #2932 left unsplit, got {len(others)}: "
+        f"{others}")
     assert "deep-research" in others, (
         "deep-research holds browser_* beside vault_write/fact_add at triage and must "
         "stay named until someone splits it")
+
+
+def test_the_reverted_video_envelope_keeps_the_note_write_and_loses_the_same_verbs_as_always():
+    """#3201 clause 2: what the reverted single turn can actually reach.
+
+    Compiled from THIS module's own options builder — `youtube_digest.video_run_options()`
+    is the same call `execute()` spreads into `run_prompt_in_session` — and then put
+    through the real `_pre_dispatch` gate. Nothing here copies a deny list into the test:
+    a copied list would keep passing after a change to `DISALLOWED`, which is the exact
+    drift #2269 was filed for.
+
+    Both directions are the clause. `Write` and `vault_write` must be REACHABLE: the
+    revert exists because the pilot's reader stage could not land the note the digest
+    had already written, so a single turn that cannot write is a job that digests
+    nothing. And `Bash`, `Edit` and `Task` must still be refused by name — a revert that
+    restored the write by widening the deny list would trade 79 refusals for a turn that
+    can edit code. `http_fetch`/`http_search` stay reachable too: that is the
+    co-presence the node above records as accepted, not something this node hides.
+    """
+    opts = youtube_digest.video_run_options()
+    reach = _reach_after(opts)
+
+    for name in ("Write", "vault_write"):
+        assert name in reach, f"{name} unreachable: the reverted turn cannot write its note"
+        assert _dispatch(opts, name) is None, (
+            f"{name} is refused at the gate although the compile reached it")
+    for name in ("Bash", "Edit", "Task"):
+        assert name not in reach, f"{name} is reachable on a digest turn"
+        refused = _dispatch(opts, name)
+        assert refused is not None, f"{name} would dispatch on a digest turn"
+        assert name in str(getattr(refused, "data", refused)), (
+            f"{name} was refused by something other than the deny list — the message "
+            "names the rule that fired, and it should name this one")
+
+    # The egress half of the accepted co-presence, stated rather than assumed.
+    assert sorted(_egress_names(reach)) == ["http_fetch", "http_search"], (
+        f"the video turn's egress reach moved: {_egress_names(reach)} — this item's "
+        "decision is about these two verbs beside the note write, so a change here is a "
+        "different decision, not the same one")
+    # And the envelope the dispatch carries is the one the census compiles, so the row
+    # in the committed fixture describes the turn that actually runs.
+    assert sorted(set(youtube_digest.DISALLOWED)) == sorted(
+        set(youtube_digest.TURN_ENVELOPES["video-single-turn"])), (
+        "the published single-turn envelope is no longer this source's own deny set")
 
 
 def test_the_census_reads_its_envelopes_from_the_module_and_narrows_nothing_behind_them():
@@ -2070,8 +2143,19 @@ def test_the_census_reads_its_envelopes_from_the_module_and_narrows_nothing_behi
     live = _co_census()
 
     narrowing = live["sources"][youtube_digest.NAME]["narrowing"]
+    # Four labels since #3201: the pilot's two stages stay published (their machinery
+    # stays defined for a >=0.95-adherence re-attempt), the paper turn is untouched, and
+    # `video-single-turn` is the one the live video path dispatches. A fifth label with
+    # no call site, or a call site naming a label that is not here, fails two lines
+    # below — this list is the census's denominator, not its opinion.
     assert narrowing["envelopes"] == sorted(youtube_digest.TURN_ENVELOPES) == [
-        "paper-note-turn", "stage-a-reader", "stage-b-writer"], narrowing
+        "paper-note-turn", "stage-a-reader", "stage-b-writer",
+        "video-single-turn"], narrowing
+    assert narrowing["dispatch_sites"] == 7, (
+        f"this module narrows {narrowing['dispatch_sites']} turns; the row describes "
+        "7 (video, reader/writer/paper option builders, the paper turn, the writer "
+        "stage) — a site that appeared or vanished changes what the row is a statement "
+        "about, and the committed fixture has to be re-recorded, not edited")
     assert narrowing["unmeasured_sites"] == [], (
         f"youtube-digest narrows a turn no row measures, at line(s) "
         f"{narrowing['unmeasured_sites']}: the row would read clean over a shape the "

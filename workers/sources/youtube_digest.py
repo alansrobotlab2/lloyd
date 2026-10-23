@@ -1075,7 +1075,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     tracked = await asyncio.to_thread(tracked_items)
     try:
         prompt = await asyncio.to_thread(build_prompt, meta, tracked)
-        prompt = prompt + _stage_a_footer(note_path)
     except SkillProtocolMissing as exc:
         # The protocol lives in the vault skill now (#737), so a deleted or
         # emptied skill leaves this dispatch holding a bundle and no
@@ -1093,8 +1092,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             source=NAME,
             max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
             priority=1,
-            # Stage A of #2932: the digest's own deny plus every durable writer.
-            extra_disallowed=list(TURN_ENVELOPES["stage-a-reader"]),
+            # #3201 reverted the #2932 two-stage pilot on this path: one turn, on the
+            # digest's own deny — the set this source shipped before the split. The
+            # label is published rather than `list(DISALLOWED)` so the census in
+            # `tests/test_worker_capability_allowlist.py` compiles this exact shape.
+            extra_disallowed=list(TURN_ENVELOPES["video-single-turn"]),
             final_schema=RESULT_SCHEMA if want_structured else None,
             final_schema_prompt=(
                 "Restate the RESULT block above as a single JSON object "
@@ -1123,74 +1125,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     verdict_meta = {"verdict_source": parsed["source"] if parsed else "none",
                     "structured_error": structured_error,
                     **await asyncio.to_thread(reconcile_fact_writes, session_id, "")}
-    # ── 2b. The handoff and stage B (#2932) ───────────────────────────────────
-    # Stage A had no write tool, so the document it was asked to emit travels as a
-    # named artifact and a second turn lands it. The order below is the point: the
-    # artifact is written, then RE-READ and re-validated, and only then is the writer
-    # dispatched — so a refusal costs one session, not a bad file. Everything after
-    # this block is the pre-split code unchanged: `--mark-note`, `_note_is_real`,
-    # `_record_published` and the RESULT-block reconciliation now judge stage B's
-    # output, which is why the pilot must not need a new on-disk check.
-    #
-    # Only a turn that CLAIMS it wrote the note gets a writer stage. A `kept` or
-    # `failed` turn falls through to the disk checks below exactly as it did before.
-    stage_b_meta: dict[str, Any] = {}
-    if parsed and parsed.get("result") == "written":
-        handoff_path, refusal = await asyncio.to_thread(
-            write_handoff, video_id,
-            _stage_b_payload(meta, note_path, _note_document(text),
-                             str(parsed.get("verdict") or ""),
-                             parsed.get("relevance")))
-        stage_b_meta = {"handoff_path": str(handoff_path)}
-        if not refusal:
-            _payload, refusal = await asyncio.to_thread(read_handoff, video_id)
-        if refusal:
-            # The shape of the pre-split message is kept (`without a note` at the
-            # path), because that is what a reader of `runs.summary` has been
-            # matching for a year; what it now adds is WHY, which used to be
-            # unknowable — the turn said `written` and nothing was on disk.
-            why = (f"turn ended ({run.get('stop_reason')}, {run.get('num_turns')} "
-                   f"iterations) without a note at {note_path.name} "
-                   f"(handoff refused: {refusal})")
-            await _fail(channel, video_id, why)
-            return {"status": "failed",
-                    "summary": f"{channel} {video_id}: {_one_line(why)}",
-                    "response": text,
-                    # `stop_reason` and `empty_response` ride along because the
-                    # pre-split no-note failure carried them, and the readers of
-                    # `runs.meta_json` — the failure-ledger rollup above all — group
-                    # this row with that one.
-                    "meta": {**base_meta, "session_id": session_id,
-                             "stop_reason": stop_reason,
-                             "empty_response": not text.strip(),
-                             "handoff_refusal": refusal, **stage_b_meta}}
-        try:
-            writer_run = await _run_writer_stage(
-                _payload, handoff_path,
-                max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
-                title=f"{meta.get('channel_name', channel)}: {title[:52]}", priority=1,
-                item_id=item.id)
-        except DrainActive as exc:
-            # The writer never got to run: the artifact is on disk and the row is not
-            # counted, so the retry lands the same document rather than re-reading it.
-            return {"status": "skipped",
-                    "summary": f"landing in progress: {_one_line(exc)}",
-                    "meta": {**base_meta, "drain_active": True, **stage_b_meta}}
-        except Exception as exc:  # noqa: BLE001 — a crashed writer is a failed run
-            logger.exception("youtube-digest: stage B crashed for %s %s", channel, video_id)
-            await _fail(channel, video_id, f"writer stage crashed: {exc}")
-            return {"status": "failed",
-                    "summary": f"{channel} {video_id}: writer stage crashed: "
-                               f"{_one_line(exc)}",
-                    "meta": {**base_meta, "writer_crashed": True, **stage_b_meta}}
-        stage_b_meta.update({"stages": 2, "writer_session_id": writer_run.get("session_id"),
-                             "writer_turns": writer_run.get("num_turns"),
-                             "writer_stop_reason": writer_run.get("stop_reason")})
-
+    # 2b was the #2932 handoff and writer stage. It is gone (#3201): see the block
+    # above `TURN_ENVELOPES` for why, and for what stays defined for a re-attempt.
+    # Disk decides below, exactly as it did before the split — `_note_is_real`,
+    # `_record_published` and the RESULT-block reconciliation judge the one turn
+    # that wrote the note.
     on_disk = await asyncio.to_thread(_note_is_real, note_path, video_id)
-    # Measured across BOTH stages now: a vault path that moved during either
-    # turn is unexpected, and stage B is exactly the stage whose writes must
-    # be the note and nothing else.
     unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
 
     # 3a. An infra-shaped turn: no text and no stop reason means the harness
@@ -1294,10 +1234,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         bits.append(f"claimed #{eval_result['filed_unverified']} (unverified)")
     elif eval_result.get("duplicate_of"):
         bits.append(f"duplicate of #{eval_result['duplicate_of']}")
-    if stage_b_meta.get("stages") == 2:
-        # Says out loud, in the row a human reads, that the file on disk came from
-        # the writer stage rather than from the turn that read the transcript.
-        bits.append("note landed by the writer stage")
     if parsed and parsed.get("result") == "kept":
         bits.append("note kept")
     if papers_meta.get("papers_registered"):
@@ -1314,19 +1250,38 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "response": text,
         "meta": {**base_meta, "session_id": session_id, "note": str(note_path),
                  "stop_reason": run.get("stop_reason"), "num_turns": run.get("num_turns"),
-                 # `stages: 2`, the artifact path and stage B's turn count. Readable
-                 # after the fact, which is what owed clause 1 needs: "zero production
-                 # refusals on the writer stage" is a query over these keys.
+                 # No `stages`, no `handoff_path`, no `writer_session_id`: the note on
+                 # disk came from this one session. #3201's owed clause is a query over
+                 # exactly this — `meta_json.handoff_refusal` must never appear again.
                  "eval": eval_result, "unexpected_vault_writes": unexpected,
-                 "parsed": parsed is not None, **verdict_meta, **papers_meta,
-                 **stage_b_meta},
+                 "parsed": parsed is not None, **verdict_meta, **papers_meta},
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# The two-stage split (#2932): a reader stage with no durable write, a writer
-# stage with no ingest reach.
+# The two-stage split (#2932), REVERTED out of the live video path by #3201.
 #
+# The idea stays worth having, so nothing below is deleted: `TURN_ENVELOPES`,
+# `write_handoff`/`read_handoff`, `_stage_a_footer`, `_stage_b_prompt`,
+# `_run_writer_stage` and `reader_run_options`/`writer_run_options` remain defined and
+# unit-tested, for the re-attempt named by `HANDOFF_REATTEMPT_BAR`. What is NOT any
+# more is a call from `execute()`: the video turn is one session again, on
+# `TURN_ENVELOPES["video-single-turn"]`, and it writes its own note.
+#
+# Why it came out, measured over `workers.db` on 2026-10-23T17:35Z (backlog #3201):
+# the pilot's source ran 85 failed / 47 success (64% failure) after it landed on
+# 2026-10-17 against 45 failed / 237 success (16%) before; all 79 rows carrying
+# `meta_json.handoff_refusal` are `handoff_missing_field:note_document`, and 21 of
+# them landed in the 24 h before that measurement. The mechanism is prompt adherence,
+# not a caught injection: `_note_document` requires stage A to re-emit its whole note
+# inside a `## NOTE_DOCUMENT` fence, and a turn that ends on the RESULT schema block
+# without the fence is counted as a failed digest. Adherence was 36 stage-B dispatches
+# against 79 refusals — 31%. A live path that converts a format miss into a poisoned
+# queue row is worse than the co-presence it removed, so the co-presence is accepted
+# for now: the video turn again holds `http_fetch`/`http_search` beside `Write` and
+# `vault_write`, and the census says so by name.
+#
+# ── The original #2932 rationale, kept because the risk it names is still open ──
 # #2269 gave this source a capability allow-list, which narrows WHICH tools a
 # source can reach inside ONE turn, and its own residual-risk paragraph named what
 # that leaves behind: "an untrusted-ingest turn that legitimately must write durably
@@ -1426,8 +1381,26 @@ _STAGE_B_DENY = _EGRESS_DENY | frozenset({
 #: here. Without that, the table could record a split source as fixed while a third
 #: shape it never measured still paired the halves — the exact way the first version
 #: of this file got it wrong with the paper turn.
+#: What the two-stage video path must show before it may go back into `execute()`.
+#: The pilot's measured adherence was 0.31 (36 stage-B dispatches against 79
+#: `handoff_missing_field:note_document` refusals, 2026-10-17→2026-10-23); the bar is
+#: 0.95 over at least 20 runs, which is the point where a format miss stops being the
+#: majority outcome. Recorded in code because a re-attempt is written by someone who
+#: reads this file, and #3201's review of that round starts here.
+HANDOFF_REATTEMPT_BAR: dict[str, float | int] = {
+    "measured_pilot_adherence": 0.31,
+    "min_adherence": 0.95,
+    "min_runs": 20,
+}
+
 TURN_ENVELOPES: dict[str, tuple[str, ...]] = {
-    #: Stage A of the video path: reads the transcript, keeps egress, no durable writer.
+    #: The video path as #3201 reverted it: one turn, the digest's own deny, and it
+    #: writes its own note. Same SET as the module's `DISALLOWED` — it is published
+    #: under a label only because `_site_measured` in
+    #: `tests/test_worker_capability_allowlist.py` refuses a bare `list(DISALLOWED)`
+    #: from a module that publishes envelopes, and the row must describe this shape.
+    "video-single-turn": tuple(sorted(set(DISALLOWED))),
+    #: Stage A of the reverted pilot: reads the transcript, keeps egress, no durable writer.
     "stage-a-reader": tuple(sorted(set(DISALLOWED) | _STAGE_A_EXTRA_DENY)),
     #: Stage B: lands the validated note, no egress verb at all.
     "stage-b-writer": tuple(sorted(set(DISALLOWED) | _STAGE_B_DENY)),
@@ -1469,6 +1442,21 @@ HANDOFF_SCHEMA_VERSION = 1
 #: harmless.
 _NOTE_FENCE_RE = re.compile(
     r"(?m)^##\s*NOTE_DOCUMENT\b[^\n]*\n+```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def video_run_options(cfg: dict | None = None, max_turns: int | None = None):
+    """The live video turn's options as #3201 reverted them: the digest's own deny.
+
+    One route into `_worker_run_options` per turn shape, so a test asks what THIS module
+    compiles rather than copying a deny list into the test — which is how clause 2 of
+    #3201 is measured. `Write`, `vault_write` and the backlog writers stay reachable
+    beside `http_fetch`/`http_search`: that co-presence is the cost of the revert, and
+    the census names this source for it.
+    """
+    cfg = cfg or {}
+    return _worker_run_options(
+        int(max_turns or cfg.get("max_turns") or 40), source=NAME,
+        extra_disallowed=list(TURN_ENVELOPES["video-single-turn"]))
 
 
 def reader_run_options(cfg: dict | None = None, max_turns: int | None = None):

@@ -93,49 +93,29 @@ class _Script:
 def _turn(text: str, *, writes: Path | None = None, video_id: str = "abc123",
           raises: Exception | None = None, stop_reason: str = "stop",
           structured: dict | None = None, structured_error: str = ""):
-    #: The document a two-stage reader hands over: the same bytes the pre-split fake
-    #: wrote to disk, now emitted inside the fenced section stage A is asked for. The
-    #: WRITER stage is the only turn that may put them there (#2932), so `writes=`
-    #: now means "stage B lands this", which is what every node below means by it.
-    document = (f"---\nsegment: knowledge\nvideo_id: {video_id}\n---\n# Note\n\n"
-                + "body " * 200)
+    """A stand-in digest turn. `writes=` means THE TURN ITSELF put the note on disk.
 
-    def reader_text() -> str:
-        """The reader turn's reply with the document AHEAD of the RESULT block.
-
-        The real footer asks for the document as the LAST section; the fake puts it
-        first because `parse_result` reads a field to end-of-text, so a trailing
-        fenced block would be swallowed by `PAPERS:`. The doc-last shape, which is
-        what the reader stage is actually told, is exercised by
-        `test_the_two_stage_pilot_still_leaves_a_note_the_on_disk_check_accepts`.
-        """
-        return ("## NOTE_DOCUMENT\n\n```markdown\n" + document + "\n```\n\n" + text)
-
+    That is what it meant before the #2932 pilot and what it means again after #3201
+    reverted it: the video path is one session and that session holds `Write`. While
+    the pilot was live, `writes=` meant "stage B lands this" and the reader's reply
+    carried the note inside a `## NOTE_DOCUMENT` fence — the shape whose absence, 79
+    times in six days, is why the path came back (`handoff_missing_field:note_document`).
+    The fenced handoff is still exercised, as a unit, by
+    `test_the_two_stage_machinery_is_intact_for_a_reattempt`.
+    """
     async def run(prompt, **kwargs):
-        if writes is not None and Y.HANDOFF_MARK in prompt:
-            # Stage B: the only turn in this file that may put bytes at `writes`.
-            run.stage_b_prompt = prompt
-            run.stage_b_kwargs = kwargs
-            writes.parent.mkdir(parents=True, exist_ok=True)
-            writes.write_text(document, encoding="utf-8")
-            return {"text": "written", "session_id": "20260908_youtubed_ab12",
-                    "stop_reason": "stop", "num_turns": 3, "errors": [],
-                    "structured": None, "structured_error": ""}
-        # The READER turn — the pre-split digest turn — is what `run.prompt` and
-        # `run.kwargs` describe, so every node below still asserts about the
-        # dispatch it was written for. Stage B's own prompt is `stage_b_prompt`.
         run.prompt = prompt
         run.kwargs = kwargs
         if raises is not None:
             raise raises
-        return {"text": reader_text() if writes is not None else text,
-                "session_id": "20260908_youtubed_ab12", "stop_reason": stop_reason,
+        if writes is not None:
+            writes.parent.mkdir(parents=True, exist_ok=True)
+            writes.write_text(f"---\nsegment: knowledge\nvideo_id: {video_id}\n---\n# Note\n\n" + "body " * 200)
+        return {"text": text, "session_id": "20260908_youtubed_ab12", "stop_reason": stop_reason,
                 "num_turns": 9, "errors": [], "structured": structured,
                 "structured_error": structured_error}
     run.prompt = ""
     run.kwargs = {}
-    run.stage_b_prompt = ""
-    run.stage_b_kwargs = {}
     return run
 
 
@@ -1257,7 +1237,15 @@ async def test_a_paper_is_not_charged_for_a_drain_an_outage_or_a_missing_skill(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# #2932 — the digest split into a reader stage and a writer stage.
+# #2932 — the digest split into a reader stage and a writer stage, REVERTED out of
+# the live video path by #3201 on 2026-10-23.
+#
+# The nodes below the pilot's own are unit tests of machinery NO run reaches: the
+# split's deny sets, its artifact validator, its writer prompt and its footer. They
+# stay green because the split is a proposal with a bar on it
+# (`Y.HANDOFF_REATTEMPT_BAR`: >=0.95 handoff adherence over >=20 runs, against the
+# 0.31 the pilot measured), not because the live path uses them. The three nodes
+# named `#3201` pin what the video path does instead.
 #
 # Before this item ONE digest turn held the third-party transcript and the durable
 # writers: its compiled envelope reached `http_fetch` and `http_search` beside
@@ -1452,14 +1440,22 @@ def test_the_writer_prompt_names_the_artifact_and_never_the_bundle_text(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_an_unusable_handoff_fails_the_run_and_dispatches_no_writer(tmp_path, backlog,
-                                                                         monkeypatch):
-    """Clause 4, the fail-closed half: stage A claims it wrote, hands over nothing.
+async def test_a_written_claim_with_no_note_is_the_ondisk_check_and_never_a_handoff_refusal(
+        tmp_path, backlog, monkeypatch):
+    """#3201 clause 1: the turn claims it wrote and put nothing on disk.
 
-    The alternative — write something anyway — is what would make the split a
-    downgrade, so the run must record `failed`, tell the script `--fail`, never
-    dispatch stage B, and leave the target path empty. `--fail` matters as much as
-    the empty file: a claim of `written` with nothing on disk is not a `done` row.
+    This is the exact input that produced the pilot's 79 refusals — a turn whose reply
+    ends on the RESULT block, so no `## NOTE_DOCUMENT` fence exists, so
+    `_handoff_refusal` said `handoff_missing_field:note_document` and a video that was
+    one format miss away from a note became a poisoned queue row (21 of them in the 24 h
+    before 2026-10-23T17:35Z). After the revert the same turn takes the pre-split route:
+    the on-disk check decides, the script is told `--fail`, and the run's `meta_json`
+    carries NO handoff key at all — the failure is the one the source has always
+    reported (`without a note`), not one the pilot invented.
+
+    The assertion that makes this non-vacuous is `"handoff" not in json.dumps(meta)`:
+    `handoff_refusal` set to `""` would pass a `not result["meta"].get(...)` check and
+    would still be the key owed clause 1 counts.
     """
     meta = _meta(tmp_path)
     script = _Script({"ok": True, "meta": meta})
@@ -1481,46 +1477,48 @@ async def test_an_unusable_handoff_fails_the_run_and_dispatches_no_writer(tmp_pa
     result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
 
     assert result["status"] == "failed", result
-    assert len(seen) == 1, "stage B was dispatched on a handoff that handed over nothing"
-    assert "handoff_missing_field:note_document" in str(result["meta"]), result["meta"]
+    assert len(seen) == 1, "a second turn was dispatched to land what the first one wrote"
+    assert "handoff" not in json.dumps(result["meta"], default=str).lower(), result["meta"]
+    assert "without a note" in result["summary"], result["summary"]
     assert script.modes() == ["--fetch", "--fail"], script.modes()
     assert not Path(meta["target_note"]).exists(), "a note was created from no document"
 
 
 @pytest.mark.asyncio
-async def test_the_two_stage_pilot_still_leaves_a_note_the_on_disk_check_accepts(tmp_path,
-                                                                                backlog,
-                                                                                monkeypatch):
-    """Clause 5: the split did not cost the job its deliverable.
+async def test_the_video_path_dispatches_one_turn_that_writes_its_own_note(tmp_path, backlog,
+                                                                          monkeypatch):
+    """#3201 clauses 1 + 2: ONE session, on the published single-turn envelope.
 
-    Checked by the source's OWN `_note_is_real` — `---` front matter, at least
-    `_MIN_NOTE_BYTES` (400) bytes, a `video_id:` line matching the bundle — not by a
-    re-implementation of it, because "safe, and not a digest" is a failure this item
-    must not be able to ship green. Stage A wrote nothing: the file on disk is stage
-    B's, taken from the artifact, and `stages: 2` in the run meta is what the owed
-    7-day census counts refusals over.
+    This is the node the pilot replaced. `execute()` dispatches a video item exactly
+    once, the deny it passes is the label whose set is the module's own `DISALLOWED`,
+    and the note on disk is that one turn's own write — checked by the source's OWN
+    `_note_is_real` (`---` front matter, `_MIN_NOTE_BYTES` (400) bytes, a `video_id:`
+    line matching the bundle), not by a re-implementation of it.
+
+    The envelope claim is measured on the DISPATCHED bytes and on the real
+    `_pre_dispatch` gate over the module's own compiled options, never on a list copied
+    into this file: the pilot's co-presence came back as the price of the revert, so
+    `Write` and `vault_write` must be reachable here while `Bash`, `Edit` and `Task`
+    stay refused — a revert that quietly lost the note write would be a job that digests
+    nothing, and a revert that quietly lost the deny would be the same hole wider.
     """
     meta = _meta(tmp_path)
     target = Path(meta["target_note"])
     script = _Script({"ok": True, "meta": meta})
     prompts: list[str] = []
-    stage_b_kwargs: dict = {}
+    turn_kwargs: dict = {}
 
     async def runner(prompt, **kwargs):
         prompts.append(prompt)
-        if Y.HANDOFF_MARK in prompt:                      # stage B
-            stage_b_kwargs.update(kwargs)
-            from json import loads as _loads
-            art = Y.handoff_dir("abc123") / Y.HANDOFF_FILENAME
-            document = _loads(art.read_text(encoding="utf-8"))["payload"]["note_document"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(document, encoding="utf-8")
-            return {"text": "written", "session_id": "s_b", "stop_reason": "stop",
-                    "num_turns": 3, "errors": [], "structured": None,
-                    "structured_error": ""}
-        return {"text": _reader_text(), "session_id": "s_a", "stop_reason": "stop",
-                "num_turns": 9, "errors": [], "structured": None,
-                "structured_error": ""}
+        turn_kwargs.update(kwargs)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(NOTE_DOC, encoding="utf-8")
+        return {"text": "Done.\n\nRESULT: written\n" + f"NOTE: {target}\n"
+                        "RELEVANCE: 74\nVERDICT: actionable\nAREAS: harness\n"
+                        "SOURCE_KIND: concept\nAPPROACH: recreate\nIDEA: none\n"
+                        "DUPLICATE_OF: none\nFILED: none\n",
+                "session_id": "s_v", "stop_reason": "stop", "num_turns": 9,
+                "errors": [], "structured": None, "structured_error": ""}
 
     monkeypatch.setattr(Y, "_script", script)
     monkeypatch.setattr(Y, "run_prompt_in_session", runner)
@@ -1529,60 +1527,175 @@ async def test_the_two_stage_pilot_still_leaves_a_note_the_on_disk_check_accepts
 
     result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
 
+    # ── one session, and it wrote the deliverable ───────────────────────────────
     assert result["status"] == "success", result
-    assert len(prompts) == 2, "the pilot did not run two stages"
+    assert len(prompts) == 1, f"the video path ran {len(prompts)} sessions, not one"
     assert Y._note_is_real(target, "abc123"), target.read_text(encoding="utf-8")[:200]
     assert len(target.read_bytes()) >= Y._MIN_NOTE_BYTES
-    assert target.read_text(encoding="utf-8").rstrip("\n") == NOTE_DOC.rstrip("\n"), (
-        "stage B altered the document it was handed; it is a writer, not an editor")
-    assert result["meta"]["stages"] == 2 and result["meta"]["writer_session_id"] == "s_b"
-    assert result["meta"]["handoff_path"].endswith("stage-a.json")
-    assert "note landed by the writer stage" in result["summary"]
+    assert "handoff" not in json.dumps(result["meta"], default=str).lower(), result["meta"]
+    assert "note landed by the writer stage" not in result["summary"], result["summary"]
 
-    # The seam, not the fake: every kwarg the writer stage hands the session runner
-    # must be a parameter that helper actually has. Every fake in this file takes
-    # `**kwargs`, so a kwarg the real helper does not accept dispatches green here and
-    # raises `TypeError` on the first production digest — the shape of failure this
-    # item's own risk list says will break first. `finalizer` and `run_options` were
-    # exactly that, and `extra_disallowed` is the one route that reaches
-    # `_pre_dispatch`, so it must carry the same deny `writer_run_options` compiles.
+    # ── the seam: the deny the turn CARRIED is the deny the census measures ──────
+    # Every fake in this file takes `**kwargs`, so a kwarg the real runner does not
+    # accept dispatches green here and raises `TypeError` on the first production
+    # digest — the failure `becda25d` shipped and stage B's node used to pin.
     import inspect as _inspect
 
     from workers.sources._common import run_prompt_in_session as _runner
     params = set(_inspect.signature(_runner).parameters)
-    assert set(stage_b_kwargs) <= params, (
-        f"stage B passes kwargs the runner does not accept: "
-        f"{sorted(set(stage_b_kwargs) - params)}")
-    assert "extra_disallowed" in stage_b_kwargs
-    assert sorted(set(Y.DISALLOWED) | set(Y._STAGE_B_DENY)) == sorted(
-        stage_b_kwargs["extra_disallowed"]), (
-        "the dispatched deny and the measured envelope came apart, so the census is "
-        "describing an envelope no turn uses")
+    assert set(turn_kwargs) <= params, (
+        f"the video turn passes kwargs the runner does not accept: "
+        f"{sorted(set(turn_kwargs) - params)}")
+    assert "extra_disallowed" in turn_kwargs, (
+        "no deny was dispatched at all, which is how a source ends up with the whole pool")
+    assert sorted(turn_kwargs["extra_disallowed"]) == sorted(
+        Y.TURN_ENVELOPES["video-single-turn"]), (
+        "the dispatched deny and the published envelope came apart, so the census row "
+        "describes an envelope no turn uses")
+    assert sorted(set(Y.DISALLOWED)) == sorted(turn_kwargs["extra_disallowed"]), (
+        "the single-turn envelope is no longer the digest's own deny — the revert was "
+        "supposed to restore this source's pre-split set, not invent a narrower one")
 
-    # The same seam one step earlier: the BYTES. `_pre_dispatch` decides what a stage
-    # may reach; the prompt decides what it can read. Asserted at the builder alone,
-    # the split would survive a change that appended the transcript path back onto
-    # stage B's prompt inside `execute` — the review rung named exactly that gap on the
-    # previous round. `prompts` is what `execute` handed the session runner, which is
-    # the object the pool would serialize.
-    stage_b_prompt = next(p for p in prompts if Y.HANDOFF_MARK in p)
-    stage_a_prompt = next(p for p in prompts if Y.HANDOFF_MARK not in p)
-    _assert_writer_prompt_bytes(stage_b_prompt, meta,
-                                Y.handoff_dir("abc123") / Y.HANDOFF_FILENAME)
+    # ── and the envelope those kwargs compile is the one the census measures ─────
+    # The gate itself — `Write`/`vault_write` reachable, `Bash`/`Edit`/`Task` refused —
+    # is `test_the_reverted_video_envelope_keeps_the_note_write_and_loses_the_same_verbs_as_always`
+    # in `tests/test_worker_capability_allowlist.py`, which puts these same compiled
+    # options through the real `_pre_dispatch`. Not here: this node is async, and
+    # `_dispatch` opens its own loop with `asyncio.run`, so the call would raise before
+    # it refused anything (`test_the_paper_turn_keeps_its_note_write_...` is sync for the
+    # same reason). What CAN be checked in-loop is that the kwargs this turn carries
+    # compile to those options, which is the line above.
+    opts = Y.video_run_options()
+    # Subset, not equality: the compiled options also carry the config deny and the
+    # hard bans `_worker_run_options` merges in, so the envelope is the floor of what
+    # the turn may not touch, never the whole of it.
+    assert set(turn_kwargs["extra_disallowed"]) <= {
+        str(n) for n in opts.disallowed_tools}, (
+        "`execute()` dispatches a deny the module's own options builder does not "
+        "compile, so the gate is being measured on an envelope no run carries")
+    assert opts.max_turns == turn_kwargs["max_turns"] == 40, (
+        f"the turn ran {turn_kwargs['max_turns']} iterations under options that say "
+        f"{opts.max_turns}: the deadline the budget anchor warns about and the one the "
+        "pool enforces have come apart")
+    assert opts.priority == turn_kwargs["priority"] == 1, (
+        f"a digest turn would run at priority {turn_kwargs['priority']} while the "
+        "compiled options say otherwise")
 
-    # And stage A has to be TOLD, in the bytes it is dispatched with, that it holds no
-    # write tool. A reader stage whose prompt still says only "write the note" fails
-    # closed on its first production digest with `handoff_missing_field:note_document`
-    # — this item's own named risk, arriving with a green suite.
-    assert "## NOTE_DOCUMENT" in stage_a_prompt, (
-        "stage A was dispatched without being told to emit the document it is the only "
-        "source of")
-    assert meta["target_note"] in stage_a_prompt, (
-        "the reader is not told which file its document is destined for, so it cannot "
-        "produce the note it would have written")
-    assert "NO file-write tool" in stage_a_prompt, (
-        "the deny is invisible to the turn it applies to; a skill body naming `Write` "
-        "then reads as a tool that vanished rather than a split that was declared")
+    # ── the prompt: the digest protocol, and none of the pilot's instructions ────
+    prompt = prompts[0]
+    assert meta["target_note"] in prompt, (
+        "the turn is not told which file to write, so disk cannot decide anything")
+    assert "## NOTE_DOCUMENT" not in prompt and "NO file-write tool" not in prompt, (
+        "the reverted turn was told it holds no write tool while holding one: that is "
+        "the instruction whose non-compliance made the 79 refusals")
+    assert Y.HANDOFF_MARK not in prompt, "a stage-B prompt was dispatched as the digest"
+    assert BUNDLE_PROBE not in prompt, (
+        "raw third-party bundle text reached the dispatched prompt")
+
+
+def test_the_video_path_calls_neither_the_handoff_nor_the_writer_stage():
+    """#3201 clause 1, statically: the live video path cannot PRODUCE a refusal.
+
+    A runtime node shows one run. The clause is about the code: `execute()` must hold no
+    `write_handoff`, `read_handoff`, `_run_writer_stage` call and no `_stage_a_footer`
+    append, because any one of them re-arms a refusal path that today accrues at ~21
+    rows a day. Read off the module's own AST, and scoped to `execute` alone — the
+    pilot's helpers stay defined below it, which is clause 5's separate claim.
+
+    It also pins the one thing a grep cannot: that the single dispatch reads exactly the
+    `video-single-turn` label. A re-split that quietly pointed `execute()` back at
+    `stage-a-reader` would keep this file green while the census row described a shape
+    no live turn ran.
+    """
+    import ast as _ast
+
+    tree = _ast.parse(Path(Y.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body
+              if isinstance(n, _ast.AsyncFunctionDef) and n.name == "execute")
+    called = {(n.func.id if isinstance(n.func, _ast.Name)
+               else getattr(n.func, "attr", None))
+              for n in _ast.walk(fn) if isinstance(n, _ast.Call)}
+    assert not (called & {"write_handoff", "read_handoff", "_run_writer_stage",
+                          "_stage_a_footer", "_note_document", "_stage_b_payload"}), (
+        f"the video path calls the pilot again: "
+        f"{sorted(called & {'write_handoff', 'read_handoff', '_run_writer_stage', '_stage_a_footer'})}")
+
+    dispatches = [n for n in _ast.walk(fn) if isinstance(n, _ast.Call)
+                  and getattr(n.func, "id", None) == "run_prompt_in_session"]
+    assert len(dispatches) == 1, (
+        f"execute() has {len(dispatches)} session call sites; one video, one session")
+    labels = sorted({k.slice.value for call in dispatches for k in _ast.walk(call)
+                     if isinstance(k, _ast.Subscript)
+                     and getattr(k.value, "id", None) == "TURN_ENVELOPES"
+                     and isinstance(k.slice, _ast.Constant)})
+    assert labels == ["video-single-turn"], (
+        f"the video dispatch reads {labels}: the envelope it narrows must be the "
+        "published single-turn one")
+
+
+def test_the_two_stage_machinery_is_intact_for_a_reattempt(tmp_path, monkeypatch):
+    """#3201 clause 5: taken out of the live path, NOT deleted.
+
+    Four things a re-attempt needs, pinned as units now that no run reaches them: the
+    fenced document parses back out of a reader's reply, the artifact round-trips through
+    `write_handoff` → `read_handoff`, the writer stage is dispatched on the deny the
+    census measures and with kwargs the real runner accepts, and `_stage_a_footer` still
+    tells the reader it holds no write tool.
+
+    And the bar, in code rather than in a comment: the pilot's measured adherence was
+    0.31 (36 stage-B dispatches against 79 `handoff_missing_field:note_document`
+    refusals, 2026-10-17→2026-10-23) and no two-stage video path goes back into
+    `execute()` below 0.95 over at least 20 runs. If those numbers move, they move HERE
+    — a re-attempt's reviewer reads this node, not the six days of queue rows.
+    """
+    assert Y.HANDOFF_REATTEMPT_BAR == {
+        "measured_pilot_adherence": 0.31, "min_adherence": 0.95, "min_runs": 20}, (
+        Y.HANDOFF_REATTEMPT_BAR)
+    assert Y.HANDOFF_REATTEMPT_BAR["min_adherence"] > Y.HANDOFF_REATTEMPT_BAR[
+        "measured_pilot_adherence"], "the bar has to sit above the thing it is a bar for"
+
+    # The footer is still the instruction that makes stage A's deny survivable.
+    footer = Y._stage_a_footer(Path("/vault/20260904-second-harness.md"))
+    assert "NO file-write tool" in footer and "## NOTE_DOCUMENT" in footer, footer[:200]
+    assert "/vault/20260904-second-harness.md" in footer, (
+        "the reader is not told which file its document is destined for")
+
+    # The fence parse and the artifact, end to end, on the reply the reader gives.
+    text = _reader_text()
+    assert Y._note_document(text) == NOTE_DOC.rstrip(), (
+        "the fenced document no longer parses; a re-attempt would refuse every run")
+    meta = _meta(tmp_path)
+    payload = Y._stage_b_payload(meta, Path(meta["target_note"]), Y._note_document(text),
+                                 "actionable", 74)
+    monkeypatch.setattr(Y, "handoff_dir", lambda vid: tmp_path / "handoff" / str(vid))
+    path, why = Y.write_handoff("abc123", payload)
+    assert why == "" and path.is_file(), why
+    again, why = Y.read_handoff("abc123")
+    assert why == "" and again["note_document"] == NOTE_DOC.rstrip()
+
+    # The writer stage: the kwargs the runner accepts, and the deny the census measures.
+    seen: dict = {}
+
+    async def runner(prompt, **kwargs):
+        seen.update(kwargs)
+        seen["prompt"] = prompt
+        return {"text": "written", "session_id": "s_b", "stop_reason": "stop",
+                "num_turns": 3, "errors": [], "structured": None, "structured_error": ""}
+
+    monkeypatch.setattr(Y, "run_prompt_in_session", runner)
+    import inspect as _inspect
+
+    from workers.sources._common import run_prompt_in_session as _runner
+    asyncio.run(Y._run_writer_stage(again, path, max_turns=30, title="Discover AI: T",
+                                   priority=1, item_id=1))
+    runner_params = set(_inspect.signature(_runner).parameters)
+    extra = sorted((set(seen) - {"prompt"}) - runner_params)
+    assert not extra, (
+        f"the writer stage passes kwargs the runner does not accept: {extra}")
+    assert sorted(seen["extra_disallowed"]) == sorted(
+        Y.TURN_ENVELOPES["stage-b-writer"]), (
+        "the writer stage's deny and its published envelope came apart")
+    _assert_writer_prompt_bytes(seen["prompt"], meta, path)
 
 
 def test_the_paper_turn_keeps_its_note_write_and_loses_every_egress_verb(tmp_path,

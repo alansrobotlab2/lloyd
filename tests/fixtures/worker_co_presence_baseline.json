@@ -11,7 +11,8 @@
   "failure-ledger",
   "frontend-probe-canary",
   "owed-check",
-  "scheduled-task"
+  "scheduled-task",
+  "youtube-digest"
  ],
  "durable_write_definition": "side_effecting(name) \u222a {Write, Edit, vault_write, automod_vault_land} minus READ_ONLY and the turn-state names (Scratchpad, recall_observation); NOT tool_tier(name) >= 1, which is true for all 147 pool names and would report every source, and NOT durable_external() = TIER2 \u222a TIER3, which excludes Write and vault_write and so cannot see the pilot's own pair. Bash is excluded by name: its tier is the command string (capabilities.py:512-516), which #2932's owed entry 3 rules on.",
  "pool": 147,
@@ -1336,10 +1337,12 @@
    }
   },
   "youtube-digest": {
-   "co_present": false,
+   "co_present": true,
    "declared": true,
    "durable_writes": [
     "Write",
+    "backlog_write_task",
+    "fact_add",
     "fact_relate",
     "vault_write"
    ],
@@ -1372,14 +1375,29 @@
      ],
      "egress_reads": [],
      "reachable": 13
+    },
+    "video-single-turn": {
+     "durable_writes": [
+      "Write",
+      "backlog_write_task",
+      "fact_add",
+      "fact_relate",
+      "vault_write"
+     ],
+     "egress_reads": [
+      "http_fetch",
+      "http_search"
+     ],
+     "reachable": 23
     }
    },
    "narrowing": {
-    "dispatch_sites": 6,
+    "dispatch_sites": 7,
     "envelopes": [
      "paper-note-turn",
      "stage-a-reader",
-     "stage-b-writer"
+     "stage-b-writer",
+     "video-single-turn"
     ],
     "unmeasured_sites": [],
     "unreferenced_envelopes": []
