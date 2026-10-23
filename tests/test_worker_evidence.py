@@ -1294,12 +1294,22 @@ async def test_a_piloted_run_that_asserted_nothing_still_lands_a_bundle_row(
 #  sides); it is pinned there, not here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: A doc-digester state file at fixture size, in the live file's shape: nested
-#: `deployed.<tool>.checked_at`, a `gateway_probe` block, `last_pass_utc` last so
-#: its line ends at the value with no trailing comma. The real
-#: `~/lloyd-data/_pipeline/doc-digester-state.json` is 288 lines / 92,466 bytes
-#: with 11 `checked_at` timestamps; this fixture is the same shape holding 6,
-#: dumped with `indent=2` exactly as the digester writes it.
+#: A doc-digester state file at fixture size, in the SHAPE of
+#: `~/lloyd-data/_pipeline/doc-digester-state.json` — the state file the
+#: doc-digester worker keeps for itself, and where the key paths below come from:
+#: a nested `deployed.<tool>.checked_at`, a `gateway_probe` block, and a `sources`
+#: block of per-collection doc counts. Every property stated next is a property of
+#: THIS fixture, never of that file. The fixture holds `CHECKED_AT_COUNT = 6` of
+#: the `checked_at` keys, is dumped with `indent=2` for the tests below, and has
+#: `last_pass_utc` last in the fixture so that line ends at the value with no
+#: trailing comma. The live file gets no size, no indentation width and no key
+#: order from this note: nothing in this repo writes it — the digester's own tool
+#: call does — so its size and its shape are whatever that run's model wrote, and
+#: they differ next run. #2675 put a line count and a byte count for the live file in
+#: this note, and nine days falsified the size before anyone re-read it.
+#: `test_the_digester_fixture_note_carries_no_live_file_size` is what keeps a new one
+#: out; `test_the_digester_note_numbers_are_measured_from_the_fixture` reads the
+#: fixture's bytes and fails if the counts stated above are no longer what they are.
 DIGESTER_STATE = {
     "deployed": {
         "claude_code_cli": {"checked_at": "2026-10-13T00:38:10Z",
@@ -1395,6 +1405,155 @@ def test_a_dotted_json_key_names_the_nested_value_the_digester_actually_writes(
                         root=digester_state)["status"] == "verified"
     assert verify_claim(claim("deployed.nope.checked_at"),
                         root=digester_state)["status"] == "refuted"
+
+
+def _note_above(module_text: str, name: str) -> str:
+    """The contiguous `#:` comment block immediately above a module-level name.
+
+    `re` is imported here and in the two nodes below rather than at the top of the
+    file: prose citations into this file name line 686 (`architecture/autonomy-jobs.md`
+    twice and `tests/test_autonomy_jobs_doc_claims.py` twice), and a one-line module-level
+    import would move that anchor off the assertion it points at.
+    """
+    import re
+
+    m = re.search(rf"(?:^#:[^\n]*\n)+(?={name} = \{{)", module_text, re.M)
+    assert m, (f"there is no `#:` note block directly above {name}, so a pin about "
+               f"the note above it has nothing to read")
+    return m.group(0)
+
+
+def test_the_digester_fixture_note_carries_no_live_file_size():
+    """Clause 1-3: the note states the fixture's shape and quotes nothing about
+    the live file's size, nesting width or key order.
+
+    Three groups, each with the control that makes its zero meaningful. (1) The note
+    must still say where the shape came from — the live path is named — because the
+    alternative to quoting a live file is not saying nothing about it, it is naming it
+    as the origin and describing only what was copied. (2) The two stale figures the
+    note used to carry are gone and so is the pair that is true of the file today: the
+    check is that a live byte or line count cannot be written here at all, not that
+    those particular digits are absent, which is why the forbidden tokens are built by
+    concatenation and why the general prose form is checked too — a digit glued to the
+    word for a line count or a byte count, which is what a future edit writes when it
+    re-measures the file rather than copying the stale numbers. This file consequently
+    holds no instance of any string it forbids; a pin that spelled one out would fail
+    the repo-wide grep this item's acceptance is measured by, which is precisely how the
+    note it replaces got there. (3) A positive control: the count pattern is handed a
+    count of its own to find, so a zero hit in the note is a checked absence and not a
+    pattern that never matched anything.
+
+    The third clause is the part #2675's note got wrong beyond the two dead numbers.
+    Its `indent=2` and `last_pass_utc` last were written as properties of the live
+    file, and on 2026-10-23 the live file is indented one space per level and its
+    top-level order ends with `sources` — `last_pass_utc` is third of five. Both are
+    true of the fixture, which is dumped with `indent=2` and does have that key last,
+    so the fix is to bind the claims to the fixture rather than delete them. The note's
+    guard is then mechanical: a sentence making an indent or key-order claim, or holding
+    a digit (an issue citation like `#2675` excepted), has to name the fixture as its
+    subject. That admits every true statement about these bytes and refuses every
+    measurement of the live file, which no sentence here can truthfully call a fixture.
+
+    Two controls, because both halves of the check are greps over a slice. The count
+    pattern is handed a count of its own to prove it can find one — a synthetic one, so
+    the pin never touches the runtime data root. And both shape properties are asserted
+    to still be stated somewhere in the note, because a loop over sentences is as green
+    for a note that dropped the claims as for one whose claims are correctly bounded.
+    """
+    import re
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    note = _note_above(src, "DIGESTER_STATE")
+
+    assert "doc-digester-state.json" in note, (
+        "the note no longer names the live file the fixture's shape came from")
+
+    stale = ("288 " + "lines", "92," + "466", "99," + "719", "268 " + "lines")
+    for token in stale:
+        assert token not in note, (
+            f"a live-file size ({token}) is quoted in the note again — that file is "
+            "rewritten by the doc-digester worker's own tool call, so the number is "
+            "true only for the run that wrote it")
+    digits = re.compile(r"\d[\d,]* ?" + "(lines|bytes)")
+    m_digits = digits.search(note)
+    assert m_digits is None, (
+        "the note quotes a byte or line count"
+        + (f" ({m_digits.group(0)!r})" if m_digits else ""))
+    control = digits.search("the real state file is 288 " + "lines")
+    assert control and control.group(0).startswith("288 "), (
+        "the pattern itself cannot match a digit glued to `lines` or `bytes`, so the "
+        "assertion above could never have caught a count — fix the pattern before "
+        "believing the zero hits")
+
+    shape = re.compile("(indent=" + "2" + "|last_" + "pass_utc)")
+    sentences = re.split(r"(?<=[.;])\s+", note.replace("#: ", ""))
+    for token in ("indent=" + "2", "last_" + "pass_utc"):
+        assert token in note, (
+            f"the note no longer states the fixture's {token} property at all, so the "
+            "loop below would pass on a note that had quietly dropped the claim")
+    for sentence in sentences:
+        bare = re.sub("#" + r"\d+", "", sentence)     # issue citations are not counts
+        if (shape.search(sentence) or re.search(r"\d", bare)) \
+                and "fixture" not in sentence.lower():
+            raise AssertionError(
+                "a note sentence makes a size or shape claim a reader will take about "
+                f"the live file without naming the fixture as its subject: {sentence!r}")
+
+
+def test_the_digester_note_numbers_are_measured_from_the_fixture():
+    """The note's three remaining numbers are re-derived from the committed fixture.
+
+    This is the check the old note was written without: it quoted 6 as the fixture's
+    own count and that half happened to be right, but nothing read the bytes to find
+    out, and the same sentence carried two live-file claims that were already wrong.
+    So `CHECKED_AT_COUNT`, the `indent=2` and the `last_pass_utc`-last ordering are
+    each read off `DIGESTER_STATE` here, and the note is required to state what the
+    fixture actually is. `CHECKED_AT_COUNT` and the fixture itself are untouched by
+    this change — clause 4's "behaviourally unchanged" is this node plus
+    `test_an_anchored_pattern_over_the_indented_json_body_is_refuted_and_the_unanchored_one_verifies`,
+    which is the only reader of the constant.
+    """
+    import re
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    note = _note_above(src, "DIGESTER_STATE")
+    assert re.search("(288" + "|" + "268) +(lines|bytes)", note) is None, (
+        "the note already carries a live-file size, which the sibling pin exists to "
+        "refuse; nothing stated here can be true of it")
+    body = json.dumps(DIGESTER_STATE, indent=2)
+
+    assert body.count('"checked_at":') == CHECKED_AT_COUNT == 6, (
+        f"the fixture holds a different number of checked_at keys than the "
+        f"{CHECKED_AT_COUNT} the note states and the tests count")
+    def stated(text, pattern):
+        m = re.search(pattern, text)
+        return None if m is None else m.group(1)
+
+    m_count = stated(note, r"`CHECKED_AT_COUNT = (" + r"\d+" + r")`")
+    assert m_count is not None and int(m_count) == CHECKED_AT_COUNT, (
+        "the note no longer states the fixture's own count, so the number the tests "
+        "rely on is not readable from the fixture's description of itself")
+
+    m_indent = stated(note, "(?:" + "indent=" + r")(\d+)")
+    assert m_indent is not None, "the note no longer says how the fixture is dumped"
+    real_indent = len(body.splitlines()[1]) - len(body.splitlines()[1].lstrip())
+    assert int(m_indent) == real_indent == 2, (
+        f"the note says indent={m_indent} and the fixture is dumped at "
+        f"{real_indent}: the whole point of `^` failing here is that gap")
+
+    doctored = note.replace("CHECKED_AT_COUNT = 6", "CHECKED_AT_COUNT = 7")
+    assert stated(doctored, "`CHECKED_AT_COUNT = (" + r"\d+" + ")`") == "7", (
+        "the extract-and-read helper above cannot pull a number out of a note, so the "
+        "assertion over it is reading a None-shaped nothing rather than the bytes")
+
+    assert list(DIGESTER_STATE)[-1] == "last_pass_utc", (
+        "the note says this key is last so its line has no trailing comma; the "
+        f"fixture's last key is {list(DIGESTER_STATE)[-1]!r}")
+    assert body.splitlines()[-1] == "}"
+    assert f'"last_pass_utc": "{DIGESTER_STATE["last_pass_utc"]}"' in \
+        body.removesuffix("}").rstrip().splitlines()[-1], (
+        "`last_pass_utc` is last but its line no longer ends at the value, so the "
+        "note's reason for putting it there is false")
 
 
 def test_a_json_key_expected_of_the_wrong_json_type_is_refuted_where_the_value_agrees(
