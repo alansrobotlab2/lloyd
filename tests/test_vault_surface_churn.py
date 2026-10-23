@@ -693,15 +693,22 @@ CLAUSES5 = [f"clause {i}" for i in range(1, 6)]
 
 
 def _held_by_head_turn(item_id, *, paths=(TAKEN_PATH,), held_by=None, surface="vault",
-                       review=("pass", MET5), outcome=None, session_id="s"):
+                       review=("pass", MET5), outcome=None, session_id="s",
+                       shortfall=""):
     """#2684's three rows in its own order: the vault review that graded the
     contract, the land that refused with `held_by` because HEAD already held
     every path it named (`ok: false`, no commit, `review: "skipped"` — the
     grader does not run on a refusal), and the finished turn whose
-    `vault_commits` is empty and which opened no round."""
+    `vault_commits` is empty and which opened no round.
+
+    `outcome` stayed unused at `None` for every node written against this helper
+    until #3186, and that default is the whole reason the bug survived its tests:
+    a refused land raises, so a real turn's finished row always reports
+    `acceptance: "not_met"`. #3186's nodes below are the first to hand it that
+    pairing."""
     kind, clauses = review
     _ev(event="vault_review", item_id=item_id, kind=kind, blocking=False,
-        verdict_shortfall="", paths=list(paths), clauses=list(clauses))
+        verdict_shortfall=shortfall, paths=list(paths), clauses=list(clauses))
     _ev(event="vault_land", ok=False, item_id=item_id, commit=None, review="skipped",
         review_reason="the grader does not run on a refusal", paths=list(paths),
         held_by=dict(held_by if held_by is not None else {p: TAKEN_SHA for p in paths}))
@@ -948,6 +955,162 @@ def test_the_short_sha_held_by_carries_is_recorded_as_it_stands(isolated):
     B.reconcile_statuses(S.LEDGER_PATH)
     assert _fm(p)["status"] == "done", "a short sha is still a landing to the reconcile"
     assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
+
+
+# ── #3186: the refusal is also the word that silences the rescue for it ──────
+#
+# The clean-index branch raises (`vault_round.py`'s `_no_change_refusal`), so the
+# finalizer reading that raise has no acceptance word available but `not_met`. The
+# gate in `settled_landings` treated ANY usable non-`met` report as #575's
+# substantiated refusal and skipped the #2691 rescue — so the report the refusal
+# itself produced was the thing that silenced the route built for that refusal.
+# Census over `promotions.jsonl` and its two monthly archives: 53 `vault_land` rows
+# whose error opens `nothing to commit on those paths`, all 53 with a non-empty
+# `held_by`, 24 of them naming a `pre-flight`/`pre-run snapshot` commit — against 3
+# `kind: "held_by_head"` rows in the whole ledger, and four refusals on 2026-10-23
+# with zero rescues. #3182 is the instance: its review graded all five clauses
+# `met` at 07:50:09Z, `64ebdc6a` took both its paths 23 seconds later, its land
+# refused at 07:56:50Z, and `status_moved` in_progress → draft went out at
+# 07:58:25Z with "its one unattended attempt is spent".
+
+#: #3182's two paths, both taken by the same sweep and so both naming one sha —
+#: the shape `held_by_head_landing`'s sha-choice rule was written for.
+TAKEN_PATHS = ("backlog/data/2026-10-16.2836-logs-server.log",
+               "backlog/data/2026-10-16.2836-logs-server.log.md")
+
+#: #3182's finished-turn `outcome` as its `backlog_implement` row carries it:
+#: `acceptance: not_met`, `landed: false`, one row per clause — four `met` and a
+#: fifth whose evidence is the refusal itself. `outcome_carries_no_claim` is False
+#: on it, which is exactly why the gate read it as a refusal about the work.
+LAND_REFUSAL_OUTCOME = {
+    "landed": False, "acceptance": "not_met", "deferred_to": [], "spawned": [],
+    "summary": "the land refused: nothing to commit on those paths",
+    "clause_outcomes": [
+        {"clause": i, "outcome": "met", "deferred_to": [],
+         "evidence": "the extract is on disk and byte-identical to HEAD's blob"}
+        for i in range(1, 5)] + [
+        {"clause": 5, "outcome": "not_met", "deferred_to": [],
+         "evidence": "automod_vault_land raised: nothing to commit on those paths, "
+                     "HEAD already holds them"}]}
+
+
+# ── clause 1: the refusal's own `not_met` does not unmake the landing ─────────
+
+def test_a_land_refusal_that_forced_the_not_met_report_is_still_a_landing(isolated):
+    """#3182's rows read by `settled_landings`, including the outcome its refused
+    land forced onto the turn — the pairing no existing node ever handed the
+    helper, because a refusal raises and the node author had no raise to copy.
+
+    The landing is still the taking sha, still `kind: held_by_head`, and its
+    acceptance comes from the grader that graded the whole contract, not from a
+    report whose only evidence is the refusal this branch exists to look past."""
+    _triaged(isolated, 3182)
+    _held_by_head_turn(3182, paths=TAKEN_PATHS, outcome=LAND_REFUSAL_OUTCOME)
+    assert B.outcome_carries_no_claim(LAND_REFUSAL_OUTCOME) is False, \
+        "the fixture is a USABLE report: that is what made the gate skip it"
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert 3182 in landed, "the rescue fires even though the turn reported not_met"
+    row = landed[3182]
+    assert row["kind"] == B.HELD_BY_HEAD == "held_by_head"
+    assert row["commit"] == TAKEN_SHA, "the taking sha, which is the content on main"
+    assert row["round_id"] == "" and row["vault"] is True
+    assert row["outcome"]["acceptance"] == "met", \
+        "the grader's all-met verdict decides; the turn's word is the refusal's echo"
+    assert [c["clause"] for c in row["outcome"]["clause_outcomes"]] == [1, 2, 3, 4, 5]
+
+
+# ── clause 2: settle-then-reconcile closes it, twice, and writes no draft row ─
+
+def test_the_settle_then_reconcile_closes_the_attempt_and_writes_no_draft_row(isolated):
+    """The consequence #3182 paid: 07:56:50Z refusal, 07:58:25Z `in_progress →
+    draft` with "its one unattended attempt is spent", then a re-triage at
+    08:09:25Z. With the rescue un-silenced the item is `done` on the taking sha and
+    that row is never written — on the first pass or the second."""
+    p = write_item(isolated, 3182, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=3182, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(3182, paths=TAKEN_PATHS, outcome=LAND_REFUSAL_OUTCOME)
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[3182]["closed"] is True, got[3182]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == TAKEN_SHA
+    assert _events("item_landed")[-1]["kind"] == "held_by_head"
+    B.reconcile_statuses(S.LEDGER_PATH)
+    moved = [m for m in _events("status_moved") if m.get("to") == "draft"]
+    assert moved == [], f"a held-by-HEAD close must not spend the attempt: {moved}"
+    assert _fm(p)["status"] == "done"
+
+    # Housekeeping runs this every tick, so the second pass over the SAME ledger
+    # has to leave a closed item closed and still write no draft row.
+    B.close_settled_items(S.LEDGER_PATH)
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert _fm(p)["status"] == "done", "the second pass reopened a closed item"
+    assert [m for m in _events("status_moved") if m.get("to") == "draft"] == []
+    assert B.select_confirmed(S.LEDGER_PATH) is None, "nothing left for a round to take"
+
+
+# ── clause 3: and only beside a verdict that actually graded the contract ─────
+
+@pytest.mark.parametrize("review,shortfall,label", [
+    (("retry", MET5[:4] + [{"clause": 5, "verdict": "partial"}]), "",
+     "a `retry` carrying a `partial` (#2287/#2649)"),
+    (("pass", MET5), "clause 3 has no verdict row",
+     "a `pass` that is not a verdict on this contract"),
+], ids=["retry-partial", "verdict-shortfall"])
+def test_a_forced_not_met_rescues_only_beside_an_all_met_verdict(isolated, review,
+                                                                shortfall, label):
+    """The relaxation is bounded by the predicate, not by the report. Same forced
+    `not_met`, but the newest review is not an all-`met` verdict on the contract:
+    no landing, and the item is still moved to `draft` as spent, exactly as #2287
+    and #2649 were — their spending was correct."""
+    p = write_item(isolated, 3182, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=3182, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _held_by_head_turn(3182, paths=TAKEN_PATHS, review=review, shortfall=shortfall,
+                       outcome=LAND_REFUSAL_OUTCOME)
+    assert B.held_by_head_landing(_events("vault_land") + _events("vault_review"),
+                                  3182, session_id="s") is None, label
+    assert {d["item_id"] for d in B.settled_landings(S.LEDGER_PATH)} == set(), label
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    assert B.implement_outcomes(S.LEDGER_PATH)[3182][0] == "spent", label
+    want = {int(k): v for k, v in B.desired_statuses(S.LEDGER_PATH).items()}
+    assert want[3182][0] == "draft" and SPENT_REASON in want[3182][1], label
+    assert _fm(p)["status"] == "up_next", "left where it is today, not closed on a partial"
+
+
+# ── the boundaries the relaxation must not cross ─────────────────────────────
+
+def test_the_same_report_still_decides_a_committed_vault_landing(isolated):
+    """#575's guarantee, on the branch this change does NOT touch. A landing that
+    made its own commit is still decided by a `not_met` that names its clauses,
+    beside a review that graded all five met — confining the override to the
+    held-by-HEAD branch is the whole difference between this and a rubber stamp."""
+    p = write_item(isolated, 583, clauses=CLAUSES5)
+    _ev(event="backlog_triage", item_id=583, verdict="confirmed", surface="vault",
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+    _vault_turn(583, round_id=None, stop_reason="stop", outcome=LAND_REFUSAL_OUTCOME)
+    assert B.vault_review_outcome(S.LEDGER_PATH, ["588339ab0000"]), \
+        "the review graded all five met; the turn's named refusal still decides"
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 583, "closed": False, "acceptance": "not_met"}]
+    assert _fm(p)["status"] == "up_next"
+
+
+def test_a_report_that_names_ids_or_a_verdict_still_outranks_the_rescue(isolated):
+    """The other word a refusal cannot produce. `deferred` names ids the turn waits
+    on and `unnecessary`/`rejected` are verdicts on the item, none of them the
+    mechanical consequence of a raised land, so all three still silence the rescue
+    — `outcome_carries_no_claim`'s own docstring calls overriding a `deferred`
+    "the one claim this loop cannot take back"."""
+    for word in ("deferred", "unnecessary", "rejected"):
+        write_item(isolated, 3184, clauses=CLAUSES5)
+        _ev(event="backlog_triage", item_id=3184, verdict="confirmed", surface="vault",
+            check="ls", evidence="e", acceptance="a", acceptance_clauses=CLAUSES5)
+        _held_by_head_turn(3184, paths=TAKEN_PATHS,
+                           outcome={**LAND_REFUSAL_OUTCOME, "acceptance": word,
+                                    "deferred_to": [9001] if word == "deferred" else []})
+        assert {d["item_id"] for d in B.settled_landings(S.LEDGER_PATH)} == set(), word
+        assert B.close_settled_items(S.LEDGER_PATH) == [], word
 
 
 # ── #2913: the finish-side reader must not borrow another item's vault landing ─

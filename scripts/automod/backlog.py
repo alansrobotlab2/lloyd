@@ -3974,6 +3974,17 @@ def settled_landings(ledger: Path) -> list[dict]:
     made. `held_by_head_landing` is that predicate, and
     `workers/sources/autocode._vault_landed_since` reads the same one at turn end
     so the close lands before the reconcile on either route.
+
+    **On that branch a `not_met` is not a refusal about the work** (#3186). Every
+    other vault branch lets a usable non-`met` report silence the second reader —
+    #575's guarantee — and this one did too, until it was read that way against the
+    shape it exists for: the held-by-HEAD refusal is a RAISE, so the turn reporting
+    on it can only answer `not_met`, and that answer then vetoed the rescue. Here, a
+    reported `not_met` decides nothing; the grader's all-`met` clause rows, which the
+    predicate has already checked, are what the landing carries. A `deferred`,
+    `unnecessary` or `rejected` report still silences it, because a raise produces
+    none of those, and a `met` report still rides along unchanged. On a landing that
+    made its own commit nothing here moves: #575's guarantee is intact there.
     """
     ungated = ungated_rescued_rounds(ledger)
     settled = {str(d.get("commit") or ""): d
@@ -4074,14 +4085,31 @@ def settled_landings(ledger: Path) -> list[dict]:
                 continue
             held = held_by_head_landing(vault_rows(), int(d["item_id"]),
                                         session_id=str(d.get("session_id") or "") or None)
-            # #575's guarantee holds on this path too: a refusal the turn can
-            # substantiate outranks a second reader's `met`.
-            if held is None or (usable and reported not in (None, "", "met")):
+            # #575's guarantee holds on this path — with the one exception that IS
+            # this branch's own shape (#3186). `_no_change_refusal` RAISES, so the
+            # finalizer reading that raise has no acceptance word available but
+            # `not_met`: #3182's finished row carries `acceptance: not_met`,
+            # `landed: false` and one row per clause — four `met`, and a fifth whose
+            # evidence is the refusal. That report is a claim about the tool call,
+            # and this branch has just proved the tool call wrong (HEAD holds every
+            # named path, the grader graded every clause met), so treating it as
+            # #575's substantiated refusal silenced the rescue for every one of the
+            # 24 refusals in the ledger that name a taking commit — the fall-through
+            # #2691 exists to close, still firing four times on 2026-10-23.
+            # A `deferred` names ids the turn waits on and `unnecessary`/`rejected`
+            # are verdicts on the item: neither is what a raise produces, and all
+            # three still outrank the grader, exactly as before.
+            if held is None or (usable and reported not in (None, "", "met", "not_met")):
                 continue
+            # A `met` report rides along unchanged, as it always did. Anything else
+            # that reaches here is carried by the grading the predicate already
+            # checked clause by clause, because a refused land cannot report the
+            # state of the content — only the state of its own `git add`.
+            carried = outcome if (usable and reported == "met") else held["outcome"]
             out.append({"item_id": int(d["item_id"]), "round_id": "",
                         "commit": held["commit"], "settled_at": d.get("created_at"),
                         "landed_ts": d.get("ts"), "vault": True, "kind": HELD_BY_HEAD,
-                        "outcome": outcome if usable else held["outcome"]})
+                        "outcome": carried})
             continue
         # #1910: the vault branches take `usable`, the same test the code-round
         # path above takes, not the bare truthiness of the reported word. #575's

@@ -274,6 +274,33 @@ def test_a_path_with_no_commit_in_history_is_named_without_a_sha(vault):
         assert git(vault, "cat-file", "-e", tok).returncode == 0, tok
 
 
+def test_a_never_held_path_still_refuses_with_an_empty_held_by_and_no_commit(vault):
+    """#3186 clause 4: the refusal the consumer-side rescue must never reach.
+
+    `held_by_head_landing` reads a refusal's `held_by` as the proof that HEAD holds
+    the round's bytes, so the not-held case has to stay an empty map naming no sha
+    and carrying no `commit` key — a path git has never committed is nothing to be
+    rescued onto, and this item's own fix depends on that staying a refusal. The
+    text still opens with `NOTHING_TO_COMMIT`, which is the substring
+    `scripts/autoresearch/promote.py` matches to classify a repeated undo."""
+    ghost = "backlog/never-committed-item.md"
+    before = len(_events("vault_land"))
+    with pytest.raises(V.VaultRoundError, match="nothing to commit") as got:
+        V.land([ghost], "land a path git has never seen", session_id="sess-3186")
+    text = str(got.value)
+    assert text.startswith(V.NOTHING_TO_COMMIT), text
+    assert "nothing to commit" in text, "promote.py's undo classifier keys on this"
+    rows = _events("vault_land")
+    assert len(rows) == before + 1, f"wrote {len(rows) - before} rows, expected one"
+    row = rows[-1]
+    assert row["ok"] is False and row["session_id"] == "sess-3186", row
+    assert row["paths"] == [ghost], row
+    assert row["held_by"] == {}, "no sha to rescue onto: the map stays empty"
+    assert "commit" not in row, row
+    # git's own answer, not the code's: no commit anywhere in HEAD's history.
+    assert git(vault, "log", "--format=%h", "--", ghost).stdout.strip() == ""
+
+
 def test_a_git_error_is_absence_and_never_a_guess(vault, monkeypatch):
     """The one survivor of a mutant sweep: swap the lookup's `continue` for a placeholder
     and every other node stays green, because on a real tree `_git` never raises. So the
