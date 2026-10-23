@@ -86,6 +86,27 @@ STALE_QUEUED_DAYS = 60
 MIN_NOTE_BYTES = 400
 
 
+def artifact_on_disk(artifact_path: str) -> bool:
+    """Whether a `written` row's `artifact_path` still names a file that is there.
+
+    The read-side twin of `_require_real_note`, and deliberately the weaker test:
+    that one demands at least `MIN_NOTE_BYTES` at the moment a topic settles, this
+    one only asks whether the bytes are present now. A `written` row whose note was
+    truncated in place afterwards is a different finding, and counting it as
+    "missing" would send the reader hunting for a file that is sitting right there.
+
+    A path with no usable form — empty or None, a directory, unreadable, one no
+    syscall accepts (an embedded NUL raises `ValueError`, not `False`) — is "not on
+    disk", the same posture `_require_real_note` takes.
+    """
+    try:
+        return bool(artifact_path) and Path(str(artifact_path).strip()).is_file()
+    except (OSError, ValueError):
+        # OSError: absent, a directory, unreadable. ValueError: a path no syscall
+        # accepts (an embedded NUL), which is also "no note".
+        return False
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS topics (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -607,6 +628,19 @@ class ResearchStore:
         caller's job; the corpus is the exception because its absence is the
         finding, and for four weeks the absence and the never-counted case were
         the same payload (#3046 → #3085).
+
+        `missing_artifacts` is the read-side half of #3190. Before it, disk was
+        consulted for a research note exactly once — at `finish`, by
+        `_require_real_note` — and never again, so a `written` row whose note was
+        deleted or moved afterwards stayed believed forever: this same method
+        reported it as `last_written`, `list()` reported it as settled work, and
+        the only missing-artifact counting on the box (`import_legacy`'s
+        `artifact_found`/`artifact_missing`) covers `archived` legacy rows, whose
+        artifacts are gone by design. #3190's card had no row at all, so nothing
+        ever looked; a card that DOES have a row and then loses its file now
+        shows up here, in the payload `research_stats` returns verbatim. The cost
+        is one `stat()` per `written` row (96 on 2026-10-23), which is why the
+        query names that status and not the table.
         """
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -628,10 +662,22 @@ class ResearchStore:
             last_written = conn.execute(
                 "SELECT topic, artifact_path, finished_at FROM topics "
                 "WHERE status='written' ORDER BY finished_at DESC LIMIT 1").fetchone()
+            # EVERY `written` row's artifact, not only the newest one
+            # `last_written` names: a row that loses its file is a finding at any
+            # age, and the newest note was simply the one row the old payload
+            # happened to look at (#3190).
+            written_artifacts = [r["artifact_path"] for r in conn.execute(
+                "SELECT artifact_path FROM topics WHERE status='written' "
+                "ORDER BY id").fetchall()]
             top_domains = {r["domain"] or "(none)": r["n"] for r in conn.execute(
                 "SELECT domain, COUNT(*) AS n FROM topics "
                 "WHERE status NOT IN ('archived') GROUP BY domain "
                 "ORDER BY n DESC LIMIT 10").fetchall()}
+        # Outside the connection on purpose: these are filesystem `stat()`s, and
+        # holding a read connection across them would make every other writer wait
+        # on the disk instead of on the lock.
+        missing_artifacts = [p for p in written_artifacts
+                             if not artifact_on_disk(p)]
         queued = by_status.get("queued", 0)
         head_age_days = None
         if oldest:
@@ -652,6 +698,11 @@ class ResearchStore:
             "head_age_days": head_age_days,
             "stale_queued": stale_n,
             "last_written": dict(last_written) if last_written else None,
+            # Always a mapping with both keys, so "nothing is missing" is `count: 0`
+            # and never an absent key — the #3085 rule, learned on the dedup corpus
+            # whose disappearance read as a payload that never mentioned it.
+            "missing_artifacts": {"count": len(missing_artifacts),
+                                  "paths": missing_artifacts},
             "domains": top_domains,
         }
 

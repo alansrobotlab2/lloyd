@@ -122,7 +122,7 @@ appears in this table: those threats are in the next one.
 | T-03 | B6 | T | A turn runs a denied shape on a path that never installed the hook | `agent_mcp/main.py:531` |
 | T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py:171` |
 | T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:238` |
-| T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1661` |
+| T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1709` |
 | T-07 | B7 | E | The one exempt write lane commits bytes no loader validated | `scripts/automod/vault_round.py` |
 | T-08 | B7 | I | A vault write copies a credential into a file the sync client pushes | `app/harness/outbound_content.py:526` |
 | T-09 | B3 | T | A durable memory line becomes an instruction every later turn obeys | `app/prompt_surface.py` |

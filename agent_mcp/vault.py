@@ -1651,6 +1651,54 @@ def _guard_knowledge_domain(path: str, content: str) -> tuple[str, dict | None, 
     return rewritten, None, replaced
 
 
+def _guard_research_route(path: str, content: str) -> dict | None:
+    """Refuse a ``pipeline: research`` note landing outside ``knowledge/research/``.
+
+    The write half of #3190, and the same predicate the Write/Edit lane asks
+    (`agent_mcp/builtin_fs.py::_research_route_refusal`), read from
+    ``scripts.vault.research_route`` so the two lanes cannot disagree about one
+    card. Returns an error payload — write nothing — or None to proceed.
+
+    Why a route and not a vocabulary: the two OKF guards above are scoped to
+    ``knowledge/`` and no-op everywhere else, which is exactly how a card carrying
+    ``pipeline: research`` + ``source: research-topic-1937`` came to be written at
+    ``projects/ecep/…`` — past every check on this lane, with no registry row
+    behind it, because the registry only ever hands the worker a path under
+    ``knowledge/research/`` (``deep_research.note_path_for``) and only that path
+    shape lets ``research_complete`` verify the note is really on disk (#1276). An
+    off-route research card is an unregistered one, and an unregistered card that
+    later vanished could not be reported by anything: #3190's card was gone in under
+    two hours with no row, no commit and no tripwire that sees a one-file loss.
+
+    Unlike the two guards beside it this one is NOT scoped to ``knowledge/`` — the
+    off-route path IS the finding, so scoping it there would leave it unfired.
+    """
+    try:
+        from scripts.vault import research_route
+    except Exception as exc:  # noqa: BLE001
+        # Fail closed, for the reason the type guard gives: a guard that cannot
+        # read its own rule reports a verdict it cannot justify.
+        return _err(f"cannot validate the research route: "
+                    f"scripts.vault.research_route is unimportable ({exc})",
+                    ErrorCode.INTERNAL)
+    try:
+        declared = research_route.research_route_refusal(path, content)
+    except Exception as exc:  # noqa: BLE001
+        return _err(f"cannot validate the research route: {exc}", ErrorCode.INTERNAL)
+    if declared is None:
+        return None
+    route = f"{research_route.RESEARCH_NOTE_DIR}/"
+    return _err(
+        f"vault_write refused: {path} declares `pipeline: {declared}`, which routes "
+        f"a research card to `{route}<slug>.md` — nothing was written. A card that "
+        f"leaves that directory has no registry row, so `research_complete`'s "
+        f"on-disk check never runs on it and its loss is unreportable (#3190). "
+        f"Write it under `{route}` — or, if this is not a research card, drop the "
+        f"`pipeline: {declared}` key rather than routing it here.",
+        ErrorCode.INVALID_PARAM, off_route_pipeline=declared,
+        required_dir=route, path=path)
+
+
 def _protected_write_refusal(path: str) -> dict | None:
     """The write deny-set's answer for this vault-relative path, or None to allow.
 
@@ -2027,6 +2075,14 @@ def _vault_write(params: dict) -> dict:
     # The #724 dispatch-field rail's third lane (#2362), phase A: the create rule,
     # beside the other pre-lock guards. The diff rule is phase B, inside the lock.
     refusal = _autonomy_schedule_refusal(path, content)
+    if refusal is not None:
+        return refusal
+    # #3190's route guard, at the same pre-lock position as the guards above: a
+    # refusal here returns before the ledger, the `mkdir` and the write, so the
+    # refused path leaves no file and no directory behind. It sits BEFORE the two
+    # OKF guards because it is the wider rule — theirs no-op outside `knowledge/`,
+    # and an off-route card is precisely a card outside `knowledge/`.
+    refusal = _guard_research_route(path, content)
     if refusal is not None:
         return refusal
     try:

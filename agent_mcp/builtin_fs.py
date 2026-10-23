@@ -291,17 +291,22 @@ def _protected_path_refusal(mut: _Mutation) -> str | None:
 # the same direction: a caller that cannot rewrite must not accept.
 
 
-def _knowledge_root() -> str:
-    """`<vault>/knowledge` realpathed, resolved per call so a relocated HOME or a
-    monkeypatched `app.paths.VAULT_ROOT` moves the guard with it — the reason
-    `protected_paths.protected_roots()` resolves per call too. The `app.paths`
-    fallback is the same literal that module is built from."""
+def _vault_root_real() -> str:
+    """`<vault>` realpathed, resolved per call so a relocated HOME or a
+    monkeypatched `app.paths.VAULT_ROOT` moves every path guard here with it — the
+    reason `protected_paths.protected_roots()` resolves per call too. The
+    `app.paths` fallback is the same literal that module is built from."""
     try:
         from app.paths import VAULT_ROOT
         vault = str(VAULT_ROOT)
     except Exception:  # noqa: BLE001 — a checker that cannot import still checks
         vault = os.path.join(os.path.expanduser("~"), "obsidian")
-    return os.path.realpath(os.path.join(vault, "knowledge"))
+    return os.path.realpath(vault)
+
+
+def _knowledge_root() -> str:
+    """`<vault>/knowledge` realpathed. See `_vault_root_real` for why per call."""
+    return os.path.realpath(os.path.join(_vault_root_real(), "knowledge"))
 
 
 def _knowledge_vocabulary_refusal(target: Path, text: str, tool: str) -> str | None:
@@ -371,6 +376,101 @@ def _knowledge_guard_unavailable(target: Path, tool: str, why: str) -> str:
         "error": (f"{tool} refused: the knowledge/ type vocabulary could not be "
                   f"read ({why}), so {target} is not being written. Report this "
                   f"rather than working around it."),
+        "code": ErrorCode.INTERNAL})
+
+
+# ── the research route, on this lane too (#3190) ─────────────────────────────
+#
+# `agent_mcp/vault.py::_guard_research_route` is the same rule on the other lane,
+# and #3190's card reached the vault through a file tool, not through
+# `vault_write` — so the lane the incident actually used is the one that must not
+# accept it. One definition again (`scripts.vault.research_route`, imported at call
+# time), and only the PATH shape is lane-specific, for the reason the block below
+# gives for the schedule rail: `vault.py` matches the vault-relative string
+# `_normalize_vault_path` hands it, this lane matches `os.path.realpath(target)`.
+
+
+def _vault_rel_for_guard(target_real: str) -> str | None:
+    """`target_real` as a vault-relative posix path, or None if it is off-vault.
+
+    The route is a fact about the VAULT's layout, so a `pipeline: research` file
+    the caller is writing to /tmp or to a checkout is not this guard's business —
+    exactly as the vocabulary guard above leaves everything outside `knowledge/`
+    alone. A path that resolves outside the vault returns None, which the caller
+    reads as "write it".
+    """
+    vault = _vault_root_real()
+    if not (target_real == vault or target_real.startswith(vault + os.sep)):
+        return None
+    return os.path.relpath(target_real, vault).replace(os.sep, "/")
+
+
+def _research_route_refusal(target: Path, text: str, tool: str) -> str | None:
+    """Refusal for the bytes about to land at `target`, or None to write them.
+
+    Asks the same predicate `vault_write` asks of the same bytes: refuse a note
+    whose front matter declares `pipeline: research` when it is not landing in
+    `knowledge/research/`. #3190's card carried exactly that pair at
+    `projects/ecep/cpp-adaptive-constraints-predictive-archery-blocks.md`, was
+    readable for under two hours, then vanished with no registry row behind it
+    (topic 1937 against a registry whose highest id was 129), so nothing that
+    checks a research artifact exists on disk ever ran on it.
+
+    Priced on the POST bytes like the vocabulary check beside it — `content` for
+    `Write`, `updated` for `Edit` — so an Edit that REMOVES the stray `pipeline:`
+    line repairs its way through the file that carries one, and one that adds it
+    is refused with nothing written.
+
+    Fails closed on an unimportable route module, in this module's own words above:
+    "a guard whose input cannot be read reports a verdict it cannot justify".
+    """
+    real = os.path.realpath(str(target))
+    if not real.endswith(".md"):
+        return None
+    rel = _vault_rel_for_guard(real)
+    if rel is None:
+        return None
+    try:
+        from scripts.vault import research_route
+    except Exception as exc:  # noqa: BLE001
+        return _route_guard_unavailable(
+            target, tool, f"scripts.vault.research_route is unimportable ({exc})")
+    try:
+        declared = research_route.research_route_refusal(rel, text)
+    except Exception as exc:  # noqa: BLE001
+        return _route_guard_unavailable(target, tool, str(exc))
+    if declared is None:
+        return None
+    try:  # one durable row per refusal (app/harness/denial_journal.py); never decides
+        from app.harness import denial_journal
+        denial_journal.record(guard="research_route", where="dispatch",
+                              session_id=get_bound_session(), tool=tool,
+                              reason=f"off-route `pipeline: {declared}` card",
+                              excerpt=str(target), label=str(declared))
+    except Exception:  # noqa: BLE001
+        pass
+    home = os.path.join(_vault_root_real(),
+                        *research_route.RESEARCH_NOTE_DIR.split("/"))
+    return json.dumps({
+        "error": (
+            f"{tool} refused: {target} declares `pipeline: {declared}`, which routes "
+            f"a research card to {home}/<slug>.md — nothing was written. A card that "
+            f"leaves that directory has no registry row, so `research_complete`'s "
+            f"on-disk check never runs on it and its loss is unreportable (#3190). "
+            f"Write it there — or, if this is not a research card, drop the "
+            f"`pipeline: {declared}` key. `vault_write` refuses these bytes at this "
+            f"path too."),
+        "code": ErrorCode.INVALID_PARAM, "off_route_pipeline": declared,
+        "path": str(target)})
+
+
+def _route_guard_unavailable(target: Path, tool: str, why: str) -> str:
+    """The fail-closed refusal, separate so it is never mistaken for a verdict."""
+    logger.error("research route guard unavailable for %s: %s", target, why)
+    return json.dumps({
+        "error": (f"{tool} refused: the research route could not be read ({why}), "
+                  f"so {target} is not being written. Report this rather than "
+                  f"working around it."),
         "code": ErrorCode.INTERNAL})
 
 
@@ -883,6 +983,13 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
             if vocab is not None:
                 return vocab
 
+            # The research route, on the same bytes, at the same position, for the
+            # same reason (#3190): the card that started it was written by a file
+            # tool, not by `vault_write`, so this is the lane the incident used.
+            route = _research_route_refusal(p, content, "Write")
+            if route is not None:
+                return route
+
             # The #724 dispatch-field rail, on the same bytes and at the same site:
             # `~/obsidian/autonomy/` is in no deny-set, so this was the one lane
             # where a `status: up_next` create or a draft -> up_next move reached a
@@ -1021,6 +1128,12 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
             vocab = _knowledge_vocabulary_refusal(p, updated, "Edit")
             if vocab is not None:
                 return vocab
+            # Priced on `updated` for the same reason, so an Edit that drops a
+            # stray `pipeline: research` line repairs the file that carries one and
+            # an Edit that adds one is refused with nothing written (#3190).
+            route = _research_route_refusal(p, updated, "Edit")
+            if route is not None:
+                return route
             # Priced on `updated` for the same reason the vocabulary check above is,
             # and it answers the question the vocabulary check cannot: an Edit
             # arrives as a delta, so `status: draft` -> `up_next` is only visible in

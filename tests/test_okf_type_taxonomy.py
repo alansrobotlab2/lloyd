@@ -56,7 +56,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.vault import okf_stranded, okf_taxonomy  # noqa: E402
+from scripts.vault import okf_stranded, okf_taxonomy, research_route  # noqa: E402
 from scripts.vault.okf_migrate import infer_type  # noqa: E402
 from scripts.vault.validate_okf import KNOWN_TYPES, STRICT_FM_RE  # noqa: E402
 
@@ -1636,3 +1636,218 @@ def test_no_node_of_this_suite_is_marked_away_to_get_it_green():
         "against 1 — a new one has to be a decision someone named, not a green run")
     assert "@pytest.mark.live_vault" in src, (
         "the one permitted mark is the live-vault extraction check, by name")
+
+
+# ── the research route (#3190) ───────────────────────────────────────────────
+#
+# A `pipeline: research` card has exactly one home: ``knowledge/research/``,
+# because the registry hands the worker that path at enqueue
+# (``deep_research.note_path_for``) and only that shape lets
+# ``research_complete``/``research_store._require_real_note`` verify the note is
+# really on disk (#1276). A card written anywhere else is a card with no registry
+# row, so nothing ever checks it and nothing notices when it goes.
+#
+# #3190 is that card: ``type: knowledge``, ``pipeline: research``,
+# ``source: research-topic-1937`` at
+# ``projects/ecep/cpp-adaptive-constraints-predictive-archery-blocks.md`` — a
+# topic id above the registry's maximum (129 on 2026-10-23, so topic 1937 never
+# existed), readable for under two hours, then gone with no commit, no row and no
+# tripwire that sees a one-file loss (``vaultwatch.py:61-64`` needs >= 200 files
+# in 900 s). The bytes below are that card, and the tests are the two
+# reproductions the item's acceptance names: today both lanes accepted them.
+
+_RESEARCH_CARD = ("---\ntype: research-deep\npipeline: research\n"
+                  "source: research-topic-1937\n---\n\n"
+                  "# Adaptive constraints for predictive archery blocks\n")
+
+_OFF_ROUTE = "projects/ecep/cpp-adaptive-constraints-predictive-archery-blocks.md"
+_ON_ROUTE = "knowledge/research/2026-10-22-cpp-adaptive-constraints.md"
+
+
+def test_vault_write_refuses_a_research_card_off_the_research_route(scratch_vault):
+    """Clause 3: refused, by name, with no file and no directory behind it."""
+    out = scratch_vault.mod._vault_write({"path": _OFF_ROUTE, "content": _RESEARCH_CARD})
+    assert "error" in out, f"the #3190 card was accepted again: {out}"
+    assert out.get("off_route_pipeline") == "research", out
+    assert "knowledge/research" in out["error"], out["error"]
+    assert not (scratch_vault.root / _OFF_ROUTE).exists(), "the bytes were written"
+    assert not (scratch_vault.root / "projects" / "ecep").exists(), (
+        "the guard ran after the mkdir — a refused write leaves a directory")
+
+
+def test_the_same_card_still_lands_on_the_research_route(scratch_vault):
+    """The other half of clause 3, and the positive control for the one above.
+
+    Identical bytes, one path segment different: this is the route, so it writes.
+    Without this node the refusal above is indistinguishable from a lane that
+    stopped accepting research cards at all.
+    """
+    out = scratch_vault.mod._vault_write({"path": _ON_ROUTE, "content": _RESEARCH_CARD})
+    assert out.get("success") is True, out
+    landed = (scratch_vault.root / _ON_ROUTE).read_text(encoding="utf-8")
+    assert landed == _RESEARCH_CARD, "the route guard rewrites bytes it was not asked about"
+    assert "type_normalized" not in out, "research-deep is already canonical"
+
+
+def test_a_note_declaring_a_job_pipeline_or_mentioning_the_key_in_prose_is_unaffected(
+        scratch_vault):
+    """The 67 ``pipeline:`` files on the box name a JOB and must keep landing.
+
+    Two shapes are controls here. ``pipeline: nightly-reflection`` at
+    ``memory/learnings/…`` is what 67 vault files actually carry today (#3190's
+    feasibility measurement), and a *prose* mention of the string
+    ``pipeline: research`` below the front matter is what backlog item #3190 itself
+    is — the only vault file containing that string as of 2026-10-23. A guard that
+    refused either would be a guard that breaks the board it was filed on.
+    """
+    job = "---\ntype: note\npipeline: nightly-reflection\n---\n\n# A learning\n"
+    out = scratch_vault.mod._vault_write(
+        {"path": "memory/learnings/2026-10-23.md", "content": job})
+    assert out.get("success") is True, f"a job label was treated as a route: {out}"
+    prose = ("---\ntype: backlog\n---\n\nThe lost card carried "
+             "`pipeline: research` at projects/ecep/…\n")
+    out = scratch_vault.mod._vault_write({"path": "backlog/3190-triage.md",
+                                          "content": prose})
+    assert out.get("success") is True, f"a prose mention refused a write: {out}"
+
+
+def test_the_route_is_one_exact_value_not_a_prefix_or_an_indent():
+    """The predicate is one value and one directory, so it cannot creep.
+
+    ``research-deep`` is a ``type`` value, not the route, and a card for a
+    ``knowledge/research-notes/`` directory is NOT inside the route — the rule is
+    ``knowledge/research/``, the directory the worker writes. Casing is normalised
+    because the ``type`` axis normalises casing too, and an indented ``pipeline:``
+    belongs to a nested mapping and is not the page's claim.
+    """
+    assert research_route.research_pipeline_declared(
+        "---\npipeline: Research\n---\n") == "research"
+    assert research_route.research_pipeline_declared(
+        "---\npipeline: research-deep\n---\n") is None
+    assert research_route.research_pipeline_declared(
+        "---\n  pipeline: research\n---\n") is None, "an indented key is nested"
+    assert research_route.research_pipeline_declared(
+        "---\ntype: research\n---\n") is None, "this is the pipeline axis"
+    assert research_route.research_route_refusal(
+        "knowledge/research-notes/x.md", _RESEARCH_CARD) == "research"
+    assert research_route.research_route_refusal(_ON_ROUTE, _RESEARCH_CARD) is None
+
+
+def test_the_harness_write_lane_refuses_a_research_card_off_the_route(tmp_path,
+                                                                     monkeypatch):
+    """Clause 4, and the lane the #3190 card actually used: a file tool."""
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    refusal = _fs_refusal(fs._write({"file_path": str(tmp_path / _OFF_ROUTE),
+                                     "content": _RESEARCH_CARD}))
+    assert refusal.get("off_route_pipeline") == "research", (
+        f"`pipeline: research` reached projects/ through Write again: {refusal}")
+    assert not (tmp_path / _OFF_ROUTE).exists(), "the bytes were written"
+    assert not (tmp_path / "projects" / "ecep").exists(), (
+        "the guard ran after the mkdir — a refused Write leaves a directory")
+
+
+def test_the_harness_write_lane_writes_the_same_card_on_the_route(tmp_path,
+                                                                 monkeypatch):
+    """Positive control for the lane above: same bytes, route path, lands verbatim."""
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    refusal = _fs_refusal(fs._write({"file_path": str(tmp_path / _ON_ROUTE),
+                                     "content": _RESEARCH_CARD}))
+    assert refusal == {}, f"a card on the route was refused: {refusal}"
+    assert (tmp_path / _ON_ROUTE).read_text(encoding="utf-8") == _RESEARCH_CARD
+
+
+def test_the_harness_edit_lane_refuses_an_edit_that_adds_the_route_claim(tmp_path,
+                                                                       monkeypatch):
+    """`Edit` reaches the same bytes, so it needs the same refusal (clause 4).
+
+    Priced on `updated` exactly like the vocabulary check beside it: an Edit
+    arrives as a delta, and asking the question of the whole reassembled file is
+    what catches a one-line insertion — and what lets a repair through (below).
+    """
+    import json
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "projects" / "ecep" / "card.md"
+    target.parent.mkdir(parents=True)
+    original = "---\ntype: reference\n---\n\n# Card\n"
+    target.write_text(original, encoding="utf-8")
+    result = json.loads(fs._edit({"file_path": str(target),
+                                  "old_string": "type: reference",
+                                  "new_string": "type: reference\npipeline: research"}))
+    assert "error" in result, f"an Edit routed a card into projects/: {result}"
+    assert result.get("off_route_pipeline") == "research", result
+    assert target.read_text(encoding="utf-8") == original, (
+        "the bad bytes were written, then refused — the file is the refusal")
+
+
+def test_an_edit_that_drops_a_stray_route_claim_reaches_the_file(tmp_path, monkeypatch):
+    """The repair direction must stay open, or a refusal has no way out.
+
+    A card already sitting off the route is repaired by DELETING its `pipeline:`
+    line, and that Edit's `updated` bytes still contain the string one line up for
+    a reader who asks the question of the delta. Asked of the whole file, the
+    repair lands.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "projects" / "ecep" / "stray.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_RESEARCH_CARD, encoding="utf-8")
+    refusal = _fs_refusal(fs._edit({"file_path": str(target),
+                                    "old_string": "pipeline: research\n",
+                                    "new_string": ""}))
+    assert refusal == {}, f"the repair this guard asks for was refused: {refusal}"
+    assert "pipeline: research" not in target.read_text(encoding="utf-8")
+
+
+def test_the_harness_dispatch_path_enforces_the_research_route(tmp_path, monkeypatch):
+    """The seam the code graph cannot see: `call_tool("Write", …)`, keyed on a string.
+
+    A guard wired only into the `_write` helper the dispatcher happens to call for
+    one of the two spellings would pass every direct-handler test above and still
+    let a session write through the tool by name.
+    """
+    import asyncio
+    import json
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    out = asyncio.run(fs.call_tool("Write", {"file_path": str(tmp_path / _OFF_ROUTE),
+                                             "content": _RESEARCH_CARD}))
+    assert out.is_error is True, (
+        "the tool result said success; the caller will retry, not relocate")
+    payload = json.loads(out.content[0].text)
+    assert payload.get("off_route_pipeline") == "research", payload
+    assert not (tmp_path / _OFF_ROUTE).exists()
+
+
+def test_a_research_card_outside_the_vault_is_left_alone(tmp_path, monkeypatch):
+    """The route is a fact about the VAULT's layout, not about the string.
+
+    A scratch card in a temp directory is nobody's registry artifact, and #3190 is
+    about cards that look like they live in the tree. Same reasoning as the
+    vocabulary guard above, which leaves everything outside `knowledge/` alone.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    elsewhere = tmp_path.parent / (tmp_path.name + "-outside-the-vault")
+    elsewhere.mkdir()
+    target = elsewhere / "scratch-card.md"
+    refusal = _fs_refusal(fs._write({"file_path": str(target), "content": _RESEARCH_CARD}))
+    assert refusal == {}, f"the guard reached outside the vault: {refusal}"
+    assert target.exists()
+
+
+def test_both_research_route_lanes_refuse_the_same_off_route_card(scratch_vault,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    """One predicate, two writers, and the module that holds it named once.
+
+    #2070's class rule restated for this guard: a rule on one of two write
+    surfaces is not a rule, the surface with the rule is only a detour, and the
+    detour is the one #3190's card took. All three answers come from
+    `research_route.research_route_refusal`, so a third writer cannot drift.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    through_write = _fs_refusal(fs._write({"file_path": str(tmp_path / _OFF_ROUTE),
+                                           "content": _RESEARCH_CARD}))
+    through_vault_write = scratch_vault.mod._vault_write(
+        {"path": _OFF_ROUTE, "content": _RESEARCH_CARD})
+    assert through_write.get("off_route_pipeline") == "research", through_write
+    assert through_vault_write.get("off_route_pipeline") == "research", through_vault_write
+    assert research_route.research_route_refusal(_OFF_ROUTE, _RESEARCH_CARD) == "research"

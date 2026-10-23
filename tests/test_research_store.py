@@ -685,3 +685,118 @@ def test_two_processes_racing_for_topics_each_get_their_own(tmp_path):
 
     assert sorted(won_a + won_b) == ids, "every topic claimed exactly once"
     assert not (set(won_a) & set(won_b)), "a topic was claimed by both"
+
+
+# ---------------------------------------------------------------------------
+# The read-side re-verification (#3190)
+# ---------------------------------------------------------------------------
+
+
+def test_stats_names_a_written_row_whose_artifact_vanished(s, note):
+    """A `written` row is a claim about disk that used to be checked exactly once.
+
+    `_require_real_note` verifies the note at settle time and nothing looked
+    again, so a note deleted afterwards left the row believed forever: `stats()`
+    itself served it up as `last_written`. That is #3190's failure one step on —
+    its card had no row at all, so not even the write-time check ran — and the
+    planted-and-deleted row here is the reproduction the item's acceptance names.
+    """
+    tid = s.propose("a topic whose note gets deleted after it settles")["id"]
+    s.claim(tid, by="w")
+    art = note("gone-soon.md")
+    s.finish(tid, "written", artifact_path=str(art))
+
+    clean = s.stats()["missing_artifacts"]
+    assert clean == {"count": 0, "paths": []}, (
+        f"a row whose note is on disk was reported missing: {clean}")
+
+    art.unlink()
+    missing = s.stats()["missing_artifacts"]
+    assert missing["count"] == 1, missing
+    assert missing["paths"] == [str(art)], (
+        "the payload has to name the file, or the reader goes looking blind")
+
+
+def test_missing_artifacts_survives_reopening_the_store(s, note):
+    """The check is a read of the row and the disk, not a process-local memory.
+
+    The registry is written by the worker and read by a chat turn in another
+    process, so a report that only appeared in the process that settled the topic
+    would answer `research_stats` with a clean bill of health.
+    """
+    tid = s.propose("a topic whose note is deleted, then the store reopened")["id"]
+    s.claim(tid, by="w")
+    art = note("also-gone.md")
+    s.finish(tid, "written", artifact_path=str(art))
+    art.unlink()
+    assert ResearchStore(s.path).stats()["missing_artifacts"]["count"] == 1
+
+
+def test_only_written_rows_are_judged_against_disk(s):
+    """`archived` and the path-free outcomes must not start alarming here.
+
+    `import_legacy` archives 314 rows whose notes are gone by design —
+    `_require_real_note`'s own docstring says they "have been gone for months" —
+    and `nothing_found`/`duplicate`/`rejected` claim no note at all. If the read
+    path counted them, every store carrying a legacy import would open red and
+    the one real signal in the field would be buried in 314 known absences.
+    """
+    gone = "/nonexistent/knowledge/research/2024-01-01-legacy-note.md"
+    archived = s.propose("a legacy-shaped topic")["id"]
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET status='archived', artifact_path=? WHERE id=?",
+                     (gone, archived))
+    quiet = s.propose("a topic answered with no note")["id"]
+    s.claim(quiet, by="w")
+    s.finish(quiet, "nothing_found", note="nothing out there")
+    assert s.stats()["missing_artifacts"] == {"count": 0, "paths": []}, (
+        "a row that never claimed a note is not a missing artifact")
+
+
+def test_a_written_row_with_an_empty_or_unusable_path_is_reported(s, tmp_path):
+    """The phantom row #1276 refuses at write time, seen from the read side.
+
+    A `written` row can still reach that state from outside `finish` — a hand
+    edit, or a row predating the write gate — and a path that exists but names a
+    DIRECTORY is the other unusable shape: `is_file()` says no, so it reads as
+    missing rather than raising. Both have to be missing, not clean.
+    """
+    a_directory = str(tmp_path / "knowledge")  # exists, and is not a file
+    with s._connect() as conn:
+        conn.execute(
+            "INSERT INTO topics (topic, key, status, proposed_at, finished_at, "
+            "artifact_path) VALUES ('empty', 'empty', 'written', "
+            "'2026-10-23T00:00:00+00:00', '2026-10-23T00:00:00+00:00', '')")
+        conn.execute(
+            "INSERT INTO topics (topic, key, status, proposed_at, finished_at, "
+            "artifact_path) VALUES ('dir', 'dir', 'written', "
+            "'2026-10-23T00:00:00+00:00', '2026-10-23T00:00:00+00:00', ?)",
+            (a_directory,))
+    missing = s.stats()["missing_artifacts"]
+    assert missing["count"] == 2, missing
+    assert missing["paths"] == ["", a_directory], missing
+    assert R.artifact_on_disk("") is False, "an empty path is not a note"
+    assert R.artifact_on_disk(a_directory) is False, (
+        "a directory is not a note either, and must not raise")
+    # The third unusable shape cannot be stored at all — SQLite refuses a NUL in
+    # any string it is handed — so that posture is pinned on the predicate itself.
+    assert R.artifact_on_disk("has" + chr(0) + "nul") is False, (
+        "a path no syscall accepts must read as absent, not raise ValueError")
+
+
+def test_a_truncated_note_is_not_counted_as_missing(s, note):
+    """The two disk rules stay two rules: this one asks only "is it there".
+
+    `_require_real_note` demands `MIN_NOTE_BYTES` at settle time; a note that was
+    substantial then and was trimmed afterwards is a different finding, and
+    reporting it as MISSING would send the reader looking for a file that is
+    sitting right there.
+    """
+    tid = s.propose("a topic whose note is trimmed after it settles")["id"]
+    s.claim(tid, by="w")
+    art = note("trimmed.md")
+    s.finish(tid, "written", artifact_path=str(art))
+    art.write_bytes(b"x" * 12)
+    assert s.stats()["missing_artifacts"]["count"] == 0, (
+        "a small file on disk is present; the size rule belongs to `finish`")
+    assert R.artifact_on_disk(str(art)) is True

@@ -792,8 +792,8 @@ own home directory, each naming the same directory — and the corpus the probe 
 `tests/test_research_doc_claims.py::_task_files`, which is why a shell-authored body
 naming an undelivered tool reddens the next round's base probe rather than the turn that
 wrote it. Reopen this ruling on one observable: that sweep yields an offender with no
-`guard="autonomy_body_rail"` denial row beside it — `agent_mcp/builtin_fs.py:461` and
-`agent_mcp/vault.py:1795` write such a row on each closed lane — because an offender that
+`guard="autonomy_body_rail"` denial row beside it — `agent_mcp/builtin_fs.py:561` and
+`agent_mcp/vault.py:1843` write such a row on each closed lane — because an offender that
 reached the corpus unrefused means the lane is producing bodies nobody refused, which is
 not what accepting it claimed.
 

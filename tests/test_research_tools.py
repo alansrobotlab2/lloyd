@@ -352,3 +352,46 @@ def test_store_calls_are_hopped_off_the_event_loop():
     import inspect
     src = inspect.getsource(T.call_tool)
     assert "asyncio.to_thread" in src
+
+
+# ---------------------------------------------------------------------------
+# The read-side re-verification, over MCP (#3190 clause 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_stats_reports_a_missing_artifact_through_the_tool(registry, note):
+    """The store's report has to survive the tool that returns it.
+
+    `_handle_stats` answers `store.stats()` verbatim, and that passthrough IS the
+    boundary: a chat turn and the knowledge health pass read the registry only
+    through here, so a payload that dropped or reshaped `missing_artifacts` would
+    pass the store's own test and still leave a `written` row whose note is gone
+    believed forever — which is the #3190 failure one layer up from the disk.
+    Planted, settled against a real note, deleted, then asked over `call_tool`.
+    """
+    tid = registry.propose("a topic whose note is deleted after it settles")["id"]
+    registry.claim(tid, by="w")
+    art = note("deleted-after-settle.md")
+    registry.finish(tid, "written", artifact_path=str(art))
+
+    _, payload = await call("research_stats")
+    assert payload["missing_artifacts"] == {"count": 0, "paths": []}, payload
+
+    art.unlink()
+    _, payload = await call("research_stats")
+    assert payload["missing_artifacts"]["count"] == 1, payload
+    assert payload["missing_artifacts"]["paths"] == [str(art)], (
+        "the caller must be handed the path, not just a number")
+
+
+async def test_the_missing_artifact_key_is_present_when_nothing_is_missing(registry):
+    """`count: 0`, never an absent key — the #3085 rule, applied to a new field.
+
+    The dedup corpus went unreported for four weeks because an empty corpus and an
+    unchecked corpus produced the same payload; a caller that writes
+    `payload.get("missing_artifacts", {}).get("count")` cannot tell those apart
+    either, so the key is here on a registry with no `written` row at all.
+    """
+    registry.propose("a queued topic, nothing settled")
+    _, payload = await call("research_stats")
+    assert payload["missing_artifacts"] == {"count": 0, "paths": []}, payload

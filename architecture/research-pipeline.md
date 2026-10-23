@@ -144,6 +144,34 @@ no gain, since a human researching something by hand records it afterwards with
 `research_complete` either way. `agent_mcp/annotations.py` classifies
 `research_next` read-only on exactly that reasoning.
 
+A `written` row is a claim about disk, and until #3190 it was checked exactly
+once — `_require_real_note` at `finish`, and nothing looked again. A note deleted
+afterwards left the row believed forever, and `stats()` itself served it up as
+`last_written`. `ResearchStore.stats()` now re-reads the disk on every read and
+reports `missing_artifacts` — the `written` rows whose `artifact_path` is not a
+file — as a `{count, paths}` mapping that `research_stats` returns verbatim, and
+`app/research_store.py::artifact_on_disk` is the one predicate it reads. It is
+deliberately the weaker test than `_require_real_note`: it asks only whether the
+bytes are there, not whether they still clear `MIN_NOTE_BYTES`, because a trimmed
+note is a different finding and reporting it as MISSING sends the reader hunting
+for a file that is sitting right there. `archived` rows are excluded on purpose —
+their artifacts are gone by design (§1), and counting them would bury the one real
+signal among 314 known absences — and the key is always present, so a clean
+registry is `count: 0` and never an absent field, which is #3085's rule applied to
+a count that could otherwise disappear.
+
+The other half of #3190 is on the write side, and it is a rule about *where* a
+card may land rather than what is in it. `workers/sources/deep_research.py::note_path_for`
+stamps the artifact path at enqueue, so a card that reaches the vault anywhere
+else never gets a row, and a rowless card is checked by nobody. One predicate
+decides it — `scripts/vault/research_route.py::research_route_refusal`, keyed on a
+front-matter `pipeline:` of exactly `research`, because the lost card's
+`type: knowledge` is a legal non-research value and a `type`-keyed guard passes
+that write — and both write surfaces ask it: `agent_mcp/vault.py` and
+`agent_mcp/builtin_fs.py`. It runs before either lane's `mkdir`, so a refused
+card leaves no file and no directory, and a note declaring a *job* pipeline
+(`pipeline: nightly-reflection`, the shape 67 vault files carry) is untouched.
+
 `propose` also **refuses** rather than queues once `MAX_QUEUED` (40) topics are
 waiting, returning the depth and "research them before proposing more" in place
 of an id. The generator meets the same wall from the other side — a full queue
