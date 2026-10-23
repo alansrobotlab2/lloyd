@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, data, safety, guardian, backup, automod]
 type: reference
 status: implemented
-date: 2026-09-23
+date: 2026-10-23
 ---
 
 # The data home: runtime data lives outside the code tree
@@ -49,8 +49,10 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 │                             #   reached the root from the account home's dot-dir,
 │                             #   not from the tree, so the move missed it (#1444)
 ├── desktop/                  # the computer-use lease, created on first use
+├── safety/                   # the stray journal and its acknowledgement file
+├── session-cwd/              # one dir per session: a Bash call naming no cwd starts here
 ├── data/tool_overrides.yaml
-├── usage.db  workers.db  research.db
+├── usage.db  workers.db  research.db  failure-ledger.db
 ├── mc-state.json             # Mission Control's UI mirror — "mc" is not memory capture
 └── memory-capture-state.json # the transcript watermark, off the tree since #2294
 ```
@@ -68,8 +70,10 @@ rebuildable cache inside the data root, so two things keep it from behaving
 like data:
 
 - **It is a nested btrfs subvolume.** A snapshot of `~/lloyd-data` does not
-  descend into one, so the hourly snapshots do not carry ~185 MB of AST cache
-  that every rebuild rewrites. Create it once with
+  descend into one, so the hourly snapshots do not carry the AST cache that every
+  rebuild rewrites — 691 MB of it on 2026-10-23, where this line first read ~185 MB.
+  The emptiness is measurable rather than assumed: `ls` a snapshot's `code-graph/`
+  and it lists nothing. Create it once with
   `btrfs subvolume create ~/lloyd-data/code-graph` (as the user; no root
   needed); a plain directory also works and is simply snapshotted.
 - **datawatch does not count it** (`datawatch.CACHE_DIRS`). Emptying it — a
@@ -125,15 +129,28 @@ its run prints the root it resolved in both dry-run and `--apply`, because every
 number it reports is a count of that root.
 
 The stdlib readers still to convert — `agent-services/guardian/{policy,datawatch}.py`,
-`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` —
-each read `${LLOYD_DATA:-~/lloyd-data}` directly. They resolve the live root from
-any tree, which is wrong but harmless for readers; the sweep was the one with
-`unlink` behind it. Import the same accessor when one of them next changes.
+`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` — each
+read the variable by hand: rule 2 without the marker check and without rule 3. The
+shell ones fall back to `${LLOYD_DATA:-$HOME/lloyd-data}`; the two guardian modules
+fall back to a literal absolute path naming this account, which is right on this box
+and nobody's root on any other. They resolve the live root from any tree. For a reader
+that is wrong but harmless, and for a while the sweep was the only one with `unlink`
+behind it — that is no longer true of the guardian, whose `quarantine_inert` creates
+`$DATA_ROOT/quarantine/tree-strays/<name>` under its own hand-resolved root and
+unlinks the code-tree copy (#3208). Import the accessor `policy.quarantine_dir`
+already loads by path when one of them next changes.
 
-**Nothing exports `LLOYD_DATA` in production, and nothing should.** The backend
-and the aggregator find the root by rule 2. Their Bash children inherit their
-environment. A child that ran a worktree's code with the live root exported
-would write live data, which is the leak rule 3 exists to prevent.
+**Nothing in production exports the live root as `LLOYD_DATA`, and nothing should.**
+The backend and the aggregator find the root by rule 2. Their Bash children inherit
+their environment. A child that ran a worktree's code with the live root exported
+would write live data, which is the leak rule 3 exists to prevent. One production
+process does set the variable, and it is the inverse case: the egress window's
+`start_on_arm_aggregator()` (`eval/egress_arms.py`) hands its ON-arm child the run
+root named by `LLOYD_EGRESS_ARMS_ROOT` (`~/lloyd-data/egress-arms`, created
+`ExecStartPre`, fixed rather than dated), so that arm's `decision=deny` rows are a
+file of their own and the leak witness can compare the two stores (#2435). The unit
+says in as many words that a unit-level `LLOYD_DATA` would be the bug: the parent and
+the witness must read the live store.
 
 Some consumers reach into live data *on purpose*: the review grader reading a
 round's sessions, and the promoter's knowledge-graph probe. They use
@@ -152,6 +169,7 @@ lists them, so an accidental reach looks the same as a deliberate one (#1415).
 | the `tool_choice` rung (live scripts, live baselines) | unset → production | `_child_env(live_data=True)` |
 | the canary | `<round>/canary-home/lloyd-data` | `canary_config.canary_env` |
 | pytest | a fresh mkdtemp | `tests/conftest.py::_data_root_to_scratch` |
+| the egress window's ON-arm aggregator | `~/lloyd-data/egress-arms` (its own store, not the live one) | `LLOYD_EGRESS_ARMS_ROOT`, read by `start_on_arm_aggregator()` |
 
 The round home is a symlink farm over the real `$HOME`. `ensure_round_home`
 skips `lloyd-data` (`HOME_LINK_SKIP`) and makes it a real, empty directory, so
@@ -276,7 +294,7 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
   side directory with reflinks, so it is instant, and integrity-checks every
   database. Swapping it in is a human step. The order is in the script's header.
 
-### A stray in the tree: three layers (2026-10-02)
+### A stray in the tree: four layers (2026-10-02, the fourth from #3109 on 2026-10-21)
 
 At 01:01:36 on 2026-10-02 the nightly trajectory task (#56, session
 `20261002_010103_autonomy_1d90`) ran `cd ~/lloyd && sqlite3 workers.db "select … from
@@ -287,7 +305,7 @@ two backlog items were filed, and both were parked as human-only because an igno
 file gives a round no diff to land. The start-directory fix (#1906) does not help: the
 command went to the tree itself.
 
-Three layers, in the order a turn meets them:
+Four layers, in the order a turn meets them:
 
 1. **The prompt says where the data is** (`prompt_builder._data_home_hint`). The
    platform paragraph named `Home:` and nothing else, so the checkout was the only
@@ -310,7 +328,8 @@ Three layers, in the order a turn meets them:
    same two after it: `checkout-in-data-root` for a git checkout the call laid under the
    runtime data root (#3095, above), and `empty-db-created` for a 0-byte
    `.db`/`.sqlite`/`.sqlite3` this call opened into existence (#3140). The two watched
-   directories are the data root's top level and the session's own scratch dir, and the
+   directories are the data root's top level and the session's own scratch dir
+   (`session-cwd/`, one directory per session id), and the
    second is the point: a call that names no `cwd` STARTS there, so a bare `sqlite3
    workers.db` lays its file in scratch — which is how two of the four shadows this leg
    names sat unmentioned for weeks while the hourly sweep, the only detector before #3140,
@@ -366,8 +385,9 @@ Three layers, in the order a turn meets them:
    moved** (`datawatch.data_root_shadows`, measured in the same `_runtime_data_incident`
    tick, #3109). The check above cannot see it: its candidates are git's untracked entries
    and the data root is not a repository. The shape came from the live root — a 0-byte
-   `kg.sqlite` at the top while `_pipeline/vault-derived/kg.sqlite` holds 160,882,688
-   bytes, and the same accident in the opposite direction as a 0-byte
+   `kg.sqlite` at the top while `_pipeline/vault-derived/kg.sqlite` held 160,882,688
+   bytes as measured then (the store grows; re-stat it rather than quote this figure),
+   and the same accident in the opposite direction as a 0-byte
    `_pipeline/workers.db` — and a 0-byte file is a valid *empty* SQLite database, so a
    probe opened at the wrong path prints 0 rows instead of failing. The verdict comes from
    enumerating the root and comparing basenames across depths, both directions, with no
@@ -375,8 +395,14 @@ Three layers, in the order a turn meets them:
    through a `*_DB_RELATIVE` constant, the same single spelling `policy.kg_db_path` reads,
    so a root or layout move moves the answer with it. Same inertia tests as the move above
    — one name, zero bytes, `INERT_MIN_AGE_SECONDS`, no sidecar — and then it stops:
-   **report-only**, raised under the same alert title with `needs_human=True`, because a
-   file under the data root is a person's to remove. A scan that cannot walk the root
+   **report-only**, raised with `needs_human=True`, because a
+   file under the data root is a person's to remove. Since #3124 the heading is the
+   condition, chosen in the one raise: a check that also found a code-tree stray keeps
+   `RUNTIME_DATA_ALERT_TITLE`, and one that found only data-root residue gets
+   "A 0-byte database under the data root is shadowing a populated store" — the shared
+   heading had toasted hourly over files all under the data root while telling the
+   operator to go find a writer in the checkout. An all-clear walks both headings, so a
+   section opened under the older string still closes. A scan that cannot walk the root
    raises rather than answering `[]`, and the day's note is not cleared on a tree-only
    measurement.
 
@@ -423,3 +449,23 @@ stop of `agent-supervisord.service` with the guardian stopped, not a series of
   `desktop/` child `265d597` added, and two claims stated past their coverage —
   rule 3 does not reach the stdlib-only scripts (#1415), and no monitor notices
   snapshots stopping (#1416).
+- 2026-10-23 — `stale`, corrected in place (arch review of the whole page). Six
+  statements had moved under it: the data-root shadow finding no longer shares the
+  code-tree alert heading (#3124, `6730efef`); the stray section said *three* layers
+  while numbering four; the live root does now have a child that gets `LLOYD_DATA` —
+  the egress window's ON-arm aggregator — so "nothing exports it in production" became
+  "nothing exports the *live* root"; the unconverted stdlib jobs are no longer all
+  readers, since `quarantine_inert` creates under a hand-resolved root whose guardian
+  fallback is a literal absolute path (#3208, filed); the code-graph cache is 691 MB
+  rather than ~185 MB, proven by listing a snapshot's empty `code-graph/`; and the
+  layout gained `safety/`, `session-cwd/` and `failure-ledger.db` (#3209, #3210 filed).
+  Supersedes both entries above on one point each: "the five stdlib readers … are
+  read-only" and "rule 3 does not reach the stdlib-only scripts" were both true of the
+  set as it stood, and neither describes it now. Left as written after checking: the
+  three rules and the marker, every isolation row (`_child_env` on all calls,
+  `live_data=True`, `canary_env`, conftest's mkdtemp, `HOME_LINK_SKIP`), the nine
+  `${LLOYD_DATA}` keys, each threshold (10 % / 200 files / 900 s / 20, `INERT` 600 s,
+  scratch horizon 24 h, snapshot poll 900 s and limit 3 h, stray poll 3600 s), the
+  48-hourly + 14-daily prune, both timers live with the newest snapshot 21 minutes old,
+  the five journal kinds and `actionable_by`'s two values, the inert-move conditions,
+  and `data_root_shadows` raising rather than answering `[]`.
