@@ -6,7 +6,7 @@ acceptance:
   - type: max_tool_calls
     value: 4
   - type: regex
-    value: 'mitigation drill: session_cancel state=\S+ n=(?:\d+|-) median=(?:[\d.]+|-) age=(?:\S+) \| pool_pause state=\S+ n=(?:\d+|-) median=(?:[\d.]+|-) age=(?:\S+)|\w+(?:Error|Exception)\b'
+    value: 'mitigation drill: session_cancel state=\S+ n=(?:\d+|-) median=(?:[\d.]+s?|-) age=(?:\S+) \| pool_pause state=\S+ n=(?:\d+|-) median=(?:[\d.]+s?|-) age=(?:\S+)|\w+(?:Error|Exception)\b'
   - type: tool_not_called
     value: Edit
   - type: tool_not_called

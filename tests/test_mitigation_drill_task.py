@@ -338,6 +338,18 @@ def test_the_objective_checks_grade_the_reading_report_the_prompt_asks_for():
     here as well: #2432's premise is that an exit code is not a reading, so a
     pattern that still accepted it would let a run report the death of the task it
     replaced as a good day.
+
+    #3204 added the unit-suffixed median. The pattern used to demand a bare number,
+    `median=(?:[\\d.]+|-)`, while the reporter prints seconds WITH the unit —
+    `median=0.21s`, the line at the bottom of
+    `~/lloyd-data/autonomy-runs/95/run_95_20261023_130237.md` — so every such run
+    graded `graded_fail` on this one node while the drill was healthy: 13 of the 20
+    retained `run_95_*.md`, the newest 7 all of them, and 13 of the 20 print the
+    unit. The `s` is OPTIONAL, not required, because the same corpus holds two runs
+    that printed no unit (`median=0.2025`, `median=0.3545`) and graded
+    `graded_pass`, and neither carrier instructs the unit — `SUMMARY_LINE` above
+    spells `median=<S>`. A pattern that demanded `s+` would have moved the failure
+    onto the days that currently pass, so the assertion below pins BOTH forms.
     """
     task, _ = _render(TASK_FIXTURE, SKILL_FIXTURE)
     checks = _checks(task)
@@ -388,6 +400,71 @@ def test_the_objective_checks_grade_the_reading_report_the_prompt_asks_for():
                              "median=-"), (
         "the regex accepts a line with no age in it, and the age of the newest "
         "reading is the only thing that tells a live series from a stale one"
+    )
+
+    # ── #3204: the unit is the reporter's, and the grader has to read it ──────────
+    # Clause 1. Verbatim from the bottom of a real run — the line that graded
+    # `graded_fail` for 13 of the 20 retained runs while the drill was healthy.
+    assert graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                         "median=0.21s age=1h | pool_pause state=dispatch-only n=20 "
+                         "median=- age=1h"), (
+        "the acceptance regex rejects a median printed with its unit, which is the "
+        "form the reporter prints on the surface a human reads: a healthy drill "
+        "grades as a failed day, and 7/7 of the current window is that false alarm"
+    )
+    # Both halves, or a unit on the pool_pause reading is still a false failure.
+    assert graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                         "median=0.21s age=1h | pool_pause state=dispatch-only n=20 "
+                         "median=1.5s age=1h"), (
+        "only the session_cancel half accepts the unit, so a pool_pause reading that "
+        "carries one still grades red"
+    )
+    # Clause 2 — the unit stays optional: `median=0.2025` and `median=0.3545` are the
+    # two forms in the retained corpus, and they graded `graded_pass` before #3204.
+    assert graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                         "median=0.2025 age=48m | pool_pause state=dispatch-only n=20 "
+                         "median=- age=48m"), (
+        "widening to the unit was done by REPLACING the bare form: the corpus holds "
+        "runs that print seconds with no unit, and this moves the false alarm onto "
+        "the days that currently pass"
+    )
+    assert graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                         "median=0.3545s age=48m | pool_pause state=dispatch-only "
+                         "n=20 median=0.2025 age=48m"), (
+        "the two forms the reporter actually prints have to be accepted in either "
+        "half of one line, not one each"
+    )
+    # Clause 3 — the widening costs no discrimination. The unit must not become a
+    # licence for the shapes the checks above already reject.
+    assert not graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                             "median=0.194s | pool_pause state=dispatch-only n=20 "
+                             "median=-"), (
+        "an age-less line passes as soon as the median carries a unit: the unit "
+        "widened the number field, not the line's required shape"
+    )
+    assert not graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                             "median=0.21s age=1h"), (
+        "a line with only the session_cancel half is accepted: the report is one "
+        "line per SURFACE, so a run that read the mitigation state and reported half "
+        "of it still has to fail"
+    )
+
+    # Clause 4 — the change is confined to the two median fields, so nothing else the
+    # task decides moved. `median=(?:[\\d.]+|-)` is the pre-#3204 field: it must be
+    # gone from the pattern entirely, and the widened one must appear exactly twice,
+    # once per half. This is the REPO carrier. The node that compares it against the
+    # live vault task is `test_the_live_task_and_skill_are_the_job_this_file_grades`
+    # in this file, marked `live_vault` (`pytest.ini:14-19`) so the gate does not run
+    # it — which is precisely why the vault half had to land in this same round,
+    # through `automod_vault_land`, rather than be left to the nightly full run that
+    # is the only other place that node executes.
+    assert TASK_FIXTURE.read_text(encoding="utf-8").count(r"median=(?:[\d.]+s?|-)") == 2, (
+        "the widened median is not in exactly the two fields it belongs to, so either "
+        "a half is unfixed or something outside those two fields was edited"
+    )
+    assert r"median=(?:[\d.]+|-)" not in patterns[0], (
+        "the un-widened median is still in the pattern, which is the field that made "
+        "13 of 20 retained runs grade graded_fail"
     )
 
 
