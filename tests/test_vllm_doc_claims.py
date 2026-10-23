@@ -48,6 +48,11 @@ import hashlib
 import json
 import re
 import subprocess
+from collections import Counter, namedtuple
+# Aliased, not bare: this module already carries a function-local `from datetime import
+# datetime, timezone` (#1921's chat-turn walk), and re-exporting the plain name at module scope
+# would shadow it in the one place that also needs `timezone`.
+from datetime import datetime as _Moment
 from pathlib import Path
 
 import pytest
@@ -1194,15 +1199,20 @@ def reopen(reopen_raw, cfg) -> dict:
 #: the aggregate and fatal for this file's per-event walk, because the free-pool half of §10's
 #: filing condition has no denominator at all without one.
 #:
-#: 2026-10-15 is that day, and the size below is that day's real one, not a stand-in:
-#: `agent-llm-primary.log.1`, which spans the whole 10-14 13:53 → 10-15 20:34 window, holds
-#: no `GPU KV cache size:` line, and the last boot before it is
-#: `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens` in `agent-llm-primary.log.3`.
-#: The engine that served 2026-10-15 therefore ran on the pool it booted with at 2026-10-12
-#: 16:21 PDT — the same 844,969 every §10 free-block figure on this page is computed on. An
-#: empty list for a day NOT in this map raises rather than falling back to a default: an
-#: unpinned denominator is a filing condition that was never computed, and §10's qualifying
-#: set may not rest on one.
+#: 2026-10-15 is that day, and the size below is that day's real one, not a stand-in. Its
+#: provenance is committed bytes, not a live rotation: the vault witness
+#: `backlog/data/agent-llm-primary.log` (15 lines / 2,866 bytes by `wc -l -c`, captured
+#: 2026-10-23, headed by `backlog/data/agent-llm-primary.log.witness.md`) carries every
+#: `GPU KV cache size:` line of the rotation it was cut from, each with the file and line it
+#: came from and its `INFO MM-DD HH:MM:SS` stamp.
+#: `test_the_pinned_pool_is_derived_from_the_committed_boot_lines` re-derives the integer
+#: below from those bytes: the window's own day holds no boot line at all, and the last boot
+#: before it is `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`. The engine that
+#: served 2026-10-15 therefore ran on the pool it booted with at 2026-10-12 16:21 PDT — the
+#: same 844,969 every §10 free-block figure on this page is computed on. An empty list for a
+#: day NOT in this map raises rather than falling back to a default: an unpinned denominator
+#: is a filing condition that was never computed, and §10's qualifying set may not rest on
+#: one.
 NO_BOOT_POOL = {"2026-10-15": 844969}
 
 
@@ -4417,3 +4427,390 @@ def test_the_historical_0910_records_are_left_alone():
     assert s1 and all(ABSENT_MARK.search(ln) for ln in s1), \
         "§1 names the deleted 09-10 directory somewhere it does not say the build "\
         "is gone — which is the reading a human reverting would take"
+
+
+# ── #3191: the 844,969 denominator stops citing a store that deletes itself ──────────────
+#
+# `NO_BOOT_POOL` is one hand-typed integer, and the provenance above it named a pair of
+# rotation indices. An index is a name for whatever bytes happen to sit third-from-newest this
+# week: by the day this was measured, the lines those two named sat in two other files, and the
+# rotation's own mtimes put the boot carrying 844,969 out of the 11-file window around
+# 2026-10-28 — after which §10 would be asserting an engine's cache size with nothing on this
+# machine, or in git, recording it.
+#
+# So the bytes go into git. Vault commit `4c9c3f09` lands `backlog/data/agent-llm-primary.log`:
+# all 15 `GPU KV cache size:` lines of the 2026-10-23 rotation, verbatim, each prefixed with the
+# `<file>:<line>` it came from and keeping its `INFO MM-DD HH:MM:SS` stamp. The stamp is not
+# decoration. `scripts/vllm_prefix_miss_window.py` stores `sorted(pools)` with no time attached,
+# so the committed 2026-10-12 fixture's `pool_tokens: [484612, 844969]` — the two boots of the
+# day before the counted one — cannot say which of them was the last before the 2026-10-15
+# window, and that ordering is what every free-block figure on the page divides by. A sorted
+# list has no last element; a stamped log does.
+#
+# What cannot go in is the absence. The file spanning the 2026-10-15 window is a 10,485,925-byte
+# log — ten times `WITNESS_MAX_BYTES` — holding no boot line at all, and ordering a store to
+# prove it holds nothing is what #2267 ruled out. That half is dated prose in the companion
+# `.witness.md`, and the node that reads it checks the page's census against the extract's own
+# prefixes and the page's ceiling against the constant that enforces it, so the two files cannot
+# drift apart into a copy and a story.
+
+#: The extract and its header, both under the vault's `backlog/data/` (#2517, #3187). The vault
+#: is a second git tree: this repo's `git ls-files` cannot see either file, which is why every
+#: node below asks the vault's own index.
+_ROTATION_WITNESS = "agent-llm-primary.log"
+_ROTATION_HEADER = "agent-llm-primary.log.witness.md"
+
+#: `wc -l -c` and the sha256 of the extract as landed. These are not the clause; the clause is
+#: that the bytes, the figure the comment quotes and the hash the header records still agree
+#: with one another when nobody remembers what the rotation said.
+_WITNESS_LINES = 15
+_WITNESS_BYTES = 2_866
+_WITNESS_SHA256 = "c6885164d70053df4718fb50cfbd95cca5be7a0d6ead95deacb48a39848c7f86"
+
+#: The pool §10's 2026-10-15 paragraph divides by, and the one it prices that against. Both are
+#: re-read from the extract's bytes; the literals are here so a change to the bytes fails even
+#: when somebody has already re-cut `NO_BOOT_POOL` to match.
+_LAST_BOOT_BEFORE_WINDOW = 844_969
+_COUNTERFACTUAL_POOL = 484_612
+
+#: The zero-boot file of the census and the ceiling a witness may not exceed, as the header
+#: states both. The constant is checked against the code, not against itself.
+_ZERO_BOOT_FILE = "agent-llm-primary.log.6"
+_ZERO_BOOT_BYTES = 10_485_925
+_CEILING_QUOTED = "1,048,576"
+_ROTATION_STORE_GLOB = "lloyd-data/logs/services/agent-llm-primary.log*"
+_CAPTURE_STAMP = "2026-10-23T13:46:09Z"
+
+#: One line of the extract as landed: a source `<file>:<line>`, then the engine's own boot line.
+_EXTRACT_LINE = re.compile(
+    r"(agent-llm-primary\.log(?:\.\d+)?):(\d+):.*?"
+    r"INFO (\d\d-\d\d) (\d\d:\d\d:\d\d) \[[^\]]*\] GPU KV cache size: ([\d,]+) tokens")
+
+#: A rotation index — `.log.3`. Banned from the provenance comment above `NO_BOOT_POOL`, for the
+#: reason that comment gives: it is how the last one went stale while the integer stayed right.
+_ROTATION_INDEX = re.compile(r"\.log\.\d+")
+
+#: The provenance as it stood before #3191, verbatim from the comment it replaced. The ban is
+#: graded against this so the scan is demonstrably a check and not a description of current
+#: text — the `_PRE_FIX_IV_CLAUSE` shape this file already uses.
+_PRE_3191_PROVENANCE = (
+    "no `GPU KV cache size:` line, and the last boot before it is `INFO 10-12 16:21:06 … GPU "
+    "KV cache size: 844,969 tokens` in `agent-llm-primary.log.3`.")
+
+#: The year every boot in the extract falls in. A `GPU KV cache size:` stamp carries no year.
+_BOOT_YEAR = 2026
+
+_Boot = namedtuple("_Boot", "moment tokens src line")
+
+
+def _vault() -> Path:
+    """The vault as a git tree, or a FAILURE — never a skip.
+
+    `tests/board_presence.py` gives both the route (`LLOYD_OBSIDIAN_VAULT`, else `~/obsidian`)
+    and the policy: an absent corpus makes the only measurement of a clause "not run", and
+    `skipped` files a missing pin as nobody's problem. The same choice `#2960`'s `_live_vault`
+    makes for its own vault clauses.
+    """
+    from tests.board_presence import vault_root
+
+    vault = vault_root()
+    if not (vault / ".git").exists():
+        pytest.fail(f"{vault} is not a git vault, so #3191's witness clauses cannot be measured "
+                    "here. Failing rather than skipping: the committed witness IS the corpus "
+                    "these clauses certify")
+    return vault
+
+
+def _vault_witness(name: str) -> Path:
+    """One committed `backlog/data/` file, present, or a FAILURE.
+
+    A missing witness is not a box without the fixture — it is the regression this block exists
+    to catch. The rotation it was cut from is deleting itself, so after 2026-10-28 there is no
+    second copy anywhere to fall back to.
+    """
+    path = _vault() / "backlog" / "data" / name
+    if not path.is_file():
+        pytest.fail(f"{path} is gone from the vault. It is the only committed copy of the boot "
+                    "lines §10's 2026-10-15 pool rests on, and the rotation they were cut from "
+                    "keeps deleting itself — an absent witness is the failure, not a skip")
+    return path
+
+
+def _wc_l_c(path: Path) -> tuple[int, int]:
+    """`wc -l -c < path`, run rather than reasoned about, because that is the command the
+    clause names and the number the provenance comment quotes."""
+    with open(path, "rb") as fh:
+        out = subprocess.run(["wc", "-l", "-c"], stdin=fh, capture_output=True, text=True)
+    assert out.returncode == 0, f"`wc -l -c < {path}` exited {out.returncode}: {out.stderr!r}"
+    lines, nbytes = out.stdout.split()[:2]
+    return int(lines), int(nbytes)
+
+
+def _boot_lines() -> list[_Boot]:
+    """Every boot line of the committed extract, parsed, in the order the file lists them.
+
+    Each line has to parse, and that IS the check that the file is the boot lines and nothing
+    else: a header line typed into it, a truncated log line, or a boot line from a later
+    rotation that nobody re-stamped all fail here instead of slipping past a `len(...) == 15`.
+    """
+    raw = _vault_witness(_ROTATION_WITNESS).read_text(encoding="utf-8")
+    out = []
+    for line in raw.splitlines():
+        m = _EXTRACT_LINE.match(line)
+        assert m, (
+            f"{line[:88]!r} is not a `<file>:<line>`-prefixed `GPU KV cache size:` line. The "
+            f"extract's contract is those lines and nothing else; the provenance header is a "
+            f"separate file (`{_ROTATION_HEADER}`), which is how `wc -l -c` can print 15")
+        out.append(_Boot(_Moment(_BOOT_YEAR, int(m.group(3)[:2]), int(m.group(3)[3:5]),
+                                 *[int(x) for x in m.group(4).split(":")]),
+                         int(m.group(5).replace(",", "")), m.group(1), int(m.group(2))))
+    return out
+
+
+def test_the_rotation_extract_is_committed_to_the_vault_as_boot_lines_only():
+    """#3191 clause 1 and clause 2: `backlog/data/agent-llm-primary.log` is tracked in the
+    vault, `wc -l -c` over its bytes prints 15 lines and 2,866 bytes, those bytes are the
+    rotation's boot lines and nothing else, and they carry both pool sizes §10's 2026-10-15
+    arithmetic turns on.
+
+    Tracked, not merely present. The witness lives in the vault because the store it was cut
+    from is under `~/lloyd-data`, which is not a git tree, and an untracked copy there is one
+    box's copy of the only proof of a denominator the page still prints — the same argument
+    `test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte` makes for a
+    fixture in this repo.
+
+    Clause 2 goes in this node rather than getting one of its own because both sizes are
+    properties of the same 2,866 bytes, and the paragraph that uses them uses them together: it
+    prices 408,165 tokens of gap work against 413,190 free blocks on the 844,969 pool, then says
+    the same gap would read as churned on the 484,612 pool. A witness holding only the figure
+    and not the counterfactual cannot be checked by anyone — which is the weakness #2852's own
+    docstring called the weakest claim on the page.
+    """
+    path = _vault_witness(_ROTATION_WITNESS)
+    tracked = subprocess.run(
+        ["git", "-C", str(_vault()), "ls-files", "--error-unmatch",
+         f"backlog/data/{_ROTATION_WITNESS}"], capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{path} is on disk but not in the vault's index ({tracked.stderr.strip()}): once the "
+        "rotation drops the 2026-10-12 boots an untracked witness is the day lost, not a tidy "
+        "tree")
+    lines, nbytes = _wc_l_c(path)
+    assert (lines, nbytes) == (_WITNESS_LINES, _WITNESS_BYTES), (
+        f"the committed witness is {lines} lines / {nbytes} bytes, not "
+        f"{_WITNESS_LINES} / {_WITNESS_BYTES}: either the extract was re-cut without updating "
+        "the figure the provenance comment quotes, or the file is not the extract")
+    assert nbytes < 4_000, (
+        f"{nbytes} bytes is over the 4,000 the clause bounds this extract to — the bound is "
+        "what keeps a witness a subset of a 10 MiB store and not a copy of it")
+
+    boots = _boot_lines()
+    assert len(boots) == lines, (
+        f"{len(boots)} boot lines parse but `wc -l` counts {lines}: a boot line wrapped over "
+        "two physical lines, or a file whose last line has no newline, and the count the "
+        "comment quotes is no longer the count a reader gets")
+    assert len({(b.src, b.line) for b in boots}) == len(boots), (
+        "two extract lines carry the same source `<file>:<line>`, so one of them is a paste "
+        "rather than a distinct boot")
+
+    stamped = {(b.moment.strftime("%m-%d %H:%M:%S"), b.tokens) for b in boots}
+    assert ("10-12 16:21:06", _LAST_BOOT_BEFORE_WINDOW) in stamped, (
+        "the 2026-10-12 16:21:06 boot with the 844,969-token pool is not in the committed "
+        "bytes, and that line is the whole denominator of §10's 2026-10-15 paragraph")
+    assert ("10-12 16:15:48", _COUNTERFACTUAL_POOL) in stamped, (
+        "the 484,612-token boot the same paragraph prices its own conclusion against is not in "
+        "the committed bytes, so the counterfactual is again uncited")
+    assert _ZERO_BOOT_FILE not in {b.src for b in boots}, (
+        f"{_ZERO_BOOT_FILE} now yields a boot line, so the census the header calls zero-boot is "
+        "wrong and the 2026-10-15 day may have its own denominator after all")
+
+
+def test_the_pinned_pool_is_derived_from_the_committed_boot_lines():
+    """#3191 clause 3: the integer in `NO_BOOT_POOL` is what the committed stamps say, and the
+    ordering §10 leans on is derived rather than asserted.
+
+    Three facts, all read off the extract: no boot falls inside 2026-10-15, the last boot before
+    that day is the 844,969-token one at 16:21:06, and the boot immediately ahead of it is the
+    484,612 counterfactual at 16:15:48 — 5 min 18 s earlier, in the same file. The second fact
+    is the one no committed fixture could carry before this round: the 2026-10-12 extract holds
+    `pool_tokens: [484612, 844969]` because `scripts/vllm_prefix_miss_window.py` stores
+    `sorted(pools)` with no time, and a sorted pair has no last element. The first is what makes
+    the pin necessary at all. The third is what makes the pin thin: the page's conclusion flips
+    on which of two boots five minutes apart was the last one.
+
+    The literal is asserted against too, not just against `NO_BOOT_POOL`: if the bytes ever say
+    something else, §10's prose is wrong whether or not somebody re-cut the constant to match.
+    """
+    boots = _boot_lines()
+    months = {b.moment.month for b in boots}
+    assert {12, 1} != months & {12, 1}, (
+        f"the extract's boots fall in months {sorted(months)}, straddling the New Year, and a "
+        "stamp carries no year — ranking them under one pinned year would pick a 'last boot' by "
+        "arithmetic, so take the year from the store instead of deriving it here")
+
+    day_start, day_end = _Moment(_BOOT_YEAR, 10, 15), _Moment(_BOOT_YEAR, 10, 16)
+    inside = [b for b in boots if day_start <= b.moment < day_end]
+    assert inside == [], (
+        f"the window now carries its own boot line ({[str(b.moment) for b in inside]}), so this "
+        "day no longer needs a pinned pool and `NO_BOOT_POOL` is carrying a denominator nobody "
+        "asked for")
+    before = sorted((b for b in boots if b.moment < day_start), key=lambda b: b.moment)
+    assert len(before) >= 2, (
+        f"only {len(before)} boot line(s) precede the 2026-10-15 window in the extract, so "
+        "'the last boot before it' and 'the boot before that' are not both readable and the "
+        "counterfactual §10 prices against has no source")
+
+    last, runner_up = before[-1], before[-2]
+    assert last.tokens == NO_BOOT_POOL["2026-10-15"] == _LAST_BOOT_BEFORE_WINDOW, (
+        f"the last boot before 2026-10-15 in the committed bytes is {last.tokens:,} tokens and "
+        f"`NO_BOOT_POOL` says {NO_BOOT_POOL['2026-10-15']:,}: the literal has drifted from the "
+        "provenance it names, which is the failure this clause exists to make impossible")
+    assert last.moment.strftime("%m-%d %H:%M:%S") == "10-12 16:21:06", (
+        f"the denominator's own stamp is now {last.moment}, not the 10-12 16:21:06 §10 prints "
+        "in its provenance sentence")
+    assert runner_up.tokens == _COUNTERFACTUAL_POOL and \
+        runner_up.moment.strftime("%m-%d %H:%M:%S") == "10-12 16:15:48", (
+        f"the boot immediately ahead of the denominator is {runner_up.tokens:,} tokens at "
+        f"{runner_up.moment}, not the 484,612 at 16:15:48 the paragraph's counterfactual names")
+    assert runner_up.src == last.src, (
+        f"the two boots five minutes apart are now in different files ({runner_up.src} and "
+        f"{last.src}), so 'the same engine rebooted with a smaller pool' is a claim across a "
+        "rotation boundary and needs re-reading, not re-deriving")
+
+
+def _pool_provenance_comment() -> str:
+    """The `#:` block sitting directly above `NO_BOOT_POOL`, read out of this module's own text.
+
+    The comment, not a copy of it. What rotted last time was the comment, and a node holding its
+    own quotation of the right path would stay green while the text above the constant went
+    stale a second time.
+    """
+    src = Path(__file__).resolve().read_text(encoding="utf-8")
+    head, _, _ = src.partition("\nNO_BOOT_POOL = {")
+    assert head != src, "`NO_BOOT_POOL = {` no longer anchors: the provenance pin read nothing"
+    block = []
+    for line in reversed(head.splitlines()):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    assert block, "there is no `#:` comment above `NO_BOOT_POOL` any more"
+    return "\n".join(reversed(block))
+
+
+def test_the_pool_provenance_no_longer_cites_a_rotating_log():
+    """#3191 clause 4: the comment above `NO_BOOT_POOL` names the committed witness and the
+    figure `wc -l -c` actually prints for it, and no `.log.<N>` rotation index survives in it.
+
+    Why an index is the bug and not a style preference: `agent-llm-primary.log.1` is a name for
+    whatever file happens to be one behind the active log this week. The provenance this file
+    carried named two of them, and on the day it was re-measured the lines it described sat in
+    two other files — a comment that had silently become false while the integer stayed true,
+    and nothing anywhere could notice. A path in git has no such drift, and the byte figure is
+    what turns the citation into a measurement: a reader who counts 15 lines and 2,866 bytes has
+    the extract, and any other count is a different file wearing the name.
+
+    The byte figure is checked against the witness itself, not against a constant, so a re-cut
+    extract and a comment that follows it stay green while a comment that lags goes red. The ban
+    is graded against the text it replaced, so a scan that stopped matching a real index would
+    fail too.
+    """
+    comment = _pool_provenance_comment()
+    assert f"`backlog/data/{_ROTATION_WITNESS}`" in comment, (
+        "the provenance no longer names the committed witness, so a reader following it goes "
+        "back to the live rotation, which is the state #3191 was filed to end")
+    m = re.search(r"\((\d+) lines? / ([\d,]+) bytes", comment)
+    assert m, (
+        "the provenance names a path but not the `wc -l -c` figure for it, so the citation "
+        "cannot be checked against the file it cites")
+    measured = _wc_l_c(_vault_witness(_ROTATION_WITNESS))
+    assert (int(m.group(1)), int(m.group(2).replace(",", ""))) == measured, (
+        f"the comment quotes {m.group(1)} lines / {m.group(2)} bytes and the witness measures "
+        f"{measured[0]} / {measured[1]} — the citation and the bytes have already drifted, which "
+        "is how the last one rotted")
+    assert not _ROTATION_INDEX.search(comment), (
+        f"a rotation index ({_ROTATION_INDEX.findall(comment)}) is back in the provenance: an "
+        "index names a slot in a rotation, not bytes, and this is the second time those bytes "
+        "moved out from under a comment that named them")
+    hits = _ROTATION_INDEX.findall(_PRE_3191_PROVENANCE)
+    assert hits == [".log.3"], (
+        f"positive control: the ban matched {hits} in the provenance it replaced, so the check "
+        "above is not reading anything — the old text named a rotation index and must still "
+        "look like one to this regex")
+
+
+def test_the_witness_header_carries_what_the_extract_cannot():
+    """#3191 clause 5: the companion page names the source store, the capture instant and the
+    per-file boot census with `stat` byte sizes, and says which half of that is capture metadata
+    a later round may not go and order.
+
+    The extract proves what a boot line says. It cannot prove the absence the whole pin is
+    keyed to: the file spanning the 2026-10-15 window is a 10,485,925-byte log holding no boot
+    line, ten times `WITNESS_MAX_BYTES`, and #2267's rule is that a clause may not order a
+    store to prove it empty. So the absence is dated prose, and this node is what keeps the page
+    from decaying into a paragraph that merely sounds like a measurement — the census's boot
+    counts are re-counted from the extract's own prefixes, the ceiling is re-read from the code
+    that enforces it, the zero-boot file's size is pinned, and the hash the header records is
+    re-hashed against the bytes.
+    """
+    page = _vault_witness(_ROTATION_HEADER).read_text(encoding="utf-8")
+    flat = " ".join(page.split())
+    raw = _vault_witness(_ROTATION_WITNESS).read_bytes()
+    assert _ROTATION_STORE_GLOB in page, (
+        "the header no longer names the store the extract came from, so nobody can go check "
+        "whether it is still there")
+    assert _CAPTURE_STAMP in page, (
+        "the capture instant is gone: every figure below is dated to it, including the ones "
+        "that are no longer re-measurable")
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == _WITNESS_SHA256 == _sha_of_page_record(page), (
+        f"the extract now hashes {digest}, but #3191 landed {_WITNESS_SHA256} and the header "
+        "records what it recorded — one of the three is a different file")
+
+    rows = re.findall(r"^\| `(agent-llm-primary\.log(?:\.\d+)?)` \| ([\d,]+) \| (\d+) \| "
+                      r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \|$", page, re.M)
+    assert len(rows) == 11, (
+        f"the census lists {len(rows)} files, not the 11 of the rotation as captured — the "
+        "cadence claim and the ~2026-10-28 loss date are read off those mtimes")
+    census = {f: (int(b.replace(",", "")), int(n)) for f, b, n, _ in rows}
+    per_file = Counter(b.src for b in _boot_lines())
+    assert set(per_file) <= set(census), (
+        f"{sorted(set(per_file) - set(census))} is quoted by the extract but missing from the "
+        "census, so the page no longer describes the rotation the bytes were cut from")
+    for name, (_, boots_counted) in census.items():
+        assert boots_counted == per_file.get(name, 0), (
+            f"the census says `{name}` held {boots_counted} boot lines and the extract counts "
+            f"{per_file.get(name, 0)} from it — the page and the witness disagree about a fact "
+            "the witness can still settle")
+    assert sum(n for _, n in census.values()) == _WITNESS_LINES, (
+        "the census's boot column no longer adds up to the extract's line count, so one of the "
+        "two is not the rotation of the capture date")
+    assert census[_ZERO_BOOT_FILE] == (_ZERO_BOOT_BYTES, 0), (
+        f"the zero-boot file of the census is no longer {_ZERO_BOOT_FILE} at "
+        f"{_ZERO_BOOT_BYTES:,} B with no boot line, and that row is §10's `pool_tokens: []`")
+    assert f"`{_ZERO_BOOT_FILE}`" in page and "2026-10-14 13:53:21 → 2026-10-15 20:34:12" in \
+        flat, "the header stopped naming which file spans the 2026-10-15 window and over what"
+    assert "capture metadata" in flat, (
+        "the header no longer labels the census and the zero-boot fact as dated metadata, so a "
+        "later reader can mistake them for readings this tree can reproduce")
+
+    from scripts.automod import backlog as B
+    assert f"{B.WITNESS_MAX_BYTES:,}" == _CEILING_QUOTED, (
+        f"`WITNESS_MAX_BYTES` is {B.WITNESS_MAX_BYTES:,} and the header quotes "
+        f"{_CEILING_QUOTED}: the ceiling the page invokes is not the one the code enforces")
+    assert "WITNESS_MAX_BYTES" in page and _CEILING_QUOTED in flat, (
+        "the header no longer states the ceiling, which is the only reason its 10 MiB row is "
+        "prose rather than a file")
+    assert _ZERO_BOOT_BYTES > B.WITNESS_MAX_BYTES, (
+        "the zero-boot file is under the witness ceiling now, so the rule against ordering it "
+        "has to be re-argued from something else — the extract would no longer be the only "
+        "proportionate witness")
+    assert _WITNESS_BYTES <= B.WITNESS_MAX_BYTES, (
+        "the extract itself is over the ceiling the rule sets for a witness, which makes this "
+        "whole route illegal")
+
+
+def _sha_of_page_record(page: str) -> str:
+    """The sha256 the header records for the extract, or a failure naming its absence."""
+    m = re.search(r"sha256 ([0-9a-f]{64})", page)
+    assert m, "the header records no sha256 for the extract, so the bytes it describes are " \
+              "identifiable only by their line count"
+    return m.group(1)
