@@ -2667,6 +2667,26 @@ def _ledger_rows(ledger: Path) -> list[dict]:
     return S.ledger_rows(Path(ledger))
 
 
+def _ledger_rows_merged(ledger: Path) -> list[dict]:
+    """The live ledger's rows plus the `promotions-archive-*.jsonl.gz` rotations
+    beside it, oldest month first and the live rows last.
+
+    Opt-in, and the default every other reader keeps is the live file alone:
+    `LEDGER_ARCHIVE_AGE_DAYS = 14` (`scripts/groundskeeper/retention-sweep.py`)
+    rolls a row out of `promotions.jsonl` after two weeks, so a confirmation
+    older than that stops resolving — which is right for the pool (an item that
+    has sat confirmed for 14 days is not the loop's next job) and wrong for a
+    grader, which is asked months later whether a landing satisfied a contract
+    triage wrote before the sweep ran. Widening the pool readers is #3179's scope
+    ruling, not its change; measured 2026-10-23, 1,469 items have a `confirmed`
+    row only in the archives and every one of their backlog files already reads
+    `status: done`, so today the pool loses no work to the narrow read.
+    """
+    from scripts.automod import state as S
+
+    return S.ledger_rows_merged(Path(ledger))
+
+
 def _ledger_read_count(ledger: Path) -> int:
     """Times this process asked the ledger for its rows. The instrument
     `tests/test_backlog_ledger_cache.py` measures; see `state.ledger_read_count`.
@@ -2685,10 +2705,16 @@ def _ledger_cache_clear() -> None:
     S.ledger_rows_reset()
 
 
-def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> list[dict]:
+def _ledger_events(ledger: Path, event: str, *, require_item: bool = True,
+                   merged: bool = False) -> list[dict]:
     """Rows of one event type. `require_item=False` for the event types that
     are about a round rather than an item — `gate` carries a `round_id` and no
     `item_id`, and the default filter drops it silently.
+
+    `merged=True` asks the rotations too (`_ledger_rows_merged`); the default is
+    the live file alone, which is what every pool, board and status reader wants.
+    The predicates below are shared by both, so an archived row is filtered by
+    exactly the rules a live one is.
 
     Filters `_ledger_rows`, so the file is read and decoded at most once per
     change no matter how many event types ask. The predicates are exactly the
@@ -2698,7 +2724,7 @@ def _ledger_events(ledger: Path, event: str, *, require_item: bool = True) -> li
     crash its caller on `.get`; it is now dropped by the shared decoder.
     """
     out: list[dict] = []
-    for d in _ledger_rows(ledger):
+    for d in (_ledger_rows_merged(ledger) if merged else _ledger_rows(ledger)):
         if d.get("event") != event:
             continue
         if require_item and d.get("item_id") is None:
@@ -2822,10 +2848,19 @@ RETRIAGE_TAG = "re-triage"
 RETRIAGE_CAP = 1
 
 
-def retriage_marks(ledger: Path) -> dict[int, float]:
-    """`{item_id: ts}` of each item's latest `backlog_retriage` row."""
+def retriage_marks(ledger: Path, *, with_archives: bool = False) -> dict[int, float]:
+    """`{item_id: ts}` of each item's latest `backlog_retriage` row.
+
+    `with_archives=True` reads the rotations too, and it exists for the merge on
+    the other side: widening `confirmed_verdicts` makes an archived confirmation
+    resolvable again, so if the `backlog_retriage` mark that voided it stayed
+    archive-blind the merge would resurrect a contract the item already failed
+    once (#3179 clause 3). The two halves are widened together for that reason.
+    `max(ts)` makes this idempotent in a duplicate row and in the order the files
+    are read.
+    """
     marks: dict[int, float] = {}
-    for d in _ledger_events(ledger, "backlog_retriage"):
+    for d in _ledger_events(ledger, "backlog_retriage", merged=with_archives):
         i = int(d["item_id"])
         marks[i] = max(marks.get(i, 0.0), float(d.get("ts") or 0))
     return marks
@@ -3013,15 +3048,28 @@ def incomplete_counts(ledger: Path) -> dict[int, int]:
     return counts
 
 
-def confirmed_verdicts(ledger: Path) -> dict[int, dict]:
+def confirmed_verdicts(ledger: Path, *, with_archives: bool = False) -> dict[int, dict]:
     """{item_id: latest `confirmed` triage event}. The event carries the
     ACCEPTANCE the implementer is held to. A confirmation before a re-triage
-    mark is a contract the item has already failed once; it does not count."""
-    marks = retriage_marks(ledger)
+    mark is a contract the item has already failed once; it does not count.
+
+    `with_archives=True` reads the `promotions-archive-*.jsonl.gz` rotations too,
+    which is what lets a grader reach an acceptance the 14-day sweep has rolled
+    out of the live file (#3179). Unset — the default, and every pool, board and
+    status reader — the live file alone, exactly as before. The mark lookup is
+    widened in the same breath, because an archived confirmation voided by an
+    archived mark must stay void; and "latest" is decided by `ts` rather than by
+    which file a row arrived in, so a newer live confirmation cannot be
+    overwritten by an older archived one however the merge orders the files."""
+    marks = retriage_marks(ledger, with_archives=with_archives)
     out: dict[int, dict] = {}
-    for d in _ledger_events(ledger, "backlog_triage"):
-        if d.get("verdict") == "confirmed" and _after_mark(d, marks):
-            out[int(d["item_id"])] = d
+    for d in _ledger_events(ledger, "backlog_triage", merged=with_archives):
+        if d.get("verdict") != "confirmed" or not _after_mark(d, marks):
+            continue
+        i = int(d["item_id"])
+        if i in out and float(out[i].get("ts") or 0) > float(d.get("ts") or 0):
+            continue
+        out[i] = d
     return out
 
 

@@ -614,7 +614,19 @@ def item_contract(item_id: int, ledger: Path | None = None) -> dict:
         fm, body = B._split_frontmatter(text)
         m = re.search(r"^#\s+(.+)$", body, re.M)
         title = m.group(1).strip() if m else paths[0].stem
-    ev = B.confirmed_verdicts(ledger).get(int(item_id)) or {}
+    # The ONLY reader that asks for the rotations, and it asks because a grader
+    # is not the pool. `LEDGER_ARCHIVE_AGE_DAYS = 14`
+    # (`scripts/groundskeeper/retention-sweep.py`) rolls a `backlog_triage` row
+    # out of the live ledger after two weeks, and a round may be graded against a
+    # contract triage wrote long before that — which is how item #392 (2026-09-08),
+    # #447 (2026-09-09) and #544 (2026-09-10) all came to answer `item #N has no
+    # acceptance to grade against`: their only `confirmed` row is in
+    # `promotions-archive-202609.jsonl.gz`, and their item files predate the
+    # `acceptance_clauses` front matter that would otherwise be the fallback. A
+    # pool that forgets a confirmation after 14 days is asking a different
+    # question — `ready_confirmed`, `desired_statuses` and `held_confirmations`
+    # keep the live-only read (the scope ruling on #3179).
+    ev = B.confirmed_verdicts(ledger, with_archives=True).get(int(item_id)) or {}
     clauses = B.acceptance_clauses_of(ev, fm)
     body = body[:BODY_CAP_CHARS]
     members = [int(m) for m in (fm.get("members") or []) if str(m).strip().lstrip("-").isdigit()]

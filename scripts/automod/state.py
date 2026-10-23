@@ -29,6 +29,7 @@ later refactors them together.
 from __future__ import annotations
 
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -239,7 +240,12 @@ _rows_reads: dict[str, int] = {}
 
 
 def ledger_rows(path: Path | None = None) -> list[dict]:
-    """Every event in the ledger, decoded at most once per change to the file.
+    """Every event in ONE ledger file, decoded at most once per change to it.
+
+    A `.gz` path decodes too — a rotation is a ledger file — but one call is
+    still one file: the live-plus-rotations read is `ledger_rows_merged`, and a
+    caller that wants the population the retention sweep actually leaves behind
+    cannot get it from here.
 
     Returns the shared row objects — read-only, see the note above. A missing or
     unreadable ledger is `[]`, and a malformed line is skipped rather than
@@ -265,9 +271,9 @@ def ledger_rows(path: Path | None = None) -> list[dict]:
         # Past here the file comes off disk, and the counter moves — see
         # `ledger_read_count` for why the count is of reads and not of calls.
         # The decode is under the lock: single-flight, see the note above.
-        rows = _decode_ledger(target)
+        rows, decoded = _decode_ledger(target, st.st_size)
         _rows_reads[key] = _rows_reads.get(key, 0) + 1
-        if st.st_size > _ROWS_CACHE_MAX_BYTES:
+        if decoded > _ROWS_CACHE_MAX_BYTES:
             # Decode without caching: holding a rotated-out ledger in RAM is
             # worse than re-decoding it, and the ceiling is a round 64 MiB
             # against the 6,339,461 bytes measured on 2026-09-17. Past the
@@ -285,12 +291,49 @@ def ledger_rows(path: Path | None = None) -> list[dict]:
     return rows
 
 
-def _decode_ledger(target: Path) -> list[dict]:
+def _decode_ledger(target: Path, size: int) -> tuple[list[dict], int]:
+    """(rows, decoded JSONL bytes) for one ledger file; `.gz` decodes too.
+
+    `size` is the caller's already-taken `st.st_size`, and the returned byte count
+    is what the cache ceiling is compared against — decoded bytes, not on-disk
+    ones, because for a rotation those differ by a factor of four:
+    `promotions-archive-202609.jsonl.gz` is 6,756,902 bytes on disk and 29,742,550
+    bytes of JSONL (measured 2026-10-23). Bounding by `st_size` alone would admit a
+    64 MiB `.gz` — ~300 MB of decoded text — while refusing a plain file of the
+    same size, so both branches report what the cache actually holds. A plain
+    file's decoded length IS its on-disk length, so `size` is that branch's answer
+    rather than a re-stat or a re-encode of 27 MB of text.
+
+    **The plain branch reads with `read_text`, and must keep doing so.**
+    `tests/test_backlog_ledger_cache.py` instruments #1204's one-read-per-cycle
+    property by counting `pathlib.Path.read_text` calls filtered to the ledger
+    path; routing that branch through `read_bytes` scored `reads=0` and inverted
+    the node's `reads >= 1` floor into a permanent failure — an instrument
+    measuring nothing is worse than one measuring a cost. Only the gzip branch,
+    which has no plain-text reading to lose, uses `read_bytes`.
+
+    A `.gz` suffix is the whole gzip route, and the live ledger has never had one:
+    the rotations are named `promotions-archive-<YYYYMM>.jsonl.gz` by the retention
+    sweep (`scripts/groundskeeper/retention-sweep.py`). Reading one is what #3179
+    needed and #3079 could not get from here — a `read_text` cannot open a gzip
+    file, which is why the archives were invisible to every reader that went
+    through this function. A truncated archive raises `EOFError` out of zlib, not
+    `OSError`, and is swallowed here for the same reason: a read-side accelerator
+    must not be the reason a panel or a scorecard dies.
+    """
+    if target.suffix == ".gz":
+        try:
+            raw = gzip.decompress(target.read_bytes())
+        except (OSError, EOFError):
+            return [], 0
+        text, decoded = raw.decode("utf-8", errors="replace"), len(raw)
+    else:
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return [], 0
+        decoded = size
     out: list[dict] = []
-    try:
-        text = target.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -300,7 +343,7 @@ def _decode_ledger(target: Path) -> list[dict]:
             continue
         if isinstance(row, dict):
             out.append(row)
-    return out
+    return out, decoded
 
 
 def ledger_read_count(path: Path | None = None) -> int:
@@ -320,6 +363,69 @@ def ledger_read_count(path: Path | None = None) -> int:
     """
     with _rows_lock:
         return _rows_reads.get(str(path or LEDGER_PATH), 0)
+
+
+#: What the retention sweep names the rotations it rolls out of the live ledger
+#: (`scripts/groundskeeper/retention-sweep.py`, `LEDGER_ARCHIVE_AGE_DAYS = 14`).
+#: A reader that globs nothing reads one file and silently narrows its own
+#: population — #3079 for the landed-outcomes report, #3179 for the review
+#: contract, which lost the acceptance of every item confirmed more than 14
+#: days before the round that was graded against it.
+LEDGER_ARCHIVE_GLOB = "promotions-archive-*.jsonl.gz"
+
+
+def ledger_archives(path: Path | None = None) -> list[Path]:
+    """The rotations beside one ledger, oldest month first.
+
+    Globs at call time, never once at import, so a sweep that lands mid-cycle is
+    seen by the next read. Sorted by NAME, and the name carries `%Y%m`, which is
+    chronological: `promotions-archive-202609.jsonl.gz` then `-202610.jsonl.gz`.
+    """
+    target = Path(path or LEDGER_PATH)
+    try:
+        return sorted(target.parent.glob(LEDGER_ARCHIVE_GLOB))
+    except OSError:
+        return []
+
+
+def ledger_rows_merged(path: Path | None = None) -> list[dict]:
+    """The live ledger's rows plus every rotation's, in append order.
+
+    Each file goes through `ledger_rows` on its own path, so the single-flight
+    cache and the `ledger_read_count` instrument both still hold: two calls over
+    an unchanged tree take each file off disk once, and the counter for the LIVE
+    path stays at 1 — #1204's one-read-per-cycle property is not traded for the
+    gzip branch, it is inherited by it.
+
+    **The live rows come LAST.** The readers this exists for
+    (`backlog.confirmed_verdicts`) resolve one row per item by last-wins, so
+    order is the semantics: an older archived confirmation of the same item must
+    not overwrite a newer live one. `landed_outcomes.ledger_files()` returns
+    `[live, *archives]`, which is right for its counts and wrong for a last-wins
+    dict — an older archived row would take the item. So this is that list
+    reversed, not that pattern copied.
+
+    Rows are the shared read-only objects `ledger_rows` returns: the merged list
+    is new, its dicts are not, so filter and copy, never mutate. A row the sweep
+    rolled but did not finish removing from the live file appears twice; every
+    consumer here resolves by last-wins or by `max(ts)`, which are both
+    idempotent in a duplicate, so no dedupe pass is taken (the sweep measured 0
+    such rows for #3079, and a canonical-row dedupe over 63k dicts is a cost
+    none of these readers needs).
+
+    What it costs, measured 2026-10-23 on the live state dir: 27,518,019 B of
+    live JSONL plus 46,648,660 B decoded across the two rotations, held per-file
+    by the row cache — one cold merge of 58,283 rows (19,988 live + 26,417 +
+    11,878) in 1.55 s, and every read after that in the same process is a cache
+    hit. `landed_outcomes` has paid the same shape since #3079, and `item_contract`
+    is the only caller that asks.
+    """
+    target = Path(path or LEDGER_PATH)
+    rows: list[dict] = []
+    for archive in ledger_archives(target):
+        rows += ledger_rows(archive)
+    rows += ledger_rows(target)
+    return rows
 
 
 def ledger_rows_reset() -> None:

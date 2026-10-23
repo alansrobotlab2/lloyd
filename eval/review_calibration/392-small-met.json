@@ -13,7 +13,8 @@
     "unmet_clauses": [],
     "honesty_finding": false
   },
-  "note": "Confirmed by a diff read on 2026-10-16: the graded surface is parent..commit (`grade_commit` grades that range, not the tip), and `git diff --name-only ad64d312 ce713bf3` prints exactly the one path this case declares — a test-only landing the author called met, so `pass` is the expectation. Ruling: #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true'.",
+  "provisional": true,
+  "note": "Confirmed by a diff read on 2026-10-16: the graded surface is parent..commit (`grade_commit` grades that range, not the tip), and `git diff --name-only ad64d312 ce713bf3` prints exactly the one path this case declares \u2014 a test-only landing the author called met, so `pass` is the expectation. Ruling: #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true'. Provisional again as of the 2026-10-22 calibrate run: with item #392's archived `confirmed` row resolved, the grader answered `kind retry != pass` \u2014 'clause 1 partial: The derivation half is genuinely in the tree and shipped before this diff' \u2014 in grader session `20261022_213857_review_2794` (158.4s), line 1 of `~/lloyd-data/logs/calibrate-2822-merged-213855.log`, the run that measured `2/4 agree`. So the diff-read ruling above and a live grading of `parent..commit` now disagree about whether this landing is `pass`; whether `expect.kind: pass` or the `retry` is correct is the ruling #3179 leaves to the owed-check job, and re-marking the case is the record of the disagreement, not its resolution. `provisional` is a record and not a mute: `compare()` never reads the flag and the CLI exit code does not either, so the FAIL still prints.",
   "author_outcome": {
     "landed": true,
     "acceptance": "met",

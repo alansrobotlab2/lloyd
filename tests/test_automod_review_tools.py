@@ -231,12 +231,18 @@ def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
     owed-check entry #3 of 2026-10-16T10:33:07Z, whose second half ("correcting 447's
     changed_paths to the one path the commit contains") is refuted by the test above
     and was not applied.
+
+    **#3179 part (b) reversed half of that, and this node holds both rulings.** The
+    drop applied to 447 stands: it graded PASS in the 2026-10-22 merged-ledger run too
+    (`~/lloyd-data/logs/calibrate-2822-merged-213855.log`), so its key stays absent.
+    392 is provisional again, because that same run answered `kind retry != pass`
+    against it (grader session `20261022_213857_review_2794`) — a live disagreement
+    with the diff read this note rests on, which is exactly what the flag records.
+    Both cases still name the 2026-10-16 ruling: a re-mark documents the new
+    disagreement, it does not delete the provenance of the expectation.
     """
     for name in ("392-small-met", "447-small-met"):
         case = json.loads((RT.FIXTURE_DIR / f"{name}.json").read_text())
-        assert "provisional" not in case, (
-            f"{name} still carries the key; the expectation is confirmed, so the "
-            "disclaimer has to go from the case rather than be set to false")
         assert case["expect"]["kind"] == "pass"
         note = case["note"]
         assert "a human has not yet confirmed" not in note, f"{name}'s note still disclaims itself"
@@ -244,6 +250,16 @@ def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
             f"{name}'s note does not name the confirming ruling and its date")
         assert "CONFIRM both expectations as pass and drop provisional:true" in note, (
             f"{name}'s note does not quote the ruling it rests on")
+        if name == "447-small-met":
+            assert "provisional" not in case, (
+                "447's key came back, but it graded PASS on 2026-10-22 as well — #2822's "
+                "drop stands for it: the disclaimer goes from the case, not set to false")
+            continue
+        assert case.get("provisional") is True, (
+            "392 is un-flagged while the 2026-10-22 run still disagrees with its "
+            "`expect.kind: pass` — an unvalidated case would read as validated")
+        assert "2026-10-22" in note and "20261022_213857_review_2794" in note, (
+            "392's note does not name the run and grader session it now disagrees with")
 
 
 def test_the_calibration_readme_hedges_metric_2_and_still_documents_the_flag():
@@ -619,3 +635,81 @@ def test_a_row_carrying_its_entry_list_is_replayed_past_the_findings_cap(world):
     assert "skipped" not in by["SM_NEW"] and by["SM_NEW"]["entries"] == entries
     assert by["SM_NEW"]["outcome"] == RV.UPHELD
     assert len(by["SM_NEW"]["votes"]) == RV.CONFIRM_MAX_ENTRIES
+
+
+# The four calibration cases are only as good as the landing they name. #3179
+# touched one of them — re-marking 392 `provisional` after the 2026-10-22
+# disagreement — and the tool that rewrites a fixture (`write_fixture`) takes
+# parent, commit and changed_paths as arguments, so a hand edit that moves one of
+# them silently re-points a case at a different landing while its `expect` stays.
+# Nothing else in this file would notice, so this node holds all four still.
+_FIXTURE_IDENTITIES = {
+    "392-small-met": (
+        "ad64d31282279f93f91be895bf62c6a31fd85bf4",
+        "ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
+        ["tests/test_trajectory_extraction.py"]),
+    "447-small-met": (
+        "fe40af3816782ca09180598509c6c7a752e12d65",
+        "01219641584c35c2b0c2cfb7f117c76f851672d1",
+        ["scripts/verify_cited_identifier.py",
+         "tests/test_cited_identifier_verification.py"]),
+    "544-first-cut": (
+        "af1e8c1ae802bc57cc681977885af2ff1a9d8e10",
+        "0f019f902d045806afde30fffc336cdec32ef775",
+        ["agent_mcp/_tool_effects.py", "agent_mcp/annotations.py", "agent_mcp/main.py",
+         "app/harness/loop.py", "app/harness/mcp_pool.py", "app/harness/policy.py",
+         "app/routers/dashboard.py", "tests/test_tool_effects.py", "workers/pool.py"]),
+    "544-stripped-tests": (
+        "af1e8c1ae802bc57cc681977885af2ff1a9d8e10",
+        "0f019f902d045806afde30fffc336cdec32ef775",
+        ["agent_mcp/_tool_effects.py", "agent_mcp/annotations.py", "agent_mcp/main.py",
+         "app/harness/loop.py", "app/harness/mcp_pool.py", "app/harness/policy.py",
+         "app/routers/dashboard.py", "tests/test_tool_effects.py", "workers/pool.py"]),
+}
+
+
+def test_the_remark_moved_one_provisional_flag_and_no_landing_identity(tmp_path):
+    """#3179 clause 5: the 2026-10-22 run disagreed with 392, so the flag goes
+    back — with the 2026-10-16 diff-read ruling left in the note as history, and
+    nothing else in any fixture moved.
+
+    `provisional` was dropped from 392 and 447 by `69095bb2` (#2822) on the
+    2026-10-16 owed-check ruling, 'CONFIRM both expectations as pass and drop
+    provisional:true'. On 2026-10-22 the merged-ledger calibrate run graded 392
+    `kind retry != pass` ('clause 1 partial: The derivation half is genuinely in
+    the tree and shipped before this diff', grader session
+    `20261022_213857_review_2794`, line 1 of
+    `~/lloyd-data/logs/calibrate-2822-merged-213855.log`, which measured `2/4
+    agree`), so 392 is provisional again and its note names the disagreement. 447
+    is NOT: it graded PASS in that same run, so its key stays absent. The two 544
+    cases carry `"provisional": false` from `write_fixture`'s
+    `bool(provisional)` and are counted as not-provisional.
+
+    Pinned together with the identity of all four cases, because the flag edit and
+    a re-pointed `parent`/`commit`/`changed_paths` would otherwise be one commit,
+    and only this node reads the four files.
+    """
+    raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
+           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))}
+    assert set(raw) == set(_FIXTURE_IDENTITIES), sorted(raw)
+
+    assert raw["392-small-met"]["provisional"] is True, raw["392-small-met"].get("provisional")
+    note = raw["392-small-met"]["note"]
+    assert "2026-10-22" in note and "20261022_213857_review_2794" in note, note
+    assert "2026-10-16" in note, "the diff-read ruling is history, not collateral"
+    assert "provisional" not in raw["447-small-met"], "447 graded PASS; it gains no key"
+
+    fx = tmp_path / "fixtures"; fx.mkdir()
+    for stem, case in raw.items():
+        (fx / f"{stem}.json").write_text(json.dumps(case), encoding="utf-8")
+    cases = RT.load_fixtures(fx)
+    flagged = sorted(c["name"] for c in cases if c.get("provisional"))
+    assert flagged == ["392-small-met"], flagged
+
+    for name, (parent, commit, changed) in _FIXTURE_IDENTITIES.items():
+        case = raw[name]
+        assert (case["parent"], case["commit"], case["changed_paths"]) == (parent, commit, changed), (
+            f"{name}'s graded landing moved: this node pins parent, commit and "
+            f"changed_paths so a flag edit cannot silently re-point a case at "
+            f"another commit and keep its `expect`"
+        )

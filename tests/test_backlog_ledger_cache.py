@@ -695,3 +695,57 @@ def test_a_write_from_another_process_invalidates_the_cache(ledger):
         f"1 re-read, on top of the fixture's 1). Anything higher means the "
         f"invalidation is not the stat but a full cache eviction."
     )
+
+
+def test_the_merged_read_keeps_the_live_ledger_coming_off_disk_once(tmp_path, monkeypatch):
+    """#3179 clause 4 / #1204: the gzip branch inherits this property, it does
+    not buy it back with a second read.
+
+    `review.item_contract` is a fresh caller of the merged read
+    (`state.ledger_rows_merged`), and the file this tests is the one that exists
+    to say a cycle reads the ledger once. So: two contracts for two different
+    items over an unchanged live path, one rotation beside it. The live file goes
+    off disk **once** — `state.ledger_read_count(live)` stays at 1 — and the
+    rotation is read once too, which is the half that proves the merge ran at all:
+    a merge that quietly read only the live file would also report 1 here, and a
+    merge that re-decoded per call would report 2.
+
+    Asserted through the merged reader directly rather than by patching the
+    counter, because the counter is what this file's other nodes measure their
+    own ceilings with.
+    """
+    import gzip
+
+    from scripts.automod import review as RV
+
+    ledger = tmp_path / "promotions.jsonl"
+    monkeypatch.setattr(S, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(B, "BACKLOG_DIR", tmp_path / "backlog")
+    (tmp_path / "backlog").mkdir()
+    for i in (77, 78):
+        S.append_event({"event": "backlog_triage", "item_id": i, "verdict": "confirmed",
+                        "ts": 1000.0 + i, "acceptance": f"Live contract {i}."}, path=ledger)
+    (tmp_path / "promotions-archive-202601.jsonl.gz").write_bytes(gzip.compress(
+        json.dumps({"event": "backlog_triage", "item_id": 79, "verdict": "confirmed",
+                    "ts": 900.0, "acceptance": "Archived contract 79."}).encode() + b"\n"))
+
+    S.ledger_rows_reset()
+    a = " | ".join(RV.item_contract(77, ledger=ledger)["clauses"])
+    b = " | ".join(RV.item_contract(78, ledger=ledger)["clauses"])
+    assert "Live contract 77." in a and "Live contract 78." in b, (a, b)
+
+    live_reads = S.ledger_read_count(ledger)
+    archive_reads = S.ledger_read_count(tmp_path / "promotions-archive-202601.jsonl.gz")
+    assert live_reads == 1, (
+        f"two contracts took {live_reads} reads of the live ledger; #1204's "
+        f"one-read-per-cycle property has to survive the merge, so it must be 1"
+    )
+    assert archive_reads == 1, (
+        f"the rotation was read {archive_reads} times — the merged read has to "
+        f"reach it (1) and cache it (not 2), which is also the proof the merge is "
+        f"not silently reading only the live file"
+    )
+    # And the merged reader is what a caller sees: item 79 exists only in the
+    # rotation, so its contract resolves with no extra read of anything.
+    assert "Archived contract 79." in " | ".join(RV.item_contract(79, ledger=ledger)["clauses"])
+    assert S.ledger_read_count(ledger) == 1, "a third contract re-read the live file"

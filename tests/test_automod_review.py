@@ -9,6 +9,7 @@ go without letting author and grader disagree indefinitely.
 """
 from __future__ import annotations
 
+import gzip
 import inspect
 import json
 import re
@@ -5707,3 +5708,131 @@ def test_the_honesty_demotion_is_keyed_on_the_surface_not_the_cited_path(tmp_pat
     kind, findings = RV.decide(code_parsed, [])
     assert kind == "retry" and findings.startswith(
         "test honesty tests/test_system_health_check_vault_sync.py:1608"), findings
+
+
+# ── the acceptance the retention sweep rolled away (#3179) ──────────────────
+
+def _rotation(dirpath: Path, rows: list[dict],
+              name: str = "promotions-archive-202601.jsonl.gz") -> Path:
+    """A rotation as the retention sweep leaves one: the same JSONL, gzipped,
+    named `promotions-archive-<YYYYMM>.jsonl.gz` beside the live ledger."""
+    p = Path(dirpath) / name
+    p.write_bytes(gzip.compress("".join(json.dumps(r) + "\n" for r in rows).encode("utf-8")))
+    return p
+
+
+def test_an_acceptance_recorded_only_in_a_rotation_still_reaches_the_grader(isolated, tmp_path, repo,
+                                                                            monkeypatch):
+    """#3179 clause 1, end to end across the one seam that matters: a round is
+    graded against an acceptance the live ledger no longer holds.
+
+    `LEDGER_ARCHIVE_AGE_DAYS = 14` (`scripts/groundskeeper/retention-sweep.py`)
+    moves a `backlog_triage` row into a month rotation two weeks after it is
+    written, so a contract triage confirmed before that window is simply absent
+    from `promotions.jsonl`. That is how #392, #447 and #544 each answered
+    `item #N has no acceptance to grade against` — 0 clauses, four cases, 0/4
+    agree, measured 2026-10-22 in
+    `~/lloyd-data/logs/calibrate-2822-owedcheck-213637.log`.
+
+    Item 77 is confirmed ONLY in the rotation, with prose acceptance (the shape
+    all three real items have: they predate `acceptance_clauses` front matter, so
+    the item file offers no fallback and the prose falls through to one clause).
+    The live ledger exists and holds a confirmed row for a different item, which
+    is the case that used to read as 'no acceptance' rather than 'no ledger'.
+    Then the grader is run the way `calibrate` runs it — through
+    `review_tools.grade_commit`, which calls `item_contract` with no ledger of
+    its own and so resolves beside `state.LEDGER_PATH`.
+    """
+    ledger = Path(S.LEDGER_PATH)
+    S.append_event({"event": "backlog_triage", "item_id": 78, "verdict": "confirmed",
+                    "ts": 1500.0, "acceptance": "Some other item's contract."}, path=ledger)
+    _rotation(ledger.parent, [
+        {"event": "backlog_triage", "item_id": 77, "verdict": "confirmed", "ts": 1000.0,
+         "acceptance": "The widget resolves, and a test pins it."}])
+
+    contract = RV.item_contract(77, ledger=ledger)
+    assert len(contract["clauses"]) >= 1, contract
+    assert "widget resolves" in contract["clauses"][0], contract["clauses"]
+
+    r, base = repo
+    (r / "app" / "m.py").write_text("V = 2\n")
+    git(r, "commit", "-qam", "round")
+    commit = git(r, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    seen = {}
+
+    def grader(**kw):
+        seen.update(kw)
+        return {"ok": True, "error": "", "session_id": "sess_3179",
+                "structured": {"premise": "sound", "summary": "fine",
+                               "test_honesty": [], "seams_unverified": [],
+                               "clauses": [{"clause": 1, "verdict": "met",
+                                            "evidence_path": "app/m.py", "evidence_line": 1,
+                                            "test_node_id": "", "how_verified": "read",
+                                            "note": ""}]}}
+
+    from scripts.automod import review_tools as RT
+    out = RT.grade_commit(repo=r, item_id=77, parent=base, commit=commit,
+                          changed_paths=["app/m.py"], label="t3179", grader=grader)
+    assert "error" not in out, out
+    assert "no acceptance to grade against" not in json.dumps(out), out
+    assert seen["contract"]["clauses"] == contract["clauses"], seen["contract"]
+
+
+def test_a_newer_live_confirmation_wins_over_the_archived_row_it_replaced(isolated):
+    """#3179 clause 2: merging the rotations must not let an OLD archived row
+    overwrite a NEW live one.
+
+    The two files are read in one order and folded last-wins by
+    `confirmed_verdicts`, so an implementation that took the file order for the
+    truth would pick the wrong text in one of these two directions. Resolution is
+    by `ts`: item 77 is the case the clause names (live later, archived earlier),
+    item 78 is the control that proves the rule is `ts` and not `whichever file
+    was read last` — there the archived row is the newer one and it wins.
+    """
+    ledger = Path(S.LEDGER_PATH)
+    S.append_event({"event": "backlog_triage", "item_id": 77, "verdict": "confirmed",
+                    "ts": 2000.0, "acceptance": "LIVE-ACCEPTANCE-77: the wording in force."},
+                   path=ledger)
+    S.append_event({"event": "backlog_triage", "item_id": 78, "verdict": "confirmed",
+                    "ts": 1000.0, "acceptance": "OLD-LIVE-78: superseded by a later re-confirm."},
+                   path=ledger)
+    _rotation(ledger.parent, [
+        {"event": "backlog_triage", "item_id": 77, "verdict": "confirmed", "ts": 1000.0,
+         "acceptance": "ARCHIVED-ACCEPTANCE-77: the wording it replaced."},
+        {"event": "backlog_triage", "item_id": 78, "verdict": "confirmed", "ts": 2000.0,
+         "acceptance": "NEWER-ARCHIVED-78: re-confirmed after the live row, then swept."}])
+
+    live_wins = " | ".join(RV.item_contract(77, ledger=ledger)["clauses"])
+    assert "LIVE-ACCEPTANCE-77" in live_wins, live_wins
+    assert "ARCHIVED-ACCEPTANCE-77" not in live_wins, live_wins
+
+    archived_wins = " | ".join(RV.item_contract(78, ledger=ledger)["clauses"])
+    assert "NEWER-ARCHIVED-78" in archived_wins, archived_wins
+    assert "OLD-LIVE-78" not in archived_wins, archived_wins
+
+
+def test_a_retriage_mark_that_lives_only_in_a_rotation_still_voids_the_confirmation(isolated):
+    """#3179 clause 3: widening the confirmation read without widening the mark
+    read would resurrect a contract the item already failed once.
+
+    Both rows are archived, and nothing is live for item 77: the confirmation at
+    ts 1000, the `backlog_retriage` mark at ts 2000. `_after_mark` keeps a
+    confirmation only when it was written AFTER the item's latest mark, so the
+    answer is 0 clauses — and it is 0 clauses for the right reason, not because
+    the merge cannot see the file. Item 78 is the control that keeps the merge
+    alive: an identical archived confirmation with NO mark resolves to a clause,
+    so the empty answer above is the voiding and not a broken read.
+    """
+    ledger = Path(S.LEDGER_PATH)
+    _rotation(ledger.parent, [
+        {"event": "backlog_triage", "item_id": 77, "verdict": "confirmed", "ts": 1000.0,
+         "acceptance": "ARCHIVED-CONTRACT-77: the acceptance the item failed once."},
+        {"event": "backlog_retriage", "item_id": 77, "verdict": "confirmed", "ts": 2000.0},
+        {"event": "backlog_triage", "item_id": 78, "verdict": "confirmed", "ts": 1000.0,
+         "acceptance": "ARCHIVED-CONTRACT-78: never re-triaged, still owed."}])
+
+    assert RV.item_contract(77, ledger=ledger)["clauses"] == [], "a voided contract came back"
+    control = " | ".join(RV.item_contract(78, ledger=ledger)["clauses"])
+    assert "ARCHIVED-CONTRACT-78" in control, control
