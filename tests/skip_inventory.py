@@ -47,7 +47,8 @@ BEFORE = FIXTURES / "skip_inventory_before_20261013.jsonl"
 
 #: Read out of the artifact by `read_inventory`, and pinned there so the
 #: evidence cannot be edited to flatter a later delta. 40 skip instances on the
-#: base tree against a ceiling of 40: the round that measured this was one node
+#: 2026-10-13 base tree against the flat rail then in force — the figure #3143 has
+#: since replaced with a derived one — so the round that measured this was one node
 #: away from refused, which is the whole of #2637.
 BEFORE_TOTAL = 40
 #: 21, not the 16 the broken classifier first reported: `turn-1-mini model not
@@ -62,9 +63,17 @@ BEFORE_MACHINE = 21
 
 # ── four sites ruled NON-CONVERTIBLE, and the reserve that is not one of them ───
 #
-# The standing skip count sits under the ceiling (`PYTEST_MAX_SKIPPED` in
-# `scripts/automod/gate.py`, enforced at its tests rung), so a round that needs a
-# conversion goes looking for one. These four are not available. Each was examined
+# The bound this suite's skip count is read against is DERIVED, not a standing
+# figure: the tests rung of `scripts/automod/gate.py` refuses above `_skip_ceiling()`,
+# which is `max(PYTEST_MAX_SKIPPED, base_skips + PYTEST_SKIP_HEADROOM)` — so
+# `PYTEST_MAX_SKIPPED` is the FLOOR of that bound and never the ceiling the rung
+# refuses on, and `base_skips` is the median skip count of the newest green full
+# rounds (#3143). No standing count and no ceiling value is quoted below, because a
+# number written here goes false the moment the ledger moves: the two that used to
+# sit in this comment did exactly that and read as a trigger that could not fire.
+# Read the bound out of `gate.py`, never from here. What the bound leaves over is
+# room a round may use — so a round that needs a conversion goes looking for one.
+# These four are not available. Each was examined
 # against the three ways #1377 gives of removing an absence skip — report the real
 # failure, build a synthetic and label it, or keep it a skip with an id — and each was
 # ruled PERMANENTLY non-convertible: not an owed conversion, and a round may never
@@ -88,8 +97,8 @@ BEFORE_MACHINE = 21
 # 3. `tests/_live_data.py` — skip reason `absent at`, which already names the path and
 #    the owner it wants. This is #1377's step-3 branch, and the file carries the record
 #    of what the other branches would have hidden: `SM_20260923_034250` promoted with
-#    `kg.sqlite` missing and 39 named skips. A loss is not a stub, and no round may
-#    collapse that fork to make a node report something.
+#    `kg.sqlite` missing and 39 named skips on that round's own report. A loss is not
+#    a stub, and no round may collapse that fork to make a node report something.
 # 4. `tests/test_retrieval_seed_anchoring.py` — skip reason `no entity-vector index`.
 #    A measurement node: that probe is followed by a Qwen3 weights probe, and the node
 #    may not assert a ranking without both. A ranking over an absent index is a number
@@ -100,9 +109,13 @@ BEFORE_MACHINE = 21
 # `tests/test_turn_options.py` and `tests/test_worker_capability_allowlist.py`, found by
 # their marker reasons `recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)` and
 # `recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)` rather than by line numbers
-# that have already drifted twice. They stay untaken until a round with zero failures is
-# actually refused by the 40 rail; standing readings sit at 35-36 of 40 with no such
-# refusal on record, so a round short of the rail has no business touching them either.
+# that have already drifted twice. They stay untaken until a round with zero failures
+# is actually refused by that derived ceiling — `_skip_ceiling`, the max above, and not
+# any fixed figure — and no such refusal is on record, so a round sitting under the
+# bound has no business touching them either. Neither is making room a way in: raising
+# the FLOOR `PYTEST_MAX_SKIPPED` remains a human ruling (#2214), and a round that
+# widens the bound by editing a number has answered the question by putting away the
+# measuring stick, which is the lottery #2205 named.
 def _git(root: Path, *args: str) -> str:
     import subprocess
     r = subprocess.run(["git", "-C", str(root), *args],
@@ -183,8 +196,8 @@ CONVERTED: tuple[tuple[str, str], ...] = (
 #: A live-state skip is the opposite: it reports on mutable state outside the
 #: worktree (production `~/lloyd-data`, the working vault, a tracked config
 #: switch), so it can flip between two runs of one unchanged tree — which is how
-#: this suite oscillated 39/40/41 against a ceiling of 40 and refused rounds
-#: that had failed nothing.
+#: this suite oscillated 39/40/41 against the flat rail then in force and refused
+#: rounds that had failed nothing.
 #: The machine-fact population, as a NAME-match over the skip reason.
 #:
 #: Written once, with the alternation terms separated by a real `|` and each

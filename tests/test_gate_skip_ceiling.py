@@ -327,8 +327,11 @@ def test_the_floor_constant_keeps_the_spelling_two_guards_match():
     """Clause 2: `PYTEST_MAX_SKIPPED = 40` is still assigned that way, exactly once.
 
     Not decoration. Four nodes grep this file's bytes for that assignment
-    (`tests/test_gate_parallel_tests.py:926` and `:966-971`,
-    `tests/test_skip_inventory.py:561` and `:991`), and
+    (`tests/test_gate_parallel_tests.py:926` and `:966-971`, and
+    `test_the_pinned_before_total_is_the_ceiling_the_rung_uses` plus
+    `test_the_ruling_is_a_comment_and_the_module_surface_is_untouched` in
+    `tests/test_skip_inventory.py` — named, because #3197 added nodes to that file and
+    the two line numbers cited here were among what it moved), and
     `scripts/maintenance/guard_vacuity.py` declares the guard with
     `site_needle="PYTEST_MAX_SKIPPED"` and `symbol="PYTEST_MAX_SKIPPED"` over a
     docstring that says a name which no longer appears stops the run rather than

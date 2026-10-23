@@ -944,6 +944,23 @@ def test_the_ruling_counts_agree_with_the_tree_and_the_stale_ones_are_gone():
     assert "test_turn_options.py:331" not in text and \
         "test_worker_capability_allowlist.py:163" not in text, \
         "the drifted reserve line citations are back; the reserve is cited by marker reason"
+
+    # #3197: the two figures the block carried for the skip rail. Both were true while the
+    # rail was the flat `PYTEST_MAX_SKIPPED`, and `d085bf2c` (#3143) derived the rail from
+    # the ledger instead, so the standing reading and the rail figure were both false on the
+    # tree that inherited them — and the trigger they carried, "a round actually refused by
+    # the 40 rail", could not have fired. Banned over the whole file, not just the block:
+    # the same stale sentence sat on two dated lines outside it, and those now name the rail
+    # as the flat figure it was then rather than as a standing ceiling.
+    whole = (ROOT / "tests" / "skip_inventory.py").read_text(encoding="utf-8")
+    assert "35-36" not in whole, \
+        "the stale '35-36' standing reading is back: the bound is derived by " \
+        "`_skip_ceiling`, so any standing count quoted in prose ages into a trigger that " \
+        "cannot fire"
+    assert "of 40" not in whole, \
+        "a ceiling-of-40 figure is back in the module: 40 is the FLOOR of the derived " \
+        "bound, not a ceiling any round is refused against"
+
     for reason in ("recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)",
                    "recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)"):
         assert reason in text, f"the reserve lost its reason text `{reason}`"
@@ -974,12 +991,25 @@ def _live_bucket_consumers() -> list[str]:
 def test_the_ruling_is_a_comment_and_the_module_surface_is_untouched():
     """Clause 5: recording a ruling must not become a behaviour change.
 
-    The module's public surface is pinned by name and value, and the shipped ceiling is read
-    out of `gate.py`'s bytes rather than the imported object, so a bump that left
+    The module's public surface is pinned by name and value, and the shipped floor constant
+    is read out of `gate.py`'s bytes rather than the imported object, so a bump that left
     `BEFORE_TOTAL` alone would be red here. Also asserts every changed line of the diff (when
     one is available) is a comment — the boundary this clause exists to guard is the one
     between a note a round reads and a rule the leg enforces.
     """
+    # Clause 5's other half, added by #3197: a round that wants more skip room has to be
+    # pointed at a person, not at the constant. `#2214` is the item that rules raising the
+    # figure human-only, and its note lives in `gate.py`'s comment on the floor, so the block
+    # in `skip_inventory.py` has to carry the citation itself — a round that opened only this
+    # file is exactly the round that would otherwise reach for the number.
+    flat = " ".join(_non_convertible_block().split())
+    assert "#2214" in flat, \
+        "the block no longer cites #2214, so a round reading only skip_inventory.py has " \
+        "no note that raising the floor is not its ruling to make"
+    assert re.search(r"PYTEST_MAX_SKIPPED.{0,200}human ruling", flat), \
+        "the block lost the sentence tying `PYTEST_MAX_SKIPPED` to a human ruling; the " \
+        "citation alone does not say WHICH figure #2214 reserves"
+
     assert S.BEFORE_TOTAL == 40 and S.BEFORE_MACHINE == 21
     for fn in ("is_machine_fact", "read_inventory", "skip_sites", "machine_rows",
                "live_rows", "total", "changed_paths", "git_touches", "round_base"):
@@ -989,8 +1019,9 @@ def test_the_ruling_is_a_comment_and_the_module_surface_is_untouched():
 
     gate = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
     assert re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", gate, re.M) == ["40"], \
-        "the ceiling moved while this ruling was being written; the block's bound and " \
-        "test_the_pinned_before_total_is_the_ceiling_the_rung_uses both need the same number"
+        "the floor constant moved while this ruling was being written; the block's bound " \
+        "and test_the_pinned_before_total_is_the_ceiling_the_rung_uses both need the same " \
+        "number, and #2214 reserves raising it to a person"
 
     same, why = _executable_ast_matches_round_base()
     assert same, (
@@ -1138,3 +1169,126 @@ def _reaches_live_data_guard(func_name: str) -> bool:
                 seen.add(nxt)
                 frontier.append(nxt)
     return False
+
+
+# ── #3197: the block describes the skip rail as a mechanism, never as a figure ─────
+#
+# Two processes hold the two halves of the claim these nodes pin. A round's implement
+# session reads the comment in `tests/skip_inventory.py`; the gate's detached `tests` rung
+# applies the bound in `scripts/automod/gate.py`, deriving it from that machine's rounds
+# ledger when the rung runs. Nothing at run time connects the two texts, so these nodes
+# re-read `gate.py`'s bytes from disk: a rename of `_skip_ceiling` or a re-spelling of
+# `PYTEST_SKIP_HEADROOM` has to turn a node red here rather than leave a round comparing
+# its own skip count against a sentence that stopped describing the rail.
+_BLOCK_TITLE = "four sites ruled NON-CONVERTIBLE"
+_MAX_BOUND = re.compile(
+    r"max\(\s*PYTEST_MAX_SKIPPED,\s*base_skips\s*\+\s*PYTEST_SKIP_HEADROOM\s*\)")
+_FLOOR_CLAIM = re.compile(r"PYTEST_MAX_SKIPPED`?\s+is the FLOOR", re.I)
+_RAIL_MENTION = re.compile(r"\b(ceiling|rail|floor|standing|headroom)\b", re.I)
+#: Figures a line about the bound may still carry, because each names a thing rather than a
+#: reading of the suite: an item reference, a round id, an env flag's value, #1377's step
+#: number, or a date.
+_CITED_NOT_MEASURED = re.compile(r"#\d+|SM_\d{8}_\d{6}|=\d+|step-\d|\b20\d\d-\d\d-\d\d\b")
+
+
+def _non_convertible_block() -> str:
+    """The NON-CONVERTIBLE comment block of `tests/skip_inventory.py`, located by its title.
+
+    Read from the title line down the contiguous `#` run rather than from a line range: the
+    block's own reserve says its line citations had already drifted twice, and a pin written
+    against a range silently grades whatever text has since moved into it.
+    """
+    src = (ROOT / "tests" / "skip_inventory.py").read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(src) if _BLOCK_TITLE in ln), None)
+    assert start is not None, \
+        f"the block titled {_BLOCK_TITLE!r} is gone from tests/skip_inventory.py, and the " \
+        f"ruling every other node in this file reads is gone with it"
+    end = start
+    while end + 1 < len(src) and src[end + 1].lstrip().startswith("#"):
+        end += 1
+    return "\n".join(src[start:end + 1])
+
+
+def _gate_source() -> str:
+    """`scripts/automod/gate.py` as bytes on disk — the far side of the seam these nodes span."""
+    return (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
+
+
+def test_the_block_names_the_derived_bound_in_both_trees_and_no_figure_in_either():
+    """Clauses 2 and 3: the rail is a mechanism, spelled identically on both sides, unquantified.
+
+    Three names have to appear in the block AND in `gate.py`'s text, and that pairing is what
+    makes a rename of the ceiling turn this node red instead of quietly leaving a round with a
+    stale sentence: the block can only satisfy both sides while `gate.py` still spells the
+    mechanism the way the block quotes it. The figure test is per line rather than per file
+    because the block legitimately carries numbers that are not readings of the suite —
+    `#1377`'s step number, and the id of the round that promoted with a missing `kg.sqlite` —
+    and the figure that has to stay out is the one that tells a round how much room it has.
+    """
+    block = _non_convertible_block()
+    gate = _gate_source()
+    for name in ("_skip_ceiling", "PYTEST_SKIP_HEADROOM", "PYTEST_MAX_SKIPPED"):
+        assert name in block, \
+            f"the block no longer names `{name}`, so it no longer describes the bound the " \
+            f"tests rung actually applies"
+        assert name in gate, \
+            f"`{name}` is not in scripts/automod/gate.py's text, though the block still " \
+            f"quotes it as the mechanism — one of the two is now lying"
+    assert _MAX_BOUND.search(block), \
+        "the block does not spell the bound as max(PYTEST_MAX_SKIPPED, base_skips + " \
+        "PYTEST_SKIP_HEADROOM), which is the only spelling that says which side is the floor"
+    assert _FLOOR_CLAIM.search(block), \
+        "the block stopped naming PYTEST_MAX_SKIPPED as the FLOOR of that max — the " \
+        "attribution #3197 exists to hold, and it was PYTEST_MAX_SKIPPED read as the ceiling " \
+        "that made the stale figures believable"
+    assert not re.search(r"under the ceiling \(`?PYTEST_MAX_SKIPPED", block), \
+        "the pre-#3143 attribution is back verbatim: the standing count sitting under " \
+        "PYTEST_MAX_SKIPPED as if that constant were the ceiling"
+    quantified = [ln.strip() for ln in block.splitlines()
+                  if _RAIL_MENTION.search(ln)
+                  and re.search(r"\d", _CITED_NOT_MEASURED.sub("", ln))]
+    assert not quantified, \
+        f"these lines state the bound or a standing reading as a number: {quantified} — " \
+        f"the bound is derived from the tree and the ledger, so any figure written here " \
+        f"is false the next time either moves"
+    for gone in ("35-36", "of 40", "the 40 rail"):
+        assert gone not in block, f"the stale figure {gone!r} is back inside the block"
+
+
+def test_the_reserve_waits_for_a_refusal_by_the_derived_bound_not_by_a_fixed_rail():
+    """Clause 4: what would justify taking the reserve, in the units the rung refuses in.
+
+    The trigger is a round that failed nothing and was refused anyway, over the DERIVED bound:
+    that is the only event which shows the room is gone. A named figure as the trigger was
+    worse than no trigger, because the derived bound made a refusal at the floor arithmetically
+    impossible, and a condition that cannot fire reads to the next round as one that was tested
+    and failed. Pinned both ways — positively as the zero-failure refusal over the derived
+    ceiling with the two reason texts and the on-record absence, negatively as the fixed rail.
+    """
+    block = _non_convertible_block()
+    trigger = " ".join(ln.lstrip("# ").strip() for ln in block.splitlines()
+                       if "untaken" in ln or "refused" in ln)
+    assert trigger, "the reserve's trigger sentence is gone from the block entirely"
+    low = trigger.lower()
+    assert "untaken" in low, \
+        "the block no longer rules the two `recording mode only` skips untaken, which is " \
+        "the half of the ruling a round acts on"
+    assert "zero failures" in low, \
+        "the trigger lost its zero-failure condition: a round that failed something is " \
+        "refused for its failures, not for the rail"
+    assert "derived ceiling" in low, \
+        "the trigger no longer names the derived ceiling as what refuses, so the next " \
+        "reader goes looking for a fixed rail the rung stopped applying in #3143"
+    assert "40 rail" not in block.lower(), \
+        "'40 rail' is back as the trigger, and #3143 derived the bound — a refusal there " \
+        "cannot happen, which is exactly how the old sentence came to read as a check that " \
+        "had been run and failed"
+    assert "no such refusal is on record" in " ".join(block.split()), \
+        "the block lost its on-record claim. If a round HAS been refused over the derived " \
+        "ceiling with zero failures since this was written, that is the trigger to take the " \
+        "reserve: take it and rewrite the sentence, do not delete the claim to get green"
+    for reason in ("recording mode only (LLOYD_RECORD_TURN_OPTIONS=1)",
+                   "recording mode only (LLOYD_RECORD_CAPABILITY_BASELINE=1)"):
+        assert reason in block, \
+            f"the reserve is no longer findable inside the block by its marker reason " \
+            f"`{reason}`, which is how it is located without a line number"
