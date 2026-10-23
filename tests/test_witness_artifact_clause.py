@@ -2577,3 +2577,214 @@ def test_the_landed_outcomes_demand_text_agrees_with_the_emitter():
     assert named[0] == B._witness_artifact(src, day=m.group(1), item_id=2861), (
         "the demand and the emitter disagree on the name — which is exactly how "
         "#2861 ended up with a committed witness name no emitter produces")
+# ---------------------------------------------------------------------------
+# #3175 — an over-bound demand points at the extracts it would duplicate.
+#
+# `_witness_artifact`'s stem is `{day}.{item_id}-{tag}`, so two demands about one
+# store from two items name two files, and #3174 used that to order 98,304 bytes of
+# `workers.db` schema that `backlog/data/2026-10-14.2471-lloyd-data-workers.db`
+# already held. The emitted NAME is unchanged (#2769 measured zero byte-identical
+# pairs across 83 committed artifacts and closed cross-day reuse on that evidence);
+# what changed is that the note now says what the vault already holds.
+# ---------------------------------------------------------------------------
+
+
+def _sibling_store(tmp_path: Path, rel: str = "lloyd-data/workers.db"):
+    """An over-bound store, spelled the way a real demand spells it, plus the
+    committed extracts of it the vault already holds. Returns the `~/…` spelling.
+
+    The spelling matters: the pointer must FIT, and a `tmp_path` absolute prefix is
+    ~70 characters the real `~/lloyd-data/workers.db` does not pay. A fixture on the
+    long spelling would only ever reach the ladder's drop-the-pointer rung, and the
+    node would pass with the pointer never emitted — a green test for an absent
+    behaviour, which is the failure mode this whole item is about.
+
+    Beside the store's two real siblings sit a sibling STORE (`users.db`: same
+    parent, same tag, different name — must not be counted) and a markdown witness
+    note on the same stem (a note ABOUT an extract, not one).
+    """
+    d = tmp_path / "state" / Path(rel).parent
+    d.mkdir(parents=True, exist_ok=True)
+    store = d / Path(rel).name
+    store.write_bytes(b'{"row": 1}\n' * (B.WITNESS_MAX_BYTES // 10 + 1))
+    assert store.stat().st_size > B.WITNESS_MAX_BYTES, "the fixture is over the bound"
+    tag, stem = Path(rel).parent.name, Path(rel).name
+    for n in (f"2026-10-13.2670-{tag}-{stem}", f"2026-10-14.2471-{tag}-{stem}"):
+        _vault_witness(tmp_path, n, body="x")
+    _vault_witness(tmp_path, f"2026-10-14.2471-{tag}-{stem}-witness.md")
+    _vault_witness(tmp_path, f"2026-10-14.2471-{tag}-users.db", body="x")
+    return f"~/state/{rel}"  # `~` is never expanded away: the note quotes the
+                                       # spelling the demand was written with.
+
+
+def test_an_over_bound_demand_names_the_family_the_store_already_has(tmp_path,
+                                                                    monkeypatch):
+    """#3175 clauses 1 and 2: the note names a pattern a committed extract matches,
+    and asks for the figure to be measured over those before a new file is written.
+
+    The exhibited failure was #3174 ordering a `workers.db` extract whose bytes item
+    2471 had already committed. The note cannot list ten paths — `CLAUSE_MAX_CHARS`
+    is 600 and `clean_clauses` truncates from the END, which is the fallback — so it
+    carries one glob and a count, and the command to run over them. The count is what
+    makes the glob checkable: a reader who runs it and finds none has a contradiction
+    to report, not an instruction to ignore.
+    """
+    store = _sibling_store(tmp_path)
+    note = B._over_bound_extract_demand(store, item_id=2703)
+    glob = [g for g in re.findall(r"`(backlog/data/[^`]+)`", note) if "*" in g]
+    assert glob, f"no dated-sibling family in the note: {note}"
+    vdir = tmp_path / "vault" / "backlog" / "data"
+    matched = sorted(p.name for p in vdir.glob(glob[0].split("/")[-1]))
+    assert matched, f"the family matched nothing: {glob[0]}"
+    assert "2026-10-14.2471-lloyd-data-workers.db" in matched, (
+        f"the pattern does not reach the extract #3174 would have duplicated: "
+        f"{glob[0]} saw {matched}")
+    assert "2026-10-14.2471-lloyd-data-users.db" not in matched, (
+        f"the glob counts another store's extract; the name is what separates two "
+        f"stores sharing a directory: {glob[0]}")
+    assert "2026-10-14.2471-lloyd-data-workers.db-witness.md" not in matched and \
+        "2026-10-14.2471-lloyd-data-workers-witness.md" not in matched, (
+        "a witness NOTE was counted as an extract of the store")
+    assert "`backlog/data/*-lloyd-data-workers.db`" in note, (
+        f"the family named is not this store's: {note}")
+    assert "Measure the 2 committed extracts under" in note, (
+        f"measuring the committed extracts is not what the note asks FIRST, or the "
+        f"count is wrong: {note}")
+    assert "publish a new file only if none reproduces the figure" in note, (
+        f"nothing makes a new file the last resort: {note}")
+    assert B._committed_witness_siblings(store) == 2, (
+        "the count in the note and the probe disagree — one of them is counting the "
+        "decoy store or the witness note")
+
+
+def test_a_store_the_vault_holds_nothing_about_names_only_its_own_artifact(tmp_path,
+                                                                          monkeypatch):
+    """#3175 clause 3: with no committed extract the note is #2382's text, and an
+    absent vault tree raises nothing.
+
+    The probe reads `app.paths.VAULT_ROOT` through the module at call time — the seam
+    `_artifact_taken` uses — so both halves are reachable: an empty temporary vault,
+    and a vault root that is not a directory at all. Under the gate `~/obsidian` does
+    not exist, which is why the degradation is load-bearing: a probe that raised there
+    would take the whole demand down with it, and a demand that goes silent is how a
+    store stops being witnessed at all.
+    """
+    store = _sibling_store(tmp_path)
+    vdir = tmp_path / "vault" / "backlog" / "data"
+    for stale in sorted(vdir.iterdir()):
+        stale.unlink()
+    assert B._committed_witness_siblings(store) == 0, "fixture: the vault is not empty"
+
+    empty = B._over_bound_extract_demand(store, item_id=2703)
+    assert "`backlog/data/*" not in empty and "Measure the" not in empty, (
+        f"an empty vault produced a sibling pointer: {empty}")
+    art = B._witness_artifact(store, item_id=2703)
+    named = re.findall(r"`(backlog/data/[^`]+)`", empty)
+    assert named and all(n == art for n in named), (
+        f"with nothing committed the note pointed somewhere other than the artifact it "
+        f"orders ({art}): {named}")
+
+    monkeypatch.setattr("app.paths.VAULT_ROOT", tmp_path / "no-such-vault")
+    assert B._committed_witness_siblings(store) == 0, (
+        "an unreadable vault counted something instead of degrading to none")
+    absent = B._over_bound_extract_demand(store, item_id=2703)
+    assert absent == empty, (
+        "a missing vault tree changed the demand's wording. The pre-fix behaviour is "
+        f"the answer there — not a blank, not a raise:\n{absent}\n!=\n{empty}")
+
+
+def test_the_sibling_pointer_is_bought_within_the_note_budget_and_never_by_truncation(
+        tmp_path):
+    """#3175 clause 4: with the pointer added, every form still fits the budget the
+    clause has to survive, and the store with siblings still gets the pointer.
+
+    `CLAUSE_MAX_CHARS` is 600 and `clean_clauses` truncates from the END, so length
+    alone is not the property: the fallback ("…rather than ordering the store") is
+    what the ceiling exists to say, and it sits last. A pointer that pushed it past
+    the cut would have made this fix the cause of the failure #2382 rules against. The
+    ladder therefore trades phrasing first (`is over … on what this rule may demand:`
+    gives way to the compact lead) and only then drops the pointer. `~/.cache/qmd/
+    index.sqlite` is the short case that must keep its roomy "committed to" wording.
+    """
+    limit = f"{B.WITNESS_MAX_BYTES:,}"
+    store = _sibling_store(tmp_path)
+    vdir = tmp_path / "vault" / "backlog" / "data"
+    cases = [store,
+             "~/lloyd-data/_pipeline/reflection/"
+             "a-quite-long-live-store-name-that-keeps-going.sqlite",
+             "~/.local/state/lloyd-request-manifests/manifests/"
+             "2026-09-30-deeply-nested-request-manifest-export.ndjson",
+             "~/.cache/qmd/index.sqlite"]
+    for w in cases:
+        tail = B._witness_family_tail(B._witness_target(w))
+        _vault_witness(tmp_path, f"2026-10-01.111{tail}", body="x")
+        _vault_witness(tmp_path, f"2026-10-02.222{tail}", body="x")
+        note = B._over_bound_extract_demand(w)
+        assert len(note) <= B.CLAUSE_MAX_CHARS, (
+            f"{len(note)} chars over {B.CLAUSE_MAX_CHARS} for {w}: {note}")
+        assert note.rstrip(".").endswith("rather than ordering the store"), (
+            f"the pointer pushed the fallback past the cut: {note}")
+        assert B.clean_clauses([note]) == [note], (
+            f"the truncator the note has to survive cut it: {note}")
+        assert w in note and "WITNESS_MAX_BYTES" in note and limit in note, note
+        assert f"{B.WITNESS_ARTIFACT_DIR}/{B._witness_target(w).name}" in note, (
+            f"the ordered artifact stopped being named once the pointer arrived: {note}")
+    # The roomy wording is a budget question, and the measured answer is that a store
+    # WITH siblings cannot carry it: with `workers.db`'s family pattern interpolated the
+    # roomy form is 672 characters against the 600 bound, the compact lead is 555. So
+    # the trade is real and it is phrasing only — and it is bounded, because `~/.cache/
+    # qmd/index.sqlite` with nothing committed keeps #2382's roomy sentence verbatim (the
+    # empty-vault case the pre-existing node pins).
+    vdir.mkdir(parents=True, exist_ok=True)
+    qmd = "~/.cache/qmd/index.sqlite"
+    for stale in sorted(vdir.iterdir()):
+        if "index.sqlite" in stale.name:
+            stale.unlink()
+    assert ("committed to `backlog/data/index.sqlite`"
+            in B._over_bound_extract_demand(qmd)), (
+        "a store with nothing committed lost its roomy wording")
+    pointed = B._over_bound_extract_demand(store)
+    assert "Measure the 4 committed extracts under" in pointed, (
+        f"the store with siblings settled for wording with no pointer: {pointed}")
+    assert "`backlog/data/*-lloyd-data-workers.db`" in pointed, pointed
+    assert "else say so rather than ordering the store." in pointed, (
+        "the pointer detached the sentence that closes the bound")
+    assert len(pointed) <= B.CLAUSE_MAX_CHARS, pointed
+
+
+def test_the_docstring_says_how_far_the_name_actually_repeats(tmp_path, monkeypatch):
+    """#3175 clause 5: the sentence that re-triaging "re-asks for the same dated
+    file" was only ever true of one item re-triaged twice in one day.
+
+    That sentence is what made a second item's demand read as a restatement rather
+    than a fresh copy, so the node pins both halves of the correction — the extent
+    ("same day AND the same item id") and the exhibit (item 3174 ordering what item
+    2471 had committed) — and then measures the arithmetic instead of trusting the
+    prose: three names for one store, and the one pair that does repeat.
+    """
+    doc = B._over_bound_extract_demand.__doc__ or ""
+    assert "same day AND the same item id" in doc, (
+        f"the docstring still implies unqualified reuse: {doc[:300]}")
+    assert "two demands about ONE store from two different" in doc, (
+        "the docstring never names the case that actually broke: two items, one store")
+    assert "3174" in doc and "2471" in doc, (
+        "the exhibit is not named, and a rule with no exhibit gets re-litigated")
+
+    _sibling_store(tmp_path)          # puts `workers.db` in the vault
+    (tmp_path / "vault" / "backlog" / "data" / "workers.db").write_bytes(b"x")
+    same = B._witness_artifact("~/state/lloyd-data/workers.db", day="2026-10-23",
+                              item_id=2703)
+    again = B._witness_artifact("~/state/lloyd-data/workers.db", day="2026-10-23",
+                               item_id=2703)
+    other_item = B._witness_artifact("~/state/lloyd-data/workers.db", day="2026-10-23",
+                                    item_id=3175)
+    other_day = B._witness_artifact("~/state/lloyd-data/workers.db", day="2026-10-22",
+                                   item_id=2703)
+    assert ".2703-" in same and ".3175-" in other_item and ".2703-" in other_day
+    assert "2026-10-23" in same and "2026-10-22" in other_day
+    assert same != other_item and same != other_day, (
+        f"the name moved for a pair the docstring calls stable, or held for one it "
+        f"calls moving: {same} / {other_item} / {other_day}")
+    assert again == same, (
+        "the same item on the same day no longer names the same file — the one half "
+        "of the reuse claim the corrected docstring still makes")

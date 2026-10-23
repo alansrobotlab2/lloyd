@@ -1699,9 +1699,78 @@ def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
     if name not in _RETIRED_WITNESS_NAMES and not probe(artifact_dir, name):
         return f"{artifact_dir}/{name}"
     day = day or now_stamp()[:10]
-    tag = re.sub(r"[^\w.\-+]", "-", src.parent.name).strip("-.")[:48] or "src"
+    # One rule for the tag, shared with `_witness_family_pattern`: the sibling probe
+    # asks the vault for a family by the same spelling the emitter writes, and two
+    # copies of a 48-char substitution are how a glob and a name stop agreeing.
+    tag = _witness_tag(src)
     stem = f"{day}.{item_id}-{tag}" if item_id else f"{day}.{tag}"
     return f"{artifact_dir}/{stem}-{name}"
+
+
+# The shape `_witness_artifact` emits once a plain name is taken: a 10.2 MB
+# `promotions.jsonl` demanded by five items over nine days produced
+# `2026-10-14.2444-lloyd-automod-promotions.jsonl` and its siblings — all of them one
+# store. The family tail is what survives between two such demands, because the day
+# and the item id are precisely the two parts that move.
+_DATED_WITNESS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.(?:\d+-)?(.+)$")
+
+
+def _witness_tag(src: Path) -> str:
+    """The store-identifying component of a dated witness name.
+
+    Extracted from `_witness_artifact` rather than duplicated beside it: the 48-char
+    cap and the character substitution are what make a name like
+    `2026-10-14.2471-lloyd-data-workers.db` identify `workers.db`, and the sibling
+    probe below has to ask for exactly what the emitter writes.
+    """
+    return re.sub(r"[^\w.\-+]", "-", src.parent.name).strip("-.")[:48] or "src"
+
+
+def _witness_family_tail(target: Path) -> str:
+    """`-lloyd-data-workers.db`: the part of a dated witness name that IS the store.
+
+    `_witness_artifact` builds `{day}.{item_id}-{tag}-{name}`, so from the hyphen
+    before the tag down the name identifies the store, and nothing above it does.
+    Derived from the SOURCE through `_witness_tag` rather than by parsing an emitted
+    name: the day component itself contains hyphens, so a `split("-", 1)` on
+    `2026-10-23.2703-lloyd-data-workers.db` cuts inside the DATE and yields a family
+    that matches nothing while looking like one.
+    """
+    return f"-{_witness_tag(target)}-{target.name}"
+
+
+def _witness_family_pattern(target: Path) -> str:
+    """`*-lloyd-data-workers.db` — the glob for one store's dated sibling family.
+
+    Shown to the reader, not used to search: `_committed_witness_siblings` matches the
+    tail with `endswith`, because a store name carrying `[` or `?` would otherwise
+    widen its own family through the glob compiler.
+    """
+    return f"*{_witness_family_tail(target)}"
+
+
+def _committed_witness_siblings(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) -> int:
+    """How many extracts of `path` the vault already holds under `artifact_dir`.
+
+    Read through `_vault_witness_dir`, which resolves `app.paths.VAULT_ROOT` from the
+    module at CALL time — the same seam `_artifact_taken` uses — so a test can point
+    the whole probe at a temporary vault. An unreadable tree counts as none, which is
+    the #2513 degradation: this count exists so a demand can refuse itself against
+    bytes already committed, and under the gate (no `~/obsidian`) it has to go quiet
+    rather than raise. A demand that goes silent is how a store stops being witnessed.
+
+    `endswith` on the store's own tail is what makes the number mean extracts of THIS
+    store: `…-lloyd-data-users.db` shares the parent directory and does not match, and
+    `2026-10-14.2471-lloyd-data-workers-witness.md` is a note ABOUT an extract, ending
+    `-workers-witness.md`, so it cannot be counted as one either.
+    """
+    tail = _witness_family_tail(_witness_target(path))
+    try:
+        vdir = _vault_witness_dir(artifact_dir)
+        return sum(1 for p in vdir.iterdir()
+                   if p.name.endswith(tail) and p.is_file())
+    except OSError:
+        return 0
 
 
 def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
@@ -1739,9 +1808,22 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     `_RETIRED_WITNESS_NAMES` is asked for at a dated sibling rather than at the free
     slot the vault must not hold (#2444 owed 1, 2026-10-11: the demand against the live
     ledger named `promotions.jsonl`, a path three tests keep absent and whose deletion
-    is why the free-name probe could not see it). Re-triaging such a store re-asks for
-    the same dated file, so the extract its first demand published is the one the second
-    one measures.
+    is why the free-name probe could not see it).
+
+    How far that name repeats is narrower than it looks, and #3175 is what measured
+    it. `_witness_artifact`'s stem is `{day}.{item_id}-{tag}`, so this note orders the
+    same file ONLY for the same day AND the same item id — one item, re-triaged twice
+    in one day. Both other pairs name different paths: the same item asked again
+    tomorrow gets tomorrow's date, and two demands about ONE store from two different
+    items get two files. #3174 is that second case at the real vault: it ordered
+    `workers.db` schema whose 98,304 bytes and 21 sqlite_master objects
+    `backlog/data/2026-10-14.2471-lloyd-data-workers.db` already held. So the note
+    now says what is already there — the family pattern and how many committed
+    extracts match it — and asks for the figure to be measured over those before a new
+    file is published, which is the only reuse #2769's measurements support: it found
+    zero byte-identical pairs among 83 committed artifacts, so the emitted NAME stays
+    keyed as it is (`_witness_artifact` and `_artifact_taken` are untouched) and the
+    pointing happens in the text.
     """
     target = _witness_target(path)
     # #2513: the same name rule as the under-bound clause, because the over-bound
@@ -1758,16 +1840,55 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     # survive the budget is the sentence the budget is for.
     fallback = ("Prefer an extract under it; if the figure cannot be reproduced "
                 "under it, say so rather than ordering the store.")
-    full = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
-            f"this rule may demand: do not order it whole. What is owed is an extract "
-            f"of it — the subset that reproduces the figure the item quotes — "
-            f"committed to `{artifact}` and re-derived from it with `{cmd}`. "
-            f"{fallback}")
-    if len(full) <= CLAUSE_MAX_CHARS:
-        return full
-    return (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do not "
-            f"order it whole. Publish an extract of the subset reproducing the figure "
-            f"the item quotes, proved by `{cmd}`. {fallback}")
+    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
+             f"this rule may demand: do not order it whole. What is owed is an extract "
+             f"of it — the subset that reproduces the figure the item quotes — "
+             f"committed to `{artifact}` and re-derived from it with `{cmd}`. "
+             f"{fallback}")
+    compact = (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do "
+               f"not order it whole. Publish an extract of the subset reproducing the "
+               f"figure the item quotes, proved by `{cmd}`. {fallback}")
+
+    # #3175: what to measure BEFORE publishing. A path list cannot live here — the note
+    # has 76 characters of headroom in its longest form and `workers.db` has ten
+    # committed siblings at 52 characters a path — so the pointer is the family PATTERN
+    # plus a count, and it rides INSIDE the fallback rather than beside it: the fallback
+    # is 111 characters ending in the words the ceiling exists to produce, and a reader
+    # who is told to publish a new extract is exactly the reader who needs "…if none can,
+    # say so rather than ordering the store" to stay attached to that instruction. The
+    # count is what makes the glob checkable — run it, get a different number, and you
+    # have a contradiction to report rather than advice to ignore.
+    sibs = _committed_witness_siblings(path, artifact_dir)
+    family = f"{artifact_dir}/{_witness_family_pattern(target)}"
+    if sibs:
+        plural = "extract" if sibs == 1 else "extracts"
+        tail = (f"Measure the {sibs} committed {plural} under `{family}` first; publish "
+                f"a new file only if none reproduces the figure, else say so "
+                f"rather than ordering the store.")
+    else:
+        tail = fallback
+    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
+             f"this rule may demand: do not order it whole. What is owed is an extract "
+             f"of it — the subset that reproduces the figure the item quotes — "
+             f"committed to `{artifact}` and re-derived from it with `{cmd}`. {tail}")
+    if len(roomy) <= CLAUSE_MAX_CHARS:
+        return roomy
+    # The compact lead drops `of the subset`, which the roomy sentence has already said
+    # — not information lost, but it is the 13 characters that decide whether a store
+    # with committed siblings keeps the pointer at all. Phrasing is what gets traded
+    # here; the ceiling, the artifact, the command, the pointer and the closing words
+    # all survive the trade.
+    compact = (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do "
+               f"not order it whole. Publish an extract reproducing the figure the "
+               f"item quotes, proved by `{cmd}`. {tail}")
+    if len(compact) <= CLAUSE_MAX_CHARS or not sibs:
+        return compact
+    # A store name long enough that even the compact note cannot carry a pointer keeps
+    # #2382's text verbatim: an unspoken convenience, never a truncated fallback,
+    # because `clean_clauses` cuts from the END and the end is the bound's purpose.
+    return compact.replace(tail, fallback)
+
+
 
 
 def _tree_basenames(haystack, probe) -> "set[str]":
