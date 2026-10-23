@@ -288,6 +288,43 @@ the transcript scratch home from backlog #566:
     rule here; symlinks are skipped and never followed, store 7's rule; an absent directory
     is reported and NEVER created (#2354: the probe's `append_rows` owns the mkdir).
 
+21. ~/lloyd-data/session-cwd/<session_id>/ — the per-session Bash start directories
+    `app/session_cwd.py` mints (#3209), numbered twenty-first here because this list's
+    numbers are its own order and this one PRINTS LAST (the 23rd store line). Every session
+    mint in the tree lays one through `stamp_new_session`, and it is the directory
+    `agent_mcp/builtin_bash.py::_start_cwd` starts a call in when the call names no `cwd`,
+    so it is written by the majority of tool calls in the system. Measured 2026-10-23:
+    11,004 directories, 233–724 minted a day, the oldest still standing from 2026-09-30,
+    holding EIGHT files between them. The harm is the COUNT and not the bytes: the
+    guardian's `vaultwatch.measure()` (agent-services/guardian/vaultwatch.py:186-215, run
+    by `DataWatch.tick()` from `guardian.py:1984` every `TICK_SECONDS = 5.0`) walks this
+    tree recursively and `session-cwd` is in neither `skip_top` nor `CACHE_DIRS`, so the
+    guardian already pays 0.141 s (measured over the 11,004) every 5 seconds for a tree
+    holding 16 KiB, and that walk grows linearly forever. DELETE an entry when the
+    session's live transcript `sessions/<name>.json` does NOT exist and the directory's OWN
+    mtime is older than SESSION_CWD_MAX_AGE_DAYS (7d — store 11b/18's scratch window,
+    because this is the same object: a per-run scratch outside the archive's reach whose
+    count is the pressure. A grace, not an archive window: the window that decides a
+    session is over is the session archive's own 90/30/7, and this one only has to cover a
+    transcript that is momentarily absent — a mint that laid its scratch and died before
+    stamping, or a rotation in flight). A directory whose `sessions/<name>.json` still
+    exists is NEVER reclaimed, however old the directory is: the transcript is what makes
+    the directory resolvable, and `session_cwd._usable` re-lays a missing one on the next
+    Bash call anyway, so reclaiming under a live session buys no bound and costs that
+    session a `mkdir`. A session whose transcript has been GZIPPED is ALREADY
+    unresolvable: `session_cwd.read` opens only `(sessions_dir / f"{safe_name(id)}.json")`
+    (app/session_cwd.py:204 and :260) and never a `.json.gz`, so `resolved_for` returns
+    None for it today and its Bash inherits the server's cwd — ageing a scratch dir once
+    its `.json` is gone is therefore behaviour-preserving, which is the answer #2099's
+    non-round-scratch rule had to give once already. THE ROOT IS NEVER REMOVED, only
+    entries: `_usable` recreates one session's scratch only while `SCRATCH_ROOT` itself
+    still stands (app/session_cwd.py:119-138, whose docstring names this very case — "a
+    retention sweep that pruned one session's scratch (recover it)"), so an entry-only
+    prune recovers and a root delete would leave every later Bash call inheriting the
+    server's cwd with nothing on disk to say why. Symlinks are held and never followed
+    (store 7's rule), a non-directory entry is held and counted apart because this store
+    is directories, and an absent root is reported and NEVER created (#2354).
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -434,6 +471,22 @@ try:
     from agent_mcp import _resource_ceiling as _CEILING_MODULE
 except ModuleNotFoundError:  # pragma: no cover - same fallback as above
     import _resource_ceiling as _CEILING_MODULE  # type: ignore
+try:
+    # Store 21's DIRECTORY NAME, taken from the writer rather than typed in here, and its
+    # root derived from this run's `DATA_ROOT` — see the store's block below for why the
+    # name is borrowed and the root is not. What the module is really imported for is the
+    # other half of the pair: `app/session_cwd.py` is the only writer of this tree
+    # (`stamp_new_session`, called by every session mint) and the only reader of it
+    # (`resolved_for`, called by `agent_mcp/builtin_bash.py::_start_cwd`), so its
+    # `.json`-only resolver is the reachability the pair rule above mirrors, and the node
+    # that pins this store's root compares against `SCRATCH_ROOT.name` to notice if the
+    # writer ever moves the directory out from under that arithmetic. The import is safe
+    # from cron and from task #79's shell: `app/session_cwd.py`'s only non-stdlib import is
+    # `app.paths`, and `app.paths`'s is `app.data_root`, the resolver this file already
+    # imports above — no package, no venv.
+    from app import session_cwd as _SESSION_CWD_MODULE
+except ModuleNotFoundError:  # pragma: no cover - same fallback as above
+    import session_cwd as _SESSION_CWD_MODULE  # type: ignore
 
 # The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
 # copy of them (#1415). It used to be restated here as
@@ -3516,8 +3569,9 @@ def _injection_canary_line(p: dict) -> str:
 # Store 19: the ceiling's per-Bash-call sample rows (#2924) — the 21st line the report
 # prints, after the injection-canary corpus (#2862) at the 20th, and the second store this
 # sweep bounds on a horizon it does not own. (Neither this store nor #2862's is in the numbered
-# list in the module docstring — that list runs 1-19 and then 20, which is #3188's capture
-# store below; the two rounds that added the stores printed here never added their entries. The
+# list in the module docstring — that list runs 1-19, then numbers 20 twice (#2862's corpus and
+# #3188's capture store), then 21 (#3209's session-scratch store, far below); the two rounds
+# that added the stores printed here never added their entries. The
 # section comment is where each store's rationale lives, and `#1835`'s count guards read the
 # printed lines, not that list.)
 # ---------------------------------------------------------------------------
@@ -3811,6 +3865,156 @@ def _canary_toolcalls_line(p: dict) -> str:
             f"{p['bytes'] / 1024:.0f} KiB {unit}{tail}")
 
 
+# ---------------------------------------------------------------------------
+# Store 21: ~/lloyd-data/session-cwd/<session_id>/ — the per-session Bash start
+# directories every session mint lays (#3209).
+# ---------------------------------------------------------------------------
+# Bounding this store is a PAIR rule, and the pair is the whole design. The directory is
+# named after the session, and the session's live transcript is what makes the directory
+# resolvable at all: `session_cwd.read` opens `(sessions_dir / f"{safe_name(id)}.json")`
+# and nothing else (app/session_cwd.py:204, :260), so a scratch dir is reachable exactly
+# while its `.json` exists. Ageing on the transcript's absence rather than on the
+# directory's age alone is therefore the rule that cannot orphan a live session: a session
+# whose transcript is present keeps its scratch however ancient the directory gets, and a
+# session whose transcript is gone — gzipped by store 2, archived, or never stamped —
+# already resolves to None and has its Bash inherit the server's cwd. That is why the
+# gzipped case needs no clause of its own and #2099's non-round-scratch question is not
+# re-opened here: `.json.gz` was never openable by the resolver, so reclaiming the scratch
+# alongside it removes a directory nothing can already reach.
+#
+# The directory's OWN mtime still carries the horizon, as a grace and not an archive
+# window, and the two arms are each load-bearing: on the live tree's 11,014 entries today
+# the transcript arm holds 10,033 (a young directory whose session is still readable) and
+# the age arm would hold 0, but `stamp_new_session` lays the scratch BEFORE the record
+# exists (its docstring says so), so between those two writes a transcript-less directory
+# is a mint in progress, and a store that aged on transcript-absence alone would race the
+# mint it is bounding.
+#
+# What is NOT aged here is the root. `session_cwd._usable` recreates one session's scratch
+# only while `SCRATCH_ROOT` itself stands (app/session_cwd.py:119-138, whose docstring
+# names a retention sweep as the case it exists for), so entries-only is the difference
+# between a session that re-lays its directory on the next Bash call and a system whose
+# every Bash call silently inherits the server's cwd. This walk therefore iterates the
+# root's ENTRIES and never takes the root as a candidate.
+#
+# The root is this run's `DATA_ROOT` plus the WRITER'S DIRECTORY NAME, not
+# `app.session_cwd.SCRATCH_ROOT` itself, and the reason is the pair above. The writer
+# resolves its root once, at import, from the `LLOYD_DATA` of whichever process loaded it;
+# a sweep that imported that constant would walk a scratch tree in one root while reading
+# `sessions/` in the root THIS run resolved — a canary boots exactly that second root
+# (`canary_config.canary_data_root`), and the failure is the silent kind: the transcripts
+# it looks for are all present in its own root, so every entry is "kept", and the store
+# reads bounded forever while the real tree grows. Deriving from `DATA_ROOT` also puts the
+# two members of the pair under one resolution by construction, which is what the
+# `*_DIR` root-ownership census pins for every other store here. The name still comes from
+# the writer, and
+# `tests/test_retention_sweep.py::test_the_scratch_root_bounded_is_the_root_the_writer_writes_into`
+# is what notices if the writer moves the directory out from under this arithmetic.
+SESSION_CWD_DIR = DATA_ROOT / _SESSION_CWD_MODULE.SCRATCH_ROOT.name
+# 7 days, the same window store 11b gives the other per-run scratch outside the archive's
+# reach, because the pressure is the same one — a COUNT that only ever grows and is walked
+# by something that never asks what is in it. Deliberately NOT one of the session archive's
+# 90/30/7 windows: those decide when a SESSION ends, and a scratch dir past its transcript
+# is already unreachable, so all this horizon has to cover is a transcript that is
+# momentarily absent. Borrowing an archive window would also put two owners on one
+# session's lifetime, which is the shape store 19 exists to prevent.
+SESSION_CWD_MAX_AGE_DAYS = 7
+
+
+def sweep_session_scratch(apply: bool, now: float, *, root: "Path | None" = None,
+                          sessions: "Path | None" = None,
+                          max_age_days: "int | None" = None) -> dict:
+    """Reclaim the scratch directory of a session whose transcript is gone (#3209).
+
+    A candidate is an entry of `root` that is a real directory, whose
+    `sessions/<name>.json` does not exist, and whose own mtime is older than
+    `max_age_days` (the module's by default). Three things are held and counted apart
+    rather than aged, each named on the line so a 0 never reads as a clean tree: a
+    directory whose transcript is STILL there (the pair rule, kept whatever its age), a
+    directory younger than the horizon (a mint whose record may still be being written),
+    and an entry that is not a directory at all — a symlink is never followed and never
+    removed (store 7's rule), and a plain file is not this store's object.
+
+    THE ROOT IS NEVER A CANDIDATE: only entries are walked, and `session_cwd._usable`
+    recreates a reclaimed scratch only while the root still stands. An absent root is
+    reported and never created (#2354). Bytes are measured before each delete, because a
+    line that says `0 KiB freed` over a directory tree it just removed is the same false
+    zero store 7 refused to print.
+    """
+    out = {"apply": apply, "present": False, "dirs": 0, "stale": 0, "deleted": 0,
+           "kept_transcript": 0, "held_recent": 0, "held_link": 0, "held_notdir": 0,
+           "refused": 0, "bytes": 0,
+           "horizon_days": (SESSION_CWD_MAX_AGE_DAYS if max_age_days is None
+                            else int(max_age_days))}
+    store = Path(root) if root is not None else SESSION_CWD_DIR
+    if not store.is_dir():
+        return out
+    out["present"] = True
+    transcripts = Path(sessions) if sessions is not None else SESSIONS_DIR
+    cutoff = now - out["horizon_days"] * 86400
+    for path in sorted(store.iterdir()):
+        try:
+            st = path.lstat()
+        except OSError:
+            continue                                  # vanished mid-walk
+        if path.is_symlink():
+            out["held_link"] += 1                     # never followed, never removed
+            continue
+        if not path.is_dir():
+            out["held_notdir"] += 1
+            continue
+        out["dirs"] += 1
+        if (transcripts / f"{path.name}.json").is_file():
+            out["kept_transcript"] += 1               # the pair rule, whatever the age
+            continue
+        if st.st_mtime >= cutoff:
+            out["held_recent"] += 1
+            continue
+        out["stale"] += 1
+        size = _bytes_under(path)
+        if not apply:
+            out["bytes"] += size
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            out["refused"] += 1                       # held and named, never folded in
+            out["bytes"] += size
+            continue
+        out["deleted"] += 1
+        out["bytes"] += size
+    return out
+
+
+def _session_scratch_line(p: dict) -> str:
+    """`  session scratch dirs (session-cwd/* >7d): of 11014 dir(s), 10033 transcript
+    live, 0 held <7d — 981 would delete, 0 KiB candidate` — the numbers one dry run against
+    the live root printed on 2026-10-23, the verb pair swapping under `--apply`.
+
+    Same rule as every other delete store: only the verb changes between the modes, and
+    both words stay inside the historical suffix selector (`candidate` and `freed`).
+    `of N dir(s)` is the directories the walk found; `N transcript live` is the keep rail —
+    the scratch dirs this pass refused to touch because the session they belong to is still
+    readable — and a held symlink or non-directory entry is named in its own clause. The
+    root is neither counted nor countable here: it is never a candidate.
+    """
+    label = f"  session scratch dirs (session-cwd/* >{p['horizon_days']}d)"
+    if not p["present"]:
+        head = "no scratch root yet"
+    else:
+        head = f"of {p['dirs']} dir(s), {p['kept_transcript']} transcript live"
+        head += f", {p['held_recent']} held <{p['horizon_days']}d"
+        if p["held_link"]:
+            head += f", {p['held_link']} symlink held (never followed)"
+        if p["held_notdir"]:
+            head += f", {p['held_notdir']} non-dir entry held"
+    tail = f" ({p['refused']} would not remove, left in place)" if p["refused"] else ""
+    n = p["deleted"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    return f"{label}: {head} — {n} {verb}, {p['bytes'] / 1024:.0f} KiB {unit}{tail}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -3881,6 +4085,11 @@ def main() -> int:
     # from the same read in both, like every store here; `apply` is what separates a line
     # that names stale files from one that unlinks them.
     canary_toolcalls = sweep_canary_toolcalls(args.apply, now)
+    # The per-session Bash start directories (#3209). Run in both modes and outside the
+    # refusal guard like the three lines above it: it is a data-root store that DELETES,
+    # and `resolve_data_root_for_tree` has already decided which root this tree may reach
+    # (#1415). It never takes the root itself as a candidate — see the store's block.
+    session_scratch = sweep_session_scratch(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -3995,6 +4204,13 @@ def main() -> int:
     # items 1-21 of task 79's enumeration where the positional guard reads them — #2862's
     # reason, inherited, and the reason this line is the 22nd.
     print(_canary_toolcalls_line(canary_toolcalls))
+    # Store 21 (#3209), printed LAST and outside the refusal guard like the three lines
+    # above it: a data-root store that deletes entries under a directory
+    # `resolve_data_root_for_tree` has already decided this tree may reach (#1415).
+    # Appending rather than inserting keeps items 1-22 of task 79's enumeration where the
+    # positional guard reads them, and this line is the 23rd — the reason #2862 gave for
+    # appending, inherited.
+    print(_session_scratch_line(session_scratch))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

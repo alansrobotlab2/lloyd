@@ -187,6 +187,15 @@ def rs(tmp_path, monkeypatch):
         # (a box that has never run the leg) and belongs to its own node, not to the
         # census every other node reads this fixture's empty directory into.
         ("CANARY_TOOLCALLS_DIR", "services", True),
+        # Store 21 (#3209), the per-session Bash start directories. Created, because this
+        # is a directory store whose census every `_store_report` comparison below reads:
+        # an EMPTY root is the bounded state, and the absent-root case belongs to its own
+        # node rather than to the census. It is a sibling of `SESSIONS_DIR` by
+        # construction — the store's rule is a PAIR, transcript to directory — and both
+        # redirects land under the same tmp root, so a node that seeds a transcript beside
+        # a scratch dir is seeding the pair production has, and a node that seeds one
+        # WITHOUT the other is seeding the orphan this store exists to reclaim.
+        ("SESSION_CWD_DIR", "session-cwd", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1028,7 +1037,18 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # exists for: a `CANARY_TOOLCALLS_DIR = Path.home() / ...` added
                           # beside the others would have an `--apply` unlinking captures
                           # from outside every root this file holds it to.
-                          "CANARY_TOOLCALLS_DIR"}, \
+                          "CANARY_TOOLCALLS_DIR",
+                          # #3209's scratch store is a writable DATA_ROOT directory this
+                          # sweep DELETES ENTIRE SUBTREES from, which makes it the worst
+                          # shape in the set: a root resolved away from the data root would
+                          # not merely count the wrong directory, an `--apply` would `rmtree`
+                          # a sibling of `sessions/` full of live sessions' scratch. Its path
+                          # also reaches the data root through a SECOND module's arithmetic —
+                          # `app.session_cwd.SCRATCH_ROOT` is `app.paths.SESSIONS_DIR.parent /
+                          # "session-cwd"`, imported rather than restated — which is exactly
+                          # the drift this set exists to catch, since the two modules can
+                          # disagree without either line looking wrong.
+                          "SESSION_CWD_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         if name == "INJECTION_CANARY_DIR":
@@ -1883,7 +1903,7 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the 22 lines
+    side of the comparison is now the `_store_report` fixture — the 23 lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1896,11 +1916,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 22, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 23, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "22 unbounded-growth stores" in text, (
+    assert "23 unbounded-growth stores" in text, (
         "the skill's description states a store count other than 22")
-    assert "22 in all" in text, "the skill's body states a store count other than 22"
+    assert "23 in all" in text, "the skill's body states a store count other than 23"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1989,8 +2009,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "nineteen store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports nineteen stores by design")
+    assert "twenty store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2105,7 +2125,7 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # that says "twenty stores are bounded" would otherwise raise
                       # `unrecognised store-count numeral` at the guard instead of being
                       # graded against the twenty the sweep prints.
-                      "twenty": 20, "21": 21, "22": 22, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twenty": 20, "21": 21, "22": 22, "23": 23, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2149,8 +2169,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472, widened by #2615, #2862, #2924 and #3188: the 22
-    lines `main()` prints are 22 stores, and the three the loop leaves outside the data root
+    """#1835 clause 1, carried by #2472, widened by #2615, #2862, #2924 and #3188: the 23
+    lines `main()` prints are 23 stores, and the three the loop leaves outside the data root
     are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
@@ -2160,9 +2180,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 22, (
-        f"the sweep prints {len(_store_report)} store lines, not the 22 its report "
-        f"has had since #3188 added the canary tool-call captures: {_store_report}")
+    assert len(_store_report) == 23, (
+        f"the sweep prints {len(_store_report)} store lines, not the 23 its report "
+        f"has had since #3209 added the session scratch dirs: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2272,13 +2292,13 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_nineteen_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees nineteen store
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty store
     lines while the skill says 22 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
     (just "22", which makes every sandbox run look like it lost three stores) or the
@@ -2290,7 +2310,7 @@ def test_a_run_outside_the_production_checkout_reports_nineteen_stores_and_one_r
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints nineteen store lines plus one refusal
+    the rule. A refused run therefore still prints twenty store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2301,7 +2321,7 @@ def test_a_run_outside_the_production_checkout_reports_nineteen_stores_and_one_r
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 19, f"a refusal run should report nineteen stores: {report}"
+    assert len(report) == 20, f"a refusal run should report twenty stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2437,7 +2457,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the nineteen lines below be
+    branch delete it never asked about — which is what lets the twenty lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2513,7 +2533,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 22, (
+    assert len(items) == len(_store_report) == 23, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2550,6 +2570,28 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert items[20][0] == 21, items[20]
     assert "canary" in items[21][1] and "captures" in items[21][1], items[21]
     assert items[21][0] == 22, items[21]
+    # Store 22 was this file's append point, so item 23 is #3209's per-session Bash scratch
+    # directory. Its label has to carry the printed label's first and last word and the
+    # constant that decides its window — the store has no path in its name to recognise it by,
+    # since the directory is `session-cwd/` and nothing else in the report is.
+    assert items[22][0] == 23, items[22]
+    assert "session" in items[22][1] and "dirs" in items[22][1], items[22]
+    assert "SESSION_CWD_MAX_AGE_DAYS" in items[22][1], (
+        f"item 23's label names no horizon constant, so a worker reading the enumeration "
+        f"cannot tell which of the sweep's constants bounds it: {items[22][1]!r}")
+    # The three things no OTHER store here has, read from the shipped item's own text (the
+    # enumerator's label stops at the first comma): the transcript PAIR that decides whether
+    # a directory may go, the root that is never reclaimed — the failure mode where a
+    # "bounded" store silently hands every Bash call the server's cwd instead — and the gzip
+    # ruling that makes ageing with the transcript behaviour-preserving rather than a loss of
+    # reachability. Drop any one and the operator's procedure describes a store that does not
+    # exist, which is the drift this node exists to catch.
+    item23 = description[description.index("23 session scratch dirs"):
+                         description.index("Report all")]
+    assert "sessions/<name>.json" in item23, item23
+    assert "ONLY" in item23, item23
+    assert "THE ROOT IS NEVER REMOVED" in item23, item23
+    assert ".json.gz" in item23, item23
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
     # both files plus the constant that decides its window, so the description says
@@ -7345,8 +7387,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "22 unbounded-growth stores" in front, front[:200]
-    assert "22 in all" in text, "the skill's body states a count other than 22"
+    assert "23 unbounded-growth stores" in front, front[:200]
+    assert "23 in all" in text, "the skill's body states a count other than 23"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8339,7 +8381,7 @@ def test_an_absent_or_unreadable_canary_store_reports_zero_rows_and_is_never_cre
     `unreadable` is the same claim one level down: `iterdir()` raising `PermissionError`
     is the state a `chmod 000` reproduces, and a store that cannot be read is a store the
     report describes as empty-and-that-is-known, never an exception that kills the sweep
-    before the other nineteen lines print.
+    before the other twenty-two lines print.
     """
     absent = Path(rs.INJECTION_CANARY_DIR) / "…".replace("…", "no-such-store")
     p = rs.sweep_injection_canary(False, path=absent)
@@ -8420,39 +8462,40 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_second_last_and_the_refused_run_prints_nineteen(
+def test_the_injection_canary_store_prints_fourth_last_and_the_refused_run_prints_twenty(
         rs, monkeypatch, capsys):
-    """#2862 clause 4, re-pointed by #2924 and #3188: a refused run prints nineteen lines
-    and a production run prints 22, with the canary line THIRD-LAST in both.
+    """#2862 clause 4, re-pointed by #2924, #3188 and #3209: a refused run prints twenty
+    lines and a production run prints 23, with the canary line FOURTH-LAST in both.
 
     Third-last is not a demotion, it is the pin that the append order is intact.
     `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
     enumeration to the printed lines POSITIONALLY, so a store is added at the END and the
     items above it keep the rule they always had: #2924's ceiling sample store took the last
-    slot, which moved the canary from -1 to -2, and #3188's capture store then took the last
-    slot, moving it to -3. A store inserted in the middle would silently re-point every item
+    slot, which moved the canary from -1 to -2, #3188's capture store then took it, moving
+    the canary to -3, and #3209's session scratch store took it last, moving it to -4. A
+    store inserted in the middle would silently re-point every item
     at its neighbour's rule, which is the class of drift this file exists to catch — and the
     positional assert below is what would name it.
 
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 19 (22 minus the three automod
-    rungs that collapse into one refusal line) and not 18, and why the line still appears
+    says nothing about it. That is why the count is 20 (23 minus the three automod
+    rungs that collapse into one refusal line) and not 19, and why the line still appears
     after the refusal. The ceiling store answers to `DATA_ROOT` and survives the same
-    guard for the same reason; `test_the_ceiling_sample_store_prints_second_last_and_survives_the_refusal`
+    guard for the same reason; `test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal`
     pins that line's own position.
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 22, f"a production run prints 22 store lines: {lines}"
-    assert lines[-3].split(":")[0].strip().startswith("injection-canary corpus"), lines[-3]
+    assert len(lines) == 23, f"a production run prints 23 store lines: {lines}"
+    assert lines[-4].split(":")[0].strip().startswith("injection-canary corpus"), lines[-4]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 19, (
-        f"a refused run prints nineteen store lines plus the refusal: {refused}")
-    assert refused[-3].split(":")[0].strip().startswith("injection-canary corpus"), refused[-3]
+    assert len(refused) == 20, (
+        f"a refused run prints twenty store lines plus the refusal: {refused}")
+    assert refused[-4].split(":")[0].strip().startswith("injection-canary corpus"), refused[-4]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -8664,28 +8707,29 @@ def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, mo
     assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
 
 
-def test_the_ceiling_sample_store_prints_second_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal(rs, monkeypatch,
                                                                        capsys):
     """Where the line prints, in both kinds of run.
 
-    Second-to-last since #3188 appended a store below it, and last before that: task 79's
-    enumeration is matched to the printed lines POSITIONALLY, so appending keeps items 1-20
-    on their own rules — #2862's reason, #2924's and now #3188's.
+    Third-last since #3209 appended a store below it, second-to-last since #3188 did, and
+    last before that: task 79's enumeration is matched to the printed lines POSITIONALLY, so
+    appending keeps items 1-20 on their own rules — #2862's reason, #2924's, #3188's and now
+    #3209's.
     And printed outside the production-checkout refusal, because the store is a data-root
     file: a run from a round's worktree declines the loop's three refs and still bounds this
     one, so a box that only ever runs the sweep from a gate cannot let the store grow past
     the horizon while its report says nothing about it. That is the same argument that put
-    the canary line after the refusal, and it is why the refused run has 19 lines rather
-    than 18.
+    the canary line after the refusal, and it is why the refused run has 20 lines rather
+    than 19.
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 22, f"a production run prints 22 store lines: {report}"
-    assert report[-2].split(":")[0].strip().startswith("ceiling sample rows"), report[-2]
+    assert len(report) == 23, f"a production run prints 23 store lines: {report}"
+    assert report[-3].split(":")[0].strip().startswith("ceiling sample rows"), report[-3]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 19, f"a refused run prints nineteen store lines: {refused}"
-    assert refused[-2].split(":")[0].strip().startswith("ceiling sample rows"), refused[-2]
+    assert len(refused) == 20, f"a refused run prints twenty store lines: {refused}"
+    assert refused[-3].split(":")[0].strip().startswith("ceiling sample rows"), refused[-3]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -8862,10 +8906,11 @@ def test_the_capture_store_horizon_is_the_shortest_window_in_the_file(rs):
         "behind 14 — the shortest delete window in this file — is stale")
 
 
-def test_the_capture_store_prints_last_and_survives_the_refusal(rs, monkeypatch, capsys):
-    """Clause 5's report-half: the 22nd line, printed LAST, in both kinds of run.
+def test_the_capture_store_prints_second_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+    """Clause 5's report-half: the 22nd line, printed SECOND-TO-LAST, in both kinds of run.
 
-    Last, because task 79's enumeration is matched to the printed lines POSITIONALLY:
+    Second-to-last since #3209 appended the session scratch store below it, and last before
+    that, because task 79's enumeration is matched to the printed lines POSITIONALLY:
     appending keeps items 1-21 on the rules each already names, which is #2862's reason,
     #2924's, and now this store's. And outside the production-checkout refusal, because it is
     a DATA_ROOT store that deletes — `resolve_data_root` has already decided which tree an
@@ -8876,9 +8921,371 @@ def test_the_capture_store_prints_last_and_survives_the_refusal(rs, monkeypatch,
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 22, f"a production run prints 22 store lines: {report}"
-    assert report[-1].split(":")[0].strip().startswith("canary tool-call captures"), report[-1]
+    assert len(report) == 23, f"a production run prints 23 store lines: {report}"
+    assert report[-2].split(":")[0].strip().startswith("canary tool-call captures"), report[-2]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 19, f"a refused run prints nineteen store lines: {refused}"
-    assert refused[-1].split(":")[0].strip().startswith("canary tool-call captures"), refused[-1]
+    assert len(refused) == 20, f"a refused run prints twenty store lines: {refused}"
+    assert refused[-2].split(":")[0].strip().startswith("canary tool-call captures"), refused[-2]
+
+
+# ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
+#
+# `app/session_cwd.py::stamp_new_session` lays one directory per session at
+# `<data root>/session-cwd/<session_id>`, and `agent_mcp/builtin_bash.py::_start_cwd` starts
+# every Bash call that names no `cwd` inside it. The store is the COUNT, not the bytes:
+# 11,013 directories held 8 files between them on the day this was filed, and
+# `agent-services/guardian/vaultwatch.py::measure` walks the data root recursively every
+# `TICK_SECONDS = 5.0` with `session-cwd` in neither `skip_top` nor `CACHE_DIRS`, so the
+# guardian pays for the tree whether or not anything in it does anything.
+#
+# The rule is a PAIR and every node below pins one of its edges: an entry goes when
+# `sessions/<name>.json` is gone AND its own mtime is past `SESSION_CWD_MAX_AGE_DAYS`; the
+# root is never a candidate. `app/session_cwd.py::_usable` recreates a session's directory
+# only while the root stands, so an entry-only prune recovers on that session's next Bash
+# call, while a root delete would leave every Bash call in the system inheriting the MCP
+# process's cwd — a store that "bounds" itself by degrading behaviour everywhere is worse
+# than the unbounded one it replaced.
+#
+# The fixtures seed `SESSION_CWD_DIR` and `SESSIONS_DIR` as the siblings production has them,
+# which the pairing depends on: a transcript without a directory, or a directory without a
+# transcript, is one of the two arms the store exists to tell apart.
+
+
+def _scratch_entry(rs, name: str, *, days: float = 0.0, size: int = 2048,
+                   transcript: bool = False) -> Path:
+    """One entry in the scratch store, aged `days` on its OWN mtime, holding `size` bytes,
+    with or without the session transcript that makes it resolvable.
+
+    The transcript is written through `_write_session`, so a `transcript=True` entry is the
+    same pair of files a real session leaves behind, in the same sibling directories.
+    """
+    if transcript:
+        _write_session(Path(rs.SESSIONS_DIR), name, days)
+    d = Path(rs.SESSION_CWD_DIR) / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "scratch.txt").write_bytes(b"x" * size)
+    if days:
+        _backdate(d, days)
+    return d
+
+
+def test_an_orphan_scratch_dir_past_the_horizon_is_reclaimed_and_its_live_twin_is_not(rs):
+    """Clause 1, both arms of the pair off ONE measurement.
+
+    An orphan older than `SESSION_CWD_MAX_AGE_DAYS` goes; the directory of a session whose
+    transcript is still on disk is kept however old it is. Both come out of the same call
+    because the rule is one predicate with two arms, and two nodes planted separately can
+    pass with the arms swapped — the store's whole content is which arm a directory falls on.
+
+    The old-but-live arm is the one that matters operationally: `sessions/` holds 13,368 live
+    transcripts, and a sweep that aged scratch on its own mtime alone would empty the start
+    directory out from under every long-lived session on the box. Such a directory is kept
+    because `session_cwd._usable` would re-lay it on the next Bash call anyway — reclaiming
+    it buys no bound and costs that session the files it had written there.
+    """
+    gone = _scratch_entry(rs, "20260101_000000_gone", days=40)
+    live = _scratch_entry(rs, "20260101_000001_live", days=40, transcript=True)
+    p = rs.sweep_session_scratch(True, time.time())
+    assert (p["stale"], p["kept_transcript"], p["deleted"]) == (1, 1, 1), p
+    assert not gone.exists(), f"the orphan survived the sweep that counted it: {p}"
+    assert live.is_dir() and (live / "scratch.txt").is_file(), (
+        f"a session with a live transcript lost its start directory and what it had written "
+        f"in it — the arm of the rule that exists to keep exactly this: {p}")
+    assert Path(rs.SESSION_CWD_DIR).is_dir(), f"the root went out with the orphan: {p}"
+
+
+def test_an_orphan_younger_than_the_horizon_is_held_not_reclaimed(rs):
+    """Clause 1's horizon, from the young side: an orphan inside the window is counted and
+    left alone.
+
+    The 7 days is a grace for a transcript that is momentarily absent — `stamp_new_session`
+    lays the directory BEFORE the session's first transcript write — not a second archive
+    window. A sweep keyed on absence alone would race every mint on the box.
+    """
+    young = _scratch_entry(rs, "20260101_000002_young", days=0)
+    p = rs.sweep_session_scratch(True, time.time())
+    assert (p["stale"], p["held_recent"], p["deleted"]) == (0, 1, 0), p
+    assert young.is_dir(), f"a directory inside the grace window was deleted: {p}"
+
+
+def test_the_scratch_horizon_is_one_constant_the_line_and_the_docs_both_quote(rs):
+    """Clause 1's "new named horizon" and clause 5's "naming the horizon" are one number.
+
+    A tuned constant is what drifts from the prose that quotes it, and this store states a
+    horizon in three places: the constant, the report line's window, and the module
+    docstring's `(7d)`. All three are read against the same value here, and the line is
+    checked against the constant rather than a literal so the pair outlives the number.
+    """
+    assert rs.SESSION_CWD_MAX_AGE_DAYS == 7, rs.SESSION_CWD_MAX_AGE_DAYS
+    entry = rs.__doc__[rs.__doc__.index("21. ~/lloyd-data/session-cwd/"):]
+    assert f"({rs.SESSION_CWD_MAX_AGE_DAYS}d" in entry, (
+        f"the module docstring's session-scratch entry names no horizon matching "
+        f"SESSION_CWD_MAX_AGE_DAYS = {rs.SESSION_CWD_MAX_AGE_DAYS}:\n{entry[:400]}")
+    p = rs.sweep_session_scratch(False, time.time())
+    assert p["horizon_days"] == rs.SESSION_CWD_MAX_AGE_DAYS, p
+    assert f"session-cwd/* >{rs.SESSION_CWD_MAX_AGE_DAYS}d" in rs._session_scratch_line(p), (
+        rs._session_scratch_line(p))
+
+
+def test_a_sweep_that_reclaims_every_scratch_dir_leaves_the_root_standing_and_reusable(rs):
+    """Clause 2: a sweep whose every entry is age-eligible still leaves the store's root.
+
+    This is the clause whose failure does not look like a bug. Deleting the root bounds the
+    store completely, the report line still prints a confident count, and the harm lands two
+    modules away in `app/session_cwd.py::_usable`, which returns False without creating
+    anything once `SCRATCH_ROOT` itself is missing — every Bash call that names no `cwd` then
+    falls through `_start_cwd`'s `or Path.cwd()` into the MCP process's directory, which is
+    the behaviour #2333 removed (worker writes landing in the live tree, in production). The
+    line even announces the root is gone; only a reader who knows what `_usable` does sees
+    that as the incident it is.
+
+    Every entry here is age-eligible, and the root is checked standing, empty, and still able
+    to hold a NEW session's directory afterwards — the "re-usable" half, measured rather than
+    asserted, because that recovery path is what makes an entry-only prune safe.
+    """
+    for i in range(4):
+        _scratch_entry(rs, f"20260101_00000{i}_orphan", days=40, size=1024)
+    root = Path(rs.SESSION_CWD_DIR)
+    p = rs.sweep_session_scratch(True, time.time())
+    assert (p["dirs"], p["deleted"]) == (4, 4), p
+    assert root.is_dir(), f"the sweep reclaimed the scratch ROOT itself: {p}"
+    assert list(root.iterdir()) == [], f"the root was kept but its entries were not: {p}"
+    assert p["present"] is True, p
+    (root / "20260102_000000_next").mkdir()
+    again = rs.sweep_session_scratch(False, time.time())
+    assert (again["present"], again["dirs"], again["stale"]) == (True, 1, 0), again
+
+
+def test_the_shipped_apply_run_reclaims_orphans_and_leaves_the_scratch_root(rs, monkeypatch,
+                                                                           capsys):
+    """Clause 2 across the process boundary the operator actually crosses: `main()` --apply.
+
+    The node above calls the rung; this one runs the shipped `main()`, because what is at risk
+    is not the rung's arithmetic but which paths the sweep reaches when it runs for real. A
+    `--apply` that deleted the root would print an unremarkable line and leave every Bash
+    call on the box with the server's cwd. A live session's directory is seeded beside the
+    orphan so this run proves the pair survives the whole sweep and not just this store.
+    """
+    gone = _scratch_entry(rs, "20260101_000000_gone", days=40)
+    live = _scratch_entry(rs, "20260101_000001_live", days=40, transcript=True)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    out = capsys.readouterr().out
+    assert not gone.exists(), f"the shipped --apply left an orphan standing:\n{out}"
+    assert live.is_dir(), f"the shipped --apply reclaimed a live session's scratch:\n{out}"
+    assert Path(rs.SESSION_CWD_DIR).is_dir(), f"the shipped --apply removed the root:\n{out}"
+
+
+def test_the_scratch_line_has_one_shape_in_both_modes_and_a_dry_run_deletes_nothing(
+        rs, monkeypatch, capsys):
+    """Clause 3: ONE line per run, the same counting half in dry run and under `--apply`, and
+    a dry run that counts what it would do while deleting nothing.
+
+    The shape check compares skeletons, not words: each line splits at its em dash into a
+    counting half and a mode tail, and the two runs must agree on the counting half
+    character for character. That is the property task 79's procedure rests on — the worker is
+    told to report the per-store lines verbatim — so a line whose counted numbers move
+    between modes makes every day's report incomparable with yesterday's, and a line that
+    exists in only one mode makes the store invisible in the other.
+
+    The dry-run half is the sweep's first principle (#1415: a dry run that deleted something
+    cannot be re-run to check the count). Both halves are measured over ONE seeded tree, in
+    order — count, prove nothing moved, then apply and prove that exact entry moved.
+    """
+    gone = _scratch_entry(rs, "20260101_000000_gone", days=40, size=1024)
+    _scratch_entry(rs, "20260101_000001_live", days=40, size=1024, transcript=True)
+    young = _scratch_entry(rs, "20260101_000002_young", days=0, size=1024)
+
+    def scratch_line(out: str) -> str:
+        hits = [ln for ln in _store_report_lines(out)
+                if ln.startswith("session scratch dirs")]
+        assert len(hits) == 1, f"the store contributes {len(hits)} report lines: {hits}"
+        return hits[0]
+
+    dry = scratch_line(_dry_run_report(rs, monkeypatch, capsys))
+    assert gone.is_dir() and young.is_dir(), (
+        f"a run without --apply deleted an entry it counted: {dry}")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = scratch_line(capsys.readouterr().out)
+    assert not gone.exists(), f"--apply did not reclaim the entry the dry run counted: {dry}"
+
+    dry_count, dry_tail = dry.split(" — ")
+    applied_count, applied_tail = applied.split(" — ")
+    assert dry_count == applied_count, (
+        f"the counting half differs between a dry run and --apply, so two days' reports "
+        f"cannot be read side by side:\n  dry:     {dry}\n  applied: {applied}")
+    assert dry_tail == "1 would delete, 1 KiB candidate", dry
+    assert applied_tail == "1 deleted, 1 KiB freed", applied
+    assert "1 transcript live" in dry_count and "1 held <7d" in dry_count, dry_count
+
+
+def test_the_scratch_entry_never_deletes_through_a_symlink_and_never_makes_the_root(rs):
+    """The two rails this store inherits, pinned because it deletes directories.
+
+    `shutil.rmtree` refuses a symlink and `Path.is_dir()` follows one, so without the
+    `is_symlink()` test first an entry that is a link to a tree outside the data root would
+    be counted as a scratch directory and deleted INTO. The rule is store 7's (the provenance
+    journal) and store 20's (the canary captures): hold a link, count it apart — held
+    whatever its age, which is why neither of the two held entries here is backdated. A
+    non-directory entry is held for the same reason: this store's unit is a directory, and an
+    unrecognised entry is reported, never removed.
+
+    The second half is store 19's "creates nothing" (#2354). An absent root is the state of a
+    box that has never minted a session; a sweep that mkdir'd it would report `no scratch root
+    yet` and `0 dirs` in the same breath, which are different claims.
+    """
+    root = Path(rs.SESSION_CWD_DIR)
+    outside = Path(root.parent / "outside-tree")
+    outside.mkdir(parents=True)
+    (outside / "precious.txt").write_text("do not delete me")
+    (root / "20260101_000000_link").symlink_to(outside, target_is_directory=True)
+    (root / "20260101_000001_file").write_text("stray")
+
+    p = rs.sweep_session_scratch(True, time.time())
+    assert (p["held_link"], p["held_notdir"], p["deleted"]) == (1, 1, 0), p
+    assert outside.is_dir() and (outside / "precious.txt").is_file(), (
+        f"the sweep deleted through a symlink: {p}")
+    assert (root / "20260101_000001_file").is_file(), f"a stray file was removed: {p}"
+
+    absent = Path(rs.SESSION_CWD_DIR).parent / "no-such-scratch-root"
+    p2 = rs.sweep_session_scratch(True, time.time(), root=absent)
+    assert p2["present"] is False and p2["deleted"] == 0, p2
+    assert not absent.exists(), "the sweep created the root it reported as absent"
+    assert "no scratch root yet" in rs._session_scratch_line(p2), rs._session_scratch_line(p2)
+
+def test_an_entry_the_sweep_cannot_remove_is_held_and_named(rs, monkeypatch, capsys):
+    """One entry the sweep cannot remove stays on disk AND is named on the line, never
+    counted as a delete.
+
+    This store `rmtree`s whole directories, so a failure is per-entry: the healthy ones go and
+    one does not. If that one left the count silently, the line would report `N deleted` for a
+    store that still holds N+1, and the NEXT operator would read a bounded store while the
+    entry that resists removal is precisely the kind that keeps resisting. The count and the
+    named clause are the same event seen from the two ends of the line, so both are pinned
+    here, and the sweep runs through `main() --apply` because the claim is about the
+    transition the schedule takes, not about a helper called in isolation.
+
+    The unreadable directory is real — `chmod 000` on it and on its contents — and the node
+    SKIPs rather than passes on a box where that is not a barrier (running as root, or a mount
+    that ignores the mode bits), because there the precondition does not exist.
+    """
+    bad = _scratch_entry(rs, "orphan-stuck", days=40, size=1024)
+    ok = _scratch_entry(rs, "orphan-clean", days=40, size=1024)
+    kids = list(bad.rglob("*"))
+    # Children first, then the directory: with the directory at 000 the children cannot be
+    # reached at all, and the setup would die on its own chmod rather than on the sweep.
+    for p in kids:
+        p.chmod(0o000)
+    bad.chmod(0o000)
+    try:
+        monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+        assert rs.main() == 0
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "session scratch dirs" in ln)
+
+        assert ok.is_dir() is False, f"a removable entry was not reclaimed:\n{line}"
+        assert bad.exists(), f"an entry the sweep could not remove vanished anyway:\n{line}"
+        assert "1 deleted" in line, f"the one entry that DID go is not the number reported:\n{line}"
+        assert "1 would not remove, left in place" in line, (
+            f"the entry that resists removal is absent from the line an operator reads "
+            f"before approving the next run:\n{line}")
+    except AssertionError:
+        raise
+    finally:
+        # The modes come off whatever happens, or the tmp tree is undeletable and the next
+        # node in this file inherits a directory nothing can walk.
+        bad.chmod(0o755)
+        for p in kids:
+            p.chmod(0o644)
+
+def test_the_store_entry_names_the_transcript_pair_and_the_gzip_ruling(rs):
+    """Clause 5: the module docstring carries the numbered store, and the two claims that make
+    it safe to run are IN the entry rather than only in the code.
+
+    The pair is the half an operator cannot reconstruct from the report line: a directory
+    whose transcript exists is kept, so a store that settles near ten thousand entries is the
+    rule WORKING, not a failure — without that sentence the next reader files a bug about the
+    number, which is how this item was written.
+
+    The gzip sentence is the one #2099 already had to answer, and it decides whether ageing
+    with the transcript loses anything. `session_cwd.read` resolves through
+    `sessions/<name>.json` and never opens `.json.gz`, so a session whose transcript was
+    archived is ALREADY unresolvable and its Bash call has inherited the server's cwd since
+    the day it was gzipped: ageing the directory removes nothing that was still reachable.
+    The claim is checked against the resolver it cites rather than against the prose, so the
+    entry cannot drift from the code it describes.
+    """
+    doc = rs.__doc__
+    anchor = "21. ~/lloyd-data/session-cwd/"
+    assert anchor in doc, "the numbered store list has no entry for this store"
+    entry = doc[doc.index(anchor):doc.index("Stores 11, 12 and 13")]
+    for phrase, why in (
+            ("sessions/<name>.json", "the entry never names the transcript whose absence "
+                                     "the rule keys on"),
+            ("THE ROOT IS NEVER REMOVED", "the entry does not state the one thing that makes "
+                                          "this prune recoverable rather than destructive"),
+            ("session_cwd.read", "the entry cites no resolver for its gzip claim"),
+            ("unresolvable", "the entry does not say what the gzip ruling means")):
+        assert phrase in entry, f"{why}:\n{entry[:500]}"
+
+    resolver = (Path(__file__).resolve().parents[1] / "app" / "session_cwd.py").read_text()
+    assert 'f"{safe_name(session_id)}.json"' in resolver, (
+        "the docstring says `session_cwd.read` resolves through `<name>.json`; the resolver "
+        "no longer does — re-read the claim in the entry, do not soften it")
+    read_body = resolver.split("def read(")[1].split("\ndef ")[0]
+    assert ".json.gz" not in read_body, (
+        "`session_cwd.read` now opens a gzipped transcript, which retires the entry's gzip "
+        "ruling and the behaviour-preserving argument built on it")
+
+
+def test_the_scratch_root_bounded_is_the_root_the_writer_writes_into(rs):
+    """Store 21's pair has to sit under ONE root resolution, or the store reads bounded
+    forever while the real tree grows.
+
+    The rule is `reclaim session-cwd/<name> when sessions/<name>.json is gone`, so it reads
+    TWO trees that live in different modules: the scratch root this store walks, and the
+    transcript directory whose absence licenses a delete. `SESSIONS_DIR` is this file's own
+    `DATA_ROOT / "sessions"`, resolved per run; `app.session_cwd.SCRATCH_ROOT` is a constant
+    frozen at import from whatever `LLOYD_DATA` was set in the process that imported it — and
+    a canary boots exactly that second root (`canary_config.canary_data_root`). Importing the
+    writer's constant would therefore walk the canary's scratch tree while asking the live
+    `sessions/` whether each entry is orphaned, find every transcript present, count 0 stale,
+    and print a confident `0 would delete` over an unbounded store. So the name comes from
+    the writer and the root comes from `DATA_ROOT`; these three asserts are what notice if the
+    writer moves the directory out from under that arithmetic, which is the only way the two
+    members of the pair can come apart.
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "SESSION_CWD_DIR = DATA_ROOT / _SESSION_CWD_MODULE.SCRATCH_ROOT.name" in src, (
+        "the scratch root stopped being this run's data root plus the writer's directory "
+        "name. Do not 'fix' this by importing the writer's own constant: that constant "
+        "resolves from the LLOYD_DATA of the process that imported it, so the sweep's "
+        "transcript half and its directory half would then be two different roots, every "
+        "entry would look like it still had a transcript, and the store would report itself "
+        "bounded forever")
+
+    # The derivation has to agree with the writer's value on the tree this suite pins the
+    # data root to, so a writer that moved the directory out from under this arithmetic fails
+    # here instead of silently bounding a path nothing writes. Unpatched constants, on the
+    # same ground `test_the_spill_glob_is_the_glob_the_writer_actually_writes` states: the
+    # `rs` fixture redirects both roots, and comparing a redirect against itself proves
+    # nothing about production. No skip marker — a checkout that cannot import the writer has
+    # to fail here, because an unpinnable pair is the regression under test.
+    import importlib.util as _ilu
+
+    _spec = _ilu.spec_from_file_location("retention_sweep_scratch_unpatched", _SCRIPT)
+    mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(mod)      # module level only; nothing walks the filesystem
+
+    assert mod.SESSION_CWD_DIR == mod._SESSION_CWD_MODULE.SCRATCH_ROOT, (
+        f"the sweep bounds {mod.SESSION_CWD_DIR} but the writer mints into "
+        f"{mod._SESSION_CWD_MODULE.SCRATCH_ROOT} — the store's numbers describe a directory "
+        "`stamp_new_session` never touches")
+    assert mod.SESSION_CWD_DIR == mod.SESSIONS_DIR.parent / \
+        mod._SESSION_CWD_MODULE.SCRATCH_ROOT.name, (
+        "the bounded store is no longer a sibling of the transcript directory its pair rule "
+        "reads: the sweep would be asking one root whether an entry is orphaned while "
+        "deleting entries in another")

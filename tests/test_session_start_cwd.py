@@ -50,6 +50,7 @@ the next `create_session` call site calls it.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -694,3 +695,99 @@ def test_a_round_opened_without_a_session_still_records_its_baseline(tmp_path,
     assert start["live_untracked_count"] == 1, start
     assert session_cwd.read(out.get("session_id") or "") is None, (
         "a round with no session must not invent a start directory for one")
+
+
+# ── #3209: a reclaimed scratch directory still yields a usable start directory ────
+#
+# `scripts/groundskeeper/retention-sweep.py` store 21 unlinks a session's scratch
+# directory once `sessions/<name>.json` is gone and the directory's own mtime is past
+# `SESSION_CWD_MAX_AGE_DAYS`. That is only safe because of what these two nodes pin:
+# a record that survives with its directory removed must still hand the next Bash call a
+# directory, and the sweep that removes it must leave the scratch root standing, because
+# `_usable` recreates an entry only while the root is there.
+
+
+def test_a_session_whose_scratch_directory_was_reclaimed_still_gets_a_usable_start_dir(
+        tmp_path, scratch, monkeypatch):
+    """Clause 4: a live transcript naming a directory that no longer exists resolves to a
+    usable path, and a command actually runs in it.
+
+    This is the boundary the retention sweep is written against. Store 21 unlinks a scratch
+    directory whose transcript has been archived, and `app/session_cwd.py::_usable` is the
+    half that makes that prune recoverable — it re-lays a missing entry, which is the case
+    its own docstring names ("a retention sweep that pruned one session's scratch (recover
+    it)"). If it stopped doing that, `resolved_for` would return None,
+    `agent_mcp/builtin_bash.py::_start_cwd` would fall through to `or Path.cwd()`, and every
+    relative write from that session's turns would land in the MCP process's directory: the
+    live tree on the backend, which is the incident #2333 closed.
+
+    The recreate is asserted through a real subprocess, not by `is_dir()`. `resolved_for`
+    answering with a path is not the property — the property is that a Bash call can start
+    there, which is what `subprocess` with `cwd=` measures.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    sid = "20260101_000000_autocode_0000"
+    (sessions / f"{sid}.json").write_text(
+        json.dumps({"session_id": sid, "platform": "worker",
+                    session_cwd.META_KEY: str(scratch / sid)}), encoding="utf-8")
+    monkeypatch.setattr(session_cwd, "SESSIONS_DIR", sessions)
+
+    session_cwd.ensure(sid)
+    (scratch / sid / "notes.md").write_text("written by a turn\n", encoding="utf-8")
+    before = session_cwd.resolved_for(sid)
+    assert before == str(scratch / sid), before
+
+    shutil.rmtree(scratch / sid)          # what the sweep's prune does, done here directly
+    assert not (scratch / sid).exists()
+
+    after = session_cwd.resolved_for(sid)
+    assert after is not None, (
+        "the resolver raised or returned None for a record whose directory was reclaimed, "
+        "so that session's next Bash call inherits the server's cwd — the live tree on the "
+        "backend. `_usable`'s recreate is the whole reason store 21 may delete entries.")
+    assert after == before, f"{after!r} != {before!r}"
+    assert Path(after).is_dir(), f"the path the resolver returned is not a directory: {after}"
+
+    run = subprocess.run([sys.executable, "-c", "import os; print(os.getcwd())"],
+                         cwd=after, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert Path(run.stdout.strip()).resolve() == Path(after).resolve(), (
+        f"a command started in the recreated directory reports {run.stdout.strip()!r}")
+
+
+def test_reclaiming_every_scratch_entry_leaves_the_root_the_recreator_needs(
+        tmp_path, scratch, monkeypatch):
+    """Clause 4's premise, checked on the sweep side: the recreate needs the ROOT, so the
+    sweep must never remove it.
+
+    `_usable` returns False without creating anything when `path.parent` is missing — by
+    design, because `app/paths.py` is emphatic that re-laying a swept data tree under a path
+    that was just deleted is what bit last time. So the entry-only prune in store 21 is not a
+    stylistic choice: delete the root and every reclaimed session degrades to inheriting the
+    server's cwd, permanently, with a report line that still prints a tidy zero.
+
+    Both sides of that dependency are measured here, over the fixture's own scratch root: a
+    pruned entry recovers (the store's contract), and a missing root does not (which is why
+    the sweep's `entries.append`-only loop is what it is, and why
+    `tests/test_retention_sweep.py::test_a_sweep_that_reclaims_every_scratch_dir_leaves_the_root_standing_and_reusable`
+    exists beside this one).
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(session_cwd, "SESSIONS_DIR", sessions)
+    sid = "20260101_000001_review_0001"
+    (sessions / f"{sid}.json").write_text(
+        json.dumps({"session_id": sid, "platform": "review",
+                    session_cwd.META_KEY: str(scratch / sid)}), encoding="utf-8")
+    session_cwd.ensure(sid)
+
+    shutil.rmtree(scratch / sid)                       # the sweep's prune: one entry
+    assert session_cwd.resolved_for(sid) == str(scratch / sid)
+    assert scratch.is_dir(), "pruning an entry took the scratch root with it"
+
+    shutil.rmtree(scratch)                             # the sweep the sweep must never be
+    assert session_cwd.resolved_for(sid) is None, (
+        "the resolver re-laid the scratch ROOT after a sweep removed it — incidental "
+        "creation from a read path is what `app/paths.py` refuses, so if this ever becomes "
+        "True, store 21's root rule needs re-reading, not relaxing")
