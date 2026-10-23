@@ -113,6 +113,21 @@ SNAPSHOT_OWNER_DIR_REL = Path(SNAPSHOT_REPO_REL).parent
 #: alarms on one skipped cycle is a check that gets ignored.
 SNAPSHOT_MAX_AGE_SECONDS = 3 * 3600.0
 
+#: The per-run beat `backup-vault.sh` writes into the repo directory, under this
+#: exact name, after BOTH branches of its commit step: `echo "$count" >
+#: "$last_file"` runs whether the run committed or logged `no change`, so this
+#: file's mtime advances on EVERY run that reaches that line, while HEAD's `%ct`
+#: moves only on a commit. It is the second age `snapshot_age_state` weighs,
+#: because HEAD alone cannot tell a producer alive over an unchanged vault from
+#: one that died — on 2026-10-22 07:09 that over-subtraction paged a producer
+#: twelve consecutive deliveries deep (#3184). Every refusal in the script
+#: (tripwire :56-59, `lock_guard` :126-137, shrink :158-163) exits BEFORE the
+#: beat write, which is what makes a stale or missing beat mean a stopped
+#: producer. The file sits inside the repo dir, so `snapshot_repo_is_owned`
+#: confines it as tightly as the HEAD it is weighed beside;
+#: tests/test_vaultwatch_vault_snapshot_age.py fails if the two spellings drift.
+SNAPSHOT_BEAT_FILE = "lloyd-last-count"
+
 
 #: How deep below a top-level folder a `.git` entry may sit and still make that
 #: folder a code checkout. Two real shapes set the bound, both from 2026-10-20:
@@ -629,6 +644,21 @@ def _age_phrase(age: float) -> str:
     return f"{int(age // 86400.0)} d {hours % 24} h"
 
 
+def _beat_age(repo: str | Path, now: float) -> float | None:
+    """Age of the producer's per-run beat, or None when there is no beat to weigh.
+
+    A missing or unreadable file is NO witness rather than a live one — the same
+    rule a missing HEAD follows — because every refusal path in
+    `backup-vault.sh` exits before the beat write, so absence is exactly the
+    shape a stopped producer leaves: the 2026-10-16→10-20 freeze's 370 failed
+    runs all died inside `git add`, never touching this file (#3184).
+    """
+    try:
+        return now - (Path(repo).expanduser() / SNAPSHOT_BEAT_FILE).stat().st_mtime
+    except (OSError, ValueError):
+        return None
+
+
 def _not_owner_clause(owner: Path) -> str:
     """The sentence appended to a reading taken outside the owner directory.
 
@@ -659,6 +689,21 @@ def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AG
 
     `repo=None` takes `snapshot_repo()`.
 
+    `fresh` weighs TWO ages against `max_age`, because HEAD alone over-subtracts:
+    a producer alive over an unchanged vault never moves HEAD (`backup-vault.sh`
+    logs `no change` and commits nothing) yet re-writes `<repo>/lloyd-last-count`
+    on every run that reaches its commit branch, so HEAD-age-alone read a HEAD
+    3 h 8 m old as a dead producer and paged one that had delivered twelve times
+    in a row, the last beat 8 m before the alarm fired (#3184).
+    Fresh is therefore HEAD age inside the bound OR beat age
+    inside it; `beat_age: None` means no beat exists to weigh — missing or
+    unreadable — and weighs as no witness, never as alive, the same way an
+    unreadable HEAD does. A caveat carried knowingly, as the data-root twin
+    `datawatch.snapshot_state` does: `lloyd-vault-backup.timer` has
+    `Persistent=true`, so a catch-up run after a suspend refreshes the beat while
+    HEAD may still be hours old — defensible because that run itself proves the
+    copy current.
+
     `owned` is a second axis, and deliberately not folded into `fresh`. A repository
     outside `snapshot_owner_dir()` is not the vault's off-vault copy whatever its HEAD
     says, and `fresh=False` is the guardian's page: folding the two would let a
@@ -671,9 +716,10 @@ def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AG
     """
     path = repo if repo is not None else snapshot_repo()
     owned = snapshot_repo_is_owned(path)
+    now_ts = time.time() if now is None else now
     state: dict[str, Any] = {"repo": path, "sha": None, "committed_at": None,
                              "age": None, "max_age": max_age, "fresh": False,
-                             "owned": owned}
+                             "owned": owned, "beat_age": _beat_age(path, now_ts)}
     try:
         out = subprocess.run(["git", "--git-dir", path, "log", "-1", "--format=%H %ct"],
                              capture_output=True, text=True, timeout=20)
@@ -689,11 +735,23 @@ def snapshot_age_state(repo: str | None = None, max_age: float = SNAPSHOT_MAX_AG
         if not owned:
             state["text"] += _not_owner_clause(snapshot_owner_dir())
         return state
-    state["age"] = (time.time() if now is None else now) - state["committed_at"]
-    state["fresh"] = state["age"] <= max_age
-    state["text"] = (f"{path} commit {state['sha'][:8]} is {_age_phrase(state['age'])} old"
-                     + ("" if state["fresh"]
-                        else f", past the {max_age / 3600.0:g} h limit"))
+    beat = state["beat_age"]
+    state["age"] = now_ts - state["committed_at"]
+    state["fresh"] = (state["age"] <= max_age
+                      or (beat is not None and beat <= max_age))
+    state["text"] = f"{path} commit {state['sha'][:8]} is {_age_phrase(state['age'])} old"
+    if state["fresh"] and state["age"] > max_age:
+        state["text"] += (f"; HEAD is past the {max_age / 3600.0:g} h limit, but the "
+                          f"producer's last beat was {_age_phrase(beat)} old and found "
+                          "the vault unchanged, so this repo holds its current content")
+    elif not state["fresh"]:
+        state["text"] += f", past the {max_age / 3600.0:g} h limit"
+        if beat is None:
+            state["text"] += (f"; and there is no per-run beat ({SNAPSHOT_BEAT_FILE}), "
+                              "so no run has reached its commit branch")
+        else:
+            state["text"] += (f"; and the producer's last beat is {_age_phrase(beat)} "
+                              f"old, past the same {max_age / 3600.0:g} h limit")
     if not owned:
         state["text"] += _not_owner_clause(snapshot_owner_dir())
     return state

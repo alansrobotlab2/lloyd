@@ -501,6 +501,35 @@ def test_a_stale_vault_backup_alerts_once_and_a_fresh_one_is_quiet(guardian, tmp
     assert len(acted["alerts"]) == 2                     # quiet from here on
 
 
+def test_a_fresh_beat_holds_the_alert_and_a_stale_one_pages_with_both_ages(guardian,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """#3184 clause 5, at the alert surface. HEAD four hours old with a beat
+    written THIS minute is `backup-vault.sh` delivering over an unchanged vault —
+    the exact state that paged at 2026-10-22 07:09 for twelve straight runs, and
+    the guardian must stay quiet about it. Age the beat past the bound as well
+    and the page returns, and its body names both ages it weighed: the commit's
+    with its sha (#3132's shape, unchanged) and the beat's, so a reader can see
+    the check looked for an idle producer and found none."""
+    g, _, acted = guardian
+    repo, sha = _owner_backup_repo(tmp_path, monkeypatch, "idle", age_seconds=FOUR_HOURS)
+    beat = repo / VW.SNAPSHOT_BEAT_FILE
+    beat.write_text("8516\n")                        # mtime now: the timer just ran
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    assert not acted["alerts"], acted["alerts"]      # delivering, idling: no page
+
+    old = time.time() - 5 * 3600.0                   # the beats stopped too
+    os.utime(beat, (old, old))
+    g._vault_snapshots_checked_at = 0.0
+    g.check_vault()
+    [(level, title, body)] = acted["alerts"]
+    assert (level, title) == ("error", G.VAULT_SNAPSHOT_ALERT_TITLE), acted["alerts"]
+    assert sha[:8] in body and "4 h 0 m old" in body, body
+    assert "the producer's last beat is 5 h 0 m old" in body, body
+    assert "past the same 3 h limit" in body, body
+
+
 def test_the_vault_snapshot_alert_is_quiet_while_the_vault_tripwire_is_set(guardian,
                                                                             tmp_path,
                                                                             monkeypatch):

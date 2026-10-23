@@ -172,6 +172,12 @@ else
   g commit --quiet --no-verify -m "snapshot $(date -Is) files=$count"
   log "committed $(g rev-parse --short HEAD) ($count files)"
 fi
+# This write is the producer's per-run beat, not just bookkeeping: the guardian's
+# snapshot check (agent-services/guardian/vaultwatch.py `snapshot_age_state`,
+# #3184) weighs this file's mtime beside HEAD's %ct, so a `no change` delivery
+# above still proves the timer is delivering. That reading only means anything
+# because every refusal above — tripwire, lock_guard, shrink — exits before this
+# line, so a stale or missing beat means a stopped producer and nothing else.
 echo "$count" > "$last_file"
 # Not `|| true`. That is how the 2026-10-14 17:15 gc lock went unnoticed: the
 # commit succeeded, gc printed "fatal: Unable to create '…/gc.pid.lock': File

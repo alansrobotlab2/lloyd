@@ -2093,8 +2093,13 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # inside `_recover_infra` / `_recovery_body` — above `evaluate_liveness`, so BOTH
     # heads move by the same +23, which is why this node is the one that notices.
     # `architecture/threat-model.md`'s T-26 cell moved with the second of them.
-    assert heads[guardian]["main"] == 2825, (
-        f"`main` moved off :2825 ({heads[guardian]['main']}) — if it is gone "
+    # 2825 → 2829 is #3184: one hunk, `@@ -1684,8 +1684,12 @@` (+4, the alert body
+    # naming the beat file beside the commit as the evidence it weighed), inside
+    # `_vault_snapshot_stream` — below `evaluate_liveness` and above `main`, so
+    # only `main` moves. Re-check as before: `git diff <base> <head> --
+    # agent-services/guardian/guardian.py | grep '^@@'` shows that one hunk only.
+    assert heads[guardian]["main"] == 2829, (
+        f"`main` moved off :2829 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 869, (
         f"`evaluate_liveness` moved off :869 "

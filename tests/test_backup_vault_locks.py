@@ -61,6 +61,15 @@ def _head(repo: Path) -> str | None:
     return r.stdout.strip() or None if r.returncode == 0 else None
 
 
+def _head_ct(repo: Path) -> str | None:
+    """HEAD's `%ct` — the stamp `snapshot_age_state` weighs — or None with no
+    commit. The beat tests compare this before and after a run: a `no change`
+    delivery must leave it exactly where it was."""
+    r = subprocess.run(["git", "--git-dir", str(repo), "log", "-1", "--format=%ct"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
 def _snapshot(tmp_path: Path, vault: Path, repo: Path, marker: Path) -> str:
     """Get the repo to a committed state, and return that commit."""
     out = _run(tmp_path, vault, repo, marker)
@@ -368,3 +377,58 @@ def test_the_gc_line_no_longer_swallows_its_own_failure():
     assert "REFUSING" not in gc_lines[0], (
         f"a gc failure must not fail the run — the commit above it succeeded: {gc_lines[0]}")
     assert "WARNING" in gc_lines[0], gc_lines[0]
+
+
+# ── #3184: the beat the guardian now weighs, and what must never write it ──────
+
+def test_an_unchanged_vault_advances_the_beat_without_moving_head(tmp_path):
+    """The asymmetry the check rests on: `echo "$count" > "$last_file"` runs
+    after BOTH branches of the commit step, so a `no change` delivery re-beats
+    while HEAD's `%ct` does not move at all. If this ever stops holding — if the
+    write moves above the branch, or the branch starts exiting early — the
+    guardian's beat age would say "alive" about a producer that wrote nothing,
+    or "stopped" about one delivering, which is the exact confusion #3184 was
+    filed to end."""
+    vault = _vault(tmp_path / "obsidian")
+    repo, marker = tmp_path / "state" / "vault.git", tmp_path / "gstate" / "vault-tripped.json"
+    _snapshot(tmp_path, vault, repo, marker)
+    beat = repo / "lloyd-last-count"
+    ct_before, beat_before = _head_ct(repo), beat.stat().st_mtime
+
+    out = _run(tmp_path, vault, repo, marker)          # vault untouched: idle beat
+
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "no change (40 files)" in out.stdout, out.stdout
+    assert _head_ct(repo) == ct_before, (
+        "the idle run moved HEAD; %ct is no longer the witness of an unchanged vault")
+    assert beat.stat().st_mtime > beat_before, (
+        "a delivering run did not advance lloyd-last-count — the beat is dead as a witness")
+
+
+def test_a_refused_run_beats_no_more_than_a_dead_one(tmp_path):
+    """The other edge of the same property: the two refusals that exit 0 — the
+    tripwire (`vault-tripped.json` present) and the shrink guard — return BEFORE
+    the beat write, so neither advances the beat nor HEAD. If either started
+    beating, the guardian could never distinguish a producer refusing on purpose
+    from one delivering, and #3184's predicate would page on the wrong shape."""
+    vault = _vault(tmp_path / "obsidian")
+    repo, marker = tmp_path / "state" / "vault.git", tmp_path / "gstate" / "vault-tripped.json"
+    _snapshot(tmp_path, vault, repo, marker)
+    beat = repo / "lloyd-last-count"
+    ct_before, beat_before = _head_ct(repo), beat.stat().st_mtime
+
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"reason": "200 of 401 vault files disappeared"}')
+    out = _run(tmp_path, vault, repo, marker)
+    assert out.returncode == 0 and "tripwire is set" in out.stdout, out.stdout
+    assert (beat.stat().st_mtime, _head_ct(repo)) == (beat_before, ct_before), \
+        "the tripwire refusal wrote a beat — a muted incident now reads as delivering"
+    marker.unlink()
+
+    for f in (vault / "backlog").glob("*.md"):          # 30 of 40 < the 90% floor
+        f.unlink()
+    out = _run(tmp_path, vault, repo, marker)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "REFUSING: vault holds 30 files, the last snapshot held 40" in out.stdout, out.stdout
+    assert (beat.stat().st_mtime, _head_ct(repo)) == (beat_before, ct_before), \
+        "the shrink refusal wrote a beat — a refusing producer now reads as delivering"
