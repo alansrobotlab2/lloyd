@@ -1434,3 +1434,147 @@ def test_a_worker_handed_no_key_still_speaks(tmp_path, monkeypatch):
 
     assert speak.main(["--state-dir", str(tmp_path), "--text", _ALERT]) == 1
     assert (tmp_path / speak.LOSS_NAME).is_file(), "the loss is still recorded"
+
+
+# ── #3171: how old a lost burst may be and still be re-spoken ───────────────
+#
+# `voice-loss.md` on this box named a burst from 2026-10-05 and `loss_replay_state`
+# answered `owed` for it on 2026-10-23 — 16.97 days, `occurrences: 2`, two named texts,
+# no cursor. Nothing in the reader bounded that, so the next `agent-tts` recovery would
+# force-speak a `Landed:` line from an outage two weeks gone. These two nodes own the
+# bound itself (`LOSS_REPLAY_MAX_AGE`: its value, its derivation, and the rule that
+# `speak.py` stays importable on its own) and the state answer it produces. What the
+# bound COSTS the recovery body is pinned in `tests/test_guardian_recovery_respeak.py`.
+
+
+def _burst_started_ago(state_dir, *texts, age: float):
+    """Write a real burst whose `burst_started` is `age` seconds in the past.
+
+    Through `speak._record_loss` with only the clock moved, the same way
+    `tests/test_guardian_recovery_respeak.py::_lose` does it: a fixture that invented the
+    fields could pin a record the writer never produces. Both texts are written at the
+    same shifted instant, so they land in ONE burst and `occurrences: 2` with two named
+    texts is exactly the shape the live 2026-10-05 record has.
+    """
+    real = time.time
+    speak.time.time = lambda: real() - float(age)
+    try:
+        for t in texts:
+            speak._record_loss(state_dir, t, "ConnectionRefusedError: [Errno 111]")
+    finally:
+        speak.time.time = real
+    return speak.read_loss_record(state_dir)
+
+
+def test_the_replay_age_bound_is_the_restart_budget_not_the_refresh_rule():
+    """Clause 1: the constant, where its number comes from, and what may not be imported.
+
+    Three properties, one per group of assertions, and the middle group is the one that
+    makes the number mean something: `LOSS_WINDOW` (3600.0) is the writer's rule for
+    whether a fresh failure REFRESHES a burst or opens a new one, so a bound that
+    borrowed it would refuse the re-speak of an outage that ended 61 minutes ago — the
+    exact gap #2264 exists to close. The bound is `policy.FLAP_WINDOW_SECONDS`, the
+    window in which `recover_service` is allowed its 2 restarts and so the longest span
+    the guardian can still be working the SAME outage. The value is asserted against the
+    policy constant rather than only against a literal, so the two cannot drift apart in
+    silence; the literal is asserted too, because the drift this item is about is a
+    number that meant one thing in one file and another in its reader.
+
+    The import half is the standalone-load rule. `eval/speaker_embed_eval.py` and
+    `scripts/voice/tts_bakeoff.py` load `speak.py` by path with nothing else on
+    `sys.path`, so a MODULE-LEVEL (column-0) import of a guardian sibling would break
+    them — that is what the bound must not do to get its number, and what stays banned.
+    The file's one sibling import — `policy`, for `_REPO` — is legal precisely because a
+    `try/except` guards it, and that guarded form is asserted as still indented so the
+    scan demonstrably looked at the only place a sibling import exists in this file rather
+    than at nothing. The same pattern is then handed a column-0 `import policy` of its own
+    to prove it can find one: without that, a loop that matched nothing and a loop that
+    could match nothing are the same green.
+    """
+    import policy
+
+    src = (GUARDIAN_DIR / "speak.py").read_text(encoding="utf-8")
+
+    assert speak.LOSS_REPLAY_MAX_AGE == 21600.0, (
+        f"the bound moved: {speak.LOSS_REPLAY_MAX_AGE}")
+    assert speak.LOSS_REPLAY_MAX_AGE == policy.FLAP_WINDOW_SECONDS, (
+        f"{speak.LOSS_REPLAY_MAX_AGE} is no longer the guardian's restart budget "
+        f"({policy.FLAP_WINDOW_SECONDS}), and 6 h is the whole argument for the number")
+    assert speak.LOSS_REPLAY_MAX_AGE > speak.LOSS_WINDOW, (
+        f"the bound collapsed onto the writer's refresh rule ({speak.LOSS_WINDOW}): a "
+        "burst refreshed across a window boundary is a live outage, and a reader that "
+        "bounded replay on 3600 s would refuse it")
+
+    m_def = re.search(r"^LOSS_REPLAY_MAX_AGE = 21600\.0\b", src, re.M)
+    assert m_def, ("LOSS_REPLAY_MAX_AGE is not the literal 21600.0 it is specified as — "
+                   "it must not be computed from an import of a guardian sibling")
+    m_comment = re.search(r"(?:^#[^\n]*\n)+(?=LOSS_REPLAY_MAX_AGE = 21600\.0)", src, re.M)
+    assert m_comment, ("the constant carries no comment block, so the next reader has no "
+                       "derivation to keep it honest with")
+    comment = m_comment.group(0)
+    assert "FLAP_WINDOW_SECONDS" in comment, (
+        "the comment no longer names where the number comes from")
+    assert "LOSS_WINDOW" in comment, (
+        "the comment no longer says why the 3600 s refresh rule is NOT the basis")
+
+    siblings = sorted(p.stem for p in GUARDIAN_DIR.glob("*.py"))
+    assert "policy" in siblings and len(siblings) > 5, (
+        f"the sibling walk found {siblings}, so the loop below is asserting about "
+        "nothing — it is the scan, not the code, that is broken")
+    for name in siblings:
+        assert not re.search(rf"^(from|import)[ \t]+{name}\b", src, re.M), (
+            f"speak.py now imports the guardian sibling `{name}` at module level, which "
+            "breaks the standalone load `eval/speaker_embed_eval.py` and "
+            "`scripts/voice/tts_bakeoff.py` depend on — spell the bound as a literal and "
+            "put the derivation in the comment, as it is now")
+    guarded = re.search(r"^([ \t]+)import policy as _policy\b", src, re.M)
+    assert guarded, (
+        "the guarded `import policy as _policy` that gives `_REPO` is gone or moved to "
+        "column 0, so this scan has no sibling import left to look at and its zero hits "
+        "above prove nothing about the pattern")
+    assert re.search(r"^(from|import)[ \t]+policy\b", "import policy as _policy", re.M), (
+        "the pattern itself cannot match a column-0 import, so the loop above could never "
+        "have caught one — fix the pattern before believing the zero hits")
+
+
+def test_a_burst_past_the_age_bound_is_not_owed_anymore(tmp_path):
+    """Clause 2: `loss_replay_state` must not answer `owed` for a stale burst.
+
+    The aged half is the live case, fixture-shaped like it: `occurrences: 2`, two named
+    texts, no `voice_replay_cursor.json`, and a `burst_started` one minute past the bound.
+    The answer has to be a state that is not `owed` — and it is asserted as `aged` rather
+    than only as `!= owed`, because `guardian._recovery_body` words itself from this value
+    and a body that stays silent about an aged burst is a different decision from a body
+    that reports an un-speakable one.
+
+    The in-bound half is the positive control, and it is the node's other load-bearing
+    assertion: the same writer, the same two texts, the same directory, one minute INSIDE
+    the bound, still `owed`. Without it, `LOSS_REPLAY_MAX_AGE = 0.0` would satisfy the
+    aged assertion as happily as the correct value, and the bound would silently be "never
+    re-speak anything" — the same class of false green as a 0-hit grep whose path never
+    resolved.
+    """
+    aged = _burst_started_ago(tmp_path, _ALERT, _OTHER_ALERT,
+                              age=speak.LOSS_REPLAY_MAX_AGE + 60.0)
+    assert aged["occurrences"] == 2, aged
+    assert len([s for s in aged["said"] if s.strip()]) == 2, aged
+    assert not (tmp_path / speak.REPLAY_CURSOR_NAME).exists(), (
+        "no recovery ever re-spoke this burst, so the cursor cannot be what stopped it")
+
+    state = speak.loss_replay_state(aged, tmp_path)
+    assert state != speak.REPLAY_OWED, (
+        "an aged burst is still `owed`: the next recovery would force-speak it")
+    assert state == speak.REPLAY_AGED, (
+        f"the aged burst answered {state!r} instead of {speak.REPLAY_AGED!r}, and the "
+        "recovery body keys its sentence off this value")
+
+    in_bound = tmp_path / "in-bound"        # its own dir: a second write into the aged
+    in_bound.mkdir()                        # dir would REFRESH it (2 min apart, well
+                                          # inside LOSS_WINDOW) and read as occurrences 4
+    fresh = _burst_started_ago(in_bound, _ALERT, _OTHER_ALERT,
+                               age=speak.LOSS_REPLAY_MAX_AGE - 60.0)
+    assert fresh["occurrences"] == 2, (
+        f"the control burst did not come out the same shape as the aged one: {fresh}")
+    assert speak.loss_replay_state(fresh, in_bound) == speak.REPLAY_OWED, (
+        f"an in-bound burst answered {speak.loss_replay_state(fresh, in_bound)!r}: the "
+        "bound is refusing re-speaks it was never meant to refuse")

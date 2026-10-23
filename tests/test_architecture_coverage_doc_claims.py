@@ -2087,11 +2087,17 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # again only `main` moves. Same re-check as above: `git diff <base> <head> --
     # agent-services/guardian/guardian.py | grep '^@@'` shows that one hunk and nothing
     # else.
-    assert heads[guardian]["main"] == 2802, (
-        f"`main` moved off :2802 ({heads[guardian]['main']}) — if it is gone "
+    # 2802 → 2825 AND 846 → 869 is #3171: two hunks, `@@ -658,7 +658,10 @@` (+3, the
+    # comment on the state that now also carries the age bound) and
+    # `@@ -711,13 +714,33 @@` (+20, the `REPLAY_AGED` branch and its docstring), both
+    # inside `_recover_infra` / `_recovery_body` — above `evaluate_liveness`, so BOTH
+    # heads move by the same +23, which is why this node is the one that notices.
+    # `architecture/threat-model.md`'s T-26 cell moved with the second of them.
+    assert heads[guardian]["main"] == 2825, (
+        f"`main` moved off :2825 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 846, (
-        f"`evaluate_liveness` moved off :846 "
+    assert heads[guardian]["evaluate_liveness"] == 869, (
+        f"`evaluate_liveness` moved off :869 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89

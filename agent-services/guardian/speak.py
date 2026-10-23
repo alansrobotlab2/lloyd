@@ -160,6 +160,40 @@ LOSS_HEADING = "# Voice alert lost"
 # on the next flap, which is the same "a repeating reader must not re-act" rule
 # `voiceloss.CURSOR_NAME` exists for one file over.
 REPLAY_CURSOR_NAME = "voice_replay_cursor.json"
+# ── how old a lost burst may be and still be re-spoken (#3171, 2026-10-23) ──
+# Nothing bounded this before today. The live record read at 2026-10-23 is burst
+# `1791248736.184` — `occurrences: 2`, two named texts, no cursor, last seen
+# 2026-10-05T18:13:26-0700, i.e. 16.97 days old at triage — and `loss_replay_state`
+# answered `owed` for it, so the next `agent-tts` recovery would force-speak the
+# `Landed:` line that burst names — words about a deploy from before the box was last
+# restarted into this state. A stale alert that arrives late is not a rescued alert; it
+# is a wrong one, spoken at the moment the room most needs an accurate channel.
+#
+# WHY 6 h: the bound is the longest span in which the guardian can still be working
+# the SAME outage. `guardian.recover_service` gets `policy.FLAP_HALT_AFTER` (2)
+# restarts inside `policy.FLAP_WINDOW_SECONDS` (6 * 3600.0) and then refuses until
+# that window ages out, so a synthesiser that keeps coming back down is ONE incident
+# for six hours and the record belongs to a recovery that is still in progress. The
+# delay the bound has to clear is that budget, not a boot: each attempt can block for
+# `policy.HEALTH_WAIT_TTS` (420.0 s) waiting on the endpoint, and the next one arrives
+# on a later tick. Past the restart budget the recovery ringing the bell is a
+# different outage, and `voice-loss.md` under it is history.
+#
+# WHY NOT `LOSS_WINDOW`: 3600.0 is the WRITER's rule for whether a fresh failure
+# refreshes a burst or opens a new one, and a burst legitimately outlives one window by
+# being refreshed — a reader that borrowed it would refuse the re-speak of an outage
+# that ended 61 minutes ago, which is the gap #2264 exists to close. The two bounds
+# answer different questions and must not be conflated.
+#
+# A literal, not a read of `_policy.FLAP_WINDOW_SECONDS`. This module's ONE sibling
+# import — `policy`, for `_REPO` — sits inside a `try/except` at the top of the file
+# exactly so that `eval/speaker_embed_eval.py` and `scripts/voice/tts_bakeoff.py`, which
+# load it standalone with nothing else on `sys.path`, still get a working module; a bound
+# computed from that import would then have TWO values, one per branch, which is the
+# drift this item is about. So the number is spelled once, here, and
+# `tests/test_guardian_speak.py::test_the_replay_age_bound_is_the_restart_budget_not_the_refresh_rule`
+# asserts it against `policy.FLAP_WINDOW_SECONDS` so the two cannot drift apart silently.
+LOSS_REPLAY_MAX_AGE = 21600.0    # == policy.FLAP_WINDOW_SECONDS
 
 # The locally-generated attention chirp. Under a second so that
 # `_FALLBACK_PLAY_TIMEOUT` can hold the whole failure path inside the 2.0 s the
@@ -323,27 +357,44 @@ def _write_replay_cursor(state_dir: Path, burst_started: float, text: str) -> No
         pass
 
 
-#: What `loss_replay_state` answers, and the only three things that are true about a
-#: burst and the voice that owes it a re-saying.
-REPLAY_OWED, REPLAY_SPOKEN, REPLAY_NONE = "owed", "spoken", "none"
+#: What `loss_replay_state` answers, and the only four things that are true about a
+#: burst and the voice that owes it a re-saying. `aged` joined on 2026-10-23 (#3171);
+#: until then a burst was owed forever, and the 2026-10-05 record proves what that means
+#: in practice: `owed` sixteen days after the outage, and spoken on the next flap.
+REPLAY_OWED, REPLAY_SPOKEN, REPLAY_NONE, REPLAY_AGED = "owed", "spoken", "none", "aged"
 
 
 def loss_replay_state(record: dict | None, state_dir: Path) -> str:
-    """`owed`, `spoken` or `none` for a loss record already read (#2264).
+    """`owed`, `spoken`, `none` or `aged` for a loss record already read (#2264).
 
-    One call, one answer, three states rather than a bool, because the recovery has to
+    One call, one answer, four states rather than a bool, because the recovery has to
     SAY which of them it is in: a body that promised "none of them has been said again"
     on the second recovery of a burst the first recovery already re-said would be a
     false statement about the room, written by the one process that knows the difference.
+    This function is the ONE predicate for that decision: `replay_latest_loss` asks it
+    before opening its mouth and `guardian._recovery_body` words itself from the answer
+    it was handed, so the utterance and the alert can never disagree about the burst.
 
-    * `owed` — the record counts at least one lost utterance, names words to say, and
-      the cursor has not spent its burst. This is the re-speak's cue.
+    * `owed` — the record counts at least one lost utterance, names words to say, is
+      younger than `LOSS_REPLAY_MAX_AGE`, and the cursor has not spent its burst. This is
+      the re-speak's cue.
     * `spoken` — an earlier recovery already re-said this burst. The losses stay facts
       worth reporting; the speech does not happen twice.
-    * `none` — no re-speak is possible or owed: no record, a count of zero, a record
-      with no words in it, or a burst with no start to bound. A `Recovered:` body that
-      reported `0 spoken alerts` on an uneventful day would be announcing an outage
-      nobody had, and the box is in this state nearly always.
+    * `none` — no re-speak is possible: no record, a count of zero, a record with no
+      words in it, or a burst with no start to bound. A `Recovered:` body that reported
+      `0 spoken alerts` on an uneventful day would be announcing an outage nobody had,
+      and the box is in this state nearly always.
+    * `aged` — the burst started more than `LOSS_REPLAY_MAX_AGE` ago, so nothing is owed
+      for it (#3171, 2026-10-23). The losses stay facts; they are not THIS outage's
+      facts. `none` could have carried this case, and does not, because the two need
+      different sentences: `none` still counts the losses in the recovery body — that box
+      did swallow alerts — while `aged` must say nothing at all, because
+      "did not reach the speakers while it was down" about a burst from before this
+      downtime would blame the outage that just ended for a silence it did not cause.
+
+    The age test runs BEFORE the cursor read, so an aged burst answers `aged` whether or
+    not a cursor has spent it: its age is the reason it is not replayable, and a burst
+    that is both spent and stale has nothing left to say either way.
 
     `spoken` means the CURSOR says this process's predecessors said it, which is the only
     sense in which the recovery may claim it out loud. A record whose `burst_started` is
@@ -362,6 +413,8 @@ def loss_replay_state(record: dict | None, state_dir: Path) -> str:
     started = record.get("burst_started")
     if started is None:
         return REPLAY_NONE
+    if time.time() - float(started) > LOSS_REPLAY_MAX_AGE:
+        return REPLAY_AGED
     done = _read_replay_cursor(state_dir).get("burst_started")
     if isinstance(done, (int, float)) and float(started) <= float(done):
         return REPLAY_SPOKEN
@@ -371,10 +424,23 @@ def loss_replay_state(record: dict | None, state_dir: Path) -> str:
 def replay_latest_loss(record: dict, state_dir: Path, *, window: float) -> bool:
     """Say the newest lost utterance again, and record this burst as said.
 
-    `record` is the one the caller already put to `loss_replay_state`; re-reading the
-    file here would be a second opinion about which burst is live, and that same caller
-    is composing an alert body from this record one line later — the two must be about
-    the same burst.
+    `record` is the one the caller already put to `loss_replay_state`; re-reading
+    `voice-loss.md` here would be a second opinion about which burst is live, and that
+    same caller is composing an alert body from this record one line later — the two must
+    be about the same burst. What this function does check is the ANSWER: its first line
+    re-applies `loss_replay_state` to the record it was handed, so a caller that forgot
+    to gate cannot speak a burst the state refuses. It re-reads the cursor, which is one
+    small file and does not change which burst is live; it never re-reads the record.
+
+    **A burst older than `LOSS_REPLAY_MAX_AGE` is not replayed, as of 2026-10-23
+    (#3171)** — `loss_replay_state` answers `aged` for it and this returns False before
+    the `dispatch`, so `REPLAY_CURSOR_NAME` stays unwritten and the words stay unsaid.
+    The bound is 21600.0 s (`LOSS_REPLAY_MAX_AGE`), which is
+    `policy.FLAP_WINDOW_SECONDS`, the guardian's restart-budget window: it is how long a
+    recovery can still be working the outage that swallowed the utterance. The live
+    2026-10-05 burst was 16.97 days old and still `owed` the day #3171 measured it, so
+    without this the next flap of `agent-tts` reads out a `Landed:` line from an outage
+    two weeks gone — and the re-speak is `force=True`, so nothing else holds it back.
 
     **One alert per burst is settled policy, ruled 2026-10-13** — the owed question
     #2264 left, closed by the owed-check on #2469 — and it is three clauses: re-speak
@@ -413,6 +479,11 @@ def replay_latest_loss(record: dict, state_dir: Path, *, window: float) -> bool:
     mark in `voice_spoken.json` — the artefact a later reader checks to see whether an
     alert was said twice.
     """
+    # The same predicate the caller used and the body is worded from, applied here so the
+    # replay cannot be reached past a state that refuses it. `aged` (#3171) and `spoken`
+    # both land here before the `dispatch`, so neither spends the burst it refused.
+    if loss_replay_state(record, state_dir) != REPLAY_OWED:
+        return False
     said = [s for s in list(record.get("said") or []) if str(s).strip()]
     if not said:
         return False

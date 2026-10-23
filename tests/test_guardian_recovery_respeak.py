@@ -1042,3 +1042,137 @@ def test_the_replay_docstring_states_the_ruling_as_settled_policy():
     assert "LOSS_TEXT_KEEP" in inspect.getsource(speak._record_loss), (
         "the cap is no longer applied where the burst is written, so 'the record cannot "
         "hold the whole burst' is a claim about a file nobody writes that way")
+
+
+# ── #3171: a burst older than the restart budget is not this outage's loss ───
+#
+# The live `voice-loss.md` on this box named burst `1791248736.184` — `occurrences: 2`,
+# two named texts, no cursor, last seen 2026-10-05T18:13:26-0700 — and
+# `speak.loss_replay_state` answered `owed` for it on 2026-10-23, 16.97 days later. So the
+# next `agent-tts` recovery would have force-spoken a `Landed:` line about a deploy from
+# before the box last went down, and written an alert body saying alerts were lost "while
+# it was down" — blaming the current outage for a silence that predates it.
+# `speak.LOSS_REPLAY_MAX_AGE` (21600.0 s, the guardian's own 6 h restart budget from
+# `policy.FLAP_WINDOW_SECONDS`) is the bound; `speak.REPLAY_AGED` is the answer it
+# produces. What the bound does NOT take away is pinned below by the `REPLAY_NONE`
+# half of the second node: a burst that cannot be re-spoken is not the same thing as a
+# burst that happened too long ago to mention.
+
+
+def test_a_burst_past_the_age_bound_is_neither_re_spoken_nor_spent(tmp_path, monkeypatch):
+    """Clause 3: `replay_latest_loss` refuses an aged burst and leaves the cursor alone.
+
+    The node calls the replay directly, which production does not: `_recover_infra` gates
+    on `state == REPLAY_OWED` before it ever gets here. That gate is one line of statement
+    order in a function that is otherwise a straight line, and this node is the reason the
+    function under test holds the property itself — `replay_latest_loss` re-applies
+    `loss_replay_state` to the record it was handed, so a caller that forgot the gate, or
+    a future second caller, cannot speak a refused burst. Same argument `test_the_re_speak_honours_the_master_mute`
+    makes about the cursor write: a property that rests on order is a property with no
+    test on it.
+
+    `window=3600.0` is the value the production caller passes
+    (`Notifier.voice_window`, `notify.py`'s default), so the refused path is reached on the
+    real arguments rather than ones chosen to make the node pass.
+
+    The cursor must stay ABSENT, not merely unused: stamping a burst that was never spoken
+    is the permanent loss the cursor rule exists to make impossible, and an aged record is
+    now a record that will never be spoken by design. The final third is the positive
+    control — one in-bound burst in the same directory, replayed by the same call, which
+    spawns exactly one worker and writes the cursor then. Every "nothing happened"
+    assertion above is satisfied by a replay route that never works at all; only the
+    control tells those two states apart.
+    """
+    g = _guardian(tmp_path, monkeypatch)
+    aged_at = time.time() - speak.LOSS_REPLAY_MAX_AGE - 60.0
+    rec = _lose(g.gdir, LOST, LOST_2, at=aged_at)
+    assert rec["occurrences"] == 2, rec
+    assert len([s for s in rec["said"] if s.strip()]) == 2, rec
+    assert speak.loss_replay_state(rec, g.gdir) == speak.REPLAY_AGED, rec
+
+    assert speak.replay_latest_loss(rec, g.gdir, window=3600.0) is False, (
+        "an aged burst came back as spoken")
+    assert [_worker_text(a) for a in g.spawned] == [], (
+        f"an aged burst was force-spoken anyway: {g.spawned}")
+    cursor = g.gdir / speak.REPLAY_CURSOR_NAME
+    assert not cursor.exists(), (
+        "the replay stamped a burst it refused to speak, so no later recovery can ever "
+        f"say it: {cursor.read_text(encoding='utf-8')!r}")
+
+    fresh = _lose(g.gdir, LOST_2)                     # an in-bound burst, same directory
+    assert fresh["occurrences"] == 1, (
+        f"the control burst did not open a new burst, so the control proves nothing: "
+        f"{fresh}")
+    g.spawned.clear()
+    assert speak.replay_latest_loss(fresh, g.gdir, window=3600.0) is True, (
+        "the positive control: this replay refuses every burst, aged or not, so the three "
+        "assertions above are reading a route that never speaks")
+    assert [_worker_text(a) for a in g.spawned] == [LOST_2], g.spawned
+    assert json.loads(cursor.read_text(encoding="utf-8"))["burst_started"] == \
+        pytest.approx(fresh["burst_started"]), (
+        "the replay route never writes its cursor, which is the same green this file "
+        "already rules out at `test_a_second_recovery_over_the_same_burst_dispatches_"
+        "nothing`")
+
+
+def test_a_stale_burst_is_not_reported_as_this_recovery_s_loss(tmp_path, monkeypatch):
+    """Clause 4: the aged recovery body is the uneventful head, byte for byte.
+
+    `_recover_infra` must dispatch nothing and say nothing about the loss: the body's
+    second sentence is `"<N> spoken alerts did not reach the speakers while it was
+    down"`, and for a burst that ended before this downtime began that is a false
+    statement about the room written by the one process that knows better — the same
+    reason `REPLAY_SPOKEN` gets its own wording rather than the `owed` one. So the aged
+    recovery is asserted against `BASE_BODY` with `==`, not `not in`: `test_a_recovery_with_no_loss_record_is_worded_exactly_as_before`
+    pins those bytes as what every recovery on this box has said since #1904, and an aged
+    record has to join it exactly rather than approximately.
+
+    **The `REPLAY_NONE` half is the point of the node, not a leftover.** The bound must
+    drop the sentence for a burst that is merely OLD, not for every burst the re-speak
+    cannot make: `occurrences: 2` over a record that names no words is `none`, cannot be
+    spoken, and still gets `2 spoken alerts did not reach the speakers` exactly as it does
+    today — those alerts WERE swallowed during this downtime and the count is the report.
+    `occurrences: 0` is already `none` by the count branch, so it cannot express the
+    difference; this shape can, and it is the one that tells an implementation which
+    returns the head whenever `state is REPLAY_NONE` from the one that returns it only for
+    `REPLAY_AGED`.
+
+    The record for that half is hand-written rather than written by `_record_loss`, because
+    the writer cannot produce it — every loss it records names its utterance. It is a shape
+    `_parse_loss_body` accepts (`said: []` over a counted body: the named list is the part
+    of the file a truncated or hand-edited record loses first), which is the same reason
+    `test_a_zero_occurrence_record_changes_nothing_and_dispatches_nothing` writes its file
+    by hand. `burst_started` is stamped NOW on purpose: with an old start the record would
+    reach `aged` and the node would assert the wrong branch.
+    """
+    g = _guardian(tmp_path, monkeypatch)
+    rec = _lose(g.gdir, LOST, LOST_2, at=time.time() - speak.LOSS_REPLAY_MAX_AGE - 60.0)
+    assert speak.loss_replay_state(rec, g.gdir) == speak.REPLAY_AGED, rec
+
+    assert g._recover_infra(REASON) == "recovered"
+    assert len(g.alerts) == 1, g.alerts
+    assert g.alerts[0]["title"] == "Recovered: agent-tts", g.alerts
+    assert g.alerts[0]["body"] == BASE_BODY, (
+        f"an aged burst leaked into a recovery that had none: {g.alerts[0]['body']!r}")
+    assert [_worker_text(a) for a in g.spawned] == [], g.spawned
+    assert not (g.gdir / speak.REPLAY_CURSOR_NAME).exists(), g.gdir
+
+    (g.gdir / speak.LOSS_NAME).write_text(
+        f"{speak.LOSS_HEADING}\n\noccurrences: 2\n"
+        f"last_seen: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+        f"burst_started: {time.time():.3f}\nwindow_s: {speak.LOSS_WINDOW:.1f}\n"
+        "\n## What did not get said\n\n(nothing named)\n", encoding="utf-8")
+    unspoken = speak.read_loss_record(g.gdir)
+    assert unspoken["occurrences"] == 2, unspoken
+    assert [s for s in unspoken["said"] if s.strip()] == [], unspoken
+    assert speak.loss_replay_state(unspoken, g.gdir) == speak.REPLAY_NONE, (
+        "this fixture is supposed to be the state that is NOT aged, and it is not")
+
+    g2 = _guardian(tmp_path, monkeypatch)
+    g2._recover_infra(REASON)
+    assert "2 spoken alerts did not reach the speakers" in g2.alerts[0]["body"], (
+        f"a burst that cannot be re-spoken lost its count sentence, which belongs to the "
+        f"aged case alone: {g2.alerts[0]['body']!r}")
+    assert "None of them has been said again." in g2.alerts[0]["body"], g2.alerts[0]["body"]
+    assert [_worker_text(a) for a in g2.spawned] == [], (
+        "a record with no words in it tried to speak one")

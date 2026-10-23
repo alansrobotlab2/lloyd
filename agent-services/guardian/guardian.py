@@ -658,7 +658,10 @@ class Guardian:
                 # One read, then a state derived from it and one cursor write, and the
                 # SAME `loss` record feeds both the re-speak and the sentence below.
                 # Reading it twice would let the alert body and the utterance disagree
-                # about which burst they are describing.
+                # about which burst they are describing. `loss_replay_state` is the one
+                # predicate that holds the age bound too (#3171): a burst older than
+                # `speak.LOSS_REPLAY_MAX_AGE` answers `aged`, so neither branch below
+                # fires for it and the body stays the uneventful one.
                 loss = speak.read_loss_record(self.gdir) or {}
                 state = speak.loss_replay_state(loss, self.gdir)
                 resaid = (speak.replay_latest_loss(
@@ -711,13 +714,33 @@ class Guardian:
         mid-word would make the recovery alert the second arbitrary truncation applied to
         that record, and a count cannot be truncated into meaning something else.
 
-        Every sentence here is true in all three states `loss_replay_state` answers,
-        because this is the record a human reads after the room has already heard or not
-        heard the re-speak: `resaid` reports the utterance this call actually dispatched,
-        `REPLAY_SPOKEN` credits an earlier recovery with a burst this cursor has spent,
-        and only a burst nobody ever said gets "None of them has been said again".
+        Every sentence here is true in every state `loss_replay_state` answers, because
+        this is the record a human reads after the room has already heard or not heard the
+        re-speak, and the sentence is chosen from the `state` the caller derived rather
+        than from the record a second time — the body and the utterance must not disagree:
+        `resaid` reports the utterance this call actually dispatched, `REPLAY_SPOKEN`
+        credits an earlier recovery with a burst this cursor has spent, and only a burst
+        nobody ever said gets "None of them has been said again".
+
+        **`REPLAY_AGED` returns the head alone, as of 2026-10-23 (#3171).** A burst older
+        than `speak.LOSS_REPLAY_MAX_AGE` (21600.0 s = `policy.FLAP_WINDOW_SECONDS`, the
+        guardian's own restart budget) is not this recovery's outage, so the count
+        sentence goes: `"<N> spoken alerts did not reach the speakers while it was down"`
+        would attribute a silence from before this downtime to the downtime that just
+        ended, which is the false statement the state split exists to prevent. That is
+        what the live record was — burst `1791248736.184`, last seen 2026-10-05T18:13:26,
+        16.97 days old and still answering `owed` the day #3171 measured it. The losses
+        remain facts in `voice-loss.md` and on #1904's escalator; they are simply not news
+        to a recovery hours or days later.
+
+        `REPLAY_NONE` is NOT the same case and must not be collapsed into it: a burst of
+        `occurrences: 2` whose record names no words is `none`, cannot be re-spoken, and
+        still swallows the count sentence as it always has — the box did lose those
+        alerts, during this downtime. Age, not speakability, is what drops the sentence.
         """
         head = f"{program} was {live_reason}.\nRestarted; {detail}."
+        if state == speak.REPLAY_AGED:
+            return head
         try:
             lost = int(loss.get("occurrences") or 0)
         except (TypeError, ValueError):
