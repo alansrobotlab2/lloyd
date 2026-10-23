@@ -14,10 +14,11 @@
   "scheduled-task",
   "youtube-digest"
  ],
- "durable_write_definition": "side_effecting(name) \u222a {Write, Edit, vault_write, automod_vault_land} minus READ_ONLY and the turn-state names (Scratchpad, recall_observation); NOT tool_tier(name) >= 1, which is true for all 147 pool names and would report every source, and NOT durable_external() = TIER2 \u222a TIER3, which excludes Write and vault_write and so cannot see the pilot's own pair. Bash is excluded by name: its tier is the command string (capabilities.py:512-516), which #2932's owed entry 3 rules on.",
+ "durable_write_definition": "side_effecting(name) \u222a {Write, Edit, vault_write, automod_vault_land} minus READ_ONLY and the turn-state names (Scratchpad, recall_observation); NOT tool_tier(name) >= 1, which is true for all 147 pool names and would report every source, and NOT durable_external() = TIER2 \u222a TIER3, which excludes Write and vault_write and so cannot see the pilot's own pair. Bash is excluded by name: its tier is the command string, so this definition cannot see it and does not pretend to \u2014 where that question is answered is the published `bash_held` field on every row, and for the most-protected fleet the named list `untrusted_ingest_sources_with_unmeasured_bash` below. A row's `co_present` is NOT a statement about Bash (#3202, owed entry 3 of #2932).",
  "pool": 147,
  "sources": {
   "arch-review": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -103,6 +104,7 @@
    }
   },
   "autocode": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -222,6 +224,7 @@
    }
   },
   "automod-regression": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -341,6 +344,7 @@
    }
   },
   "autoresearch": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -460,6 +464,7 @@
    }
   },
   "autotriage": {
+   "bash_held": true,
    "co_present": false,
    "declared": true,
    "durable_writes": [
@@ -489,6 +494,7 @@
    }
   },
   "backlog-cluster": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -608,6 +614,7 @@
    }
   },
   "bench-mine": {
+   "bash_held": false,
    "co_present": false,
    "declared": true,
    "durable_writes": [],
@@ -627,6 +634,7 @@
    }
   },
   "board-steward": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -748,6 +756,7 @@
    }
   },
   "cost-investigate": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -867,6 +876,7 @@
    }
   },
   "deep-research": {
+   "bash_held": false,
    "co_present": true,
    "declared": true,
    "durable_writes": [
@@ -910,6 +920,7 @@
    }
   },
   "failure-ledger": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -1029,6 +1040,7 @@
    }
   },
   "frontend-probe-canary": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -1148,6 +1160,7 @@
    }
   },
   "owed-check": {
+   "bash_held": true,
    "co_present": true,
    "declared": false,
    "durable_writes": [
@@ -1269,6 +1282,7 @@
    }
   },
   "scheduled-task": {
+   "bash_held": true,
    "co_present": true,
    "declared": true,
    "durable_writes": [
@@ -1312,6 +1326,7 @@
    }
   },
   "session-distill": {
+   "bash_held": true,
    "co_present": false,
    "declared": true,
    "durable_writes": [
@@ -1337,6 +1352,7 @@
    }
   },
   "youtube-digest": {
+   "bash_held": false,
    "co_present": true,
    "declared": true,
    "durable_writes": [
@@ -1408,5 +1424,8 @@
   "autotriage",
   "board-steward",
   "owed-check"
+ ],
+ "untrusted_ingest_sources_with_unmeasured_bash": [
+  "session-distill"
  ]
 }

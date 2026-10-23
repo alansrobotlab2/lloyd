@@ -196,3 +196,14 @@
 # run and fails on drift, so the table is the artifact acceptance clause (a) is
 # graded against and it has to be in the tree, not in a worktree.
 !worker_co_presence_baseline.json
+
+# …and #3202's corpus beside it: the Bash command shapes `session-distill`'s
+# transcripts actually recorded, which the census's name-level durable definition
+# cannot see and whose absence is now a published field rather than a comment. It
+# has to be committed for the same reason as the table above and one more: the
+# store it is derived from is retention-swept (`.json` then `.json.gz`, then
+# archive-only), so a node that measured it live would age into an empty corpus
+# and report "every command is below the durable-external tier" of nothing. The
+# negation is the visible route; a force-add past `*.json` is the invisible one
+# this file exists to make unnecessary.
+!session_distill_bash_shapes.json

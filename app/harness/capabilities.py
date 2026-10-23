@@ -508,7 +508,14 @@ def durable_external(names) -> frozenset[str]:
 
     `Bash` is deliberately not answered here: its tier is the command string
     (`policy.tool_tier` asks `safety.bash_command_tier`), so a name-level
-    census cannot see it and this function does not pretend to.
+    census cannot see it and this function does not pretend to. Where the
+    question IS answered is the published per-source field `bash_held` in
+    `tests/fixtures/worker_co_presence_baseline.json`, and for this fleet the
+    named list `untrusted_ingest_sources_with_unmeasured_bash` beside it
+    (#3202, owed entry 3 of #2932): a source in that list holds `Bash` and its
+    `co_present` value is not a statement about it. The command shapes the one
+    Bash-holding member of this fleet has actually recorded are tiered against
+    the real ladder in `tests/fixtures/session_distill_bash_shapes.json`.
     """
     return frozenset(normalize_tool_name(n) for n in names) & (
         frozenset(TIER2_TOOLS) | frozenset(TIER3_TOOLS))
