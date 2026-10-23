@@ -1953,6 +1953,18 @@ class Gate:
         if (res.data or {}).get("external_blocker"):
             event["external_blocker"] = True
             event["external_failures"] = (res.data or {}).get("external_failures", [])
+        # A refused whole-suite re-run (#3205) needs its own named keys for the same
+        # reason `external_blocker` does: the reason word survives only as far as
+        # `detail[:500]`, and which files it refused over survives nowhere after
+        # `gate.json` goes with the worktree. Without these the row of a round this
+        # rung never judged is byte-identical to the row of a diff failure, which is
+        # how three rounds came to spend an item's attempt on a timeout this rung
+        # cannot have been blaming them for.
+        for key in ("whole_suite_rerun_refused", "parallel_failing_files_total",
+                    "parallel_failing_nodes_total", "serial_rerun"):
+            val = (res.data or {}).get(key)
+            if val:
+                event[key] = val
         # Whose failures a `tests` pass (or a mixed failure) carried, for the
         # same reason: the scorecard counts red-tree passes, and the next round
         # is told which ids are not its own, long after `gate.json` is gone.
@@ -1967,6 +1979,14 @@ class Gate:
             ids = (res.data or {}).get(key)
             if ids:
                 event[key] = list(ids)[:self.EVENT_ID_CAP]
+        # The files a refused re-run refused OVER (#3205). Not node ids — the whole
+        # point of the refusal is that no node is blamed, so the row has to carry the
+        # census it refused on instead, under the same 50-id cap the rows above use.
+        # `_tests_verdict`'s detail is cut at 500 characters on the way in, so this
+        # is where the list actually is.
+        files = (res.data or {}).get("parallel_failing_files")
+        if files:
+            event["parallel_failing_files"] = list(files)[:self.EVENT_ID_CAP]
         if (res.data or {}).get("red_tree_item"):
             event["red_tree_item"] = res.data["red_tree_item"]
         # The review rung's two verdicts ride the event for the same reason:
@@ -2933,9 +2953,32 @@ class Gate:
             files.append(rel)
         return files or None
 
-    # A parallel failure naming more files than this is not load, it is a
-    # broken tree: re-ask the whole suite serially rather than file by file.
+    # A parallel failure naming more files than this is not something a re-run can
+    # adjudicate: it is either a broken tree or a machine-wide break, and #3205
+    # refuses the re-run by name (`WHOLE_SUITE_RERUN_REFUSED`) instead of re-asking
+    # the whole suite serially. `scripts/automod/vault_guards.py` reads this off the
+    # CLASS, so it stays a class attribute at that name whatever the branch does.
     PARALLEL_RETRY_MAX_FILES = 40
+
+    # The ceiling on one serial pytest call made by `_run_suite` — the per-file
+    # re-runs, and the whole-suite serial run taken when xdist cannot be imported.
+    # Named rather than left a literal because #3205's whole-suite re-run died
+    # inside exactly this many seconds three times, and the number has to be
+    # quotable from the reason that now refuses. The value is UNCHANGED, and so is
+    # the bound above: at 3 deaths in the 12 days to 2026-10-23, neither a longer
+    # ceiling nor a wider bound buys a ~1 h+ rung. Raising either would let a
+    # whole-suite serial re-run become reachable again, and the ledger holds no
+    # green whole-suite serial run anywhere to justify one (the two 1800-literals
+    # for unrelated `cp`/pip steps further down are not this ceiling).
+    SERIAL_RERUN_CEILING_S = 1800
+
+    # The word the ledger row of a refused re-run carries. `_rung` copies it onto the
+    # durable `gate` event and `backlog.implement_outcomes` reads it through
+    # `externally_blocked_rounds`, which is what makes the round's verdict `external`
+    # (retry the same item, attempt unspent) instead of `spent`. It has to be a fixed
+    # token because the human sentence beside it carries a file list, and a health
+    # report that counts these apart from diff failures cannot match on prose.
+    WHOLE_SUITE_RERUN_REFUSED = "whole-suite serial re-run refused"
 
     def _test_workers(self) -> tuple[int, str]:
         """`(workers, why_serial)` for a FULL run of the suite.
@@ -2956,6 +2999,73 @@ class Gate:
         if probe.returncode != 0:
             return 1, "pytest-xdist is not importable in the gate's venv"
         return n, ""
+
+    def _refused_whole_suite_rerun(self, files: list[str],
+                                   node_ids: list[str]) -> dict:
+        """Why this parallel failure gets no serial whole-suite re-run (#3205).
+
+        Two arms reach it, and the reason names which, because the two mean
+        different things to whoever reads the row:
+
+        * **more than `PARALLEL_RETRY_MAX_FILES` files** — that may be a broken
+          tree, which is the candidate's problem, or a box that broke mid-run,
+          which is not, and the re-run could not tell them apart. #2943's dead
+          parallel arm named 94 distinct files.
+        * **no file named at all** — a crashed worker prints no `FAILED` line and
+          a run whose every retry token was refused prints only the ones the parser
+          could not trust (`dropped_retry_tokens`, #2999). Either way there is no
+          per-file re-run to make, and this arm used to answer with a whole-suite
+          re-run too.
+
+        `external_blocker` is set here and nowhere else on this rung. The
+        2026-09-24 ruling in `backlog.py` stopped the tests rung flagging at all
+        because a red tree carrying the flag re-offered and killed 157 rounds in
+        a week; a base-reproducing failure still reaches
+        `pre_existing_failures`/`flaky_node_ids` and PASSES with no flag, and this
+        path does not change that. What it reports instead is a rung that never
+        judged the candidate — the one case the flag was built for — and
+        `EXTERNAL_RETRY_CAP` bounds what a wrong guess about which case it is can
+        cost. The price of answering in seconds instead of an hour is that this
+        returns BEFORE the base probe, so a >40-file failure whose nodes would all
+        have reproduced at base arrives here rather than at the 2026-09-24 red-tree
+        PASS; `EXTERNAL_RETRY_CAP` is what stops that turning into the 157-round
+        re-offer again. Recorded on #3205 as scope this round did not take.
+        """
+        bound = self.PARALLEL_RETRY_MAX_FILES
+        if not files:
+            why = ("the parallel run named no runnable test file, so there is no "
+                   "per-file re-run to make. ")
+        else:
+            why = (f"{len(files)} test files failed under parallel load, over the "
+                   f"{bound}-file bound of what a serial re-run can adjudicate. ")
+        # Under `_rung`'s 500-char event cap ON PURPOSE, measured at 490 for the
+        # 41-file arm and 471 for the no-file arm: `detail[:500]` is the whole of
+        # what the ledger keeps, and #2726 is the round whose verdict lost the
+        # clause naming the blamed tests because a bulk list arrived first in a
+        # longer sentence. The 602-run parallel baseline (373.8-1641.4 s, median
+        # 562.7 s) and the file names themselves live in `data` and in
+        # `_refused_whole_suite_rerun`'s docstring, where a reader goes for them.
+        return {
+            "reason": self.WHOLE_SUITE_RERUN_REFUSED,
+            "detail": (
+                f"{self.WHOLE_SUITE_RERUN_REFUSED}: {why}The re-run was NOT run: a "
+                f"whole-suite serial pass is strictly slower than the run that just "
+                f"failed, so inside the {self.SERIAL_RERUN_CEILING_S} s ceiling its "
+                f"only reachable outcome was TimeoutExpired — how "
+                f"SM_20261011_205100, SM_20261016_000549 and SM_20261018_034937 each "
+                f"spent an item's attempt. Unjudged, not failing: re-gate on a quiet "
+                f"box. File list in this rung's data."),
+            "data": {
+                "whole_suite_rerun_refused": True,
+                "serial_rerun": "refused",
+                "parallel_failing_files": files[:self.EVENT_ID_CAP],
+                "parallel_failing_files_total": len(files),
+                "parallel_failing_nodes_total": len(node_ids),
+                "bound": bound,
+                "ceiling_s": self.SERIAL_RERUN_CEILING_S,
+                "external_blocker": True,
+            },
+        }
 
     def _run_suite(self, only: list[str] | None):
         """Run pytest for the `tests` rung: `(completed, text, counts)`.
@@ -2978,9 +3088,13 @@ class Gate:
         passes and `parallel_only_failures` names what flinched (so a flaky
         test is a number, not a mystery); it fails, and the failure is judged
         exactly as a serial run's always was — by the serial run's own node
-        ids, through the same base probe. A parallel failure that names no
-        file (a crashed worker, a timeout) or more than
-        `PARALLEL_RETRY_MAX_FILES` re-runs the whole suite serially.
+        ids, through the same base probe. A parallel failure that names no file
+        (a crashed worker, a timeout, every retry token dropped) or names more
+        than `PARALLEL_RETRY_MAX_FILES` files gets NO re-run at all: the
+        whole-suite serial re-run it used to make has never finished inside
+        `SERIAL_RERUN_CEILING_S`, and the rung refuses it by name
+        (`WHOLE_SUITE_RERUN_REFUSED`, #3205) rather than spend an hour learning
+        nothing. See `_refused_whole_suite_rerun`.
 
         `--dist loadfile`: one file's tests stay on one worker, in order, so
         module-scoped fixtures (a booted uvicorn, a temp repo) are built once
@@ -3000,7 +3114,14 @@ class Gate:
             env[FRONTEND_PINS_ENV] = "1"
 
         def serial(extra: list[str]):
-            done = _run(base_cmd + list(extra), cwd=self.worktree, env=env, timeout=1800)
+            # `SERIAL_RERUN_CEILING_S` is the same 1800 seconds it was as a
+            # literal: #3205 named the ceiling so the refusal could quote it, and
+            # moved nothing. Since #3205 the empty-argument form of this call —
+            # the whole suite, no file list — is reached only from the xdist-absent
+            # arm above; the retry branch that used to make it is the one that now
+            # refuses. `test_..._never_asks_for_the_whole_suite` holds that line.
+            done = _run(base_cmd + list(extra), cwd=self.worktree, env=env,
+                        timeout=self.SERIAL_RERUN_CEILING_S)
             out = done.stdout + done.stderr
             return done, out, _parse_pytest_summary(out)
 
@@ -3026,10 +3147,28 @@ class Gate:
             counts["dropped_retry_tokens"] = refused
         files = sorted({nid.split("::", 1)[0] for nid in node_ids})
         if not files or len(files) > self.PARALLEL_RETRY_MAX_FILES:
-            r2, text2, counts2 = serial([])
-            counts2.update({"workers": workers, "serial_rerun": "whole suite",
-                            "parallel_failures": node_ids[:50]})
-            return r2, text2, counts2
+            # Both arms of this condition used to answer with the whole suite run
+            # again, serially and with no `-n` — and that call has never once
+            # finished. It is strictly slower than the parallel run that just
+            # failed (602 green parallel full runs: median 562.7 s, min 373.8 s),
+            # so inside SERIAL_RERUN_CEILING_S below its only reachable outcome is
+            # TimeoutExpired: a few hundred seconds of parallel plus 1800 s of
+            # nothing. `_rung`'s exception handler then turns the rung into
+            # "TimeoutExpired: Command '[…pytest -q -m …]' timed out after 1800
+            # seconds" with an EMPTY data dict — no new_failures, no base probe, no
+            # external_blocker — so a machine-wide condition was recorded as a red
+            # diff, which is what spent the attempts of #2584 (SM_20261011_205100,
+            # rung 2147.23 s), #2794 (SM_20261016_000549, 2159.34 s) and #2943
+            # (SM_20261018_034937, 2084.27 s). Refusing is the honest verdict: this
+            # rung did not judge the candidate, and it now says in one word plus a
+            # file list which of the two arms fired.
+            counts["serial_rerun"] = "refused"
+            counts["serial_rerun_refused"] = self._refused_whole_suite_rerun(
+                files, node_ids)
+            # returncode 1 with no process behind it: the parallel run is what
+            # failed, and its output is carried so nothing downstream reads an
+            # empty stdout as "pytest printed nothing".
+            return subprocess.CompletedProcess(base_cmd, 1, text, ""), text, counts
         # One pytest invocation PER FILE. One argv holding them all is the shape
         # #2999 died on: pytest validates every argument before it collects a
         # single test, so the one unrunnable entry exited 4 with `no tests ran in
@@ -3078,8 +3217,15 @@ class Gate:
         # `prompt_surface.check_contract` before committing.
         only = only if only is not None else self._tests_delta_only()
         r, text, counts = self._run_suite(only)
+        # The refusal is a VERDICT, not a measurement, so it must not ride into
+        # `counts`: `_tests_verdict` interpolates that dict into the rung's detail
+        # prose, and a dict holding a 41-entry file list is exactly the bulk that
+        # made #2726's verdict name eight flakes and no blamed node. Popped here, at
+        # the one place that knows it exists, and passed as its own argument.
+        refused = counts.pop("serial_rerun_refused", None)
         if r.returncode != 0:
-            return self._tests_failed(text, counts, only)
+            return self._tests_failed(text, counts, only,
+                                      whole_suite_rerun_refused=refused)
         ok, detail, data = self._tests_pass(counts, only, {})
         if ok and not only:
             # A full green run: the proof the red-tree bookkeeping waits for.
@@ -3294,7 +3440,8 @@ class Gate:
             text = f"{head} {trail[:room].rstrip()}{VERDICT_TAIL_NOTE}"
         return text
 
-    def _tests_failed(self, text: str, counts: dict, only: list[str] | None):
+    def _tests_failed(self, text: str, counts: dict, only: list[str] | None,
+                      whole_suite_rerun_refused: dict | None = None):
         """Judge a red run: whose failures are these?
 
         Since 2026-09-24 the rung PASSES when every failure is somebody
@@ -3314,7 +3461,17 @@ class Gate:
           * one new failure fails the rung, however many old ones sit beside
             it (the mixed case still records which ones are not the round's);
           * an INCONCLUSIVE base probe grants nothing — fail closed.
+
+        A refused whole-suite re-run (`whole_suite_rerun_refused`, #3205) answers
+        before any of that: the re-run that would have said which failure is whose
+        did not happen, so nothing below can attribute these nodes and the rung
+        says so in one named word plus the file list instead of guessing from a
+        base probe it chose not to run.
         """
+        refused = whole_suite_rerun_refused or {}
+        if refused:
+            return False, self._tests_verdict(refused["reason"], counts,
+                                              refused["detail"]), refused["data"]
         tail = "\n".join(text.strip().splitlines()[-15:])
         node_ids = _failed_node_ids(text, self.worktree)
         touched = self._touched_paths()

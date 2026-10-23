@@ -15,6 +15,7 @@ verdict.
 
 from __future__ import annotations
 
+import json
 import re
 import os
 import shutil
@@ -161,24 +162,325 @@ def test_a_long_flake_list_compacts_the_sentence_and_nothing_but_the_sentence(tm
     assert len(detail) < 2000, f"raw detail is {len(detail)} chars: {detail[:120]}"
 
 
-def test_a_parallel_failure_that_names_no_file_re_runs_the_whole_suite_serially(tmp_path, monkeypatch):
-    """A crashed worker, an INTERNALERROR, a timeout: nothing to re-ask by name."""
+def _parallel_failures_across_files(n):
+    """Script text for a parallel failure spread over `n` distinct files.
+
+    `_split_node_ids` — the parser the retry path uses — answers with whatever the
+    run printed, so the files need not exist for this arm to fire; the existence
+    filter lives in `_failed_node_ids`, which is the ATTRIBUTION parser downstream.
+    That is why the counts this refusal publishes are the census of what the
+    parallel run named, which is the honest thing to publish on a path that never
+    reached attribution.
+    """
+    return "".join(f"FAILED tests/test_bulk{i}.py::test_one - AssertionError: boom\n"
+                   for i in range(n)) + f"{n} failed, 19500 passed in 600.00s\n"
+
+
+def test_a_parallel_failure_that_names_no_file_refuses_the_rerun(tmp_path, monkeypatch):
+    """A crashed worker, an INTERNALERROR, a timeout: nothing to re-ask by name.
+
+    This node used to assert the opposite — that the rung then ran the WHOLE suite
+    serially, `calls[1]` with no `-n`, and reported `serial_rerun == "whole suite"`
+    (#3205 rewrote it). That re-run has never once finished: the 602 green parallel
+    full runs measured 373.8-1641.4 s at 8 workers and the ledger holds no green
+    whole-suite serial run anywhere, so inside the 1800 s ceiling its only reachable
+    outcome was `TimeoutExpired`. Three rounds died that way — #2584 at 2147.23 s,
+    #2794 at 2159.34 s, #2943 at 2084.27 s — and each died with an EMPTY data dict,
+    which is how an hour of nothing on the box became a red diff and a spent item
+    attempt.
+
+    The positive control for the path that IS still taken is
+    `test_exactly_the_bound_of_failing_files_still_re_runs_file_by_file`: with the
+    argv assertion here and the file-list assertion there, a refusal that quietly
+    widened into a per-file loop, or a per-file loop that quietly widened back into
+    a whole-suite pass, reddens one of the two.
+    """
     g, calls, script = _gate(tmp_path, monkeypatch)
+    # ONE scripted run only: a second answer would be a second pytest call, and
+    # there must not be one.
     script.append((3, "INTERNALERROR> worker 'gw3' crashed\n"))
-    script.append((0, SUMMARY_OK))
-    r, _text, counts = g._run_suite(None)
-    assert r.returncode == 0 and "-n" not in calls[1] and calls[1][-1] == GATE_MARK_EXPR
-    assert counts["serial_rerun"] == "whole suite"
+    ok, detail, data = g.rung_tests()
+    assert not ok
+    assert len(calls) == 1, (
+        f"{len(calls)} pytest commands issued for a failure that named no file: "
+        f"{[c[3:] for c in calls]} — only the parallel run is allowed")
+    assert all(any(a.startswith("-n") for a in c) for c in calls), (
+        f"a command with no `-n` is a whole-suite serial run: {[c[3:] for c in calls]}")
+    assert data["serial_rerun"] == "refused"
+    assert data["whole_suite_rerun_refused"] is True
+    assert data["parallel_failing_files_total"] == 0, (
+        "this arm is the one that named no runnable file; a non-zero count would "
+        "mean the run did name nodes and the wrong arm was taken")
+    assert G.Gate.WHOLE_SUITE_RERUN_REFUSED in detail
+    assert "no runnable test file" in detail, (
+        "the two arms have to be distinguishable from the row alone: this one named "
+        "no file, the other names how many files it refused over")
 
 
-def test_too_many_failing_files_is_a_broken_tree_not_load(tmp_path, monkeypatch):
+def test_forty_one_failing_files_refuses_the_rerun_and_never_asks_for_the_whole_suite(
+        tmp_path, monkeypatch):
+    """One failure in each of 41 files is not load — but the answer is not an
+    hour-long serial pass either (#3205).
+
+    #2943 is the round that proves the point: its parallel arm named 94 distinct
+    files, the rung re-asked the whole suite serially, the re-run hit its ceiling
+    after 2084 s, and the item lost its attempt to a verdict nobody read.
+    """
     g, calls, script = _gate(tmp_path, monkeypatch)
-    many = "".join(f"FAILED tests/test_f{n}.py::test_x - boom\n" for n in range(g.PARALLEL_RETRY_MAX_FILES + 1))
-    script.append((1, many + "41 failed, 5000 passed in 60s\n"))
-    script.append((1, many + "41 failed, 5000 passed in 600s\n"))
-    r, _text, counts = g._run_suite(None)
-    assert r.returncode == 1 and "-n" not in calls[1] and len(calls[1]) == 6
-    assert counts["serial_rerun"] == "whole suite" and counts["failed"] == 41
+    bound = G.Gate.PARALLEL_RETRY_MAX_FILES
+    script.append((1, _parallel_failures_across_files(bound + 1)))
+    ok, detail, data = g.rung_tests()
+    assert not ok
+    assert len(calls) == 1, (
+        f"{len(calls)} pytest commands: {[c[3:] for c in calls]} — the refusal "
+        f"issues nothing after the parallel run")
+    assert all(any(a.startswith("-n") for a in c) for c in calls), (
+        f"the whole-suite serial re-run is back: {[c[3:] for c in calls]}")
+    assert data["serial_rerun"] == "refused"
+    assert data["parallel_failing_files_total"] == bound + 1
+    assert len(data["parallel_failing_files"]) == bound + 1
+    assert data["bound"] == bound
+
+
+def test_exactly_the_bound_of_failing_files_still_re_runs_file_by_file(
+        tmp_path, monkeypatch):
+    """The positive control the refusal needs: AT the bound — 40 files — the rung
+    still re-asks every failing file serially. Without it, a refusal that simply
+    refused everything would leave the 41-file node looking just as green."""
+    g, calls, script = _gate(tmp_path, monkeypatch)
+    bound = G.Gate.PARALLEL_RETRY_MAX_FILES
+    script.append((1, _parallel_failures_across_files(bound)))
+    for _n in range(bound):
+        script.append((0, "53 passed in 1.39s\n"))
+    ok, detail, data = g.rung_tests()
+    assert ok, f"{bound} failing files is AT the bound, not over it: {detail[:200]}"
+    assert len(calls) == 1 + bound, (
+        f"{len(calls)} commands, expected 1 parallel + {bound} per-file")
+    assert any(a.startswith("-n") for a in calls[0])
+    assert all(not any(a.startswith("-n") for a in c) for c in calls[1:]), (
+        "a per-file re-run has to be serial — that is what re-asking means")
+    assert all(c[-1].startswith("tests/test_bulk") for c in calls[1:]), (
+        "the re-run must name the failing file, not the suite")
+    assert data["serial_retry_files"] == sorted(
+        f"tests/test_bulk{n}.py" for n in range(bound)), (
+        f"the rung re-asked {data.get('serial_retry_files')!r}: the file list it "
+        f"re-ran is the proof the bound was not treated as a refusal")
+
+
+def test_the_refusal_names_the_file_count_and_the_bound_it_broke(tmp_path, monkeypatch):
+    """The reason is one fixed token plus a sentence carrying BOTH numbers.
+
+    A round that dies this way has to be diagnosable from the ledger row alone, and
+    #2726 is the cautionary tale for the other half of that sentence: a detail
+    padded with a bulk list got cut at 500 characters on the way to the ledger and
+    named eight flakes and no blamed node. So the prose carries the count, the
+    bound and the ceiling, and the 41 file names live in `data` — which is exactly
+    why the payload is passed as its own argument and never rides in `counts`, the
+    dict `_tests_verdict` interpolates into this prose.
+    """
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    bound = G.Gate.PARALLEL_RETRY_MAX_FILES
+    script.append((1, _parallel_failures_across_files(bound + 1)))
+    ok, detail, data = g.rung_tests()
+    assert not ok
+    assert G.Gate.WHOLE_SUITE_RERUN_REFUSED in detail
+    assert str(bound + 1) in detail, f"the file count is missing: {detail[:300]}"
+    assert str(bound) in detail, f"the bound is missing: {detail[:300]}"
+    assert "1800" in detail, (
+        f"the ceiling is the whole reason a serial whole-suite pass is pointless; "
+        f"without the number the line reads as a preference: {detail[:300]}")
+    # `_rung` keeps `detail[:500]`, so the test is which facts fall inside those
+    # 500 — not whether the string is short. The refusal's own sentence is measured
+    # at 490 chars for this arm (471 for the no-file one) so that after
+    # `_tests_verdict`'s prefix the numbers are still in the kept window.
+    assert all(tok in detail[:500] for tok in
+               (G.Gate.WHOLE_SUITE_RERUN_REFUSED, str(bound + 1), str(bound), "1800")), (
+        f"a fact a later reader needs falls outside the 500 chars the ledger keeps: "
+        f"{detail[440:560]!r}")
+    assert "serial_rerun_refused" not in data, (
+        "the refusal's payload rode into `counts`, which `_tests_verdict` "
+        "interpolates into this prose — that is how #2726's verdict lost the "
+        "clause that named the blamed tests")
+
+
+def test_a_refused_rerun_ledgers_its_reason_word_and_the_files_it_refused_over(
+        tmp_path, monkeypatch):
+    """The health report has to count these apart from diff failures.
+
+    `gate.json` and the worktree go with the round, so the ledger row is the last
+    copy — and the three rounds that died this way left a row whose entire content
+    was `TimeoutExpired: Command '[…pytest -q -m …]' timed out after 1800 seconds`
+    plus `"skipped": false`, which nothing downstream can separate from a diff
+    failure. Captured through the real `rung_tests`, because `_rung` is the thing
+    that decides which data keys become event keys.
+    """
+    g, calls, script = _gate(tmp_path, monkeypatch)
+    events = []
+    # AFTER `_gate`: its harness installs a no-op `append_event` of its own, and a
+    # capture wired up before that call captures nothing.
+    monkeypatch.setattr(G.S, "append_event",
+                        lambda event, *a, **k: events.append(event))
+    bound = G.Gate.PARALLEL_RETRY_MAX_FILES
+    script.append((1, _parallel_failures_across_files(bound + 1)))
+    # `_rung` is what writes the row, so the rung is invoked THROUGH it — calling
+    # `g.rung_tests()` direct returns the verdict and records nothing, which is how
+    # the first two drafts of this node captured zero events and nearly passed by
+    # asserting on an empty list.
+    ok = g._rung("tests", lambda: g.rung_tests())
+    assert ok is False and len(calls) == 1
+    rows = [e for e in events if e.get("rung") == "tests" and e.get("event") == "gate"]
+    assert len(rows) == 1, f"expected one tests row, got {rows}"
+    row = rows[0]
+    assert row["ok"] is False
+    assert G.Gate.WHOLE_SUITE_RERUN_REFUSED in row["detail"], (
+        f"the reason word has to be IN the row's prose: {row['detail'][:200]}")
+    assert row["external_blocker"] is True
+    assert row["whole_suite_rerun_refused"] is True
+    assert row["serial_rerun"] == "refused"
+    assert row["parallel_failing_files_total"] == bound + 1
+    assert len(row["parallel_failing_files"]) == bound + 1, (
+        "the list is the diagnosis — which files the box failed over is the "
+        "question a later reader asks, and it is 41 entries too big for the prose")
+    assert "TimeoutExpired" not in row["detail"], (
+        "a refused row must not read like the timeout it replaced")
+
+
+def test_a_refused_rerun_is_an_external_verdict_and_the_old_row_is_still_spent(tmp_path):
+    """The promoter must read a refusal as infrastructure, not a spent attempt.
+
+    The fixture on the left is the shape #3205 publishes. The one on the right is
+    `SM_20261018_034937`'s actual row, transcribed from
+    `~/.local/state/lloyd-automod/promotions.jsonl` on 2026-10-23: a red `tests`
+    rung with `external_blocker` and nothing else. Both go through
+    `backlog.implement_outcomes`, the function that decides whether an item is
+    offered again or parked as "its one unattended attempt is spent" — #2584 and
+    #2943 both have a `backlog_retriage` row because of that decision.
+
+    That the OLD row still reads `spent` is not a weakness of this test: no later
+    reader can invent a flag a rung never set, which is why the fix had to live in
+    what the rung records.
+    """
+    from scripts.automod import backlog as B
+
+    def ledger(path, round_id, **gate_extra):
+        rows = [
+            {"event": "backlog_implement", "item_id": 3205, "round_id": round_id,
+             "phase": "started", "name": "the item", "budget": 250},
+            {"event": "gate", "round_id": round_id, "rung": "tests", "ok": False,
+             "skipped": False, "seconds": 613.0,
+             "detail": G.Gate.WHOLE_SUITE_RERUN_REFUSED + ": refused the re-run",
+             **gate_extra},
+            {"event": "backlog_implement", "item_id": 3205, "round_id": round_id,
+             "outcome": {"landed": False}, "stop_reason": "gate_failed"},
+        ]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        return path
+
+    refused = ledger(tmp_path / "refused.jsonl", "SM_REFUSED",
+                     external_blocker=True, whole_suite_rerun_refused=True,
+                     serial_rerun="refused", parallel_failing_files_total=41,
+                     parallel_failing_files=[f"tests/test_bulk{i}.py"
+                                             for i in range(41)])
+    verdict, detail = B.implement_outcomes(refused)[3205]
+    assert verdict == "external", (
+        f"a round this rung never judged must not spend the item's attempt: "
+        f"{verdict!r} / {detail[:160]}")
+
+    dead = ledger(tmp_path / "dead.jsonl", "SM_20261018_034937")
+    assert B.implement_outcomes(dead)[3205][0] == "spent", (
+        "the control: the real SM_20261018_034937 row, which carried no flag, "
+        "still reads spent — this round changed what the rung records, not what a "
+        "reader is allowed to guess")
+
+
+def test_a_base_reproducing_failure_still_passes_and_never_carries_the_flag(
+        tmp_path, monkeypatch):
+    """The 2026-09-24 behaviour is untouched: a red tree the base probe can
+    attribute PASSES, and the flag goes on the refused re-run and nowhere else.
+
+    That ruling is written into `backlog.py` for a reason — the tests rung used to
+    set `external_blocker` on every external-looking failure, a red tree carried
+    the flag, and 157 rounds re-offered and were killed in a week. So this node is
+    scope control as much as a regression pin: it is why the refusal is keyed to a
+    path that runs BEFORE the base probe, where a failure the probe could attribute
+    has already been answered by the per-file re-run.
+    """
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    events = []
+    # AFTER `_gate` — see the note in the ledger node above.
+    monkeypatch.setattr(G.S, "append_event",
+                        lambda event, *a, **k: events.append(event))
+    monkeypatch.setattr(G, "_failures_at_base",
+                        lambda python, live, base, node_ids, scratch, env, **k: (
+                            set(node_ids), "stub: every node reproduced at base"))
+    flaky = "tests/test_bulk0.py::test_one"
+    script.append((1, f"FAILED {flaky} - AssertionError\n"
+                      "1 failed, 5895 passed, 13 skipped in 71s\n"))
+    script.append((0, "53 passed in 1.39s\n"))
+    ok, detail, data = g.rung_tests()
+    assert ok, f"a red tree that reproduces at base must still pass: {detail[:220]}"
+    g._rung("tests", lambda: (True, detail, data))   # write the row this node reads
+    assert data.get("external_blocker") is not True, (
+        "the base-reproducing path acquiring the flag IS the 2026-09-24 bug: a red "
+        "tree that re-offers burns rounds")
+    assert "whole_suite_rerun_refused" not in data
+    row = [e for e in events if e.get("rung") == "tests"][0]
+    assert "external_blocker" not in row and "whole_suite_rerun_refused" not in row, (
+        f"the durable row must not carry an infrastructure flag for a red tree: {row}")
+
+
+def test_the_bound_and_the_ceiling_are_unchanged_and_still_read_from_the_class():
+    """Clause: the fix is a named refusal, NOT a longer timeout or a wider bound.
+
+    At 3 deaths in the 12 days to 2026-10-23 neither buys a ~1 h+ rung: widening
+    `PARALLEL_RETRY_MAX_FILES` would push more rounds down the per-file path with
+    no bound worth trusting, and raising the ceiling only makes the dead verdict
+    arrive later. So both numbers are pinned at their pre-#3205 values beside the
+    newly named ceiling, and the empty-argument serial call — the whole suite, no
+    file list — is pinned out of the source entirely, so a future edit cannot
+    quietly reinstate the thing this round removed.
+
+    The bound also stays a CLASS attribute on purpose: `vault_guards.py` reads
+    `Gate.PARALLEL_RETRY_MAX_FILES` off the class, so a module-level constant would
+    leave that reader with a different number than the one the rung uses.
+    """
+    from scripts.automod import vault_guards as V
+
+    assert G.Gate.PARALLEL_RETRY_MAX_FILES == 40, (
+        "#3205 refuses the re-run; it does not widen what counts as adjudicable")
+    assert G.Gate.SERIAL_RERUN_CEILING_S == 1800, (
+        "#3205 named the ceiling so the refusal could quote it; the value is the "
+        "1800 the three dead rounds hit")
+    assert not hasattr(G, "PARALLEL_RETRY_MAX_FILES"), (
+        "the bound moved to module level, and `vault_guards` — which reads it off "
+        "the class — stopped seeing the value the rung uses")
+    assert V._parallel_retry_max_files() == G.Gate.PARALLEL_RETRY_MAX_FILES, (
+        "`vault_guards` and the rung are reading different numbers for one bound")
+    guards_src = (Path(G.__file__).parent / "vault_guards.py").read_text()
+    assert re.search(r"^\s*PARALLEL_RETRY_MAX_FILES\s*=", guards_src, re.M) is None, (
+        "vault_guards grew its own copy of the bound instead of reading the class")
+    # Scoped to the retry branch, not the whole module. A file-wide ban on the
+    # whole-suite serial call would be a ban on the WRONG thing: the xdist-absent
+    # arm legitimately reaches the same run as `serial(list(only or []))` with
+    # `only` empty, and `test_it_is_serial_whenever_it_cannot_or_should_not_be_
+    # parallel` below demands that behaviour survive. What #3205 removed is the
+    # RETRY branch's call site, so that is the region this asserts over.
+    src = Path(G.__file__).read_text(encoding="utf-8", errors="replace")
+    marker = "if not files or len(files) >"
+    assert marker in src, (
+        "the retry branch moved or was renamed, so the region below is no longer "
+        "the one #3205 refused — this assertion would pass over anything")
+    retry_branch = src.split(marker, 1)[1].split(
+        "# One pytest invocation PER FILE", 1)[0]
+    # Positive control on the region itself: a split that landed on the wrong
+    # text leaves an empty string, and every `"x" not in ""` is true. The region
+    # has to name the refusal it is being credited with.
+    assert "_refused_whole_suite_rerun" in retry_branch, (
+        f"the extracted region is not the refusal branch (it is "
+        f"{len(retry_branch)} chars), so the absence below proves nothing")
+    assert "serial(" not in retry_branch, (
+        "#3205 refuses the re-run, and the retry branch grew a serial call site "
+        f"back: {retry_branch.strip()[:220]}")
 
 
 @pytest.mark.parametrize("workers, xdist, why", [
