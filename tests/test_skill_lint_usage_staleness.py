@@ -475,6 +475,137 @@ def test_an_unmeasurable_span_says_unmeasured_rather_than_reprinting_the_ask(
         "a notice about depth fired off a depth that was never measured"
 
 
+# ── #3173: the population the count and the table are over ───────────────────
+#
+# The 2026-10-23 report said "Scanned **201** live skills", then "186 skills with at
+# least one row", then "20 of 201 … carry no row" — 206 against a stated 201. The
+# telemetry dict is wider than the scan (#3173): it carries four quarantined skills
+# — `autonomy-reflection-pipeline`, `nightly-day-end-synthesis`,
+# `periodic-memory-capture-lloyd` and `research-paper-writing`, each retired from the
+# scanned set by `status: archived` — plus `knowledge-note-path-resolution`, retired in
+# the sense that it is not a directory under either root. All five have historical rows
+# emitted while they were live, and all five were being counted into a figure labelled
+# with the live corpus. The nodes below print through the real reader over a real event log, so
+# the excluded name arrives the way production delivers one — a row in the store —
+# rather than being hand-placed into the dict the printer reads.
+
+
+def _scanned_fixture(tmp_path):
+    """Two scanned skills with rows, one not-live skill with a row, one scanned skill with none.
+
+    The fourth name is `research-paper-writing`, a skill that is `status: archived` today
+    (#3173) and so never enters the scanned set; it is taken from the live window rather
+    than invented, so the fixture has the shape the report is delivered in.
+    """
+    _write_log(tmp_path, [
+        _match_row("voice-mode", landed=True, ts=_ts(3 * 1440)),
+        _match_row("voice-mode", landed=True, ts=_ts(30)),
+        _match_row("beta", landed=False, ts=_ts(60)),
+        _match_row("research-paper-writing", landed=True, ts=_ts(120)),
+    ])
+    usage = sl.collect_usage_counts(days=7, root=tmp_path)
+    assert sorted(usage["skills"]) == ["beta", "research-paper-writing", "voice-mode"], usage
+    return usage
+
+
+def _data_rows(lines):
+    return [ln for ln in lines if ln.startswith("| `")]
+
+
+def test_a_retired_skills_row_is_counted_over_the_scanned_population(tmp_path):
+    """Clauses 1 and 3: the count is the intersection, and the line says whose it is.
+
+    The quarantined fixture skill (archived today, #3173) has a row in the store and is
+    not in the scanned set, so the count must be 2 and not 3 — and the line must name the
+    population, because a bare number cannot be reconciled with the header's "Scanned N
+    live skills" by anyone reading the report. The arithmetic that was the bug is asserted as printed: the
+    with-a-row figure plus the unmeasured figure equals the scanned count on this page,
+    which is the sentence the header makes two lines above the section.
+
+    The excluded name is asserted present in the section, because clause 3 asks that its
+    rows be visibly excluded rather than dropped: `beta` proves a scanned skill with a
+    row is never on that line, and the name being there at all is what stops a filter
+    that quietly deletes history.
+    """
+    usage = _scanned_fixture(tmp_path)
+    lines = sl.usage_lines(usage, ["voice-mode", "beta", "never-seen"])
+    body = "\n".join(lines)
+
+    count_line = [ln for ln in lines if "with at least one row" in ln]
+    assert len(count_line) == 1, lines
+    count_line = count_line[0]
+    assert "2 skills with at least one row" in count_line, count_line
+    assert "3 skills with at least one row" not in count_line, (
+        f"the retired skill's row was counted into the scanned figure: {count_line}")
+    assert "of the 3 scanned skills" in count_line, (
+        f"the count names no population, so it cannot be read against the report "
+        f"header's scanned figure: {count_line}")
+
+    unmeasured_line = [ln for ln in lines if "no row in the window" in ln]
+    assert unmeasured_line and "1 of 3 scanned skills" in unmeasured_line[0], lines
+    n_with_row = int(re.search(r"(\d+) skills? with at least one row", count_line).group(1))
+    n_unmeasured = int(re.search(r"(\d+) of \d+ scanned skills",
+                                 unmeasured_line[0]).group(1))
+    assert n_with_row + n_unmeasured == 3, (
+        f"{n_with_row} with a row and {n_unmeasured} unmeasured do not add up to the "
+        f"3 scanned skills the same section declares — the 186-plus-20-against-201 bug")
+
+    assert "research-paper-writing" in body, (
+        "the excluded name is nowhere in the section: its history has been dropped "
+        f"rather than excluded in the open. Body was:\n{body}")
+    assert "`beta`" in body, "the positive control: nothing was printed at all"
+
+
+def test_no_table_row_is_printed_for_a_skill_the_scan_never_read(tmp_path):
+    """Clause 2: the table is the same population as the count, row for row.
+
+    The table used to carry one ranked row per telemetry name, so a quarantined skill sat
+    among the live ones and a reader ranked it against them. The row count is asserted
+    equal to the filtered figure the count line prints, not merely "the retired name is
+    absent": the two figures are the two ways this section answers "how many skills were
+    used", and the report's own arithmetic only holds if they are the same number. The
+    `beta` row is the control that the table is being printed at all.
+    """
+    usage = _scanned_fixture(tmp_path)
+    lines = sl.usage_lines(usage, ["voice-mode", "beta", "never-seen"])
+    body = "\n".join(lines)
+
+    rows = _data_rows(lines)
+    assert "| `research-paper-writing` |" not in body, body
+    assert len(rows) == 2, rows
+    count_line = [ln for ln in lines if "with at least one row" in ln][0]
+    assert len(rows) == int(re.search(r"(\d+) skills? with at least one row",
+                                      count_line).group(1)), (
+        f"the table prints {len(rows)} skills and the count line prints a different "
+        "figure; the section then contradicts itself the way the header and the "
+        "unmeasured line used to")
+    assert sorted(ln.split("`")[1] for ln in rows) == ["beta", "voice-mode"], rows
+
+
+def test_a_scan_with_no_names_at_all_prints_its_table_and_adds_no_exclusion_line(tmp_path):
+    """The empty scanned set is "this scan read nothing", not "every name is excluded".
+
+    `render_report` passes `result.get("names", [])`, and `check_stale`'s no-skill-tree
+    branch returns a dict with no `names` key at all — the path
+    `test_no_skills_found_anywhere_produces_a_report_rather_than_crashing` in
+    `tests/test_skill_lint_gates.py` walks. Intersecting an empty set against it would
+    move the entire table onto an exclusion line reading "not among the 0 scanned
+    skills", which contradicts the line below it that calls those very names unmeasured.
+    So the filter is skipped when there is no scanned set to filter by, and the node holds
+    that against the alternative: `outside` is empty because there is no corpus, and the
+    count stays 1 with its table row intact.
+    """
+    _write_log(tmp_path, [_match_row("voice-mode", landed=True)])
+    usage = sl.collect_usage_counts(days=7, root=tmp_path)
+    assert sorted(usage["skills"]) == ["voice-mode"], usage
+
+    lines = sl.usage_lines(usage, [])
+    body = "\n".join(lines)
+    assert "not among the 0 scanned skills" not in body, body
+    assert "with at least one row (of the 0 scanned skills)" in body, body
+    assert "| `voice-mode` |" in body, body
+
+
 def test_the_depth_fix_adds_no_retirement_threshold_and_no_verdict_about_a_skill():
     """Clause 5's second half: the window got readable, nothing got decided.
 

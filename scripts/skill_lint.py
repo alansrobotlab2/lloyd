@@ -1605,6 +1605,16 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
     states the measured span when the two disagree, `_span_text` repeats it on the
     line carrying the counts, and the notice below says which of the two is being
     measured — because a rate is only a rate over a stated span.
+
+    And the population every figure in here is over is `known_names`, the skills this
+    scan read (#3173), not every skill the telemetry has ever seen. The window is wider
+    than the corpus: it carries rows for skills the loader quarantines and for a name that
+    is no longer a skill directory at all, emitted while those skills were live. Their
+    counts are true and stay in the artifact; they are not scanned skills, so they are in
+    neither the count nor the table, and the line that says how many names are left out
+    names them. A count over the wider set cannot be read against the "Scanned N live
+    skills" the report header prints, which is how one report came to state 186 with a row
+    and 20 unmeasured under a declared corpus of 201.
     """
     days = usage.get("days", USAGE_WINDOW_DAYS)
     span = measured_span_days(usage)
@@ -1620,9 +1630,44 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
                        "offered, and not the old claim that the telemetry does not exist.", ""]
 
     counts = usage.get("skills") or {}
+    # #3173: the population this count and this table are over is `known_names` — the
+    # skills the scan actually read — and the telemetry dict is wider than that. It names
+    # skills the loader quarantines (four carrying `status: archived`) and one name that is
+    # not a skill directory on any root, whose `prefetch.skill_match` rows were emitted
+    # while they were live. Those rows are real history and stay in the artifact, but
+    # counting them against a corpus labelled with the scanned set made one report print
+    # "Scanned **201** live skills", then "186 skills with at least one row", then "20 of
+    # 201 … carry no row" — 206 against a stated 201, and the reconciling 181 nowhere. So
+    # the count and the table read the intersection, and the names left out get a line of
+    # their own instead of vanishing. `len(known_names)` is the same figure the report
+    # header prints: `result["total"]` is the length of the sorted set that
+    # `result["names"]` is, and this is the only line that reconciles the two.
+    scanned = set(known_names)
+    # `if known_names` rather than an unconditional intersection: the call site passes
+    # `result.get("names", [])`, and that key is absent from the dict `check_stale`
+    # returns on a tree with no skill directories at all. Intersecting against that empty
+    # set is not "nothing is in scope" — it makes every table row an exclusion, and the
+    # line below would read "not among the 0 scanned skills" directly above a line that
+    # calls those same names unmeasured.
+    # `tests/test_skill_lint_usage_staleness.py::test_a_scan_with_no_names_at_all_prints_its_table_and_adds_no_exclusion_line`
+    # holds an empty scanned set apart from a non-empty one that excludes everything, so a
+    # future "simplify" that drops the guard trips it.
+    rows = ({name: n for name, n in counts.items() if name in scanned}
+            if known_names else dict(counts))
+    outside = sorted(set(counts) - scanned) if known_names else []
     head.append(f"Read through `app.skill_telemetry.skill_injection_counts`: "
                 f"{usage.get('events', 0)} rows over {usage.get('sessions', 0)} sessions, "
-                f"{len(counts)} skills with at least one row, {_span_text(span)}.")
+                f"{len(rows)} skills with at least one row (of the {len(scanned)} scanned "
+                f"skills), {_span_text(span)}.")
+    if outside:                 # empty whenever the scan read no skill names (#3173)
+        one = len(outside) == 1
+        head.append(
+            f"- {len(outside)} name{' ' if one else 's'} with a row in this window "
+            f"{'is' if one else 'are'} not among the {len(scanned)} scanned skills "
+            f"({', '.join(f'`{n}`' for n in outside)}): {'it was' if one else 'they were'} "
+            "archived or stopped being a skill directory, and the rows predate that. "
+            "Excluded from the count and the table above; the usage artifact still holds "
+            "them.")
     if is_shallow_window(days, span):
         head.append("")
         head.append(f"**The window asked for is shallower than it sounds: the store holds "
@@ -1635,13 +1680,16 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
     head.append("")
     head.append("| skill | offers | loaded | ignored | loaded share |")
     head.append("|---|---|---|---|---|")
-    for name, c in sorted(counts.items(), key=lambda kv: -kv[1].get("loaded", 0)):
+    for name, c in sorted(rows.items(), key=lambda kv: -kv[1].get("loaded", 0)):
         offers = c.get("offers", 0)
         loaded = c.get("loaded", 0)
         share = f"{loaded / offers:.0%}" if offers else "n/a"
         head.append(f"| `{name}` | {offers} | {loaded} | {c.get('ignored', 0)} | {share} |")
-    seen = set(counts)
-    unmeasured = sorted(set(known_names) - seen)
+    # Over the filtered set on purpose (#3173): a scanned skill with no row is what
+    # "unmeasured" means, and a name outside the scan can never be unmeasured — it is
+    # not in the corpus the sentence counts.
+    seen = set(rows)
+    unmeasured = sorted(scanned - seen)
     head.append("")
     head.append(f"**{len(unmeasured)} of {len(known_names)} scanned skills carry no row in the "
                 f"window and are {USAGE_UNMEASURED_LABEL}, not zero-offer.**")
