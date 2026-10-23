@@ -477,9 +477,16 @@ GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
-# Background runs — autonomy tasks and worker jobs — are recorded now, and at
-# ~240 background sessions a day against ~14 chats (measured over the week to
-# 2026-09-10) they are the overwhelming majority of the directory by count. They archive sooner than a conversation because they
+# Background runs — autonomy tasks and worker jobs — are recorded now, and they
+# are the overwhelming majority of the directory by count. The figure is a range
+# over a named window rather than a rate, because the width is the finding:
+# 333-569 four-part sessions a day 2026-10-13 to 10-22 (filename date prefix over live .json plus .json.gz),
+# against 1-5 chat-shaped sessions a day over the same 2026-10-13 to 10-22. One
+# job's grid moves a day's total by ±100 — the owed-check class alone minted 216
+# transcripts on 2026-10-19 and 52 on 2026-10-21 — and each figure is a count of
+# what is still on disk, not a count of what was minted, because the sweep gzips
+# at the horizon instead of deleting. They archive sooner than a conversation
+# because they
 # are read for a different reason and over a different span: a chat is
 # something the user may come back to for months, a background transcript is
 # forensics for "what did the thing that ran last night actually do". Same

@@ -244,15 +244,15 @@ def head_names_a_machine_platform(text: str) -> Optional[bool]:
 def names_a_machine_platform(data: dict) -> bool:
     """True only when the recorded platform positively names a machine.
 
-    The Background listing needs the *class* of a run, not just its membership:
-    a four-part transcript whose platform is `worker` or `autonomy` is one of
-    ~300 ordinary runs a day and belongs in a newest-first window, while one
-    whose platform is `mission-control`, absent, or a word that is neither
-    machine nor interactive (`browser` on a four-part id, an unclassifiable new
-    client) is the shape #1064 exists to catch — a machine run wearing a human's
-    label, which no other surface shows. That class must never be aged out of
-    the listing, so it has to be identifiable, and it is identified by *failing*
-    this test rather than by matching anything.
+    The Background listing needs the *class* of a run, not just its membership: a
+    four-part transcript whose platform is `worker` or `autonomy` is one of
+    333-569 sessions a day 2026-10-13 to 10-22 (filename date prefix over live
+    .json plus .json.gz, so what survived, not a count of what was minted) and
+    belongs in a newest-first window. One whose platform is `mission-control`,
+    absent, or neither machine nor interactive (`browser` on a four-part id, an
+    unclassifiable new client) is #1064's shape — a machine run in a human's
+    label that no other surface shows and must never be aged out of the listing,
+    so it has to be identifiable by *failing* rather than by matching anything.
 
     Not `is_user_session`: that one answers "may this session receive a brief"
     and deliberately says yes to a word it has never heard, which here is

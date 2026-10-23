@@ -522,3 +522,304 @@ def test_the_restated_sessions_census_readings_are_present_and_dated():
         for token in tokens:
             assert token in text, (
                 f"{name} no longer publishes the 2026-10-16 reading {token!r}")
+
+
+# ── #3181: a per-day session-mint figure is a reading over a named window ──
+
+#: The two files that tell whoever tunes `sessions/`'s horizons how fast the
+#: directory fills, both read BY REPO PATH off the `ROOT` this file already
+#: derives — the identical path `tests/test_retention_sweep.py` builds its
+#: `spec_from_file_location("retention_sweep", _SCRIPT)` from. Not through
+#: `module.__file__` the way `_census_source` above resolves its two: the sweep
+#: script cannot be resolved that way at all (a hyphenated filename is not
+#: importable by name), and a scan that read one file off a live module and the
+#: other off a path would be two rules with one name. This scan reads comments,
+#: not behaviour, so the path is the right handle for both — and a path that does
+#: not resolve is caught below, before any absence is asserted.
+_MINT_SOURCES = {
+    "sessions_io.py": Path(ROOT) / "app" / "sessions_io.py",
+    "retention-sweep.py": (Path(ROOT) / "scripts" / "groundskeeper"
+                           / "retention-sweep.py"),
+}
+
+#: A string that MUST be found in each file before any absence is asserted. A
+#: scan of a path that never resolved is indistinguishable from a scan of a clean
+#: file, and a 0-hit grep with no positive control is this repo's own recorded
+#: failure mode — `_CENSUS_CONTROL` above exists for the same reason.
+_MINT_CONTROL = {
+    "sessions_io.py": "NON_USER_PLATFORMS",
+    "retention-sweep.py": "BACKGROUND_SESSION_ARCHIVE_AGE_DAYS",
+}
+
+#: The command each figure in those two files comes from, and the window it was
+#: run over. It counts SURVIVING files: `sweep_sessions()` gzips a transcript at
+#: its horizon instead of deleting it, so a directory count is a count of what is
+#: still there. Including `.json.gz` is load-bearing rather than tidy — counted
+#: over 2026-10-13 by hand, the day reads 326 live `.json`, 44 archived, 370
+#: together, and 370 is the number the comment carries.
+_MINT_DERIVATION = "filename date prefix over live .json plus .json.gz"
+_MINT_WINDOW = "2026-10-13 to 10-22"
+_MINT_RANGE = "333-569"
+_MINT_QUALIFIER = "not a count of what was minted"
+
+#: Lines copied from the tree this item was filed on, fed back through the scan by
+#: `test_the_mint_claim_rail_sees_the_wording_it_replaced`. The first two are the
+#: phrasings this item replaced; the third is the dated claim at
+#: `sessions_io.py:154-155` that this item deliberately left alone, here because its
+#: figure and its noun sit on different comment lines — which is exactly why the
+#: scan joins lines rather than reading them one at a time.
+RETIRED_MINT_SHAPES = (
+    ["# ~240 background sessions a day against ~14 chats (measured over the week to"],
+    ["    ~300 ordinary runs a day and belongs in a newest-first window, while one"],
+    ['#: directory to answer "is this one a chat?" — the directory held 370-469',
+     "#: four-part files per day over 2026-10-13 to 10-15 against 1-5 chat-shaped"],
+)
+
+_ANY_WINDOW = re.compile(r"2026-\d{2}-\d{2}")
+_RETIRED_WINDOW = re.compile(r"2026-09-(?:10|21)\b")
+
+#: Framing that turns a reading back into a promise. #2650 wrote
+#: `at least 3,854 files and rising` about a directory that had shrunk ~490 files
+#: three days later. Mints grow `sessions/` and `sweep_sessions` shrinks it, so a
+#: rate measured over any window has neither end pinned — the number is a reading
+#: and the constant next to it is the only bound in the file.
+_FLOOR_FRAMING = re.compile(
+    r"at least|no fewer than|as a minimum|at minimum|minimum of|as low as"
+    r"|never under|never below|\bfloor\b|\band rising\b", re.IGNORECASE)
+
+#: The scan exactly as #3181's clause 3 files it, kept as its own constant so a
+#: node below can prove the working pattern is a SUPERSET of it rather than a
+#: different rule wearing its clothes.
+_MINT_CLAIM_CORE = re.compile(
+    r"[0-9][0-9,~-]* (?:background )?(?:sessions|runs|chats|transcripts|files)"
+    r" (?:a|per) day")
+
+#: Run literally against these two files the core pattern finds ONE of the three
+#: per-day mint claims in them. `~240 background sessions a day` matches it;
+#: `~300 ordinary runs a day` puts the word `ordinary` into the slot the core
+#: wants empty, and the `370-469` claim wraps its noun onto the next comment line,
+#: so no single line holds figure and noun together for it to find. A rail blind
+#: to two of the three lines it was written for cannot fail on the shape it exists
+#: to catch, so the working pattern admits up to three short words between figure
+#: and noun and the scan joins wrapped comment lines. That is a widening in one
+#: direction only: it does NOT reach the sweep script's other per-day claims —
+#: bytes, rows, MB, spoken replies and Bash calls a day at :116, :153, :326,
+#: :2291, :2650, :2660, :3510, :3511 — nor `~70 a day` at `sessions_io.py:431`,
+#: because none of those nouns is in this set. That is what keeps this item on the
+#: three lines it names and off the ten it does not.
+_MINT_CLAIM = re.compile(
+    r"[0-9][0-9,~-]*(?: [A-Za-z0-9~.,/+%-]{1,14}){0,3} "
+    r"(?:background )?(?:sessions|runs|chats|transcripts|files) (?:a|per) day")
+
+_WINDOW_RADIUS = 3
+
+
+def _mint_source(name: str) -> list[str]:
+    """One scanned file, whole, as lines — with the control asserted first.
+
+    Order is the point: control first, then any absence. A path that resolved into
+    empty space passes every `not in` check ever written against it, and the only
+    thing that says so is a string that had better be there.
+    """
+    path = _MINT_SOURCES[name]
+    assert path.is_file(), (
+        f"{name} is scanned at {path}, which is not a file in this checkout — an "
+        "unread source reads as a clean one")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert _MINT_CONTROL[name] in "\n".join(lines), (
+        f"{name} at {path} does not even contain {_MINT_CONTROL[name]!r}, so this "
+        "is not the file the rule was written for")
+    assert len(lines) > 200, (
+        f"{name} scanned only {len(lines)} lines; a truncated read cannot pass an "
+        "absence check")
+    return lines
+
+
+def _mint_join(lines: list[str]) -> tuple:
+    """The file as one string with comment markers stripped, plus line offsets.
+
+    Wrapping is the reason this exists rather than a line loop: the largest mint
+    claim in the corpus breaks `370-469` away from `four-part files per day` across
+    two comment lines, so a per-line scan never sees a claim that is plainly on the
+    page. The offsets map a match back to the line a reader has to go fix.
+    """
+    parts, offsets = [], []
+    for line in lines:
+        body = line.strip()
+        if body.startswith("#:"):
+            body = body[2:]
+        elif body.startswith("#"):
+            body = body[1:]
+        offsets.append(len(" ".join(parts)))
+        parts.append(body.strip())
+    return " ".join(parts), offsets
+
+
+def _mint_violations(lines: list[str]) -> list[str]:
+    """Every per-day mint claim in `lines` that is not a dated reading.
+
+    Clean means: a `2026-MM-DD` within `_WINDOW_RADIUS` lines of the line the
+    figure starts on, AND the NEAREST such token is not one of the two retired
+    readings, AND no floor framing sits in that same window. Nearest rather than
+    any: the line #3181 was filed on failed with the retired `2026-09-10` on the
+    very next line and no live date anywhere near it, and a rule that accepted a
+    retired window because a newer one happened to be three lines off would
+    re-bless that exact shape.
+    """
+    text, offsets = _mint_join(lines)
+    line_of_offset = {off: i for i, off in enumerate(offsets)}
+    problems = []
+    for match in _MINT_CLAIM.finditer(text):
+        first = line_of_offset[max(off for off in offsets if off <= match.start())]
+        claim = match.group(0).strip()
+        lo = max(0, first - _WINDOW_RADIUS)
+        hi = min(len(lines), first + _WINDOW_RADIUS + 1)
+        tokens = [(abs(j - first), j, tok)
+                  for j in range(lo, hi)
+                  for tok in _ANY_WINDOW.findall(lines[j])]
+        if not tokens:
+            problems.append(
+                f"line {first + 1}: {claim!r} states a per-day mint volume with no "
+                f"2026-MM-DD within {_WINDOW_RADIUS} lines of it")
+            continue
+        dist, near_line, token = min(tokens)
+        if _RETIRED_WINDOW.search(token):
+            problems.append(
+                f"line {first + 1}: {claim!r} sits nearest to {token!r} on line "
+                f"{near_line + 1} — 2026-09-10 and 2026-09-21 are retired in both "
+                "directions by #2836, so a window named by either is not a window")
+        framed = _FLOOR_FRAMING.search("\n".join(lines[lo:hi]))
+        if framed:
+            problems.append(
+                f"line {first + 1}: {claim!r} is framed by {framed.group(0)!r}, "
+                "which turns a reading over a window back into a bound")
+    return problems
+
+
+def test_no_per_day_mint_claim_sits_outside_a_named_window():
+    """#3181 clauses 1-4: every per-day mint-volume claim in either file has to be
+    a reading over a stated, non-retired window, or this node fails.
+
+    The graded check for the item is
+    `git grep -nE '240 background|14 chats|~300 ordinary'`, which exits 1 once the
+    two comments are restated. An absence grep is worth keeping and is not worth
+    relying on: it bans the three strings that happened to be wrong, so the next
+    `600 sessions a day` added next month walks straight past it and re-creates the
+    defect with a number nobody measured. Scanning the shape instead is what makes
+    the window a condition of writing the figure down.
+    """
+    for name in _MINT_SOURCES:
+        lines = _mint_source(name)
+        problems = _mint_violations(lines)
+        hits = sum(1 for _ in _MINT_CLAIM.finditer(_mint_join(lines)[0]))
+        print(f"{name}: {len(lines)} lines scanned whole, {hits} per-day mint "
+              f"claims found, {len(problems)} of them outside a live window")
+        assert not problems, (
+            f"{name} states a per-day mint volume that is not a dated reading:\n"
+            + "\n".join(problems))
+
+
+def test_the_mint_figures_are_restated_with_window_derivation_and_qualifier():
+    """#3181 clauses 1 and 2: the replacement exists in both files, whole.
+
+    Half of this item is deletion and half is the restatement; pinning only the
+    deletion would let a later edit drop the new figure and leave the comment
+    asserting nothing at all — which is worse than the wrong figure it replaced,
+    because the wrong one at least said where it came from.
+    """
+    for name in _MINT_SOURCES:
+        lines = _mint_source(name)
+        text = "\n".join(lines)
+        # The derivation and the qualifier are pinned against the same
+        # comment-unwrapped text the scan reads, because both are prose that wraps:
+        # `_RESTATED_READINGS` above deliberately pins its numerals whole on one
+        # line, which is right for `10,169` and wrong for a nine-word clause a
+        # docstring breaks across a line end. The figure and its window stay a
+        # same-line assertion below, which is the pair that must not travel apart.
+        joined = _mint_join(lines)[0]
+        assert _MINT_RANGE in text, (
+            f"{name} no longer publishes the {_MINT_RANGE!r} four-part-mint range "
+            "measured over 2026-10-13 to 10-22 (#3181)")
+        assert _MINT_WINDOW in text, (
+            f"{name} no longer names the {_MINT_WINDOW!r} window its figure was "
+            "read over")
+        assert _MINT_DERIVATION in joined, (
+            f"{name} publishes a mint figure but no longer carries its derivation "
+            f"{_MINT_DERIVATION!r} — a figure with no method is #3181's premise")
+        assert _MINT_QUALIFIER in joined, (
+            f"{name} lost the surviving-files qualifier {_MINT_QUALIFIER!r}; the "
+            "sweep gzips rather than deletes, so a directory count is not a mint "
+            "count")
+        # The range and its window share a line, so quoting one quotes the other.
+        rate_lines = [i + 1 for i, line in enumerate(lines)
+                      if _MINT_RANGE in line and "sessions a day" in line
+                      and _MINT_WINDOW in line]
+        assert rate_lines, (
+            f"{name} has no single line holding the range, the words 'sessions a "
+            "day' and the window together; a figure that travels without its "
+            "window is the artefact this item exists to stop")
+
+    sweep = "\n".join(_mint_source("retention-sweep.py"))
+    for retired in ("240 background", "14 chats"):
+        assert retired not in sweep, (
+            f"retention-sweep.py still carries {retired!r}, the 2026-09-10 reading "
+            "#3181 clause 1 restates")
+    assert "~300 ordinary" not in "\n".join(_mint_source("sessions_io.py")), (
+        "sessions_io.py still carries '~300 ordinary', the undated figure #3181 "
+        "clause 2 restates")
+
+
+def test_the_mint_claim_rail_sees_the_wording_it_replaced():
+    """The scan has to be able to fail, and to fail on the wording it replaced.
+
+    An absence check whose pattern quietly stops matching reports a clean tree
+    forever, which is #2836's `git grep`-without-`-E` trap in a softer costume. So
+    the retired phrasings are fed back through the working pattern, the core
+    pattern's own hits are required to be hits here too, and the rule is run
+    against synthetic lines it must reject and must accept.
+    """
+    # Each retired phrasing, verbatim from the tree this item was filed on, is
+    # still something the rail can see — and the wrapped one is visible ONLY to
+    # the joined scan, which is the reason the scan joins at all.
+    for shape in RETIRED_MINT_SHAPES:
+        assert _MINT_CLAIM.search(_mint_join(shape)[0]), (
+            f"the rail no longer matches {shape[-1].strip()!r}, so a clean run of "
+            "the node above would mean nothing")
+    wrapped = RETIRED_MINT_SHAPES[2]
+    assert not any(_MINT_CLAIM.search(line) for line in wrapped), (
+        "the wrapped fixture now matches on a single line, so the join in "
+        "_mint_join is no longer load-bearing and the comment above it lies")
+
+    # The working pattern is a superset of the clause's own pattern, checked on
+    # the live files rather than asserted in prose.
+    for name in _MINT_SOURCES:
+        text, _ = _mint_join(_mint_source(name))
+        core = {m.group(0) for m in _MINT_CLAIM_CORE.finditer(text)}
+        wide = {m.group(0) for m in _MINT_CLAIM.finditer(text)}
+        assert core <= wide, (
+            f"{name}: the working pattern lost the clause's own hits {sorted(core - wide)}")
+
+    # The rule fires on each defect shape, and only on them.
+    undated = ["# the directory takes 900 sessions a day to fill", "", ""]
+    one = _mint_violations(undated)
+    assert len(one) == 1 and "no 2026-MM-DD" in one[0], (
+        f"an undated mint claim read as clean: {one}")
+
+    retired = ["# ~240 background sessions a day against ~14 chats",
+               "# measured over the week to 2026-09-10"]
+    one = _mint_violations(retired)
+    assert len(one) == 1 and "retired" in one[0], (
+        f"a claim whose nearest window is the retired reading read as clean: {one}")
+
+    floored = ["# 400 sessions a day over 2026-10-13 to 10-22 (filename date prefix",
+               "# over live .json plus .json.gz), at least"]
+    one = _mint_violations(floored)
+    assert len(one) == 1 and "bound" in one[0], (
+        f"a mint claim framed as a floor read as clean: {one}")
+
+    clean = ["#: the directory held 333-569 four-part sessions a day",
+             f"#: over {_MINT_WINDOW} ({_MINT_DERIVATION},",
+             "#: which is not a count of what was minted)"]
+    assert _mint_violations(clean) == [], (
+        "the properly dated, derived, non-floored shape was rejected — the rail "
+        "is asking for something a restated comment cannot say")
