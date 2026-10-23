@@ -424,35 +424,52 @@ def test_the_coverage_table_prints_pass_n_beside_pass_at_n_with_its_own_caveats(
         "the degeneracy warning: a constant answer scores 1.0 on pass^N without being right"
 
 
-def test_a_report_of_an_artifact_written_before_pass_n_existed_prints_it_absent(tmp_path):
-    """The old bytes on this box are still fresh, so the new renderer must read them honestly.
+def test_a_report_of_an_artifact_written_before_pass_n_existed_prints_the_derived_figure(
+        tmp_path,
+):
+    """The old bytes on this box are still fresh, and they do carry the pass^N measurement (#3192).
 
     None of `comparable`'s freshness keys changed with #2919 — route, N, model id,
     quantization, corpus digest and sampling are all untouched — so the N=8 direct arm
     written on 2026-10-09 (`~/lloyd-data/_pipeline/research/coverage/primary-direct-n8.json`,
     corpus digest `sha256:c04aac3c…`, still the live corpus digest) is read by tomorrow's
-    round report exactly as it is read today. Those records have no `pass_all_n` and no
-    `draws_excluded`.
+    round report exactly as it is read today. Those records have no `pass_all_n`, no
+    `pass_all_n_draws` and no `draws_excluded`. They have `passes` and `draws_scored`.
 
-    The cell that must come out is `-`, never `0.000`: 0.000 is the leg's own word for
-    "every draw failed", and printing it for a field the writer never emitted would put a
-    measurement on the page that was never made. The excluded count is the one figure the
-    old record can still answer exactly, because `n - draws_scored` is what the field is
-    computed from.
+    #2919 wrote this node to pin `-`, on the reasoning that a field the writer never emitted
+    prints as absent rather than as a measurement. That was right about the field and wrong
+    about the measurement: pass^N at k == N IS `passes == draws_scored`, both of which the old
+    writer emitted, so the figure was made — and the excluded-count assertion at the bottom of
+    this same node was already deriving its own number from those two counts on this very
+    record. Pinning `-` cost all 28 figures in all 34 reports that carry the column, which is
+    why #3192 moved this expectation instead of deleting the node.
+
+    What the node still guards is what it was really about: a task with nothing scored prints
+    `-`, never the 0.000 that is the leg's own word for "every draw failed". The second record
+    below is that case, added here so the absence stays pinned beside the figure that replaced
+    it.
     """
     from scripts.autoresearch import coverage_leg as cov
 
     cfg = make_cfg(tmp_path)
-    tasks = [{"id": "bench_old"}]
+    tasks = [{"id": "bench_old"}, {"id": "bench_old_unscored"}]
     context = cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
                                       quantization=None, corpus_tasks=tasks, n=8,
                                       route=cov.ROUTE_DIRECT, sampling={"temperature": 0.3})
+
+    def draw(task: str, index: int, scored_ok: bool) -> dict:
+        if scored_ok:
+            return cov.draw_record(task_id=task, draw_index=index, objective_score=1.0,
+                                   status="success", trace={"total_tokens": 120})
+        return cov.draw_record(task_id=task, draw_index=index, objective_score=None,
+                               status="error", trace={})
+
     arm = cov.build_coverage(
-        {"bench_old": [cov.draw_record(task_id="bench_old", draw_index=i, objective_score=1.0,
-                                       status="success", trace={"total_tokens": 120})
-                       for i in range(4)]
-         + [cov.draw_record(task_id="bench_old", draw_index=i, objective_score=None,
-                            status="error", trace={}) for i in range(4, 8)]},
+        # Four of eight draws scored and all four passed → pass^N over four is 1.0.
+        {"bench_old": [draw("bench_old", i, True) for i in range(4)]
+                      + [draw("bench_old", i, False) for i in range(4, 8)],
+         # Eight draws ran and none was objectively scored → nothing to derive a figure from.
+         "bench_old_unscored": [draw("bench_old_unscored", i, False) for i in range(8)]},
         n_requested=8, context=context)
     for key in ("pass_all_n", "pass_all_n_draws", "draws_excluded", "safety_critical"):
         for record in arm["records"]:
@@ -462,11 +479,20 @@ def test_a_report_of_an_artifact_written_before_pass_n_existed_prints_it_absent(
     lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
                              model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
     row = next(line for line in lines if line.startswith("| bench_old |")).split("|")
-    assert row[4].strip() == "-", \
-        f"a field the writer never emitted prints as absent, not as a measurement: {row}"
+    assert row[4].strip() == "1.000 (over 4)", (
+        f"every scored draw passed, so the figure is 1.000 — and it names four as its N, "
+        f"because four is what was scored: a bare 1.000 would read as a pass^8: {row}")
     assert row[5].strip() == "indeterminate", \
         "four scored draws of eight was `indeterminate` before #2919 and is still that"
+    assert row[6].strip() == "4/8", "the scored count is the N the derived figure names"
     assert row[7].strip() == "4", "the old record still answers the excluded count exactly"
+
+    unscored = next(line for line in lines
+                    if line.startswith("| bench_old_unscored |")).split("|")
+    assert unscored[4].strip() == "-", \
+        f"a task no draw of which was scored prints absent, never the 0.000 that means 'every " \
+        f"draw failed' — the absence this node was written to pin: {unscored}"
+    assert unscored[7].strip() == "8", "all eight draws excluded, exactly as before the fix"
 
 
 def test_a_round_whose_tasks_are_all_one_class_records_the_leg_as_cut(round_env):
@@ -594,3 +620,135 @@ def test_a_standalone_coverage_report_counts_the_submission_draw_zero(tmp_path, 
     assert census["disagreement_reachable"] == 1
     assert census["disagreement_unreachable"] == 1
     assert census["not_evaluated_failures"] == 0
+
+
+def test_a_derived_pass_n_figure_carries_its_reduced_n_into_the_report(tmp_path):
+    """clause 3 (#3192): a report reads the derived figure with its denominator named, so a
+    pre-#2919 artifact cannot print a clean-looking `1.000` in a `pass^8` column.
+
+    `test_the_pass_n_figure_names_its_own_reduced_n_and_an_absent_one_says_so` above pins
+    `1.000 (over 4)` for a record written after #2919 that says so in `pass_all_n_draws`. The
+    old writer had the same 4 scored and 8 requested in `draws_scored` and `n` and no field to
+    say it with, so its cell has to arrive at the same string: one shape for one instrument,
+    whichever generation produced the bytes. A reader comparing the 2026-10-09 arm with a
+    re-run then sees two reduced-N cells, not one reduced and one that looks complete.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    cfg = make_cfg(tmp_path)
+    tasks = [{"id": "bench_short"}, {"id": "bench_full"}]
+    context = cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
+                                      quantization=None, corpus_tasks=tasks, n=8,
+                                      route=cov.ROUTE_DIRECT, sampling={"temperature": 0.3})
+
+    def draw(task: str, index: int) -> dict:
+        return cov.draw_record(task_id=task, draw_index=index, objective_score=1.0,
+                               status="success", trace={"total_tokens": 120})
+
+    def failed(task: str, index: int) -> dict:
+        return cov.draw_record(task_id=task, draw_index=index, objective_score=None,
+                               status="error", trace={})
+
+    arm = cov.build_coverage(
+        {"bench_short": [draw("bench_short", i) for i in range(4)]
+                        + [failed("bench_short", i) for i in range(4, 8)],
+         "bench_full": [draw("bench_full", i) for i in range(8)]},
+        n_requested=8, context=context)
+    for record in arm["records"]:
+        for key in ("pass_all_n", "pass_all_n_draws", "draws_excluded"):
+            record.pop(key)
+    cov.write_coverage(cfg, arm)
+
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                             model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+
+    def cell(task: str) -> str:
+        return next(line for line in lines
+                    if line.startswith(f"| {task} |")).split("|")[4].strip()
+
+    assert cell("bench_short") == "1.000 (over 4)", cell("bench_short")
+    assert cell("bench_full") == "1.000", \
+        "eight of eight scored names nothing: the arm's N is already in the column header"
+
+
+def _bench_with_one_safety_task(root) -> None:
+    """A four-task bench dir holding exactly one task the corpus's own gate counts.
+    `is_high_consequence` reads one frontmatter field — `safety_critical`, with the same
+    `bool(task.get(...))` `promote.py`, `judge.py` and `bench_lint.py` use — so the fixture sets
+    that field and proves nothing else decides it: one task carries `safety_critical: true`, one
+    is in the `safety` CATEGORY without the field, one carries it spelled `false`, one is an
+    ordinary recall task. A count of 1 then proves the field is what was counted, where a count
+    of everything that merely looks dangerous would not.
+    """
+    import yaml
+    bench = root / "bench"
+    bench.mkdir(parents=True, exist_ok=True)
+    specs = {
+        "bench_010_safety_destructive": {"category": "safety", "safety_critical": True},
+        "bench_024_recall_user_fact_incidental": {"category": "recall"},
+        "bench_011_haiku_quantum": {"category": "safety"},
+        "bench_002_recall_user_fact": {"category": "recall", "safety_critical": False},
+    }
+    for task_id, front in specs.items():
+        front = {"id": task_id, "eval": "objective", **front}
+        (bench / f"{task_id}.md").write_text(
+            "---\n" + yaml.safe_dump(front, sort_keys=True) + "---\n\nProse.\n",
+            encoding="utf-8")
+
+
+def test_the_coverage_section_states_the_safety_critical_population_it_governs(tmp_path):
+    """clause 5 (#3192): the strict rule's population is printed, not assumed.
+
+    The class pass^N governs is small on today's bench — `grep -rl "safety_critical: true"
+    ~/obsidian/lloyd/bench/` returns exactly one file, `bench_010_safety_destructive`, out of
+    28 — and "small" is exactly the kind of fact a reader stops checking. A rule that applies
+    to one task in twenty-eight reads as decoration; a rule whose population is stated can be
+    agreed or argued with.
+
+    The count comes from the corpus through `corpus_tasks`/`is_high_consequence`, the same two
+    calls `main` uses to build `safety_critical_ids`, and NOT from the arm's records: a record
+    written before #2919 has no `safety_critical` key, so counting records would print 0 for a
+    class the bench contains. A number that reads as an empty class is how a rule gets dropped.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    cfg = make_cfg(tmp_path)
+    _bench_with_one_safety_task(tmp_path)
+    arm = cov.build_coverage(
+        {"bench_010_safety_destructive": [
+            cov.draw_record(task_id="bench_010_safety_destructive", draw_index=i,
+                            objective_score=1.0, status="success", trace={"total_tokens": 120})
+            for i in range(8)]},
+        n_requested=8,
+        context=cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
+                                        quantization=None,
+                                        corpus_tasks=cov.corpus_tasks(cfg), n=8,
+                                        route=cov.ROUTE_DIRECT,
+                                        sampling={"temperature": 0.3}),
+        safety_critical_ids={"bench_010_safety_destructive"})
+    cov.write_coverage(cfg, arm)
+
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                             model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    stated = [ln for ln in lines if ln.startswith("- `safety_critical` population:")]
+    assert len(stated) == 1, f"exactly one population line, not one per table: {stated}"
+    line = stated[0]
+    assert "1 of 4" in line, line
+    assert "1.0" in line and "reliable" in line, \
+        "the line says what the class is for, so its size can be read against its effect"
+    table = next(i for i, ln in enumerate(lines) if ln.startswith("| task |"))
+    assert lines.index(line) < table, "the population is stated above the rows it governs"
+
+    # Degradation, and it is the half that matters: an unreadable bench yields NO number.
+    # `load_bench_tasks` returns [] for a missing, unparseable or unreadable directory, so the
+    # empty corpus has to be reported as an unknown population rather than as zero tasks — a
+    # section that silently dropped the line would read as a bench with no safety class.
+    bare = make_cfg(tmp_path / "unreadable")          # bench_dir does not exist
+    broken = cov.report_lines(bare, baseline_summary={"per_task": []},
+                              model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    assert broken[1].startswith("## Bench coverage"), "the section survives"
+    degraded = [ln for ln in broken if ln.startswith("- `safety_critical` population:")]
+    assert len(degraded) == 1, broken
+    assert "unknown" in degraded[0] and "not zero" in degraded[0], degraded[0]
+    assert " 0 of " not in degraded[0], \
+        f"an unreadable bench must not print a count that reads as an empty class: {degraded[0]}"

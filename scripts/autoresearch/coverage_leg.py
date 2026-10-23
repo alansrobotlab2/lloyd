@@ -687,16 +687,30 @@ def _num(value: Any) -> str:
 def _pass_all_cell(record: dict[str, Any]) -> str:
     """The pass^N cell: the figure, naming the N it was actually computed over.
 
-    `-` and never 0.000 for a record with no figure — a task no draw of which was
-    objectively scored, or an artifact written before #2919 added the column — because
-    0.000 is a measurement that says every draw failed. When draws were excluded the
-    cell states its own reduced N: pass^8 over five scored draws is a different
-    instrument from pass^8 over eight, and the header column name cannot say that.
+    A record written before #2919 has no `pass_all_n`, and the figure is derived from
+    `draws_scored` and `passes` rather than printed absent (#3192): at k == N the figure IS
+    `passes == draws_scored` (see `pass_all_n`), both of which every old record carries, so
+    the *field* is missing and the *measurement* is not — the reasoning `_excluded_draws`
+    right below already applies to its own field, on this same file. Deriving costs zero extra
+    draws and moves no number: the derived cell is byte-identical to the cell the same record
+    prints once the writer emits the field, which is what makes the pre-#2919 corpus readable
+    instead of a column of 28 dashes.
+
+    `-` and never 0.000 for a record with no figure — a task no draw of which was objectively
+    scored, which no derivation can supply — because 0.000 is a measurement that says every
+    draw failed. When draws were excluded the cell states its own reduced N: pass^8 over five
+    scored draws is a different instrument from pass^8 over eight, and the header column name
+    cannot say that. A derived figure names `draws_scored` as its N, because that is the
+    denominator it was computed over.
     """
     value = record.get("pass_all_n")
+    over = record.get("pass_all_n_draws")
+    if value is None:
+        scored = int(record.get("draws_scored") or 0)
+        value = pass_all_n(scored, int(record.get("passes") or 0))
+        over = scored
     if value is None:
         return "-"
-    over = record.get("pass_all_n_draws")
     if isinstance(over, int) and over != record.get("n"):
         return f"{value:.3f} (over {over})"
     return f"{value:.3f}"
@@ -734,6 +748,35 @@ def _tokens_text(tokens: dict[str, Any]) -> str:
     return (f"{total} total ({tokens.get('prompt_tokens')} prompt / "
             f"{tokens.get('completion_tokens')} completion, "
             f"{tokens.get('draws_with_usage')} draws reported usage)")
+
+
+def _safety_class_line(cfg: AutoresearchConfig, n_draws: int) -> str:
+    """How many corpus tasks the strict read actually governs (#3192), counted over the
+    corpus rather than over the arm's records.
+
+    The count cannot come from the records, and that is not a stylistic choice: a record
+    written before #2919 has no `safety_critical` key at all, so counting records would print
+    0 for a class the bench contains, and a rule whose population reads as zero is a rule a
+    reader will stop applying. `corpus_tasks` is the bench's own loader and
+    `is_high_consequence` the corpus's own field — the same two calls `main` gathers the arm
+    with, at the one place `safety_critical_ids` is built — so this cannot disagree with
+    `promote.py` about which tasks are in the class.
+
+    An unreadable bench degrades to an unknown population, not to a number and not to a lost
+    section: `load_bench_tasks` returns `[]` for a missing, unparseable or unreadable
+    directory (probed: a path that is a regular file, and a directory with no read
+    permission, both read as no tasks), so an empty corpus is reported as a class nobody
+    counted. Zero and unknown are different claims, and only one of them is printable here.
+    """
+    corpus = corpus_tasks(cfg)
+    if not corpus:
+        return (f"- `safety_critical` population: unknown — no corpus task could be read from "
+                f"{cfg.paths.bench_dir}, so how many tasks the strict read governs is not "
+                f"stated. Unknown is not zero.")
+    strict = sum(1 for task in corpus if is_high_consequence(task))
+    return (f"- `safety_critical` population: {strict} of {len(corpus)} corpus tasks carry "
+            f"`safety_critical: true`, and for those alone `reliable` also requires "
+            f"pass^{n_draws} == 1.0 — the class is printed, not assumed.")
 
 
 def arm_totals(coverage: dict[str, Any]) -> dict[str, Any]:
@@ -781,6 +824,11 @@ def report_lines(cfg: AutoresearchConfig, *, baseline_summary: dict[str, Any],
             f"reachable: {NOT_EVALUATED} · unreachable: {NOT_EVALUATED}",
             f"- all {len(graded_failures)} of them {NOT_EVALUATED}: an absent arm "
             "measures nothing, which is not the same as measuring a capability limit.",
+            # Emitted here too: the corpus class exists whether or not this arm has bytes, and
+            # a line that only appears when an artifact does would leave the section asserting
+            # nothing about the population the rule governs on exactly the rounds where the
+            # reader most needs to know whether there is one to worry about.
+            _safety_class_line(cfg, n),
         ]
         return lines
 
@@ -835,6 +883,9 @@ def report_lines(cfg: AutoresearchConfig, *, baseline_summary: dict[str, Any],
               f"- Read pass^{n_draws} beside pass@1: a policy that answers the same way every "
               f"draw scores 1.0 on it without having to be right, so agreement with no answer "
               f"diversity is a task to read by hand, not a task that has been fixed.",
+              # How many tasks that strict governance actually applies to, so the class it
+              # governs is a stated number rather than something the reader assumes is small.
+              _safety_class_line(cfg, n_draws),
               f"| task | pass@1 | pass@{n_draws} | pass^{n_draws} | verdict "
               f"| draws scored | draws excluded | tokens |",
               "|---|---|---|---|---|---|---|---|"]

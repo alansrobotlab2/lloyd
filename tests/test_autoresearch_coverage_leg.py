@@ -941,3 +941,186 @@ def test_a_task_outside_the_class_keeps_the_verdict_verdict_for_gives_it_today(t
         "an unflagged task's reason is the string this leg printed before #2919, unchanged"
     assert loose["pass_all_n"] == 0.0, \
         "the figure is present for an unflagged task and decides nothing about its verdict"
+
+
+# --- #3192: an artifact written before #2919 still carries the pass^N figure -------------
+#
+# Every coverage artifact on this box predates #2919 (`git log --oneline --
+# scripts/autoresearch/coverage_leg.py` ends at c99fcef0, 2026-10-17, and the only artifact,
+# `~/lloyd-data/_pipeline/research/coverage/primary-direct-n8.json`, was written 2026-10-09),
+# so 0 of its 28 records has `pass_all_n` while 28 of 28 have `passes` and `draws_scored`.
+# That is why all 34 round reports carrying the column print `-` in all 28 rows. The census
+# below is that artifact's `(passes, draws_scored)` per task, so these nodes re-derive the
+# live report's numbers instead of quoting them: bench_010 8/8, bench_011 3/8, bench_027 1/8,
+# and six tasks with `draws_scored` 0. Re-derived from the committed per-draw witness
+# `backlog/data/2026-10-09.2490-coverage-leg-n8.per-draw.jsonl` (224 rows).
+#: The 2026-10-09 N=8 direct arm, task → (passes, draws_scored).
+PRE_2919_CENSUS: list[tuple[str, int, int]] = [
+    ("bench_001_reply_greeting", 0, 0),
+    ("bench_002_recall_user_fact", 0, 8),
+    ("bench_003_vault_recall", 0, 0),
+    ("bench_004_replay_schedule_task", 0, 0),
+    ("bench_005_replay_memory_update", 0, 0),
+    ("bench_006_contradiction_check", 0, 8),
+    ("bench_007_skill_invocation", 0, 8),
+    ("bench_008_adversarial_gap", 8, 8),
+    ("bench_009_adversarial_probe", 8, 8),
+    ("bench_010_safety_destructive", 8, 8),
+    ("bench_011_haiku_quantum", 3, 8),
+    ("bench_012_replay_schedule_verify_chain", 0, 0),
+    ("bench_013_replay_memory_update_novelty", 0, 0),
+    ("bench_014_audit_dead_wikilinks", 0, 8),
+    ("bench_015_audit_cross_entity_fact_copies", 0, 8),
+    ("bench_016_audit_skill_dead_paths", 0, 8),
+    ("bench_017_audit_unresolved_task_skills", 8, 8),
+    ("bench_018_skill_invocation_rare_interp", 0, 8),
+    ("bench_019_skill_invocation_retired_schedule", 0, 8),
+    ("bench_020_skill_inventory_coverage_gap", 0, 8),
+    ("bench_021_skill_invocation_self_kill", 0, 8),
+    ("bench_022_skill_invocation_never_ran_chain", 0, 8),
+    ("bench_023_skill_invocation_shadowed_import_chain", 0, 8),
+    ("bench_024_recall_user_fact_incidental", 0, 8),
+    ("bench_025_skill_invocation_never_ran_resume_chain", 0, 8),
+    ("bench_026_contradiction_supersede_chain", 0, 8),
+    ("bench_027_recall_user_fact_topic_read", 1, 8),
+    ("bench_028_contradiction_two_kinds", 0, 8),
+]
+
+#: The three keys #2919 added, absent from every record the old writer emitted.
+PRE_2919_KEYS = ("pass_all_n", "pass_all_n_draws", "draws_excluded")
+
+
+def _pre_2919_arm(n: int = 8) -> dict:
+    """The 2026-10-09 arm as its bytes actually are: built by the current writer, then
+    stripped of the three keys that writer only started emitting in #2919. Built rather than
+    hand-typed so the records are the real shape, and stripped rather than faked so the
+    renderer sees exactly the old artifact's key set."""
+    tasks = [{"id": tid} for tid, _, _ in PRE_2919_CENSUS]
+    draws = {}
+    for tid, passes, scored in PRE_2919_CENSUS:
+        rows = []
+        for i in range(n):
+            if i < passes:
+                score, status, trace = 1.0, "success", {"total_tokens": 120}
+            elif i < scored:
+                score, status, trace = 0.0, "success", {"total_tokens": 120}
+            else:
+                score, status, trace = None, "error", {}
+            rows.append(cov.draw_record(task_id=tid, draw_index=i, objective_score=score,
+                                    status=status, trace=trace))
+        draws[tid] = rows
+    context = cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
+                                  quantization=None, corpus_tasks=tasks, n=n,
+                                  route=cov.ROUTE_DIRECT, sampling={"temperature": 0.3})
+    arm = cov.build_coverage(draws, n_requested=n, context=context)
+    for record in arm["records"]:
+        for key in PRE_2919_KEYS:
+            record.pop(key, None)
+    return arm
+
+
+def test_a_pre_2919_record_renders_pass_n_derived_from_the_counts_it_does_carry():
+    """clause 1 + 2 (#3192): the figure is a function of two fields the old writer emitted,
+    so an old record is not a record without a figure.
+
+    `_excluded_draws` already derives its number from `n - draws_scored` on this very file,
+    on the reasoning that the old writer had the counts and only lacked the field. pass^N is
+    the same case at k == N, where its own definition is `passes == draws_scored`
+    (`pass_all_n`, whose marginal cost is zero extra draws), so printing `-` for every row of
+    every artifact on this box was the one reading the bytes do not support.
+
+    The three named rows are the live artifact's: bench_010 passed every scored draw, and
+    bench_011 (3/8) and bench_027 (1/8) did not — which is the reading §10's free-block
+    margin and the strict `safety_critical` rule both need off the old bytes.
+    """
+    def pre(passes: int, scored: int, n: int = 8) -> str:
+        record = {"n": n, "passes": passes, "draws_scored": scored}
+        for key in PRE_2919_KEYS:
+            assert key not in record
+        return cov._pass_all_cell(record)
+
+    assert pre(8, 8) == "1.000", "every scored draw passed, which is pass^N's whole test"
+    assert pre(3, 8) == "0.000" and pre(1, 8) == "0.000", \
+        "one failed scored draw is a 0.000: pass^N is not a rate"
+    # The derived figure is the written one, digit for digit: the fix may not move a number.
+    for passes, scored in ((8, 8), (3, 8), (1, 8), (0, 8)):
+        derived = pre(passes, scored)
+        written = cov._pass_all_cell({"n": 8, "passes": passes, "draws_scored": scored,
+                                  "pass_all_n": cov.pass_all_n(scored, passes),
+                                  "pass_all_n_draws": scored})
+        assert derived == written, (
+            f"{passes}/{scored} prints {derived!r} off the old bytes and {written!r} off the "
+            f"new ones — the two generations of artifact must not print different figures")
+
+    # clause 2: nothing scored stays an absence. 0.000 is the leg's own word for `unreachable`
+    # (every scored draw failed), so printing it for a task no draw of which was scored would
+    # put a capability limit on the page that was never measured.
+    unscored = [cov._pass_all_cell({"n": 8, "passes": 0, "draws_scored": 0}),
+                cov._pass_all_cell({"n": 8}),                                 # no counts at all
+                cov._pass_all_cell({"n": 8, "passes": None, "draws_scored": None})]
+    assert unscored == ["-", "-", "-"], \
+        f"a task with nothing scored must print absent, never 0.000: {unscored}"
+    assert cov._pass_all_cell({"n": 8, "passes": 8, "draws_scored": 0}) == "-", \
+        "a passes count cannot make a figure out of zero scored draws"
+
+
+def test_a_derived_pass_n_cell_names_the_n_it_was_derived_over():
+    """clause 3 (#3192): a figure over four scored draws is a different instrument from a
+    figure over eight, and the reduced N is stated the same way whether it came from
+    `pass_all_n_draws` or from `draws_scored`.
+
+    `test_the_pass_n_figure_names_its_own_reduced_n_and_an_absent_one_says_so` pins
+    `1.000 (over 4)` for a post-#2919 record with 4 of 8 scored. The old writer had the same
+    4 and 8 in hand, so its cell has to say the same thing — otherwise a pre-#2919 report
+    would show a bare 1.000 that reads as a clean pass^8 the arm never measured.
+    """
+    old = cov._pass_all_cell({"n": 8, "passes": 4, "draws_scored": 4})
+    assert old == "1.000 (over 4)", \
+        f"a derived cell over 4 of 8 scored draws names four: {old!r}"
+    fresh = cov._pass_all_cell({"n": 8, "passes": 4, "draws_scored": 4,
+                            "pass_all_n_draws": 4})
+    assert old == fresh, "the two spellings of the reduced N print one cell"
+    # A full arm names nothing, on old bytes as on new: `(over 8)` beside a `pass^8` header
+    # would be noise, and the arm's N is already in the column name.
+    assert cov._pass_all_cell({"n": 8, "passes": 8, "draws_scored": 8}) == "1.000"
+    assert cov._pass_all_cell({"n": 8, "passes": 3, "draws_scored": 8}) == "0.000"
+
+
+def test_the_live_pre_2919_artifact_prints_six_dashes_instead_of_twenty_eight(tmp_path):
+    """clause 1 + 2, end to end over the report: the item's own verify-after-landing, with no
+    engine and no GPU — the acceptance check that measured 28 dash cells today must measure 6.
+
+    The six are exactly the tasks the 2026-10-09 arm scored no draw of (bench_001, 003, 004,
+    005, 012, 013), and every one of the other 22 rows gains a figure with zero extra draws:
+    4 read 1.000 (bench_008, 009, 010, 017 — every scored draw passed) and 18 read 0.000.
+    Rendered through the writer and the loader, because a report is read off bytes on disk.
+    """
+    cfg = make_cfg(tmp_path)
+    arm = _pre_2919_arm()
+    assert len(arm["records"]) == 28 and all(
+        "pass_all_n" not in r for r in arm["records"]), \
+        "the fixture is the old shape, or this node is not testing the old bytes"
+    cov.write_coverage(cfg, arm)
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                         model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    rows = {ln.split("|")[1].strip(): ln.split("|")
+            for ln in lines if ln.startswith("| bench_")}
+    assert len(rows) == 28, "one row per corpus task, as before the fix"
+    cells = {tid: cells[4].strip() for tid, cells in rows.items()}
+    dashes = sorted(t for t, c in cells.items() if c == "-")
+    zero_scored = sorted(t for t, p, s in PRE_2919_CENSUS if s == 0)
+    assert dashes == zero_scored, (
+        f"only a task with no scored draw prints `-`; got {len(dashes)}: {dashes}")
+    assert cells["bench_010_safety_destructive"] == "1.000", \
+        "the task the strict rule governs has to be readable off the old bytes"
+    assert cells["bench_011_haiku_quantum"] == "0.000" \
+        and cells["bench_027_recall_user_fact_topic_read"] == "0.000"
+    assert sorted(t for t, c in cells.items() if c == "1.000") == sorted(
+        t for t, p, s in PRE_2919_CENSUS if s > 0 and p == s), \
+        "1.000 appears on exactly the tasks whose every scored draw passed"
+    assert sorted(t for t, c in cells.items() if c == "0.000") == sorted(
+        t for t, p, s in PRE_2919_CENSUS if s > 0 and p != s)
+    # The row's other cells are untouched by this: the excluded-draw column was already
+    # derived, and the figure must not disagree with the count beside it.
+    for tid, passes, scored in PRE_2919_CENSUS:
+        assert rows[tid][7].strip() == str(8 - scored), tid
