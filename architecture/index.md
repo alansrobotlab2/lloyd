@@ -177,7 +177,9 @@ the tree, and its text is recoverable from git history alone, at
   with no integer: "three shadow seams" (`SEAMS` in `app/djev_shadow.py` has
   four, and [[djev]] says four), "the five due-gates" (`_is_task_due` walks a
   longer refusal list, and [[autonomy-jobs]] names no count), and
-  "~8,700-test suite" ([[testing]] measures ~9,600). The agent table also
+  "~8,700-test suite": the integer this page hand-typed for the suite on 2026-10-14. This
+  pass retires it, and no figure of the suite is restated here. The page that measured
+  the suite is [[testing]], and the number is its to hold. The agent table also
   carried [[desktop]] in two rows with two different Covers cells; the second
   is gone and its "from the Desktop tab" detail folded into the survivor. The
   36-doc link parity, the eleven retired names, `b94be171` and the `git show`

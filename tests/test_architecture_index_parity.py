@@ -38,6 +38,17 @@ that revision, with two different and equally true Covers cells until `8ac21903`
 table rows only: `index.md` also names `[[desktop]]` in the Review-log entry that
 records that deletion, and a whole-file count would report the survivor as the
 duplicate and invite a "fix" that rewrites the log.
+
+The fourth half is a figure that travels. #3249 found the index quoting a suite integer
+this page had already retired while claiming, in the present tense, that the doc which
+owns the measurement measured it — a figure the owner had long since re-measured, and a
+second copy of one measurement kept in prose nothing re-measures. So a present-tense
+attribution of a tilde'd or comma-grouped figure to another architecture doc is refused
+across `architecture/*.md` and this file's own docstrings, and a bare suite size may sit
+in a live body only in the doc that owns it plus a closed register of dated growth
+records. `## Review log` history stays standing, and both guards are shown red by
+planting the retired prose into the shipped pages themselves — never by being handed a
+sentence typed by the same hand that wrote the guard.
 """
 
 from __future__ import annotations
@@ -395,11 +406,14 @@ def test_the_module_states_its_exemption_as_a_class_and_not_as_a_figure():
     """The exemption this file promises is a rule, not a number that will age.
 
     Its docstring used to name one suite-size figure as the exemption's whole meaning,
-    and that number went stale inside the same window #2700 was open in:
-    `architecture/testing.md` line 11 and the gate's own collected count both measure
-    ~9,600 now (9,583–9,620 across rounds). That is the identical failure the guard
-    exists to prevent, committed in the guard's own prose — and it went unnoticed for
-    the same reason the rotted Covers cells
+    and that number went stale inside the same window #2700 was open in. Dated now,
+    because the sentence used to say it in the present tense (#3249): on 2026-09-24 the
+    `tests` rung collected 9,583–9,620 across three sampled rounds and
+    `architecture/testing.md` opened at the same order of magnitude; by the 2026-10-24
+    rounds that same rung collected over twice that. A present-tense reading of the old
+    sentence would have concluded the doc was wrong while the doc was right — the
+    identical failure the guard exists to prevent, committed in the guard's own prose,
+    and it went unnoticed for the same reason the rotted Covers cells
     did: nothing read the sentence. So the exemption is now stated as a class (a tilde'd
     order of magnitude is a measurement with a margin, not a count of an owned set), and
     this node keeps it that way in both directions:
@@ -408,8 +422,10 @@ def test_the_module_states_its_exemption_as_a_class_and_not_as_a_figure():
     2. the class wording must stay, because without it the next reader has only an
        example to generalise from, which is how the sentence got a number in it;
     3. whatever the current figure is, the guard must still refuse to match it — the
-       negative control in `test_the_parity_check_can_see_a_count` carries the
-       measurement, and this asserts the class, not a specific suite size.
+       negative control in `test_the_parity_check_can_see_a_count_in_a_covers_row`
+       carries the measurement, and this asserts the class, not a specific suite size.
+       That citation used to name a node that does not exist, which is what
+       `test_every_node_this_file_cites_in_prose_is_a_node_this_file_defines` now stops.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     assert ROTTED_FIGURE not in MODULE_DOC, (
@@ -425,6 +441,516 @@ def test_the_module_states_its_exemption_as_a_class_and_not_as_a_figure():
     assert _OWNED_COUNT.findall("the ~9,600-test suite") == [], (
         "a tilde'd suite size now trips the count guard, which means the exemption is "
         "no longer a class but whatever figure happens to be current")
+
+
+#: ── #3249: a figure that lives in one doc may be *owned* there and restated nowhere ──
+#:
+#: The count guard above stops `index.md` re-typing a set its owner enumerates. This is
+#: the other half of the same rot, which that guard cannot see because a suite size is
+#: deliberately exempt from it: prose in one file asserting, **in the present tense**,
+#: what a *different* architecture doc measures. Three of those existed at once —
+#: `index.md`'s Review log said `([[testing]] measures ~9,600)` twenty-four hours after
+#: the correcting pass had moved the doc to over twice that; this module's own docstring
+#: said `both measure ~9,600 now`; and `testing.md`'s live body asserted it was `still
+#: what architecture/index.md quotes this doc for`, which was true only until the index
+#: stopped quoting it. Nothing read the sentences, so all three rotted silently. A
+#: dated-past clause is allowed to quote a dead figure — that is history, and the Review
+#: log is made of it — so the discriminator is an *undated present-tense* attribution.
+
+#: How prose points at another architecture doc: the wiki stem the link tables use, or
+#: the backticked path. Both spellings occur in the sentences this guard had to catch.
+_XDOC_REF = r"(?:\[\[[a-z0-9-]+\]\]|`architecture/[a-z0-9-]+\.md`)"
+#: Present-tense attribution verbs, and only those. A past form ("measured", "restated",
+#: "advertised") puts the figure in the tense the Review log lives in, and a spelled-out
+#: count belongs to the owned-set guard above, not here. The trailing `\s` is what makes
+#: this a verb list: the index's own Review-log sentence — `…names no count), and`
+#: followed two tokens later by the retired suite-size integer — sits one character away
+#: from tripping it on the **noun** "count", which is how a guard meant for attributions
+#: would fire on half the Review log.
+_ATTRIB_VERB = (r"(?:measures?|says|quotes?|counts?|reports?|gives?|carries?|"
+                r"advertises?|states?)\s")
+#: A figure written with a margin or a thousands separator — the shape a suite size, a
+#: rate or a token count takes. Spelled numbers are out on purpose: `[[djev]] says four`
+#: is the #2700 case, which has its own guard.
+_FIGURE = r"(?:~\s?\d[\d,]*|\d{1,3},\d{3,})"
+#: A gap inside one sentence: prose wraps at ~80 columns, so newlines are allowed and a
+#: sentence-ending period is not (a period before a letter is an abbreviation).
+_GAP = r"(?:[^.]|\.(?=[a-z0-9])){0,%d}"
+_XDOC_FIGURE = re.compile(
+    rf"(?:{_XDOC_REF}{_GAP % 80}{_ATTRIB_VERB}{_GAP % 40}{_FIGURE}"
+    rf"|{_FIGURE}{_GAP % 60}{_XDOC_REF}{_GAP % 40}{_ATTRIB_VERB})",
+    re.I)
+#: An explicit day stamp turns a claim into a measurement of its date, which is what
+#: makes a quoted figure survivable instead of rotten.
+_DATE_STAMP = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+#: A sentence end: a period with whitespace or end-of-text after it. A period before a
+#: letter is an abbreviation or a version number and does not close a sentence — the same
+#: rule `_GAP` follows inside a match.
+_SENT_BREAK = re.compile(r"\.(?=\s|\Z)")
+
+
+def _sentences(text: str) -> list[str]:
+    """`text` split into sentences, so a node can reason one sentence at a time.
+
+    The unit is the point: #3249's fix rewrote a sentence to stop attributing a figure to
+    another doc, and an `== []` over a whole file cannot tell that achievement apart from
+    a page that simply stopped naming the owner. Split per sentence and a node can demand
+    both halves of the fix — the pointer is still there, and no sentence holding it carries
+    a number.
+    """
+    out, head = [], 0
+    for brk in _SENT_BREAK.finditer(text):
+        out.append(text[head:brk.end()])
+        head = brk.end()
+    if head < len(text):
+        out.append(text[head:])
+    return out
+
+
+def _live_body(text: str) -> str:
+    """Everything above a page's `## Review log`: the prose a reader takes as current.
+
+    One definition for both guards that need it — the cross-doc figure scan and the
+    suite-size placement check — because if the two disagree about where "live" ends, one
+    of them is exempting text the other indicts.
+    """
+    return text.split("## Review log")[0]
+
+
+def _xdoc_figure_claims(text: str) -> list[str]:
+    """Present-tense cross-doc figure claims in `text`, dated clauses excluded.
+
+    The date window is ±60 characters around the match, so a clause can carry its stamp on
+    either side. Refusing to exempt a *dated* clause is what would make this guard fire on
+    every Review-log entry, and those are the record #3249's own clause forbids rewriting.
+
+    The window is characters, not sentences, and that was measured rather than assumed:
+    scoping the carve-out to the claim's own sentence looked stricter and reddened a dated
+    Review-log entry in `testing.md` — the very record #3249 is told to leave standing —
+    because log prose wraps mid-sentence, and a wrapped bullet is not a sentence. What the
+    narrower scope would buy is covered from the other side instead: the corpus node
+    asserts that no LIVE sentence of `index.md` carries a figure at all, so a stamp in that
+    page can shield nothing there, and the `far` control below pushes the date past sixty
+    characters and requires the guard to speak.
+    """
+    claims = []
+    for match in _XDOC_FIGURE.finditer(text):
+        window = text[max(0, match.start() - 60):match.end() + 60]
+        if _DATE_STAMP.search(window):
+            continue
+        claims.append(" ".join(match.group(0).split()))
+    return claims
+
+
+#: The one doc that measures the suite: `scripts/automod/gate.py`'s `tests` rung collects
+#: it, and `testing.md` is where that rung's numbers are recorded. No other doc owns a
+#: re-measurement, which is why no other doc may state the size as a present fact.
+SUITE_SIZE_OWNER = "testing.md"
+#: Suite sizes that appear in some other doc's live body, and are allowed to, because each
+#: is the record of a suite **once** having that size — `automod.md`'s gate-latency history
+#: of the suite growing. A measurement of the past cannot move, which is what makes naming
+#: these by *value* safe where naming their line numbers would not be: the numbers below
+#: stay true no matter how far the corpus grows downward, and an unregistered figure is
+#: red whether it is a new copy of the present count or a fourth growth record, in which
+#: case it joins the list with its own history sentence beside it.
+SUITE_SIZE_RECORDS = {
+    "automod.md": ["~5,830", "3,271", "5,900"],
+}
+#: A suite size planted by the controls: not a figure any page holds, so a report of it can
+#: only have come from the plant, and the registered records beside it stay untouched.
+PLANTED_FIGURE = "~12,345"
+#: A suite size: the figure, immediately followed by "test"/"tests" (optionally
+#: hyphenated into it, as in the retired integer the index hand-typed and then quoted).
+#: Anchored on the noun rather than on the word "suite" so a count of something else
+#: sitting beside that word — "529 lines in test_testing_md", "26 test files" — is not
+#: read as a restatement of the suite's size.
+_SUITE_FIGURE = re.compile(rf"({_FIGURE})(?=\s*-?\s*tests?\b|\s*-?\s*test\b)", re.I)
+
+
+def _live_suite_figures(doc) -> list[str]:
+    """Suite sizes in `doc`'s live body — everything above its `## Review log`.
+
+    The Review log is exempt as the dated record of retired numbers: the 2026-10-14 entry
+    is *about* a hand-typed count that rotted, and #3249 is about the cross-doc clause in
+    that same sentence, not about the log keeping it.
+    """
+    text = doc.read_text(encoding="utf-8").split("## Review log")[0]
+    return _SUITE_FIGURE.findall(text)
+
+
+def _suite_placement_offenders(arch_dir: Path) -> dict[str, tuple[list[str], list[str]]]:
+    """Per doc under `arch_dir`: (figures with no registration, figures found at all).
+
+    Factored out of the corpus loop so the planted-figure control can run the WALK instead
+    of a copy of its idea of a walk: a node asserting over a corpus and a control asserting
+    against a hand-built list are two different guards, and only the first is watching the
+    shipped pages. Both readings come back because the loop needs both — an unregistered
+    figure is rot, and a registered value that has stopped being found means the register
+    is now describing a sentence nobody wrote. `SUITE_SIZE_OWNER` is skipped for one reason
+    only: it holds the live count, which is what makes it the sole home by clause 5.
+    """
+    seen = {}
+    for doc in sorted(arch_dir.glob("*.md")):
+        if doc.name == SUITE_SIZE_OWNER:
+            continue
+        found = _live_suite_figures(doc)
+        seen[doc.name] = (_unregistered(doc.name, found), found)
+    return seen
+
+
+def _unregistered(name: str, figures: list[str]) -> list[str]:
+    """Which of `figures` `name` has no registration for. Split out so the register can be
+    handed a planted figure and shown to be red: an `== []` over a corpus is the same green
+    as a pattern that matches nothing, which is the failure this file has been bitten by
+    twice already (#2700's digits-only pattern, #2701's set-based extractors)."""
+    return [f for f in figures if f not in SUITE_SIZE_RECORDS.get(name, [])]
+
+
+def _module_docstrings() -> str:
+    """Every docstring in this file: the module's and each test node's.
+
+    The fixtures deliberately hand the count guard a stale-looking suite size, so the
+    scan is of docstrings — the prose a reader trusts — and not of the source.
+    """
+    import sys
+
+    parts = [MODULE_DOC]
+    for name, obj in sorted(vars(sys.modules[__name__]).items()):
+        if name.startswith("test_") and callable(obj) and obj.__doc__:
+            parts.append(obj.__doc__)
+    return "\n".join(parts)
+
+
+#: The pre-fix sentence, and the one site in the shipped page it can come back to. Both
+#: are planted into copies of the REAL `index.md` below rather than handed to the guard on
+#: their own: a string typed out beside the pattern proves the pattern matches a string,
+#: not that the page is clean, and the page is what #3249 is about.
+PRE_FIX_INDEX_CLAUSE = "[[testing]] measures ~9,600"
+#: The clause #3249 wrote in its place, located by its own words rather than by a line
+#: number, so re-wrapping the page cannot hide the site from either control below. Both
+#: read it as a literal substring of the shipped bytes, and both read the WHOLE page: the
+#: clause sits under `## Review log`, which is exactly why the cross-doc scan is whole-file
+#: while the suite-size placement check stops at that heading.
+INDEX_CLAUSE_HERE = "The page that measured"
+
+
+#: The three sentences as they stood before #3249, one per surface. The index one is
+#: assembled without the retired integer because this file forbids that literal.
+PRE_FIX_CLAIMS = (
+    PRE_FIX_INDEX_CLAUSE,
+    "`architecture/testing.md` line 11 and the gate's own collected count both "
+    "measure ~9,600 now",
+    "was ~9,600 (still what `architecture/index.md` quotes this doc for)",
+)
+#: `index.md`'s neighbouring sentence: an attribution with a doc reference and a number
+#: in it that is not a tilde'd or comma-grouped figure. The guard must stay quiet here,
+#: or it fires on half the Review log.
+CLEAN_ADJACENT_CLAIM = "with this page's own [[djev]] row, which says GPU 2 is djev's"
+#: The date carve-out's controls: the same claim with a stamp inside its own sentence,
+#: without one at all, and with a stamp one sentence away. All three directions are
+#: asserted: a carve-out with no control is a hole with a docstring, and the guard's
+#: silence must be attributable to the date and not to the pattern having stopped matching.
+DATED_SILENT_CLAIM = "[[testing]] measures ~9,600 as of 2026-09-24"
+UNDATED_FIRING_CLAIM = "[[testing]] measures ~9,600"
+
+
+def test_no_architecture_doc_restates_another_docs_figure_in_the_present_tense():
+    """No file may assert, undated and in the present tense, what another doc measures.
+
+    #3249 found three such sentences live at once. Two of them named `[[testing]]`'s
+    suite size from somewhere else, and the third was `architecture/testing.md` itself
+    claiming what the index quoted it for — a claim that dies the moment the index is
+    fixed, which is how a correction written in one file becomes a falsehood in the
+    file next to it. What each of them should have said instead is the rule: the
+    document that measures a figure owns the number, and everywhere else points at the
+    owner or dates the quote. Both corpus halves are scanned — every
+    `architecture/*.md`, and this module's own docstrings, whose last sentence is the
+    one that rotted first.
+    """
+    offenders = []
+    for doc in sorted(ARCH.glob("*.md")):
+        for claim in _xdoc_figure_claims(doc.read_text(encoding="utf-8")):
+            offenders.append(f"{doc.name}: {claim!r}")
+    for claim in _xdoc_figure_claims(_module_docstrings()):
+        offenders.append(f"this module's docstrings: {claim!r}")
+    assert offenders == [], (
+        "an architecture doc or this module attributes a figure to another doc in the "
+        "present tense: " + "; ".join(offenders) +
+        " — state the rule (that doc owns the number) or date the quote; a present-tense "
+        "copy is wrong the next time the owner re-measures")
+
+    # The scan's most important reader has to be shown reading something. A corpus `== []`
+    # is also what a live body that stopped mentioning the owner at all would produce, and
+    # the point of #3249's fix was to keep the pointer while dropping the number — so the
+    # pointer's presence, and the sentence's figure-freeness, are asserted, and both are
+    # shown red below rather than left as a shape the guard happens to be silent on.
+    idx_sentences = [s for s in _sentences(_live_body(INDEX.read_text(encoding="utf-8")))
+                     if re.search(_XDOC_REF, s)]
+    assert idx_sentences, (
+        "index.md's LIVE body no longer names another architecture doc in any sentence, "
+        "so the corpus scan above has nothing left to read in the page #3249 was about — "
+        "delete the pointer and the guard stays green while the parity it enforces dies")
+    numbered = [s for s in idx_sentences if re.search(_FIGURE, s)]
+    assert numbered == [], (
+        f"index.md attributes a figure to another doc inside its own live sentence: "
+        f"{[s.strip()[:90] for s in numbered]} — that is the #3249 sentence again")
+    # …and the scan has to be READING this page. A corpus `== []` is equally what a page
+    # that dropped the pointer altogether would produce, and clause 1 asks for the pointer
+    # to survive with no number beside it — so #3249's own sentence goes back into the
+    # shipped bytes and must come out of the scan. Whole page, because the clause lives
+    # under `## Review log`, which the placement guard cuts and this one must not.
+    shipped = INDEX.read_text(encoding="utf-8")
+    revived = shipped.replace(INDEX_CLAUSE_HERE, "The suite is " + PRE_FIX_INDEX_CLAUSE)
+    assert revived != shipped, (
+        "the clause #3249 rewrote is gone from index.md, so this scan has no site left in "
+        "the page it was written for — deleting the pointer is the other way the parity "
+        "dies, and it would leave the corpus green")
+    assert _xdoc_figure_claims(revived), (
+        "restoring #3249's sentence into the shipped index.md reported nothing: the corpus "
+        "scan is not reading this page, and clause 1 is unenforced")
+
+
+def test_the_cross_doc_figure_guard_fires_on_the_rotten_sentences():
+    """Negative control: all three pre-fix sentences must fire, and the neighbour must not.
+
+    A corpus `== []` is the same green a regex that matches nothing gives, and this file
+    has already been bitten twice by exactly that (#2700's digits-only pattern, #2701's
+    set-based extractors). So the guard is handed the three sentences as they stood
+    before #3249 — one per surface, the index's assembled without the retired integer
+    this file bans — and must report each. The fourth assertion is the other direction:
+    `index.md`'s own next sentence attributes GPU 2 to a doc in the present tense with a
+    spelled-out number in the neighbourhood, and must stay out of the report, because
+    the rule is about figures with a margin, not about every mention of another doc.
+    """
+    for sentence in PRE_FIX_CLAIMS:
+        claims = _xdoc_figure_claims(sentence)
+        assert len(claims) == 1, (
+            f"the guard let the pre-fix sentence through: {sentence!r} reported "
+            f"{claims} — if this goes quiet, the corpus green above is the pattern "
+            "having stopped matching, not the prose having been fixed")
+        assert claims[0] in " ".join(sentence.split()), (
+            f"the guard reported {claims[0]!r}, which is not the sentence it was handed")
+    assert _xdoc_figure_claims(CLEAN_ADJACENT_CLAIM) == [], (
+        "the guard now fires on a spelled-out attribution with no tilde'd or "
+        "comma-grouped figure, which is the owned-count case #2700 owns and would make "
+        f"the Review log unreadable: {CLEAN_ADJACENT_CLAIM!r}")
+    # Both directions of the date carve-out, so its silence is attributable to the stamp
+    # and not to the pattern having stopped matching. The two strings are the same
+    # sentence — `PRE_FIX_CLAIMS[0]` — with and without a date inside the ±60-char window.
+    assert _xdoc_figure_claims(DATED_SILENT_CLAIM) == [], (
+        f"{DATED_SILENT_CLAIM!r} is the dated form the acceptance text allows and should "
+        "be silent; if it fires, no dated Review-log sentence is safe either and the "
+        "guard gets widened away")
+    assert len(_xdoc_figure_claims(UNDATED_FIRING_CLAIM)) == 1, (
+        f"{UNDATED_FIRING_CLAIM!r} is the rot itself and must fire — this is the same "
+        "sentence as the dated control above, so a green here with a red above is the "
+        "carve-out working and a red here is the pattern dying")
+    # …and the stamp only carves out while it is *in the clause*. The gap is measured in
+    # the assertion, so the 60-character bound is the thing under test, not an assumption.
+    far = UNDATED_FIRING_CLAIM + (" x" * 40) + " re-measured 2026-09-24"
+    gap = far.index("2026-09-24") - (far.index("~9,600") + len("~9,600"))
+    assert gap > 60, f"the control put the stamp only {gap} chars from the figure"
+    assert len(_xdoc_figure_claims(far)) == 1, (
+        f"a date {gap} chars from the figure silenced the guard; the carve-out is a "
+        "clause-length bound, not a whole-paragraph one")
+
+    # The third direction, and the one #3249's own fix could have hidden inside. The
+    # rewritten clause retires a figure under a `2026-10-14` stamp; if that stamp fell
+    # within the window, the page would be excused from re-inserting the very number the
+    # sentence exists to drop. The probe is the SHIPPED bytes, because a string typed out
+    # beside the pattern proves only that the pattern matches a string — the vacuity this
+    # file has been bitten by twice (#2700's digits-only pattern, #2701's set extractors).
+    shipped = INDEX.read_text(encoding="utf-8")
+    at = shipped.index(INDEX_CLAUSE_HERE)
+    near = shipped[max(0, at - 60):at + len(INDEX_CLAUSE_HERE) + 60]
+    stamps = [d.group(0) for d in _DATE_STAMP.finditer(near)]
+    assert not stamps, (
+        f"a day stamp ({stamps}) sits within sixty characters of the clause #3249 rewrote, "
+        "so the carve-out would excuse a figure planted back at that site — the sentence "
+        "has to keep its retirement stamp out of the window, not merely beside it")
+    planted = shipped.replace(INDEX_CLAUSE_HERE,
+                              "The suite is " + PRE_FIX_INDEX_CLAUSE)
+    assert _xdoc_figure_claims(planted), (
+        "planting the retired clause back at the shipped site came back silent, so the "
+        "rewritten sentence has crept inside its own date carve-out")
+
+
+def test_only_the_doc_that_measures_the_suite_states_a_bare_suite_size():
+    """The live figure has one home; everywhere else it is quoted history or nothing.
+
+    #3249 is not a request to move `architecture/testing.md`'s number into the index —
+    that would be the third definition the item is about. So placement is pinned and the
+    value is not: hard-coding the current figure here would restart the rot this whole
+    file exists to stop.
+
+    The rule, measured rather than assumed: `testing.md` is the only doc whose live body
+    states the suite's size as a plain present fact, and everywhere else a suite size may
+    appear only as the record of a suite that **once** had that size. `index.md` is held to
+    more than that — its live body may carry none at all, because the #3249 fix was to
+    point at [[testing]] and quote nothing — and it carries the retired integer only inside
+    `## Review log`, where a past correction is on record removing it. Three growth records
+    in `automod.md`'s gate-latency history are registered in `SUITE_SIZE_RECORDS` by value,
+    which cannot rot the way a line number does, and the node's own control shows an
+    unregistered figure in that same doc is red. Whether `automod.md`'s three should also
+    have their dates moved into the sentence rather than sitting in the table beside them is
+    filed on #3249 as a finding, not taken here.
+
+    The exemptions the shipped page depends on are re-checked rather than trusted,
+    because deleting them is the easy way to make every guard above go green.
+    """
+    # The register has to be shown capable of red, or a green below is the pattern
+    # matching nothing. A copy of the owner's current figure is the planted case, because
+    # that is the third definition #3249 exists to stop.
+    planted = ["~5,830", "3,271", "5,900", "~12,345"]
+    assert _unregistered("automod.md", planted) == ["~12,345"], (
+        f"the register let a fourth figure through: {_unregistered('automod.md', planted)}")
+    assert _unregistered("index.md", ["~12,345"]) == ["~12,345"], (
+        "the register treats index.md as having a registered home for suite sizes, so the "
+        "page whose prose #3249 fixed is now unguarded")
+
+    for doc_name, (unexpected, found) in _suite_placement_offenders(ARCH).items():
+        assert not unexpected, (
+            f"{doc_name}'s live prose states {unexpected} as a suite size with no "
+            f"registration in SUITE_SIZE_RECORDS — outside {SUITE_SIZE_OWNER} a suite size "
+            "is a definition nobody re-measures; point at the owner instead")
+        assert sorted(set(found)) == sorted(SUITE_SIZE_RECORDS.get(doc_name, [])), (
+            f"{doc_name}'s registered growth records are no longer the ones on file "
+            f"(found {sorted(set(found))}, registered "
+            f"{sorted(SUITE_SIZE_RECORDS.get(doc_name, []))}) — a record may be added with "
+            "its history sentence, and a deleted one is a rewritten history")
+    assert _live_suite_figures(ARCH / SUITE_SIZE_OWNER), (
+        f"{SUITE_SIZE_OWNER}'s live body no longer states a suite size at all, so the "
+        "docs that must not restate one have no owner to defer to")
+    index = INDEX.read_text(encoding="utf-8")
+    assert _live_suite_figures(INDEX) == [], (
+        "index.md's live prose states a suite size again — the #3249 fix was to point at "
+        "[[testing]] and quote no figure outside the log")
+    assert ROTTED_FIGURE in _section(index, "## Review log"), (
+        "the retired suite-size integer this page hand-typed has been scrubbed out of "
+        "the Review log — #3249 rewrote that sentence's cross-doc clause, and a "
+        "correction may not delete the quoted history it is recording")
+    for phrase, heading in EXEMPT_COUNTS:
+        assert phrase in _section(index, heading), (
+            f"{phrase!r} has gone from {heading!r}, so this page's exemptions now "
+            "survive only because the guard stopped looking")
+    assert _row_first_cells(index).count("desktop") == 1, (
+        "[[desktop]] heads more than one row again, or the row was deleted to satisfy a "
+        "figure guard — #2701 is the duplicate, this item is not")
+    # The register is CLOSED, not merely populated: one doc, the three figures this item
+    # names. Each entry added is another live copy of a measurement only the owner may hold,
+    # so the exception list is part of the rule and is pinned as one.
+    assert list(SUITE_SIZE_RECORDS) == ["automod.md"], (
+        f"suite sizes are registered as exceptions in {list(SUITE_SIZE_RECORDS)}, not in "
+        "automod.md alone — every doc added here is a second home for the owner's "
+        "measurement, which is the thing clause 5 refuses")
+    assert SUITE_SIZE_RECORDS["automod.md"] == ["~5,830", "3,271", "5,900"], (
+        f"automod.md's registered records are {SUITE_SIZE_RECORDS['automod.md']}, not the "
+        "three growth figures on file (~5,830 at its line 1351, 3,271 at 2176, 5,900 at "
+        "2938); a widened register is the placement rule quietly removed")
+    assert index.count("[[desktop]]") >= 2, (
+        "the Review-log mention of the deleted duplicate row has gone, and "
+        "test_the_row_scope_is_what_keeps_the_review_log_from_reading_as_a_duplicate "
+        "exists to keep the log from being 'fixed'")
+
+
+def test_the_placement_guard_fires_on_a_figure_planted_into_a_real_page(tmp_path,
+                                                                       monkeypatch):
+    """A suite size planted into copies of the SHIPPED pages is reported, in both of them.
+
+    A corpus `== []` is not evidence about the corpus: it reads identically when the walk
+    works and nothing is out of place and when `_SUITE_FIGURE` has stopped matching a suite
+    at all, and this file has been bitten by that exact vacuity twice (#2700's digits-only
+    pattern, #2701's set-based extractors). So the guard runs over a staged tree carrying the
+    real bytes of the pages #3249 is about — `index.md`, which hand-typed the retired count,
+    and `automod.md`, whose three growth records are the only registered exceptions — with
+    one suite-size sentence added to each live body.
+
+    What must come back is the walk's own verdict, per doc: the planted figure and nothing
+    else, so the registered records neither swallow it nor are reported with it. Clause 5
+    asks for a plant into a real corpus file through the module's staging pattern rather
+    than a list handed to `_unregistered`, which is what the `_unregistered` asserts at the
+    top of the corpus node are: a unit check on the register, not a check that the walk
+    reaches the pages.
+    """
+    import sys
+    mod = sys.modules[__name__]
+    fake_arch = tmp_path / "architecture"
+    fake_arch.mkdir()
+    for name in ("index.md", "automod.md", SUITE_SIZE_OWNER):
+        (fake_arch / name).write_text(
+            _live_body((ARCH / name).read_text(encoding="utf-8"))
+            + f"\nThe suite now holds {PLANTED_FIGURE} tests under `tests/` for this "
+              "sentence only.\n",
+            encoding="utf-8")
+    monkeypatch.setattr(mod, "ARCH", fake_arch)
+
+    offenders = {n: u for n, (u, _f) in _suite_placement_offenders(fake_arch).items() if u}
+    assert set(offenders) >= {"index.md", "automod.md"}, (
+        f"planting a suite-size sentence into the staged live bodies of index.md and "
+        f"automod.md produced {offenders} — on a page now stating {PLANTED_FIGURE} as the "
+        "suite's size the guard is silent, so its silence over the real corpus is not "
+        "evidence that the corpus is clean")
+    for name in ("index.md", "automod.md"):
+        assert offenders.get(name) == [PLANTED_FIGURE], (
+            f"{name} reported {offenders.get(name)!r} instead of exactly "
+            f"[{PLANTED_FIGURE!r}]: automod.md's three registered growth records must pass "
+            "the plant untouched, and a plant that is reported twice or not at all means "
+            "the register and the walk are not the same code")
+
+
+def test_every_node_this_file_cites_in_prose_is_a_node_this_file_defines():
+    """A citation to a test that does not exist is a pointer into nothing.
+
+    Docstrings are what a reader of a red suite reads first, so a name in one is a promise.
+    At main, line 411 of this file sent the reader to a node that is a strict PREFIX of the
+    real one — three words short of
+    `test_the_parity_check_can_see_a_count_in_a_covers_row`, and no such node exists here.
+    The prose that documents the exemption carried a broken pointer, which is the same
+    defect #3249 is about one level up: a claim about a source nobody can re-open.
+
+    This docstring therefore does not spell the dead name out — this node would otherwise
+    indict its own sentence, exactly as it indicts the one below it, and a guard that fires
+    on its own explanation is a guard someone deletes. The name is rebuilt from the live
+    node's name plus nothing, by trimming the real one back to the prefix main cited.
+    """
+    import ast
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    defined = {n.name for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
+    assert defined, "this module defines no tests, so every citation in it is vacuous"
+
+    prose = "\n".join(d for d in (
+        [ast.get_docstring(tree) or ""]
+        + [ast.get_docstring(n) or "" for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]))
+
+    def undefined_in(text: str) -> list[str]:
+        out = []
+        for name in sorted(set(re.findall(r"\btest_[a-z0-9_]+\b", text))):
+            if name in defined:
+                continue
+            # `test_mc_tab_parity.py` and `test_infrastructure_gpu_inventory.py` are OTHER
+            # files and legitimately named here; a bare `test_x` with no `.py` glued to it
+            # is a promise about a node in this module.
+            if not re.search(re.escape(name) + r"\.py", text):
+                out.append(name)
+        return out
+
+    # Its own prefix-truncated citation, rebuilt from a live name so this docstring never
+    # has to contain the dead string, has to be reported — or the scan is reading a corpus
+    # that can no longer produce a hit and the `== []` below is the same green as no guard.
+    live = "test_the_parity_check_can_see_a_count_in_a_covers_row"
+    assert live in defined, f"{live} was renamed, and this node's control is stale"
+    dead = live[: -len("_in_a_covers_row")]
+    assert undefined_in(f"see `{dead}` for the negative control") == [dead], (
+        "the scan went silent on a citation truncated to the exact shape main's line 411 "
+        "had, so it enforces nothing and the green below is an artefact")
+
+    bad = undefined_in(prose)
+    assert bad == [], (
+        f"prose cites node(s) {bad} that this module does not define — the citation sends "
+        "a reader to a node that is not here; name the real one or say which file")
 
 
 def test_the_parity_check_can_see_a_count_in_a_covers_row():

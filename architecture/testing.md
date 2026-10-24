@@ -224,8 +224,8 @@ round being gated excluded from its own base. On the ledger of 2026-10-24 the ba
 collected 21,341 and passed 21,300, which yields floors of 5,335 and 5,325 (against the
 literals' 1000).
 
-Why the absolute 1000 stopped being enough: it was budgeted when the suite was ~9,600
-(still what `architecture/index.md` quotes this doc for), where 1000 was a tenth of it;
+Why the absolute 1000 stopped being enough: it was budgeted when the suite was ~9,600 across the `tests` rounds of
+2026-09-24, where 1000 was a tenth of it;
 against ~21,300 it is under 5%. And `collected` here is what the run reports having
 **run plus skipped**, not pytest's collection report (`gate._PYTEST_COUNT_WORDS`), so it
 cannot tell a full run from a twentieth of one: a truncated full run that executed 1,200
