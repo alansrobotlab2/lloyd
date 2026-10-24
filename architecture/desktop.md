@@ -1,7 +1,7 @@
 ---
 title: Desktop computer use
 status: implemented
-updated: 2026-09-23
+updated: 2026-10-24
 ---
 
 # Desktop computer use
@@ -25,7 +25,7 @@ Code:
 | Desktop tab routes | `app/routers/desktop.py`, `web/src/components/pages/DesktopPage.tsx` |
 | Images through the harness | `app/harness/tool_images.py` |
 | Config | `desktop:` and `harness.images:` in `config.yaml` |
-| Tests | `tests/test_desktop_module.py`, `tests/test_tool_images.py` |
+| Tests | `tests/test_desktop_module.py`, `tests/test_desktop_frame_mirror.py`, `tests/test_tool_images.py` |
 
 ## 1. What Hermes does, and what transferred
 
@@ -125,10 +125,12 @@ exposes no AT-SPI tree"), and the model acts by coordinate from the image.
 The seat is shared. `desktop_capture` needs no lease. Every `desktop_act`
 action except `wait` needs one.
 
-- `app/desktop_lease.py` keeps `{holder, epoch, expires_at, last_cursor,
-  last_window}`. A missing file, a corrupt file or an expired grant all mean
-  the human holds the lease. That is the opposite of Hermes's private-desktop
-  default, and it is on purpose.
+- `app/desktop_lease.py` keeps `{holder, epoch, expires_at, session_id,
+  last_cursor, last_window}`. A grant may be pinned to one session
+  (`session_id`); a pinned lease then covers only that session. A missing
+  file, a corrupt file or an expired grant all mean the human holds the
+  lease. That is the opposite of Hermes's private-desktop default, and it is
+  on purpose.
 - Only the Desktop tab grants a lease (`POST /api/desktop/lease`, 10/30/60
   minutes, capped at 240). A grant or a revoke toasts through `hyprctl notify`.
 - Before each action the tripwire compares the pointer and the focused window
@@ -138,13 +140,16 @@ action except `wait` needs one.
 - `epoch` is read before an action and again after it. A result produced
   across a takeover is void.
 - Nothing Lloyd can call grants a lease. `safety.check_bash_command` refuses:
-  - a request to the route (curl, wget, xh);
+  - a request to the route (curl, wget, xh, and the `http`/`httpie` aliases);
   - a write to the file (`>`, tee, cp, mv…);
   - a Python call into `desktop_lease.grant`.
 
-  `agent_mcp/main.call_tool` refuses any other non-read-only tool whose
-  arguments name the route or the file. That covers `http_request` to
-  loopback, and `Write`/`Edit`.
+  The same matcher refuses a shell read of the frame mirror
+  (`/api/desktop/frame`, `/api/desktop/state`) — a retained capture is Alan's
+  screen too (#1418). `agent_mcp/main.call_tool` refuses any other
+  non-read-only tool whose arguments name one of those routes or the lease
+  file (`safety.desktop_refusal`). That covers `http_request` to loopback,
+  and `Write`/`Edit`.
 
 ## 4. Who may call it
 
@@ -152,7 +157,9 @@ These rules are refused in `agent_mcp/main.call_tool`, the one path every tool
 call takes, so it does not matter which hooks a caller installed:
 
 - `desktop_*` is refused for a background session: worker, autonomy, or a
-  `task:*` child of one, via `service_control.is_background_session`.
+  `task:*` child of one, via `service_control.classify_session` — which
+  refuses `BACKGROUND` and `UNKNOWN` alike, so a `task:*` id whose parent
+  does not resolve no longer inherits the chat surface (#1961).
 - It is also refused for a bench or eval session and for a sessionless call.
   The screen is Alan's private desktop.
 - `_tool_sandbox.refusal` refuses `desktop_*`, capture included, for read-only
@@ -228,8 +235,14 @@ This is what made any of the above visible to a model, and it also fixed
   JPEG and up to 300 element names to the desktop state route, and the backend
   holds the latest frame in a process global that the frame route returns to any
   loopback or trusted-network peer. That path checks neither the lease nor the
-  session, and the frame outlives the turn, which makes it a different surface
-  from the tools §4 gates (#1418).
+  session, which makes it a different surface from the tools §4 gates (#1418).
+  Its boundary is decided, not missing: the peer address `server.ApiPeerGate`
+  rules on (loopback, or `server.trusted_networks`) is the designed access
+  boundary — #683 ruled "no per-device token for now" on 2026-09-27, so no
+  read path carries a device identity by decision. Retention is bounded:
+  `desktop.frame_ttl_seconds` (default 120 s) ages a stale frame out of the
+  route and out of `latest_frame_summary`, and only a loopback peer may
+  publish (#1418).
 
 ## 6. Turning it on
 
@@ -258,8 +271,9 @@ This is what made any of the above visible to a model, and it also fixed
 ## 7. Not built yet
 
 - The bot screen: a private Xvnc desktop with cua-driver adopted as a second
-  backend, for unattended work. It needs `tigervnc` and `xfce4` from pacman,
-  which requires sudo, so it is blocked on Alan installing them.
+  backend, for unattended work. The pacman prerequisites are installed
+  (`Xvnc` and `xfwm4` are on the box as of 2026-10-24), so the remaining gap
+  is the implementation itself, not the install.
 - Capturing without a toplevel id (every current client has one).
 - `eval/desktop_grounding/`, the instrument §2 says decides
   `desktop.coordinate_space` (#1421).
@@ -284,3 +298,17 @@ This is what made any of the above visible to a model, and it also fixed
   recovery is one-shot but re-arms), #1420 (nothing probes an engine for image
   input), #1421 (no grounding eval), #1422 (hypr.py docstring names the wrong
   grim path).
+- 2026-10-24 — **stale**. Re-checked every path, key, count, route and refusal
+  site against the tree at `7b92abf0`; the backend table, tripwire, guards,
+  annotations, image budget/eviction/keep numbers and the §6 probe trio all
+  hold. The drift is what this doc's own filings shipped since: the frame
+  mirror now has a built boundary (§5 — `ApiPeerGate`'s peer address as the
+  designed gate per the #683 ruling, `desktop.frame_ttl_seconds` default
+  120 s, loopback-only publisher, and `/api/desktop/frame|state` reads added
+  to the shell/argument refusals); the dispatch guard is `classify_session`,
+  which also refuses an unresolvable `task:*` parent (#1961); the lease
+  carries a pinned `session_id`; §7's bot-screen install blocker is
+  obsolete — `Xvnc` and `xfwm4` are installed; and
+  `tests/test_desktop_frame_mirror.py` joined the code table. Filed nothing:
+  every finding was a line of this doc corrected in place, a shipped fix, or
+  a ruled decision (#683).
