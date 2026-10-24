@@ -2078,6 +2078,12 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
             f"{', '.join(failing) or 'none'}\n")
 
 
+#: Where the degraded-edge floor lives, relative to ``PIPELINE_DIR``. One spelling for
+#: the read in `main()` and for the text of the alarm that names it (#3222), so the
+#: alarm can never point a reader at a path the report does not actually read.
+GRAPH_BASELINE_RELPATH = "memory-graph/graph-baseline.json"
+
+
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
             baseline: int) -> list[str]:
     """Conditions that make this run an alarm rather than a report."""
@@ -2088,6 +2094,23 @@ def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
     active = store_stats.get("edges_active", 0)
     if baseline > 0 and active < baseline * 0.5:
         out.append(f"active edges {active:,} is below 50% of the baseline {baseline:,}")
+    if baseline <= 0 and active > 0:
+        # #3222: an absent floor is not a satisfied floor, and until now the two were
+        # one code path. `main()` seeds `baseline = 0` and swallows every read failure,
+        # so a missing file, an unparseable file and a recorded `active_edges` of 0 all
+        # arrive here as `<= 0` — indistinguishable from a comparison that ran and
+        # found the store healthy. The rail therefore alarmed on a store losing half
+        # its edges while being silent on the one event that removes the rail: a wipe
+        # that takes the floor file with it. The class #2968 closed: the sweep's
+        # `--apply` and `backup-graph.sh` both stopped failing open on a missing floor.
+        # `active > 0` keeps a legitimately empty store silent (it has no edges to
+        # compare, and the unreadable store already returned above), and the floor count
+        # is quoted so the alarm reports which shape it found rather than asserting one.
+        out.append(f"the degraded-edge comparison could not run: no usable floor in "
+                   f"{GRAPH_BASELINE_RELPATH} (read as {baseline}) while the store "
+                   f"reports {active:,} active edges — the half-the-baseline rail is "
+                   f"blind tonight, and the run that removed the floor file would "
+                   f"report clean")
     if hygiene.get("contaminated_dirs"):
         out.append(f"{hygiene['contaminated_dirs']} directories hold facts about another entity "
                    f"({hygiene['foreign_facts']} facts) — a merge went wrong")
@@ -2264,10 +2287,15 @@ def main():
     if "both_pct" in pv:
         print(f"  Provenance coverage: {pv['both_pct']}% of {pv['facts']:,} facts")
 
+    # The bare `except` stays, because the value it defaults to is no longer read as
+    # "no opinion": a 0 reaching `_alarms` over a store that reports edges is now the
+    # alarm below, so an absent, unparseable or non-positive floor costs the run its
+    # clean exit code instead of its silence (#3222). One spelling of the path with the
+    # alarm's own text, so the two cannot drift apart.
     baseline = 0
     try:
-        baseline_path = PIPELINE_DIR / "memory-graph" / "graph-baseline.json"
-        baseline = int(json.loads(baseline_path.read_text())["active_edges"])
+        baseline = int(json.loads(
+            (PIPELINE_DIR / GRAPH_BASELINE_RELPATH).read_text())["active_edges"])
     except Exception:
         pass
 

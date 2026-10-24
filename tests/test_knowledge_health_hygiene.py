@@ -490,7 +490,9 @@ def test_untagged_above_the_floor_makes_the_run_an_alarm(tmp_path):
     root = _blank_tree(tmp_path / "facts")
     entities = khr.load_entities(root)
     h = khr.compute_hygiene(entities, datetime.now(timezone.utc))
-    alarms = khr._alarms({"edges_active": 100}, h, 0, 0)
+    # Floor at the store's own count: usable, and not below half, so the single alarm
+    # below is the untagged rail and not #3222's unusable-floor alarm.
+    alarms = khr._alarms({"edges_active": 100}, h, 0, 100)
     assert len(alarms) == 1, alarms
     a = alarms[0]
     for frag in ("4 fact records carry no entity tag", "80.0% of 5 records",
@@ -514,7 +516,9 @@ def test_the_untagged_alarm_is_independent_of_the_contamination_one(tmp_path):
     assert h["untagged"] == {"facts": 0, "dirs": 0, "files": 0, "records": 2,
                              "share_pct": 0.0, "floor_pct": 0.5,
                              "over_floor": False}
-    alarms = khr._alarms({"edges_active": 100}, h, 0, 0)
+    # Same usable floor as the node above, so `len(alarms) == 1` still counts the merge
+    # alarm alone and not a floor alarm that arrived with #3222.
+    alarms = khr._alarms({"edges_active": 100}, h, 0, 100)
     assert len(alarms) == 1 and "a merge went wrong" in alarms[0], alarms
     assert not any("entity tag" in a for a in alarms), alarms
 

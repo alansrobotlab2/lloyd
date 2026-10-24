@@ -18,6 +18,7 @@ path intact on the way, because a fact that carries an `event_date` still ages f
 """
 import importlib.util
 import inspect
+import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -272,6 +273,39 @@ def test_missing_coverage_measurement_is_not_read_as_clean(tmp_path):
 
 # ── clause 6: none of this reaches the alarm channel ──────────────────────────
 
+#: Where the floor lives relative to `PIPELINE_DIR`, spelled by this file and not by the
+#: report: `test_the_floor_path_the_alarm_names_is_the_path_main_reads` pins it against
+#: the constant `main()` reads, and every node below seeds through this literal. If the
+#: two ever disagree, the seeded file is not the file the report reads, the end-to-end
+#: nodes fail on the alarm, and this node says which side moved.
+GRAPH_FLOOR_RELPATH = "memory-graph/graph-baseline.json"
+
+
+def _seed_graph_floor(tmp_path, monkeypatch, *, active_edges: int | None = None,
+                      contents: str | None = None) -> Path:
+    """Give `main()` a graph floor under a `PIPELINE_DIR` of this node's own.
+
+    The report reads the floor at `PIPELINE_DIR / GRAPH_FLOOR_RELPATH`, and `PIPELINE_DIR`
+    comes from `app.paths` (`$LLOYD_DATA`, the root marker, or the production root) — never
+    from `$HOME`, which is why the `$HOME` patch the end-to-end nodes carry does nothing to
+    it. Under pytest `tests/conftest.py` points `$LLOYD_DATA` at a scratch directory, so
+    these runs had no floor at all until #3222 gave them one. `active_edges` writes a
+    usable floor as the sweep writes it; `contents` writes the bytes of a broken one;
+    neither writes no file, which is the wipe the new alarm exists for.
+    """
+    pipeline = tmp_path / "pipeline"
+    floor = pipeline / GRAPH_FLOOR_RELPATH
+    floor.parent.mkdir(parents=True, exist_ok=True)
+    if active_edges is not None:
+        floor.write_text(json.dumps(
+            {"active_edges": active_edges,
+             "recorded_at": "2026-10-17T15:19:37.561400+00:00"}))
+    elif contents is not None:
+        floor.write_text(contents)
+    monkeypatch.setattr(khr, "PIPELINE_DIR", pipeline)
+    return floor
+
+
 def _clean_hygiene() -> dict:
     return {"contaminated": [], "contaminated_dirs": 0, "foreign_facts": 0,
             "near_dup_clusters": 0, "near_dup_dirs": 0, "near_dup_tiers": {},
@@ -285,7 +319,9 @@ def test_alarm_inputs_do_not_include_staleness(tmp_path):
         "store_stats", "hygiene", "duplicate_id_files", "baseline")
     assert (khr.EXIT_OK, khr.EXIT_ALARM) == (0, 2)
 
-    alarms = khr._alarms({"edges_active": 53416}, _clean_hygiene(), 0, 0)
+    # Floor at the store's own count — usable, and not below half — so the empty alarm
+    # set below is a statement about staleness and not about a missing floor (#3222).
+    alarms = khr._alarms({"edges_active": 53416}, _clean_hygiene(), 0, 53416)
     assert alarms == []
 
 
@@ -522,10 +558,12 @@ def test_main_prints_the_line_and_exits_zero(tmp_path, monkeypatch):
         {"fact": "old claim", "event_date": _iso(200)},
         {"fact": "undatable claim"},
     ])
-    # HOME is where the graph baseline lives; pointing it at tmp_path keeps the
-    # baseline out of the verdict so the exit code under test is only about
-    # staleness.
+    # HOME is patched so no fixture can reach the operator's real home. It is NOT where
+    # the graph floor lives — `main()` reads that off `PIPELINE_DIR` — so the usable
+    # floor this node needs, and needs since #3222 made an absent one an alarm, is
+    # seeded below at the count the faked store itself reports.
     monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_graph_floor(tmp_path, monkeypatch, active_edges=53416)
     monkeypatch.setattr(khr, "_kg_store",
                         lambda: _FakeStore([{"source": "Pile", "target": "Other", "type": "uses"}],
                                            {"edges_active": 53416, "edges_total": 53416}))
@@ -865,6 +903,9 @@ def test_the_nightly_run_prints_the_cohort_line_and_exits_zero(tmp_path, monkeyp
         {"fact": "undatable claim"},
     ])
     monkeypatch.setenv("HOME", str(tmp_path))
+    # A usable floor at the count the faked store reports, so the degraded-edge
+    # comparison runs and passes and `rc == EXIT_OK` stays about staleness alone (#3222).
+    _seed_graph_floor(tmp_path, monkeypatch, active_edges=53416)
     monkeypatch.setattr(khr, "_kg_store",
                         lambda: _FakeStore([{"source": "Rebuilt", "target": "Other", "type": "uses"}],
                                            {"edges_active": 53416, "edges_total": 53416}))
@@ -975,6 +1016,10 @@ def test_cardinality_fail_is_report_output_and_still_exits_zero(tmp_path, monkey
     _write(root, "Pile", "state", [{"fact": "fresh claim", "event_date": _iso(1)}])
     monkeypatch.setenv("HOME", str(tmp_path))
     edges = _drifted_edges()
+    # Floor at the store's own count. A cardinality FAIL must still exit 0, and since
+    # #3222 an unseeded floor is itself an alarm — which would make this node pin the
+    # floor instead of the cardinality verdict.
+    _seed_graph_floor(tmp_path, monkeypatch, active_edges=len(edges))
     monkeypatch.setattr(khr, "_kg_store",
                         lambda: _FakeStore(edges, {"edges_active": len(edges),
                                                    "edges_total": len(edges)}))
@@ -1001,7 +1046,9 @@ def test_alarms_take_no_edge_type_input():
     cardinality verdict can reach the exit code through it."""
     assert list(inspect.signature(khr._alarms).parameters) == [
         "store_stats", "hygiene", "duplicate_id_files", "baseline"]
-    assert khr._alarms({"edges_active": 100}, {}, 0, 0) == []
+    # Floor at the store's own count, so the empty list below is the cardinality verdict
+    # staying out of the alarms and not #3222's floor alarm going off unremarked.
+    assert khr._alarms({"edges_active": 100}, {}, 0, 100) == []
 
 
 # ── #1596: the conflicts_with resolution trace is counted, and counted only ───
@@ -1099,14 +1146,17 @@ def test_the_trace_line_never_moves_the_alarm_exit_code(tmp_path, monkeypatch):
     """Clause 3, end to end: a corpus holding a real resolution exits EXIT_OK,
     posts no alarm, and `_alarms()` has no parameter able to carry the number.
 
-    The alarm baseline is the real one (`active_edges` 37,867 on 2026-09-28), so
-    the faked store reports above half of it and the exit code under test is about
-    the trace and nothing else.
+    The alarm floor is seeded at the count the faked store reports (53,416), so the
+    degraded-edge comparison runs and finds nothing and the exit code under test is
+    about the trace and nothing else. Before #3222 this node rode an absent floor, which
+    the report read as "no opinion"; that same absence is now an alarm, so the floor has
+    to be a real one.
     """
     root = tmp_path / "facts"
     out = tmp_path / "out"
     _settled_pair(root, traced=True)
     monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_graph_floor(tmp_path, monkeypatch, active_edges=53416)
     monkeypatch.setattr(khr, "_kg_store", lambda: _FakeStore(
         [{"source": "Lloyd", "target": "Other", "type": "uses"}],
         {"edges_active": 53416, "edges_total": 53416}))
@@ -2106,3 +2156,191 @@ def test_the_skill_names_the_rebuild_tail_instead_of_calling_it_decay():
     # A row count in this bullet is a number the skill cannot keep current. The dated
     # 2026-10-09 measurement above it stays — that one is a measurement, not a forecast.
     assert "12,737" not in bflat and "16,693" not in bflat and "20,104" not in bflat, bflat[:300]
+
+
+# ── #3222: a floor that cannot be read is an alarm, not a silence ──────────────
+#
+# `main()` seeds `baseline = 0` and swallows every read failure of
+# `_pipeline/memory-graph/graph-baseline.json`, and `_alarms` had exactly one baseline
+# condition — `if baseline > 0 and active < baseline * 0.5` — so three shapes arrived as
+# "no opinion": the file absent, the file unparseable, and a floor parsed at 0. The
+# measured shape of the hole, taken off the live store the day this was triaged:
+# `_alarms({"edges_active": 50152}, <clean hygiene>, 0, 0)` returned `[]`. So the rail
+# that exists to catch the store losing half its edges was silent on the one event that
+# removes the rail — a wipe taking the floor file with it — while the same page (§3 of
+# `architecture/knowledge-graph.md`) records that the sweep's `--apply` and
+# `backup-graph.sh` refusals were both closed on that hole (#2968, and the backup's own
+# missing-input refusal). The nodes below pin the third reader of the same file closing
+# it too: the alarm names the path, the four parameters of `_alarms` are unchanged, a
+# usable floor moves the verdict in neither direction, and the two legitimate silences —
+# an empty store and an unreadable store — stay silent.
+#
+# The end-to-end nodes drive `main()` with `_alert` captured rather than running the
+# script as a subprocess for the same reason the hygiene file gives: a real alarm is
+# posted to Discord, and no test may do that to a live channel. The exit code, the alert
+# payload and the floor file are the boundary the nightly job actually crosses, and all
+# three are asserted here.
+
+#: The live floor the item quotes: 50,152 active edges, recorded 2026-10-17T15:19:37Z.
+#: Every number asserted below is derived from it, so a reader can check the halves.
+LIVE_FLOOR = 50152
+
+#: The three shapes of an unusable floor, as the item names them. `None` is the file
+#: absent, a non-JSON body is the unparseable file, and a floor parsed at 0 is the
+#: `active_edges <= 0` shape — all three reach `_alarms` as `baseline <= 0`.
+UNUSABLE_FLOOR_SHAPES = (
+    ("absent", None),
+    ("unparseable", "this is not json {{{"),
+    ("zero-count", '{"active_edges": 0, "recorded_at": "2026-10-17T15:19:37.561400+00:00"}'),
+)
+
+
+def _run_main_with_a_floor(tmp_path, monkeypatch, *, shape=None, store_edges: int):
+    """Run `main()` end to end over a faked store and one shape of graph floor.
+
+    `shape` is one of `UNUSABLE_FLOOR_SHAPES` (contents, or `None` for the file absent);
+    `shape=None` with a `usable_floor` count writes a real one instead. Returns the
+    exit code and every captured alert payload.
+    """
+    root = tmp_path / "facts"
+    out = tmp_path / "out"
+    _write(root, "Floor", "state", [{"fact": "fresh claim", "event_date": _iso(1)}])
+    if isinstance(shape, int):
+        _seed_graph_floor(tmp_path, monkeypatch, active_edges=shape)
+    else:
+        _seed_graph_floor(tmp_path, monkeypatch, contents=shape)
+    monkeypatch.setattr(khr, "_kg_store", lambda: _FakeStore(
+        [{"source": "Floor", "target": "Other", "type": "uses"}],
+        {"edges_active": store_edges, "edges_total": store_edges}))
+    monkeypatch.setattr(khr, "fact_duplicate_stats",
+                        lambda: {"unavailable": True, "reason": "store faked in test"})
+    alerts: list = []
+    monkeypatch.setattr(khr, "_alert", lambda alarms, path: alerts.append(alarms))
+    monkeypatch.setattr(sys, "argv", ["knowledge-health-report.py",
+                                     "--facts-dir", str(root),
+                                     "--output-dir", str(out)])
+
+    rc = khr.main()
+    return rc, alerts
+
+
+def test_an_unusable_floor_raises_one_alarm_naming_the_floor_path():
+    """Clause 1, at the function: a store reporting edges and a floor giving no usable
+    count is one alarm, and it names the file a human has to go and look at."""
+    alarms = khr._alarms({"edges_active": LIVE_FLOOR}, _clean_hygiene(), 0, 0)
+
+    assert len(alarms) == 1, alarms
+    a = alarms[0]
+    assert GRAPH_FLOOR_RELPATH in a, f"the alarm never names the file: {a}"
+    assert "the degraded-edge comparison could not run" in a, a
+    # The count it did see, so the alarm is falsifiable against the store rather than
+    # being a bare complaint about a file.
+    assert f"{LIVE_FLOOR:,} active edges" in a, a
+
+
+def test_the_three_unusable_floor_shapes_agree_and_exit_alarm(tmp_path, monkeypatch):
+    """Clause 1, across the boundary the nightly job crosses: all three shapes of an
+    unusable floor exit `EXIT_ALARM` with the same single entry in the alert payload."""
+    entries = []
+    for name, contents in UNUSABLE_FLOOR_SHAPES:
+        rc, alerts = _run_main_with_a_floor(
+            tmp_path / name, monkeypatch, shape=contents, store_edges=LIVE_FLOOR)
+        assert rc == khr.EXIT_ALARM, f"{name}: rc={rc}"
+        assert len(alerts) == 1 and len(alerts[0]) == 1, f"{name}: {alerts}"
+        assert GRAPH_FLOOR_RELPATH in alerts[0][0], f"{name}: {alerts}"
+        assert "the degraded-edge comparison could not run" in alerts[0][0], alerts
+        entries.append(alerts[0][0])
+
+    assert entries[0] == entries[1] == entries[2], (
+        f"the three shapes raised three different alarms: {entries}")
+
+
+def test_the_unusable_floor_alarm_survives_a_negative_recorded_count(tmp_path,
+                                                                    monkeypatch):
+    """The clause says `active_edges <= 0`, and the read is `int(...)` with no floor at
+    zero: a negative count is the fourth shape, and it alarms alone just the same."""
+    rc, alerts = _run_main_with_a_floor(
+        tmp_path, monkeypatch,
+        shape='{"active_edges": -5, "recorded_at": "2026-10-17T15:19:37.561400+00:00"}',
+        store_edges=LIVE_FLOOR)
+
+    assert rc == khr.EXIT_ALARM, f"rc={rc}"
+    assert len(alerts) == 1 and len(alerts[0]) == 1, alerts
+    assert GRAPH_FLOOR_RELPATH in alerts[0][0], alerts
+
+
+def test_a_usable_floor_moves_the_alarm_set_in_neither_direction():
+    """Clause 2, at the function: the shrink line keeps its exact words, the new entry
+    never rides with it, and a count at or above the floor stays as silent as it was."""
+    shrink = (f"active edges 1 is below 50% of the baseline {LIVE_FLOOR:,}")
+
+    below = khr._alarms({"edges_active": 1}, _clean_hygiene(), 0, LIVE_FLOOR)
+    assert below == [shrink], below
+    assert not any("could not run" in a for a in below), below
+    # Exactly half is not below half: `<`, not `<=`, and this is where that is pinned.
+    assert khr._alarms({"edges_active": LIVE_FLOOR // 2}, _clean_hygiene(), 0,
+                       LIVE_FLOOR) == []
+    assert khr._alarms({"edges_active": LIVE_FLOOR}, _clean_hygiene(), 0,
+                       LIVE_FLOOR) == []
+    assert khr._alarms({"edges_active": LIVE_FLOOR + 1}, _clean_hygiene(), 0,
+                       LIVE_FLOOR) == []
+    # One edge under half, on the live floor, on the old line and nothing else.
+    assert khr._alarms({"edges_active": LIVE_FLOOR // 2 - 1}, _clean_hygiene(), 0,
+                       LIVE_FLOOR) == [
+        f"active edges {LIVE_FLOOR // 2 - 1:,} is below 50% of the baseline "
+        f"{LIVE_FLOOR:,}"]
+
+
+def test_a_floor_below_half_still_alarms_on_the_old_line_alone(tmp_path, monkeypatch):
+    """Clause 2 end to end: with a usable floor the exit code still comes from the
+    half-the-baseline comparison, and the entry is that line word for word."""
+    rc, alerts = _run_main_with_a_floor(tmp_path, monkeypatch,
+                                        shape=LIVE_FLOOR * 4, store_edges=100)
+
+    assert rc == khr.EXIT_ALARM, f"rc={rc}"
+    assert alerts == [["active edges 100 is below 50% of the baseline 200,608"]], alerts
+
+
+def test_the_two_silent_zeros_stay_silent():
+    """Clause 3, at the function: a store that legitimately holds nothing says nothing,
+    and an unreadable store still says exactly the one thing it always said."""
+    assert khr._alarms({"edges_active": 0}, _clean_hygiene(), 0, 0) == []
+    assert khr._alarms(None, _clean_hygiene(), 0, 0) == [
+        "the knowledge-graph store could not be read"]
+    # An absent store outranks the floor: without a count there is no comparison
+    # to have failed, and the report already has its one true statement.
+    assert khr._alarms(None, _clean_hygiene(), 0, LIVE_FLOOR) == [
+        "the knowledge-graph store could not be read"]
+
+
+def test_an_empty_store_with_no_floor_still_exits_zero(tmp_path, monkeypatch):
+    """Clause 3 end to end, and the shape a landing would otherwise punish: a fresh
+    install has an empty store and no floor file, and must not be woken by this alarm."""
+    rc, alerts = _run_main_with_a_floor(tmp_path, monkeypatch, store_edges=0)
+
+    assert rc == khr.EXIT_OK, f"rc={rc}, alerts={alerts}"
+    assert alerts == [], alerts
+
+
+def test_the_unusable_state_rides_the_fourth_parameter_alone():
+    """Clause 4: no `measured=` flag and no fifth argument. The single `baseline: int`
+    carries the state because all three shapes reach it as `<= 0` — which is also why
+    this rail did not need the `recorded_zero` split #2968 needed in `guard_vacuity`."""
+    params = tuple(inspect.signature(khr._alarms).parameters)
+    assert params == ("store_stats", "hygiene", "duplicate_id_files", "baseline"), params
+    assert "measured" not in params and "baseline_measured" not in params, params
+    # And it is the parameter that carries it, not a module-level fallback: the same
+    # store, the same hygiene, only the floor differing, is the whole difference.
+    assert khr._alarms({"edges_active": LIVE_FLOOR}, _clean_hygiene(), 0, 0) != []
+    assert khr._alarms({"edges_active": LIVE_FLOOR}, _clean_hygiene(), 0, LIVE_FLOOR) == []
+
+
+def test_the_floor_path_the_alarm_names_is_the_path_main_reads():
+    """The alarm sends a reader to a file. This pins that the string it names is the
+    string `main()` opens, so the alarm can never point at a path nobody reads."""
+    assert GRAPH_FLOOR_RELPATH == khr.GRAPH_BASELINE_RELPATH, (
+        f"the test seeds {GRAPH_FLOOR_RELPATH!r} and the report reads "
+        f"{khr.GRAPH_BASELINE_RELPATH!r}")
+    src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
+    assert "PIPELINE_DIR / GRAPH_BASELINE_RELPATH" in src, (
+        "main() no longer reads the floor through the constant the alarm quotes")
