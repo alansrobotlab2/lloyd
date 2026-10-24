@@ -511,15 +511,33 @@ see *Tools*.
    half has refused since #1557 and still does, and a measured floor of 0 still applies
    labelled `unmeasured` — a recorded zero is a statement, an absent one is a missing
    comparison, and the two are separate classes in `guard_vacuity.py` so a defaulted
-   `measured` argument cannot quietly re-widen the hole. A floor is bootstrapped only by
-   a run that went on to apply (or by a dry-run, which is the fresh-install route), so a
-   night that refuses leaves the floor as it found it instead of recording the damaged
-   count as the new normal. What still does not refuse, named so nobody rediscovers it:
+   `measured` argument cannot quietly re-widen the hole. **The floor moves only on a run
+   that got past this decision** (#3221): on the apply path, once a refusal has already
+   returned, `update_baseline` ratchets it up to that run's *pre-apply* active-edge
+   count, and an unmeasured apply bootstraps the file at that same place. A dry-run
+   bootstraps a floor it could not read — the fresh-install route — and never raises one
+   it read, because a read-only run must not move the reference the apply is then
+   measured against; `scripts/maintenance/corpus_shape.py` names that self-reference as
+   #543's failure in its own module docstring, "a baseline the run it judges rewrites".
+   Either way a night that refuses leaves the floor as it found it
+   instead of recording the damaged count as the new normal. Why the ratchet's location
+   is stated as a rule: #2968 moved the bootstrap past the decision inside
+   `if not baseline_measured:`, which quietly took the ratchet out of every run that
+   *read* a floor — every nightly #48 apply — and the file froze at its first bootstrap
+   (50,152, stamped 2026-10-17) while six applies grew the store to 52,878, each one
+   reporting `baseline_active_edges: 50152`. A reference that stops being rewritten is a
+   trip point drifting below the graph it guards, one edge per edge added. What still does not refuse, named so nobody rediscovers it:
    (a) `--allow-degraded` on one of those runs both applies and seeds the floor from the
    run's own count, re-arming the guard from a possibly-damaged store — deliberate, since
    a permanently absent file strands every following night (#1395); (b) `update_baseline`
-   is max-only, so a slow leak never trips it, which is also what self-heals a refused
-   backup within one nightly sweep; (c) the floor is written by a job in the family that
+   is max-only, so the ratchet can only ever *raise* the reference and a slow leak never
+   trips it. What self-heals a refused backup within one nightly sweep is emphatically
+   not max-only: a backup refuses on an *absent* reference, which only a bootstrap can
+   answer, and the bootstrap that answers it is the **#48 dry-run's** — the job's skill
+   runs the dry-run half before the apply every night, so the absent file is re-seeded
+   by a run that cannot be refused; an unattended `--apply` alone would meet #1395's
+   permanent refusal, because #2968 made an absent floor a refusal and a refusal writes
+   nothing. (c) the floor is written by a job in the family that
    reads it, which is Deliverable 3's independent-reference ask. A backup
    taken after a wipe is worse than no backup: it rotates the last good
    snapshot out of the window.
@@ -781,6 +799,26 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-10-24 — #3221 fixed: rule 3's floor had stopped moving.** The rule said a
+  floor is "bootstrapped only by a run that went on to apply", and after #2968 that
+  was true in a way nobody intended: the move put `update_baseline` below the guard
+  decision inside `if not baseline_measured:`, so a run that *read* a floor never wrote
+  one and the max-ratchet was unreachable on every nightly #48 apply. Measured on disk:
+  `graph-baseline.json` frozen at 50,152 (`recorded_at` 2026-10-17T15:19:37Z) across six
+  applies whose own `safety.active_edges` climbed to 52,878, each reporting
+  `baseline_active_edges: 50152`. Three consumers read that one number — the sweep's
+  guard, `backup-graph.sh`'s `THRESHOLD=$((BASE / 2))` and
+  `knowledge-health-report.py`'s `baseline * 0.5` — so a 27,802-edge loss (53% of the
+  store) passed all three. The apply path now ratchets the floor after the decision, on
+  the count it read before applying, max-only as ever; the dry-run stays bootstrap-only.
+  Rule 3's (b) also credited `update_baseline` being max-only with self-healing a
+  refused backup within one nightly sweep — true, but by the #48 dry-run's bootstrap of
+  an absent floor, not by max-only, and the sentence now says which is which. Pinned by
+  `tests/test_entity_sweep.py::test_a_measured_apply_above_its_floor_ratchets_the_floor_to_its_pre_apply_count`,
+  `::test_a_measured_apply_below_its_floor_never_lowers_the_floor`,
+  `::test_a_refused_apply_leaves_the_floor_it_compared_byte_identical`,
+  `::test_a_dry_run_bootstraps_an_absent_floor_and_never_ratchets_one_it_read`, and
+  `tests/test_kg_doc_claims.py::test_rule_3_names_where_the_ratchet_lives_and_what_re_heals_a_refused_backup`.
 - **2026-10-18 — stale.** All the machinery is live and re-verified against the
   tree (store API, gate order, write chain, tools, the doc-claim tests), but the
   document's *measured state* was three weeks behind an event it never

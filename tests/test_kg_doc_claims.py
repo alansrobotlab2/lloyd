@@ -61,6 +61,31 @@ DEAD_DIAGRAM = ("DRY RUN ONLY", "a human reads the plan and runs --apply")
 #: What #48 actually runs on schedule, spelled the way the command is spelled.
 APPLY_CMD = "`--apply --tiers CASE,PUNCT`"
 
+#: Rule 3's pre-#3221 wording for the two sentences #3221 re-derived. Both were TRUE
+#: on disk and both named the wrong mechanism, which is why they are asserted absent
+#: rather than merely superseded: a rule that is true for a reason it does not state is
+#: how the next refactor drops the mechanism and keeps the sentence.
+#:
+#: `DEAD_BOOTSTRAP_SENTENCE` covered the floor with "bootstrapped only by a run that
+#: went on to apply" and never said where the max-ratchet lived. After #2968 moved
+#: `update_baseline` below the guard inside `if not baseline_measured:`, the ratchet was
+#: unreachable on every run that READ a floor — every nightly #48 apply — and the file
+#: froze at 50,152 (`recorded_at` 2026-10-17T15:19:37Z) while six applies grew the store
+#: to 52,878, each reporting `baseline_active_edges: 50152`.
+#:
+#: `DEAD_SELF_HEAL` credited `update_baseline` being max-only with re-arming a backup
+#: that had refused for want of a reference. That refusal is about an ABSENT file, which
+#: only a bootstrap can answer, and the bootstrap that answers it is #48's dry-run — the
+#: half the job's skill runs before the apply every night.
+#:
+#: `DEAD_DRY_RUN` is the pre-#3221 shape of the read-only bound: it names the seed and
+#: says nothing about a floor the dry-run *read*, which is the half that has to be on the
+#: page now the apply path is the one that raises.
+DEAD_BOOTSTRAP_SENTENCE = "A floor is bootstrapped only by a run that went on to apply"
+DEAD_SELF_HEAL = ("(b) `update_baseline` is max-only, so a slow leak never trips it, "
+                  "which is also what self-heals a refused backup within one nightly sweep")
+DEAD_DRY_RUN = "A dry-run bootstraps a floor it could not read (the fresh-install route)"
+
 
 def _text() -> str:
     return DOC.read_text()
@@ -286,3 +311,202 @@ def test_the_two_stale_sites_fail_their_own_checks_when_restored():
     header = _sweep_node(restored_diagram).splitlines()[0]
     assert not (re.search(r"\bappl(?:y|ies)\b", header, re.I) and "CASE" in header), (
         "the diagram predicate passed a #48 line that says the run is a dry run")
+
+
+# ── rule 3's floor: where the ratchet lives, and what re-heals a refused backup ──
+#
+# #3221 is a documentation bug as much as a code bug. The code defect was three lines —
+# `update_baseline` wrapped in `if not baseline_measured:` on both call sites — and every
+# one of those lines was written deliberately, by #2968, to close a worse hole. What let
+# the ratchet die unnoticed for a week was that rule 3 described the floor in a sentence
+# that stayed true while the mechanism behind it went missing ("bootstrapped only by a
+# run that went on to apply"), and credited max-only with a self-heal that was actually
+# being performed by a different run than the one the sentence was about.
+
+
+def _rule3(text: str) -> str:
+    """Rule 3's whole block, scoped to §Rules that came out of the incidents.
+
+    Section-scoped before `_rule_block` rather than handed straight to it: that matcher
+    answers on the first `N. **` line in whatever text it is given, and this file numbers
+    more than one list, so a "rule 3" somewhere else in the document must not be able to
+    satisfy a claim about THE rule that governs `--apply`.
+    """
+    return _rule_block(_section(text, RULES_SECTION), "3.")
+
+
+def _ratchet_sentence(block: str) -> str | None:
+    """The one sentence stating where the floor may move, and to which count.
+
+    Four requirements because the sentence has to be the rule and not the story of the
+    bug: the floor moves on an APPLY that got past the guard's DECISION (not "a run that
+    went on to apply", which after #2968 described a bootstrap and nothing else); it moves
+    by RATCHET; it moves to the store's count BEFORE the apply, which is #1557's
+    measure-before-write order; and the block's own explanatory sentence about what #2968
+    broke — which mentions a ratchet, an apply and a decision — carries no `pre-apply`, so
+    only the normative sentence clears this.
+    """
+    for s in _sentences(block):
+        if (re.search(r"\bratchet", s, re.I)
+                and re.search(r"\bappl(?:y|ies)\b", s, re.I)
+                and re.search(r"\bdecision\b|\brefus", s, re.I)
+                and re.search(r"pre-apply|before[^\n]{0,40}appl", s, re.I)):
+            return s
+    return None
+
+
+def _dry_run_sentence(block: str) -> str | None:
+    """The sentence bounding the dry-run to bootstrapping: it seeds a floor it could not
+    read and NEVER raises one it read.
+
+    This is the half that has to be on the page once the apply path raises the floor: with
+    both halves able to write, "a dry-run seeds the floor" reads as "a dry-run maintains
+    the baseline", and a reader then expects the nightly dry-run to keep the reference
+    young — which is precisely the belief that let 50,152 ride for a week.
+    """
+    for s in _sentences(block):
+        if (re.search(r"dry[- ]?run", s, re.I)
+                and re.search(r"never\s+(?:raises|ratchets|writes|touches)", s, re.I)):
+            return s
+    return None
+
+
+def _self_heal_sentence(block: str) -> str | None:
+    """The sentence naming WHAT re-arms a backup that refused for want of a reference.
+
+    It must be a BOOTSTRAP, and specifically #48's DRY-RUN — not max-only. Max-only cannot
+    answer an absent file by construction: there is nothing to take a maximum with, and
+    #2968 made an absent floor a refusal, so an unattended apply is not the run that
+    re-seeds it.
+    """
+    for s in _sentences(block):
+        if (re.search(r"self-heal", s, re.I)
+                and re.search(r"bootstrap", s, re.I)
+                and re.search(r"dry[- ]?run", s, re.I)
+                and "#48" in s):
+            return s
+    return None
+
+
+def _defined_nodes() -> set[str]:
+    """Every `test_*` node defined in this module or in `tests/test_entity_sweep.py`.
+
+    The #3221 review-log entry pins nodes in BOTH files — the behaviour in the sweep's own
+    suite, the prose here — so its citations can only resolve against both, where #2641's
+    entry was deliberately held to this module alone.
+    """
+    names: set[str] = set()
+    for f in (Path(__file__), ROOT / "tests" / "test_entity_sweep.py"):
+        for n in ast.walk(ast.parse(f.read_text())):
+            if isinstance(n, ast.FunctionDef) and n.name.startswith("test_"):
+                names.add(n.name)
+    return names
+
+
+def test_rule_3_names_where_the_ratchet_lives_and_what_re_heals_a_refused_backup():
+    """Clause 5 of #3221: rule 3 has to say which run may move the floor, and which run
+    re-arms a backup — the two things its old sentences left a reader to guess.
+
+    The three dead sentences above are asserted absent, then each live replacement is
+    located, then each is spliced back out and re-graded against its own predicate, so a
+    node that only ever sees the current bytes cannot pass by accident of phrasing.
+    Rule 3's (c) — the floor is written by a job in the family that reads it, which is
+    Deliverable 3's independent-reference ask — is re-checked rather than rewritten: the
+    ratchet is more reasons for that complaint, not fewer, and (c) is the sentence a
+    reader needs to still be there after the paragraph around it moved.
+    """
+    text = _text()
+    block = _rule3(text)
+    for dead in (DEAD_BOOTSTRAP_SENTENCE, DEAD_SELF_HEAL, DEAD_DRY_RUN):
+        assert dead not in block, (
+            f"rule 3 still carries {dead!r}. It is not wrong so much as unfalsifiable: "
+            f"it stayed true while the mechanism it described went missing, and it is "
+            f"why nobody noticed the floor had stopped moving")
+
+    ratchet = _ratchet_sentence(block)
+    assert ratchet is not None, (
+        "rule 3 never states, in one sentence, that the floor RATCHETS on an apply that "
+        "got past the guard decision to the store's PRE-apply count. Without it, "
+        "'where does the reference come from' has no answer on the page — which is how "
+        "the floor sat at 50,152 while the store grew to 52,878 and three guards kept "
+        "trip-pointing off it")
+    dry_run = _dry_run_sentence(block)
+    assert dry_run is not None, (
+        "rule 3 never says the dry-run bootstraps a floor it could not read and NEVER "
+        "raises one it read. With the apply now able to raise the floor, that bound is "
+        "the difference between a read-only run and the writer of the reference")
+    self_heal = _self_heal_sentence(block)
+    assert self_heal is not None, (
+        "rule 3 never says the one-night self-heal of a refused backup comes from #48's "
+        "dry-run BOOTSTRAP. Crediting max-only instead points the next change at the "
+        "wrong run: a backup refuses on an ABSENT reference, and max-only has no "
+        "opinion about absence")
+    assert re.search(r"max-only", self_heal, re.I) and re.search(r"not", self_heal, re.I), (
+        "the self-heal sentence should also say it is NOT max-only, since that is the "
+        "claim it is replacing: " + self_heal[:120])
+    assert re.search(r"\(c\)[\s\S]{0,240}?written by a job in the family that\s+reads it",
+                     block, re.I), (
+        "rule 3's (c) is gone or reworded past recognition. The ratchet gives that "
+        "complaint MORE weight, not less — the job that gates on the reference now also "
+        "raises it — so (c) has to survive the paragraph around it")
+
+    # Each predicate must reject the wording it replaced, one at a time.
+    no_ratchet = block.replace(ratchet, DEAD_BOOTSTRAP_SENTENCE + ".", 1)
+    assert DEAD_BOOTSTRAP_SENTENCE in no_ratchet, "the splice did not take — nothing tested"
+    assert _ratchet_sentence(no_ratchet) is None, (
+        "the ratchet predicate passed the pre-#3221 sentence, so it is not checking for "
+        "a floor that moves on a passed decision")
+
+    no_dry_run = block.replace(dry_run, DEAD_DRY_RUN + ".", 1)
+    assert DEAD_DRY_RUN in no_dry_run, "the splice did not take — nothing tested"
+    assert _dry_run_sentence(no_dry_run) is None, (
+        "the dry-run predicate passed a sentence that only names the seed, which is the "
+        "phrasing that let a ratcheting dry-run read as normal")
+
+    no_self_heal = block.replace(self_heal, DEAD_SELF_HEAL + ";", 1)
+    assert DEAD_SELF_HEAL in no_self_heal, "the splice did not take — nothing tested"
+    assert _self_heal_sentence(no_self_heal) is None, (
+        "the self-heal predicate passed the max-only credit, so it is not checking which "
+        "run re-seeds an absent floor")
+
+
+def test_review_log_names_3221_and_where_the_ratchet_moved():
+    """The section's own form: a dated bullet naming what was stale, ending `Pinned by …`
+    with the nodes that hold it. #3221 corrected rule 3 in a paragraph an operator reads
+    before deciding whether a nightly write into `kg.sqlite` needs watching, and a
+    correction with no entry is one the next review pass re-litigates.
+
+    The entry also has to carry the measured pair — 50,152 frozen against 52,878 of
+    store — because that is what makes it a record rather than a paraphrase of the rule,
+    and its citations have to resolve across both test files it pins.
+    """
+    entry = next((e for e in _review_entries(_section(_text(), REVIEW_SECTION))
+                  if "#3221" in e), None)
+    assert entry is not None, (
+        "§Review log has no entry for #3221, so nothing records that rule 3's floor "
+        "sentence was corrected here rather than left as a true-but-empty claim")
+    assert entry.startswith("- **2026-10-24"), (
+        "the #3221 entry must carry the date the correction was made, the way every "
+        "other entry in this section does: " + entry[:40])
+    for site in ("rule 3", "dry-run", "max-only"):
+        assert site in entry.lower(), (
+            f"the entry names #3221 but never the {site} — the entry exists to say "
+            "which sentence moved and to which mechanism")
+    for figure in ("50,152", "52,878"):
+        assert figure in entry, (
+            f"the entry does not carry the measured {figure}; without the frozen floor "
+            "beside the store's own count it restates the rule instead of recording what "
+            "the rule failed to catch")
+    assert "Pinned by" in entry, (
+        "the entry does not follow the section's `Pinned by …` form, so it reads as a "
+        "claim rather than a checked one")
+    cited = set(re.findall(r"::(test_\w+)", entry))
+    assert cited, "the entry cites no test node by name, so its pin cannot resolve"
+    assert "tests/test_kg_doc_claims.py" in entry and "tests/test_entity_sweep.py" in entry, (
+        "the entry pins only one file; the behaviour and the prose are pinned in two, and "
+        "a reader needs to find both")
+    missing = cited - _defined_nodes()
+    assert not missing, (
+        f"the entry pins {sorted(missing)}, which neither test file defines — a pin to a "
+        "node that does not exist is worse than no pin, because it closes the report "
+        "that would have found the gap")

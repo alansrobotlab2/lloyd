@@ -1843,13 +1843,20 @@ def main() -> int:
     print(f"Plan written: {plan_out}")
 
     if not args.apply:
-        # A dry-run still seeds a floor it could not read, exactly as it did before
-        # #2968 — this is the deliberate fresh-install route the item's fix direction
-        # asks to keep workable: one run without `--apply` and the next apply has a real
-        # count to compare against, instead of facing a refusal with no way back
-        # (#1395's permanent-refusal state). Nothing is at risk in seeding here: a
-        # read-only run cannot be the run that damaged the store, and it returns before
-        # the apply branch that decides whether to write.
+        # A dry-run BOOTSTRAPS a floor it could not read and never RATCHETS one it
+        # read (#3221) — the `if` below is the whole of that sentence. Seeding is the
+        # deliberate fresh-install route the fix direction for #2968 asks to keep
+        # workable: one run without `--apply` and the next apply has a real count to
+        # compare against, instead of facing a refusal with no way back (#1395's
+        # permanent-refusal state). It is also what re-arms `backup-graph.sh` the
+        # morning after that unit refuses for want of a reference: #48's skill runs
+        # THIS half first every night, so the absent file is back before the apply is
+        # ever attempted. The ratchet lives on the apply path below and not here
+        # because the apply is the only run that can damage the store, and so the only
+        # run that may move the reference it is then measured against —
+        # `scripts/maintenance/corpus_shape.py` names exactly that self-reference as
+        # #543's failure: "a baseline the run it judges rewrites". Read-only stays
+        # read-only: a floor this run read is left byte-for-byte as it found it.
         if not baseline_measured:
             baseline = update_baseline(len(active_edges), baseline_path)
         print()
@@ -1863,16 +1870,36 @@ def main() -> int:
         print(f"\nREFUSING --apply: {reason}")
         return 3
 
-    # Past the decision, and only there, an unmeasured run seeds the floor it could
-    # not read (#2968). A refusal returned above and wrote nothing, so a night whose
-    # store is in trouble leaves the floor as it found it instead of lowering it — and
-    # a dry-run never reaches this line either, which is what keeps a read-only
-    # invocation read-only (rule 1). An unmeasured apply the operator chose to
-    # --allow-degraded DOES seed it: that count is an accepted one, and leaving the
-    # file absent would make every following night refuse with no route back, which is
-    # the permanent-refusal state #1395 recorded.
+    # Past the decision, and only there, the floor moves (#2968 put the bootstrap
+    # here; #3221 restored the ratchet the move silently dropped). A refusal returned
+    # above and wrote nothing, so a night whose store is in trouble leaves the floor as
+    # it found it instead of lowering it — and a dry-run never reaches this line
+    # either, which is what keeps a read-only invocation read-only (rule 1). Two routes
+    # meet on one call:
+    #
+    #   * an unmeasured run seeds the floor it could not read (#2968). An apply the
+    #     operator chose to --allow-degraded DOES seed it: that count is an accepted
+    #     one, and leaving the file absent would make every following night refuse with
+    #     no route back, which is the permanent-refusal state #1395 recorded.
+    #   * a measured run RATCHETS it up to this run's count (#3221). Wrapping the call
+    #     in `if not baseline_measured:` took the ratchet out of every run that READ a
+    #     floor — which is every nightly #48 apply — and left `graph-baseline.json` at
+    #     its first bootstrap while the store grew behind it: frozen at 50,152 across
+    #     six applies whose own counts climbed to 52,878, so the trip point shared by
+    #     this guard, `backup-graph.sh` and `knowledge-health-report.py` sat 27,802
+    #     edges below the store and drifted further with every edge added.
+    #
+    # `update_baseline` is max-only, so the call can only ever RAISE the file, and what
+    # it writes is `len(active_edges)` — the store's count read before this run applied
+    # anything, which is the same number the guard just compared (#1557's
+    # measure-before-write order: a leak keeps the higher floor instead of meeting the
+    # damage). `baseline` is deliberately not reassigned on the measured route, so the
+    # report's `baseline_active_edges` keeps naming the floor the guard actually
+    # compared against, stale included — that field is the only place a reader can see
+    # the reference stop ageing.
+    ratcheted = update_baseline(len(active_edges), baseline_path)
     if not baseline_measured:
-        baseline = update_baseline(len(active_edges), baseline_path)
+        baseline = ratcheted
 
     # Apply. One stamp per run: the report's name, the store backup it takes, and the
     # `timestamp` field a `--resume` reads back all carry the plan emit's value, so no

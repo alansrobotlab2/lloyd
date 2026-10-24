@@ -253,9 +253,13 @@ def _run(root, db, out, *extra, floor="auto"):
 
     `"auto"` (the default) seeds the floor with THIS store's own live count when the file
     is not already there. That is what a healthy previous night leaves behind —
-    `update_baseline` is max-only, so a store that has not lost edges sits exactly at its
-    floor — and it is why the apply fixtures already in this file are untouched by #2968
-    instead of every one of them refusing on a file none of them ever wrote. It is NOT
+    `update_baseline` is max-only and, since #3221, runs again on every apply that gets
+    past its guard, so a store that has not lost edges sits exactly at its floor. On the
+    live tree it did NOT between #2968 and #3221: a nightly apply read the floor and
+    never raised one, so a real floor can legitimately sit BELOW the store it guards —
+    which is why a node states the floor it wants instead of inferring it from the
+    counts. Seeding is also why the apply fixtures already in this file are untouched by
+    #2968 instead of every one of them refusing on a file none of them ever wrote. It is NOT
     `--allow-degraded`: the guard still runs, so a fixture that goes on to DELETE edges
     from that store still refuses. `floor=None` leaves the file exactly as the test left
     it (usually absent), which is how a node reaches the unmeasured state; `floor=<int>`
@@ -500,6 +504,217 @@ def test_an_unmeasured_apply_bootstraps_the_floor_only_once_it_applied(tmp_path)
     assert "guard unmeasured" in r3.stdout
     assert json.loads(floor.read_text())["active_edges"] == _live_edges(db) == 1, \
         "the dry-run no longer seeds the floor, which removes the fresh-install route"
+
+def test_a_measured_apply_above_its_floor_ratchets_the_floor_to_its_pre_apply_count(tmp_path):
+    """#3221 clause 1: the max-ratchet is back on the MEASURED path.
+
+    #2968 moved the bootstrap below the guard decision and wrapped it in `if not
+    baseline_measured:`, which silently took the ratchet out of every run that READ a
+    floor — i.e. every nightly #48 apply. On disk that is
+    `~/lloyd-data/_pipeline/memory-graph/graph-baseline.json` frozen at
+    `{"active_edges": 50152, "recorded_at": "2026-10-17T15:19:37.561400+00:00"}`
+    across the six applies that followed, whose `safety.active_edges` climbed 50,650 →
+    52,878 with `baseline_active_edges: 50152` on every one. Three consumers trip off
+    that one file — this guard, `backup-graph.sh`'s `THRESHOLD=$((BASE / 2))`, and
+    `knowledge-health-report.py`'s `baseline * 0.5` — so at that frozen floor the shared
+    trip point sat at 25,076 under a 52,878-edge store, and every edge added widened it.
+
+    The fixture is that state in miniature: a floor BELOW the store's own count, which
+    is what a ratcheting nightly run leaves behind and what a frozen one is stuck in.
+    Two assertions carry the clause:
+
+    * the floor rises to THIS run's count and `recorded_at` moves off the seed's fixed
+      2026-01-01 stamp — a stamp that never ages is the visible signature of the bug;
+    * it rises to the PRE-apply count. The apply aliases `vllm`→`vLLM`, which retires
+      one of the fixture's two edges, so the store holds 1 active edge when the run is
+      over and the floor holds 2. A ratchet reading the post-apply store would write 1,
+      which is not the count the guard compared (#1557's measure-before-write order),
+      and this node fails.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    live = _live_edges(db)
+    assert live == 2, "positive control: this node needs the store ABOVE its floor"
+    _write_floor(out, live - 1)
+    seeded = (out / "graph-baseline.json").read_bytes()
+
+    r = _run(root, db, out, "--apply", floor=None)
+    got = r.stdout + r.stderr
+    assert r.returncode == 0, f"an apply holding more edges than its floor refused:\n{got}"
+    assert "guard unmeasured" not in got, "a readable floor must read as measured"
+
+    floor = json.loads((out / "graph-baseline.json").read_text())
+    assert floor["active_edges"] == live == 2, (
+        f"the floor stayed at {floor['active_edges']}, so the ratchet is still "
+        "unreachable on a run that read one — #3221: three guards then share a trip "
+        "point below the store and drift lenient as it grows")
+    assert (out / "graph-baseline.json").read_bytes() != seeded
+    assert dt.datetime.fromisoformat(floor["recorded_at"]) > dt.datetime.fromisoformat(
+        json.loads(seeded.decode())["recorded_at"]), (
+        "the count moved but the stamp did not, so `backup-graph.sh`'s unit-log line "
+        "would go on printing a reference that has stopped ageing")
+
+    assert _live_edges(db) == 1, (
+        "the apply stopped retiring the aliased edge, so the pre/post distinction this "
+        "node is checking has stopped existing")
+    rep = json.loads(sorted(out.glob("entity-merges-applied-*.json"))[-1].read_text())
+    assert rep["safety"]["active_edges"] == 2, rep["safety"]
+    assert rep["baseline_active_edges"] == live - 1, (
+        "the report names the ratcheted count instead of the floor the guard compared, "
+        "and the one field that lets a reader SEE a stale reference went blind")
+
+
+def test_a_measured_apply_below_its_floor_never_lowers_the_floor(tmp_path):
+    """#3221 clause 2: the restored ratchet is max-only, and the guard still compared
+    the PRE-run floor.
+
+    The store holds 2 active edges and the floor says 3 — above the store, but inside
+    `DEGRADED_FRACTION`, so this apply is legal rather than a refusal. That is exactly
+    the case a ratchet must not turn into a downward revision: `update_baseline` writes
+    only when `active > current`, so the file is left byte-for-byte as found,
+    `recorded_at` included. That is rule 3's (b) with the ratchet back — growth raises
+    the reference, a leak cannot lower it to meet the damage.
+
+    The comparison the guard made is pinned from both sides: the run prints
+    `Baseline:        3 active edges (now 2)`, and the report carries
+    `baseline_active_edges: 3` beside `safety.active_edges: 2`.
+
+    What this node does NOT pin, stated so the next reader does not look for it here:
+    reassigning `update_baseline`'s return into `baseline` is invisible on this route,
+    because a kept floor and a returned floor are the same number when the store is
+    below it. The ratchet's return value is pinned where the two differ instead — in
+    `test_a_measured_apply_above_its_floor_ratchets_the_floor_to_its_pre_apply_count`,
+    where the floor the guard compared is 1 and the count it ratchets to is 2, and a
+    reassignment would report the second as if it were the first.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _write_floor(out, 3)
+    seeded = (out / "graph-baseline.json").read_bytes()
+    assert _live_edges(db) == 2, "positive control: the store must sit BELOW the seeded floor"
+
+    r = _run(root, db, out, "--apply", floor=None)
+    got = r.stdout + r.stderr
+    assert r.returncode == 0, f"an apply above half its floor was refused:\n{got}"
+    assert not (root / "vllm").exists(), "the apply did not do its work"
+    assert re.search(r"Baseline:\s+3 active edges \(now 2\)", got), (
+        "the printed comparison is not the pre-run floor against the store's count:\n" + got)
+
+    assert (out / "graph-baseline.json").read_bytes() == seeded, (
+        "the ratchet revised the floor DOWN. Max-only is rule 3 (b): a slow leak has to "
+        "leave the higher reference standing or the guard measures itself")
+    rep = json.loads(sorted(out.glob("entity-merges-applied-*.json"))[-1].read_text())
+    assert rep["baseline_active_edges"] == 3, rep
+    assert rep["safety"]["active_edges"] == 2, rep["safety"]
+    assert rep["safety"]["baseline_measured"] is True, rep["safety"]
+
+
+def test_a_refused_apply_leaves_the_floor_it_compared_byte_identical(tmp_path):
+    """#3221 clause 3: putting the ratchet back did not give a refused run a pen.
+
+    `update_baseline` now runs on the apply path whatever the floor says, so the only
+    thing keeping a refusal from writing the floor is its POSITION — the call sits past
+    the `return 3`. The absent-file half of that is already pinned by
+    `test_an_unmeasured_apply_bootstraps_the_floor_only_once_it_applied` and
+    `test_a_store_with_edges_and_no_baseline_file_refuses_the_apply`; what nothing
+    covered is a refusal over a floor that EXISTS and reads fine, which is the route
+    this change actually puts at risk — ratcheting there would re-arm `backup-graph.sh`
+    from a damaged store on the very night that noticed the damage.
+
+    Three refusals, each asserted on the file's BYTES rather than its parsed count,
+    because a rewrite is exactly what a count comparison can hide:
+
+    * a shrink below `DEGRADED_FRACTION` — #917's branch;
+    * an empty store whose floor still says 10,000 — #1557's branch, with the floor
+      readable, which the shipped node for that shape does not have;
+    * an unparseable floor — #2968's branch.
+    """
+    pop = tmp_path / "pop"; pop.mkdir()
+    root, db = _tree(pop); out = pop / "out"; out.mkdir()
+    floor = out / "graph-baseline.json"
+
+    _write_floor(out, 10_000)                      # 2 live edges: far below half of it
+    seeded = floor.read_bytes()
+    r = _run(root, db, out, "--apply", floor=None)
+    got = r.stdout + r.stderr
+    assert r.returncode == 3, f"the shrink stopped refusing:\n{got}"
+    assert "graph is degraded" in got, got
+    assert floor.read_bytes() == seeded, \
+        "the shrink refusal ratcheted the floor to the damaged count"
+
+    bad = b'{"active_ed'
+    floor.write_bytes(bad)
+    r2 = _run(root, db, out, "--apply", floor=None)
+    got2 = r2.stdout + r2.stderr
+    assert r2.returncode == 3, f"the unmeasured floor stopped refusing:\n{got2}"
+    assert "could not run" in got2, got2
+    assert floor.read_bytes() == bad, \
+        "the unparseable-floor refusal rewrote the file it was refusing on"
+
+    emp = tmp_path / "emp"; emp.mkdir()
+    eroot, edb = _tree(emp, edges=0); eout = emp / "out"; eout.mkdir()
+    efloor = eout / "graph-baseline.json"
+    _write_floor(eout, 10_000)
+    eseek = efloor.read_bytes()
+    r3 = _run(eroot, edb, eout, "--apply", floor=None)
+    got3 = r3.stdout + r3.stderr
+    assert r3.returncode == 3, f"the empty store stopped refusing:\n{got3}"
+    assert "empty or unmeasurable" in got3, got3
+    assert efloor.read_bytes() == eseek, (
+        "the empty-store refusal touched the floor, which is the 2026-09-22 apply "
+        "writing its own baseline and then re-arming the backup guard from it")
+    assert (eroot / "vllm").exists() and (eroot / "Intel Pipeline").exists()
+
+
+def test_a_dry_run_bootstraps_an_absent_floor_and_never_ratchets_one_it_read(tmp_path):
+    """#3221 clause 4: the dry-run half is bootstrap-only, in both directions.
+
+    The design call behind this round's contract: the apply is the only run that can
+    damage the store, so it is the only run that may move the reference the store is
+    then measured against. `scripts/maintenance/corpus_shape.py` names that
+    self-reference as #543's failure — "a baseline the run it judges rewrites" — and a
+    ratcheting dry-run would put it back on the read-only half, which the nightly job
+    runs first every night. The comment at the dry-run's return says the same thing;
+    this node is what makes that comment checkable.
+
+    Both halves, on one store:
+
+    * a floor this run READS is left byte-for-byte alone even though the store has
+      outgrown it — the one state in which a ratcheting dry-run would have written;
+    * no floor at all is still bootstrapped. `test_a_dry_run_under_a_missing_floor_is_
+      untouched` pins that route for a store nobody seeded; the two together are the
+      whole of the dry-run's relationship with the file, and the bootstrap is what
+      re-arms `backup-graph.sh` the morning after that unit refuses for want of a
+      reference.
+
+    Neither run may apply anything, so the alias assertions ride along: the clause is
+    "read-only stays read-only", and the floor file is the one thing a read could
+    otherwise turn into a write.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    floor = out / "graph-baseline.json"
+    live = _live_edges(db)
+
+    _write_floor(out, live - 1)                    # a floor the store has outgrown
+    seeded = floor.read_bytes()
+    r = _run(root, db, out, floor=None)            # no --apply
+    got = r.stdout + r.stderr
+    assert r.returncode == 0, f"a dry-run over a stale floor refused:\n{got}"
+    assert "REFUSING" not in got
+    assert list(out.glob("entity-merges-applied-*.json")) == [], "a dry-run wrote a report"
+    assert (root / "vllm").exists(), "a dry-run moved a fact dir"
+    assert floor.read_bytes() == seeded, (
+        "the dry-run raised a floor it read, so the run that only looks has become the "
+        "writer of the reference the apply judges itself against")
+    assert json.loads(floor.read_text())["active_edges"] == live - 1
+
+    floor.unlink()
+    r2 = _run(root, db, out, floor=None)
+    got2 = r2.stdout + r2.stderr
+    assert r2.returncode == 0, f"the fresh-install bootstrap is gone:\n{got2}"
+    assert "guard unmeasured" in got2, got2
+    assert json.loads(floor.read_text())["active_edges"] == live == 2, (
+        "a dry-run with nothing to read no longer seeds a floor, which is #1395's "
+        "permanent-refusal state: the next apply refuses and only a dry-run can fix it")
+
 
 def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
