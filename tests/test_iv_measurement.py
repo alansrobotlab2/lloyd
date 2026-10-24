@@ -9,6 +9,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import yaml
+
 import pytest
 
 from app import usage_store
@@ -492,3 +494,243 @@ def test_the_grep_command_section_3_publishes_reproduces_the_call_site():
     assert hits[0].startswith("app/sessions_io.py:1363:"), \
         f"the one hit is not the stamping call site: {hits[0]!r}"
     assert "import assignment" in hits[0]
+
+
+# ── #3220: the report must name its own enrollment gap ─────────────────────────
+#
+# `load_sessions` selects solely on the stored `inner_voice_ab` stamp, so a chat that
+# was never enrolled is invisible to the report and an unreadable window reads as a
+# clean 0/0: on 2026-10-18 the live `--experiment iv-chat-1` run printed both arms at
+# sessions 0 / turns 0, every rate and z null, and exited 0 (landed 2f6bd2de). The
+# window held 29 mission-control sessions and none carried a stamp, because the sole
+# assignment call sits on `_save_session_meta`'s create branch
+# (app/sessions_io.py:1363) while `create_session` (app/sessions_io.py:398) mints every
+# chat the API creates and never reaches it. These nodes pin the diagnostic that makes
+# that shape self-announcing, and pin that it announces without moving the verdict.
+
+#: The window iv-chat-1 was armed over, straight from `config.yaml:248-249`.
+_IV_WINDOW = ("2026-09-25", "2026-10-09")
+
+
+def _report_mod():
+    """The report script as a module. The file already imports it this way —
+    `from scripts.iv_ab_report import load_sessions, report` — so the diagnostic under
+    test is the same object the nightly invocation's `main()` runs."""
+    from scripts import iv_ab_report
+    return iv_ab_report
+
+
+def _mc_session(tmp_path: Path, sid: str, *, created_at: str,
+                platform: str = "mission-control", stamp: dict | None = None,
+                with_message: bool = True) -> Path:
+    """One session file as the store holds it, with the two keys only the create path
+    writes (`id`, `created_at`) so it is a real candidate for enrolment."""
+    p = tmp_path / f"{sid}.json"
+    data: dict = {"id": sid, "platform": platform, "created_at": created_at,
+                  "messages": ([{"role": "user", "content": "hello"}]
+                               if with_message else [])}
+    if stamp is not None:
+        data["inner_voice_ab"] = stamp
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return p
+
+
+def _stamp(arm: str = "on", experiment: str = "iv-chat-1") -> dict:
+    return {"experiment": experiment, "arm": arm, "fraction_on": 0.5}
+
+
+def _window_cfg(start: str = _IV_WINDOW[0], end: str = _IV_WINDOW[1]) -> dict:
+    return {"enabled": True, "name": "iv-chat-1", "start": start, "end": end,
+            "fraction_on": 0.5}
+
+
+def test_enrollment_gap_counts_the_population_load_sessions_globs(tmp_path, monkeypatch):
+    """Clause 1: the count is over the same set `load_sessions` reads — top-level
+    `*.json`, turnlog siblings excluded — and only the window's platform sessions,
+    split by whether the named experiment's stamp is on the file. "Named experiment"
+    is load-bearing: a stamp naming a different experiment does not enrol this one."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    in_w, out_w = "2026-10-01T09:00:00.000000", "2026-11-01T09:00:00.000000"
+    _mc_session(tmp_path, "mc-in-1", created_at=in_w, stamp=_stamp("on"))
+    _mc_session(tmp_path, "mc-in-2", created_at=in_w)
+    _mc_session(tmp_path, "mc-in-3", created_at=in_w)
+    _mc_session(tmp_path, "mc-out", created_at=out_w)              # window's far edge
+    _mc_session(tmp_path, "mc-before", created_at="2026-09-01T09:00:00.000000")
+    _mc_session(tmp_path, "other-platform", created_at=in_w, platform="autocode")
+    _mc_session(tmp_path, "no-stamp-exp", created_at=in_w,
+                stamp=_stamp("on", experiment="iv-chat-2"))
+    (tmp_path / "mc-in-3-turnlog.json").write_text(
+        json.dumps([{"session_id": "mc-in-3"}]), encoding="utf-8")   # sibling, not a session
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+
+    gap = m.enrollment_gap(tmp_path, "iv-chat-1")
+
+    # 4, not 3: `no-stamp-exp` is a mission-control session inside the window too, and
+    # "enrolled" here means stamped FOR THE NAMED EXPERIMENT — a stamp naming
+    # `iv-chat-2` enrols this window's chat in someone else's reading, so it belongs in
+    # both the population and the gap. That rule is why the file is in this fixture at
+    # all: drop it and the count silently becomes 3/1/2, which is also what a helper
+    # that matched on the key alone rather than the experiment would report.
+    assert gap["platform_sessions"] == 4, gap
+    assert gap["stamped"] == 1, gap
+    assert gap["unstamped"] == 3, gap
+    assert gap["unreadable"] == 1, gap     # counted, and named as a caveat: a wipe reads as no gap
+    assert gap["window_start"] == _IV_WINDOW[0] and gap["window_end"] == _IV_WINDOW[1], gap
+    assert "config" in gap["window_source"], gap
+
+
+def test_the_window_is_the_cli_range_when_given_else_the_config_block(tmp_path, monkeypatch):
+    """Clause 1's window rule: `--since`/`--until` win, and the experiment's own
+    `inner_voice.ab` start/end are the fallback — without it the clause-3 run, which
+    passes no dates, would have no window to count against."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    _mc_session(tmp_path, "oct", created_at="2026-10-01T09:00:00.000000")
+    _mc_session(tmp_path, "jun", created_at="2026-06-01T09:00:00.000000")
+
+    cli = m.enrollment_gap(tmp_path, "iv-chat-1", "2026-06-01", "2026-07-01")
+    assert cli["platform_sessions"] == 1, cli
+    assert "argv" in cli["window_source"], cli
+
+    cfg = m.enrollment_gap(tmp_path, "iv-chat-1")
+    assert cfg["platform_sessions"] == 1, cfg      # the October one, via the config window
+    assert cfg["window_start"] == _IV_WINDOW[0], cfg
+
+    # An experiment with no config block at all is not an error: it has no window of
+    # its own, so the count is over all time and the source says so.
+    monkeypatch.setattr(ab, "ab_config", lambda: {})
+    all_time = m.enrollment_gap(tmp_path, "iv-chat-1")
+    assert all_time["platform_sessions"] == 2, all_time
+    assert all_time["window_source"] == "all time (no window given)", all_time
+
+
+def test_the_gap_line_names_the_counts_and_both_writers(tmp_path, monkeypatch):
+    """Clause 2: the line is wiring, not only arithmetic. A reader who has never
+    opened `architecture/inner-voice.md` has to learn from it where an arm would have
+    to be written, so it names `create_session` (which does not stamp) and
+    `_save_session_meta` (the sole stamping site) at their real line numbers."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    _mc_session(tmp_path, "a", created_at="2026-10-01T09:00:00.000000")
+    _mc_session(tmp_path, "b", created_at="2026-10-02T09:00:00.000000")
+    _mc_session(tmp_path, "c", created_at="2026-10-03T09:00:00.000000",
+                stamp=_stamp("off"))
+
+    line = m.gap_line(m.enrollment_gap(tmp_path, "iv-chat-1"))
+
+    assert line.startswith("ENROLLMENT-GAP:"), line
+    assert "create_session" in line and "app/sessions_io.py:398" in line, line
+    assert "_save_session_meta" in line and "app/sessions_io.py:1363" in line, line
+    # The three counts, in words a reader can act on.
+    assert " 3 mission-control sessions" in line, line
+    assert "1 stamped for iv-chat-1" in line, line
+    assert "2 unstamped" in line, line
+
+
+def test_the_gap_fires_on_a_partial_store_and_says_nothing_on_a_complete_one(tmp_path,
+                                                                            monkeypatch,
+                                                                            capsys):
+    """Clause 3: one missing stamp is already a broken enrolment, and a window where
+    every platform session was stamped has no gap to report — printing the line there
+    would teach the reader to ignore the line."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    _mc_session(partial, "s1", created_at="2026-10-01T09:00:00.000000", stamp=_stamp())
+    _mc_session(partial, "u1", created_at="2026-10-02T09:00:00.000000")
+    _mc_session(partial, "u2", created_at="2026-10-03T09:00:00.000000")
+
+    gap = m.enrollment_gap(partial, "iv-chat-1")
+    assert (gap["platform_sessions"], gap["stamped"], gap["unstamped"]) == (3, 1, 2), gap
+
+    def _plain(store: Path) -> str:
+        capsys.readouterr()
+        rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                     "--event-logs", str(tmp_path / "no-logs")])
+        assert rc == 0, rc
+        return capsys.readouterr().out
+
+    out = _plain(partial)
+    assert "ENROLLMENT-GAP:" in out and "2 unstamped" in out, out
+
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    for i, arm in enumerate(("on", "off", "on")):
+        _mc_session(complete, f"ok{i}", created_at=f"2026-10-0{i + 1}T09:00:00.000000",
+                    stamp=_stamp(arm))
+    gap2 = m.enrollment_gap(complete, "iv-chat-1")
+    assert gap2["unstamped"] == 0, gap2
+    assert "ENROLLMENT-GAP" not in _plain(complete)
+
+
+def test_the_diagnostic_announces_itself_without_moving_the_verdict(tmp_path, monkeypatch,
+                                                                    capsys):
+    """Clause 4: the whole reason this is a diagnostic and not an alarm. On the live
+    unreadable shape — platform sessions in window, not one stamped — the run must say
+    the gap out loud and change NOTHING it reports: exit 0, both arms 0/0, all three
+    rates and all three z's null, no rate invented, nothing written."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    store = tmp_path / "store"
+    store.mkdir()
+    for i in range(2):
+        _mc_session(store, f"unstamped{i}", created_at=f"2026-10-0{i + 1}T09:00:00.000000")
+    logs = tmp_path / "no-logs"
+    before = sorted(p.name for p in store.iterdir())
+
+    rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                 "--event-logs", str(logs)])
+    out = capsys.readouterr().out
+    assert rc == 0, rc
+    assert "ENROLLMENT-GAP:" in out, out
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                   "--event-logs", str(logs), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["arms"]["on"]["sessions"] == 0 and payload["arms"]["off"]["sessions"] == 0
+    assert payload["arms"]["on"]["turns"] == 0 and payload["arms"]["off"]["turns"] == 0
+    for arm in ("on", "off"):
+        for key in ("bad_stop_rate", "tool_error_rate", "correction_rate"):
+            assert payload["arms"][arm][key] is None, (arm, key, payload["arms"][arm])
+    assert payload["z"] == {"bad_stop_rate": None, "tool_error_rate": None,
+                            "correction_rate": None}, payload["z"]
+    assert payload["enrollment_gap"]["unstamped"] == 2, payload["enrollment_gap"]
+    assert "create_session" in payload["enrollment_gap_line"], payload["enrollment_gap_line"]
+    # The two payload views agree with the plain run rather than restating it.
+    assert payload["enrollment_gap_line"] in out, out
+
+    # And a diagnostic that writes is a second instrument nobody asked for.
+    assert sorted(p.name for p in store.iterdir()) == before, (before,
+                                                               sorted(store.iterdir()))
+
+
+def test_the_config_block_carries_the_precondition_as_comment_only():
+    """Clause 5: whoever moves `end` forward has to read the precondition first, so it
+    lives in the block — and the five keys stay exactly where they are, because the
+    values are not this clause's to change."""
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").split("\n")
+    assert lines[244].strip() == "ab:", lines[244]
+    assert lines[245].strip() == "enabled: true"
+    assert lines[246].strip() == "name: iv-chat-1"
+    assert lines[247].strip() == "start: '2026-09-25'"
+    assert lines[248].strip() == "end: '2026-10-09'"
+    assert lines[249].strip() == "fraction_on: 0.5"
+    assert ab.ab_config() == {"enabled": True, "name": "iv-chat-1",
+                                 "start": "2026-09-25", "end": "2026-10-09",
+                                 "fraction_on": 0.5}
+
+    block = "\n".join(lines[244:268])
+    for phrase in ("0/0", "2026-10-18", "2f6bd2de", "#2149", "create_session",
+                   "app/sessions_io.py:398", "app/sessions_io.py:1363"):
+        assert phrase in block, f"the ab block no longer says {phrase!r}:\n{block}"
+    assert "record-only is permanent" in block.lower(), block
+
+    # Comment text ONLY: strip every comment and the block must still parse to the
+    # same five keys, which is the clause's own wording.
+    stripped = "\n".join(ln for ln in lines if not ln.lstrip().startswith("#"))
+    body = yaml.safe_load(stripped)["inner_voice"]["ab"]
+    assert body == ab.ab_config(), body
+    assert yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))["inner_voice"]["ab"] == body

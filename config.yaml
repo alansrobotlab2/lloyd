@@ -248,6 +248,23 @@ inner_voice:
     start: '2026-09-25'
     end: '2026-10-09'
     fraction_on: 0.5
+    # READ THIS BEFORE MOVING `end` FORWARD. iv-chat-1 read 0/0 — both arms zero
+    # sessions, every rate null — and scripts/iv_ab_report.py reported it that way on
+    # 2026-10-18 (landed 2f6bd2de) without saying why, because an unstamped chat is
+    # invisible to the report: load_sessions selects solely on the stored
+    # inner_voice_ab stamp. The window was not empty. It held 29 mission-control
+    # sessions and not one carried a stamp, because the sole assignment call sits in
+    # _save_session_meta (app/sessions_io.py:1363), reached only on that function's
+    # create branch, while every chat the API creates is minted by create_session
+    # (app/sessions_io.py:398), which never reaches it. So an arm is never written on
+    # the path chats actually take, and a window armed as this one was enrols nobody
+    # and reads 0/0 silently. Record-only is permanent for iv-chat-1 per #2149 — the
+    # keep/change question is closed; do not re-arm this name to reopen it. ANY RE-ARM,
+    # this name or a new one, requires stamping in create_session FIRST. Verify a
+    # window enrolled before spending days on it: run the report, which now prints an
+    # ENROLLMENT-GAP line naming the in-window platform count and the stamped count.
+    # Nothing above is enforced by code — window_open (app/inner_voice/ab.py:69-76)
+    # checks enabled and the dates and asks nothing about whether anyone can enrol.
   todo_stewardship:
     enabled: true
     completion_gate: true

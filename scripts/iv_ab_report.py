@@ -188,6 +188,103 @@ def _verdict(z: float | None) -> str:
     return "IV-on lower" if z < 0 else "IV-on higher"
 
 
+#: The one platform the stamping branch admits, and the two writer sites a reader needs
+#: to fix a window that enrolled nobody. `app/sessions_io.py:1361` gates assignment on
+#: `data["platform"] == "mission-control"` and `:1363` is the sole call, inside
+#: `_save_session_meta` and reached only on that function's create branch;
+#: `create_session` (`app/sessions_io.py:398`) is the writer every chat actually goes
+#: through (`POST /api/sessions/create` mints through it at `app/routers/sessions.py:988`)
+#: and it never reaches that branch. The asymmetry is why iv-chat-1 read 0/0 across a
+#: window that held 29 mission-control sessions, none of them stamped (#3220).
+ENROLLED_PLATFORM = "mission-control"
+STAMPING_SITE = "_save_session_meta (app/sessions_io.py:1363)"
+CREATE_WRITER = "create_session (app/sessions_io.py:398)"
+
+
+def _configured_window(experiment: str) -> tuple[str, str]:
+    """The experiment's own `inner_voice.ab` start/end, or ("", "") when this is not it.
+
+    `ab_config()` reads the live `config.yaml`, so the window counted against is the one
+    the engine actually armed and not one this script re-derives. Local import and a
+    swallow, both load-bearing: the test execs this file standalone with no `app`
+    importable, and a diagnostic must never be the reason a report cannot run.
+    """
+    try:
+        from app.inner_voice.ab import ab_config
+        cfg = ab_config()
+    except Exception:
+        return "", ""
+    if cfg.get("name") != experiment:
+        return "", ""
+    return str(cfg.get("start") or ""), str(cfg.get("end") or "")
+
+
+def enrollment_gap(sessions_dir: Path, experiment: str, since: str = "",
+                   until: str = "") -> dict:
+    """Count the window's sessions of the enrolled platform by whether they carry a stamp.
+
+    `load_sessions` selects solely on the stored stamp, so an unstamped chat is invisible
+    to it and a window that enrolled nobody prints the same 0/0 with null rates that a
+    window where the treatment did nothing would. This walks the same population that
+    function globs — top-level `*.json`, turn logs excluded — and reports what it could
+    not read.
+
+    Window: `--since`/`--until` when both bound it, else the experiment's own
+    `inner_voice.ab` start/end, else all time. End-exclusive, the convention of
+    `window_open` (`app/inner_voice/ab.py:69-76`), so a `--until 2026-10-09` does not
+    count 2026-10-09.
+    """
+    lo = since[:10] if since else ""
+    hi = until[:10] if until else ""
+    source = "argv --since/--until" if (lo and hi) else "all time (no window given)"
+    if not (lo and hi):
+        cfg_lo, cfg_hi = _configured_window(experiment)
+        if cfg_lo and cfg_hi:
+            lo, hi, source = cfg_lo, cfg_hi, "config inner_voice.ab"
+
+    in_window = stamped = undated = unreadable = 0
+    for path in sorted(sessions_dir.glob("*.json")):
+        if path.name.endswith("-turnlog.json"):
+            continue
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            unreadable += 1
+            continue
+        if not isinstance(rec, dict) or rec.get("platform") != ENROLLED_PLATFORM:
+            continue
+        day = str(rec.get("created_at") or "")[:10]
+        if not day:
+            undated += 1
+            continue
+        if (lo and day < lo) or (hi and day >= hi):
+            continue
+        in_window += 1
+        ab = rec.get("inner_voice_ab")
+        if isinstance(ab, dict) and ab.get("experiment") == experiment:
+            stamped += 1
+    return {"experiment": experiment, "platform": ENROLLED_PLATFORM,
+            "window_start": lo, "window_end": hi, "window_source": source,
+            "platform_sessions": in_window, "stamped": stamped,
+            "unstamped": in_window - stamped, "undated": undated,
+            "unreadable": unreadable}
+
+
+def gap_line(gap: dict) -> str:
+    """The one line that tells a reader of an empty window why the window is empty."""
+    span = (f"{gap['window_start'] or '..'}..{gap['window_end'] or '..'} "
+            f"({gap['window_source']})")
+    extra = ""
+    if gap["undated"] or gap["unreadable"]:
+        extra = (f" ({gap['undated']} of the platform's files carried no created_at and "
+                 f"{gap['unreadable']} did not parse, so neither is counted here)")
+    return (f"ENROLLMENT-GAP: {gap['platform_sessions']} {gap['platform']} sessions in "
+            f"window {span}, {gap['stamped']} stamped for {gap['experiment']}, "
+            f"{gap['unstamped']} unstamped{extra} — an arm is written only by "
+            f"{STAMPING_SITE}; {CREATE_WRITER}, which mints every chat the API creates, "
+            f"writes no stamp, so this window cannot be read as an experiment.")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -206,8 +303,14 @@ def main(argv: list[str] | None = None) -> int:
     rep = report(load_sessions(args.sessions_dir, name), args.event_logs,
                  since=args.since, until=args.until)
     rep["experiment"] = name
+    # Counted over the same store and window `load_sessions` just filtered, and before
+    # either output branch, so the plain run and --json can never disagree about it.
+    gap = enrollment_gap(args.sessions_dir, name, args.since, args.until)
     if args.json:
-        print(json.dumps(rep, indent=2))
+        print(json.dumps({**rep, "enrollment_gap": gap,
+                          "enrollment_gap_line": (gap_line(gap)
+                                                  if gap["unstamped"] else None)},
+                         indent=2))
         return 0
     print(f"\nInner Voice A/B — experiment {name}"
           f"{' since ' + args.since if args.since else ''}"
@@ -229,6 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {label:<20}{str(on if on is not None else '—'):>14}"
               f"{str(off if off is not None else '—'):>14}{tail}")
     print(f"\n  crossed over (flags changed by hand after assignment): {rep['crossed_over']}")
+    # Only when a session that could have been enrolled was not. A window whose every
+    # platform session carries the stamp has no gap to report, and printing a line there
+    # would teach the reader to ignore the line.
+    if gap["unstamped"]:
+        print(f"\n  {gap_line(gap)}\n")
     print("  Outcomes come from the event log; nothing the observer wrote decides one.\n")
     return 0
 
