@@ -112,6 +112,24 @@ say which it was. A refused entity is the one shape where `checked` is not
 coverage: it is the size of the read that was never scanned, so the plan counts it
 as excluded and nothing as scanned.
 
+The denominator of that fraction is `facts_total` alone, and the `before_active`
+sitting beside it on the same row is not a second denominator to reconcile it
+against. `facts_total` is `checked` plus `facts_excluded`, both counted off the
+same per-category read that names `categories_skipped`; `before_active` is
+`_active_count(entity)` — the index's own active count for that one entity, read
+out of the fact store rather than off the derived-tree rows the scan walked, and
+kept as an independent witness of the tree the denominator came from. It is that
+entity's row count, not the run-level store total §4 quotes, which is
+`_active_count()` with no entity: two measurements that happen to share a name.
+So a scanned row where the two disagree is index-vs-derived-tree drift for that
+entity — a finding in its own right, not arithmetic to be reconciled — and the
+one shape where a disagreement is by design is the refused row just above, where
+`facts_total` repeats a read that was never scanned while `before_active` stays
+the store's count. A `before_active` of **-1** is the sentinel `_active_count`
+returns when the store could not answer, so there the witness is simply missing:
+the row is silent about how many active facts the entity holds, and can never be
+read as an entity holding zero of them.
+
 Two bounds sit under the evidence rules — `MAX_ACTIONS_PER_ENTITY = 5`, applied
 by `plan_entity` to one entity's plan, and `MAX_ACTIONS_PER_RUN = 25`, the budget
 the write loop spends down — and the second is what the CLI's exit 3 checks: it

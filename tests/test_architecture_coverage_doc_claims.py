@@ -6853,6 +6853,17 @@ def test_the_persistence_page_keeps_the_two_denominators_apart():
 # apart. The clause this node pins is that the page states a hub's reach as a
 # fraction of its facts, and that the retired pair-count figures stay out of the
 # page and out of the code that quotes them.
+#
+# #3267 extended this node rather than opening a new one, because it is the same
+# pair of numbers. Publishing the fraction put TWO counts on every scanned row —
+# the read-sourced `facts_total` and the store-sourced `before_active` — and §2
+# explained only one of them, so which one a scan's coverage is read from was a
+# ruling that lived only in the planner's own comment
+# (`agent_mcp/fact_improvement.py:2138-2139`, "`before_active` beside it is the
+# index's own count … deliberately not this total"), which nothing outside the
+# code reads. The node therefore now also requires the page to say what the
+# row's other count is FOR: a witness of a different tree, never a second
+# denominator to reconcile the first against.
 
 #: The coverage figure §2 has to lead with, and the retired readings of the same
 #: entity: pair counts and the fact counts that produced them, from both the
@@ -6862,8 +6873,8 @@ _RETIRED_HUB_READINGS = ("~195", "527,000", "5.5 million", "208 partitioned",
                          "3,321", "13 categories")
 
 
-def _memory_section_2() -> str:
-    """§2 of `architecture/memory.md`, flattened.
+def _memory_section_2_raw() -> str:
+    """§2 of `architecture/memory.md`, as the page writes it (line breaks and all).
 
     Selected by its section number and not by its wording, so a re-titled heading
     fails here loudly instead of silently narrowing the graded window to nothing —
@@ -6873,9 +6884,30 @@ def _memory_section_2() -> str:
     sections = _h2_sections((ARCH / "memory.md").read_text(encoding="utf-8"))
     hits = [head for head in sections if head.startswith("2.")]
     assert len(hits) == 1, f"§2 of memory.md resolved to {hits}, not exactly one section"
-    body = _flat(sections[hits[0]])
+    body = sections[hits[0]]
     assert body, "§2 of memory.md read back empty"
     return body
+
+
+def _memory_section_2() -> str:
+    """§2 of `architecture/memory.md`, flattened."""
+    body = _flat(_memory_section_2_raw())
+    assert body, "§2 of memory.md read back empty"
+    return body
+
+
+def _memory_section_2_passages() -> list[str]:
+    """§2 split into the passages the page itself writes — a blank line is its
+    boundary — each flattened, so hand-wrapping cannot hide a sentence from a
+    needle.
+
+    #3267's ruling is graded per passage and not over the whole section because it
+    is a ruling about two counts that sit on ONE row: a page that names
+    `facts_total` in one paragraph and `before_active` two thousand characters
+    away has still not said which of them a scan's coverage is read from, which is
+    the state the item was filed against.
+    """
+    return [_flat(p) for p in _memory_section_2_raw().split("\n\n") if p.strip()]
 
 
 def _reads_as_a_fact_fraction(body: str) -> bool:
@@ -6883,6 +6915,39 @@ def _reads_as_a_fact_fraction(body: str) -> bool:
     text this file writes rather than only on text the doc happens to carry."""
     return (_HUB_FRACTION in body
             and not any(stale in body for stale in _RETIRED_HUB_READINGS))
+
+
+#: #3267 — the two counts a scanned row carries. `facts_total` is read off the
+#: same per-category read that names `categories_skipped`; `before_active` is
+#: `_active_count(entity)`, a query of the index instead, and the two have been
+#: equal on every scanned row published since #3007 (200/200 re-measured
+#: 2026-10-24 over `_pipeline/improvement`, refusing rows that carry neither key).
+_DENOMINATOR_FIELD = "facts_total"
+_WITNESS_FIELD = "before_active"
+
+#: The phrases that make the pairing a RULING rather than two names that happen
+#: to appear on one page: which count coverage is read from, what the other one
+#: is for, that it is a different measurement from the run-level total §4 quotes,
+#: what a disagreement on a scanned row means, and what the sentinel means. Drop
+#: any one of them and §2 is back to publishing two counts and leaving the reader
+#: to guess — the state #3267 was filed against.
+_WITNESS_RULING = ("not a second denominator", "witness", "run-level", "drift",
+                   "could not answer", "**-1**")
+
+
+def _row_reads_as_denominator_plus_witness(passages: list[str]) -> bool:
+    """The rule as a predicate, on this file's pattern: so the node below rejects
+    text it writes here, not only accepts the text the doc happens to carry.
+
+    One passage has to carry both field names AND all six phrases. A page that
+    names `facts_total` in one paragraph and `before_active` in another has
+    printed both counts without ruling on which one a scan's coverage is read
+    from, which is the same drift the planner's own comment at
+    `fact_improvement.py:2138` has been carrying alone.
+    """
+    return any(_DENOMINATOR_FIELD in p and _WITNESS_FIELD in p
+               and all(claim in p for claim in _WITNESS_RULING)
+               for p in passages)
 
 
 def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
@@ -6904,7 +6969,8 @@ def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
     # rewrite has replaced a figure that moved with one that does not exist.
     fi_src = (ROOT / "agent_mcp" / "fact_improvement.py").read_text(
         encoding="utf-8", errors="replace")
-    for field in ("facts_excluded", "facts_total", "categories_skipped", "scan_scope"):
+    for field in ("facts_excluded", "facts_total", "categories_skipped", "scan_scope",
+                  _WITNESS_FIELD):
         assert field in fi_src, (
             f"§2 cites {field}, but agent_mcp/fact_improvement.py no longer emits it")
     cli_src = (ROOT / "scripts" / "memory" / "fact-improvement.py").read_text(
@@ -6920,6 +6986,54 @@ def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
     assert not _reads_as_a_fact_fraction(
         body + " ~195 comparisons against ~527,000 whole")
     assert not _reads_as_a_fact_fraction(body.replace(_HUB_FRACTION, "some facts"))
+
+    # ── #3267: the row's OTHER count has to be explained on the page too ──────
+    # Publishing the fraction put two counts on every scanned row and §2 ruled on
+    # only one, so which one coverage is read from lived in a code comment and
+    # nowhere a reader goes. Both names have to be in the section, one passage has
+    # to say what each is for, and the planner has to still emit both — the page's
+    # "facts_total is checked plus facts_excluded" and "before_active is
+    # _active_count(entity)" are both claims about this module, not about prose.
+    for field in (_DENOMINATOR_FIELD, _WITNESS_FIELD):
+        assert field in body, (
+            f"§2 of memory.md no longer names {field}, the field its coverage "
+            "fraction and its witness are read by")
+    passages = _memory_section_2_passages()
+    assert passages, "§2 of memory.md split into no passages"
+    assert _row_reads_as_denominator_plus_witness(passages), (
+        "§2 publishes both row counts without ruling on which is the denominator; "
+        f"no passage names both fields with {list(_WITNESS_RULING)}: {body[:1200]}")
+    assert '"facts_total": detection.get("checked", 0) + facts_excluded' in fi_src, (
+        "§2 states `facts_total` as `checked` plus `facts_excluded` off the "
+        "per-category read; the planner no longer derives it that way")
+    assert '"before_active": _active_count(entity)' in fi_src, (
+        "§2 calls the row's `before_active` the index's own count FOR THAT ENTITY, "
+        "but the planner no longer asks the store per entity")
+    # The sentence's other half is a claim about a DIFFERENT section: §2 says this
+    # one is not the run-level total "§4 quotes". If §4 stopped quoting it, §2
+    # would be distinguishing its number from a number the page no longer prints —
+    # true-sounding prose with nothing behind it, which is what this whole file
+    # exists to refuse. `_active_count()` with no entity is that total's source
+    # (`fact_improvement.py`'s run-level `before`), so both trees are checked.
+    assert _WITNESS_FIELD in _memory_section_4(), (
+        "§2 tells the reader its `before_active` is not the run-level store total "
+        "§4 quotes, but §4 no longer quotes one")
+    assert "before = _active_count()" in fi_src, (
+        "§2 says the run-level total §4 quotes is `_active_count()` with no "
+        "entity; the run record no longer takes it that way")
+
+    # Can the #3267 half fail? Both field names struck from the passage that
+    # carries the ruling — each on its own, because clause 4 asks for either name
+    # removed, and a predicate satisfied by the surviving name alone is the
+    # denominator-less read #3007 was filed for.
+    assert not _row_reads_as_denominator_plus_witness(
+        [p.replace(_WITNESS_FIELD, "the store's count") for p in passages]), (
+        "the ruling still 'holds' with `before_active` removed from §2, so the "
+        "assertion above was matching the other field name only")
+    assert not _row_reads_as_denominator_plus_witness(
+        [p.replace(_DENOMINATOR_FIELD, "the fact total") for p in passages]), (
+        "the ruling still 'holds' with `facts_total` removed from §2, so the "
+        "assertion above was matching the other field name only")
 
 
 # ── #3009: §4 states the arm's non-parity as a named field, not a false flag ──
