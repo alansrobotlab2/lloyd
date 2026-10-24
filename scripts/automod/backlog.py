@@ -1773,6 +1773,470 @@ def _committed_witness_siblings(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) 
         return 0
 
 
+# ── the loop does the cp itself (#3218) ───────────────────────────────────────
+#
+# WHY A COPY ROUTE EXISTS. For every round of this the guard's answer was a DEMAND:
+# "copy it into `backlog/data` and quote `wc -l -c` off the copy". The demand was
+# correct, and the rounds that obeyed it were spent on a `cp`. The promotions ledger
+# holds four `vault_land` events (#2685→#2954 and #2935 for a `gate.json`) whose whole
+# path list is one `backlog/data/nightly-*.json` plus the item that asked for it, each
+# closed `acceptance_source: round`. Since `9f5dc0cd` (#2289) the demand reaches the owed
+# list rather than the graded contract, so what those rounds were really buying is the
+# copy a human clause implies. Where the bytes are already decided, the guard can put
+# them in history and stop asking.
+#
+# WHY ONLY ONE FAMILY. The guard above is generic: it fires on any cited path that is on
+# disk, under `WITNESS_MAX_BYTES`, and in no git tree — a `gate.json`, a `gate.log`, a
+# classify batch, an index. Those witnesses need an item to CHOOSE something (an extract,
+# which arm, which window), and a route that copied them would be the loop writing its
+# own evidence. A nightly retrieval-eval baseline is quoted WHOLE by construction:
+# `summary.overall` is the rate table every trend claim in an item reads, and its
+# basename is unique per run, so there is nothing to choose and nothing to rewrite. So
+# the family test names both the basename AND the root the eval job writes under, and it
+# is the same test the budget below counts against — a cap that counted only `nightly-*`
+# while the route accepted any basename would let a 404,430-byte blob into a 127 MB
+# `backlog/data` through whichever item happened to cite it.
+#
+# WHY THE COMMIT IS NOT `vault_round.land()`. `land()` refuses a caller with no
+# `round_id` and no `item_id`: its own probe rail raises for want of "the second
+# reader's verdict", and this route is not a round — it is the copy that makes a round
+# unnecessary. What it shares with `land()` is the commit discipline that the same file
+# had to learn the hard way: `--` before every pathspec (#2454: without it a path
+# starting with `-` is read as a rev), no `-f` anywhere (an ignored target is refused,
+# not forced), one path per commit, and the figures read back out of the commit rather
+# than off the disk that produced it.
+ANCHOR_WITNESS_PREFIX = "nightly-"
+#: The source root the eval job writes baselines into. Required alongside the prefix:
+#: `~/lloyd-data/eval/baselines/` is not a git tree (`git -C ~/lloyd-data rev-parse` →
+#: `fatal: not a git repository`), which is the whole reason the guard fires on these
+#: files every night, and it is what keeps a `nightly-something.json` cited from
+#: somewhere else out of a route scoped to this one store.
+ANCHOR_WITNESS_ROOT = ("eval", "baselines")
+#: What the family may cost the vault. Measured at triage (2026-10-24): 9 tracked
+#: `nightly-*` witnesses totalling 3,129,787 B in a 271-file / 127 MB `backlog/data`,
+#: and 15 cited-but-uncommitted sources — so the condition recurs nightly, and 20 files
+#: is roughly a fortnight of them at the 31-file source inventory's rate. A tracked
+#: witness is never deleted or rewritten by this route: the budget can only ever be
+#: reached by a NEW copy, so refusing is the whole of the enforcement.
+ANCHOR_WITNESS_MAX_FILES = 20
+ANCHOR_WITNESS_MAX_TOTAL_BYTES = 8 * 1_048_576
+#: The figures an item quotes off a baseline, and the only ones re-derived from the
+#: blob: `scripts/eval_trend_stats.py` grades `entity_hit_rate`/`doc_hit_rate` as its
+#: rate legs and `ndcg10`/`mrr_doc` as its continuous ones (its `CONT_LEGS`, :125), over
+#: the `n_queries` denominator. Anything else in `summary.overall` is a knob, not a
+#: result, and an item that needs it can read the blob by the sha this route names.
+ANCHOR_WITNESS_FIGURES = ("n_queries", "entity_hit_rate", "doc_hit_rate",
+                          "mrr_doc", "ndcg10")
+
+#: `reason` values that mean "this witness already has history" — no demand, no note.
+#: A plain basename the vault holds can only be OUR earlier copy: `_witness_artifact`
+#: hands out a dated sibling name once the plain one is taken, and this family's names
+#: are never in `_RETIRED_WITNESS_NAMES`, so taken ⟺ archived by a previous pass.
+ANCHOR_WITNESS_DONE = "taken"
+#: `reason` values that mean "the copy failed for a reason that is not a guard's
+#: judgement" — the demand falls back, because a witness that silently stops being
+#: witnessed is the failure this whole guard exists to prevent. The four named refusals
+#: above (ceiling / ignored target / taken name / budget) do NOT fall back: ordering a
+#: copy the guard has just refused is how a round gets booked for nothing.
+_ANCHOR_WITNESS_FALLBACKS = frozenset(
+    {"unreadable", "copy", "git", "add", "commit", "no_sha", "blob", "split_vault"})
+
+
+def _is_anchor_witness(path) -> bool:
+    """True for a cited nightly eval baseline: basename `nightly-*` under `eval/baselines/`.
+
+    Both halves, and neither is redundant. The prefix alone would sweep in any other
+    `nightly-` file an item cites; the root alone would sweep in a whole directory the
+    eval job does not write. Checked on the resolved path's components, so `~`,
+    `$HOME/lloyd-data` and a relative `eval/baselines/` all read the same way.
+    """
+    parts = _witness_target(path).parts
+    if not parts or not parts[-1].startswith(ANCHOR_WITNESS_PREFIX):
+        return False
+    return any(parts[i:i + 2] == ANCHOR_WITNESS_ROOT for i in range(len(parts) - 1))
+
+
+def _anchor_witness_family(vault_root) -> "tuple[int | None, int | None]":
+    """(tracked files, total bytes) of the nightly witnesses already in history.
+
+    `git ls-files` and not `iterdir()`: the budget is about what the vault CARRIES, and
+    a `nightly-*.json` sitting untracked in `backlog/data` is not in the history the
+    budget is bounding — it is the gap this route is trying to close. Either figure is
+    `None` when git cannot answer, which the caller must treat as "unknown", never as
+    zero: a probe that reads an absent vault as an empty one is how a cap passes
+    silently on the machine it is meant to protect.
+    """
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(vault_root), "ls-files", "-z", "--",
+                               WITNESS_ARTIFACT_DIR],
+                              capture_output=True, text=True, timeout=60)
+    except Exception:
+        return (None, None)
+    if proc.returncode != 0:
+        return (None, None)
+    names = [n for n in (proc.stdout or "").split("\0")
+             if Path(n).name.startswith(ANCHOR_WITNESS_PREFIX)]
+    total = 0
+    for n in names:
+        try:
+            total += (Path(vault_root) / n).stat().st_size
+        except OSError:
+            # A tracked path with no bytes under it (deleted in the worktree, still in
+            # HEAD) counts as 0 bytes and still counts as a file. The cap that matters
+            # for the vault's size is the byte one, and it errs the other way here — so
+            # say so rather than quietly understating what is there.
+            continue
+    return (len(names), total)
+
+
+def _blob_figure(vault_root, sha: str, artifact: str) -> "tuple[str, str]":
+    """(`wc -l -c` of the blob, the rate figures read off the blob).
+
+    Both read through `git show <sha>:<path>` and nothing else. The reason is #2954's:
+    the figure a round quoted was the figure of whatever bytes were on disk when it
+    looked, so the number in an item and the number in history could disagree and
+    nothing caught it. `wc` runs over the blob on stdin, so the two integers this
+    returns ARE `wc -l -c < backlog/data/<name>` for anyone who re-runs it — the
+    comparison is on the numbers, not on the whitespace `wc` pads when it is given a
+    file operand.
+    """
+    import subprocess
+    proc = subprocess.run(["git", "-C", str(vault_root), "show", f"{sha}:{artifact}"],
+                          capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        return ("", "")
+    blob = proc.stdout
+    # `wc` gets the blob on STDIN with no `text=True`: the bytes are what is being
+    # measured, and decoding them to count characters would be a different measurement
+    # than the `wc -c < file` a reader re-runs on disk.
+    wc = subprocess.run(["wc", "-l", "-c"], input=blob, capture_output=True,
+                        timeout=60)
+    bits = (wc.stdout or b"").decode(errors="replace").split()
+    figures = ""
+    try:
+        overall = json.loads(blob.decode("utf-8")).get("summary", {}).get("overall", {})
+        got = [f"{k}={overall[k]:.6g}" if isinstance(overall[k], float)
+               else f"{k}={overall[k]}"
+               for k in ANCHOR_WITNESS_FIGURES if k in overall]
+        figures = ", ".join(got)
+    except Exception:
+        figures = ""
+    if wc.returncode != 0 or len(bits) != 2:
+        return ("", figures)
+    return (f"{bits[0]} {bits[1]}", figures)
+
+
+def commit_anchor_witness(source, artifact: str, *,
+                          max_files: "int | None" = None,
+                          max_total_bytes: "int | None" = None,
+                          item_id: "int | None" = None,
+                          session_id: "str | None" = None) -> dict:
+    """Archive a cited nightly eval baseline into the vault and quote it from history.
+
+    Copies the WHOLE source file byte-identically to `artifact` under the vault witness
+    dir, leaves the source exactly where it is (no extract, no move, no truncate), and
+    commits exactly one revertable sha touching that one path. Returns
+    `{"ok", "reason", "sha", "artifact", "note", "wc", "figures"}`; on any refusal
+    nothing is committed and `note` says why in the terms a human needs — `note` is
+    empty only for `reason="not_anchor"`, which is the caller's cue to emit the demand
+    clause this route exists to replace.
+
+    The vault is resolved AT CALL TIME through `_vault_witness_dir`, which reads
+    `app.paths.VAULT_ROOT` from the module — the constraint `scripts/autoresearch/promote.py:1099`
+    records as the failure mode of resolving it at import: a test that cannot move the
+    vault root is a test that runs `git add` against `~/obsidian`. `max_files` and
+    `max_total_bytes` are parameters so the budget's arithmetic is testable without
+    planting eight megabytes of baselines.
+    """
+    import shutil
+    import subprocess
+
+    # The budget is read HERE, from the module, rather than as a signature default: a
+    # default argument is bound at import, and the note below has to quote the budget it
+    # actually applied. An explicit argument still wins.
+    max_files = ANCHOR_WITNESS_MAX_FILES if max_files is None else max_files
+    max_total_bytes = (ANCHOR_WITNESS_MAX_TOTAL_BYTES if max_total_bytes is None
+                       else max_total_bytes)
+
+    def refuse(reason: str, note: str = "") -> dict:
+        return {"ok": False, "reason": reason, "sha": "", "artifact": artifact,
+                "note": note, "wc": "", "figures": ""}
+
+    if not _is_anchor_witness(source):
+        # Not this family: no refusal to surface, the caller's demand stands as #2289
+        # and #2382 left it.
+        return refuse("not_anchor")
+
+    src = _witness_target(source)
+    artifact_dir = str(Path(artifact).parent)
+    name = Path(artifact).name
+    vdir = _vault_witness_dir(artifact_dir)
+    root = vdir
+    for _ in Path(artifact_dir).parts:
+        root = root.parent          # `backlog/data` → the vault itself
+    # One vault, both ends. The tree this function commits in is a git tree under the
+    # root `_vault_witness_dir` names — there is no second `git -C` to disagree with, so
+    # the failure this rules out is a witness DIRECTORY that is not inside a vault at
+    # all: under the gate `~/obsidian` is absent and `app.paths.VAULT_ROOT` resolves to
+    # `/`, which is a git tree for no value of artifact_dir. `rev-parse --show-toplevel`
+    # is the answer rather than an equality test against `vault_round.VAULT` because it
+    # reads the tree that is actually there, and because both spellings of the vault are
+    # movable by a test — `LLOYD_VAULT` rebinds `vault_round.VAULT` (`vault_round.py:64`)
+    # while `app.paths.VAULT_ROOT` is monkeypatched, and the one that is captured at
+    # import time is the one `promote.py:1099` says must never be used to `git add`.
+    top = None
+    try:
+        # The dir a fresh vault clone may not have yet. Guarded because the failure
+        # this function must never produce is a traceback: with the vault absent (the
+        # gate sandbox, a round run with `HOME` elsewhere) this is a permission error
+        # on `/backlog`, and the rev-parse below is what turns that into a note.
+        vdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        top = subprocess.run(["git", "-C", str(vdir), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=60)
+    except Exception:
+        top = None
+    answer = (top.stdout or "").strip() if top is not None else ""
+    if (top is None or top.returncode != 0 or not answer
+            or not str(root.resolve()).startswith(str(Path(answer).resolve()))):
+        return refuse("split_vault",
+                      f"#3218 archived nothing: `{artifact_dir}` does not resolve into "
+                      f"a git tree (`git -C {vdir} rev-parse --show-toplevel` "
+                      f"{'exited ' + str(top.returncode) if top is not None and top.returncode != 0 else 'answered nothing'}`), "
+                      f"so there is no vault to commit `{artifact}` into and the "
+                      f"witness still has no history.")
+    root = Path(answer).resolve()
+
+    # ONE vault, both ends. The copy is written under the root `_vault_witness_dir` names
+    # and the commit is made by `vault_round.land()`, which takes its tree from the module
+    # attribute `vault_round.VAULT`. Those are two independent seams — `app.paths.VAULT_ROOT`
+    # and `VR.VAULT` — and on this box they are the same directory only because nothing
+    # moved them. When they differ the copy lands in one tree, `land` stages nothing in
+    # the other, and the route either refuses with a message about a path it never wrote
+    # or, worse, commits a sha whose blob is not the file that was measured. Refuse here,
+    # naming both, rather than report bytes archived that no history holds.
+    from scripts.automod import vault_round as _VR
+    _land_root = Path(_VR.VAULT).expanduser().resolve()
+    # Containment, not a string prefix: `…/vault2` starts with `…/vault` as TEXT and the
+    # two are unrelated trees, which is how a prefix test passes on exactly the split it
+    # exists to catch. `is_relative_to` asks the question about path components.
+    if root != _land_root and not (
+            hasattr(root, "is_relative_to") and root.is_relative_to(_land_root)):
+        return refuse("split_vault",
+                      f"#3218 archived nothing: the witness directory resolves to "
+                      f"`{root}` but the landing route commits in `{_land_root}`, so the "
+                      f"copy would be written where no commit is made and `{artifact}` "
+                      f"would still have no history.")
+
+    size = _witness_size(source)
+    if size is None:
+        return refuse("unreadable",
+                      f"#3218 could not read `{src}` to archive it, so the copy "
+                      f"route committed nothing and the witness still has no history.")
+    if not _witness_within_size_bound(source):
+        return refuse("over_ceiling",
+                      f"#3218 archived nothing: `{src}` is {size:,} bytes, over the "
+                      f"WITNESS_MAX_BYTES = {WITNESS_MAX_BYTES:,} ceiling on what a "
+                      f"witness clause may demand whole. Nothing was committed. An "
+                      f"extract is still owed, and only an item can choose it.")
+    # Idempotence, keyed on the SOURCE's own basename and NOT on `artifact`: on a second
+    # triage of the same item `_witness_artifact` has already disambiguated the slot
+    # (#2513), so the artifact handed to this function is a dated sibling that is
+    # perfectly free — copying again would plant one more copy of a single baseline every
+    # time its item is re-triaged, which is the guard committing unbounded witnesses
+    # instead of stopping rounds. The question being asked is "has THIS baseline already
+    # been archived?", and the answer is whether its own name is tracked.
+    own = subprocess.run(["git", "-C", str(root), "ls-files", "--",
+                          f"{WITNESS_ARTIFACT_DIR}/{src.name}"],
+                         capture_output=True, text=True, timeout=60)
+    tracked = own.stdout.strip() if own.returncode == 0 else ""
+    if tracked:
+        # A tracked name is only "already archived" if the tracked BYTES are this
+        # file's. One name can hold two documents — two runs that picked the same
+        # basename, or an item filed against a baseline that was later re-run — and
+        # calling that done would silently withhold a witness nobody has committed.
+        shown = subprocess.run(["git", "-C", str(root), "show", f"HEAD:{tracked}"],
+                               capture_output=True, timeout=120)
+        if shown.returncode == 0 and shown.stdout == src.read_bytes():
+            return {"ok": True, "reason": ANCHOR_WITNESS_DONE, "sha": "",
+                    "artifact": tracked, "note": "", "wc": "", "figures": ""}
+
+
+    if _artifact_taken(artifact_dir, name):
+        return refuse(ANCHOR_WITNESS_DONE,
+                      f"#3218 archived nothing: `{artifact_dir}/{name}` already holds "
+                      f"bytes. The name is never overwritten (#2513 — a demand aimed "
+                      f"at a slot the vault holds is what made main red), and the "
+                      f"witness already has history, so nothing is owed.")
+    # An ignored target cannot be committed without `-f`, which is refused here and
+    # everywhere: `.gitignore:141` ignores `eval/baselines/*` wholesale with one
+    # carve-out, and a `backlog/data` rule added tomorrow must stop this route rather
+    # than make it force a path past the ignore. `check-ignore` exits 0 on a match, 1
+    # on none, 128 on error — and "cannot prove it is addable" is a refusal, not a pass.
+    # `-v` and NOT `-q`: git 2.56 refuses to have both ("cannot have both --quiet and
+    # --verbose", exit 128), and a 128 here is indistinguishable from a broken tree.
+    try:
+        chk = subprocess.run(["git", "-C", str(root), "check-ignore", "-v", "--",
+                              artifact], capture_output=True, text=True, timeout=60)
+    except Exception:
+        return refuse("git",
+                      f"#3218 archived nothing: `git check-ignore` for `{artifact}` "
+                      f"could not run, so the target's ignore state is unknown and the "
+                      f"copy would have to force it. The witness has no history.")
+    if chk.returncode == 0:
+        return refuse("ignored",
+                      f"#3218 archived nothing: `git check-ignore -v` accepts "
+                      f"`{artifact}` (matched `{(chk.stdout or '').strip()}`), so "
+                      f"committing it needs `-f` — which this route never passes. "
+                      f"Nothing was committed; the witness still has no history.")
+    if chk.returncode != 1:
+        return refuse("git",
+                      f"#3218 archived nothing: `git check-ignore` for `{artifact}` "
+                      f"exited {chk.returncode}, so the target's ignore state is "
+                      f"unknown. Nothing was committed.")
+
+    count, total = _anchor_witness_family(root)
+    if count is None:
+        return refuse("git",
+                      f"#3218 archived nothing: the tracked nightly-witness count in "
+                      f"`{WITNESS_ARTIFACT_DIR}` could not be read, so the "
+                      f"{max_files}-file / "
+                      f"{max_total_bytes:,}-byte family budget could not "
+                      f"be checked and is not assumed to pass.")
+    if count + 1 > max_files:
+        return refuse("too_many_files",
+                      f"#3218 archived nothing: `{WITNESS_ARTIFACT_DIR}` already "
+                      f"carries {count} tracked `nightly-*` witnesses and the family "
+                      f"budget is {max_files} files "
+                      f"(these would be {count + 1}). Nothing was committed, and "
+                      f"nothing tracked was deleted or rewritten — the cap is a "
+                      f"human call on the family, not a licence to expire a witness.")
+    if total + size > max_total_bytes:
+        return refuse("too_many_bytes",
+                      f"#3218 archived nothing: {count} tracked `nightly-*` witnesses "
+                      f"total {total:,} bytes and the family budget is "
+                      f"{max_total_bytes:,} bytes (this file is {size:,}). Nothing was "
+                      f"committed, and nothing tracked was deleted or rewritten.")
+
+    try:
+        vdir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, vdir / name)
+    except OSError as exc:
+        return refuse("copy",
+                      f"#3218 archived nothing: the copy of `{src}` to "
+                      f"`{artifact}` failed ({exc}). The witness has no history.")
+    import filecmp
+    if not filecmp.cmp(str(src), str(vdir / name), shallow=False):
+        (vdir / name).unlink(missing_ok=True)
+        return refuse("copy",
+                      f"#3218 archived nothing: the copy at `{artifact}` is not "
+                      f"byte-identical to `{src}`, so the copy was removed and nothing "
+                      f"was committed.")
+
+    def head() -> str:
+        try:
+            p = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, timeout=60)
+            return (p.stdout or "").strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    msg = (f"#3218 archive the nightly eval baseline an item quotes: {name}\n\n"
+           f"Source: `{src}` (left in place; the whole file, not an extract).\n"
+           f"Filed automatically by the unarchived-witness guard, which found this file "
+           f"cited by an item with no git tree behind it.\n")
+
+    # The commit goes through the loop's own vault write route. `vault_round.land()` is
+    # what the `automod_vault_land` tool runs: the only door that validates the paths,
+    # runs the vault's guards and appends the `vault_land` row to `promotions.jsonl`. That
+    # row is what the owed-check reads to decide whether this route ever archived
+    # anything, and what `promote.py:vault_commits_for` reads to decide whether a mixed
+    # item's vault half landed at all; a raw `git add`/`git commit` would put bytes in the
+    # vault with no ledger event behind them, which is the un-ledgered half of a landing.
+    #
+    # Read at CALL time, like the vault root: `land()` takes its tree from the module
+    # attribute `vault_round.VAULT` when it runs, so a test that rebinds that attribute
+    # works against a temporary repo and no node stages a thing against `~/obsidian` — the
+    # failure `promote.py:1099` records for an import-time binding.
+    from scripts.automod import vault_round as VR
+
+    before = head()
+    try:
+        landed = VR.land([artifact], msg, item_id=item_id, session_id=session_id)
+    except Exception as exc:
+        # `land` refuses two ways: a validation/scope/guard failure comes back as
+        # `{"ok": false, ...}`, and "nothing staged on those paths" is RAISED as
+        # `VaultRoundError` (`vault_round.py:1879`). Both are refusals, and neither may
+        # escape as a traceback — this function is called from triage, on every item
+        # text a nightly job reads, and an exception there loses the whole triage pass.
+        (vdir / name).unlink(missing_ok=True)
+        return refuse("commit",
+                      f"#3218 archived nothing: the vault's landing route rejected "
+                      f"`{artifact}` ({type(exc).__name__}: `{str(exc)[:240]}`), so no "
+                      f"sha exists to quote and the witness still has no history.")
+    if not landed.get("ok"):
+        # Everything `land` refuses on it refuses before staging, so a refusal committed
+        # nothing — but the copied bytes are sitting in the vault's working tree RIGHT
+        # NOW, and an untracked witness there is a file with no history that reads as
+        # archived to anyone who only lists the directory. Take it back.
+        (vdir / name).unlink(missing_ok=True)
+        detail = (landed.get("validation") or landed.get("note")
+                  or landed.get("message") or landed.get("error") or "")
+        code = landed.get("refuse_code") or landed.get("reason") or "refused"
+        return refuse("commit",
+                      f"#3218 archived nothing: the vault's landing route refused "
+                      f"`{artifact}` ({code}: `{str(detail)[:240]}`), so no sha exists "
+                      f"to quote and the witness still has no history.")
+    # The route names its commit `commit`, not `sha` (`vault_round.py:1943`); reading the
+    # wrong key would report a landed archive as a commit-less one.
+    after = str(landed.get("commit") or "")
+    if not after:
+        (vdir / name).unlink(missing_ok=True)
+        return refuse("no_sha",
+                      f"#3218 archived nothing: the landing route reported success for "
+                      f"`{artifact}` without naming a commit, so any figure quoted below "
+                      f"would come from a commit nobody can revert.")
+    if after == before:
+        return refuse("no_sha",
+                      f"#3218 archived nothing: the landing route returned the HEAD it "
+                      f"started at (`{after}`), so nothing was committed and any figure "
+                      f"quoted below would name bytes that are not in history.")
+
+    # The tree the commit landed in is the route's, and it is only the same directory as
+    # the one `_vault_witness_dir` named because nothing moved it — `head()` above and
+    # `VR.VAULT` below disagree the moment a caller rebinds one and not the other, and
+    # then every later check would be reading a repo that does not hold the file.
+    root = Path(VR.VAULT)
+    touched = [ln for ln in (subprocess.run(
+        ["git", "-C", str(root), "show", "--pretty=format:", "--name-only", after],
+        capture_output=True, text=True, timeout=60).stdout or "").splitlines()
+        if ln.strip()]
+    if touched != [artifact]:
+        return refuse("split_commit",
+                      f"#3218 landed `{after}` for `{artifact}` but that sha also names "
+                      f"{touched} — the sha this route reports must touch one path and "
+                      f"nothing else, because it is the sha a human reverts. Revert it "
+                      f"(`git -C {root} revert {after}`) before trusting the figures.")
+    wc, figures = _blob_figure(root, after, artifact)
+    if not wc:
+        return refuse("blob",
+                      f"#3218 committed `{after}` for `{artifact}` but `git show "
+                      f"{after}:{artifact}` gave no bytes to measure, so no figure is "
+                      f"quoted and the archive must be checked by hand.")
+    ext = Path(name).suffix.lower().lstrip(".")
+    note = (f"#3218 archived the witness itself, no round needed: `{src}` -> "
+            f"`{artifact}` in the vault at `{after}` (whole file, source left in place, "
+            f"{size:,} bytes). Re-derived from that blob, not from the disk it came "
+            f"from: `{_rederive_command(artifact, ext)}` -> `{wc}`"
+            + (f"; summary.overall {figures}" if figures else
+               "; summary.overall figures not present in the blob"))
+    return {"ok": True, "reason": "archived", "sha": after, "artifact": artifact,
+            "note": note, "wc": wc, "figures": figures}
+
+
 def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
                               item_id=None) -> str:
     """The owed note for a witness too large to be asked for whole (#2382).
@@ -2106,6 +2570,35 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     # that obeyed the clause is what made main red.
     artifact = _witness_artifact(witness, artifact_dir, item_id=item_id)
     ext = Path(witness).suffix.lower().lstrip(".")
+    # #3218: the bytes of a nightly eval baseline are already decided — the file is
+    # quoted whole, its basename is unique per run, and nothing but its own run rewrites
+    # it — so the guard puts them in history instead of ordering a round to `cp` them.
+    # Every other unarchived witness falls through to the demand below, which is emitted
+    # and routed exactly as #2289/#2382/#2513 left it.
+    if _is_anchor_witness(witness):
+        sink = owed if route_to_owed else every
+        res = commit_anchor_witness(witness, artifact, item_id=item_id)
+        if res["reason"] == ANCHOR_WITNESS_DONE:
+            # Either this exact baseline is already tracked, or the slot holds another
+            # item's bytes and is refused with a note (#2513). Only the refused half has
+            # something to say; the archived half must not add an empty owed line, which
+            # would read to a human as a refusal with no reason.
+            if res["note"]:
+                sink.append(res["note"])
+            return _answer()
+        if res["ok"]:
+            sink.append(res["note"])          # the archive record, figures and all
+            return _answer()
+        if res["reason"] not in _ANCHOR_WITNESS_FALLBACKS:
+            # A guard refused it (ceiling / ignored target / family budget). Say so
+            # loudly and do NOT also order the copy that was just refused: a demand the
+            # route knows is unexecutable is the round this item exists to stop.
+            sink.append(res["note"])
+            return _answer()
+        # The copy failed for a reason that is not a judgement — git would not answer,
+        # the commit did not land. Fall through to the demand so the witness is still
+        # witnessed, with the failure named beside it rather than swallowed.
+        sink.append(res["note"])
     # Past the `MAX_CLAUSES` check above, which is where both destinations are
     # gated. #2289 clause 4 pinned that gate for the copy demand; #2382 clause 5
     # pins it for the note.

@@ -34,6 +34,7 @@ unreachable by it.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -2788,3 +2789,377 @@ def test_the_docstring_says_how_far_the_name_actually_repeats(tmp_path, monkeypa
     assert again == same, (
         "the same item on the same day no longer names the same file — the one half "
         "of the reuse claim the corrected docstring still makes")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #3218 — the guard does the `cp` itself, for the one family whose bytes are
+# already decided: the nightly retrieval-eval baseline.
+#
+# Why the copy used to cost a round: the clause said "copy it into
+# `backlog/data` and quote `wc -l -c` off the copy", and obeying it is a vault
+# commit, which no code round's diff can contain — so it went to the owed list
+# (#2289) and a vault round was opened for the copy anyway. `promotions.jsonl`
+# has four `vault_land` events whose entire path list is one
+# `backlog/data/nightly-*.json` plus the item that asked (#2685→#2954, #2935 for
+# a `gate.json`), each closed `acceptance_source: round`.
+#
+# The seam every node below depends on: the autouse `isolated` fixture points
+# `app.paths.VAULT_ROOT` at an empty NON-git `tmp_path/"vault"`. `_anchor_vault`
+# additionally `git init`s that same directory, because a route that commits has
+# to be tested against a tree that can commit — and against a temp one, because a
+# node that resolved the vault at import time would run `git add` against
+# `~/obsidian` instead (`promote.py:1099` records exactly that failure).
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _anchor_git(vault: Path, *args: str, input_bytes: str = "",
+                timeout: int = 120) -> subprocess.CompletedProcess:
+    """One git call, TEXT mode: a node comparing `rev-parse` output wants a string —
+    bytes would interpolate as `b'9f1c'` into a rev-range and answer a question about
+    nothing."""
+    return subprocess.run(["git", "-C", str(vault), *args], input=input_bytes,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def _anchor_blob(vault: Path, sha: str, rel: str) -> bytes:
+    """`git show <sha>:<path>` in BYTES, which is what `wc -c` measures.
+
+    The route's own reader (`_blob_figure`) is binary for the same reason; decoding a
+    blob to count it would be counting characters, not the bytes a reader gets from
+    `git show` into a pipe.
+    """
+    r = subprocess.run(["git", "-C", str(vault), "show", f"{sha}:{rel}"],
+                       capture_output=True, timeout=120)
+    assert r.returncode == 0, r.stderr.decode()[:200]
+    return r.stdout
+
+
+def _anchor_vault(tmp_path: Path, monkeypatch=None) -> Path:
+    """The isolated fixture's vault, made into a git tree with one commit.
+
+    One commit first, so a node can tell "HEAD moved" from "HEAD exists": a route
+    that reports a sha after a commit that silently failed is the failure this
+    section's first node is about, and on a vault with no commits HEAD is the
+    empty string either way.
+
+    BOTH vault seams are pointed here, which is the part a node cannot skip. The copy
+    resolves its directory through `app.paths.VAULT_ROOT` (the autouse `isolated`
+    fixture already rebinds that), but the commit goes through
+    `vault_round.land()`, which takes its tree from the module attribute
+    `vault_round.VAULT` when it runs. Rebinding only the first would have the copy land
+    in the fixture vault and the commit attempted in `~/obsidian`.
+    """
+    vault = tmp_path / "vault"
+    if monkeypatch is not None:
+        from scripts.automod import vault_round as VR
+        monkeypatch.setattr(VR, "VAULT", vault)
+    for k, v in (("user.email", "witness@test"), ("user.name", "witness")):
+        _anchor_git(vault, "config", k, v)
+    _anchor_git(vault, "init", "-q", "-b", "main")
+    (vault / "backlog" / "data" / ".seed").write_bytes(b"")
+    _anchor_git(vault, "add", "--", "backlog/data/.seed")
+    _anchor_git(vault, "commit", "-q", "-m", "seed")
+    return vault
+
+
+def _anchor_baseline(tmp_path: Path, name: str = "nightly-20261024-20261024-060345.json",
+                     root: str = "eval/baselines", body: str | None = None) -> Path:
+    """A baseline where a baseline lives: under the data root, in no git tree.
+
+    `git -C ~/lloyd-data rev-parse` exits 128 on the live box, which is the whole
+    reason the guard fires on these files nightly. The body carries the fields the
+    route quotes (`summary.overall`, and the four legs
+    `scripts/eval_trend_stats.py` grades) so a figure quoted from the blob can be
+    checked against a figure that means something.
+    """
+    d = tmp_path / "lloyd-data" / Path(root)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(body if body is not None else json.dumps({
+        "label": name, "ran_at": "2026-10-24T06:03:45+00:00",
+        "rows": [{"q": "kg-maintenance-tasks", "hit": True}],
+        "summary": {"overall": {
+            "n_queries": 81,
+            "entity_hit_rate": 0.5185185185185185,
+            "doc_hit_rate": 0.4074074074074074,
+            "mrr_doc": 0.3456789, "ndcg10": 0.3981234}},
+    }, indent=2) + "\n", encoding="utf-8")
+    return p
+
+
+def _demand_sentence(artifact: str) -> str:
+    """The demand as #2289/#2382/#2513 left it, spelled here so clause 2 can prove
+    the untouched path is byte-identical and not merely similar."""
+    return (f"The witness bytes have no history: copy `X` to `{artifact}` in the "
+            f"vault (an extract reproducing the same numbers is fine) and re-derive "
+            f"the quoted report from the committed bytes with "
+            f"`{_rederive_expected(artifact)}` — that output is the figure the item "
+            f"quotes.")
+
+
+def _rederive_expected(artifact: str) -> str:
+    return B._rederive_command(artifact, "json")
+
+
+def _wc_from_disk(path: Path) -> str:
+    """`wc -l -c < path`, which is what the demand tells a human to run.
+
+    The redirection matters to nothing here and the pipe does to everything:
+    `wc -l -c < f` prints two bare numbers where `wc -l -c f` prints a filename,
+    and `_rederive_command` returns the redirection form so the quoted figure is
+    reproducible byte for byte on a machine that has never seen this fixture.
+    """
+    with open(path, "rb") as fh:
+        out = subprocess.run(["wc", "-l", "-c"], stdin=fh, capture_output=True,
+                             text=True, timeout=60).stdout
+    return " ".join(out.split()[:2])
+
+
+def _wc_of(blob: bytes) -> str:
+    """`wc -l -c` over bytes pulled out of `git show <sha>:<path>`.
+
+    Deliberately the same invocation as `_wc_from_disk` with a different feed: the
+    whole point of clause 1 is that the two feeds agree, so any difference in how
+    they were measured would be a difference in the test, not in the code.
+    """
+    out = subprocess.run(["wc", "-l", "-c"], input=blob, capture_output=True,
+                         timeout=60).stdout
+    return " ".join(out.decode().split()[:2])
+
+
+def test_an_archived_baseline_quotes_the_blob_and_leaves_no_copy_demand(tmp_path, monkeypatch):
+    """Clause 1: the route archives the file, emits no demand, and its figure is
+    the blob's — `wc -l -c < backlog/data/<name>` equals the same command over
+    `git show <sha>:backlog/data/<name>`.
+
+    Six things have to hold together for the round to stop being owed, and the node
+    checks all six rather than the happy one:
+      * the file lands WHOLE and byte-identical (`cmp`, via read_bytes equality);
+      * the source is still there with the same bytes — no move, no truncate;
+      * exactly ONE sha exists afterwards and it names exactly one path;
+      * the figure in the note is the committed blob's, not the disk's;
+      * the copy demand is gone from both destinations;
+      * re-triaging the same item archives nothing a second time — otherwise the
+        guard that stops booking rounds starts committing one copy per triage.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    src = _anchor_baseline(tmp_path)
+    before = _anchor_git(vault, "rev-parse", "HEAD").stdout.strip()
+    text = (f"Per `{src}`, summary.overall entity_hit_rate is 0.5185.")
+
+    out = B.add_witness_artifact_clause([], text, route_to_owed=True, item_id=3218)
+    clauses, owed = out
+
+    assert clauses == [], "a graded clause came back where an archive should be"
+    assert len(owed) == 1, owed
+    assert "archived nothing" not in owed[0], owed[0]
+    assert "no history" not in owed[0], "the copy demand is still being emitted"
+
+    dst = vault / "backlog" / "data" / src.name
+    assert dst.is_file(), owed[0]
+    assert dst.read_bytes() == src.read_bytes(), "the copy is not byte-identical"
+    assert src.is_file() and src.read_bytes(), "the source was moved or emptied"
+
+    after = _anchor_git(vault, "rev-parse", "HEAD").stdout.strip()
+    assert after and after != before, "no sha was created"
+    assert len(_anchor_git(vault, "rev-list", f"{before}..{after}").stdout.split()) == 1, \
+        "more than one commit for one archive"
+    names = [ln for ln in _anchor_git(vault, "show", "--pretty=format:", "--name-only",
+                                      after).stdout.splitlines() if ln.strip()]
+    assert names == [f"backlog/data/{src.name}"], names
+
+    blob = _anchor_blob(vault, after, f"backlog/data/{src.name}")
+    assert _wc_of(blob) == _wc_from_disk(dst), (
+        "the copy on disk and the committed blob disagree, so quoting either one "
+        "is quoting a different document")
+    quoted = re.search(r"`wc -l -c < [^`]+` -> `(\d+ \d+)`", owed[0])
+    assert quoted, f"the note carries no re-derivable figure: {owed[0]}"
+    assert quoted.group(1) == _wc_of(blob), (
+        f"the figure the note tells a human to reproduce is not the blob's "
+        f"{_wc_of(blob)}: {owed[0]}")
+    assert f"`wc -l -c < backlog/data/{src.name}`" in owed[0], owed[0]
+    assert f"at `{after}`" in owed[0], f"the note does not name the sha it quotes: {owed[0]}"
+    for fig in ("n_queries=81", "entity_hit_rate=0.518519", "ndcg10=0.398123"):
+        assert fig in owed[0], f"{fig} missing from the note: {owed[0]}"
+
+    # Re-triage: the plain name is taken, so a dated sibling is what `_witness_artifact`
+    # would hand out — and the route must read that as "already archived".
+    out2 = B.add_witness_artifact_clause([], text, route_to_owed=True, item_id=3218)
+    assert out2[0] == [] and out2[1] == [], out2
+    assert _anchor_git(vault, "rev-parse", "HEAD").stdout.strip() == after, \
+        "the second triage committed a second copy"
+
+
+def test_the_vault_is_resolved_at_call_time_not_at_import(tmp_path, monkeypatch):
+    """A node that cannot move the vault root is a node that runs `git add` against
+    `~/obsidian` — the failure `promote.py:1099` records, and the constraint the
+    autouse `isolated` fixture exists to satisfy.
+
+    Proved by archiving into the fixture vault, moving `VAULT_ROOT` to a SECOND
+    vault, and archiving a second baseline: the second copy must land in the
+    second tree. An import-time binding would have put it in the first.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    first = _anchor_baseline(tmp_path, "nightly-20261022-20261022-060000.json")
+    assert B.commit_anchor_witness(first, f"backlog/data/{first.name}")["ok"]
+    assert (vault / "backlog" / "data" / first.name).is_file()
+
+    other = tmp_path / "vault2"
+    (other / "backlog" / "data").mkdir(parents=True)
+    _anchor_git(other, "init", "-q", "-b", "main")
+    for k, v in (("user.email", "w@test"), ("user.name", "w")):
+        _anchor_git(other, "config", k, v)
+    # `git add -- backlog/data` on an EMPTY directory stages nothing, and the seed
+    # commit then fails with nothing to commit, leaving HEAD unborn — which `land`
+    # reports as "vault HEAD is on 'HEAD'". The seed file is what gives the tree a HEAD.
+    (other / "backlog" / "data" / "seed.json").write_text('{"seed": 1}\n')
+    _anchor_git(other, "add", "--", "backlog/data/seed.json")
+    c = _anchor_git(other, "commit", "-q", "-m", "seed")
+    assert c.returncode == 0, c.stderr
+    monkeypatch.setattr("app.paths.VAULT_ROOT", other)
+    # Both seams again — the copy follows the first, the commit follows the second.
+    from scripts.automod import vault_round as VR2
+    monkeypatch.setattr(VR2, "VAULT", other)
+
+    second = _anchor_baseline(tmp_path, "nightly-20261023-20261023-060000.json")
+    res = B.commit_anchor_witness(second, f"backlog/data/{second.name}")
+    assert res["ok"], res["note"]
+    assert (other / "backlog" / "data" / second.name).is_file()
+    assert not (vault / "backlog" / "data" / second.name).exists(), \
+        "the second archive went to the tree the first one used: the root is bound"
+
+
+def test_only_the_nightly_baseline_family_is_archived_every_other_witness_still_owed(tmp_path, monkeypatch):
+    """Clause 2: the route is scoped to `nightly-*` under `eval/baselines/`, and
+    for everything else the demand is emitted and routed exactly as before.
+
+    Five witnesses in one call, chosen so each half of the family test is load-
+    bearing on its own: a baseline under the right root (archived), the same root
+    with a different basename, the right basename under the WRONG root, the right
+    basename with the root spelled as a bare `baselines/` component, and the
+    fixture's own reflection path. The four demands are compared to the exact
+    sentence #2289/#2382/#2513 produce, so a paraphrase is a failure.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    base = _anchor_baseline(tmp_path)
+    same_root = _anchor_baseline(tmp_path, "compaction-recall-20261024.json")
+    wrong_root = _anchor_baseline(tmp_path, "nightly-20261024-bare.json",
+                                  root="baselines")
+    flat = _anchor_baseline(tmp_path, "nightly-20261024-flat.json", root=".")
+
+    # One witness per call: `add_witness_artifact_clause` acts on the FIRST eligible
+    # token and returns (#2382's one-demand-per-triage rule), so the family test drives
+    # the route once per cited source rather than expecting one call to do four things.
+    owed, clauses = [], []
+    for p in (base, same_root, wrong_root, flat):
+        out = B.add_witness_artifact_clause([], f"Numbers in `{p}`",
+                                            route_to_owed=True, item_id=3218)
+        clauses.extend(out[0])
+        owed.extend(out[1])
+
+    assert clauses == []
+    assert (vault / "backlog" / "data" / base.name).is_file(), \
+        "the baseline in the family was not archived"
+    for p in (same_root, wrong_root, flat):
+        assert not (vault / "backlog" / "data" / p.name).exists(), \
+            f"{p} is outside the family and must not be copied by this route"
+    demanded = " ".join(owed)
+    for p in (same_root, wrong_root, flat):
+        assert f"`backlog/data/{p.name}`" in demanded, \
+            f"no demand for {p}: {owed}"
+        assert any(s.startswith("The witness bytes have no history: copy ")
+                   and f"backlog/data/{p.name}" in s for s in owed)
+    assert len([s for s in owed if s.startswith("The witness bytes have no history")]) == 3
+    assert len([s for s in owed if "archived nothing" in s or "archived the witness" in s]) == 1
+
+    # The untouched destination: with route_to_owed=False a non-family witness is
+    # still a GRADED clause, worded as it was before this round existed.
+    out2 = B.add_witness_artifact_clause([], f"Numbers in `{same_root}`",
+                                         item_id=3218)
+    graded = out2[0] if isinstance(out2, tuple) else out2
+    assert len(graded) == 1, out2
+    assert graded[0].startswith("The witness bytes have no history: copy ")
+    assert f"`{_rederive_expected(f'backlog/data/{same_root.name}')}`" in graded[0]
+
+
+def _head_tree(vault: Path) -> str:
+    return _anchor_git(vault, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_baseline_over_the_ceiling_is_refused_by_name_and_committed_nowhere(tmp_path, monkeypatch):
+    """Clause 3, ceiling: over `WITNESS_MAX_BYTES` the route commits NOTHING and the
+    note names the ceiling by NAME.
+
+    Why the name and not a line number: the constant's line moved from `:1268` to
+    `:1328` twice over (#2289 → #2513), and the item was written citing a number that
+    had already moved. A note that cites `WITNESS_MAX_BYTES = 1,048,576` is checkable
+    from a checkout of any vintage.
+
+    The bytes are `WITNESS_MAX_BYTES + 1`, not "a big number", so the boundary is the
+    one the constant states: at the ceiling the guard's own `_witness_within_size_bound`
+    passes (`<=`), one byte over it does not.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    before = _head_tree(vault)
+    src = _anchor_baseline(tmp_path, "nightly-20261024-fat.json",
+                           body="x" * (B.WITNESS_MAX_BYTES + 1))
+    res = B.commit_anchor_witness(src, "backlog/data/nightly-20261024-fat.json")
+    assert res["ok"] is False and res["reason"] == "over_ceiling"
+    assert res["sha"] == "" and res["wc"] == ""
+    assert "WITNESS_MAX_BYTES" in res["note"], res["note"]
+    assert f"{B.WITNESS_MAX_BYTES:,}" in res["note"], res["note"]
+    assert src.is_file(), "a refusal removed the source it refused to copy"
+    assert _head_tree(vault) == before, "a refusal committed a sha"
+    assert not (vault / "backlog" / "data" / src.name).exists(), \
+        "the refused bytes were left in the vault untracked"
+
+
+def test_a_target_the_vault_ignores_is_refused_and_never_forced(tmp_path, monkeypatch):
+    """Clause 3, ignore: `check-ignore -v` exiting 0 means the vault has DECIDED not to
+    hold this path, and `-f` is not a workaround — it is the failure #3095's cousin.
+
+    The `.gitignore` is committed rather than left dirty so the refusal is about the
+    rule, not about a scratch file a later `git add -A` might sweep up.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    before = _head_tree(vault)
+    (vault / ".gitignore").write_text("backlog/data/nightly-20261024-ignored.json\n")
+    _anchor_git(vault, "add", "--", ".gitignore")
+    _anchor_git(vault, "commit", "-q", "-m", "ignore one witness slot")
+    head = _head_tree(vault)
+    # Positive control on the setup itself: the `.gitignore` commit has to BE what HEAD is
+    # now, or `head` below is a sha that predates the rule and the refusal that follows
+    # could be for any reason. `check-ignore` reads the committed rules, not a working
+    # file, so an uncommitted ignore would make this node green for the wrong reason.
+    assert head and head != before, "the .gitignore commit did not land — nothing to refuse on"
+    src = _anchor_baseline(tmp_path, "nightly-20261024-ignored.json")
+    res = B.commit_anchor_witness(src, "backlog/data/nightly-20261024-ignored.json")
+    assert res["ok"] is False and res["reason"] == "ignored"
+    assert "check-ignore" in res["note"] and res["note"].strip()
+    assert _head_tree(vault) == head, "an ignored target was committed anyway"
+    assert not (vault / "backlog" / "data" / src.name).exists()
+
+
+def test_a_basename_the_vault_already_holds_is_refused_not_overwritten(tmp_path, monkeypatch):
+    """Clause 3, taken name (#2513): the vault holds `nightly-20261024-taken.json`
+    from another item, and a second source with the same basename must be refused, not
+    written over.
+
+    #2513's whole finding is that the overwrite is the destructive case — #2512's round
+    obeyed a literal `backlog/data/gate.json` demand and deleted #1883's witness, which
+    is what turned main red. So this node asserts the SURVIVOR's bytes, not merely that
+    HEAD did not move: a refusal that rewrote the file first and then reported a refusal
+    would pass a HEAD-only check.
+    """
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    held = vault / "backlog" / "data" / "nightly-20261024-taken.json"
+    held.write_text('{"mine": "the evidence another item reads"}\n')
+    _anchor_git(vault, "add", "--", "backlog/data/nightly-20261024-taken.json")
+    _anchor_git(vault, "commit", "-q", "-m", "another item's witness")
+    before, kept = _head_tree(vault), held.read_bytes()
+    src = _anchor_baseline(tmp_path, "nightly-20261024-taken.json")
+    res = B.commit_anchor_witness(src, "backlog/data/nightly-20261024-taken.json")
+    assert res["ok"] is False and res["reason"] == "taken"
+    assert "already" in res["note"] and res["note"].strip()
+    assert held.read_bytes() == kept, "the refusal overwrote the witness it refused onto"
+    assert _head_tree(vault) == before
