@@ -888,13 +888,29 @@ BACKLOG_PATH_PREFIX = "backlog/"
 #: How a kept path is marked in a `reverted` list (#3039 clause 4). A bare entry is what
 #: a path that was put back at HEAD or unlinked has, so an unannotated kept path would
 #: make the row claim a deletion that did not happen.
-KEPT_UNTRACKED_NOTE = (" kept (untracked backlog item file: left on disk, bytes are "
+KEPT_UNTRACKED_NOTE = (" kept (untracked backlog file: left on disk, bytes are "
                        "the round's — git holds no pre-round copy)")
 
 
 def _kept_when_untracked(p: str) -> bool:
-    """True for an untracked path a refused land must leave on disk (#3039)."""
-    return p.startswith(BACKLOG_PATH_PREFIX) and p.endswith(".md")
+    """True for an untracked path a refused land must leave on disk (#3039, widened #3272).
+
+    All of `backlog/`, whatever the extension. #3039 carved the class out for a `.md`, and
+    the extension then carried none of the reason: on 2026-10-24 the refused land of a
+    promotions witness ran this function on
+    `backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl`, answered False because
+    the name does not end `.md`, and `revert_paths` unlinked the bytes it had been
+    grading minutes earlier. The caller had to re-cut them from the live ledger to attempt
+    the land again — and the window those rows were cut from folds, so the second attempt
+    could have had nothing to re-cut. A guard that consumes what it grades is a guard the
+    caller cannot re-run.
+
+    The class argument above already covers a `.jsonl` under `backlog/data/`: it feeds no
+    loader, arms no task, and an unwritten witness is the silent absence every other clause
+    of this file is written against. `autonomy/<n>-*.md` stays deleted, for #2437's reason
+    and not this one — that file arms a task, so a refused round must not leave one armed.
+    """
+    return p.startswith(BACKLOG_PATH_PREFIX)
 
 
 def revert_paths(paths: list[str]) -> list[str]:

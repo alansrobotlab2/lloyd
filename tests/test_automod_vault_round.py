@@ -7945,6 +7945,10 @@ def test_the_recovery_tag_survives_the_shrink_note_and_the_800_char_clip(vault, 
 # reaches `autonomy/*.md` and stops there: a `backlog/*.md` arms no task and feeds
 # no prompt, which is what
 # `test_loaders_run_only_for_paths_that_feed_a_prompt_or_the_scheduler` already pins.
+# #3272 then removed the `.md` from the KEEP side of that rule, because a promotions
+# extract under `backlog/data/` is a `.jsonl` and the refusal unlinked the bytes it had
+# been grading: the class argument above holds for it word for word, and the extension
+# was never part of the reason.
 # ===========================================================================
 
 #: The round's edit to its own item file, in the shape `app/backlog_write.py` writes.
@@ -8041,7 +8045,8 @@ def test_a_refused_land_still_deletes_an_untracked_autonomy_task(vault):
     One refusal, two files untracked at HEAD, one of each class: the backlog item stays
     and the autonomy task is gone. #2437's reason stands for the task — a created
     `autonomy/*.md` left in the tree goes on arming the task the refusal exists to stop
-    — and a `backlog/*.md` arms nothing, so deletion there buys no safety.
+    — and nothing under `backlog/` arms anything, so deletion there buys no safety, nor
+    since #3272 buys any safety at all: the same refusal unlinked a `.jsonl` witness.
     """
     _untrack_at_head(vault, "autonomy/1-task.md")
     _untrack_at_head(vault, "backlog/9-item.md")
@@ -8054,9 +8059,153 @@ def test_a_refused_land_still_deletes_an_untracked_autonomy_task(vault):
 
     assert not task.exists(), (
         "#2437: a created task file left on disk keeps arming the task this refusal "
-        "exists to stop — the #3039 keep rule covers backlog/ item files and nothing else"
+        "exists to stop — the keep rule (#3039, widened by #3272 to all of backlog/ "
+        "whatever the extension) covers nothing outside it"
     )
     assert item.exists(), row["reverted"]
+
+
+# ── #3272: a witness-glob path is a landable file, not a permanently refused one ──
+#
+# `tests/test_failure_ledger_witness.py::test_every_dated_promotions_extract_is_committed_and_parses`
+# asked every dated promotions extract on disk whether the vault's index already held it.
+# Asked of a PRE-commit tree that is not a check, it is a ban: the only tree in which a
+# brand-new extract answers "yes" is the commit the land was on its way to make. So the
+# probe refused, the refusal called `revert_paths`, and `revert_paths` unlinked the file it
+# had just been grading — item #3264's whole deliverable, on 2026-10-24, with no route and
+# no re-runnable bytes. The witness node is narrowed in its own file; the two nodes here
+# pin what that surface cannot pin for itself: that a land of such a file REACHES a commit,
+# and that if a different rail refuses it, the bytes are still there to land again.
+
+#: #3264's real artifact name, kept exact: the node below is worth nothing if the shape
+#: it lands is one the witness glob does not match, and the glob is `*.????-*promotions.jsonl`.
+PROMOTION_EXTRACT_REL = "backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl"
+
+#: One row in the shape the ledger writer emits. The 384-row real artifact is parsed by
+#: the witness file's own fixture node; what this node grades is the ROUTE, and a route
+#: test whose fixture was not a promotions extract would pass even on a refused extension.
+PROMOTION_EXTRACT_TEXT = ('{"event": "vault_land", "item_id": 2992, "ok": true, '
+                          '"created_at": "2026-10-19T21:00:00Z"}\n')
+
+
+def _new_promotion_extract(vault) -> str:
+    """Put a brand-new promotions extract where a round's first attempt would put it.
+
+    On disk, inside a `backlog/data/` the scratch vault already holds, and unknown to git
+    — the exact state that refused on 2026-10-24. Asserted unknown rather than assumed: a
+    fixture whose file was somehow already tracked would quietly be testing a rewrite of a
+    committed witness, which is a different claim with the same name.
+    """
+    (vault / "backlog" / "data").mkdir(parents=True, exist_ok=True)
+    (vault / PROMOTION_EXTRACT_REL).write_text(PROMOTION_EXTRACT_TEXT, encoding="utf-8")
+    assert PROMOTION_EXTRACT_REL not in git(vault, "ls-files").stdout, (
+        "the fixture's extract is already tracked, so this node would be grading a "
+        "rewrite of a committed witness rather than the first land of a new one")
+    return PROMOTION_EXTRACT_REL
+
+
+def test_a_land_of_a_new_promotions_extract_reaches_a_commit_and_one_ok_row(
+        monkeypatch, vault):
+    """#3272 clause 4: `land()` can commit a brand-new promotions extract.
+
+    The probe is stubbed — the rail that refused on 2026-10-24 is a pytest subprocess over
+    the mirrored tree, and stubbing it says plainly which surface this node owns: the one
+    where a fresh untracked witness path goes through `validate()`, the probe hand-off,
+    staging and a commit. What is NOT stubbed is staging and commit, which is where the
+    claim lives. The stub also records what it was asked about, because the probe is
+    handed the path while that path is still untracked, and the land has to proceed anyway
+    — that single fact is the circle opening.
+
+    The last assert is the one that crosses the process boundary this item is about: after
+    the commit, the witness file's OWN predicate is asked whether the directory it walks is
+    satisfied. It is read off the scratch vault by path, not by importing the module name,
+    so this node does not care whether `tests/` is a package.
+    """
+    import importlib.util
+
+    rel = _new_promotion_extract(vault)
+    # The land names item 3264, because a witness land is filed against an item and the
+    # row has to carry that id — and naming an item is what lets `land()` reach the
+    # reviewer, which this node is not about and which `tests/conftest.py` refuses to let
+    # a test do for real. The file's own convention for that seam is a stubbed GRADER.
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("pass", "content met", []))
+    seen: dict = {}
+
+    def agree(*, paths, **kw):
+        seen.clear()
+        seen.update(kw, paths=list(paths))
+        return {"state": "checked", "refuse": False, "reason": "", "nodes": []}
+
+    monkeypatch.setattr(VG, "agreement", agree)
+    out = V.land([rel], "witness: the 2026-10-19 promotions extract", item_id=3264)
+
+    assert out["ok"] is True, out
+    rows = _events("vault_land")
+    assert len(rows) == 1 and rows[0]["ok"] is True, (
+        f"{len(rows)} vault_land rows for one land: {[(r['ok'], r.get('guards')) for r in rows]}")
+    assert seen["paths"] == [rel], (
+        f"the probe was not handed the new extract: {sorted(seen)} — a land that skipped "
+        "it would agree with anything")
+    assert "live_root" not in seen, (
+        "the land aimed the probe at a tree of its own to make the new file agree, which "
+        "is the hole #2036 closed")
+    assert git(vault, "ls-files", "--error-unmatch", rel).returncode == 0, (
+        f"{rel} passed the probe but was never staged: "
+        f"{git(vault, 'status', '--short', '--untracked-files=all').stdout!r}")
+    assert git(vault, "show", f"HEAD:{rel}").stdout == PROMOTION_EXTRACT_TEXT, (
+        "the commit holds different bytes than the round wrote")
+    assert (vault / rel).read_text(encoding="utf-8") == PROMOTION_EXTRACT_TEXT
+    assert f"?? {rel}" not in git(
+        vault, "status", "--short", "--untracked-files=all").stdout
+
+    spec = importlib.util.spec_from_file_location(
+        "witness_checks", Path(__file__).resolve().parent
+        / "test_failure_ledger_witness.py")
+    witness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(witness)
+    findings, ids, hits = witness._promotion_extract_findings(vault)
+    assert hits == [vault / rel], (
+        f"the committed extract is not a glob hit for the witness directory: {hits}")
+    assert findings == [], (
+        f"the file this land just committed still fails the witness node: {findings}")
+    assert ids == {"2992": [Path(rel).name]}, ids
+
+
+def test_a_refused_land_keeps_a_new_promotions_extract_and_still_deletes_a_task(vault):
+    """#3272 clause 5: the keep rule is all of `backlog/`, and no more than all of it.
+
+    One refusal over three new untracked files: the promotions extract whose refusal cost
+    #3264 its bytes, and an `autonomy/1-task.md` the round created, which is #2437's case
+    and must STILL be deleted — a task file left on disk arms the task the refusal exists
+    to stop. The refusal comes from a third path with unparseable front matter, so neither
+    file under test is what refused.
+
+    The row's `reverted` is graded alongside existence, because the row is the only record
+    a later reader has: an entry naming the extract without the kept annotation would
+    report a deletion that did not happen, which is the reason the annotation exists
+    (#3039 clause 4).
+    """
+    rel = _new_promotion_extract(vault)
+    _untrack_at_head(vault, "autonomy/1-task.md")
+    task = vault / "autonomy" / "1-task.md"
+    task.write_text(CREATED_TASK_TEXT, encoding="utf-8")
+    row = _refused_batch([rel, "autonomy/1-task.md", _broken_created_task(vault)])
+
+    assert (vault / rel).exists(), (
+        f"the refusal deleted the witness it was grading, which is how #3264 lost its "
+        f"384 rows on 2026-10-24: {row['reverted']}")
+    assert (vault / rel).read_text(encoding="utf-8") == PROMOTION_EXTRACT_TEXT
+    assert f"?? {rel}" in git(
+        vault, "status", "--short", "--untracked-files=all").stdout, (
+        "a kept extract is untracked, not silently committed by the refusal")
+    kept = [e for e in row["reverted"] if e.startswith(rel)]
+    assert len(kept) == 1 and " kept" in kept[0], (
+        f"the row does not mark the extract kept rather than removed: {row['reverted']}")
+    assert not task.exists(), (
+        "#2437: a created task file left on disk keeps arming the task this refusal exists "
+        "to stop — widening the keep rule to all of backlog/ must not widen it to autonomy/")
+    assert not any(e.startswith("autonomy/1-task.md") and " kept" in e
+                   for e in row["reverted"]), row["reverted"]
 
 
 def test_the_refusal_row_distinguishes_a_kept_item_file_from_a_removed_one(vault):

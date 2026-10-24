@@ -25,7 +25,8 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships thirteen nodes: twelve over the vault bytes —
+It ships fourteen nodes: thirteen that read a vault tree through git — the live
+vault's for twelve of them, and one throwaway vault this file builds for the #3272 pair —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
@@ -36,7 +37,8 @@ It ships thirteen nodes: twelve over the vault bytes —
 `test_the_2383_gate_witness_is_a_dated_sibling_because_gate_json_was_taken`,
 `test_the_2523_red_tree_extract_reproduces_the_two_roundless_items`,
 `test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio`,
-`test_every_dated_promotions_extract_is_committed_and_parses` and
+`test_every_dated_promotions_extract_is_committed_and_parses`,
+`test_the_promotions_directory_check_passes_on_an_extract_that_is_not_committed_yet` and
 `test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
@@ -629,9 +631,9 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 13, (
-        "twelve witness nodes over the vault bytes plus this rail. The count is spelled "
-        "out so that adding a node has to come back here and re-read the "
+    assert len(shipped) == 14, (
+        "thirteen nodes that read a vault tree through git plus this rail. The count is "
+        "spelled out so that adding a node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
 
 
@@ -753,6 +755,160 @@ _PROMOTION_EXTRACT_NAME = re.compile(
     r"^\d{4}-\d{2}-\d{2}\.(\d{4})-[\w.\-+]+-promotions\.jsonl$")
 
 
+#: The witness directory, as the vault writes it. One constant for both `git`
+#: questions below and for the throwaway vault the #3272 node builds, so a fixture
+#: cannot drift out of the directory the live node reads.
+_PROMOTION_SUBDIR = "backlog/data"
+
+#: One extract of each of the two states an extract can be in on the day a land is
+#: asked to make it a witness: one committed, so it has a HEAD entry, and one left
+#: untracked, so it has none. Both names are invented — the fixture vault they live in
+#: is a throwaway, and the live node below may not spell an item id, so neither may this
+#: pair be one the vault has.
+_EXTRACT_IN_HEAD = "2026-09-30.4111-automod-promotions.jsonl"
+_EXTRACT_UNTRACKED = "2026-10-19.4112-automod-promotions.jsonl"
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """One git command in `repo`, with its return code left to the caller.
+
+    The nodes in this file usually assert on a subprocess directly, because the
+    subprocess is the claim. #3272 split one claim into two — is this path in the
+    commit, is it in the index — and both are asked of one tree and answered as a set,
+    so they share a call and the nodes assert on the sets.
+    """
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+
+
+def _vault_commit_paths(vault: Path, subdir: str, rev: str = "HEAD") -> set[str]:
+    """Paths under `subdir` that the commit `rev` holds, as one set.
+
+    `ls-tree` reads a COMMIT. That is the question a pre-commit guard is allowed to
+    ask, because the rev is named: it is answerable of a tree that does not hold the
+    file yet, and it answers "no" as a fact about the candidate instead of failing.
+    """
+    r = _git(vault, "ls-tree", "-r", "--name-only", rev, "--", subdir)
+    assert r.returncode == 0, (
+        f"`git ls-tree -r --name-only {rev} -- {subdir}` in {vault} exited "
+        f"{r.returncode}: {r.stderr.strip()[:200]}")
+    return {ln for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def _vault_index_paths(vault: Path, subdir: str) -> set[str]:
+    """Paths under `subdir` that the vault's INDEX holds, as one set.
+
+    `ls-files` reads the index, which is the second reason #3272 stopped asking it of a
+    promotions extract: a vault land runs the code-agreement probe BEFORE its own
+    `git add` (`vault_round.py`'s `land()` probes at the `guards = VG.agreement(` call
+    and first stages seventeen lines later, past the whole refusal branch), so during
+    the probe a brand-new extract is in the index no more than it is in HEAD. A guard
+    that fails on the state every candidate is born in does not check the candidate; it
+    bans the class.
+    """
+    r = _git(vault, "ls-files", "--", subdir)
+    assert r.returncode == 0, (
+        f"`git ls-files -- {subdir}` in {vault} exited {r.returncode}: "
+        f"{r.stderr.strip()[:200]}")
+    return {ln for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def _fixture_promotions_vault(tmp_path: Path, *, committed: dict[str, str],
+                              untracked: dict[str, str]) -> Path:
+    """A throwaway vault: `committed` extracts at HEAD, `untracked` ones on disk only.
+
+    A real `git init` and a real commit rather than two sets handed to the check,
+    because the claim under test is that the directory check now reads a COMMIT and an
+    INDEX. A fixture that supplied those two answers itself would be the node agreeing
+    with itself, which is the hole `vault_round.py` names when it refuses to hand the
+    probe a candidate tree (#2036).
+    """
+    vault = tmp_path / "vault"
+    data = vault / _PROMOTION_SUBDIR
+    data.mkdir(parents=True)
+    assert _git(vault, "init", "-q", "-b", "main").returncode == 0, "git init failed"
+    for name, body in committed.items():
+        (data / name).write_text(body, encoding="utf-8")
+    assert _git(vault, "add", "-A").returncode == 0, "staging the fixture failed"
+    # `--allow-empty` because the fixture's whole subject is a tree with NOTHING
+    # committed yet, and such a tree still has to have a HEAD for `ls-tree` to be asked
+    # of it — which is the state a candidate vault land is in: the vault has commits, the
+    # candidate is not one of them.
+    commit = _git(vault, "-c", "user.email=fixture@lloyd.invalid",
+                  "-c", "user.name=Lloyd Fixture", "commit", "-q", "--allow-empty",
+                  "-m", "fixture history")
+    assert commit.returncode == 0, commit.stderr.strip()[:200]
+    for name, body in untracked.items():
+        (data / name).write_text(body, encoding="utf-8")
+    return vault
+
+
+def _promotion_extract_findings(vault: Path
+                                ) -> tuple[list[str], dict[str, list[str]], list[Path]]:
+    """Every way the dated promotions extracts under `vault/backlog/data` are wrong.
+
+    Returns `(findings, ids_by_item, hits)`; `findings` is empty exactly when the
+    directory is in order. A function that takes a vault rather than a node that
+    asserts on the live one, because #3272 has to show two things the live tree cannot
+    show: that an extract with no commit yet is not a violation, and that the
+    narrowing removed ONE check and not four — which needs bytes this file writes and
+    can therefore also corrupt on purpose.
+
+    Tracked-ness is the only property asked conditionally, and the condition is that a
+    commit exists to be tracked against. `ls-tree` naming a path while `ls-files` does
+    not means history left the tree, which is a real loss and stays red; a path neither
+    knows is a candidate on its way to being committed, which is where every tracked
+    extract in this directory began. The other four checks are unconditional, because
+    a misnamed, doubled, oversized or truncated extract is wrong in the index, in HEAD
+    and in a land's working tree alike.
+    """
+    from scripts.automod import backlog as B
+
+    data = vault / _PROMOTION_SUBDIR
+    hits = sorted(data.glob("*.????-*promotions.jsonl"))
+    in_head = _vault_commit_paths(vault, _PROMOTION_SUBDIR)
+    in_index = _vault_index_paths(vault, _PROMOTION_SUBDIR)
+    findings: list[str] = []
+
+    ids: dict[str, list[str]] = {}
+    for p in hits:
+        m = _PROMOTION_EXTRACT_NAME.match(p.name)
+        if not m:
+            findings.append(
+                f"{p.name} matches the promotions-extract glob but not the dated-sibling "
+                "form `_witness_artifact` emits, so it is either misnamed or a scratch "
+                "file wearing a promotions suffix")
+            continue
+        ids.setdefault(m.group(1), []).append(p.name)
+    dupes = {k: v for k, v in sorted(ids.items()) if len(v) > 1}
+    if dupes:
+        findings.append(
+            f"{dupes} — an item with more than one dated promotions extract leaves a "
+            "later reader to choose between two witnesses of the same figure")
+
+    for p in hits:
+        rel = str(p.relative_to(vault))
+        raw = p.read_bytes()
+        if rel in in_head and rel not in in_index:
+            findings.append(
+                f"{p.name} is in the vault's HEAD and not in its index: `git ls-files` "
+                "cannot name it, so the history this directory's guard exists to keep "
+                "has left the tree and the bytes on disk are a scratch file again")
+        if not len(raw) == p.stat().st_size < B.WITNESS_MAX_BYTES:
+            findings.append(
+                f"{p.name} is {len(raw):,} bytes against the "
+                f"{B.WITNESS_MAX_BYTES:,}-byte ceiling an owed entry may ask a witness "
+                "to fit under")
+        bad = [(i + 1, ln) for i, ln in enumerate(raw.decode("utf-8").splitlines())
+               if ln.strip() and not _parses_as_json(ln)]
+        if bad:
+            findings.append(
+                f"{p.name} line {bad[0][0]} is not JSON: {bad[0][1][:120]!r} — a "
+                "truncated row is the failure mode of a hand-copied extract, and the "
+                "only one nobody sees by eye in 1,742 lines")
+    return findings, ids, hits
+
+
 def _own_source_of(node_name: str) -> str:
     """The bytes of one node in this file, docstring included, cut from `def` to `def`.
 
@@ -786,10 +942,11 @@ def test_every_dated_promotions_extract_is_committed_and_parses():
     - The name is the dated-sibling form `_witness_artifact` emits, and AT MOST ONE
       file exists per item id — two extracts for one item is two candidate witnesses
       for one figure, which is the drift this directory's naming scheme exists to avoid.
-    - The file is TRACKED (`git ls-files --error-unmatch`), not merely present. Same
-      reason #2523's node goes one subprocess further than `is_file()`: an uncommitted
-      extract is a scratch file, and history is the only thing that outlives the fold
-      of the live store the extract was cut from.
+    - A file the vault's HEAD holds is also held by its index. Same reason #2523's node
+      goes one subprocess further than `is_file()`: an extract whose history has gone is
+      a scratch file, and history is the only thing that outlives the fold of the live
+      store the extract was cut from. #3272 narrowed WHICH files this is asked of, and
+      the paragraph below is why the narrowing is the whole of the fix.
     - It fits under `WITNESS_MAX_BYTES` — the ceiling an owed entry may ask for. The
       largest extract today is 870,849 bytes of it; the smallest is 1,509.
     - Every non-empty line parses as JSON.
@@ -806,33 +963,23 @@ def test_every_dated_promotions_extract_is_committed_and_parses():
     subjects would pass today and go silently stale the day a witness is added, which
     is precisely how the six unpinned extracts stayed unpinned.
     """
-    from scripts.automod import backlog as B
-
-    data = paths.VAULT_ROOT / "backlog" / "data"
-    hits = sorted(data.glob("*.????-*promotions.jsonl"))
-    assert len(hits) >= _MIN_PROMOTION_EXTRACTS, (
-        f"{len(hits)} dated promotions extracts are on disk, fewer than the "
-        f"{_MIN_PROMOTION_EXTRACTS} committed as at this node's writing: a witness "
-        "someone owes has left the tree, and only one of the six unpinned ones was "
-        "ever checked for being there")
+    data = paths.VAULT_ROOT / _PROMOTION_SUBDIR
     # The store this file may never read is a sibling of the vault, and this is the
     # node that walks a directory named after promotions. Say which root it is in.
     assert data.resolve().is_relative_to(paths.VAULT_ROOT.resolve()), (
         f"{data} is not inside the vault, so the `git ls-files` below is grading some "
         "other tree")
 
-    ids: dict[str, list[str]] = {}
-    for p in hits:
-        m = _PROMOTION_EXTRACT_NAME.match(p.name)
-        assert m, (
-            f"{p.name} matches the promotions-extract glob but not the dated-sibling "
-            "form `_witness_artifact` emits, so it is either misnamed or a scratch "
-            "file wearing a promotions suffix")
-        ids.setdefault(m.group(1), []).append(p.name)
-    dupes = {k: v for k, v in sorted(ids.items()) if len(v) > 1}
-    assert not dupes, (
-        f"{dupes} — an item with more than one dated promotions extract leaves a later "
-        "reader to choose between two witnesses of the same figure")
+    # The five checks live in `_promotion_extract_findings`, which takes a vault and
+    # returns what is wrong with it, so the #3272 node can drive the SAME function over
+    # a throwaway tree. Left here, they would have been prose about a directory only the
+    # live vault can show, and the fix would have had no witness of its own.
+    findings, ids, hits = _promotion_extract_findings(paths.VAULT_ROOT)
+    assert len(hits) >= _MIN_PROMOTION_EXTRACTS, (
+        f"{len(hits)} dated promotions extracts are on disk, fewer than the "
+        f"{_MIN_PROMOTION_EXTRACTS} committed as at this node's writing: a witness "
+        "someone owes has left the tree, and only one of the six unpinned ones was "
+        "ever checked for being there")
 
     # The enumeration is a property, not a roster. Every id discovered above must be
     # ABSENT from this node's own bytes; the day someone writes one in, the node stops
@@ -844,26 +991,9 @@ def test_every_dated_promotions_extract_is_committed_and_parses():
         "than a property of the directory — which is how the six unpinned extracts "
         "stayed unpinned: the one node that looked named only its own subject")
 
-    for p in hits:
-        rel = str(p.relative_to(paths.VAULT_ROOT))
-        tracked = subprocess.run(
-            ["git", "-C", str(paths.VAULT_ROOT), "ls-files", "--error-unmatch", rel],
-            capture_output=True, text=True)
-        assert tracked.returncode == 0, (
-            f"{p.name} is on disk but not tracked: `git ls-files --error-unmatch` said "
-            f"{tracked.stderr.strip() or 'nothing'}, and an uncommitted extract is a "
-            "scratch file rather than bytes with history")
-        raw = p.read_bytes()
-        assert len(raw) == p.stat().st_size < B.WITNESS_MAX_BYTES, (
-            f"{p.name} is {len(raw):,} bytes against the "
-            f"{B.WITNESS_MAX_BYTES:,}-byte ceiling an owed entry may ask a witness to "
-            "fit under")
-        bad = [(i + 1, ln) for i, ln in enumerate(raw.decode("utf-8").splitlines())
-               if ln.strip() and not _parses_as_json(ln)]
-        assert not bad, (
-            f"{p.name} line {bad[0][0]} is not JSON: {bad[0][1][:120]!r} — a truncated "
-            "row is the failure mode of a hand-copied extract, and the only one nobody "
-            "sees by eye in 1,742 lines")
+    assert not findings, (
+        f"{len(findings)} problem(s) among the {len(hits)} dated promotions extracts of "
+        f"the live vault: {findings[0]}")
 
 
 def _parses_as_json(line: str) -> bool:
@@ -872,6 +1002,102 @@ def _parses_as_json(line: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def test_the_promotions_directory_check_passes_on_an_extract_that_is_not_committed_yet(tmp_path):
+    """The directory check on a throwaway vault: one extract with history, one without.
+
+    #3272, and the state is the one every promotions extract in `backlog/data/` is born
+    into. The node above asked `git ls-files --error-unmatch` of every glob hit, and that
+    node runs inside the gate's own selection and inside a vault land's code-agreement
+    probe, which a `land()` call reaches SEVENTEEN LINES BEFORE its first `git add`
+    (`vault_round.py`: the `guards = VG.agreement(` call, then the whole refusal branch,
+    then `_ensure_main`, `stage = _stageable(norm)` and `add = _git("add", ...)`). So the
+    only tree where that guard was green was the tree the refused commit was going to
+    create: #3264's extract has sat untracked in the witness directory since 2026-10-19
+    because its own land was refused by a check no commit could satisfy from the outside,
+    and every round's `tests` rung carried the same node red in the meantime.
+
+    The first assertion is the narrowing: two extracts, one at HEAD and one on disk only,
+    and the directory is in order. What has to come with it, or the change is simply a
+    check deleted, is the rest of the node — each of the four surviving properties fires
+    once against an extract that HAS a commit and once against one that has NONE, and
+    tracked-ness still fires where it names an actual loss: a file HEAD holds and the
+    index no longer does.
+
+    A fixture and not the live vault because the live vault cannot hold "not committed
+    yet" for the length of a run — the moment the land that fixes #3264 succeeds the
+    state stops existing — and because demonstrating that four checks survived needs
+    bytes this file is free to corrupt.
+    """
+    from scripts.automod import backlog as B
+
+    row = json.dumps({"kind": "vault_land", "item_id": 4111, "ok": True}) + "\n"
+    vault = _fixture_promotions_vault(tmp_path / "pair",
+                                      committed={_EXTRACT_IN_HEAD: row},
+                                      untracked={_EXTRACT_UNTRACKED: row})
+    # The two states the pass below is about have to be real and not assumed: one name in
+    # the commit, the other in neither the commit nor the index.
+    head = _vault_commit_paths(vault, _PROMOTION_SUBDIR)
+    index = _vault_index_paths(vault, _PROMOTION_SUBDIR)
+    assert f"{_PROMOTION_SUBDIR}/{_EXTRACT_IN_HEAD}" in head
+    assert f"{_PROMOTION_SUBDIR}/{_EXTRACT_UNTRACKED}" not in head | index, (
+        "the fixture's uncommitted extract is already somewhere git can see it, so the "
+        "assertion below is grading a file nobody asked about")
+    findings, ids, hits = _promotion_extract_findings(vault)
+    assert len(hits) == 2 and len(ids) == 2, (
+        f"the fixture is two extracts of two different items, not {len(hits)} extract(s) "
+        f"reading as {sorted(ids)}: a name the pattern cannot read is skipped by the "
+        "one-per-item check, and a clean result would then be about one file")
+    assert not findings, (
+        "an extract with no commit yet is a violation again, which is the circle #3264 "
+        f"died in: {findings[0]}")
+
+    bad = (
+        ("misnamed", "2026-9-30.4113-automod-promotions.jsonl", row,
+         "dated-sibling form"),
+        ("oversized", "2026-10-01.4114-automod-promotions.jsonl",
+         row * (B.WITNESS_MAX_BYTES // len(row) + 1), "byte ceiling"),
+        ("truncated", "2026-10-02.4115-automod-promotions.jsonl",
+         '{"kind": "vault_land", "it\n', "is not JSON"),
+    )
+    for label, name, body, needle in bad:
+        for in_head in (True, False):
+            got = _promotion_extract_findings(_fixture_promotions_vault(
+                tmp_path / f"{label}-{in_head}",
+                committed={name: body} if in_head else {},
+                untracked={} if in_head else {name: body}))[0]
+            assert any(needle in f and name in f for f in got), (
+                f"the {label} check passed a bad extract "
+                f"{'with' if in_head else 'without'} a commit behind it: {got[:2]} — "
+                "narrowing tracked-ness was meant to take one check out of five, not four")
+
+    # A second extract of one item id: the item the fixture already has a committed
+    # extract for, so the HEAD-present half is the pair itself and the HEAD-absent half is
+    # the twin a land is on its way to committing.
+    twin = "2026-10-03.4111-automod-promotions.jsonl"
+    for in_head in (True, False):
+        got = _promotion_extract_findings(_fixture_promotions_vault(
+            tmp_path / f"duplicate-{in_head}",
+            committed=({_EXTRACT_IN_HEAD: row, twin: row} if in_head
+                       else {_EXTRACT_IN_HEAD: row}),
+            untracked=({} if in_head else {twin: row})))[0]
+        assert any("more than one" in f and twin in f for f in got), (
+            f"two extracts of one item id read as clean when the second is "
+            f"{'committed' if in_head else 'uncommitted'}: {got[:2]}")
+
+    # And the tracked-ness check itself, in the one shape that is a loss rather than a
+    # birth state: HEAD holds the file, the index no longer does.
+    dropped = _fixture_promotions_vault(tmp_path / "dropped",
+                                        committed={_EXTRACT_IN_HEAD: row},
+                                        untracked={})
+    removed = _git(dropped, "rm", "-q", "--cached", f"{_PROMOTION_SUBDIR}/{_EXTRACT_IN_HEAD}")
+    assert removed.returncode == 0, removed.stderr.strip()[:200]
+    got = _promotion_extract_findings(dropped)[0]
+    assert any(_EXTRACT_IN_HEAD in f and "not in its index" in f for f in got), (
+        f"a file the commit holds and the index does not read as clean: {got[:2]} — "
+        "history leaving the tree is the only thing tracked-ness was ever asked for, and "
+        "#3272 keeps it")
 
 
 def test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles():
