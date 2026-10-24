@@ -33,6 +33,11 @@ key is present (#811) — three classes the scheduler only objects to at dispatc
     days while this script reported 0 warnings over 38 files. The `frequency:`
     word being outside the map with NO `runs_per_day` beside it (#815) is the
     other half: that pair resolves no interval at all and never dispatches.
+  * membership: whether every live task file is named by BOTH tables of
+    `architecture/autonomy-jobs.md` (`DOC_MEMBERSHIP`, #2895), and — since #3270 — whether the
+    drift journal those tables' filing check appends to still holds a row whose id no table
+    names (`DRIFT_UNCLOSED`, which carries that row's date and so says how long the doc has been
+    behind). Both are warnings, never exit rules short of `--strict`.
   * `requires_slot:` naming a program whose enabled flag is false (#1577) —
     `agent-llm-secondary` while `secondary_enabled: false`, the shape that retired
     #85. No name check can see this one: `secondary` is still a key of `models:`,
@@ -48,6 +53,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -83,9 +89,16 @@ except Exception:  # noqa: BLE001
 # `tests/` precisely so the linter, the two task-file writers and the nightly reconciler
 # share ONE reading of the two tables. A second copy of the rule is how the class of drift
 # this file now reports survived four rounds of tests.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+#
+# Imported under its package name, which is also how BOTH writers import it
+# (`app/routers/autonomy.py:320`, `agent_mcp/autonomy.py:407`) — and that is load-bearing, not
+# tidiness. `import jobs_membership` off a sys.path entry naming this directory builds a SECOND
+# module object for the same file, and `jobs_membership.journal_path` is a value inside one of
+# them: redirecting the store by patching the module (the seam #3270's reader tests use, and the
+# one `tests/test_autonomy_task_membership_at_filing.py:373` already patches) would then aim at
+# the writers' copy and leave this one reading the real journal. One name, one object, one patch.
 try:
-    import jobs_membership as jm  # noqa: E402
+    from scripts.autonomy import jobs_membership as jm  # noqa: E402
 except Exception:  # noqa: BLE001
     jm = None
 # Which supervisord program each `models:` alias tracks (#2632). `requires_slot:`
@@ -318,9 +331,120 @@ def skill_resolves(value: str, skills_dirs: list[Path]) -> bool:
     return False
 
 
+#: The drift journal's default location, for the one run in which `jobs_membership` did not
+#: import. `jm.journal_path()` is the authority — it is what the writer appends through and what
+#: a test redirects — and this is the same pipeline-relative path spelled out so the journal
+#: reader below reports on a store instead of going silent when the import above failed. The
+#: node at `tests/test_autonomy_task_membership_at_filing.py:250` pins what that function
+#: resolves to, which is what keeps this fallback from drifting away from it.
+JOURNAL_PATH = (Path.home() / "lloyd-data" / "_pipeline" / "arch-review"
+                / "membership-drift.jsonl")
+
+
+def drift_closed_since(doc_text: str, row: dict, parser) -> bool:
+    """Is a journal row's drift closed — does every table it says was missing name it now?
+
+    A named predicate rather than a line inside the loop below, because this is the exact question
+    the clause under test asks, and because it is the only question the journal can be asked:
+    #2813, #2881 and #3012 each end with somebody hand-adding the rows, so "is it STILL open" is
+    what decides whether a row is history or news.
+
+    `parser` is the caller's `jobs_membership`, which may be None; a row whose tables cannot be
+    re-read counts as STILL OPEN rather than closed. The reason is the shape of the failure: an
+    unreadable doc is the one state in which every row would look closed, and a reader that goes
+    quiet exactly when the doc breaks is the reader that has already failed.
+    """
+    tid = str(row.get("task_id") or "").strip()
+    tables = [str(t) for t in (row.get("tables_missing") or [])]
+    if not tid or not tables:
+        return True                                   # not a row this class can speak about
+    if parser is None:
+        return False
+    try:
+        return all(tid in parser.named_ids(doc_text, header)
+                   for name, header in parser.TABLES if name in tables)
+    except parser.UnreadableDoc:
+        return False
+
+
+def drift_journal_warnings(jobs_doc: Path, journal: Path | None = None,
+                           parser=None) -> list[str]:
+    """DRIFT_UNCLOSED warnings — the journal rows whose drift the doc has not taken back.
+
+    `jobs_membership.report_at_filing` appends one row the moment a CREATED task file's id is
+    missing from a membership table, carrying the `ts` of that filing. Nothing read the file: at
+    the HEAD this was written on, `git grep -l membership-drift` named the writer and two test
+    files and no script, and the drift reached a human three times (#2813, #2881, #3012) only
+    through the `@live_vault` nodes the automod gate deselects
+    (`scripts/automod/gate.py:719`, `TESTS_MARK_EXPR`). So the reader goes where a nightly looks
+    and never under `scripts/automod/`: the bound at
+    `tests/test_autonomy_task_membership_at_filing.py:303-305` is that no promotion or rollback
+    path reads this journal, because documentation must not gate execution.
+
+    Every line carries the row's date, because `ts` is the journal's ONLY unique content.
+    `doc_membership_warnings` above already prints today's drift from the tables and the
+    directory on every run, so a line that only repeated it would be a second copy of a check
+    this file already runs; what only the journal knows is WHEN the drift started, which is what
+    tells "the doc is a day behind" from "behind since the file landed, and nobody saw it".
+
+    An absent journal prints nothing and reports nothing. That is the normal state, not a fault:
+    task creates run about twice a week, the doc has been kept since #2881, and the store has
+    never held a row on this machine — a class that reads red on an empty store is muted inside a
+    day, which is the failure this item's own traffic report warned against. Only a store that
+    HOLDS rows and cannot be read or parsed says `unchecked`.
+
+    Which store is meant follows `app.paths.PIPELINE_DIR`, and that is anchored to the tree the
+    import came from: run from an automod worktree, this reads the worktree's own empty
+    `.lloyd-data/_pipeline/`, and run from the live checkout it reads
+    `~/lloyd-data/_pipeline/`. So the readings a gate run prints are about the live fleet only
+    when the nightly runs it from the live tree — name the tree, as `app.paths.describe_tree()`
+    does, before calling a silent report a clean one.
+    """
+    jm = parser if parser is not None else globals().get("jm")
+    path = Path(journal) if journal else (jm.journal_path() if jm else JOURNAL_PATH)
+    if not path.is_file():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"DRIFT_UNCLOSED: unchecked — {path} could not be read: "
+                f"{type(exc).__name__}: {exc}"]
+    try:
+        text = Path(jobs_doc).read_text(encoding="utf-8")
+        doc_error = ""
+    except OSError as exc:
+        text = ""
+        doc_error = f"{jobs_doc} unreadable: {type(exc).__name__}: {exc}"
+
+    out: list[str] = []
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            out.append(f"DRIFT_UNCLOSED: unchecked — {path}:{lineno} is not a json object: {exc}")
+            continue
+        if not isinstance(row, dict):
+            out.append(f"DRIFT_UNCLOSED: unchecked — {path}:{lineno} is not a json object")
+            continue
+        if drift_closed_since(text, row, jm):
+            continue
+        tid = str(row.get("task_id") or "?")
+        if doc_error:
+            out.append(f"{tid}: DRIFT_UNCLOSED: unchecked — open since {row.get('ts')}; "
+                       f"{doc_error}, so its tables could not be re-read")
+            continue
+        missing = ", ".join(str(t) for t in (row.get("tables_missing") or []))
+        out.append(f"{tid}: DRIFT_UNCLOSED: open since {row.get('ts')} — {path.name} says {missing} "
+                   f"omitted it when the file was filed, and it still does "
+                   f"(doc {row.get('doc_short_sha')})")
+    return out
+
+
 def doc_membership_warnings(d: Path, jobs_doc: Path,
                             parser=None) -> list[str]:
-    """DOC_MEMBERSHIP warnings for the fleet in `d` against `jobs_doc`'s two tables.
+    """DOC_MEMBERSHIP and DRIFT_UNCLOSED warnings for the fleet in `d` against `jobs_doc`.
 
     Separate from `main()` so `tests/test_validate_tasks_linter.py` can assert on the
     messages over a fixture pair without running the scheduler's whole field validation over
@@ -330,11 +454,19 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
     `scripts/autonomy/jobs_membership.py` — never from a list of expected ids in this file.
     A roster here would be the fifth hand-typed membership table in the tree, which is the
     thing that keeps drifting.
+
+    The drift journal rides along here rather than beside here, because the two say one thing:
+    the directory-and-tables scan is what decides whether a journal row is still open, so asking
+    it twice in two places is how a report gets its two opinions. It is also the only seam that
+    reads the doc once — the journal's rows are graded against the same text this function
+    already parsed, and both classes share the scoping rule that a doc the caller never named is
+    not this run's business (`main`'s `--jobs-doc` gate).
     """
     jm = parser if parser is not None else globals().get("jm")
     if jm is None:
         return [f"DOC_MEMBERSHIP: unchecked — jobs_membership.py is not importable from "
-                f"{Path(__file__).parent}"]
+                f"{Path(__file__).parent}",
+                *drift_journal_warnings(jobs_doc, parser=None)]
     try:
         text = Path(jobs_doc).read_text(encoding="utf-8")
         live = jm.task_file_ids(Path(d))
@@ -347,7 +479,12 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
         # inside this `try` — the header is looked up per table, so a loop that parsed outside
         # it raised straight out of the linter on a doc with its headings reworded, which is
         # exactly the shape the exception exists for.
-        return [f"DOC_MEMBERSHIP: unchecked — {jobs_doc}: {exc}"]
+        #
+        # The journal is still read on this path: a row's date is a fact about the store and does
+        # not depend on the doc parsing, and `drift_journal_warnings` reports its own rows as
+        # `unchecked` rather than closed when the tables cannot be re-read.
+        return [f"DOC_MEMBERSHIP: unchecked — {jobs_doc}: {exc}",
+                *drift_journal_warnings(jobs_doc, parser=parser)]
     out: list[str] = []
     for name, named in parsed:
         ghosts, unlisted, dupes = jm.table_drift(named, live, retired)
@@ -356,10 +493,20 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
         out += [f"{i}: DOC_MEMBERSHIP: {name} names a job with no task file under {d} and "
                 f"no Retired row" for i in ghosts]
         out += [f"{i}: DOC_MEMBERSHIP: listed more than once in {name}" for i in dupes]
+    out += drift_journal_warnings(jobs_doc, parser=parser)
     return out
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """Run the linter and return its exit code. `argv=None` is the real command line.
+
+    The parameter exists because of one class: `DRIFT_UNCLOSED` reads a store whose path
+    `jobs_membership.journal_path()` resolves INSIDE this process, so a test that seeds a
+    journal has to run the check in the process holding the patch, and cannot go out through a
+    subprocess. Nothing else about the entry point changes — `python scripts/autonomy/
+    validate_tasks.py …` still calls this with nothing and parses `sys.argv`, the flags are the
+    same ones, and the codes are the documented ones.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--autonomy-dir", default=str(DEFAULT_DIR))
     ap.add_argument("--skills-dir", action="append", default=None,
@@ -374,13 +521,16 @@ def main() -> int:
                          "requires_slot: programs are switched off")
     ap.add_argument("--jobs-doc", default=None, metavar="FILE",
                     help="architecture/autonomy-jobs.md whose two membership tables are "
-                         "checked against the directory (DOC_MEMBERSHIP). Default: that "
-                         "doc in the tree this script runs from, but only when "
-                         "--autonomy-dir is the default fleet directory; pass it "
-                         "explicitly to check a fixture or a redirected fleet.")
+                         "checked against the directory (DOC_MEMBERSHIP), and whose same "
+                         "tables decide whether the drift journal's rows are still open "
+                         "(DRIFT_UNCLOSED). Default: that doc in the tree this script runs "
+                         "from, but only when --autonomy-dir is the default fleet directory; "
+                         "pass it explicitly to check a fixture or a redirected fleet. Both "
+                         "classes are skipped without it — a store this run was never asked "
+                         "about is not its business.")
     ap.add_argument("--strict", action="store_true",
                     help="treat structural warnings as failures (exit 2)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     d = Path(args.autonomy_dir).expanduser()
     if not d.is_dir():

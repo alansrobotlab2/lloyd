@@ -3276,8 +3276,8 @@ def test_no_live_sentence_calls_a_superseded_id_the_newest():
 # surface was blind to the one thing the doc hand-types and no other artifact owns:
 # `test_every_job_has_one_function_and_exactly_one_write_tier` compares the two
 # tables with *each other*, so a job missing from both is symmetric and passes, and
-# `scripts/autonomy/validate_tasks.py` never opens the doc at all
-# (`git grep -c "autonomy-jobs" scripts/autonomy/validate_tasks.py` → 0, 2026-10-13).
+# `scripts/autonomy/validate_tasks.py` did not read the doc either until #2895 taught it to,
+# and it now reports `DOC_MEMBERSHIP` and `DRIFT_UNCLOSED` from that one read (#3270).
 #
 # The drift that proves both directions: on 2026-10-12 the tables named #87 #88 #89,
 # whose task files had been removed (their run records still sit in

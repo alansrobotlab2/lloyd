@@ -15,7 +15,9 @@ and a `skill_name` with no SKILL.md behind it.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import inspect
+import json
 import re
 import subprocess
 import sys
@@ -1574,6 +1576,334 @@ def test_the_live_doc_names_the_3012_pair_and_the_linter_reads_its_rows(tmp_path
             f"{tid}'s warnings name only one of the two tables: {named}. #3012 is one row "
             "in EACH membership table, and a warning that names one sends a reader to add "
             "that one and leave the other wrong")
+
+
+# ── #3270: DRIFT_UNCLOSED — the linter is the drift journal's reader ───────────
+#
+# `jobs_membership.report_at_filing` appends one row to
+# `~/lloyd-data/_pipeline/arch-review/membership-drift.jsonl` the moment a CREATED task file's
+# id is missing from a membership table, so the drift has a start date. Until this block the
+# tree had no reader of it: `git grep -l -e membership-drift -e membership_drift` named the
+# writer and two test files and nothing else, and the drift itself reached a human three times
+# (#2813, #2881, #3012) only through the `@live_vault` reconciling nodes the automod gate
+# deselects (`scripts/automod/gate.py:719`, `TESTS_MARK_EXPR = "not live_vault and not
+# fault_injection"`). So a store whose whole subject is "someone will read this later" had no
+# later reader, and the file's absence was indistinguishable from "no drift".
+#
+# These nodes make `scripts/autonomy/validate_tasks.py` that reader: one `DRIFT_UNCLOSED: #<id>`
+# line per journal row whose id a named table still omits, carrying that row's `ts` date —
+# because `ts` is the ONLY thing the journal knows that a fresh DOC_MEMBERSHIP scan does not
+# (that class already prints live drift every run, at `doc_membership_warnings` below), so a
+# line without the date would be a second copy of a check the linter already runs.
+#
+# Shape, and why it is this shape: the linter is a CLI and nothing imports it — the file's
+# opening rule — but a journal a test must redirect is a value inside the process, and clause
+# 3 names the seam: patch `jobs_membership.journal_path`, which `jm.report_at_filing` already
+# resolves per call (`scripts/autonomy/jobs_membership.py:301`) and which
+# `tests/test_autonomy_task_membership_at_filing.py:373` already patches. So the linter is
+# loaded as a module here (`importlib`, with `ROOT` on `sys.path`, the
+# `tests/test_autonomy_run_record.py:491` convention) and the store is redirected in that
+# process. No node below carries `@live_vault`, so the gate runs every one of them, and none
+# can see a row a filing between rounds happened to write.
+
+
+def _load_linter():
+    """`scripts/autonomy/validate_tasks.py` as a module, for the one class a subprocess cannot point at.
+
+    The file's own rule is that the linter is tested as a CLI, because its exit code is part of
+    the contract. That rule holds for every class below EXCEPT a store the caller has to
+    redirect: `jobs_membership.journal_path()` is resolved inside the linter's process, so a
+    seeded journal can only be handed to it by patching `jobs_membership` in the process that
+    runs the check. `ROOT` goes on `sys.path` first because `validate_tasks.py` itself does
+    exactly that at import, and `jm.journal_path` imports `app.paths` from there.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    spec = importlib.util.spec_from_file_location("validate_tasks_drift_under_test", str(SCRIPT))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _drift_row(task_id: int, tables_missing: list[str], ts: str) -> dict:
+    """A journal row in the shape `jm.report_at_filing` writes (`jobs_membership.py:297-299`)."""
+    return {"task_id": f"#{task_id}", "file": f"{task_id}-slug.md",
+            "tables_missing": tables_missing, "doc_short_sha": "0" * 12, "ts": ts}
+
+
+def _redirect_journal(tmp_path: Path, monkeypatch, *, rows=()) -> Path:
+    """Point `jobs_membership.journal_path` at a fixture file holding `rows`, and return it.
+
+    The patch is on the module, not on the linter, because that is the seam the writer uses too
+    — redirecting the module is what makes ONE patch cover the reader and the writer alike. A
+    `rows=()` call leaves the file uncreated, which is the normal state: task creates run about
+    twice a week and the doc has been kept since #2881, so an empty store is not a fault.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.autonomy import jobs_membership as jm
+
+    journal = tmp_path / "arch-review" / "membership-drift.jsonl"
+    if rows:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    monkeypatch.setattr(jm, "journal_path", lambda: journal)
+    return journal
+
+
+def _drift_run(lint: "Linter", doc: Path, module, capsys, *extra: str) -> tuple[int, str]:
+    """One linter run in this process: its exit code and what it printed.
+
+    In-process, and that is the whole point — `journal_path()` is resolved inside the linter, so
+    a seeded store reaches the check only through a patch in the process that runs it. The CLI
+    half of the contract is untouched: `module.main(argv)` is `main`'s real entry point, the
+    argv is the same one the subprocess nodes pass, and the exit code comes back out of it.
+    `_load_linter()` hands over a freshly executed module, so a node's patch cannot leak into a
+    node that did not make one. `readouterr()` is drained first so the returned text is one run.
+    """
+    capsys.readouterr()
+    rc = module.main(["--autonomy-dir", str(lint.autonomy_dir),
+                      "--skills-dir", str(lint.skills_dir),
+                      "--config", str(lint.config_path),
+                      "--jobs-doc", str(doc), *extra])
+    return rc, capsys.readouterr().out
+
+
+def _drift_lines(out: str) -> list[str]:
+    """The printed `DRIFT_UNCLOSED` lines of a run's stdout."""
+    return [ln for ln in out.splitlines() if "DRIFT_UNCLOSED" in ln]
+
+
+def test_a_journal_row_whose_id_no_membership_table_names_prints_one_drift_line(
+        tmp_path, monkeypatch, capsys):
+    """Clause 1: one line per open row, naming the id, the table(s) and the row's date.
+
+    Two rows, deliberately differing in which tables they say are missing: #41 absent from
+    BOTH, #42 absent from the functions table only — the #2881 shape, where a job landed in one
+    table and not the other. Both ids sit outside the seeded doc, which names only 40, so a line
+    about them can only come out of the journal and not out of this run's own scan.
+    """
+    _redirect_journal(tmp_path, monkeypatch, rows=[
+        _drift_row(41, ["the functions table (`## The functions`)",
+                        "the write-authority tier table"], "2026-10-17T12:34:56+00:00"),
+        _drift_row(42, ["the functions table (`## The functions`)"],
+                   "2026-10-18T09:00:00+00:00")])
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+
+    rc, out = _drift_run(lint, doc, _load_linter(), capsys)
+    hits = _drift_lines(out)
+    assert len(hits) == 2, f"two open rows printed {len(hits)} lines:\n{out}"
+    assert all("#4" in ln for ln in hits), hits
+    assert len([h for h in hits if "#41" in h]) == 1, hits
+    assert len([h for h in hits if "#42" in h]) == 1, hits
+    # `#41:` first, like every other warning class — a reader triages a report by its ids.
+    assert hits[0].lstrip().startswith("#41:") and hits[1].lstrip().startswith("#42:"), hits
+
+    # The date is the clause: `ts` is the journal's unique content, so a line without it is
+    # DOC_MEMBERSHIP copied. `12:34:56` is asserted beside the date so a line that printed
+    # today's stamp instead of the row's could not pass on the year alone.
+    forty_one = hits[0]
+    assert "2026-10-17" in forty_one and "12:34:56" in forty_one, forty_one
+    assert "the functions table" in forty_one and "write-authority" in forty_one, forty_one
+    forty_two = hits[1]
+    assert "2026-10-18" in forty_two, forty_two
+    assert "write-authority" not in forty_two, (
+        f"a row that says only the functions table was missing named the tier table too: "
+        f"{forty_two} — the fix is one row, and a line naming two sends a reader to edit a "
+        f"table that is already right")
+
+    # The count line is what says these are WARNINGS and not stray prints: two drift lines and
+    # nothing else wrong with the board, so the report has to count exactly them.
+    assert "2 structural warning(s):" in out, out
+    assert rc == 0, f"drift a person can fix by editing a doc cost a validation run exit {rc}"
+
+
+def test_a_row_closes_when_both_tables_name_the_id_and_an_absent_journal_prints_nothing(
+        tmp_path, monkeypatch, capsys):
+    """Clause 2: zero lines once the tables name every row's id, and zero lines with no file.
+
+    The closing run mutates the DOC rather than the journal: a doc naming 40, 41 and 42 in both
+    tables closes both rows, and the same text with every `#41` token deleted must reopen
+    exactly #41 and still nothing for #42. Putting the ids on the board too would change the
+    DOC_MEMBERSHIP count as well, and a passing filter could then be satisfied by the wrong
+    class — so the board stays one file deep and every filter below names the class it reads.
+    """
+    _redirect_journal(tmp_path, monkeypatch, rows=[
+        _drift_row(41, ["the functions table (`## The functions`)",
+                        "the write-authority tier table"], "2026-10-17T12:34:56+00:00"),
+        _drift_row(42, ["the functions table (`## The functions`)"],
+                   "2026-10-18T09:00:00+00:00")])
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    closed_doc = _membership_doc(tmp_path, functions=(40, 41, 42), tiers=(40, 41, 42))
+
+    rc, out = _drift_run(lint, closed_doc, _load_linter(), capsys)
+    assert _drift_lines(out) == [], (
+        "every journal id is named by both tables and the reader still reported drift:\n" + out)
+    assert rc == 0
+
+    # The mutation, so the silence above is a consequence of the rows and not of a reader that
+    # never ran: deleting `#41` from both tables reopens #41 alone. `mutated != text` is the
+    # control that keeps a regex which matched nothing from reading as a closed journal.
+    text = closed_doc.read_text(encoding="utf-8")
+    mutated = re.sub(r"#41\b", "", text)
+    assert mutated != text, "the deletion landed on nothing, so the line below proves nothing"
+    reopened = tmp_path / "autonomy-jobs-without-41.md"
+    reopened.write_text(mutated, encoding="utf-8")
+    _, out2 = _drift_run(lint, reopened, _load_linter(), capsys)
+    hits = _drift_lines(out2)
+    assert len(hits) == 1 and "#41" in hits[0], (
+        f"deleting #41 from both tables printed {len(hits)} drift lines:\n{out2}")
+
+    # No journal at all is the normal state, not a fault: the writer landed 2026-10-17 and no
+    # create has reached an instrumented process since, so the store is empty on every machine
+    # and on every gate run. It must print nothing and report nothing — a missing file that
+    # reads as a failure would have this class muted inside a day.
+    missing = tmp_path / "nowhere" / "membership-drift.jsonl"
+    assert not missing.exists() and not missing.parent.exists()
+    from scripts.autonomy import jobs_membership as jm
+    monkeypatch.setattr(jm, "journal_path", lambda: missing)
+    rc3, out3 = _drift_run(lint, closed_doc, _load_linter(), capsys)
+    assert _drift_lines(out3) == [], out3
+    assert "unchecked" not in out3, (
+        f"an empty store was reported as an unread one:\n{out3}")
+    assert "Traceback" not in out3 and rc3 == 0, out3
+    assert "all task files parse" in out3, f"an absent journal did not report a clean run:\n{out3}"
+
+
+def test_the_drift_lines_join_warnings_and_no_exit_rule_short_of_strict(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4: exit 0 over a drifting journal, exit 2 under `--strict`, exit 1 still 1.
+
+    The bound is `validate_tasks.py`'s own, stated where DOC_MEMBERSHIP joins the run: prose
+    lagging the fleet by a day has never been a reason to fail a scheduler's validation, and
+    `--strict`'s whole meaning is "treat structural warnings as failures". The unparseable half
+    is the ordering that must not move: a journal row outranking a scheduler-invisible task
+    file would send a reader off to fix a doc while the fleet silently dropped a job.
+    """
+    _redirect_journal(tmp_path, monkeypatch, rows=[
+        _drift_row(41, ["the functions table (`## The functions`)",
+                        "the write-authority tier table"], "2026-10-17T12:34:56+00:00")])
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="draft", frequency="daily",
+             skill_name="heartbeat")
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+
+    linter = _load_linter()
+    rc, out = _drift_run(lint, doc, linter, capsys)
+    assert len(_drift_lines(out)) == 1 and rc == 0, (
+        f"a drifting journal changed the exit code to {rc} without --strict:\n{out}")
+    assert "1 structural warning(s):" in out, out
+
+    rc_strict, out_strict = _drift_run(lint, doc, linter, capsys, "--strict")
+    assert rc_strict == 2, (
+        f"--strict did not turn a DRIFT_UNCLOSED warning into exit 2, got {rc_strict} — "
+        f"DOC_MEMBERSHIP's warnings do, so this class would sit outside the flag:\n{out_strict}")
+    assert len(_drift_lines(out_strict)) == 1, out_strict
+
+    (lint.autonomy_dir / "43-broken.md").write_text(
+        "---\ntype: autonomy\nid: [unclosed\n---\n\nx\n", encoding="utf-8")
+    rc_unparse, out_unparse = _drift_run(lint, doc, linter, capsys)
+    assert rc_unparse == 1, (
+        f"an unparseable task file stopped being exit 1 with drift present: {rc_unparse}")
+    assert len(_drift_lines(out_unparse)) == 1, (
+        "the drift report disappeared beside an unparseable file — both are true at once")
+
+
+def test_the_drift_nodes_carry_no_live_vault_mark_and_read_a_redirected_journal(
+        tmp_path, monkeypatch):
+    """Clause 3: the reader is graded by nodes the gate actually runs, on a redirected store.
+
+    #3270 exists because the drift reached a human only through `@live_vault` nodes, and
+    `scripts/automod/gate.py:719`'s `TESTS_MARK_EXPR = "not live_vault and not
+    fault_injection"` deselects those at every gate. So the mark is the thing worth pinning
+    here, read off this file's own AST rather than asserted once and left to drift.
+
+    The containment half is the bound #2895 put on this journal — reading it from a promotion
+    or rollback path would make documentation gate execution — pinned as a grep over
+    `scripts/automod/`. Both commands are positive-controlled in the same node: a grep against
+    a path that does not exist also returns nothing, which is the 0-hit trap the tree already
+    has a rule about.
+    """
+    _redirect_journal(tmp_path, monkeypatch)      # this node satisfies its own redirect rule
+
+    test_src = Path(__file__).read_text(encoding="utf-8")
+    reader_calls = ("doc_membership_warnings", "_drift_run(")
+    graded = [n for n in ast.parse(test_src).body
+              if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")
+              and any(call in (ast.get_source_segment(test_src, n) or "")
+                      for call in reader_calls)]
+    def _redirects_store(fn: ast.FunctionDef) -> bool:
+        """Whether this node points the store somewhere: patches `journal_path`, or calls the
+        helper that does. An AST walk and not a substring, because a node that merely names
+        `journal_path` inside an assertion message would pass a prose check — and a check that
+        passes on prose is a check that cannot fail.
+        """
+        for sub in ast.walk(fn):
+            if isinstance(sub, ast.Attribute) and sub.attr == "journal_path":
+                return True
+            if isinstance(sub, ast.Call) and getattr(sub.func, "id", "") == "_redirect_journal":
+                return True
+        return False
+
+    assert len(graded) >= 3, (
+        f"only {len(graded)} nodes in this file call the reader, and the clause needs the "
+        "drift, closed and exit-code facts pinned by fixture-backed nodes")
+    for node in graded:
+        decs = " ".join(ast.get_source_segment(test_src, d) or ""
+                        for d in node.decorator_list)
+        assert "live_vault" not in decs, (
+            f"{node.name} carries @live_vault, so the gate deselects the reader — which is the "
+            "exact failure #3270 was filed for")
+        assert _redirects_store(node), (
+            f"{node.name} runs the reader without patching jobs_membership.journal_path, so it "
+            f"grades whatever journal the machine running the gate happens to hold")
+
+    def _git_grep(*pattern: str) -> list[str]:
+        """`git grep -l` as a file list. rc 1 is git's own word for "selected nothing", which
+        is what the containment assertion below IS — so only rc >= 2 or a message on stderr is
+        a command that failed. A helper that asserted rc 0 here would fail the empty answer and
+        could never see the strays it is looking for.
+        """
+        proc = subprocess.run(["git", "grep", "-l", *pattern], cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode in (0, 1) and not proc.stderr.strip(), (
+            f"git grep {' '.join(pattern)} did not run: rc={proc.returncode} "
+            f"{proc.stderr.strip()}")
+        return proc.stdout.split()
+
+    strays = _git_grep("-e", "membership-drift", "--", "scripts/automod/")
+    assert strays == [], (
+        f"the drift journal is read under scripts/automod/, so a promotion or rollback path "
+        f"now depends on documentation: {strays} — the bound at "
+        f"tests/test_autonomy_task_membership_at_filing.py:303-305 puts the reader outside "
+        f"the gate")
+    hits = _git_grep("membership-drift", "--", "scripts/")
+    assert any(h.endswith("validate_tasks.py") for h in hits), (
+        f"the positive control for the grep above: `git grep -l membership-drift -- scripts/` "
+        f"names {hits}, so no script reads the journal and the emptiness above is a dead "
+        "instrument, not a bound")
+    assert any(h.endswith("jobs_membership.py") for h in hits), hits
+
+    # One more thing the redirect depends on, and it is not obvious: the linter has to hold the
+    # SAME `jobs_membership` module object as the patch target. `import jobs_membership` off a
+    # sys.path entry naming its directory builds a second object for the same file — and then
+    # every node above reads the real journal while believing it seeded a fixture, which is a
+    # test that passes by accident. `validate_tasks.py` imports it as `scripts.autonomy.…`, the
+    # way both writers do, so there is exactly one object to patch.
+    flat = [ln for ln in SCRIPT.read_text(encoding="utf-8").splitlines()
+            if re.match(r"^\s*import jobs_membership\b", ln)]
+    assert flat == [], (
+        f"validate_tasks.py imports jobs_membership by bare file name ({flat}), which builds a "
+        "SECOND module object for the same file — the redirect every node above depends on would "
+        "then aim at the writers' copy and the reader would grade the real journal while the "
+        "test believes it seeded a fixture. Measured, not theorised: with the flat import a "
+        "seeded row printed zero lines. Import it as `scripts.autonomy.jobs_membership`, the way "
+        "both writers do.")
 
 
 # ── #3074: a path-valued skill reference is a path, and a miss on it is terminal ─
