@@ -294,3 +294,88 @@ def test_an_unresolvable_task_session_gets_a_journal_row_where_a_chat_child_gets
         "attended override must survive the fix, or every chat turn pays a "
         "registry round trip")
     assert attended.refusal is None and not supply_chain.journal_entries(attended)
+
+
+# ── #3206 clause 4's process boundary: the version hold has to bite at the tool
+#    boundary, not only inside `check_install_provenance`. The seam is Bash →
+#    `app/harness/safety.py::check_bash_command` → supply_chain → a returned
+#    `(label, excerpt)` that `agent_mcp/main.py` turns into a tool denial.
+
+def _declared_name_facts(fresh_days: int, old_days: int,
+                         name: str = "httpx"):  # noqa: ANN001
+    """`httpx` as the registry answers it today: a years-old name whose newest pin
+    went out `fresh_days` ago and whose previous pin went out `old_days` ago.
+
+    Pinned against the REAL clock because `check_bash_command` takes no clock — the
+    dispatch path reads wall time, so a fixed date here would print a day count off
+    by however long ago this fixture was authored (the same trap the age node above
+    records).
+    """
+    clock = dt.datetime.now(dt.timezone.utc)
+    return supply_chain.RegistryFacts(
+        name=name, exists=True, first_release=clock - dt.timedelta(days=2_500),
+        release_count=144, source="pypi.org", observed_at=clock,
+        version_upload_times={"0.29.0": clock - dt.timedelta(days=fresh_days),
+                              "0.27.0": clock - dt.timedelta(days=old_days)},
+        latest_version="0.29.0")
+
+
+def test_a_declared_name_at_a_fresh_pinned_version_is_denied_at_the_boundary(monkeypatch):
+    """#3206 clause 4 at the seam: `httpx` is in this repo's dependency set, and the
+    shipped check sends a declared name straight to `declared` without a registry
+    read — so nothing in the shipped system could see Rybka's exhibit, a working and
+    declared package that added one line at its next release.
+
+    Asserted on the printed refusal rather than on `is not None`: the acceptance names
+    what the refusal must print (distribution, version, age in days, release date), and
+    a boundary test that only checked for *a* refusal would stay green if some other
+    guard owned the command.
+    """
+    def fake_lookup(self, name, **kw):  # noqa: ANN001
+        # `**kw` because the dispatch path asks this client for a LIVE read
+        # (`PypiRegistry.lookup(fresh=True)`) when it is about to price a version; the
+        # double returns the same snapshot either way, which is what the node is about.
+        return _declared_name_facts(fresh_days=1, old_days=200)
+
+    monkeypatch.setattr(supply_chain.PypiRegistry, "lookup", fake_lookup)
+    monkeypatch.delenv(supply_chain.OSV_API_URL_ENV, raising=False)
+    monkeypatch.delenv(supply_chain.OVERRIDE_ENV, raising=False)
+    out = _verdict("pip install httpx==0.29.0", BACKGROUND)
+
+    assert out is not None, "the version hold did not reach the dispatch boundary"
+    label, excerpt = out
+    assert label.startswith("install provenance:"), label
+    assert "httpx" in label and "0.29.0" in label, label
+    printed = re.search(r"version 0\.29\.0 was published (\d+) day\(s\) ago", label)
+    assert printed, label
+    assert 0 <= int(printed.group(1)) <= 3, (
+        f"printed a day count that is not this fixture's one-day-old release: {label}")
+    clock = dt.datetime.now(dt.timezone.utc)
+    assert f"released {(clock - dt.timedelta(days=1)).date().isoformat()}" in label, label
+    assert "hold: 14 day(s)" in label, label
+    assert supply_chain.OVERRIDE_ENV in label, (
+        "the refusal does not print the one-line escape, and the held version is very "
+        f"often the CVE fix: {label}")
+    assert "0.29.0" in excerpt, excerpt
+
+
+def test_the_same_declared_name_at_an_old_pinned_version_is_allowed_at_the_boundary(monkeypatch):
+    """The pair that makes the node above a measurement: same declared name, same
+    registry object, same clock, and the ONLY difference is the pinned version's age
+    (200 days instead of one). A rule that refused every declared install would pass
+    the node above while blocking this box's own rebuild, which is #688's four-
+    false-block first month all over again.
+    """
+    def fake_lookup(self, name, **kw):  # noqa: ANN001
+        # `**kw` because the dispatch path asks this client for a LIVE read
+        # (`PypiRegistry.lookup(fresh=True)`) when it is about to price a version; the
+        # double returns the same snapshot either way, which is what the node is about.
+        return _declared_name_facts(fresh_days=1, old_days=200)
+
+    monkeypatch.setattr(supply_chain.PypiRegistry, "lookup", fake_lookup)
+    monkeypatch.delenv(supply_chain.OSV_API_URL_ENV, raising=False)
+    monkeypatch.delenv(supply_chain.OVERRIDE_ENV, raising=False)
+
+    assert _verdict("pip install httpx==0.27.0", BACKGROUND) is None, (
+        "a declared name's 200-day-old pin was held, so the tree's own frozen "
+        "requirements.lock is not safe from this rule")

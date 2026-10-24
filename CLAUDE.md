@@ -141,9 +141,20 @@ the scorer reads `agent_mcp.annotations.READ_ONLY`.
 ## Install provenance and advisory scan
 
 `app/harness/supply_chain.py`. **A background session's `pip install <name>` for a
-distribution new to this repo's dependency set is refused at dispatch, from three
-facts read off PyPI: never published, first released under 90 days ago, or fewer
-than 2 releases.** A chat session is never refused (the operator already decides
+distribution new to this repo's dependency set is refused at dispatch, from four
+facts read off PyPI: never published, first released under 90 days ago, fewer than
+2 releases, or the version being fetched published under 14 days ago (#3206).**
+That fourth fact is also the *only* one a name already in the dependency set is
+priced on: `pip install <declared-name>==<version>` does read the registry, for that
+release's date alone, and holds it when it is under 14 days old — the exhibit the
+rule was written from was a declared, years-old package that added one line at v16,
+after 15 clean releases, and a name's history is no evidence about its next release.
+A version whose date cannot be had fails open as `version-age-unknown`, and one read
+through a registry-cache entry older than the hold as `version-age-stale-cache`;
+neither ever reads as vetted, and an unpinned install of a declared name costs no
+lookup and stays `declared`. The age is measured against `observed_at`, and the fact
+is cached per name for 7 days — that bound sits beside `Thresholds.min_release_age_days`
+rather than being rediscovered in a review. A chat session is never refused (the operator already decides
 what runs) and pays no registry lookup; a name the check could not examine — npm
 or cargo, a `git+` URL, an unreachable or timing-out PyPI — is reported UNVETTED,
 never as clean. An override is `LLOYD_DEP_OVERRIDE="<why>"` on that one command, and

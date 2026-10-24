@@ -64,6 +64,30 @@ Scope notes (measured 2026-09-24, recorded on backlog #688)
 * One live registry request per *new* name. Only the advisory half is fully
   local; the provenance half needs a registry, and the item's human-decision
   list names accepting that GET.
+
+The fourth fact, and why a declared name is looked up too (#3206)
+-----------------------------------------------------------------
+The three facts above are all facts about a NAME, and #688's contract deliberately
+sent a name already in the dependency set to `declared` with no registry read at all.
+That is structurally blind to the exhibit this control was written from: a working MCP
+utility with **15 clean releases** that added one line at **v16** which BCC-ed the
+owner on every email — a package that is *already declared* when the bad release ships.
+So one more fact is priced, about the ARTIFACT: **the release being downloaded is at
+least :data:`MIN_RELEASE_AGE_DAYS` days old** (:data:`Thresholds.min_release_age_days`),
+and for a declared name it is the ONLY fact consulted, so no existing pass gains a new
+failure mode. Its fact name is :data:`VERSION_YOUNG_FACT`; the three fail-opens that
+mean "age could not be measured" are :data:`VERSION_AGE_UNKNOWN_FACT` (the snapshot has
+no date for that version — which absence in `RegistryFacts.version_upload_times` always
+and only ever means), :data:`VERSION_TARGET_UNKNOWN_FACT` (nothing says which release
+would be taken) and :data:`REGISTRY_UNREACHABLE_NOTE` (no verdict, not a pass either).
+
+The lookup cost that buys it: one cached read when the command pins a version the
+cached snapshot already dates, one live read when it pins one the snapshot cannot date
+(a release published since the entry was written is the release a hold exists for), and
+one live read for any unpinned install, because "latest" is an identity and identities
+expire. A pinned install of an old release — the whole content of this repo's own
+`requirements.lock` — therefore costs what it always cost, and attended turns still pay
+nothing at all, because the turn-level skip is untouched.
 """
 
 from __future__ import annotations
@@ -113,8 +137,13 @@ def normalize_dist_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", str(name or "")).strip().lower()
 
 
-def _requirements_names(text: str) -> list[str]:
-    """Distribution names declared by requirements-file *text*.
+def _requirements_declared(text: str) -> list[tuple[str, str | None]]:
+    """(name, specifier) for every distribution a requirements-file *text* declares.
+
+    The one loop both readers go through: names for #688's declared set, and the pinned
+    specifier too since #3206, because a `-r requirements.lock` install asks for a
+    SPECIFIC artifact and the version hold has to be priced on that release rather than on
+    whatever the registry currently calls latest.
 
     Handles comments, line continuations, `-r`/`-e`/`--hash` option lines,
     environment markers, extras, and `name @ url` direct references. A VCS or
@@ -122,7 +151,7 @@ def _requirements_names(text: str) -> list[str]:
     it names no registry project, and guessing a name out of a repo URL is how a
     control-set reader starts classifying real dependencies as new.
     """
-    names: list[str] = []
+    declared: list[tuple[str, str | None]] = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -132,12 +161,27 @@ def _requirements_names(text: str) -> list[str]:
             continue
         if "+://" in line or line.startswith(("file:", ".", "/", "~", "$", "-")):
             continue
-        body = line.split(" @ ", 1)[0] if " @ " in line else line
+        spec: str | None = None
+        if " @ " in line:                     # `name @ url` — the URL is the artifact
+            body, _, tail = line.partition(" @ ")
+            spec = ("@ " + tail.strip()) or None
+        else:
+            body = line
+        # The specifier is read off the line BEFORE the extras are stripped, so
+        # `mcp[cli]==2.1.0` keeps `[cli]==2.1.0` here exactly as a command line would, and
+        # `mcp>=2.1.0,<3` keeps its range — which is a claim about the newest release, not
+        # about a pinned one, and the difference is what the hold turns on.
+        spec = spec or _version_spec("pip", body)
         body = _EXTRAS.sub("", body).strip()
         m = _NAME_RE.match(body)
         if m:
-            names.append(m.group(1))
-    return names
+            declared.append((m.group(1), spec))
+    return declared
+
+
+def _requirements_names(text: str) -> list[str]:
+    """Distribution names declared by requirements-file *text* (specs dropped)."""
+    return [name for name, _spec in _requirements_declared(text)]
 
 
 def read_dependency_set(root: Path | str | None = None,
@@ -267,6 +311,28 @@ class InstallRequest:
     #: line. The decision is per name either way; the journal uses this to write
     #: a 180-name lockfile as one entry instead of 180 (#1956).
     source: str = ""
+    #: The specifier that followed the name, exactly as written and lowercased — `==2.2.0`,
+    #: `>=1.2,<2`, `[cli]==2.0`, `@2.0` — or None for a bare name (#3206).
+    #:
+    #: #688 throws this away on purpose (`foo[extra]>=1,<2` → `foo`), because its two facts
+    #: are facts about the NAME and a specifier is noise to them. The hold this item adds is
+    #: a fact about the ARTIFACT, so the specifier is the claim and has to reach the policy:
+    #: this field is the raw text, and `target_version` decides which release it names,
+    #: because only an exact `==` names one and everything else means "whatever the registry
+    #: currently calls latest". A `None` here is therefore a real claim ("nothing was
+    #: pinned"), not a missing value.
+    version_spec: str | None = None
+
+    @property
+    def pins_exact_version(self) -> bool:
+        """Whether this request names ONE release rather than a range or "whatever is new".
+
+        The dispatch path asks this before spending a registry read on a name it already
+        declared (#3206): an exact pin is a claim about a specific artifact and is worth a
+        lookup, and everything else is a claim about the registry's latest release, which on
+        a declared name would refuse an old artifact just because a newer one exists.
+        """
+        return exact_pin(self.version_spec) is not None
 
 
 #: An npm scoped package: `@scope/name`, optionally with a version suffix.
@@ -295,6 +361,45 @@ def _strip_version_spec(prog: str, tok: str) -> str:
     body = _EXTRAS.sub("", body.split("[", 1)[0])
     body = re.split(r"[=<>!~;]", body, 1)[0]
     return body.strip()
+
+
+#: The first character that can begin a PyPI specifier or an extras block.
+_SPEC_START_RE = re.compile(r"[\[\]=<>!~;]")
+
+
+def _version_spec(prog: str, tok: str) -> str | None:
+    """What `_strip_version_spec` throws away: the specifier that followed the name (#3206).
+
+    #688 discards it deliberately — `foo[extra]>=1,<2` and `foo` are one name to its two
+    facts. The hold this item adds is a fact about the ARTIFACT, so the specifier is the
+    claim itself and has to survive the parse. This returns the text after the name, trimmed
+    (`==2.2.0`, `>=1.2,<2`, `[cli]==2.0`, `@2.0`, `;python_version<...`), or None for a bare
+    name.
+
+    Deliberately NOT decided here: which of those shapes names an exact release. Only an
+    exact `==` does, and answering that for the others needs the registry's own latest
+    version — which is `target_version`'s job, on the other side of the lookup.
+    """
+    body = tok.strip()
+    if prog in _NPM_FAMILY:
+        if body.startswith("@"):
+            m = _SCOPED_RE.match(body)
+            tail = body[m.end():] if m else ""
+        elif "@" in body:
+            tail = "@" + body.split("@", 1)[1]
+        else:
+            tail = ""
+        return tail.strip() or None
+    if " @ " in body:                        # PEP 508 direct reference: `name @ url`
+        return ("@ " + body.split(" @ ", 1)[1].strip()) or None
+    if " @" in body:
+        return ("@" + body.split(" @", 1)[1]) or None
+    m = _SPEC_START_RE.search(body)
+    if not m:
+        return None
+    # The match is the first character of the specifier, so the slice already carries the
+    # whole of it: `mcp==2.2.0` → `==2.2.0`, `pkg[cli]==2.0` → `[cli]==2.0`.
+    return body[m.start():].strip() or None
 
 
 #: Programs that spell the same tool differently: option tables are keyed by the
@@ -479,13 +584,14 @@ _INSTALL_HINT_RE = re.compile(r"\b(pip|pip3|uv|uvx|npm|pnpm|yarn|poetry|cargo|pi
 
 
 def _one(prog: str, verb: str,
-         name: tuple[str, bool] | None) -> list[InstallRequest]:
+         name: tuple[str, bool] | None, *, tok: str = "") -> list[InstallRequest]:
     if not name:
         return []
     nm, vcs = name
     ecosystem = _ECOSYSTEM_BY_PROGRAM.get(prog, _Ecosystem_PYPI)
     return [InstallRequest(name=nm, ecosystem=ecosystem, verb=verb,
-                           vetted=ecosystem == _Ecosystem_PYPI, vcs=vcs)]
+                           vetted=ecosystem == _Ecosystem_PYPI, vcs=vcs,
+                           version_spec=_version_spec(prog, tok) if tok else None)]
 
 
 #: Re-installing the installer is not adding a dependency: `pip install --upgrade
@@ -550,18 +656,26 @@ def _requests_for(prog: str, verb: str, args: Sequence[str]) -> list[InstallRequ
         nm, vcs = name
         if normalize_dist_name(nm) in _SELF_PACKAGES:
             continue  # re-installing the tool that is doing the installing
+        # `tok` still holds the specifier `_strip_version_spec` removed for `nm`, and #3206's
+        # hold is priced on exactly that: an operand written `mcp==2.2.0` is a claim about a
+        # specific release, and one written `mcp` is a claim about whatever is newest.
         out.append(InstallRequest(name=nm, ecosystem=ecosystem, verb=verb,
-                                  vetted=ecosystem == _Ecosystem_PYPI, vcs=vcs))
+                                  vetted=ecosystem == _Ecosystem_PYPI, vcs=vcs,
+                                  version_spec=_version_spec(prog, tok)))
     # `-r other.txt`: the names declared inside that file are being installed too.
     for req in _requirement_files(prog, args):
         try:
             text = Path(req).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for nm in _requirements_names(text):
+        # The pin travels with the name: an `install -r requirements.lock` asks for the
+        # EXACT version that file freezes, and a hold priced on the registry's latest release
+        # instead would refuse an install of a six-month-old artifact because some other,
+        # newer release exists. That is the false-block shape #688's own history warns about.
+        for nm, spec in _requirements_declared(text):
             out.append(InstallRequest(name=nm, ecosystem=ecosystem, verb=verb,
                                       vetted=ecosystem == _Ecosystem_PYPI,
-                                      source=req))
+                                      source=req, version_spec=spec))
     return out
 
 
@@ -585,6 +699,26 @@ def _requirement_files(prog: str, args: Sequence[str]) -> list[str]:
 
 MIN_FIRST_RELEASE_AGE_DAYS = 90
 MIN_RELEASE_COUNT = 2
+#: How long a distribution VERSION must be public before an unattended install may take
+#: it (#3206). Note the near-miss with the constant above: `MIN_FIRST_RELEASE_AGE_DAYS`
+#: is the age of the *name* (its oldest release), this is the age of the *artifact being
+#: downloaded* (the release named on the command line, or the latest one when the command
+#: names none). Rybka's exhibit is a working MCP utility that shipped 15 clean releases
+#: and added one line at v16 which BCC-ed the owner on every email: no fact about the
+#: name saw that release, and #688's two facts are both facts about the name. 14 days is
+#: his own recipe ("ingest it maybe in a week or two"), taken as the shorter of the two so
+#: the hold bites on a two-week-old release rather than a three-week-old one.
+MIN_RELEASE_AGE_DAYS = 14
+#: Cap on how many release dates one snapshot carries (#3206). A SIZE bound, not a
+#: knowledge bound: the map keeps the NEWEST `MAX_VERSION_DATES` dated releases, and the
+#: entries it can drop are exactly the ones a hold could never reach. Dropping one makes
+#: precisely one thing true about that version — it is unmeasurable — because absence from
+#: this map has exactly one meaning (see `RegistryFacts.version_upload_times`), so the cap
+#: can never turn "old" into "young" or the reverse. An entry costs ~40 bytes per release
+#: carried, and this file's own `parse_pypi_payload` docstring records a live payload
+#: carrying 317 release keys for one ordinary name — so the cap is what makes this map safe
+#: to write into the cache file at all, rather than a bound nobody needs.
+MAX_VERSION_DATES = 400
 REGISTRY_URL = "https://pypi.org/pypi/{name}/json"
 #: Hard ceiling on one lookup. The item's budget is "<300 ms" for the check as a
 #: whole; a TLS handshake to pypi.org does not reliably fit in 300 ms, so the
@@ -595,12 +729,36 @@ REGISTRY_URL = "https://pypi.org/pypi/{name}/json"
 #: installs in 3,167 session transcripts).
 DEFAULT_REGISTRY_TIMEOUT = 1.5
 CACHE_TTL_DAYS = 7
+#: The bound to read beside `min_release_age_days` below, because it is what makes a
+#: version fact trustworthy rather than merely recent. An upload time is an absolute
+#: instant, so a date that IS in a cached snapshot is exactly as true on day 6 of the
+#: cache as on day 0 — the cache never ages a number. What a cache entry does expire into
+#: is COVERAGE: a snapshot written 6 days ago cannot contain a release published since
+#: then, and that missing release is the one a hold exists for. `_registry_facts` is the
+#: rule that pays for it — any version claim the cached map does not date is re-read live
+#: rather than answered from the entry — so no verdict in this module is ever priced on a
+#: release the snapshot could not have seen.
 
 
 @dataclass(frozen=True)
 class Thresholds:
     min_first_release_age_days: int = MIN_FIRST_RELEASE_AGE_DAYS
     min_release_count: int = MIN_RELEASE_COUNT
+    #: The #3206 hold, in days, on the VERSION rather than on the name.
+    #:
+    #: Its bound is `CACHE_TTL_DAYS = 7`, the age of the per-name registry cache, and the
+    #: two interact in one direction only. An upload time is an absolute instant, so a
+    #: date the cached map DOES carry is exact for the whole 7 days and can never make a
+    #: young release look old. What the cache can do is fail to contain a release published
+    #: after it was written — which is why a version claim whose pin the cached map does not
+    #: date is read live (`_registry_facts`) instead of being answered from the entry. What
+    #: remains, and what this threshold then also governs, is the entry that is OLDER than
+    #: the hold itself: such a snapshot cannot date anything inside its own window, and is
+    #: answered `version-age-stale-cache` (allowed, named, not vetted) rather than treated as
+    #: evidence of age. So raising this threshold above `CACHE_TTL_DAYS` can never turn a
+    #: stale cache into a silent hold, and `min_release_age_days=0` means the rule is inert,
+    #: since no release can be younger than zero days.
+    min_release_age_days: int = MIN_RELEASE_AGE_DAYS
 
 
 DEFAULT_THRESHOLDS = Thresholds()
@@ -616,10 +774,41 @@ class RegistryFacts:
     #: can say whether a verdict rested on a measured fact or on an outage.
     source: str = "pypi.org"
     observed_at: dt.datetime | None = None
+    #: Upload time of each release this snapshot could date, keyed by version string
+    #: (#3206). The map has ONE rule and it holds for a live read, a warm cache read and a
+    #: fixture alike: **a version in it has a measured release date; a version absent from it
+    #: has no date, and no version is ever read as old because it is missing.** Absence is
+    #: therefore never evidence of age — not "older than some horizon", which is the reading
+    #: an earlier shape of this field invited and the review rung disproved on the shipped
+    #: code (a release published after the snapshot is absent from it for the very same
+    #: reason a two-year-old one is, and it is the release the hold exists for). What
+    #: absence does say is that the age could not be measured, which the policy answers by
+    #: allowing the install and naming the fact (`version-age-unknown`), the same honesty
+    #: rule that already keeps `first_release=None` from reading as "old". Entries are the
+    #: newest `MAX_VERSION_DATES` dated releases, so a cache entry is bounded and a dropped
+    #: release loses only a date OLDER than every date kept — for the drop to cost anything,
+    #: one distribution would have to publish more than `MAX_VERSION_DATES` releases INSIDE
+    #: the hold window.
+    version_upload_times: dict[str, dt.datetime] = field(default_factory=dict)
+    #: What the registry itself calls the latest release (`info.version`, falling back to
+    #: the dated release with the newest upload time). An unpinned install takes THIS
+    #: artifact, so an unpinned install is judged by its age rather than skipped: `""` means
+    #: the payload named no latest release, which is unmeasurable, not "old".
+    latest_version: str = ""
 
     @property
     def unreachable(self) -> bool:
         return self.source == "unreachable"
+
+    def dates_version(self, version: str | None) -> bool:
+        """Whether this snapshot carries a release date for `version`.
+
+        The one question that decides whether a cached entry may answer a version claim
+        (`_registry_facts`): a date in the map is an absolute instant and stays true for the
+        whole cache TTL, while an entry the map does not have may be a release published
+        after the snapshot was taken — the one shape a hold must not guess about.
+        """
+        return version is not None and version in self.version_upload_times
 
 
 @dataclass(frozen=True)
@@ -680,24 +869,144 @@ def parse_pypi_payload(name: str, payload: dict, *,
                 stamp = _as_utc(item.get("upload_time") or item.get("upload_time_iso_8601"))
                 if stamp is not None:
                     times.append(stamp)
+    vtimes = release_version_times(releases)
+    latest = str((payload.get("info") or {}).get("version") or "").strip()
+    if not latest:
+        # `info.version` is the authoritative answer and PyPI always sends one, but a
+        # trimmed blob or a mirror payload may not: fall back to the newest release we can
+        # actually date, and if none is datable leave it empty, so an unpinned install is
+        # judged `version-target-unknown` rather than on a guess about which artifact pip
+        # would resolve.
+        latest = max(vtimes, key=lambda v: vtimes[v]) if vtimes else ""
     if not times and payload.get("info", {}).get("version"):
         # A release list with no timestamps is not "old": record what is unknown
-        # and let the caller fail open rather than assert an age it cannot see.
+        # and let the caller fail open rather than assert an age it cannot see. The
+        # version map travels with it for the same reason — an undated payload yields an
+        # EMPTY map — so the #3206 hold reads it as "no version is datable", never as
+        # "every version is old enough".
         return RegistryFacts(name=name, exists=True, first_release=None,
                              release_count=count or None, source="pypi.org",
-                             observed_at=obs)
+                             observed_at=obs, version_upload_times=vtimes,
+                             latest_version=latest)
     return RegistryFacts(name=name, exists=bool(releases) or bool(payload.get("urls")),
                          first_release=min(times) if times else None,
-                         release_count=count or None, source="pypi.org", observed_at=obs)
+                         release_count=count or None, source="pypi.org", observed_at=obs,
+                         version_upload_times=vtimes, latest_version=latest)
+
+
+def release_version_times(releases: dict[str, Any], *,
+                          max_versions: int = MAX_VERSION_DATES,
+                          ) -> dict[str, dt.datetime]:
+    """Date every release in the payload that HAS a date. Nothing is dated out by age.
+
+    The live payload shape is `releases: {version: [file, …]}`, one `upload_time` per file,
+    and #688's reader collapsed the whole map into `min(times)` plus a key count — two facts
+    about the NAME. This keeps the per-release dates #3206's hold needs under one rule: a
+    version is in the result exactly when one of its files carries a usable `upload_time`,
+    and the value is the newest of them (the artifact an installer would fetch).
+
+    No age filter, deliberately, because absence is the one statement this map makes and it
+    must have one meaning: **"this snapshot could not date that version"**, which the policy
+    answers by allowing the install and naming the fact. Filtering by age makes the same
+    absence mean two different things depending on which snapshot is being read — for one
+    snapshot it means "measured older than the cut", for the other it means "not published
+    yet when we looked", and the second is the release a hold exists for. That two-meaning
+    shape is what the review rung refused on the previous round's commit, and it is the
+    reason a cut of any width cannot be repaired by a flag saying which snapshot this is: a
+    release published after a snapshot is invisible to it however wide the cut is drawn.
+
+    `max_versions` is a SIZE bound. Keeping the newest entries is what makes it safe: every
+    dropped release is older than everything kept, so the most a drop can do is turn
+    "measured old, allowed" into "unmeasurable, allowed".
+    """
+    out: dict[str, dt.datetime] = {}
+    for raw_version, files in releases.items():
+        version = str(raw_version or "").strip()
+        if not version or not isinstance(files, list):
+            continue
+        stamps = [stamp for stamp in (
+            _as_utc(item.get("upload_time") or item.get("upload_time_iso_8601"))
+            for item in files if isinstance(item, dict)
+        ) if stamp is not None]
+        if stamps:
+            out[version] = max(stamps)
+    ceiling = max(int(max_versions), 0)
+    if len(out) > ceiling:
+        out = dict(sorted(out.items(), key=lambda item: item[1],
+                          reverse=True)[:ceiling])
+    return out
+
+
+#: An exact pin and nothing else: `==1.2.3` or the deprecated `=1.2.3`. A wildcard
+#: (`==1.*`), a range (`>=`, `<`, `~=`, `!=`), a uv `@2.0` or a bare name all fail it, and
+#: every one of those means "whatever the resolver picks", which in practice is the newest
+#: artifact on the registry. One regex, because the policy's two questions — which release
+#: is this claim about, and is this claim about a release at all — must not answer
+#: differently for the same string.
+_EXACT_PIN_RE = re.compile(r"^(?:==|=)\s*(?!.*[*?])\S+$")
+
+
+def exact_pin(version_spec: str | None) -> str | None:
+    """The version an exact pin names, or None when the specifier does not name one.
+
+    `==2.2.0` → `"2.2.0"`; `[cli]==2.0` → `"2.0"`; `>=1.2,<2`, `==1.*`, `@2.0`, `""` and
+    None → None. Extras are stripped first because the shipped parser lowercases the token
+    and does not strip them here, so a pin on an extras-bearing name is still a pin.
+    """
+    spec = (version_spec or "").strip()
+    if spec.startswith("["):                     # `pkg[cli]==2.0` → the spec carries extras
+        spec = spec[1:].split("]", 1)[-1].strip()
+    if not _EXACT_PIN_RE.match(spec):
+        return None
+    return spec.split(None, 1)[-1].lstrip("= ") or None
+
+
+def target_version(facts: RegistryFacts, version_spec: str | None = None,
+                   ) -> tuple[str, str]:
+    """Which artifact a command actually asks for: ``(version, how)``, ``how`` ∈ pinned/latest/unknown.
+
+    Naming the version the claim is about is the whole of #3206 — a hold on "the version"
+    is meaningless if the check cannot say which one it priced — and the three command
+    shapes answer differently:
+
+      * ``pkg==1.2.3`` → ``("1.2.3", "pinned")``. The claim is about THAT release.
+      * ``pkg`` (bare), ``pkg>=1.2``, ``pkg<3``, ``pkg!=1.0``, ``pkg~=2.0``, ``pkg==1.*``,
+        ``pkg@2.0``, ``pkg[extra]`` → the registry's own latest release, ``how="latest"``.
+        A range resolves at resolve time to the newest artifact available, and a wildcard
+        or a uv ``@`` names no exact release we could date either, so the honest claim is
+        "what you are about to fetch is the latest one". An unpinned install is the shape
+        that silently takes a day-old release, which is exactly why it is not skipped.
+      * neither the command nor the registry names a version → ``("", "unknown")``.
+    """
+    pinned = exact_pin(version_spec)
+    if pinned:
+        return pinned, "pinned"
+    if facts.latest_version:
+        return facts.latest_version, "latest"
+    return "", "unknown"
 
 
 def evaluate_provenance(facts: RegistryFacts, *, now: dt.datetime | None = None,
-                        thresholds: Thresholds = DEFAULT_THRESHOLDS) -> Provenance:
-    """The three-fact policy, as a pure function of (facts, clock, thresholds).
+                        thresholds: Thresholds = DEFAULT_THRESHOLDS,
+                        version_spec: str | None = None) -> Provenance:
+    """The four-fact policy, as a pure function of (facts, clock, thresholds, requested version).
 
     Pure so the fixture eval and the real dispatch path cannot drift: there is
     one place that turns a registry fact into a refusal, and a threshold change
     moves both at once.
+
+    Three of the four facts are facts about the NAME — how old its first release is, how
+    many releases it has, whether the registry has heard of it at all — and they are
+    #688's shipped contract. The fourth is a fact about the ARTIFACT (`version_spec`, the
+    specifier the command carried, or none): #3206's hold window on the age of the release
+    being fetched. Rybka's poisoned MCP utility had 15 clean releases and a four-year-old
+    first release, so all three name facts passed it and only this one can see it.
+
+    The version facts are asked LAST, after the name facts, so a name that is already
+    refused for being new or thin is not also charged a version verdict it may not have
+    earned, and so an existing refusal's `fact` stays the one a journal reader already
+    knows. `version_spec=None` is a real claim, not an absent one: it means the command
+    pinned nothing, and it is priced against the registry's own latest release.
     """
     clock = now or dt.datetime.now(dt.timezone.utc)
     if facts.unreachable:
@@ -737,6 +1046,80 @@ def evaluate_provenance(facts: RegistryFacts, *, now: dt.datetime | None = None,
                     f"history is a placeholder name, not a maintained project. Re-run "
                     f'with {OVERRIDE_ENV}="why this exact package" to override.'),
             facts=facts)
+
+    # ---- the artifact's own age (#3206) -------------------------------------
+    version, how = target_version(facts, version_spec)
+    if how == "unknown":
+        # The hold is INERT here, which is a different thing from the two fail-opens below
+        # and worth the distinction. `unknown` means there is no version CLAIM to price:
+        # the command pinned nothing and the payload named no latest release either — and a
+        # payload that dates nothing at all has already been answered by
+        # `first-release-unknown` above, so what reaches here carries no version
+        # information of any kind (a cache blob written before #3206, a hand-built fixture).
+        # There is no artifact to hold, the name facts have done their job, and the shipped
+        # verdict stands. The two branches below are the fail-opens proper: there the
+        # target IS nameable and only its AGE is missing, and those stay distinctly named,
+        # because reading that as vetted is the folding #688's finding warns about.
+        return Provenance(blocked=False, fact="cleared", reason="", facts=facts)
+    observed = facts.observed_at
+    if observed is None or (clock - observed).days > thresholds.min_release_age_days:
+        # A version fact is only as fresh as the observation it came from, and facts are
+        # cached per NAME for CACHE_TTL_DAYS. An entry older than the hold cannot date
+        # anything inside it, and refusing on that would let a stale cache file block a
+        # real install — the false-block shape #688's first month actually measured (four
+        # denials, every one of them a parser false-block). So staleness allows.
+        return Provenance(blocked=False, fact="version-age-stale-cache", reason="",
+                          facts=facts)
+    if not facts.dates_version(version):
+        # This snapshot has no release date for the version the command is about to take,
+        # and that is the ONE thing absence from `version_upload_times` is ever allowed to
+        # mean. It is never evidence of age — not for a payload whose files carry no
+        # timestamps, not for a cache entry written before the version map existed, not for a
+        # release published after the snapshot was fetched, and not for a tail beyond
+        # `MAX_VERSION_DATES` in a 317-release name. All of those answer alike: allowed, on
+        # the unknown, and DISTINCTLY NAMED, because folding them into `cleared` is what
+        # turns a fail-open into a pass (#688's finding). The same rule already keeps
+        # `first_release=None` from reading as "old". `_registry_facts` closes the one gap
+        # where this matters operationally: a version claim whose pin a cached entry cannot
+        # date re-reads the registry live rather than being answered from the entry.
+        return Provenance(
+            blocked=False, fact="version-age-unknown",
+            reason=(f"'{facts.name}' version {version} has no release date in the registry "
+                    f"facts (observed {observed.date().isoformat()} via {facts.source}), so "
+                    f"its age could not be measured and the hold cannot price it. Allowed on "
+                    f"the unknown — NOT vetted: absence from a set of dated releases is not "
+                    f"evidence of age in either direction. If you know the release date and "
+                    f"it is inside the "
+                    f"{thresholds.min_release_age_days}-day hold, do not override to take "
+                    f"it; if it is outside, re-run with {OVERRIDE_ENV}=\"why this version\"."),
+            facts=facts)
+    upload = facts.version_upload_times[version]
+    v_age = (clock - upload).days
+    if v_age < thresholds.min_release_age_days:
+        which = ("that is the registry's current latest release, so an unpinned "
+                 "install would take whatever is newest"
+                 if how == "latest" else "you pinned that version")
+        return Provenance(
+            blocked=True, fact="version-too-recent",
+            reason=(
+                f"'{facts.name}' version {version} was published {v_age} day(s) ago "
+                f"(released {upload.date().isoformat()}; hold: "
+                f"{thresholds.min_release_age_days} day(s) on a version, judged from "
+                f"facts observed {observed.date().isoformat()} via {facts.source}; "
+                f"{which}. The name itself is older and passed its own checks, which "
+                f"is the point: a name's history is not evidence about its NEXT "
+                f"release. The exhibit this hold was written from is a working MCP "
+                f"utility with 15 clean releases that added one line at v16. If this "
+                f"release is a security fix, do not override blind — vendor the "
+                f"artifact instead: the files and their hashes are at "
+                f"https://pypi.org/simple/{facts.name}/, and vendoring the wheel into "
+                f"the offline index and pointing `pip` at it with `--index-url` or "
+                f"`PIP_INDEX_URL` is how the rest of this box installs. If you mean "
+                f"to take the version anyway, re-run with "
+                f'{OVERRIDE_ENV}="why this exact version", which journals an override '
+                f"with your reason instead of looking like a clean install."),
+            facts=facts)
+    # dated, and dated older than the hold: this one is a measurement, and it passes on it
     return Provenance(blocked=False, fact="cleared", reason="", facts=facts)
 
 
@@ -782,18 +1165,45 @@ class PypiRegistry:
         self.name = "pypi.org"
         self._memo: dict[str, RegistryFacts] = {}
 
-    def lookup(self, name: str) -> RegistryFacts:
+    def lookup(self, name: str, *, fresh: bool = False) -> RegistryFacts:
+        """Facts for `name`; `fresh=True` asks the registry, skipping the cache and the memo.
+
+        #3206's version hold is why that parameter exists, and `_registry_facts` is the only
+        caller that sets it, because it is the only caller that knows which of the two cache
+        failures a decision can survive:
+
+        * A date the entry DOES carry is exact for the whole `CACHE_TTL_DAYS` — an upload
+          time is an absolute instant, and the cache never ages a number. A pinned version
+          the entry dates is therefore served from the cache at zero cost.
+        * What the entry cannot do is speak about a release it never saw. A snapshot written
+          6 days ago has no entry for a release published yesterday, and that release is the
+          one the hold exists for. Answering from the entry there is answering
+          "unmeasurable" — allowed, on the honesty rule — about precisely the artifact the
+          check was written to catch. So `_registry_facts` re-reads live whenever the cached
+          map does not date the pin, and always for an unpinned install, where even a
+          perfectly-dated `latest_version` has expired as a description of what pip fetches.
+
+        The cost is bounded by the traffic this path actually sees: #688 measured about two
+        executed installs per 30 days on this box, each inside `DEFAULT_REGISTRY_TIMEOUT`
+        (1.5 s), failing open on any transport error, and attended turns never reach the
+        registry at all. The pin that keeps the guard from living only in the policy is
+        `tests/test_supply_chain_provenance.py::
+        test_a_pinned_release_published_after_the_cached_snapshot_re_reads_the_registry` —
+        a test that only ever planted a fresh snapshot by hand would be satisfied by an
+        implementation that served the cache always.
+        """
         import logging
         logger = logging.getLogger("lloyd-supply-chain")
         key = normalize_dist_name(name)
         now = dt.datetime.now(dt.timezone.utc)
-        cached = self._memo.get(key)
-        if cached is not None:
-            return cached
-        cached = _read_cache(self.cache_path, key, max_age_days=self.ttl_days, now=now)
-        if cached is not None:
-            self._memo[key] = cached
-            return cached
+        if not fresh:
+            cached = self._memo.get(key)
+            if cached is not None:
+                return cached
+            cached = _read_cache(self.cache_path, key, max_age_days=self.ttl_days, now=now)
+            if cached is not None:
+                self._memo[key] = cached
+                return cached
         url = self.url_template.format(name=key)
         try:
             import httpx
@@ -825,6 +1235,53 @@ class PypiRegistry:
         self._memo[key] = facts
         _write_cache(self.cache_path, key, facts)
         return facts
+
+
+#: Sentinel for "this lookup is not about a version at all", distinct from `pin=None`, which
+#: means "it is about a version and the command pinned nothing". Two meanings, one parameter,
+#: and the difference decides whether the 7-day cache may answer (`_registry_facts`).
+NO_VERSION_CLAIM = object()
+
+
+def _registry_facts(registry: Any, name: str, *,
+                    pin: Any = NO_VERSION_CLAIM) -> RegistryFacts:
+    """The facts this decision is priced on, choosing the read that may answer it.
+
+    Three states of one parameter, because the 7-day per-name cache is admissible for one of
+    them and not for the other two:
+
+    * **`pin` is a version string.** A date the cached entry holds for that version is an
+      absolute instant and stays true for the whole `CACHE_TTL_DAYS` — the cache never ages a
+      number — so the cache is used when it DATES THE PIN (`RegistryFacts.dates_version`) and
+      the decision costs no round trip. When it does not date it, the cache may not answer:
+      the missing version may be a release published after the entry was written, and
+      answering from the entry would report the exact artifact a hold exists for as
+      unmeasurable. So it reads live.
+    * **`pin` is None** — a bare name, a range, an extra. The artifact is whatever the
+      registry calls latest NOW, and that identity is what expires. A 6-day-old entry whose
+      `latest_version` it dates perfectly still misses a release published yesterday, and an
+      unpinned install is precisely the shape that silently takes one. So the cache is never
+      admissible and the read is live.
+    * **`NO_VERSION_CLAIM`** — #688's original read, for a caller pricing only the name facts.
+      Cache first, because the two facts it uses (first release, release count) go stale in
+      the permissive direction only, which is what a TTL is for.
+
+    A registry double that has never heard of `fresh` is served the plain read rather than
+    failing the decision: its own answer is what the caller planted, and raising there would
+    turn a test seam into a fail-open the shipped path never takes. The round-trip cost is
+    bounded by the traffic this path actually sees — #688 measured about two executed installs
+    per 30 days on this box — and capped at `registry_timeout()` per lookup.
+    """
+    if pin is NO_VERSION_CLAIM:
+        return registry.lookup(name)
+    if pin is not None:
+        cached = registry.lookup(name)
+        if cached.dates_version(pin):
+            return cached
+    try:
+        return registry.lookup(name, fresh=True)
+    except TypeError:
+        return registry.lookup(name)
 
 
 def registry_timeout() -> float:
@@ -863,7 +1320,37 @@ def _read_cache(path: Path, key: str, *, max_age_days: float,
     return RegistryFacts(name=key, exists=True,
                          first_release=_as_utc(row.get("first_release")),
                          release_count=row.get("release_count"),
-                         source="cache", observed_at=stamp)
+                         source="cache", observed_at=stamp,
+                         version_upload_times=_versions_from_blob(row.get("version_times")),
+                         latest_version=str(row.get("latest_version") or ""))
+
+
+def _versions_from_blob(raw: Any) -> dict[str, dt.datetime]:
+    """Decode the cached version map. Wire form: ``{version: iso-date}``.
+
+    A version is kept only if its stamp parses, because a map entry is the ONLY form in
+    which this cache may say "I have a release date for that version" — absence is the form
+    for "I do not", and the policy never reads absence as age (#3206: the review rung
+    refused a commit that let a cached entry answer "older than the horizon" about a release
+    it had never seen, since a release published after the entry was written is absent for
+    exactly the same reason). So a malformed, missing or pre-#3206 field decodes to an EMPTY
+    map, which the policy reads as "nothing here is dated" and fails open on — never as
+    "every version is old". A `null` stamp — what an undated release looked like on the wire
+    before this round, and what a half-written entry could still hold — decodes to the same
+    absence as an absent key, which is the only pair of states this decoder is allowed to
+    equate.
+    """
+    out: dict[str, dt.datetime] = {}
+    if not isinstance(raw, dict):
+        return out
+    for version, stamp in raw.items():
+        version = str(version or "").strip()
+        if not version:
+            continue
+        moment = _as_utc(stamp)
+        if moment is not None:
+            out[version] = moment
+    return out
 
 
 def _write_cache(path: Path, key: str, facts: RegistryFacts) -> None:
@@ -880,6 +1367,15 @@ def _write_cache(path: Path, key: str, facts: RegistryFacts) -> None:
         "first_release": facts.first_release.isoformat() if facts.first_release else None,
         "release_count": facts.release_count,
         "observed_at": (facts.observed_at or dt.datetime.now(dt.timezone.utc)).isoformat(),
+        # #3206: this codec is a hand-written field-by-field projection, NOT an `asdict`, so
+        # a field added to RegistryFacts but not to BOTH halves of it silently vanishes on
+        # every warm read for CACHE_TTL_DAYS — which would make the version hold fire at most
+        # once a week per name, i.e. mostly not at all. Only dated releases are written: a
+        # version with no date has no key here, which is the same statement the decoder makes
+        # about it, and `MAX_VERSION_DATES` is what bounds the entry's size.
+        "version_times": {v: t.isoformat()
+                          for v, t in sorted(facts.version_upload_times.items())},
+        "latest_version": facts.latest_version,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1126,6 +1622,63 @@ def _journal_decision(command: str, session_id: str | None, session_class: str,
             "stands and only this row is lost", type(exc).__name__, str(exc)[:160])
 
 
+def _declared_hold(request: InstallRequest, reg: Any, notes: list[str], *,
+                   now: dt.datetime | None = None,
+                   thresholds: Thresholds = DEFAULT_THRESHOLDS) -> Provenance | None:
+    """Price a DECLARED name's pinned version against #3206's hold, or explain why it cannot.
+
+    Returns the blocking `Provenance` when the artifact this exact command asks for is
+    inside the hold window, and `None` when the install may proceed — which includes every
+    case where the age could not be measured, each with a note. The name being in
+    `requirements.txt` is not evidence about a release: the exhibit this hold exists for was
+    a declared, years-old package whose v16 — after 15 clean releases — went out yesterday.
+
+    The three ways this returns None without a verdict are all recorded in `notes` and all
+    keep the name's outcome `declared`, exactly as #688 clause 5 requires:
+
+      * the registry read raised — a lookup failure must never block a turn;
+      * the registry is unreachable — no verdict, and not a pass either;
+      * the policy itself allowed it, including its own `version-*` fail-opens.
+    """
+    try:
+        # The read is chosen by the claim: an exact pin may be answered from the cache if the
+        # cached snapshot dates it, and anything else (a bare name, a range) has to be live
+        # because "latest" is the artifact and that identity expires.
+        facts = _registry_facts(reg, request.name, pin=exact_pin(request.version_spec))
+    except Exception as exc:  # noqa: BLE001 — fail OPEN, never block a turn
+        notes.append(f"{request.name}: declared name, and its pinned version was never "
+                     f"dated because the registry read raised {type(exc).__name__} "
+                     f"({exc}); version not checked")
+        return None
+    if facts.unreachable:
+        notes.append(f"{request.name}: declared name, but the registry was unreachable so "
+                     f"its pinned version was never dated (not checked, not allowed)")
+        return None
+    verdict = evaluate_provenance(facts, now=now, thresholds=thresholds,
+                                  version_spec=request.version_spec)
+    if not verdict.blocked or not verdict.fact.startswith("version-"):
+        # A DECLARED name is not judged on the name facts: #688 clause 5 is that a name the
+        # repo already lists is never classed as new, and this lookup exists only to date one
+        # release. A fixture or a stale cache that answers 404 for a name sitting in
+        # `requirements.lock` is therefore not a refusal here — it is the registry failing to
+        # answer the one question we asked, and it is said in a note rather than charged to
+        # the install.
+        if verdict.blocked:
+            notes.append(f"{request.name}: declared name, so its {verdict.fact} registry "
+                         f"answer was not charged to this install; only the pinned "
+                         f"version's age was")
+        elif verdict.fact.startswith("version-"):
+            # The fail-open half, and the only place it can be seen: the name's outcome
+            # stays `declared` (the declaration did license the install), so without this
+            # line a held-eligible version whose age could not be measured would leave no
+            # trace at all, and "we could not tell" would read as "we checked".
+            notes.append(f"{request.name}: declared name, install allowed, but the pinned "
+                         f"version's age was never measured ({verdict.fact}) — not vetted, "
+                         f"and not held")
+        return None
+    return verdict
+
+
 def check_install_provenance(command: str, session_id: str | None, *,
                              parent_of: Callable[[str], str | None] | None = None,
                              registry: Any = None,
@@ -1176,6 +1729,41 @@ def check_install_provenance(command: str, session_id: str | None, *,
             continue
         seen.add(key)
         if key in known:
+            # #688 clause 5: a name already listed is never classed as new, and that
+            # outcome stays `declared` here whatever the version rule decides. But the
+            # name's own seniority says nothing about its NEXT release — the exhibit this
+            # hold was written from was a declared, years-old package that added one line at
+            # v16, after 15 clean releases — so a command that names ONE exact release of a
+            # declared name is priced against the hold, and only that shape.
+            #
+            # Not priced: a bare or ranged install of a declared name. Its target is
+            # whatever the registry currently calls latest, so holding it would refuse an
+            # install of an artifact this repo already ships whenever any newer release
+            # exists — #688's own false-block record (4 denials, all parser false-blocks on
+            # `list`/`freeze`/`check`/`show`) is the cautionary precedent, and refusing a
+            # 6-month-old artifact because a newer one exists is the same class of error.
+            if request.pins_exact_version and not request.vcs and request.vetted:
+                held = _declared_hold(request, reg, result.notes, now=now,
+                                      thresholds=thresholds)
+                if held is not None:
+                    if request.override:
+                        # Deliberately NOT appended to `result.declared`: the journal
+                        # projects declared last, so adding it here would overwrite this
+                        # row's own `overridden` outcome with `declared` and the override
+                        # would vanish from the only durable record of it.
+                        result.overrides.append((request.name, request.override.strip()))
+                        result.cleared.append(request)
+                        logger.warning("supply-chain: %s of %r version %s held by %s and "
+                                       "overridden: %s", request.verb, request.name,
+                                       exact_pin(request.version_spec), held.fact,
+                                       request.override.strip()[:200])
+                        continue
+                    result.refusals.append((request, held))
+                    logger.warning("supply-chain: %s of %r version %s held by %s: %s",
+                                   request.verb, request.name,
+                                   exact_pin(request.version_spec), held.fact,
+                                   held.reason[:200])
+                    continue
             result.declared.append(request)
             continue
         if request.override:
@@ -1208,7 +1796,10 @@ def check_install_provenance(command: str, session_id: str | None, *,
                            request.ecosystem, request.name, request.ecosystem)
             continue
         try:
-            facts = reg.lookup(request.name)
+            # Chosen the same way as the declared branch, because the verdict this call feeds
+            # is priced on a version too (the pinned one, or the registry's latest) — and a
+            # cached snapshot is admissible for the first and not the second.
+            facts = _registry_facts(reg, request.name, pin=exact_pin(request.version_spec))
         except Exception as exc:  # noqa: BLE001
             result.unvetted.append(request)
             result.notes.append(f"{request.name}: the registry lookup raised "
@@ -1216,7 +1807,12 @@ def check_install_provenance(command: str, session_id: str | None, *,
             logger.warning("supply-chain: registry lookup raised for %r (%s: %s)",
                            request.name, type(exc).__name__, str(exc)[:160])
             continue
-        verdict = evaluate_provenance(facts, now=now, thresholds=thresholds)
+        # The version fact is priced on the SAME call for a new name as for a declared one
+        # (#3206): a first release that is four years old and 40 releases deep does not vet
+        # yesterday's artifact, and skipping the specifier here would leave the rule
+        # guarding only the half of the traffic #688 already looked at.
+        verdict = evaluate_provenance(facts, now=now, thresholds=thresholds,
+                                       version_spec=request.version_spec)
         if verdict.blocked:
             reason = verdict.reason
             if request.override is not None:
@@ -2082,6 +2678,13 @@ def read_fixtures(path: Path | str | None = None, *,
     return yaml.safe_load(target.read_text(encoding="utf-8")) or {}
 
 
+#: The fixture shape #3206 exists for: a WELL-ESTABLISHED name at a version published
+#: yesterday. The two shipped planted shapes (new-name, unpublished-name) are both attacks
+#: on the NAME, which is the half #688 already covers; an attacker who has watched a
+#: package work for four years does not need a new name, he needs the next release.
+FRESH_VERSION_SHAPE = "fresh-version"
+
+
 def fixtures_registry(doc: dict[str, Any]) -> MappingRegistry:
     """A registry carrying exactly the fixture document's facts, measured or planted."""
     facts: dict[str, RegistryFacts] = {}
@@ -2091,16 +2694,267 @@ def fixtures_registry(doc: dict[str, Any]) -> MappingRegistry:
             if not name:
                 continue
             blob = entry.get("facts") or {}
+            # Section order is meaningful since #3206: `planted` is read first and a later
+            # `control` entry for the SAME name does not overwrite it. Without that, a
+            # planted fresh-version `mcp` and a control `mcp` collide and the control's
+            # versionless facts win — so the planted attack would be measured against facts
+            # its own fixture never claimed, and read as allowed.
+            if name in facts:
+                continue
             facts[name] = _facts_from_blob(name, blob)
     return MappingRegistry(facts, name="fixtures")
 
 
 def _facts_from_blob(name: str, blob: dict[str, Any]) -> RegistryFacts:
+    # The version map has to be readable here or the `fresh-version` shape cannot be
+    # expressed at all. `versions:` means exactly what the live parser's map means: a key
+    # with a date is a dated release, and NO KEY (absent, or written `null`) is a release this
+    # snapshot could not date — which is never read as "old". A fixture and a live payload
+    # therefore cannot mean different things about the same shape.
+    versions: dict[str, dt.datetime] = {}
+    raw_versions = blob.get("versions")
+    if isinstance(raw_versions, dict):
+        for version, stamp in raw_versions.items():
+            moment = _as_utc(stamp)
+            if moment is not None:
+                versions[str(version)] = moment
     return RegistryFacts(
         name=name, exists=bool(blob.get("exists")),
         first_release=_as_utc(blob.get("first_release")),
         release_count=blob.get("release_count"),
-        source="fixture", observed_at=_as_utc(blob.get("observed_at")))
+        source="fixture", observed_at=_as_utc(blob.get("observed_at")),
+        version_upload_times=versions,
+        latest_version=str(blob.get("latest_version") or ""))
+
+
+#: The control set for the version hold (#3206): the tree's OWN frozen pins, and how far
+#: before the eval clock a pin whose date cannot be had is placed — longer than the hold plus
+#: the cache bound, so an undated pin is never held by accident.
+LOCK_PINS_FILE = "requirements.lock"
+_LOCK_PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^;#\s]+)")
+#: Cap on the commits :func:`lock_pin_first_seen` walks. This file has been amended a handful
+#: of times since it was frozen, so the cap never binds here; it exists so a lock with a long
+#: history cannot make the eval's cost proportional to it.
+_LOCK_HISTORY_MAX_COMMITS = 64
+
+
+def lock_pins(root: Path | str | None = None) -> list[tuple[str, str]]:
+    """(name, version) for every exact `==` pin in :data:`LOCK_PINS_FILE`, in file order.
+
+    The lock and not `requirements.txt`, and the reason is load-bearing: the txt declares a
+    RANGE (`requirements.txt:16` is `mcp>=2.1.0,<3`), and a range is a claim about the
+    registry's LATEST release — pricing a range against the hold would refuse the tree's own
+    documented intent every time any upstream ships, which is #688's reflexive-override
+    failure at the scale of the whole dependency set. A `==` line names exactly one artifact,
+    the only claim the hold can be tested against. Option lines, comments and `name @ url`
+    references are excluded, so `n` is the count of artifacts a frozen rebuild downloads at a
+    pinned version (180 on this tree today), not a chosen subset.
+    """
+    try:
+        text = (_repo_root(root) / LOCK_PINS_FILE).read_text(encoding="utf-8",
+                                                             errors="replace")
+    except OSError:
+        return []
+    out: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        m = _LOCK_PIN_RE.match(line.strip())
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def lock_pin_first_seen(root: Path | str | None = None, *,
+                        clock: dt.datetime) -> dict[tuple[str, str], dt.datetime]:
+    """When each `name==version` line in the lock was FIRST committed — a real age floor.
+
+    Offline, no registry may be asked when `aiofiles==25.1.0` was published, so the control
+    arm needs a date to price each pin against. Git history supplies one that needs no
+    registry at all and needs no assumption: a pin cannot have been published after the
+    commit that recorded it, so the commit that first introduced that exact line is an UPPER
+    bound on the release date and therefore a LOWER bound on its age. Pricing the pin AT that
+    bound is the worst case for the hold — the youngest the artifact could possibly be — so
+    if the hold clears there it clears for every date the release could really have.
+
+    Per pin, not per file: the lock has been amended several times since it was frozen, so a
+    pin added by the newest commit is genuinely younger than one present in the first, and a
+    single file-wide date would price all 180 at the newest one. A pin whose floor is inside
+    the hold window is therefore reported as unbounded rather than passed, which is the
+    honest answer and is what keeps this arm from claiming a proof it does not have.
+
+    History is walked oldest-first and each line kept at its FIRST sighting, over every commit
+    that touched the file, reading each blob once. The command is `git log --follow`, not
+    `git rev-list --follow`, and the difference is the reason this walk is written the way it
+    is: `--follow` is not a rev-list option, and git refuses it with exit 129 and usage on
+    STDERR — measured on this tree, `stdout` was 0 bytes. A walk that reads only stdout and
+    never checks the exit code therefore gets a clean EMPTY map, which is how an earlier
+    revision of this function reported `n=0`: the arm printed "0 of 0 pins held", the eval
+    published it, and nothing was measured. Exit codes are now irrelevant because stdout is
+    parsed line by line and a malformed line is dropped, but the empty result is still visible
+    as `n=0` rather than as a passed control. `git log` also carries the commit date in the same
+    invocation (`%ct`) instead of costing one subprocess per commit. Nine commits touch this
+    file on this tree; anything longer is capped, and no git, a failed read or a lock with no
+    history yields an EMPTY map, which the arm reports as zero proven pins.
+    """
+    repo = _repo_root(root)
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "log", "--reverse", "--follow",
+                              "--format=%H %ct", "--", LOCK_PINS_FILE],
+                             capture_output=True, text=True, timeout=20.0)
+        revs: list[tuple[str, dt.datetime]] = []
+        for line in (out.stdout or "").splitlines():
+            head, _, epoch = line.strip().partition(" ")
+            if len(head) != 40 or not epoch.strip().isdigit():
+                continue
+            stamp = dt.datetime.fromtimestamp(int(epoch.strip()), dt.timezone.utc)
+            if stamp <= clock:
+                revs.append((head, stamp))
+    except Exception:  # noqa: BLE001 — no git, no timeout, no history: empty map covers it
+        return {}
+    first: dict[tuple[str, str], dt.datetime] = {}
+    for rev, stamp in revs[:_LOCK_HISTORY_MAX_COMMITS]:
+        text = _blob_text(repo, rev, LOCK_PINS_FILE)
+        if text is None:
+            continue
+        for line in text.splitlines():
+            m = _LOCK_PIN_RE.match(line.strip())
+            if m:
+                first.setdefault((m.group(1), m.group(2)), stamp)
+    return first
+
+
+_LOCK_HISTORY_MAX_COMMITS = 64
+
+
+def _blob_text(repo: Path, rev: str, file: str) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{file}"],
+                             capture_output=True, text=True, timeout=10.0)
+    except Exception:  # noqa: BLE001
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout
+
+
+def lock_pin_hold_report(facts_for, *, root: Path | str | None = None,
+                         thresholds: Thresholds = DEFAULT_THRESHOLDS,
+                         now: dt.datetime | None = None,
+                         pins: list[tuple[str, str]] | None = None) -> dict[str, Any]:
+    """Run the version hold across the lock's own pins and report how many of them bite.
+
+    Clause 5's second n: *0 of the repo's own `==` pins held*, over every pin in the file —
+    the arm that stops the hold from being a control which blocks the box's own rebuild.
+    `facts_for` is injected for the reason the registry is injected everywhere in this file:
+    the eval may not reach pypi.org, and neither may the question "when was `aiofiles==25.1.0`
+    published".
+
+    What makes the 0 mean something instead of being a tautology is the date it prices each
+    pin at: the commit that FIRST introduced that exact line (`lock_pin_first_seen`). A release
+    cannot postdate the commit that records it, so pricing a pin AT that instant is the worst
+    case available without a registry — the youngest the artifact could possibly be — and a
+    hold that clears there clears for the release's real date too. A pin whose floor is inside
+    the hold window cannot be shown old or young from history, so it goes to `unbounded` and is
+    not priced: claiming it cleared would be the same unsupported pass this whole module refuses
+    elsewhere, and holding it would red the tree on a fact nobody measured.
+
+    So the arm goes red only on a pin that IS provably older than the hold and was still
+    refused — a real bug in the hold, not a property of the tree. The limitation travels with
+    the numbers: `n` is the pins priced, `unbounded` the pins history could not place, and
+    `youngest_floor` the tightest margin the arm actually relied on.
+    """
+    clock = now or dt.datetime.now(dt.timezone.utc)
+    floors = lock_pin_first_seen(root, clock=clock)
+    wanted = pins if pins is not None else lock_pins(root)
+    held: list[dict[str, Any]] = []
+    checked = 0
+    unbounded = 0
+    used: list[dt.datetime] = []
+    for name, version in wanted:
+        floor = floors.get((name, version))
+        if floor is None or (clock - floor).days < thresholds.min_release_age_days:
+            unbounded += 1
+            continue
+        checked += 1
+        used.append(floor)
+        facts = facts_for(name)
+        times = dict(facts.version_upload_times)
+        # A provider that dates the pin (a future live arm) wins; offline the history floor is
+        # the only date available and it is applied as the fact it is — the youngest the
+        # artifact can be. Leaving the entry out instead would answer `version-age-unknown` and
+        # the arm would prove only that an unknown fails open, not that an old pin clears.
+        times.setdefault(version, floor)
+        facts = replace(facts, latest_version=version, version_upload_times=times)
+        verdict = evaluate_provenance(facts, now=clock, thresholds=thresholds,
+                                      version_spec=f"=={version}")
+        if verdict.blocked:
+            held.append({"name": name, "version": version, "fact": verdict.fact})
+    youngest = max(used) if used else None
+    return {"shape": "lock-pin", "n": checked, "held": len(held), "ok": not held,
+            "pins": len(wanted), "unbounded": unbounded, "file": LOCK_PINS_FILE,
+            "youngest_floor": youngest.isoformat() if youngest else None,
+            "holding": held,
+            "note": (f"{checked} of {len(wanted)} pins priced at the commit that first "
+                     f"introduced them — the youngest each could possibly be, every one at "
+                     f"least {thresholds.min_release_age_days} days old (tightest: "
+                     f"{(clock - youngest).days if youngest else 'n/a'} days); "
+                     f"{unbounded} pin(s) history could not place outside the hold window are "
+                     "counted separately and not claimed either way")}
+
+
+def _install_operand(command: str) -> str | None:
+    """The first install operand of a command line: `pkg==1.2` from `pip install pkg==1.2`.
+
+    Textual on purpose rather than via `find_install_commands`: an eval fixture is one install
+    by construction, and routing through the full matcher would report a fixture the matcher
+    refuses to parse as `held: false` — an ALLOW — instead of failing loudly.
+    """
+    for segment in re.split(r"&&|\|\n|;", str(command or "")):
+        toks = segment.split()
+        for i, tok in enumerate(toks):
+            if tok in ("install", "add") and i + 1 < len(toks) \
+                    and not toks[i + 1].startswith("-"):
+                return toks[i + 1]
+    return None
+
+
+def evaluate_version_hold(name: str, *, command: str, facts: RegistryFacts,
+                          thresholds: Thresholds = DEFAULT_THRESHOLDS,
+                          now: dt.datetime | None = None) -> bool:
+    """Whether the version hold bites THIS command — the eval's held/allowed oracle.
+
+    The version is read out of the command by the same exact-pin rule the dispatch path uses,
+    so a fixture cannot assert a version the checker would not have seen: `version:` in the
+    document and the `==` in `command:` must agree or this raises. A command that pins nothing
+    is priced against the registry's own latest release, which is the claim an unpinned
+    install actually makes (step 3) and the shape that silently takes a day-old one.
+    """
+    operand = _install_operand(command)
+    if operand is None:
+        raise ValueError(f"{name}: fixture command {command!r} names no install operand")
+    pinned = exact_pin(_version_spec("pip", operand))
+    if pinned and facts.latest_version and pinned != facts.latest_version:
+        raise ValueError(
+            f"{name}: the fixture pins {pinned!r} in its command but names "
+            f"{facts.latest_version!r} as the version under test; the hold can only be "
+            "measured on the version the command asks for")
+    spec = f"=={pinned}" if pinned else (
+        f"=={facts.latest_version}" if facts.latest_version else None)
+    return evaluate_provenance(facts, now=now, thresholds=thresholds,
+                               version_spec=spec).blocked
+
+
+def entry_is_version_shaped(entry: dict[str, Any]) -> bool:
+    """Whether a fixture entry's claim is about a VERSION rather than about a name (#3206).
+
+    One predicate for the two readers, because the eval's held/allowed arm and
+    :func:`measure_fixtures`' authored `expected_blocked:` must not disagree about which policy
+    decides an entry. Measured on the name facts alone, a `fresh-version` fixture comes back
+    `expected_blocked: false` — its first release is years old and it has dozens of releases —
+    while the eval holds it, so `fixtures --measure` would write a line into the committed
+    document describing a check that is not the one running.
+    """
+    return (entry.get("version") is not None
+            or bool((entry.get("facts") or {}).get("versions")))
 
 
 def run_fixtures_eval(doc: dict[str, Any], *, root: Path | str | None = None,
@@ -2128,23 +2982,64 @@ def run_fixtures_eval(doc: dict[str, Any], *, root: Path | str | None = None,
     reg = registry if registry is not None else fixtures_registry(doc)
     session = "20260924_054120_autonomy_fixtures"
 
-    def verdict(name: str) -> bool:
-        result = check_install_provenance(f"pip install {name}", session,
-                                          registry=reg, dependency_set={},
-                                          now=clock)
+    def verdict(entry: dict[str, Any]) -> bool:
+        """Whether THIS entry is held: the shipped name check, or the version hold when the
+        entry carries a version (#3206).
+
+        Two arms deliberately. An entry with no version is the shipped name-shaped case and is
+        decided by calling the shipped entry point, exactly as #688 decided it — re-deriving
+        that verdict here would let the eval drift from the path it exists to measure. An
+        entry that names a version is priced by `evaluate_version_hold`, which reads the
+        version out of the entry's OWN command line rather than being told it.
+        """
+        name = str(entry.get("name") or "")
+        command = str(entry.get("command") or f"pip install {name}")
+        if entry_is_version_shaped(entry):
+            return evaluate_version_hold(name, command=command, facts=reg.lookup(name),
+                                         thresholds=DEFAULT_THRESHOLDS, now=clock)
+        result = check_install_provenance(command, session, registry=reg,
+                                          dependency_set={}, now=clock)
         return bool(result.refusal)
 
     planted = list(doc.get("planted") or [])
     control = list(doc.get("control") or [])
-    missed = [str(e.get("name")) for e in planted if not verdict(str(e.get("name")))]
-    false_blocked = [str(e.get("name")) for e in control
-                     if verdict(str(e.get("name")))]
+    missed = [str(e.get("name")) for e in planted if not verdict(e)]
+    false_blocked = [str(e.get("name")) for e in control if verdict(e)]
     blocked = len(planted) - len(missed)
     declared = read_dependency_set(root)
+    # Clause 5's second arm: the tree's own frozen pins, none of which may be held. Each pin
+    # is priced at the commit that first recorded it — the youngest the artifact could
+    # possibly be, from the tree's own history rather than a registry — so a hold that clears
+    # there clears on the release's real date. That is what makes the printed 0 a measurement
+    # rather than an absence, and `unbounded` is what the arm refuses to claim.
+    def _pin_facts(name: str) -> RegistryFacts:
+        # Name facts only, and dated well outside the hold: an empty version map would answer
+        # `version-age-unknown` and the arm would prove only that an unknown fails open, not
+        # that an old pin clears. The per-pin release date comes from the arm itself (the
+        # first-commit floor), and the clock here is the real one for the same reason — see
+        # `lock_pin_hold_report`.
+        real = dt.datetime.now(dt.timezone.utc)
+        return RegistryFacts(name=name, exists=True,
+                             first_release=real - dt.timedelta(days=2_000),
+                             release_count=40, source="fixture", observed_at=real)
+    # No `now=` on purpose. This arm measures the LIVE tree — its pins, its git history, and
+    # the instant a rebuild would actually run — and the floors it prices against are real
+    # commit dates, some of them later than the fixture clock this eval's planted arms use.
+    # Sharing that fictional 2026-09-24 clock would date every floor in its future and leave
+    # the arm nothing to prove, which is the incoherence an earlier revision patched with a
+    # special case for "commit date is after the clock".
+    pin_arm = lock_pin_hold_report(_pin_facts, root=root)
     shapes: dict[str, int] = {}
     for entry in planted:
         shapes[str(entry.get("shape") or "unlabelled")] = (
             shapes.get(str(entry.get("shape") or "unlabelled"), 0) + 1)
+    # The `fresh-version` arm has its own held/missed counts rather than being read back out
+    # of the squat total. #3206 clause 5 is a rate about THIS shape: with 63 planted names and
+    # only two of them fresh-version, a total block rate can stay at 100 % while this arm goes
+    # to zero, and a shape whose rate nobody prints is a shape nobody notices going quiet.
+    fresh_planted = [str(e.get("name")) for e in planted
+                     if e.get("shape") == FRESH_VERSION_SHAPE]
+    fresh_missed = [n for n in fresh_planted if n in set(missed)]
     return {
         "planted_total": len(planted), "planted_blocked": blocked, "planted_missed": missed,
         "control_total": len(control), "control_blocked": len(false_blocked),
@@ -2152,6 +3047,10 @@ def run_fixtures_eval(doc: dict[str, Any], *, root: Path | str | None = None,
         "block_rate": (blocked / len(planted)) if planted else None,
         "false_block_rate": (len(false_blocked) / len(control)) if control else None,
         "planted_shapes": shapes,
+        "lock_pins": pin_arm,
+        "fresh_planted": fresh_planted,
+        "fresh_missed": fresh_missed,
+        "fresh_held": len(fresh_planted) - len(fresh_missed),
         "evaluated_at": clock.isoformat(),
         "clock": ("pinned" if doc.get("evaluated_at") else "wall clock"),
         "control_names": [str(e.get("name")) for e in control],
@@ -2174,7 +3073,7 @@ def _expectation_mismatches(planted: Sequence[dict[str, Any]],
         expect = entry.get("expect")
         if expect is None:
             continue
-        if bool(str(expect).strip().lower() == "block") != bool(verdict(name)):
+        if bool(str(expect).strip().lower() == "block") != bool(verdict(entry)):
             bad.append(name)
     return bad
 
@@ -2197,6 +3096,8 @@ def format_fixtures_eval(summary: dict[str, Any]) -> str:
     def pct(value: Any) -> str:
         return "n/a" if value is None else f"{value * 100:.1f}%"
     shapes = summary.get("planted_shapes") or {}
+    fresh_n = len(summary.get("fresh_planted") or [])
+    pins = summary.get("lock_pins") or {}
     lines = [
         (f"planted squat-shaped names: {summary['planted_blocked']}/"
          f"{summary['planted_total']} blocked — block rate {pct(summary['block_rate'])}"),
@@ -2204,6 +3105,23 @@ def format_fixtures_eval(summary: dict[str, Any]) -> str:
          f"{summary['control_total']} blocked — false-block rate "
          f"{pct(summary['false_block_rate'])}"),
         "planted shapes: " + ", ".join(f"{k} {v}" for k, v in sorted(shapes.items())),
+        # #3206 clause 5's two n's, each on its own line. The squat total above cannot carry
+        # either: two fresh-version names inside a set of 63 planted names is a rate that can
+        # read 100 % while this arm is zero, and a control arm over 180 frozen pins is not
+        # the same claim as a false-block rate over the 61 names in `control:`.
+        (f"fresh-version installs: {summary.get('fresh_held', 0)}/{fresh_n} planted "
+         f"well-established names at a held-eligible version HELD"
+         + (f" — NOT HELD: {', '.join(summary['fresh_missed'])}"
+            if summary.get("fresh_missed") else "")),
+        (f"{pins.get('file', 'requirements.lock')} pins (control): "
+         f"{pins.get('held', '?')}/{pins.get('n', '?')} of the tree's own frozen `==` pins "
+         f"HELD"
+         + (f" — HELD: {', '.join(h['name'] + '==' + h['version'] for h in pins['holding'][:8])}"
+            if pins.get("holding") else "")
+         + (f" (each priced at the commit that first recorded it; youngest "
+            f"{str(pins['youngest_floor'])[:10]})" if pins.get("youngest_floor") else "")
+         + (f"; {pins['unbounded']} not datable by history"
+            if pins.get("unbounded") else "")),
         f"clock: {summary['clock']} at {summary['evaluated_at']}",
     ]
     if summary["planted_missed"]:
@@ -2257,10 +3175,20 @@ def measure_fixtures(doc: dict[str, Any], *, registry: Any = None,
             age = int(blob["first_release_age_days"])
             stamp = clock - dt.timedelta(days=age)
             entry["facts"]["first_release"] = stamp.isoformat().replace("+00:00", "Z")
-        verdict = evaluate_provenance(_facts_from_blob(str(entry.get("name")),
-                                                       entry.get("facts") or {}),
-                                      now=clock)
-        entry["expected_blocked"] = bool(verdict.blocked)
+        # The same two arms the eval runs, chosen by the same predicate: an entry whose claim
+        # is about a version is decided by the version hold, and one whose claim is about a
+        # name by the shipped name policy. Asking only the name facts here would stamp
+        # `expected_blocked: false` onto a `fresh-version` fixture the eval holds, and the
+        # committed document would then carry a number about a check that is not the one
+        # running — the exact drift `expectations_mismatch` exists to catch in `expect:`.
+        entry_facts = _facts_from_blob(str(entry.get("name")), entry.get("facts") or {})
+        entry["expected_blocked"] = (
+            evaluate_version_hold(
+                str(entry.get("name")),
+                command=str(entry.get("command") or f"pip install {entry.get('name')}"),
+                facts=entry_facts, now=clock)
+            if entry_is_version_shaped(entry)
+            else bool(evaluate_provenance(entry_facts, now=clock).blocked))
         if _reality_contradicts(entry, clock):
             out.setdefault("contradictions", []).append(str(entry.get("name") or ""))
 

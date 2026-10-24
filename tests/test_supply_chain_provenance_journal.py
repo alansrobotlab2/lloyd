@@ -489,3 +489,175 @@ def test_a_denied_name_from_a_requirements_file_keeps_its_own_entry(journal, tmp
     assert by_name["graphy"]["outcome"] == "denied" and by_name["graphy"]["fact"]
     assert by_name["graphy"]["file"] == str(req)
     assert by_name["rich"]["outcome"] == "cleared" and "count" not in by_name["rich"]
+
+
+# ── #3206 clause 4: the hold reaches a name ALREADY in the dependency set, and a
+#    held install is journalled `denied` with its fact — never folded into the
+#    clean `declared` outcome #688 clause 5 built
+
+#: An `mcp` release one day old and one six months old, against this file's clock.
+_FRESH = NOW - dt.timedelta(days=1)
+_OLD = NOW - dt.timedelta(days=180)
+
+
+def _versioned(name, *, first, count=40, versions, latest):
+    """`RegistryFacts` carrying per-version upload times, at this file's `NOW`.
+
+    A helper rather than a literal because three of the four tests below need the same
+    shape and the fourth needs one field changed — and because the version map is the
+    thing under test, so it must be written exactly once per test.
+    """
+    return sc.RegistryFacts(
+        name=name, exists=True,
+        first_release=dt.datetime.fromisoformat(first).replace(tzinfo=dt.timezone.utc),
+        release_count=count, source="test", observed_at=NOW,
+        version_upload_times=versions, latest_version=latest)
+
+
+def test_a_declared_name_at_a_version_published_yesterday_is_held_and_journalled_denied(journal):
+    """#3206 clause 4, the whole point of the item: `httpx` is in `requirements.txt`, and
+    `httpx==<yesterday>` is still refused.
+
+    #688 clause 5 is that a name the repo already lists is *never classed as new* — and for
+    its two facts (first-release age, release count) that is exactly right, so those stay
+    untouched. What it bought structurally was a branch that never reads the registry at
+    all for a declared name, which is why the shipped check could not see Rybka's exhibit: a
+    working, declared package that shipped 15 clean releases and added one line at v16.
+    The outcome is
+    `denied` with the fact recorded, NOT `declared`: folding a held install into the clean
+    list is what turns a fail-open into a pass.
+    """
+    reg = MappingRegistry({"httpx": _versioned(
+        "httpx", first="2019-01-01T00:00:00", versions={"0.28.1": _FRESH, "0.27.0": _OLD},
+        latest="0.28.1")}, name="test")
+
+    _check("pip install httpx==0.28.1", reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert entry["fact"] == "version-too-recent", entry
+    assert entry["outcome"] == "denied" and entry["fact"] == "version-too-recent", entry
+    assert entry["outcome"] != "declared", (
+        "a held install of a declared name was journalled declared — the fold that makes an "
+        "unvetted install look like a recognised one")
+
+
+def test_the_same_declared_name_at_an_older_pinned_version_is_still_declared(journal):
+    """#3206 clause 4's control, on the same registry object: the pin is what changed.
+
+    Without this half the clause is unfalsifiable — a rule that refuses every declared
+    install would pass the test above while blocking the tree's own setup. Same name, same
+    registry, same clock, and a pinned version 180 days out: back to `declared`, with the
+    `file` field naming which dependency file declared it, exactly as #688 shipped.
+    """
+    reg = MappingRegistry({"httpx": _versioned(
+        "httpx", first="2019-01-01T00:00:00", versions={"0.28.1": _FRESH, "0.27.0": _OLD},
+        latest="0.28.1")}, name="test")
+
+    _check("pip install httpx==0.27.0", reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert entry["name"] == "httpx" and entry["outcome"] == "declared", entry
+    assert not entry.get("fact") and not entry.get("reason"), entry
+    assert not entry.get("count"), f"one name, not a file batch: {entry}"
+    # The shipped `declared` projection carries no `file` key for a command-line name —
+    # only an `-r <file>` batch does, because that is where the file is the subject. Which
+    # dependency file declared a name is answerable from the lock, so the hold adds nothing.
+    assert not entry.get("file"), (
+        f"a command-line declared name gained a `file` key ({entry}); #1839's row shape is "
+        "unchanged by #3206 and this test is where that would silently move")
+
+
+def test_an_unpinned_install_of_a_declared_name_is_not_looked_up_at_all(journal):
+    """#3206 clause 4's scope limit: a declared name with NO exact pin costs no lookup.
+
+    An unpinned `pip install httpx` asks for whatever is newest, so pricing it against the
+    registry's latest would refuse the tree's own documented range (`requirements.txt:16` is
+    `mcp>=2.1.0,<3`) every time a new release lands — the reflexive-override failure #688's
+    four-false-block month warns about, at a scale of every install of every declared name.
+    The honest limit is stated in the note instead of being silently skipped: the hold is
+    priced on what the COMMAND asks for, and an unpinned declared install asks for nothing
+    specific.
+    """
+    reg = MappingRegistry({"httpx": _versioned(
+        "httpx", first="2019-01-01T00:00:00", versions={"0.28.1": _FRESH},
+        latest="0.28.1")}, name="test")
+
+    _check("pip install httpx", reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert entry["name"] == "httpx" and entry["outcome"] == "declared", entry
+    assert reg.lookups == [], (
+        f"a declared name with no exact pin cost a registry lookup ({reg.lookups}); the "
+        "cost #688's contract removed for declared names must not come back for unpinned "
+        "installs")
+
+
+def test_a_held_declared_install_with_a_written_reason_is_journalled_overridden(journal):
+    """#3206 clause 4's override: the held version is very often the CVE fix, so the escape
+    has to be one line — and it has to be visible as an override, not as a clean install.
+
+    `overridden` is the outcome, the reason is journalled with it, and the row is NOT
+    `declared`: the declared projection runs last, so anything added to `result.declared`
+    on this path overwrites its own outcome and the override disappears from the only
+    durable record of it. That is the difference between an override that can be counted
+    (the rate that tells a reader whether the threshold is theatre) and one that cannot.
+    """
+    reg = MappingRegistry({"httpx": _versioned(
+        "httpx", first="2019-01-01T00:00:00", versions={"0.28.1": _FRESH},
+        latest="0.28.1")}, name="test")
+
+    _check('LLOYD_DEP_OVERRIDE="CVE-2026-9999 fix" pip install httpx==0.28.1', reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert entry["outcome"] == "overridden", entry
+    # `override` is the key the shipped `overridden` projection writes the reason into
+    # (#1839), so the reason is read from there rather than from `reason`.
+    assert entry.get("override", "") == "CVE-2026-9999 fix", entry
+    assert entry["outcome"] != "declared", (
+        f"the override was journalled {entry['outcome']!r}; #3206's owed check is the "
+        "override RATE on version-too-recent rows, and an override recorded as declared "
+        "cannot be counted at all")
+
+
+def test_a_declared_name_whose_registry_answer_is_404_is_still_declared(journal):
+    """#3206 clause 4's false-block rail: a declared name the registry 404s is not refused.
+
+    The lookup added for a pinned version exists to date ONE release, so nothing else that
+    answer says is charged to the install — otherwise a fixture, a stale cache or a registry
+    outage that answers 404 for a name sitting in `requirements.lock` would block the box's
+    own setup, and #688's first month (4 denials, every one a false block) is the record of
+    what that costs. The name facts stay #688's contract for NEW names; this branch is a
+    version query and only a `version-*` refusal belongs here.
+    """
+    reg = MappingRegistry({"httpx": sc.RegistryFacts(
+        name="httpx", exists=False, source="test", observed_at=NOW)}, name="test")
+
+    result = _check("pip install httpx==0.28.1", reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert not result.refusal, result.refusal
+    assert entry["name"] == "httpx" and entry["outcome"] == "declared", entry
+    assert any("not charged" in n or "not checked" in n for n in result.notes), (
+        f"the non-refusal was silent: {result.notes}")
+
+
+def test_a_declared_name_held_by_version_carries_the_version_and_fact_in_its_row(journal):
+    """#3206 clause 4's reader-facing half: the row says which VERSION was held.
+
+    `name` and `outcome` are #1839's shipped keys and are unchanged; `fact` is where the
+    reason lives for the `denied` outcome, and it must name the version, or the journal
+    cannot answer "which release did this guard stop" a month from now — the question the
+    owed override-rate ruling is asked against.
+    """
+    reg = MappingRegistry({"httpx": _versioned(
+        "httpx", first="2019-01-01T00:00:00", versions={"0.28.1": _FRESH},
+        latest="0.28.1")}, name="test")
+
+    _check("pip install httpx==0.28.1", reg)
+    entry = _rows(journal)[0]["names"][0]
+
+    assert entry["fact"] == "version-too-recent", entry
+    assert "0.28.1" in entry.get("reason", ""), (
+        f"the journalled reason does not name the held version: {entry['reason']!r}")
+    assert not entry.get("count"), (
+        f"a command-line install is one name, not a file batch: {entry}")

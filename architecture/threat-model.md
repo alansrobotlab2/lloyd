@@ -98,7 +98,7 @@ prompt cannot be access control — is for.
 | B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `server.py:241`, `server.py:181` |
 | B15 | a nested RPC call → tool dispatch | a tool call issued from inside a `Bash` child | the allowlist stamped when the parent call began | `app/harness/rpc_policy.py:76` |
 | B16 | an act → Alan's desktop session | a click, a keystroke, a window focus | a lease only a human grants, revoked by mouse motion | `app/desktop_lease.py:123` |
-| B17 | a new dependency → this machine | a package name, a resolver, an installer | an install-command matcher | `app/harness/supply_chain.py:340` |
+| B17 | a new dependency → this machine | a package name, a resolver, an installer | an install-command matcher | `app/harness/supply_chain.py:421` |
 | B18 | a bench or eval trial → the production tool surface | a full `run_query` with the real tool pool | the task's `requires_runtime:` flag | `scripts/autoresearch/bench_runner_sdk.py`, `agent_mcp/_tool_sandbox.py` |
 | B19 | a guard's own inputs → its verdict *(added by I-03, I-10, I-11 in this sitting)* | the file set a counter walks, the argv a matcher reads, the config value a mode resolves | the guard itself, with no second reader | `app/config.py`, `app/harness/denial_journal.py` |
 
@@ -137,7 +137,7 @@ appears in this table: those threats are in the next one.
 | T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `egress._is_private_host` — one resolving predicate since #2584, which retired the text-only copy the HTTP lane used to carry. `browser.py`'s `_host_block_reason`, `http_fetch` and `http_request` all call it, each hop of a redirect chain included, and `egress.floor_reason` answers from it too, so arming `enforce` adds the allow-list rather than changing this answer |
 | T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580) |
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |
-| T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:340` |
+| T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:421` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
 | T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py::check_scope` |
 | T-24 | B11 | E | A round edits its own gate to let itself through | `scripts/automod/gate.py:3532` |
