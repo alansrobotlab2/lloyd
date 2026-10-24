@@ -59,11 +59,13 @@ What it captures, and why each matters:
 | `~/lloyd-data/` (everything else in it) | varies | **All runtime data** since 2026-09-22 ([data-home](architecture/data-home.md)): `sessions/` (conversation history, not recoverable), `usage.db`, `workers.db`, `research.db`, `event_logs/`, `autonomy-runs/`, `eval/baselines/`, logs. Simplest: back up the whole directory. A btrfs snapshot (`~/.lloyd-data-snapshots/`) is a consistent copy of all of it, databases included. |
 | `~/.local/state/lloyd-vault-backup/vault.git` | ~vault size | The vault's 15-minute git snapshots (Part 11), kept outside the vault so a wipe of `~/obsidian` cannot reach them. The vault's own `.git` travels with the vault row above; this is the second history. |
 
-Five things that **used** to live only on this disk are now tracked in the repo,
+Six things that **used** to live only on this disk are now tracked in the repo,
 so they arrive with a `git clone` and need no backup: the custom-trained
 wake-word ONNX models, the openwakeword base models, the Silero VAD model
-(`agent-services/models/silero-vad/`), the vendored TTS repo's local patch
-(`qwen3-tts-local.patch`), and the qmd collection definitions
+(`agent-services/models/silero-vad/`), the turn-1-mini end-of-turn detector
+(`agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx`, 21,825,125
+bytes, with the model's Apache-2.0 `LICENSE` and `NOTICE`), the vendored TTS
+repo's local patch (`qwen3-tts-local.patch`), and the qmd collection definitions
 (`agent-services/conf/qmd-index.yml`). Keep them that way — if you retrain a wake
 word or edit the vendored TTS code, re-sync into the repo rather than relying on
 a backup.
@@ -72,6 +74,23 @@ The voice worker's larger models — Smart Turn, Parakeet ASR and the streaming
 ASR, ~1.1 GB — are untracked and re-downloadable:
 `bash agent-services/setup/fetch-voice-models.sh` (size-checked; `--check`
 reports only). `setup-all.sh` runs it.
+
+**The end-of-turn detector the config ships is not one of them, and that is
+deliberate.** `livekit.turn_detection.backend: turn-1-mini` reads
+`agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx` — 21,825,125 bytes,
+beside that model's `LICENSE` and `NOTICE` — which is **tracked in git** (force-added
+past the unanchored `models/` ignore rule, the way the wake models are) rather than a
+row in `fetch-voice-models.sh`, because the
+upstream URL is unverified and a model the fetch script cannot download would make
+`--check` report a pass on a tree that cannot boot. A clone that lacks it does not
+start the worker: `Turn1Mini.load` raises `RuntimeError: turn-1-mini model not
+found: …` out of `voice.turn.build_turn_detector`, and `WorkerManager.__init__`
+lets it propagate, so `lloyd-agent-worker` dies rather than run the room with no
+end-of-turn detector. That loud failure is the design, and
+`tests/test_voice_wake_and_turn.py` pins it. `tests/test_voice_model_restore.py`
+is the class guard: every `agent-services/models/…` path `config.yaml` names must
+be tracked or be a size-checked row in `fetch-voice-models.sh`, so a future model
+wired into config with no restore route breaks the tests instead of the worker.
 
 **Models are the big one.** `agent-services/llm/models/` is **311 GB** and
 `agent-services/services/tts/qwen3-tts/models/` is another 4.3 GB. All of it is

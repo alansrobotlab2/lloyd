@@ -2840,3 +2840,156 @@ def test_the_precheck_reopen_trigger_states_the_23_rows_as_a_gate_population():
         assert res.search(block), (
             f"the trigger block no longer states {label}, which is what keeps the 23 "
             "from being re-read as a review-row count")
+
+
+# ─── the end-of-turn detector a rebuild has to receive (#3252) ─────────────
+#
+# `architecture/voice.md`'s voice-asset table used to tell a re-imager that the
+# detector `config.yaml` names was untracked, unfetched and to be copied from a
+# backup; `SETUP.md` never named it at all, and its voice-model paragraph said the
+# fetch script brings down the worker's models. Both sentences were true when the
+# row was written and both are false now, and a doc node is the only thing that
+# keeps a well-meaning arch review from writing the gap back — #3252's own triage
+# cites the row as the artifact that reported the hole. Checked flat (this repo
+# wraps at ~80 columns, so a phrase split across two lines is the same sentence)
+# and scoped to the one paragraph or table row, because a whole-file grep for
+# "turn-1-mini" passes the moment the word appears in an unrelated section.
+
+#: The doc this node reads. `DOC` above is `architecture/automod.md`; the voice-asset
+#: table lives in `architecture/voice.md`, and reusing `DOC` would have the node grade
+#: the wrong page and report a pass.
+VOICE_ASSET_TABLE = ROOT / "architecture" / "voice.md"
+
+#: The detector, as `config.yaml` names it, and the size the blob is committed at.
+DETECTOR_PATH = "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx"
+DETECTOR_BYTES = "21,825,125"
+
+#: The restore paragraph's marker, and the fetch paragraph it must be distinguished
+#: from: the one that says what `fetch-voice-models.sh` brings down.
+DETECTOR_MARKER = "**The end-of-turn detector the config ships"
+FETCH_MARKER = "The voice worker's larger models"
+
+#: The row #3252 replaced, verbatim, for the control that says the check below can
+#: fail. Kept as a constant rather than a manual paste so a reader can see the exact
+#: wording the node refuses.
+RETIRED_VOICE_MD_ROW = (
+    "| `agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx` (22 MB, plus a "
+    "6 MB int8 sibling) | **no — and nothing fetches it.** "
+    "`turn_detection.backend` has been `turn-1-mini` since `fed5ad3f` (2026-10-09), the "
+    "file is untracked, and `fetch-voice-models.sh` does not list it, so `--check` passes "
+    "on a tree where the worker cannot boot (a missing model raises in "
+    "`build_turn_detector`). Copy it from a backup, or set `backend: smart-turn`, until "
+    "the fetch list catches up |")
+
+#: The same paragraph, in the shape it had before the row existed at all: the detector
+#: named nowhere, so the fetch paragraph read as the complete list of what a rebuild
+#: brings down.
+RETIRED_SETUP_PROSE = (
+    "The voice worker's larger models — Smart Turn, Parakeet ASR and the streaming ASR, "
+    "~1.1 GB — are untracked and re-downloadable: "
+    "`bash agent-services/setup/fetch-voice-models.sh` (size-checked; `--check` reports "
+    "only). `setup-all.sh` runs it.")
+
+
+def _paragraph(text: str, marker: str) -> str:
+    """The one markdown paragraph of `text` opening at `marker`, flattened, or fail.
+
+    Cut on the blank line first and flattened second: flattening the whole file before
+    searching destroys the very boundary that scopes the claim, so a node built that way
+    reads the rest of SETUP.md as one paragraph and passes on a sentence two screens
+    away. Paragraph-scoped rather than file-scoped for the standing reason in this file —
+    a claim moved into an unrelated section still satisfies a whole-file `in`, and the
+    claim here is about where a reader asking "what must I fetch" finds the answer.
+    """
+    start = text.find(marker)
+    assert start >= 0, (
+        f"SETUP.md lost the paragraph opening {marker!r} — the voice-model restore prose "
+        f"is where a rebuild reader learns what to fetch and what not to (#3252)")
+    end = text.find("\n\n", start)
+    raw = text[start:] if end < 0 else text[start:end]
+    return " ".join(raw.split())
+
+
+def _voice_md_rebuild_row(text: str) -> str:
+    """The detector's row in `architecture/voice.md`'s voice-asset table, or fail.
+
+    Matched on the leading cell so the row travels with the doc's re-wrapping and
+    re-sorting; a heading-scoped reader would sweep in every other asset's row and let a
+    stale instruction survive in a row this node never looked at.
+    """
+    rows = [ln for ln in text.splitlines()
+            if ln.lstrip().startswith("|") and DETECTOR_PATH in ln]
+    assert len(rows) == 1, (
+        f"architecture/voice.md's voice-asset table holds {len(rows)} rows naming "
+        f"{DETECTOR_PATH}; exactly one is what a re-imager reads, and 0 means the table "
+        f"stopped telling them the detector arrives with the clone (#3252)")
+    return rows[0]
+
+
+def _assert_setup_names_the_detector(paragraph: str) -> None:
+    """What the restore prose has to say about the detector, on the words."""
+    low = paragraph.lower()
+    assert DETECTOR_PATH in paragraph, (
+        f"the restore prose no longer names the path config.yaml boots, so a reader "
+        f"cannot tell it from the models they must fetch: {paragraph!r}")
+    assert DETECTOR_BYTES in paragraph, (
+        f"the byte count is the thing that makes a tracked-blob decision reviewable — a "
+        f"row saying '22 MB' cannot be argued with; {paragraph!r}")
+    assert "tracked" in low and "git" in low, (
+        f"the prose has to say the file is tracked in git, which is the whole claim a "
+        f"re-imager acts on: {paragraph!r}")
+    assert "fetch-voice-models.sh" in paragraph and "unverified" in low, (
+        f"the prose has to say it is deliberately NOT a fetch-script row and why — the "
+        f"upstream URL is unverified, which is the reason route (a) was not taken: "
+        f"{paragraph!r}")
+
+
+def _assert_row_says_the_detector_is_tracked(row: str) -> None:
+    """The rebuilt table row: tracked, sized, and no instruction to go elsewhere."""
+    low = row.lower()
+    assert DETECTOR_BYTES in row, f"the row lost its byte count: {row!r}"
+    assert "**yes**" in row and "force-added" in low, (
+        f"the row no longer says the detector is force-added and tracked, which is what "
+        f"a re-imager needs to stop looking for a fetch command: {row!r}")
+    for stale in ("copy it from a backup", "nothing fetches it", "smart-turn",
+                  "from a backup"):
+        assert stale not in low, (
+            f"the row tells a reader to {stale!r} again; the file is tracked since #3252, "
+            f"so that instruction sends a rebuild to a backup that need not exist: {row!r}")
+
+
+def test_setup_md_and_the_voice_asset_table_say_the_detector_arrives_with_the_clone():
+    """Clause 5 of #3252: the two documents stop describing a restore hole that closed.
+
+    Lives in this file because it is a doc-claim guard over two documents, and the seam
+    it crosses is a human reader's next action: `bash fetch-voice-models.sh` after a
+    rebuild is what SETUP.md tells a person to do, and the table row is what an arch
+    review quotes. `tests/test_voice_model_restore.py` proves the file is in the index;
+    nothing there reads these sentences, and a green suite with these sentences stale
+    sends the next re-imager to a backup.
+
+    The controls below run both checks over the retired text held in this file, so the
+    checks are proved able to fail rather than merely green on the current doc.
+    """
+    setup = (ROOT / "SETUP.md").read_text(encoding="utf-8")
+    _assert_setup_names_the_detector(_paragraph(setup, DETECTOR_MARKER))
+    # The fetch paragraph must stay honest about its own scope: turn-1-mini may not
+    # appear in it, since the script does not and must not carry the file.
+    fetch = _paragraph(setup, FETCH_MARKER)
+    assert "turn-1-mini" not in fetch, (
+        f"the fetch paragraph names turn-1-mini as something the script brings down: "
+        f"{fetch!r}")
+    assert "~1.1 gb" in fetch.lower(), (
+        f"the fetch paragraph lost the models it does cover: {fetch!r}")
+
+    row = _voice_md_rebuild_row(VOICE_ASSET_TABLE.read_text(encoding="utf-8"))
+    _assert_row_says_the_detector_is_tracked(row)
+
+    with pytest.raises(AssertionError) as stale_row:
+        _assert_row_says_the_detector_is_tracked(RETIRED_VOICE_MD_ROW)
+    assert "backup" in str(stale_row.value), str(stale_row.value)
+    # The retired prose names the detector nowhere, so the paragraph scoper refuses it
+    # before any of the word checks run — which is the failure mode: silence, not a lie.
+    with pytest.raises(AssertionError) as missing:
+        _assert_setup_names_the_detector(RETIRED_SETUP_PROSE)
+    assert DETECTOR_PATH in str(missing.value), str(missing.value)

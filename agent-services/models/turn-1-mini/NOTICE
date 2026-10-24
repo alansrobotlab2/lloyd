@@ -1,0 +1,28 @@
+p99lab turn-1-mini, an end-of-turn detection model
+Copyright 2026 p99lab (https://p99lab.com)
+
+This product includes turn-1-mini, an end-of-turn detection model developed by p99lab
+(https://huggingface.co/p99lab/turn-1-mini). Redistributed copies, and models or products that include or are
+derived from it, must retain this notice, as section 4(d) of the Apache License, Version 2.0 requires.
+The names "p99lab" and "turn-1-mini" may not be used to name or endorse derived models or products without
+permission (section 6).
+
+The code in this repository and the model weights are released under the Apache License, Version 2.0 (see LICENSE).
+turn-1-mini uses no third-party model at run time.
+
+Third-party data credits
+The datasets below are licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/), which asks for credit.
+The model was trained in part on them. Their audio was processed for training and is not redistributed here.
+Their authors do not endorse p99lab or this model.
+
+HarperValleyBank. C. Wu, M. Nafziger, A. Scodary, A. Maas, "HarperValleyBank: A Domain-Specific Spoken Dialog
+  Corpus", arXiv:2010.13929. https://github.com/cricketclub/gridspace-stanford-harper-valley
+LibriSpeech. V. Panayotov, G. Chen, D. Povey, S. Khudanpur, "LibriSpeech: an ASR corpus based on public domain
+  audio books", ICASSP 2015. https://www.openslr.org/12
+AMI Meeting Corpus. J. Carletta et al., "The AMI Meeting Corpus: A Pre-announcement", MLMI 2005.
+  https://groups.inf.ed.ac.uk/ami/corpus/
+ICSI Meeting Corpus. A. Janin et al., "The ICSI Meeting Corpus", ICASSP 2003. https://groups.inf.ed.ac.uk/ami/icsi/
+
+Evaluation (never trained or tuned on)
+eot-bench (code), LiveKit. Apache-2.0. https://github.com/livekit/eot-bench
+livekit/eot-bench-data, LiveKit. CC BY 4.0 per its dataset card. https://huggingface.co/datasets/livekit/eot-bench-data

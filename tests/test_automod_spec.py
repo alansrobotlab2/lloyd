@@ -2614,12 +2614,13 @@ def grant_corpus() -> list[str]:
     turn-1-mini files and the two directory probes.
 
     It is `tracked_agent_services_paths() + AGENT_SERVICES_GLOB_PROBES` — the universe
-    #1376 clause 1 walks — with the grant's three targets appended, because they are not
-    in the index: the grant binds for the round after this one, so asking the question of
-    the index alone would score an empty set and read as "the entry moved nothing". The
-    three siblings and the two probes come along for the same reason the shared probes do:
-    they are not files a diff can contain yet, and they are exactly what a wildcard would
-    admit without anyone choosing it.
+    #1376 clause 1 walks — with the grant's three targets appended. They were not in the
+    index when #3258 wrote this, and asking the question of the index alone would then
+    have scored an empty set and read as "the entry moved nothing"; #3252 has since
+    committed them, and the set-union below is what makes the same corpus correct in both
+    trees. The three siblings and the two probes come along for the reason the shared
+    probes do: they are not files a diff may contain, and they are exactly what a wildcard
+    would admit without anyone choosing it.
     """
     return (sorted(set(tracked_agent_services_paths())
                    | set(AGENT_SERVICES_GLOB_PROBES)
@@ -2633,13 +2634,14 @@ def test_the_turn1mini_grant_admits_three_exact_paths_and_nothing_else():
     """#3258 clauses 1 and 2: three verdicts, each from one verbatim entry.
 
     Every number is checked before it is trusted, in the shape #3162's twin sets: the
-    index holds seven tracked files under `agent-services/models/` at this base and
-    `AGENT_SERVICES_ACOUSTIC_WEIGHTS` names five of them — the sixth is
-    `wakeword/stop/lloyd_stop.onnx`, the seventh `silero-vad/SOURCE` — so "the weights
-    are still refused" is asserted against a corpus that exists rather than a sample. The
-    grant targets are asserted ABSENT from the index on purpose: this grant is the one
-    here whose object is a file it must not contain, and a node that asked only
-    `classify` would stay green on a directory entry.
+    tracked corpus under `agent-services/models/` is derived, not counted, and
+    `AGENT_SERVICES_ACOUSTIC_WEIGHTS` names five files that must stay refused whatever
+    else lands there — so "the weights are still refused" is asserted against a corpus
+    that exists rather than a sample. The grant targets are asked of `classify` and of
+    `_match` path by path, because a node that sampled the corpus instead would stay
+    green on the one entry that matters, and a directory entry would look like a grant.
+    Whether the three bytes are in the index is not this node's question — it holds in
+    #3258's tree (nothing tracked) and in #3252's (all three tracked) alike.
 
     `reaching` is the clause-1 question again for the same reason: a `models/**`
     re-spelling leaves all three verdicts `allowed`, because `fnmatch`'s `*` crosses `/`,
@@ -2679,9 +2681,15 @@ def test_the_turn1mini_grant_admits_three_exact_paths_and_nothing_else():
         f"only {len(models)} tracked files under agent-services/models/, against the 7 "
         f"this grant was priced on — the sibling assertions below would be scoring a "
         f"corpus that is no longer there")
-    assert model_paths_allowed() == [], (
-        "a tracked model file is writable in the granting round itself, which means "
-        "somebody committed bytes here that #3252 owns")
+    # Index-derived, not `== []`: #3258 priced this on a tree where the blob was still
+    # untracked, and this is the assertion that would have failed the round it exists to
+    # unblock. What it refuses now is a writable model file outside the three granted
+    # names — the int8 sibling, the source safetensors, any weight added later.
+    assert model_paths_allowed() == expected_allowed_model_paths(), (
+        f"the writable set inside agent-services/models/ is {model_paths_allowed()}, "
+        f"expected the granted paths the index actually holds "
+        f"{expected_allowed_model_paths()}; anything else in there is a model weight a "
+        f"round may rewrite with no rung scoring whether it still fires")
     test_only_a_verbatised_path_under_agent_services_may_be_admitted()
     assert agent_services_paths_admitted_without_being_named() == []
 
@@ -2914,15 +2922,19 @@ def test_the_grant_moves_exactly_the_three_admitted_verdicts_in_a_fresh_interpre
     assert not buckets["unlisted"] and not buckets["protected"], buckets
 
 
-def test_this_round_granted_the_paths_without_committing_the_blob():
-    """#3258 clause 5: the grant is in force and the bytes are still not tracked.
+def test_the_grant_reached_no_collateral_under_the_turn1mini_folder():
+    """#3258 clause 5, re-pinned for the tree #3252 landed into.
 
-    The two halves are the whole difference between this item and #3252, and only the
-    second one is checkable from the index: `agent-services/models/` is ignored, so the
-    files exist on this disk (`du` reads 21,825,125 bytes for the fp32) while
-    `git ls-files` reports none of them. That asymmetry is the reason the grant had to be
-    a round of its own — a diff cannot contain a path the live spec refuses, and the live
-    spec only changes once a grant has landed.
+    #3258 asserted its three paths were ABSENT from the index, and that was right in its
+    own round: the grant and the bytes were two rounds precisely because a diff cannot
+    contain a path the live spec refuses. That assertion fails in the tree the grant was
+    written to enable — the same trap as `model_paths_allowed() == []`, one node above,
+    which #3252 had to fix before it could commit anything. What survives both trees is
+    the question the absence was standing in for: nothing outside the three granted names
+    may reach the folder. The int8 sibling is a second copy of the same model that no
+    config key reads, and the source `.safetensors`, `config.json` and `SHA256SUMS` are
+    upstream furniture — a fourth tracked file is a directory grant smuggled in as a
+    restore, so the subset holds whether or not the blob has landed.
 
     Read from the index rather than the working tree for the standing reason in this file:
     rung 0 classifies the paths a diff touches, so the index is the authority on what this
@@ -2932,13 +2944,11 @@ def test_this_round_granted_the_paths_without_committing_the_blob():
     for path in TURN1MINI_GRANT:
         assert spec.classify(path) == "allowed"
     tracked = tracked_agent_services_paths()
-    assert [p for p in TURN1MINI_GRANT if p in tracked] == [], (
-        f"{[p for p in TURN1MINI_GRANT if p in tracked]} is already tracked, so this "
-        f"round carried #3252's diff as collateral — the grant was supposed to be the "
-        f"only thing it landed")
-    assert [p for p in tracked if p.startswith(TURN1MINI_DIR + "/")] == [], (
-        "some turn-1-mini path reached the index; the item states this round's diff "
-        "must contain no path under agent-services/models/")
+    under_folder = sorted(p for p in tracked if p.startswith(TURN1MINI_DIR + "/"))
+    assert set(under_folder) <= set(TURN1MINI_GRANT), (
+        f"the tracked files under {TURN1MINI_DIR}/ are {under_folder}, and "
+        f"{sorted(set(under_folder) - set(TURN1MINI_GRANT))} is not one of the three "
+        f"granted names — that is a models-tree grant arriving one commit at a time")
     assert spec.classify("agent-services/.gitignore") == "unlisted", (
         f"the nested ignore file classifies {spec.classify('agent-services/.gitignore')}. "
         f"The claim repeated in #3252's findings and in b118f05f's commit message was "
