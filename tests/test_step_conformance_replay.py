@@ -365,3 +365,99 @@ def test_the_replay_flags_three_of_twenty_one_runs(fixtures, replayed):
     assert replayed["deviations"] == 6
     assert replayed["flagged_rate"] == pytest.approx(3 / 21)
     assert replayed["tasks"] == sorted(sc.FIXTURE_TASKS)
+# ── #3246 — a phantom capture cannot become an expectation ────────────────────
+
+PHANTOM_TASK = "autonomy-task:76"
+#: The queue-health check four of task 76's five runs make. `REDIRECT_RE` has no quote
+#: awareness, so it reads the jq threshold's `>` as an output redirect and the `0` after it as
+#: the file that was written: those four runs "wrote `0`".
+PHANTOM_JQ = "jq -r '.sources[] | select(.pending_wait_over_bound_count > 0) | .name'"
+#: The flagged run — `run_scheduled-task_20261021_172318_b8d329` in the live corpus — differs
+#: from its peers only in spelling its jq filter without a threshold. It therefore never
+#: "wrote `0`", and the replay escalated it for skipping a stage no run of its task ever ran.
+THRESHOLD_FREE_JQ = "jq -r '.sources[] | select(.pending_wait_over_bound_count) | .name'"
+#: The artifact every run of the task really does publish, so the task keeps a baseline.
+REPORT_WRITE = "printf ok | tee /tmp/qhc_regrade.txt"
+
+
+def _phantom_corpus(tmp_path, *, flagged_at=2, drop_report_at=None):
+    """Five real trajectory rows plus a real worker ledger for one five-run task."""
+    import json
+    import sqlite3
+
+    root = tmp_path / "phantom"
+    root.mkdir(parents=True, exist_ok=True)
+    db = tmp_path / "workers.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE runs (run_id TEXT, task_id INTEGER, status TEXT, source TEXT,"
+                 " started_at TEXT, completed_at TEXT, meta_json TEXT)")
+    for i in range(5):
+        jq = THRESHOLD_FREE_JQ if i == flagged_at else PHANTOM_JQ
+        calls = [{"tool": "Bash", "command": jq}]
+        if i != drop_report_at:
+            calls.append({"tool": "Bash", "command": REPORT_WRITE})
+        (root / "trajectories-0.jsonl").open("a", encoding="utf-8").write(
+            json.dumps(sc._trajectory_row(f"phantom-run-{i}", PHANTOM_TASK, calls,
+                                         "2026-09-20T05:00:00")) + "\n")
+        conn.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)", (
+            f"run_task76_{i}", 76, "success", sc.DEFAULT_SOURCE, "2026-09-20T05:00:00+00:00",
+            "2026-09-20T05:12:00+00:00", json.dumps({"session_id": f"phantom-run-{i}"})))
+    conn.commit()
+    conn.close()
+    return root, db
+
+
+def _phantom_replay(tmp_path, **kwargs):
+    root, db = _phantom_corpus(tmp_path, **kwargs)
+    return sc.replay(trajectory_dir=root, db_path=db, now=CHECKED,
+                     grace_seconds=GRACE_SECONDS, min_runs=5)
+
+
+def test_a_run_that_omits_only_the_phantom_is_neither_flagged_nor_escalated(tmp_path):
+    """Clause 4: the task-76 corpus end to end, where the flag has to disappear at its source.
+
+    `learn` needs `n_runs - 1` of `n_runs` at the default `support`, which is why four runs
+    carrying `write:0` made `0` an expectation of all five — the same arithmetic that flagged 1
+    run of the real task 76's seven. So the fix cannot live in the escalator: every *structural*
+    missing step escalates, and the only sound move is that the phantom never enters a trace, and
+    so never enters `expected_steps` at all.
+
+    The zero is asserted three ways because each is satisfiable by a detector that has stopped
+    working. The task is still SCORED with its real report step expected, so nothing here passed
+    for want of a baseline. And the same corpus with the report write missing from one run still
+    flags that run and files the draft — the door the nightly job walks is open and armed, and it
+    is only the phantom that no longer walks through it.
+    """
+    res = _phantom_replay(tmp_path)
+    assert res["runs_scored"] == 5, "five joined runs, or the zero below measures an empty corpus"
+    expected = res["corpus"].baselines[PHANTOM_TASK].expected_steps
+    assert "write:qhc_regrade.txt" in expected, (
+        f"the step this task really publishes has to stay expected or the zero is vacuous; "
+        f"expected_steps={expected}"
+    )
+    assert "write:0" not in expected, (
+        f"a jq threshold is not an artifact; expected_steps={expected}"
+    )
+    assert res["deviations"] == 0 and res["runs_flagged"] == 0, (
+        f"a run that wrote its report is not a skipped stage: "
+        f"{[r['deviations'] for r in res['reports']]}"
+    )
+    backlog = tmp_path / "backlog"
+    assert sc.file_escalations(res, backlog_dir=backlog) == [], (
+        "nothing to escalate once the phantom is not a step"
+    )
+    assert not backlog.exists() or not list(backlog.glob("*.md")), (
+        "a draft was filed for a clean run"
+    )
+
+    # The witness that the zero above is a verdict and not a blind detector: the same corpus,
+    # with the artifact the task genuinely publishes missing from that same run, still flags and
+    # still files — naming the report, not a number.
+    broken = _phantom_replay(tmp_path / "broken", drop_report_at=2)
+    assert broken["runs_flagged"] == 1, "the escalator has to stay armed on a real dropped stage"
+    broken_backlog = tmp_path / "broken-backlog"
+    filed = sc.file_escalations(broken, backlog_dir=broken_backlog)
+    assert len(filed) == 1, "a run that really skipped its report still gets escalated"
+    drafts = sorted(p.name for p in broken_backlog.glob("*.md"))
+    assert len(drafts) == 1 and "qhc_regrade.txt" in (
+        broken_backlog / drafts[0]).read_text(encoding="utf-8"), drafts

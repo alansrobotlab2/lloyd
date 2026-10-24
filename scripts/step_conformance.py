@@ -138,6 +138,11 @@ GENERIC_BASENAMES = {"", "null", "none", "dev", "stdout", "stderr", "input", "ou
 # expansion (`${OUT}`, `$VAR`) is not in here on purpose: an unexpanded variable directory still
 # leaves a basename that names the artifact, and rejecting those would shrink the learned set.
 SHELL_TOKEN_RE = re.compile(r"\$\(|`|\$\{[^}]*\Z")
+# What a `>` capture has to have left, once the shell-fragment and generic-name filters above
+# have run, before it counts as a file some stage produced. See `_names_no_file`, which is the
+# only reader and carries the measurement — this is the hole that escalated a clean run of task
+# 76 for "never writing `0`" (#3246).
+DIGITS_ONLY_RE = re.compile(r"[0-9]+")
 
 # How much of an artifact's directory the step identity carries (#2502 clause 2). Two, not
 # the whole path and not one. Whole paths are what `normalized_dir` refuses, for the data-home
@@ -201,18 +206,48 @@ def _unclosed_shell_word(text: str) -> bool:
     return bool(SHELL_TOKEN_RE.search(text)) or text.count("(") != text.count(")")
 
 
+def _names_no_file(text: str) -> bool:
+    """True when a capture names no file: nothing in it but digits, or nothing but punctuation.
+
+    The third hole in this filter, after `GENERIC_BASENAMES` and `_unclosed_shell_word`, and the
+    same mistake twice. `REDIRECT_RE` runs over raw command text with no quote awareness, so a
+    `>` inside a quoted program is taken for an output redirect and whatever follows it for the
+    file some stage wrote. Task 76's queue-health checks all contain `jq -r '.sources[] |
+    select(.pending_wait_over_bound_count > 0)'`, which the grammar turned into a write of a file
+    named `0`; the same peer run, comparing `>= 0`, yielded a write of a file named `=`. Neither
+    file exists and none can: the capture has no letter to hang a name on.
+
+    Measured 2026-10-24 over every trajectory run on this host (12,718 traces, re-derived through
+    the module's own `load_traces`): the guard removes 303 step ids over 1,234 trace-runs, every
+    one of them a bare number or pure punctuation, and it ADDS none — no learned step is renamed,
+    so no task's baseline churns. `write:=` (377 runs) and `write:0` (124) are the two largest
+    populations, and they are what made a run look like it had skipped a stage its peers completed.
+    Nothing downstream can suppress these two classes either: `normalized_dir("0")` is `''`, so
+    neither the #2502 disk witness nor `written_elsewhere` ever fires, which is why the replay
+    escalated task 76's clean run at `disk_witnessed=0 written_elsewhere=0` while that run had in
+    fact written its report.
+
+    Like `_unclosed_shell_word`, the test is on the WHOLE captured word, not the basename: a file
+    genuinely named `0` inside a directory still has that directory in its capture, and
+    `report-2026-09-20.md` and `2258rows.jsonl` keep their digits. The digits test is anchored, so
+    `0` and `2026` go and `data2` stays.
+    """
+    return bool(DIGITS_ONLY_RE.fullmatch(text)) or not any(ch.isalnum() for ch in text)
+
+
 def normalized_basename(raw) -> str:
     """Basename of a path-ish value, with a date stamp elided so a nightly file is one step.
 
-    Empty for a name that is not a name: a value in `GENERIC_BASENAMES`, and a capture that is
-    not a complete shell word (#2104 clause 1, `_unclosed_shell_word`). The test is on the whole
+    Empty for a name that is not a name: a value in `GENERIC_BASENAMES`, a capture that is
+    not a complete shell word (#2104 clause 1, `_unclosed_shell_word`), and a capture that is an
+    operator mistaken for a redirect (#3246, `_names_no_file`). The test is on the whole
     captured word rather than the basename, because a truncation in the directory part means the
     shell never wrote the path the basename appears to name; a *closed* expansion is not a
     truncation, so `${OUT}/knowledge-handoff-2026-09-20.md` still contributes
     `knowledge-handoff-<date>.md` — banning `$` outright would shrink the learned set in silence.
     """
     text = str(raw or "").strip().strip("\"'")
-    if not text or _unclosed_shell_word(text):
+    if not text or _unclosed_shell_word(text) or _names_no_file(text):
         return ""
     base = os.path.basename(text.rstrip("/"))
     return DATE_RE.sub("<date>", base)

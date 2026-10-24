@@ -1045,3 +1045,132 @@ def test_learned_artifact_path_is_the_best_supported_location_or_nothing():
     assert sorted(sc.corroborated(tie)) == sorted(tie)
     assert sc.corroborated({"only/one/run": 1}) == ["only/one/run"]
     assert sc.learned_artifact_path({}, step) == "", "nothing learned, so no path to stat"
+
+
+# ── #3246 — a `>` that is an operator names no artifact ─────────────────────────
+#
+# Task 76's queue-health checks all shell out to
+# `curl -s "localhost:8080/api/workers/health?days=7&runs=0" | jq -r '.sources[] |
+#  select(.pending_wait_over_bound_count > 0) | .name'`, and `REDIRECT_RE` has no quote
+# awareness: it reads the comparison's `>` as an output redirect and the `0` after it as the
+# file that was written. Six of task 76's seven runs therefore "wrote `0`" and the seventh —
+# `run_scheduled-task_20261021_172318_b8d329`, which wrote its report like every other run —
+# was escalated for never writing it. The same peer run, comparing `>= 0`, also "wrote `=`".
+# Both constants below are transcribed from those stored rows.
+
+JQ_THRESHOLD_CHECK = (
+    "curl -s \"localhost:8080/api/workers/health?days=7&runs=0\" | "
+    "jq -r '.sources[] | select(.pending_wait_over_bound_count > 0) | .name'"
+)
+JQ_THRESHOLD_AND_REAL_WRITE = (
+    "curl -s \"localhost:8080/api/workers/health?days=7&runs=0\" | "
+    "jq -r '.sources[] | select(.quota_used >= 0) | .name' > /tmp/qhc_health.json"
+)
+
+
+def test_a_comparison_inside_a_quoted_program_contributes_no_write_step():
+    """Clause 1: `select(.x > 0)` is a comparison, and the call that only makes one writes nothing.
+
+    The trace is the replay's whole view of what a run did, so this is where the phantom has to
+    die: `write:0` here is what `learn` turns into an expectation and what the escalator turns
+    into a draft naming a stage that was never skipped.
+
+    The second half of the node is the OTHER reader of the same grammar. `app/run_acceptance.py`
+    files each tool call with `writes: artifact_basenames(name, args)` and the in-run
+    `artifact_written` grader passes or fails a live run on that list, so a guard that fixed only
+    the replay would have the two disagree about one command in opposite directions — the nightly
+    replay quiet, the in-run grader demanding a file named `0` that cannot exist. `DispatchTrace`
+    is fed the two events a dispatch actually emits and is asserted to file the call with no
+    writes at all.
+    """
+    assert sc.artifact_basenames("Bash", {"command": JQ_THRESHOLD_CHECK}) == []
+    assert sc.steps_from_tools([_tool("Bash", command=JQ_THRESHOLD_CHECK)]) == ["tool:Bash"], (
+        "a run whose only Bash call is a jq threshold check must trace as a Bash call and nothing "
+        "else — a `write:` step here is the phantom that got task 76's clean run escalated"
+    )
+
+    from app.run_acceptance import DispatchTrace
+
+    trace = DispatchTrace()
+    trace.observe({"type": "tool_call", "call_id": "c1", "name": "Bash",
+                   "args_dict": {"command": JQ_THRESHOLD_CHECK}})
+    trace.observe({"type": "tool_result", "call_id": "c1", "name": "Bash",
+                   "content": "queue-paused"})
+    assert not trace.error, f"the grader's own collector faulted: {trace.error}"
+    assert trace.tool_calls == [{"name": "Bash", "writes": []}], (
+        "the in-run `artifact_written` grader and the replay read one grammar, so both have to "
+        f"stop seeing a write here; the trace filed {trace.tool_calls}"
+    )
+
+
+def test_a_bare_number_capture_is_not_an_artifact_step():
+    """Clause 2: a captured `>` target that is only digits is a threshold, not a file, so `0` and
+    `2026` yield nothing — and the digits a real name is made of stay put.
+
+    The whole corpus says these are comparisons and not nightly files: measured over all 12,718
+    trajectory runs on this host, every id the guard removes is digits-only or pure punctuation,
+    and the top ones are thresholds (`write:1` at 74 runs, `write:100` at 25, `write:200` at 13)
+    beside the `write:0` that fired the escalation. The digits test is anchored for the opposite
+    evidence: real names here carry digits among their letters (`2258rows.jsonl`, `data2`) and a
+    bare-number rule that matched substrings would delete those too.
+    """
+    assert sc.normalized_basename("0") == ""
+    assert sc.normalized_basename("2026") == ""
+    assert sc.normalized_basename("100") == ""
+    # Anchored, not substring: a name with a digit in it is still a name.
+    assert sc.normalized_basename("/lloyd-data/eval/2258/rows.jsonl") == "rows.jsonl"
+    assert sc.normalized_basename("data2") == "data2"
+    assert sc.normalized_basename("/lloyd/_pipeline/report2026.txt") == "report2026.txt"
+    # One command, both kinds: the comparison goes, the real redirect beside it stays.
+    assert sc.artifact_basenames("Bash", {"command": JQ_THRESHOLD_CHECK + " > /tmp/x.json"}) == (
+        ["x.json"]
+    ), "rejecting the phantom may not take the real target written in the same command with it"
+
+
+def test_a_capture_with_no_letter_or_digit_is_not_an_artifact_step():
+    """Clause 3: the second phantom from the same peer run — a capture of pure punctuation.
+
+    `>= 0` is what `REDIRECT_RE` sees first, and it hands back the `=` that follows the operator
+    as a filename (`write:=`, 377 runs, the single largest step-id population of noise in the
+    corpus). A guard scoped to digits would have escalated that one on the next run, so the
+    predicate is "no letter and no digit anywhere in the capture", not "is a number".
+
+    `JQ_THRESHOLD_AND_REAL_WRITE` is the peer's own shape — a `>=` comparison and a real redirect
+    in one command — which is the pair this has to separate: no `write:=`, `qhc_health.json` kept.
+    """
+    for phantom in ("=", ">=", ">", "\\", "{}", "*", ".", "::", "[[", "→"):
+        assert sc.normalized_basename(phantom) == "", f"{phantom!r} names no file"
+    assert sc.artifact_basenames("Bash", {"command": JQ_THRESHOLD_AND_REAL_WRITE}) == (
+        ["qhc_health.json"]
+    ), "the operator residue goes and the artifact actually written beside it stays"
+
+
+def test_the_guard_costs_the_detector_no_real_capture_its_published_basename():
+    """Clause 5: what the guard must NOT touch — the captures the corpus publishes today.
+
+    These are the three shapes the learned set is built from, each stated with the basename the
+    step identity is expected to carry: a plain redirect keeps its basename, the published `cp`
+    rule still contributes its SOURCE, and a closed expansion keeps its basename with the date
+    stamp elided. Together with the anchored-digit assertions above they are the whole reason the
+    predicate is "digits only" and "no letter and no digit" rather than "contains a digit" or
+    "starts with a symbol" — a wider test would have deleted `report-<date>.md` and every
+    nightly artifact step with it, silently shrinking every task's baseline.
+    """
+    assert sc.normalized_basename("/tmp/qhc_health.json") == "qhc_health.json"
+    # The glued form is what `REDIRECT_RE` hands back when the command has no space after the `>`.
+    assert sc.normalized_basename(">/tmp/qhc_health.json") == "qhc_health.json"
+    # Spelled in two pieces because a bare `${OUT}` in this file is what the shell that wrote it
+    # expands to nothing. The value is the CLOSED expansion #2104 clause 1 protects.
+    assert sc.normalized_basename("$" + "{OUT}/report-2026-09-20.md") == "report-<date>.md"
+    dst = "/lloyd-data/_pipeline/referral/referential-integrity-2026-09-20.md"
+    src = "/lloyd-data/_pipeline/referral/referential-integrity-latest.md"
+    assert sc.write_targets("Bash", {"command": f"cp {src} {dst}"})[0] == src, (
+        "the published rule is that a copy names its source; only `cp /dev/null X` is refused"
+    )
+    assert sc.artifact_basenames("Bash", {"command": f"cp {src} {dst}"}) == [
+        "referential-integrity-latest.md"
+    ]
+    # And the guard is reached through the one filter both readers share, not by a second list
+    # that can drift: every entry point goes through `normalized_basename`.
+    assert sc._names_no_file("0") and sc._names_no_file("=")
+    assert not sc._names_no_file("qhc_health.json")
