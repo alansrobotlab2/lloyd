@@ -864,6 +864,13 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'voice_library/profiles/dave_cullen/':
    ('generated: a cloned voice profile produced by a sample run, so'
     'it exists only on a box where that profile was built'),
+  '~/.lloyd/':
+   ('historical: the home dot-directory the wake-miss corpus lived'
+    'in before #1444 moved it to the data root, and the 2026-10-24'
+    'review line lifts it only to say the corpus is NOT there — the'
+    'same line names the live spelling `~/lloyd-data/ww_diag`, which'
+    'resolves on this box — so the citation is the record of a move,'
+    'and the dot-directory itself is gone from the account home'),
   '~/Projects/lloyd-services/':
    ("other-tree: a checkout on the machine this page's history"
     'describes, not on this box and never in a worktree'),
@@ -918,13 +925,17 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: autonomy having run under supervisord all along.
 #:
 #: LOWER IT IN THE SAME COMMIT as each further clear, so the ratchet records the shrink. It
-#: bounds the rot kind only, deliberately not the whole list: between `afb27381` and here
-#: the list grew by five entries and every one of them is `generated:` about a file that
-#: exists, so a bound on the whole list would have reddened honest reporting and taught the
-#: next reader to distrust it. At zero, one new rot exemption fails the suite by itself.
+#: bounds the rot kind only, deliberately not the whole list: between `afb27381` and the
+#: `917f669b` reading below the list grew by five entries and every one of them is
+#: `generated:` about a file that exists, so a bound on the whole list would have reddened
+#: honest reporting and taught the next reader to distrust it. At zero, one new rot
+#: exemption fails the suite by itself.
 #: It has stayed there, and the residue #2795 left open was ruled on 2026-10-18 at
-#: `917f669b`, not left as a question. Measurement: 107 exemptions across 29 docs —
-#: other-tree 43, generated 33, historical 31 — and NONE of them is `stale:`; and `git log
+#: `917f669b`, not left as a question. Re-measured 2026-10-24, after #3255 added one
+#: `historical:` entry for the retirement `voice.md` records in its own sentence
+#: (`~/.lloyd/`, the home dot-directory the wake-miss corpus left in #1444): 108
+#: exemptions across 29 docs —
+#: other-tree 43, generated 33, historical 32 — and NONE of them is `stale:`; and `git log
 #: -L` on the line below names `24228136` and nobody since, so the bound has not moved in
 #: the 93 commits landed since it was cut. No run count is quoted here because the ledger
 #: cannot produce one: a `promotions.jsonl` gate row has no field marking a full-suite run.
@@ -1314,6 +1325,76 @@ def test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes():
         f"{total} exemptions against {every_citation} citations in the corpus: the "
         "widening has stopped reporting rot and started documenting an absence, "
         "and the honest move is a doc fix or a filed item, not another entry")
+
+
+#: The spelling the 2026-10-24 review bullet in `voice.md`'s change log cites for the
+#: home dot-directory the wake-miss corpus lived in before #1444 moved it under the
+#: data root. The extractor lifts it because the trailing slash makes it read as a
+#: directory, and no root the box has holds it.
+RETIRED_HOME_SPAN = "~/.lloyd/"
+
+#: The live spelling the same line puts beside it, and the relative path it means.
+#: `ww_diag` has neither a trailing slash nor an extension, so the extractor lifts
+#: nothing from it — which is why this node asks `resolve_citation` about the path
+#: spelled out here rather than about the line's extracted citations.
+LIVE_CORPUS_CITATION = "~/lloyd-data/ww_diag"
+LIVE_CORPUS_REL = "lloyd-data/ww_diag"
+
+
+def test_the_retired_home_citation_is_exempt_only_because_its_line_names_the_live_root():
+    """#3255: that exemption is earned by its sentence, not by the list that holds it.
+
+    `PATH_CITATION_EXEMPTIONS` is a report with a date, and the rail above proves only
+    that a doc still writes the span and that the reason opens with an admitted kind —
+    it cannot tell a record of a move from a pointer nobody corrected. #3255 is that
+    ambiguity made visible: the 2026-10-24 review of this page wrote "the room corpus
+    paths are `~/lloyd-data/ww_diag`, not `~/.lloyd/`", a sentence whose whole point is
+    that the retired path is NOT where the data is, and the path node read it as a
+    broken pointer. main was red on it — three nodes, at base `2e9fe880`.
+
+    So the exemption stands on three properties of that one line, and all three are
+    checked here rather than read: the retired span is exempted and reasons `historical:`
+    (a fifth kind, or a re-spelling nobody cited, is the list's own rot); the line
+    actually negates the retired span instead of pointing at it; and the live path it
+    names on the same line exists, asked through the same passwd-home rule every other
+    citation in this file uses, not `$HOME` — so the nested-home node's symlink farm
+    cannot quietly make an untrue sentence look true.
+
+    Rewrite the sentence into a bare pointer — drop the negation, or drop the live
+    path beside it — and this node goes red with the exemption still in place, which is
+    the moment the path check is supposed to fire again and a person, not the list, has
+    to rule on where the corpus is.
+    """
+    entries = PATH_CITATION_EXEMPTIONS["voice.md"]
+    assert RETIRED_HOME_SPAN in entries, (
+        "the exemption for the retired dot-directory is gone, so the node that reads "
+        "this page reports a true sentence about a moved corpus as a broken pointer — "
+        "the exact red #3255 filed")
+    assert entries[RETIRED_HOME_SPAN].startswith("historical:"), (
+        f"the `{RETIRED_HOME_SPAN}` exemption now reasons "
+        f"{entries[RETIRED_HOME_SPAN]!r}; only a record of a move excuses a directory "
+        "this box no longer has")
+
+    quoted = f"`{RETIRED_HOME_SPAN}`"
+    lines = [ln for ln in _text("voice.md").splitlines() if quoted in ln]
+    assert len(lines) == 1, (
+        f"{quoted} is cited by {len(lines)} lines of voice.md, so this node cannot say "
+        "which sentence the exemption was written for: " + repr(lines[:3]))
+    line = lines[0]
+    assert re.search(r",\s*not\s+" + re.escape(quoted) + r"(?![A-Za-z0-9])", line), (
+        f"voice.md now writes {quoted} without negating it on the same line "
+        f"({line!r}); the sentence has turned back into a pointer, so the exemption "
+        "has to go and the path check has to answer for the spelling again")
+    assert f"`{LIVE_CORPUS_CITATION}`" in line, (
+        f"the sentence stopped naming `{LIVE_CORPUS_CITATION}` where it retires "
+        f"{quoted}, and a negation with no live location beside it tells a reader "
+        "nothing about where the corpus is")
+
+    hit = resolve_citation(_resolve("~/", LIVE_CORPUS_REL))
+    assert hit is not None and hit.is_dir(), (
+        f"the live corpus path the line names does not resolve to a directory under "
+        f"any root the box has ({hit!r}), so the retirement this exemption records is "
+        "no longer true either")
 
 
 # ── #2606: a collected count a doc states has to be re-measurable ────────────
