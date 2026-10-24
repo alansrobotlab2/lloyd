@@ -304,8 +304,8 @@ async def _bash(args: dict[str, Any]) -> str:
             # shell `create_subprocess_shell` was already running). Fail-open:
             # `wrap` returns a bare spawn plus False when bwrap cannot build,
             # and says so on the log and on `/state`.
-            sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
-                                                 cwd)
+            sb_argv, sb_enforced = await asyncio.to_thread(_path_sandbox.wrap, command,
+                                                           cwd)
             # #2578: outside the path sandbox's argv, so the command keeps bwrap's
             # read-only binds AND gets a bound on what its subtree may consume. The
             # ceiling is the other half of what this module's docstring says it is for:
@@ -317,7 +317,12 @@ async def _bash(args: dict[str, Any]) -> str:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env=_resource_ceiling.launcher_env(rpc_env),
+                # #3213: the marker is this module's to set, not the invoker's to
+                # hand down. On the fail-open argv nothing bound anything read-only,
+                # so leaving an inherited `LLOYD_PATH_SANDBOX=enforced` in the child's
+                # environment has it reporting a substrate it is not running under.
+                env=_path_sandbox.child_env(
+                    _resource_ceiling.launcher_env(rpc_env), sb_enforced),
                 start_new_session=True,
             )
     except Exception as exc:
@@ -482,9 +487,9 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
         # Same substrate as a foreground command, minus `--die-with-parent`:
         # this child is meant to outlive the call that returned its id, and it
         # keeps `bash -c` because that is what this path already execs.
-        sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
-                                             cwd or os.getcwd(),
-                                             background=True)
+        sb_argv, sb_enforced = await asyncio.to_thread(_path_sandbox.wrap, command,
+                                                       cwd or os.getcwd(),
+                                                       background=True)
         # #2578: a long task is the one the ceiling matters most for, because a runaway
         # in a detached task has no 120 s timeout waiting for it — the deadline reaps
         # the *record*, not the process tree, and nothing else bounded its consumption.
@@ -497,7 +502,12 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
             stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd or os.getcwd(),
-            env=_resource_ceiling.launcher_env(env),
+            # #3213, the same reason as the foreground call above. A detached task is
+            # the worse half of it: its only record is the file it writes, so a
+            # background command that inherited the marker testifies to a substrate
+            # it never had, in a log nothing else can re-check.
+            env=_path_sandbox.child_env(_resource_ceiling.launcher_env(env),
+                                        sb_enforced),
             close_fds=True,
         )
     except Exception as exc:

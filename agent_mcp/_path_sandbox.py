@@ -88,8 +88,8 @@ logger = logging.getLogger("lloyd-path-sandbox")
 
 #: Re-exported so a caller can name the list without importing the deny-set
 #: module. Tests assert this IS the object `protected_paths` owns (clause 5).
-__all__ = ["PROTECTED_SHELL_RO_ROOTS", "available", "profile_argv", "status",
-           "wrap"]
+__all__ = ["PROTECTED_SHELL_RO_ROOTS", "available", "child_env", "profile_argv",
+           "status", "wrap"]
 
 #: Set inside the sandbox so a command can tell where it is running. Not a
 #: security property — a command cannot unset it — just a legible marker.
@@ -167,6 +167,38 @@ def wrap(command: str, cwd: str | None = None, *,
         shell = _BACKGROUND_SHELL if background else "/bin/sh"
         return [shell, "-c", command], False
     return profile_argv(command, cwd, background=background), True
+
+
+def child_env(env: "dict[str, str] | None", enforced: bool) -> "dict[str, str]":
+    """The environment for a spawn whose argv this module produced.
+
+    `enforced` True — the caller's environment, untouched: `profile_argv` sets
+    `ENV_MARKER` itself with `--setenv`, so a command inside the substrate reports
+    the substrate, and this function adds nothing to that.
+
+    `enforced` False — the marker is REMOVED. The fail-open argv is a bare
+    `/bin/sh -c` / `bash -c`: no binds, and no `--setenv`, so the ONLY way that
+    child can carry `LLOYD_PATH_SANDBOX=enforced` is that the process spawning it
+    already had it in its own environment — which it does every time a Bash call
+    is made from inside a Bash call, because the outer command runs under the
+    profile that exports it and `_resource_ceiling.launcher_env` bases the child
+    on `dict(os.environ if env is None else env)` (`agent_mcp/_resource_ceiling.py:331`).
+    The command then claims, in its own output and in whatever reads that output,
+    a read-only substrate the kernel never gave it. Measured before this function
+    existed: `env LLOYD_PATH_SANDBOX=enforced … -m pytest tests/test_path_sandbox.py -q`
+    gave the fail-open node `ran=enforced2` where it asserts `ran=2`.
+
+    Removing it is the only direction that cannot be fixed downstream: the marker
+    is not a security property (`ENV_MARKER`'s own comment says a command cannot
+    unset it — which is also why a child cannot restore what was taken), so a
+    false `enforced` is a claim no later reader can audit, and the false is the
+    one that costs a reader something: an inherited marker makes an UNSANDBOXED
+    command look enforced, never the reverse.
+    """
+    out = dict(os.environ if env is None else env)
+    if not enforced:
+        out.pop(ENV_MARKER, None)
+    return out
 
 
 def _probe_command(entries: "list[str] | None" = None) -> str:

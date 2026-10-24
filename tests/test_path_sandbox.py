@@ -644,11 +644,167 @@ def test_bash_still_runs_when_the_substrate_cannot_build(monkeypatch):
     whatever it decides, Bash keeps working. `_path_sandbox.available()` False has
     to reach the spawn, run the command bare, and leave the marker unset — the
     behaviour this tool had before the substrate existed, not a half-built
-    sandbox. `/state` then reads `fallback`, which `test_status_reports…` pins."""
+    sandbox. `/state` then reads `fallback`, which `test_status_reports…` pins.
+
+    The node names the environment it is asserting in (#3213). Before this line it
+    inherited one: run from inside a Bash tool call, this node read `ran=enforced2`
+    — the marker came from the outer sandbox, not from the spawn under test — and
+    the file was red for the one reader most likely to run it. Stripping the
+    inherited value here is what makes the verdict mean the same thing in the gate's
+    curated child (`scripts/automod/gate.py::_child_env`, which never carries the
+    marker) and in a session's Bash call; the case where the marker IS present is
+    `test_an_inherited_marker_is_stripped…` below, which is a scenario rather than an
+    accident of who invoked pytest."""
     monkeypatch.setattr(P, "available", lambda: (False, "probe: no userns"))
+    monkeypatch.delenv(P.ENV_MARKER, raising=False)
     out = asyncio.run(B._bash({"command": "echo ran=$LLOYD_PATH_SANDBOX$((1+1))"}))
     assert "ran=2" in out, \
         f"the command did not run when the profile could not be built: {out[:200]}"
+
+
+def test_an_inherited_marker_is_stripped_from_a_fallback_foreground_call(monkeypatch):
+    """Clause 2 of #3213: the marker travels no further than the argv that set it.
+
+    The scenario is not hypothetical — it is what running this file from inside a
+    Bash tool call used to do. The outer command is already inside the substrate
+    (`profile_argv` exports `LLOYD_PATH_SANDBOX=enforced` with `--setenv`,
+    `agent_mcp/_path_sandbox.py:146`); the inner call's `available()` is forced
+    False here exactly as a broken userns forces it for real; and the spawn's env
+    comes from `dict(os.environ …)` (`agent_mcp/_resource_ceiling.py:331`), so the
+    marker rides along into a command that got no read-only binds. The claim that
+    makes this worth a node is that the false half is the expensive one: a command
+    that says `enforced` while unprotected is a claim about the kernel that nothing
+    downstream can audit, and this file's own background node (:616) reads a sink
+    file for precisely that token.
+
+    The control at the bottom is why the fix is a strip and not a deletion: the
+    enforcing branch must still mark, or clause 4's two nodes go blind.
+    """
+    monkeypatch.setenv(P.ENV_MARKER, "enforced")
+    monkeypatch.setattr(P, "available", lambda: (False, "probe: no userns"))
+    out = asyncio.run(B._bash({"command": "echo ran=[$LLOYD_PATH_SANDBOX]$((1+1))"}))
+    assert "ran=[]2" in out, (
+        "a fail-open spawn carried the invoker's marker, so the command reports a "
+        f"substrate it is not running under: {out[:200]!r}")
+    # Two controls, both bound to the spawn rather than to a helper's return value.
+    # (a) the enforcing argv still carries the `--setenv` that sets the marker, which is
+    # `profile_argv`'s own mechanism and the one `child_env` deliberately leaves alone —
+    # if it stopped setting it, this file's two substrate-claims-enforcement nodes would
+    # go blind and stay green; (b) the strip is exercised on the CALLER-SUPPLIED dict
+    # too, because a stamped Bash session reaches the same spawn with an env from
+    # `_rpc.bash_env` rather than `None`, and the `os.environ` base inside
+    # `launcher_env` is only the unstamped half. An unrelated key in both dicts is the
+    # proof that only the marker is dropped.
+    argv = P.profile_argv("true", "/")
+    marks = [argv[i:i + 3] for i in range(len(argv) - 2)
+             if argv[i] == "--setenv" and argv[i + 1] == P.ENV_MARKER]
+    assert marks == [["--setenv", P.ENV_MARKER, "enforced"]], (
+        f"the enforcing branch no longer sets the marker in the child, so the spawn "
+        f"assertion above would pass on an unmarked sandbox: {marks}")
+    kept = P.child_env({P.ENV_MARKER: "enforced", "LLOYD_SESSION": "s"}, True)
+    assert kept == {P.ENV_MARKER: "enforced", "LLOYD_SESSION": "s"}, kept
+    stripped = P.child_env({P.ENV_MARKER: "enforced", "LLOYD_SESSION": "s"}, False)
+    assert stripped == {"LLOYD_SESSION": "s"}, stripped
+
+
+def test_an_inherited_marker_is_stripped_from_a_fallback_background_call(tmp_path,
+                                                                         monkeypatch):
+    """Clause 3 of #3213, on the path whose only evidence is a file it writes.
+
+    Same forcing as the foreground node, same inheritance, and the background spawn
+    is the one where a false claim outlives the call that made it: `_spawn_background`
+    detaches, and the sink this command writes is the whole record of what it
+    believed about its own environment. The command prints `absent` only when the
+    variable expands to nothing, so a sink that never got written cannot be read as
+    an absence, and `enforced` inherited from the parent fails the same assertion
+    from the other side."""
+    monkeypatch.setenv(P.ENV_MARKER, "enforced")
+    monkeypatch.setattr(P, "available", lambda: (False, "probe: no userns"))
+    monkeypatch.setattr(TR, "TASKS_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(TR, "start_waiter", lambda record: None)
+    sink = tmp_path / "bg-marker"
+    raw = asyncio.run(B._bash({
+        "command": f'if [ -z "$LLOYD_PATH_SANDBOX" ]; then echo absent; '
+                   f'else echo present=$LLOYD_PATH_SANDBOX; fi > {sink}',
+        "run_in_background": True,
+        "description": "fallback background marker probe"}))
+    payload = json.loads(raw)
+    assert payload.get("task_id"), raw
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline and not sink.exists():
+        time.sleep(0.25)
+    assert sink.exists(), f"the background command never ran: {raw}"
+    assert sink.read_text().strip() == "absent", (
+        "a detached fail-open command carried the invoker's marker into the file it "
+        f"wrote: {sink.read_text().strip()!r}")
+
+
+def test_the_fallback_path_is_green_whether_or_not_the_parent_carries_the_marker():
+    """Clause 1 of #3213, run as it is written: this file, twice, in a child pytest.
+
+    The rest of the file pins the mechanism; only a child process can pin the
+    done-check, because the thing being measured is the ENVIRONMENT PYTEST ITSELF WAS
+    STARTED WITH. `Gate._child_env` (`scripts/automod/gate.py`) hands the suite a
+    curated dict that never merges `os.environ`, so the gate can never see the marker
+    state that an implementer's session — a suite run issued from inside a Bash tool
+    call, under the substrate — always has. That asymmetry is what made this bug green
+    at the gate and red for whoever implemented it, and a node that only asserts about
+    `os.environ` inside its own process cannot close it: the node that was wrong here
+    was wrong precisely because the marker it read was its parent's, not a command it
+    spawned.
+
+    So: the three fail-open nodes of this file run again in a child interpreter, once
+    with `LLOYD_PATH_SANDBOX=enforced` forced into the child's env and once with it
+    stripped, and BOTH must exit 0. The forced run is the one that was red at `7ed54532`
+    (`1 failed, 34 passed`, `'ran=2' in 'ran=enforced2'`); the stripped run is the
+    control, so the pair cannot be satisfied by a selection that matches nothing.
+    The child runs with `cwd` one directory down and an absolute path to this file, which
+    is the shape `test_path_sandbox_skip_accounting.py::test_a_module_without_a_substrate_
+    gate_is_named_by_a_module_level_marker` proved works on this box: running from a tree's
+    own root trips the root-directory rail at `tests/conftest.py:241` and exits 4, so a
+    child pointed at the root would be measuring the rail.
+
+    The selection is three nodes and the assertion says so: the fallback node plus this
+    file's two inherited-marker nodes. That count is also the recursion guard — this node's
+    name carries neither selector substring, and were it matched by its own `-k` it would
+    re-enter itself as a child and the child would report four, not three."""
+    root_dir = Path(__file__).resolve().parents[1]
+    this_file = str(root_dir / "tests" / Path(__file__).name)
+    selectors = "substrate_cannot_build or inherited_marker_is_stripped"
+    this_node = "test_the_fallback_path_is_green_whether_or_not_the_parent_carries_the_marker"
+    for forced in (True, False):
+        child_env = dict(os.environ)
+        if forced:
+            child_env["LLOYD_PATH_SANDBOX"] = "enforced"
+        else:
+            child_env.pop("LLOYD_PATH_SANDBOX", None)
+        ran = subprocess.run(
+            [sys.executable, "-m", "pytest", this_file, "-q", "-p", "no:randomly",
+             "--no-header", "-W", "ignore", "-k", selectors],
+            cwd=str(root_dir / "agent_mcp"), env=child_env, capture_output=True,
+            text=True, timeout=420,
+        )
+        out = ran.stdout + ran.stderr
+        which = "with the marker forced" if forced else "with the marker absent"
+        assert ran.returncode == 0, (
+            f"the fallback nodes are not green {which}: exit {ran.returncode}"
+            f"\n{out[-1200:]}")
+        # The exit code is the verdict; the summary line is the DENOMINATOR, because
+        # pytest reports an empty selection as `no tests ran` and nothing else. Whole
+        # -output substring checks are unusable here: tmpdir teardown prints `error
+        # removing …` on this box, so the count is read off the summary line alone.
+        summary = [ln for ln in out.splitlines()
+                   if re.search(r"\d+ (passed|failed|error|no tests ran)", ln)]
+        assert summary, f"the child printed no pytest summary line {which}:\n{out[-600:]}"
+        last = summary[-1]
+        passed = re.search(r"(\d+) passed", last)
+        assert passed and int(passed.group(1)) == 3, (
+            f"the child did not report exactly three passing nodes {which} — expected the "
+            f"fallback node plus this file's two inherited-marker nodes, and a fourth would "
+            f"mean {this_node} ran inside its own child. Summary: {last!r}\n{out[-600:]}")
+        assert "failed" not in last and "error" not in last and "deselected" in last, (
+            f"the child's summary is not a clean pass over a real selection {which}: "
+            f"{last!r}")
 
 
 def test_status_reports_enforcing_or_fallback(monkeypatch):
