@@ -204,7 +204,211 @@ FLAP_STOP_AFTER = 3      # also stop the backend
 # ── Runtime data root ──────────────────────────────────────────────────────
 # Sessions, databases and logs, outside the code tree since 2026-09-22
 # (`app/paths.py` resolves the same place; `datawatch.py` guards it).
-DATA_ROOT = __import__("os").environ.get("LLOYD_DATA", "/home/alansrobotlab/lloyd-data")
+#
+# Until #3208 this line read the environment variable straight, over an account-named
+# absolute default — the resolver's rule 2 with neither the `.lloyd-data-root` marker check
+# nor rule 3. It looked harmless while every consumer was a
+# reader, but `datawatch.quarantine_inert` (`5b8d3e8d`, 2026-10-02) CREATES a stamped copy
+# and a `log.jsonl` row under `QUARANTINE_DIR_RELATIVE` beneath that root and UNLINKS the
+# code-tree copy, and `guardian.py` called it with this constant. So a gate's
+# prefetch checkout, a sandbox clone or a round's worktree that imported the guardian was
+# writing into, and deleting from, a root that belongs to a different checkout — the same
+# asymmetry #2110 fixed for the *name inside* the root while the root itself stayed a
+# literal. Resolution now goes through `app/data_root.py` loaded by path, for the tree that
+# identifies the process, and the write route refuses when it cannot resolve.
+_Os = __import__("os")
+_Path = __import__("pathlib").Path
+
+#: Which branch of `data_root_for_tree` / `data_root_or_fallback` answered. Same reason as
+#: the `KG_SOURCE_*` pair below: on this box the resolver and the fallback name ONE
+#: directory, so no printed path can tell the two branches apart (#1525's lesson).
+DATA_SOURCE_RESOLVER = "resolver"
+DATA_SOURCE_FALLBACK = "fallback-literal"
+DATA_SOURCE_UNRESOLVED = "unresolved"
+#: Rule 1 answered with no resolver to ask it. Separate from `DATA_SOURCE_FALLBACK`
+#: because they are different kinds of answer: one is the operator's own instruction, the
+#: other is this file naming a directory because it has nothing better. Collapsing them
+#: would make a watchdog whose root was handed to it read like one that guessed.
+DATA_SOURCE_ENV = "env-var"
+
+
+def _env_data_root() -> "str | None":
+    """Rule 1 read straight, and with NO default (#3208).
+
+    The only line in this package that still looks at `LLOYD_DATA`, and the only reading
+    of it that cannot be a guess: whoever sets the variable named a root, so honouring it
+    is obeying an instruction, whereas the account-named ABSOLUTE DEFAULT this file used
+    to hang off the same lookup is the thing #3208 deleted. `app.data_root` applies this
+    rule itself, so nothing here reaches it while a resolver can be loaded — it answers
+    only where there is no resolver to load (the shape `tests/test_guardian_selftest.py`
+    case 4 builds: a tree with `app/data_root.py` deleted) AND the operator exported a
+    root, which is exactly the relocation route rule 1 documents. Dropping it would make
+    `LOG_FILES` and `KG_DB` stop following a root they follow today, which is clause 5's
+    complaint.
+    """
+    return _Os.environ.get("LLOYD_DATA") or None
+
+
+def _account_data_root() -> "str | None":
+    """`<account home>/lloyd-data`, the home read off passwd and never off `$HOME`.
+
+    What the deleted literal named, reconstructed instead of restated — the point of
+    #3208 was that no file here may spell this directory, not that the watchdog may never
+    name one. The home comes from passwd for the reason `app/data_root.py` gives for the
+    same choice: "read off passwd and never off `Path.home()`: under a gate's `HOME` that
+    name belongs to the round". A fallback computed from `$HOME` therefore points a
+    gate's, a round's or a test's guardian at a temporary directory that holds no logs at
+    all, and the error-rate check greps nothing while reporting a clean answer — the
+    moved-root non-answer #1525 is about, arriving by a new route. Only when there is no
+    passwd entry at all does it fall to `Path.home()`, which is exactly what
+    `app/data_root.py`'s own `ACCOUNT_HOME` does on that same failure — one rule, not a
+    second opinion.
+    """
+    try:
+        import pwd
+
+        home = _Path(pwd.getpwuid(_Os.getuid()).pw_dir)
+    except Exception:      # noqa: BLE001 - no pwd module, or no entry for this uid
+        home = _Path.home()
+    return str(home / "lloyd-data")
+
+#: The tree a caller wants THIS process to treat as its own. Nothing in production sets
+#: it; a gate, a round or a test child names its checkout with it. `process_data_tree`
+#: falls back to where the module was loaded from.
+GUARDIAN_TREE = _Os.environ.get("LLOYD_TREE")
+
+
+def _data_root_module(repo: str):
+    """The stdlib-only data-root resolver, imported by file path, or None.
+
+    By path and not by name for the reason `speak.py::_load_shaping_module`
+    spells out: this file runs from the pinned snapshot under
+    `~/.local/state/lloyd-guardian/bin` on `/usr/bin/python3`, where the repo is
+    not on `sys.path`. The module's own header says nothing here may import from
+    `app/`, and this is not an exception to that rule so much as the case the rule
+    is written around: `app/data_root.py` is the stdlib-only half (#1415) with no
+    import of its own and no venv behind it — `app.paths`, which does need one,
+    stays out. Every failure shape (no repo, no module, a loader that refuses, a
+    module that raises while executing) returns None rather than propagating,
+    because an exception here is a watchdog that never starts.
+
+    Moved above `DATA_ROOT` by #3208: the data root is now resolved through this
+    loader, so it has to exist before the constant is computed.
+    """
+    path = _Path(repo) / "app" / "data_root.py"
+    if not path.is_file():
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("lloyd_data_root", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:      # noqa: BLE001 - see the docstring: never propagate
+        return None
+
+
+def _module_tree() -> "str | None":
+    """The checkout this module was loaded from, or None when it was loaded from none.
+
+    `<tree>/agent-services/guardian/policy.py` → `<tree>`, decided structurally: the
+    candidate counts as a tree only when the sibling module really sits where a checkout
+    keeps it. A promoted snapshot at `~/.local/state/lloyd-guardian/bin/policy.py` fails
+    that, which is the point — it is not a checkout, and the checkout it watches is `REPO`.
+    """
+    here = _Path(__file__).resolve()
+    if len(here.parts) < 4:
+        return None
+    candidate = here.parents[2]
+    if (candidate / "agent-services" / "guardian" / "policy.py").is_file():
+        return str(candidate)
+    return None
+
+
+def process_data_tree() -> str:
+    """Which checkout's data root is THIS process's, for the rules in `app/data_root.py`.
+
+    In order: `LLOYD_TREE` when a caller named one; the checkout this module was loaded
+    from; `REPO` — which is the promoted snapshot's case, since `guardian-stage.sh`
+    installs this file outside any checkout and the watchdog that runs it exists to guard
+    the production one.
+
+    Deliberately not `REPO` in general. `REPO` is the rollback repo and is the same
+    account-named literal whichever tree imported it, so keying the data root on it would
+    answer the live root from everywhere and turn this fix cosmetic — which is what #3208's
+    triage named. Whether `REPO` and `datawatch.TREE` should themselves be resolved is a
+    scope ruling the item declined, and is not taken here.
+    """
+    return GUARDIAN_TREE or _module_tree() or REPO
+
+
+def data_root_for_tree(tree: "str | None" = None, repo: "str | None" = None):
+    """`(root, source, why)` for one tree, by the same three rules `app.paths` uses.
+
+    `app/data_root.py` is loaded by path through `_data_root_module`, the route
+    `kg_db_path`, `vault_root` and `quarantine_dir` already use, and the answer comes from
+    its `resolve_data_root_for_tree` — all three rules, marker check and rule 3 included,
+    with `LLOYD_DATA` winning as it does for `app.paths`. `repo` says only where that
+    stdlib-only file is READ FROM and defaults to the process's own tree; `tree` is what
+    the answer is ABOUT and defaults to `process_data_tree()`. Both are explicit
+    parameters, which is what lets a test put a resolver anywhere and ask about any tree.
+
+    Never raises. `root` is None when there is no answer at all — no resolver file, a
+    resolver that raised, or `DataRootMissing` on an unmarked production root — and `why`
+    carries the reason. Readers take `data_root_or_fallback`; the one route that creates
+    and deletes takes this one and refuses on None.
+    """
+    resolver = _data_root_module(repo or process_data_tree() or REPO)
+    if resolver is None:
+        return (None, DATA_SOURCE_UNRESOLVED,
+                f"no data-root resolver at "
+                f"{_Path(repo or process_data_tree() or REPO) / 'app' / 'data_root.py'}")
+    try:
+        return (str(resolver.resolve_data_root_for_tree(
+            _Path(tree or process_data_tree()))), DATA_SOURCE_RESOLVER, None)
+    except Exception as exc:  # noqa: BLE001 - DataRootMissing and anything like it
+        return (None, DATA_SOURCE_UNRESOLVED, f"{type(exc).__name__}: {exc}")
+
+
+def data_root_or_fallback(tree: "str | None" = None, repo: "str | None" = None,
+                          fallback_root: "str | None" = None):
+    """`(root, source, why)` for a READ-ONLY consumer: always answers, and says how.
+
+    Three answers in order, and `DATA_ROOT_SOURCE` is which one ran. The resolver's, if a
+    resolver can be loaded and does not refuse. Then rule 1 read straight
+    (`_env_data_root`), because a root somebody named is not a guess and the watchdog has
+    to keep following the root it is given even with no `app/data_root.py` to ask. Then
+    the account's `lloyd-data` off passwd (`_account_data_root`) — what the deleted
+    literal named, reconstructed rather than restated.
+
+    The file's own precedent for degrading instead of raising is explicit for readers: "a
+    watchdog that dies because its resolver is missing or refuses is worse than one
+    counting against a path it can name" (`kg_db_path`'s docstring, #1525), and the exact
+    state the resolver refuses in — a production root that lost its `.lloyd-data-root`
+    marker — is the state `datawatch.judge` exists to alert on. A watchdog that raised at
+    import could not file that alert, which is why the raise belongs on the move route
+    only (`datawatch.quarantine_inert`).
+    """
+    root, source, why = data_root_for_tree(tree, repo=repo)
+    if root is not None:
+        return (root, source, why)
+    if fallback_root is not None:
+        return (str(_Path(fallback_root)), DATA_SOURCE_FALLBACK, why)
+    env = _env_data_root()
+    if env is not None:
+        return (env, DATA_SOURCE_ENV, why)
+    return (_account_data_root(), DATA_SOURCE_FALLBACK, why)
+
+
+#: The root this process's READ-ONLY consumers use: `LOG_FILES`, the KG store,
+#: `datawatch.DataWatch`'s tripwire root, and the alerts that name either. It always
+#: answers, because every one of them is a reader; `DATA_ROOT_SOURCE` says which rule
+#: answered and `DATA_ROOT_SOURCE_WHY` why the resolver did not. The stray MOVE does not
+#: use it — see `datawatch.quarantine_inert`.
+DATA_ROOT, DATA_ROOT_SOURCE, DATA_ROOT_SOURCE_WHY = data_root_or_fallback()
 # How often the tree is checked for a runtime name that came back into it.
 STRAY_CHECK_SECONDS = 3600.0
 # How often the snapshot directory is asked how old its newest snapshot is. The
@@ -258,36 +462,6 @@ DATA_DROP_FRACTION = 0.05
 #: branch is the one where no resolver could be loaded at all. Everything else
 #: that needs this layout reads `app.data_root.KG_DB_RELATIVE`.
 _KG_DB_RELPATH = "_pipeline/vault-derived/kg.sqlite"
-
-
-def _data_root_module(repo: str):
-    """The stdlib-only data-root resolver, imported by file path, or None.
-
-    By path and not by name for the reason `speak.py::_load_shaping_module`
-    spells out: this file runs from the pinned snapshot under
-    `~/.local/state/lloyd-guardian/bin` on `/usr/bin/python3`, where the repo is
-    not on `sys.path`. The module's own header says nothing here may import from
-    `app/`, and this is not an exception to that rule so much as the case the rule
-    is written around: `app/data_root.py` is the stdlib-only half (#1415) with no
-    import of its own and no venv behind it — `app.paths`, which does need one,
-    stays out. Every failure shape (no repo, no module, a loader that refuses, a
-    module that raises while executing) returns None rather than propagating,
-    because an exception here is a watchdog that never starts.
-    """
-    path = __import__("pathlib").Path(repo) / "app" / "data_root.py"
-    if not path.is_file():
-        return None
-    try:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("lloyd_data_root", path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    except Exception:      # noqa: BLE001 - see the docstring: never propagate
-        return None
 
 
 #: Which of the two branches of `kg_db_path` answered, returned as its second half

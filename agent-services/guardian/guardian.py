@@ -1808,11 +1808,21 @@ class Guardian:
             # and was parked on a human because a file git ignores gives a round no
             # diff to land. Whatever is left alerts exactly as before, and a tree the
             # move emptied falls through to the retraction below.
-            try:
-                moved.extend(datawatch.quarantine_inert(policy.REPO, strays,
-                                                        policy.DATA_ROOT, now))
-            except Exception as exc:  # noqa: BLE001
-                log(f"stray quarantine failed (continuing): {exc}")
+            # The destination is the data root OF THE TREE JUST SCANNED, resolved through
+            # that tree's `app/data_root.py` by `resolve_move_root` — not `policy.DATA_ROOT`.
+            # The constant is this process's READ-ONLY root and it always answers, falling
+            # back to a literal when the resolver refuses; for a move, which creates a file
+            # under the root and unlinks one from the tree, that answer is a guess (#3208).
+            # A refusal is logged and the stray goes on alerting: no move, no data loss.
+            move_root, _move_source, move_why = datawatch.resolve_move_root(policy.REPO)
+            if move_root is None:
+                log(f"stray quarantine refused (continuing): {move_why}")
+            else:
+                try:
+                    moved.extend(datawatch.quarantine_inert(policy.REPO, strays,
+                                                            move_root, now))
+                except Exception as exc:  # noqa: BLE001
+                    log(f"stray quarantine failed (continuing): {exc}")
             if moved:
                 gone = {name for name, _ in moved}
                 strays = [s for s in strays if s not in gone]
@@ -1821,7 +1831,7 @@ class Guardian:
                     "\n".join(f"{os.path.join(policy.REPO, name)} → {dest}"
                               for name, dest in moved)
                     + "\n\n0 bytes, idle, and the real store is in "
-                    f"{policy.DATA_ROOT}; nothing was deleted.")
+                    f"{move_root}; nothing was deleted.")
         if (strays or shadows) and self.data.armed:
             # One `alert` call per check, whatever the number of conditions reporting,
             # because `Guardian.alert` suppresses a same-title repeat inside

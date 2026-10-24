@@ -1698,3 +1698,205 @@ def test_the_tree_half_of_the_capture_check_can_see_the_dirt_it_denies(tmp_path)
     assert control_rc == 0 and "!" not in control_rule, (
         f"positive control broken: git does not ignore `qmd/dist/probe.js` either "
         f"({control_rule!r}), so the answer above proves nothing about either case")
+
+
+# ── #3208: the guardian's read-only consumers keep answering ───────────────
+#
+# #3208 made the stray MOVE resolve its root and refuse when it cannot, and the item's own
+# findings say what the danger of that shape is: `policy.DATA_ROOT` is consumed AT IMPORT
+# by `LOG_FILES` and by `KG_DB, KG_DB_SOURCE = kg_db_path()`, so an accessor that raised
+# would leave the watchdog unable to start — in the exact state (a production root that
+# lost its `.lloyd-data-root` marker) whose alert the un-started watchdog was supposed to
+# file. So the raise went onto the move route only, and the readers kept a marked
+# fallback. These two nodes pin both halves: the names did not move, and a guardian whose
+# resolver refuses still imports.
+
+_GUARDIAN_FILES_NEEDED = ("policy.py", "datawatch.py", "vaultwatch.py", "notify.py")
+
+
+def _guardian_tree(tmp: Path, resolver_text: "str | None", name: str = "guardian-tree") -> Path:
+    """A throwaway tree holding the guardian's files and one chosen `app/data_root.py`.
+
+    `resolver_text=None` installs the shipped resolver; anything else is written as the
+    tree's resolver, which is how a refusal state gets built without touching the live
+    root — `production_data_root()` is read from the passwd entry, so no in-process call
+    can put THIS machine's production checkout into it.
+    """
+    import shutil
+
+    tree = tmp / name
+    shutil.copytree(GUARDIAN_DIR, tree / "agent-services" / "guardian",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    for name in _GUARDIAN_FILES_NEEDED:
+        assert (tree / "agent-services" / "guardian" / name).is_file(), (
+            f"{name} is not in the guardian directory, so this tree would import a "
+            "different module than the one under test")
+    (tree / "app").mkdir()
+    shutil.copy(ROOT / "app" / "data_root.py", tree / "app" / "data_root.py")
+    if resolver_text is not None:
+        (tree / "app" / "data_root.py").write_text(resolver_text, encoding="utf-8")
+    return tree
+
+
+_UNMARKED_PRODUCTION_RESOLVER = '''"""A resolver that refuses the way an unmarked production root does (#3208 fixture).
+
+The rules are the shipped `resolve_data_root` from @REAL@; the only thing declared here is
+that THIS tree is the live checkout and its production root has no marker — a pair no test
+can bind in-process, because `app.data_root` reads both off the passwd entry.
+"""
+import importlib.util as _u
+import pathlib as _P
+
+_spec = _u.spec_from_file_location("real_data_root", "@REAL@")
+_real = _u.module_from_spec(_spec)
+_spec.loader.exec_module(_real)
+
+DataRootMissing = _real.DataRootMissing
+QUARANTINE_DIR_RELATIVE = _real.QUARANTINE_DIR_RELATIVE
+KG_DB_RELATIVE = _real.KG_DB_RELATIVE
+DATA_ROOT_MARKER = _real.DATA_ROOT_MARKER
+DATA_ROOT_ENV = _real.DATA_ROOT_ENV
+
+
+def resolve_data_root_for_tree(tree=None):
+    home = _P.Path(tree)
+    return _real.resolve_data_root(
+        env=None, lloyd_home=home, is_worktree=False, live_checkout=home,
+        production_root=home.parent / "lloyd-data")
+'''
+
+
+def _run_guardian_probe(tree: Path, statement: str) -> dict:
+    """One `/usr/bin/python3` process importing `policy` from `tree`, with the suite's
+    `LLOYD_DATA` popped — the interpreter `lloyd-guardian.service` uses, and the only way
+    to see rules 2 and 3 at all under a suite that exports rule 1."""
+    probe = tree / "probe.py"
+    probe.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(tree / 'agent-services' / 'guardian')!r})\n"
+        "import policy\n"
+        f"out = {statement}\n"
+        "print(json.dumps(out))\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("LLOYD_DATA", "LLOYD_TREE")}
+    proc = subprocess.run([sys.executable if not Path("/usr/bin/python3").exists()
+                           else "/usr/bin/python3", str(probe)],
+                          capture_output=True, text=True, timeout=180, env=env)
+    assert proc.returncode == 0, (
+        f"importing `policy` from {tree} exited {proc.returncode}\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr[-3000:]}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_the_guardians_read_only_paths_are_the_same_two_paths_they_were(tmp_path):
+    """#3208 clause 5: `policy.LOG_FILES` and `policy.KG_DB` still name the error logs and
+    the KG store they name today, so taking the move route off the constant did not move
+    anything a reader depends on.
+
+    The names are checked against this file's own copy of the layout module, not read back
+    from `policy`, for the reason every other node in this file gives: an assertion that
+    compares a constant with itself cannot see the constant change. `logs/server.err` and
+    `logs/mcp.err` are the two files the error-rate check greps, and `KG_DB_RELATIVE` is the
+    store `app/health.py` opens.
+
+    Asserted through a child process with `LLOYD_DATA` popped, so the root under test is the
+    one THIS tree's own rules give it — rule 3, `<tree>/.lloyd-data`, because a copy of the
+    guardian sitting in a tmp checkout is not the production one. Under the suite's exported
+    rule 1 every branch agrees and the comparison would be between two copies of the same
+    answer, which is the vacuity #1415's review advisory named. The fallback branch is pinned
+    next to it, so the clause cannot be satisfied by a fallback that stopped naming anything.
+    """
+    from app import data_root as AR
+
+    tree = _guardian_tree(tmp_path, None)
+    out = _run_guardian_probe(tree, """{
+        "root": policy.DATA_ROOT,
+        "source": policy.DATA_ROOT_SOURCE,
+        "logs": list(policy.LOG_FILES),
+        "kg": policy.KG_DB,
+        "kg_source": policy.KG_DB_SOURCE,
+        "repo": policy.REPO,
+        # Computed IN THE CHILD: the shipped resolver's answer for the same repo, under the
+        # same popped `LLOYD_DATA`. Asking the parent would compare a rule-1 path (the suite
+        # exports it) with a rule-2 path (the child does not) and fail on the difference
+        # between two correct answers.
+        "kg_expected": (lambda r, m: None if r is None else str(
+            __import__("pathlib").Path(r) / m.KG_DB_RELATIVE))(
+            policy.data_root_for_tree(policy.REPO, repo=policy.REPO)[0],
+            policy._data_root_module(policy.REPO))}""")
+
+    assert out["root"] == str(AR.data_root_for_tree(tree)), (
+        f"the guardian's read-only root {out['root']} is not the rule-3 root of its own tree "
+        f"({AR.data_root_for_tree(tree)}); answering {AR.production_data_root()} from a copy "
+        "in a tmp checkout is the bug #3208 is about")
+    assert out["source"] == "resolver", out
+    assert out["logs"] == [f"{out['root']}/logs/server.err", f"{out['root']}/logs/mcp.err"], (
+        f"the error-rate check's files are not the two it tails today: {out['logs']}")
+    # `KG_DB` is computed at import as `kg_db_path()` — no arguments — so its root comes from
+    # `policy.REPO`, not from `DATA_ROOT`, exactly as it did before this change. Pinning that
+    # asymmetry is the point: a "fix" that re-keyed the store onto `DATA_ROOT` would move the
+    # path the tripwire and `app/health.py` read, and here the two roots are different
+    # directories, so the move would show up.
+    assert out["kg"] == out["kg_expected"], (
+        f"the KG store the guardian reads at import is {out['kg']}, not the store the shipped "
+        f"resolver gives for the repo it asks about ({out['repo']}): the same call "
+        "`kg_db_path()` made before #3208")
+    assert out["kg"].endswith(str(AR.KG_DB_RELATIVE)), out
+    assert out["kg_source"] == "resolver", out
+    assert Path(out["kg"]).parent.parent.parent != Path(out["root"]), (
+        f"KG_DB and DATA_ROOT answered the same root ({out['root']}) in a fixture built so "
+        "they differ, so one of the two consumers was re-keyed onto the other")
+
+    fallback = _run_guardian_probe(tree, """{
+        "root": policy.data_root_or_fallback(repo="/nonexistent-checkout-3208")[0],
+        "source": policy.data_root_or_fallback(repo="/nonexistent-checkout-3208")[1]}""")
+    assert fallback["root"] and fallback["source"] == "fallback-literal", (
+        f"with no resolver to ask, the read-only consumers answered {fallback!r}: the "
+        "fallback has to name a path and say that it is one, or the watchdog has no logs "
+        "to read and no way for a reader to tell")
+    assert fallback["root"] != out["root"], (
+        f"the fallback branch answered the same path as the resolver ({out['root']}) and "
+        "the label is the only thing that tells them apart — which is why the label is the "
+        "assertion above and not the path")
+
+
+def test_the_watchdog_still_starts_when_its_resolver_refuses(tmp_path):
+    """#3208 clause 5's other half, and the failure the item's own findings predicted: a
+    round that made the accessor raise wherever `DataRootMissing` appeared would produce a
+    watchdog that cannot start.
+
+    So: a tree whose resolver refuses with `DataRootMissing` — the unmarked production root
+    — and `policy` imported by a child `/usr/bin/python3` in exactly that state. The exit
+    code IS the clause: a raise at import is a nonzero exit and nothing else. The two paths
+    must still be named, and `DATA_ROOT_SOURCE` must say the answer did not come from the
+    resolver, because on this box the fallback and the live root are the same directory and
+    only the label tells them apart (#1525's reason for the label).
+
+    The positive control is the same probe against the same tree with the shipped resolver
+    installed, where the source must be `resolver`: without it, a probe that never reached
+    the resolver would satisfy every assertion below.
+    """
+    import policy as P
+
+    refusing = _guardian_tree(
+        tmp_path, _UNMARKED_PRODUCTION_RESOLVER.replace(
+            "@REAL@", str(ROOT / "app" / "data_root.py")), name="refusing-tree")
+    out = _run_guardian_probe(refusing, """{
+        "root": policy.DATA_ROOT,
+        "source": policy.DATA_ROOT_SOURCE,
+        "why": policy.DATA_ROOT_SOURCE_WHY,
+        "logs": list(policy.LOG_FILES),
+        "kg": policy.KG_DB}""")
+
+    assert out["source"] == P.DATA_SOURCE_FALLBACK, out
+    assert "has no .lloyd-data-root" in (out["why"] or ""), (
+        f"the watchdog does not say which refusal it fell back from: {out['why']!r}")
+    assert out["logs"] == [f"{out['root']}/logs/server.err", f"{out['root']}/logs/mcp.err"], out
+    assert out["kg"].endswith("_pipeline/vault-derived/kg.sqlite"), out
+
+    shipped = _guardian_tree(tmp_path, None, name="shipped-tree")
+    control = _run_guardian_probe(shipped, """{
+        "source": policy.DATA_ROOT_SOURCE, "why": policy.DATA_ROOT_SOURCE_WHY}""")
+    assert control["source"] == P.DATA_SOURCE_RESOLVER and control["why"] is None, (
+        f"positive control broken: with the shipped resolver installed the source was "
+        f"{control['source']!r} ({control['why']!r}), so the refusal above proves nothing "
+        "about which branch the assertions read")

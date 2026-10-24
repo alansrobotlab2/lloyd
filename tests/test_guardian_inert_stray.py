@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,6 +142,12 @@ def _guardian(tmp_path, monkeypatch, tree, data, strays):
     (vault / "memory").mkdir(parents=True)
     monkeypatch.setattr(gmod.policy, "REPO", str(tree))
     monkeypatch.setattr(gmod.policy, "DATA_ROOT", str(data))
+    # #3208 moved the move's destination off `policy.DATA_ROOT` and onto the root the
+    # resolver answers for `policy.REPO`, so pointing the fixture's root at `data` now has
+    # to go through the resolver's rule 1 — an env var, which is what a caller really sets
+    # — rather than by patching the guardian's own accessor. Patching `resolve_move_root`
+    # here would have this file's nodes pass on a resolver that was never called.
+    monkeypatch.setenv("LLOYD_DATA", str(data))
     monkeypatch.setattr(gmod.datawatch, "stray_in_tree", lambda _tree: list(strays))
     g = gmod.Guardian.__new__(gmod.Guardian)
     g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
@@ -345,6 +352,225 @@ def test_the_quarantine_destination_is_one_constant_from_the_data_layout(tmp_pat
     assert live == str(app_paths.QUARANTINE_DIR), (
         f"the guardian resolves {live} and `app.paths` exports "
         f"{app_paths.QUARANTINE_DIR}: one destination, two spellings")
+
+
+# ── clause 4 (#3208): the root is never spelled as an environment DEFAULT again ──
+
+#: What this scan bans: `LLOYD_DATA` read with a DEFAULT attached, in any of the three
+#: spellings the guardian actually used (`os.environ`, `__import__("os").environ`, and the
+#: `_Os` alias `policy.py` carries), plus `environ["LLOYD_DATA"]`, which has no default to
+#: drop and so is a hand-rolled root standing on its own. A default is the whole defect: it
+#: is the branch that names a directory without asking the tree or the marker, and the
+#: literal that used to sit there named this machine's account. `LLOYD_DATA_SNAPSHOTS`, the
+#: snapshot directory, is a DIFFERENT variable and is deliberately not matched: this item is
+#: the runtime data root.
+_LLOYD_DATA_DEFAULT = re.compile(
+    r"""environ\.(?:get\(\s*["']LLOYD_DATA["']\s*,|(?:setdefault\(\s*)?["']LLOYD_DATA["']\s*[,=])""")
+_ENVIRON_INDEX = re.compile(r"""environ\[\s*["']LLOYD_DATA["']\s*\]""")
+
+#: What this scan tolerates, and pins to one line: rule 1 read with NO default. `app.data_root`
+#: applies the same lookup first, so it is a command rather than a guess — an operator who
+#: set the variable named a root, and a watchdog that ignored it would disagree with every
+#: other process on the box. It is permitted at exactly one site, `policy._env_data_root`,
+#: and the third assertion below is what keeps a second one from appearing beside it.
+_LLOYD_DATA_READ = re.compile(r"""environ\W{0,4}get\(\s*["']LLOYD_DATA["']\s*\)""")
+
+
+def test_no_data_root_is_hand_rolled_inside_the_guardian():
+    """No file under `agent-services/guardian/` hangs the runtime data root off an
+    environment DEFAULT any more — the default is what made the stray move's destination a
+    machine-specific guess (#3208). The root comes from `app/data_root.py` loaded by path,
+    and the one surviving environment read is rule 1 with no default, pinned here to the
+    single line in `policy._env_data_root` that carries it.
+
+    Structural and recursive — every `*.py` in the directory, not the two files this item
+    named — for the same reason `test_no_quarantine_path_is_spelled_inside_the_guardian`
+    scans instead of greps the two it knows: the failure mode was a THIRD spelling appearing
+    somewhere else, and a list of today's offenders cannot see tomorrow's.
+
+    Three controls, because a 0-hit regex over six files is exactly the shape of a check
+    that cannot fail, and this one guards a property whose last four attempts (1525's
+    constant, 2110's destination, and the two literals here) all survived a suite that was
+    sure it held: the banned spellings must be caught (positive), the permitted no-default
+    read must NOT be caught (negative — otherwise the scan would be banning the very
+    fallback the read-only consumers need), and the permitted pattern must actually match
+    something in the tree, so deleting `policy._env_data_root` fails this node instead of
+    quietly leaving it with nothing to permit.
+    """
+    files = sorted(GUARDIAN_DIR.glob("*.py"))
+    assert len(files) >= 6, f"only {[f.name for f in files]} — the directory is not what this scan assumes"
+    hits, reads = [], []
+    for path in files:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            where = f"{path.name}:{lineno}: {line.strip()}"
+            if _LLOYD_DATA_DEFAULT.search(line) or _ENVIRON_INDEX.search(line):
+                hits.append(where)
+            elif _LLOYD_DATA_READ.search(line):
+                reads.append(where)
+    assert hits == [], (
+        "the runtime data root is being resolved by hand again, and a defaulted answer "
+        "carries no marker check and no rule 3 — so the stray move's destination and its "
+        f"unlink are named by an account path, not by the tree: {hits}")
+    assert reads == [s for s in reads if s.startswith("policy.py")] and len(reads) == 1, (
+        f"rule 1 is read at {len(reads)} site(s) in the guardian — {reads} — and every one "
+        "beyond `policy._env_data_root` is a second process allowed to answer for the root "
+        "without consulting the tree that owns it")
+
+    # Positive control: the shapes the scan exists to catch, in lines that are in no file.
+    # Without this the assert above cannot tell an empty directory from a regex that matches
+    # nothing, which is the identical weakness #3154 names in the confinement gate.
+    caught = 0
+    for spelling in ('DATA_ROOT = os.environ.get("LLOYD_DATA", "/home/someone/lloyd-data")',
+                     'DATA_ROOT = __import__("os").environ.get("LLOYD_DATA",'
+                     ' "/home/someone/lloyd-data")',
+                     'DATA_ROOT = _os.environ.get("LLOYD_DATA", "/home/someone/lloyd-data")',
+                     'DATA_ROOT = os.environ["LLOYD_DATA"]'):
+        if _LLOYD_DATA_DEFAULT.search(spelling) or _ENVIRON_INDEX.search(spelling):
+            caught += 1
+    assert caught == 4, (
+        f"the scan caught {caught} of 4 hand-rolled spellings, so the pass above is not "
+        "evidence that the guardian stopped hand-rolling its data root")
+
+    # Negative control: the permitted reading has to sit outside the ban, or the scan would
+    # be prohibiting the fallback clause 5 requires and the pass above would be a lie about
+    # a different file.
+    assert not (_LLOYD_DATA_DEFAULT.search('ROOT = _Os.environ.get("LLOYD_DATA") or None')
+                or _ENVIRON_INDEX.search('ROOT = _Os.environ.get("LLOYD_DATA") or None')), (
+        "the ban catches rule 1 read with no default, so it is no longer a ban on the "
+        "default and the scan above is scoring something else")
+
+
+# ── clause 3 (#3208): the move route refuses an unresolvable root ───────────
+
+def _unmarked_production_layout(tree: Path) -> Path:
+    """Give `tree` an `app/data_root.py` that refuses like an unmarked production root.
+
+    The shim imports the REAL `app/data_root.py` and calls its real pure `resolve_data_root`
+    with one pair of inputs changed: this tree is declared the live checkout, and its
+    production root carries no `.lloyd-data-root`. Every rule that runs is shipped code —
+    the marker check, the comparison, the exception — and the only thing fabricated is which
+    directory counts as production, which nothing can rebind in a test because
+    `app.data_root.live_checkout()` and `production_data_root()` are read from the passwd
+    entry, not from `$HOME`. That is also why the deployed counterpart of this state is
+    checked post-landing on the watchdog's journal rather than here.
+
+    It re-exports `QUARANTINE_DIR_RELATIVE` unchanged, so the refusal under test is the
+    ROOT's and not the layout's: `_quarantine_dir` would have answered fine.
+    """
+    real = ROOT / "app" / "data_root.py"
+    (tree / "app").mkdir(parents=True, exist_ok=True)
+    (tree / "app" / "data_root.py").write_text(
+        f'"""A checkout that IS production, whose data root lost its marker (#3208 fixture).\n'
+        f'\n'
+        f'The rules are `{real}`\'s own; only which tree is production is declared here.\n'
+        f'"""\n'
+        f'import importlib.util as _u\n'
+        f'import pathlib as _P\n'
+        f'\n'
+        f'_spec = _u.spec_from_file_location("real_data_root", {str(real)!r})\n'
+        f'_real = _u.module_from_spec(_spec)\n'
+        f'_spec.loader.exec_module(_real)\n'
+        f'\n'
+        f'DataRootMissing = _real.DataRootMissing\n'
+        f'QUARANTINE_DIR_RELATIVE = _real.QUARANTINE_DIR_RELATIVE\n'
+        f'KG_DB_RELATIVE = _real.KG_DB_RELATIVE\n'
+        f'DATA_ROOT_MARKER = _real.DATA_ROOT_MARKER\n'
+        f'\n'
+        f'\n'
+        f'def resolve_data_root_for_tree(tree=None):\n'
+        f'    home = _P.Path(tree)\n'
+        f'    return _real.resolve_data_root(\n'
+        f'        env=None, lloyd_home=home, is_worktree=False, live_checkout=home,\n'
+        f'        production_root=home.parent / "lloyd-data")\n',
+        encoding="utf-8")
+    return tree
+
+
+def test_the_move_refuses_a_root_that_cannot_be_resolved_and_leaves_the_stray(tmp_path,
+                                                                              monkeypatch):
+    """`quarantine_inert` raises when no data root resolves for the tree it was given, and
+    the stray is still in the tree afterwards — the same refusal shape as the
+    `QUARANTINE_DIR_RELATIVE` nodes above, applied to the root (#3208).
+
+    Two ways to have no answer are pinned, because the accessor fails in two shapes and a
+    move that answered either with the old literal is the bug:
+
+    * no `app/data_root.py` in that tree at all — what the pinned snapshot meets when the
+      checkout it names has been moved or deleted;
+    * a resolver that REFUSES with `DataRootMissing`, which is `app.data_root`'s own answer
+      for a production checkout whose root lost its `.lloyd-data-root` marker — the state
+      `datawatch.judge` exists to alert on, and the state the read-only consumers must keep
+      answering in. `_unmarked_production_layout` puts the tree in it through the shipped
+      pure resolver.
+
+    `LLOYD_DATA` is unset for the calls because the refusal is reached by rules 2 and 3, and
+    the suite exports rule 1 — an inherited value would answer first and make both halves
+    pass on a resolver that was never consulted. It goes through `monkeypatch.delenv` rather
+    than the suite's own `os.environ`, because a test writing `LLOYD_DATA` back into this
+    process is the thing the `exports-lloyd-data-to-process-environ` code rule exists to stop
+    (`tests/test_automod_code_rules.py`): every child of this pytest run would inherit the
+    removed root, while `monkeypatch` puts it back when the node ends.
+    """
+    def _stray_tree(name, layout):
+        tree = tmp_path / name / "lloyd"
+        tree.mkdir(parents=True)
+        layout(tree)
+        stray = tree / "workers.db"
+        stray.write_bytes(b"")
+        os.utime(stray, (OLD, OLD))
+        return tree, stray
+
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+
+    tree, stray = _stray_tree("bare", lambda t: None)
+    try:
+        datawatch.quarantine_inert(str(tree), ["workers.db"], now=NOW)
+        raise AssertionError("a move with no resolvable data root was allowed to run")
+    except RuntimeError as exc:
+        assert "#3208" in str(exc), exc
+        assert "no data root resolves" in str(exc), exc
+        assert "no data-root resolver" in str(exc), (
+            f"the refusal does not name its cause: {exc}")
+    assert stray.is_file(), "the refusal moved the file anyway"
+
+    tree, stray = _stray_tree("unmarked", _unmarked_production_layout)
+    try:
+        datawatch.quarantine_inert(str(tree), ["workers.db"], now=NOW)
+        raise AssertionError("a move whose resolver refused was allowed to run")
+    except RuntimeError as exc:
+        assert "DataRootMissing" in str(exc), (
+            f"a resolver that refused is reported as: {exc}")
+        assert "has no .lloyd-data-root" in str(exc), (
+            f"the refusal lost the resolver's own reason: {exc}")
+    assert stray.is_file(), "DataRootMissing did not stop the unlink"
+    assert not (tmp_path / "quarantine").exists()
+    assert not (tree / ".lloyd-data").exists(), (
+        "a refused move still created a data root beside the tree")
+
+
+def test_a_caller_can_still_name_the_root_it_wants_moved(tmp_path):
+    """The explicit argument stays, and it still means what it says (#3208).
+
+    Dropping it would strand every caller that has already resolved a root itself —
+    `tests/test_guardian_inert_stray.py`'s own nodes above pass one, and it is the shape a
+    future caller holding several trees needs. What changed is only that there is no
+    DEFAULT: an omitted root is resolved, and an unresolvable one is refused. The direct
+    positive half is what keeps clause 3 from being satisfiable by deleting the parameter.
+    """
+    tree = tmp_path / "lloyd"
+    _with_layout_module(tree)
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    (data / "workers.db").write_bytes(b"SQLite format 3\x00" + b"x" * 100)
+    stray = tree / "workers.db"
+    stray.write_bytes(b"")
+    os.utime(stray, (OLD, OLD))
+
+    moved = datawatch.quarantine_inert(str(tree), ["workers.db"], str(data), NOW)
+
+    assert [name for name, _ in moved] == ["workers.db"]
+    assert not stray.exists()
+    assert (data / "quarantine" / "tree-strays" / Path(moved[0][1]).name).is_file()
 
 
 def test_no_quarantine_path_is_spelled_inside_the_guardian():

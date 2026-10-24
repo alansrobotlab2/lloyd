@@ -2098,8 +2098,17 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # `_vault_snapshot_stream` — below `evaluate_liveness` and above `main`, so
     # only `main` moves. Re-check as before: `git diff <base> <head> --
     # agent-services/guardian/guardian.py | grep '^@@'` shows that one hunk only.
-    assert heads[guardian]["main"] == 2829, (
-        f"`main` moved off :2829 ({heads[guardian]['main']}) — if it is gone "
+    # 2829 → 2839 is #3208: two hunks, `@@ -1808,11 +1808,21 @@` (+10 — the comment block
+    # explaining that the stray move's destination is now resolved for the tree that was
+    # scanned instead of passed in as `policy.DATA_ROOT`, plus the refusal branch those
+    # words describe) and `@@ -1821,7 +1831,7 @@` (+0, the same alert body re-worded to name
+    # the resolved root), both inside `_runtime_data_incident`. Below `evaluate_liveness` and
+    # above `main`, so again only `main` moves, by exactly +10. Same re-check: `git diff
+    # <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` shows those two
+    # hunks and nothing else, and `grep -n '^    def evaluate_liveness\|^def main'
+    # agent-services/guardian/guardian.py` still prints 869 with 2839 below it.
+    assert heads[guardian]["main"] == 2839, (
+        f"`main` moved off :2839 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 869, (
         f"`evaluate_liveness` moved off :869 "

@@ -48,7 +48,21 @@ from pathlib import Path
 import policy as P
 import vaultwatch as V
 
-DATA_ROOT = os.environ.get("LLOYD_DATA", "/home/alansrobotlab/lloyd-data")
+#: Where this process's READ-ONLY data lives: `DataWatch`'s tripwire root (`:643`),
+#: `snapshot_gate` (`:755`) and the shadow check's scan root (`:490`). One resolution with
+#: `policy.DATA_ROOT` (#3208) — this line used to hand-roll the same answer a second time,
+#: reading the environment over an account-named absolute default, and two independent
+#: copies of one resolution are how a single root move ends up with two answers (#1525's
+#: shape, one constant later). It is a reader's root and it always answers, including in
+#: the state the tripwire below exists to alert on: a production root that lost its marker,
+#: where the resolver refuses by design and a raise at import would take the watchdog with
+#: it. The spell-and-scan node in `tests/test_guardian_inert_stray.py` is what keeps a
+#: hand-rolled spelling from coming back here, prose included.
+#:
+#: The stray MOVE does not use it. `resolve_move_root` is the write route, and it answers
+#: for the tree the residue was found in — refusing rather than falling back, because a
+#: move creates a file under the root and unlinks one from the tree.
+DATA_ROOT = P.DATA_ROOT
 TREE = os.environ.get("LLOYD_TREE", "/home/alansrobotlab/lloyd")
 ROOT_MARKER = ".lloyd-data-root"
 
@@ -314,6 +328,24 @@ def stray_in_tree(tree: str = TREE) -> list[str]:
 #: (`sqlite3` creates the file on connect and writes the header on first use), so it
 #: is left for the next check rather than moved from under a live handle.
 INERT_MIN_AGE_SECONDS = 600.0
+def resolve_move_root(tree: str):
+    """`(root, source, why)` for inert residue found in `tree` — the root it belongs to.
+
+    The same three rules `app.paths` uses, read out of that tree's `app/data_root.py` by
+    path, which is the file `policy.quarantine_dir` already reads for the destination's
+    last segments. `LLOYD_DATA` wins; else the marked production root; else
+    `<tree>/.lloyd-data` — so a sandbox, a round's worktree or a gate's prefetch checkout
+    that finds residue in its own tree moves it into its OWN root instead of into the live
+    one, which is what this root being an account-named literal used to make impossible
+    (#3208).
+
+    None is an answer, not a crash: no resolver in that tree, or a resolver that refused
+    (`DataRootMissing` on an unmarked production root). The caller refuses the move; the
+    stray stays put and keeps alerting.
+    """
+    return P.data_root_for_tree(tree, repo=tree)
+
+
 #: Where inert residue goes, under the data root — read from the repo's data-layout
 #: module, never spelled here. A move, so the hourly snapshots carry it and nothing is
 #: ever deleted on this check's say-so.
@@ -325,6 +357,12 @@ INERT_MIN_AGE_SECONDS = 600.0
 #: read the layout, and this module treats that as a REFUSAL to move rather than a
 #: default: relocating a file on an unverifiable path is the un-witnessed action the item
 #: is about, so `_quarantine_dir` below raises and the stray keeps alerting, loudly.
+#:
+#: #3208 applies that same rule one level up, to the ROOT. `_quarantine_dir` used to
+#: default `data_root` to this module's `DATA_ROOT`, and a read-only resolution always
+#: answers — including from its fallback literal — which is exactly the guess a move may
+#: not make. There is no default here: the root comes from `resolve_move_root` above, and
+#: a caller with no answer gets a refusal.
 def _quarantine_dir(tree: str, data_root: str) -> str:
     dest = P.quarantine_dir(repo=tree, data_root=data_root)
     if dest is None:
@@ -382,7 +420,7 @@ def inert_residue(tree: str, names, data_root: str = DATA_ROOT,
     return out
 
 
-def quarantine_inert(tree: str, names, data_root: str = DATA_ROOT,
+def quarantine_inert(tree: str, names, data_root: "str | None" = None,
                      now: float | None = None) -> list[tuple[str, str]]:
     """Move each `inert_residue` file out of the tree. Returns `(name, destination)`
     for the ones that moved; a file that could not be moved is simply not in the list
@@ -393,8 +431,24 @@ def quarantine_inert(tree: str, names, data_root: str = DATA_ROOT,
     is EXDEV. The source is re-read immediately before the unlink and must be the
     same inode, still empty — a writer that arrived between the two reads keeps its
     file. One JSONL line per move records what the file was, so the quarantine
-    directory is its own audit and not just a pile of empty files."""
+    directory is its own audit and not just a pile of empty files.
+
+    `data_root` is the root the residue belongs to and there is deliberately no default
+    for it (#3208). This function creates a file under that root, writes an audit line
+    beside it, and `os.unlink`s the tree's copy — so the answer cannot come from a
+    read-only fallback, which always answers even when the resolver refused. Left unset,
+    it is resolved for `tree` by `resolve_move_root`, and an unresolvable root raises: a
+    refusal is the same shape as `_quarantine_dir`'s missing-layout refusal, the file
+    stays in the tree, and the hourly check keeps alerting on it.
+    """
     now = time.time() if now is None else now
+    if data_root is None:
+        data_root, _source, why = resolve_move_root(tree)
+        if data_root is None:
+            raise RuntimeError(
+                f"refusing to move inert residue out of {tree}: no data root resolves "
+                f"for that tree ({why}) and the move would have to guess one — the file "
+                "stays put and keeps alerting (#3208)")
     moved: list[tuple[str, str]] = []
     # Resolved lazily and deliberately: with nothing to move there is nothing to
     # relocate, and a tick that finds the tree clean must not raise because this process
