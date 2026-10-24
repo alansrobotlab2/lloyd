@@ -15,7 +15,16 @@
 #
 # ---------------------------------------------------------------------------
 # THE SOAK, AS MEASURED ON 2026-10-19 (#2809 wrote the record #2574 left owed; #2992
-# re-ran the block below and raised the figures it had aged out of — see AGING, last).
+# re-ran the block below and raised the figures it had aged out of).
+#
+# WHO MAY CHANGE THE FIGURES IN THIS BLOCK. The owed-check pass alone decides that this
+# soak record has gone stale, and it alone raises the figures, by publishing the fresh
+# measurement in its decision. A round changes these comment lines only inside an
+# organic edit it is already making for another reason. That is #2809's ruling, which
+# #2992's owed-check pass restated on 2026-10-24 naming #3263 as the organic edit this
+# sentence sits inside; `tests/test_automod_code_rules.py` carries the same two
+# sentences above `RULES_LANDED_AT`, and one node there requires both files to hold
+# them, so the ruling cannot be refreshed in one place and left stale in the other.
 #
 #   0 flags. Zero hits, and zero sites rescued by an allow list, over 384 `gate`
 #   rows from 249 distinct rounds, every one of them `status: evaluated` — not a
@@ -32,20 +41,28 @@
 # gated against #2810's widened scope — read-only from that ledger. Every figure in this
 # block has a command in that block; a figure with no command is a caption.
 #
+# THE WINDOW IS BOUNDED AT BOTH ENDS. `UNTIL` defaults to the span end recorded above,
+# and every command below filters on it as well as on `SINCE`, so re-running the block
+# replays THIS record instead of counting whatever the ledger has grown since. The zero
+# is therefore a statement about the window the record describes, not about the ledger
+# today: rows past the bound exist, and measuring them is the owed-check pass's job under
+# the ruling above, not a figure to be re-quoted from a run of this block.
+#
 # RECOMPUTE-BEGIN
 # L="${CODE_RULES_LEDGER:-$HOME/.local/state/lloyd-automod/promotions.jsonl}"
 # SINCE="${CODE_RULES_SOAK_SINCE:-2026-10-13T03:07:36Z}"   # 4592296e's commit time, UTC
-# jq -s --arg s "$SINCE" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s)]
+# UNTIL="${CODE_RULES_SOAK_UNTIL:-2026-10-19T03:14:48Z}"   # the Date span end above, UTC
+# jq -s --arg s "$SINCE" --arg u "$UNTIL" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s and .created_at<=$u)]
 #   | "rows \(length)  flags \([.[].code_rules | (.counts|add // 0)] | add // 0)  span \([.[].created_at]|min) .. \([.[].created_at]|max)"' "$L"
-# jq -s --arg s "$SINCE" '
-#   [.[] | select(.event=="gate" and .code_rules and .created_at>=$s)] as $rs
+# jq -s --arg s "$SINCE" --arg u "$UNTIL" '
+#   [.[] | select(.event=="gate" and .code_rules and .created_at>=$s and .created_at<=$u)] as $rs
 #   | [$rs[] | .code_rules.totals.coverage | to_entries[] | [.key, .value.covered]]
 #   | group_by(.[0]) | .[]
 #   | "\(.[0][0]): \(.|map(select(.[1]>0))|length)/\($rs|length) rows saw >=1 file, \(.|map(.[1])|add) file-reads"' "$L"
 # WIDENED="${CODE_RULES_SCOPE_WIDENED:-2026-10-16T09:03:23Z}"   # 1168247e's commit time, UTC
-# jq -s --arg s "$SINCE" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s)]
+# jq -s --arg s "$SINCE" --arg u "$UNTIL" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s and .created_at<=$u)]
 #   | "rows \(length)  distinct_rounds \([.[].round_id]|unique|length)  unevaluated \([.[]|select(.code_rules.status!="evaluated")]|length)"' "$L"
-# jq -s --arg w "$WIDENED" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$w)]
+# jq -s --arg w "$WIDENED" --arg u "$UNTIL" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$w and .created_at<=$u)]
 #   | "rows at or after the #2810 widening: \(length)"' "$L"
 # RECOMPUTE-END
 #
@@ -103,7 +120,10 @@
 #       and read beside a per-rule coverage table like the one above; AND
 #   (b) at least 1 confirmed real catch in a live diff — a hit that a human agreed was
 #       a genuine defect. A soak of 20 landings with zero catches is #679's outcome
-#       ("not the defect class here"), not a licence to flip; and
+#       ("not the defect class here"), not a licence to flip. A label this file's own
+#       runner writes onto a ledger row is the instrument counting itself, not that
+#       agreement, and a round which was aborted before it landed is the furthest
+#       possible thing from a human agreeing on its diff; and
 #   (c) the round that flips a rule adds the allow list that rule will need in the
 #       SAME diff, because a blocking rule whose known exceptions land later refuses
 #       every round in between, including the round sent to fix them.

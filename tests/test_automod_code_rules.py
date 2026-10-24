@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -757,13 +758,24 @@ def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sit
 #
 # What is deliberately NOT asserted anywhere below is the VALUE of a live soak figure.
 # The gate-row and landing counts in the header were true when written and age by the
-# day (~51 gate rows a day as of 2026-10-19), and #2809 recorded the re-measurement as
-# the owed-check pass's job; #2992 is the first ROUND to raise them, under an ownership
-# ruling that item's own owed clause says a person still has to settle. Neither route
-# makes a node read the ledger: #2992's nodes pin FLOORS (see below), because a node
-# that demanded today's flags still be 0 would enforce this instrument through the test
-# rung — and a rule that fails a round is precisely the flip #679 ruled has to be a
-# human decision, so the suite must not make it.
+# day (~51 gate rows a day as of 2026-10-19). WHO OWNS RAISING THEM IS SETTLED, and the
+# two sentences of it below are quoted verbatim from the header's soak block, where
+# #3263 wrote them into the rule file:
+#
+#   The owed-check pass alone decides that this soak record has gone stale, and it
+#   alone raises the figures, by publishing the fresh measurement in its decision.
+#   A round changes these comment lines only inside an organic edit it is already
+#   making for another reason.
+#
+# `test_the_ownership_ruling_is_the_same_two_sentences_in_both_files` reads this file's
+# own source and the rule file's header and requires the pair in BOTH, so the ruling
+# cannot move in one place and be contradicted in the other — which is exactly the state
+# #2992 left behind, this block ending on an open question its own owed-check pass had
+# already answered. Neither route makes a node read the ledger: #2992's
+# nodes pin FLOORS (see below), because a node that demanded today's flags still be 0
+# would enforce this instrument through the test rung — and a rule that fails a round is
+# precisely the flip #679 ruled has to be a human decision, so the suite must not make
+# it.
 # ---------------------------------------------------------------------------
 
 #: The landing that put these rules on the gate, as the header cites it. Clause 1's
@@ -829,10 +841,16 @@ def _recorded_figure(header: str, key: str) -> int:
 
 
 def _fixture_row(created_at: str, counts: dict[str, int],
-                 covered: dict[str, int]) -> str:
-    """A `gate` ledger row shaped like the ones `rung_code_rules` writes."""
+                 covered: dict[str, int],
+                 round_id: str = "SM_FIXTURE") -> str:
+    """A `gate` ledger row shaped like the ones `rung_code_rules` writes.
+
+    `round_id` defaults to one round because the nodes that planted this row before #3263
+    ask nothing of it; the window node needs a spread of them, because the arm that counts
+    distinct rounds is one of the four the bound has to cover.
+    """
     return json.dumps({
-        "event": "gate", "rung": "code_rules", "round_id": "SM_FIXTURE",
+        "event": "gate", "rung": "code_rules", "round_id": round_id,
         "created_at": created_at,
         "code_rules": {
             "status": "evaluated", "counts": counts, "labels": [],
@@ -841,16 +859,26 @@ def _fixture_row(created_at: str, counts: dict[str, int],
                                     for rid, n in covered.items()}}}})
 
 
-def _run_recompute_block(tmp_path: Path, ledger: Path) -> str:
-    """Extract the header's RECOMPUTE block and run it against `ledger`."""
+def _recompute_body() -> str:
+    """The header's RECOMPUTE block with its comment markers stripped: what bash runs.
+
+    Cut exactly the way `_run_recompute_block` cuts it, so a structural claim about the
+    block — that it binds a variable, that a command filters on it — is a claim about the
+    script the figures come out of, not about a commented copy of it.
+    """
     lines = _header_lines()
     starts = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("# RECOMPUTE-BEGIN")]
     ends = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("# RECOMPUTE-END")]
     assert starts and ends and ends[0] > starts[0], (
         "the soak record names no RECOMPUTE-BEGIN/END block, so its figures cannot be "
         "recomputed by a reader holding only this file")
-    body = "\n".join(ln[1:] if ln.startswith("#") else ln
+    return "\n".join(ln[1:] if ln.startswith("#") else ln
                      for ln in lines[starts[0] + 1:ends[0]])
+
+
+def _run_recompute_block(tmp_path: Path, ledger: Path) -> str:
+    """Extract the header's RECOMPUTE block and run it against `ledger`."""
+    body = _recompute_body()
     script = tmp_path / "recompute.sh"
     script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n",
                       encoding="utf-8")
@@ -1442,3 +1470,261 @@ def test_the_rule_surface_below_the_comment_block_is_the_one_the_anchor_shipped(
         f"the scopes moved: {[tuple(r.scope) for r in rules]} vs "
         f"{RULE_SCOPES_AT_RECORDING}. #2810's widened scope is pinned by name in its own "
         "three nodes; nothing in a comment edit licenses changing one")
+
+
+# ---------------------------------------------------------------------------
+# #3263 — the ownership ruling written into the tree, a soak window that replays, no
+# dangling section pointer, and the four allow entries the file has always carried.
+#
+# Each node answers one clause with a mechanism that is not the prose it checks: this
+# file's own bytes on disk for the ruling, `bash`+`jq` over a synthetic ledger for the
+# window, the loader for the allow list, and a positive control for the pointer resolver
+# so an assertion of absence cannot pass by never firing.
+# ---------------------------------------------------------------------------
+
+#: The two sentences of the settled figure-owner ruling, verbatim, which BOTH the rule
+#: file's soak header and this file's comment block above `RULES_LANDED_AT` must carry.
+#: Quoted rather than paraphrased: two paraphrases of one ruling drift, and the drift is
+#: the bug — the header said the owed-check pass owns the refresh while this block said a
+#: person had to settle it.
+OWNERSHIP_RULING = (
+    "The owed-check pass alone decides that this soak record has gone stale, and it "
+    "alone raises the figures, by publishing the fresh measurement in its decision.",
+    "A round changes these comment lines only inside an organic edit it is already "
+    "making for another reason.",
+)
+
+#: The item both files name as the organic edit that carried the ruling in. An organic
+#: edit is named, never implied, or the next round claims the licence by analogy.
+OWNERSHIP_RULING_ITEM = "#3263"
+
+#: Every allow entry the five rules ship, as #2810 left them. A comment-only edit adds
+#: none: an exemption for a shape the matcher cannot even see is a dead entry, and the
+#: rule it would blank is the one whose whole point is that nobody exports the data root.
+ALLOW_ENTRIES_AT_RECORDING = [
+    ("broad-except-swallow-same-line", "app/sessions_io.py"),
+    ("exports-lloyd-data-to-process-environ", "tests/conftest.py"),
+    ("exports-lloyd-data-to-process-environ", "tests/test_youtube_artifact_phase.py"),
+    ("opens-kg-store-outside-kg-store", "tests/test_data_home.py"),
+]
+
+
+def _prose(lines: list[str]) -> str:
+    """Comment lines as one string, with bare `#` lines collapsed out of it.
+
+    `_header_prose` keeps a space for every comment line including the blank ones, so a
+    sentence that wraps near one comes out double-spaced there; text that has to match in
+    two files is compared in a form where one paragraph is one run of single spaces.
+    """
+    return " ".join(t for t in (ln.lstrip("#").strip() for ln in lines) if t)
+
+
+def _own_comment_block_lines() -> list[str]:
+    """This file's own comment block above `RULES_LANDED_AT`, read off disk.
+
+    Read from disk and not restated, because the clause is about what the shipped file
+    says: a node that paraphrased its own module would keep passing after the comment it
+    certifies had been edited away.
+    """
+    lines = Path(__file__).resolve().read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.startswith("RULES_LANDED_AT = ")]
+    assert hits, "RULES_LANDED_AT is no longer a module-level constant in this file"
+    block: list[str] = []
+    for ln in reversed(lines[:hits[0]]):
+        if ln.lstrip().startswith("#"):
+            block.append(ln)
+        elif ln.strip():
+            break
+    assert block, "nothing comments the RULES_LANDED_AT anchor any more"
+    return list(reversed(block))
+
+
+def _dangling_section_refs(text: str) -> list[str]:
+    """Every `see <SECTION>` in `text` whose section is not defined in that same text.
+
+    A pointer inside a file has to land in that file: the reader holding one rule file has
+    no reason to know another subsystem spells the same word, and a section nobody wrote
+    is worse than no pointer, because it reads as a checked reference.
+    """
+    return [name for name in re.findall(r"\bsee ([A-Z][A-Z0-9_]{2,})\b", text)
+            if not re.search(rf"(?m)^\s*#*\s*{name}\b", text)]
+
+
+def test_the_ownership_ruling_is_the_same_two_sentences_in_both_files():
+    """Clauses 1 and 2: one ruling, quoted identically in the rule file and here.
+
+    Three surfaces. (1) The rule file's soak header carries both sentences and names the
+    item that carried them in, so the answer to "whose figures are these?" lives in the
+    file the figures live in. (2) This file's comment block carries the same two sentences
+    quoted, not restated. (3) The open question is gone from this block, so the block
+    cannot be read as licensing a round to raise a figure on its own initiative.
+    """
+    header = _prose(_header_lines())
+    own = _prose(_own_comment_block_lines())
+    for sentence in OWNERSHIP_RULING:
+        assert sentence in header, (
+            f"the rule file's soak header no longer carries, verbatim: {sentence!r} — "
+            "with the ownership question open again, every round has to guess whether it "
+            "may touch these lines")
+        assert sentence in own, (
+            f"the comment block above RULES_LANDED_AT no longer quotes: {sentence!r} — "
+            "two files disagreeing about who owns the figures is the state #3263 was "
+            "filed to close")
+    assert OWNERSHIP_RULING_ITEM in header, (
+        f"the header states the ruling without naming {OWNERSHIP_RULING_ITEM} as the "
+        "organic edit it came in on, so the exception has no precedent to be read "
+        "against")
+    assert OWNERSHIP_RULING_ITEM in own, (
+        "this file's block names no item, so the ruling quoted here cannot be checked "
+        "against the one in the rule file")
+    assert "still has to settle" not in own, (
+        "the comment block above RULES_LANDED_AT still asks a person to settle an "
+        "ownership question its own owed-check pass had already ruled")
+
+
+def test_the_recompute_block_bounds_its_window_on_every_command(tmp_path):
+    """Clause 3: the block replays the recorded window, on all four of its arms.
+
+    The header's figures describe rows between `SINCE` and `UNTIL`. Unbound at the top the
+    same command counts rows the record never measured, so a reader who "verifies the
+    soak" gets a different soak and a zero that belongs to neither. Planted here: exactly
+    the recorded number of rows spread across the recorded span, over the recorded number
+    of distinct rounds, every one `evaluated` and flag-free — plus one flagged `gate` row
+    past the bound, from a round the record never counted. If the bound is not honoured,
+    four figures move at once (the rows, the flags, the denominator on every coverage line,
+    the widened-scope cut), which is why each is asserted on its own.
+    """
+    header = _prose(_header_lines())
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    m = re.search(r"(\d+) `?gate`? rows from (\d+) distinct rounds", header)
+    assert m, "the header's row count and distinct-round count are no longer one phrase"
+    rounds = int(m.group(2))
+    assert rows >= rounds, (
+        f"the record claims {rows} rows across {rounds} distinct rounds — more rounds "
+        "than rows is not a measurement this fixture can plant")
+    span = re.search(r"Date span (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \.\. "
+                     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", header)
+    assert span, "the header names no `Date span`, so the window has no recorded end"
+    start, stop = span.group(1), span.group(2)
+
+    body = _recompute_body()
+    bound = re.search(r'UNTIL="\$\{CODE_RULES_SOAK_UNTIL:-'
+                      r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\}"', body)
+    assert bound, (
+        "the RECOMPUTE block binds no UNTIL default, so re-running it counts rows the "
+        "record never measured and prints a soak that never happened")
+    assert bound.group(1) == stop, (
+        f"UNTIL defaults to {bound.group(1)} while the recorded span ends {stop}: the "
+        "bound has to be the end of the window the figures above it describe, or the "
+        "block replays a different soak than the one it sits under")
+
+    cmds: list[str] = []
+    cur: str | None = None
+    for ln in body.splitlines():
+        if ln.lstrip().startswith("jq "):
+            if cur is not None:
+                cmds.append(cur)
+            cur = ln
+        elif cur is not None:
+            cur += "\n" + ln
+    if cur is not None:
+        cmds.append(cur)
+    assert len(cmds) == 4, (
+        f"the block runs {len(cmds)} jq commands, not the four the record's figures come "
+        "from — a fifth arm is an unbound figure nobody has to filter")
+    for i, cmd in enumerate(cmds, 1):
+        assert '--arg u "$UNTIL"' in cmd, (
+            f"command {i} is never given UNTIL, so it cannot honour the bound")
+        assert ".created_at<=$u" in cmd, (
+            f"command {i} does not filter .created_at<=$u, so its figure counts rows past "
+            "the recorded window while the figures above it do not")
+
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    span_start = datetime.strptime(start, fmt).replace(tzinfo=timezone.utc)
+    span_stop = datetime.strptime(stop, fmt).replace(tzinfo=timezone.utc)
+    whole = int((span_stop - span_start).total_seconds())
+
+    def stamp(i: int) -> str:
+        """One in-window row time, with the recorded endpoints hit exactly."""
+        if i == 0:
+            return start
+        if i == rows - 1:
+            return stop
+        offset = timedelta(seconds=whole * i // (rows - 1))
+        return (span_start + offset).strftime(fmt)
+
+    every_rule = {rid: 1 for rid in SHIPPED_RULE_IDS}
+    planted = [stamp(i) for i in range(rows)]
+    rows_jsonl = [_fixture_row(t, {}, dict(every_rule), round_id=f"SM_R{i % rounds:04d}")
+                  for i, t in enumerate(planted)]
+    rows_jsonl.append(_fixture_row(
+        "2026-10-24T18:46:41Z", {"opens-kg-store-outside-kg-store": 1}, dict(every_rule),
+        round_id="SM_PAST_THE_BOUND"))
+    ledger = tmp_path / "window.jsonl"
+    ledger.write_text("\n".join(rows_jsonl) + "\n", encoding="utf-8")
+
+    out = _run_recompute_block(tmp_path, ledger)
+    head = out.splitlines()[0]
+    assert f"rows {rows}  flags 0  span {start} .. {stop}" in head, (
+        f"over a ledger of the recorded window plus one row past the bound, the block's "
+        f"headline line is {head!r} instead of the recorded {rows} rows, zero flags and "
+        "the recorded span — the later row is being counted")
+    for rid in SHIPPED_RULE_IDS:
+        assert f"{rid}: {rows}/{rows} rows saw >=1 file" in out, (
+            f"{rid}'s coverage line does not divide by the window's {rows} rows, so the "
+            "table's denominator and the headline figure are two different soaks")
+    assert f"rows {rows}  distinct_rounds {rounds}  unevaluated 0" in out, (
+        f"the distinct-round arm does not report the recorded {rows} rows over {rounds} "
+        "rounds with nothing unevaluated:\n"
+        + "\n".join(ln for ln in out.splitlines() if "distinct_rounds" in ln))
+    wide = sum(1 for t in planted if t >= SCOPE_WIDENED_AT)
+    assert f"rows at or after the #2810 widening: {wide}" in out, (
+        f"the widened-scope arm should count the {wide} in-window rows at or after "
+        f"{SCOPE_WIDENED_AT}; anything it finds after the bound makes the sub-figure "
+        "unrecomputable:\n"
+        + "\n".join(ln for ln in out.splitlines() if "widening" in ln))
+
+
+def test_the_header_promises_no_section_that_the_rule_file_does_not_have():
+    """Clause 4: a `see <SECTION>` has to land in the file it is written in.
+
+    `see AGING, last` promised a section its own round never wrote: `AGING` occurred once
+    in the rule file, in the pointer itself, and every other use of that word in the repo
+    names a queue-priority constant in `workers/queue.py` (re-named in
+    `architecture/workers.md`) — a reader who follows the sentence arrives in another
+    subsystem. The positive control below is what keeps this a test and not an echo of a
+    grep: the resolver must still call the removed pointer dangling when it is handed the
+    sentence that carried it.
+    """
+    text = RULES_PATH.read_text(encoding="utf-8")
+    assert text.count("AGING") == 0 or re.search(r"(?m)^\s*#\s*AGING\b", text), (
+        f"`AGING` appears {text.count('AGING')} time(s) in the rule file with no `AGING` "
+        "section defining it, so the pointer sends the reader somewhere that does not "
+        "exist")
+    assert _dangling_section_refs("the figures it had aged out of — see AGING, last") \
+        == ["AGING"], "the resolver does not catch the pointer this clause removed"
+    dangling = _dangling_section_refs(text)
+    assert dangling == [], (
+        f"the rule file points at sections it does not have: {dangling}")
+
+
+def test_the_comment_only_edit_carries_no_new_allow_entry():
+    """Clause 5's unpinned half: the exemption list is the four entries it always was.
+
+    The rest of clause 5 — non-comment bytes, the five ids, matchers and scopes, the
+    pinned strings, one published flip bound — is held by the anchor node, the precedent
+    node and the bound node above. Nothing pinned the `allow` list, which is the part of a
+    comment-only change that moves a matcher without touching code: an entry for a file
+    the rule cannot report is dead weight that blanks that rule over that file, and
+    `load_rules` checks only that an entry carries a why, never that the exception is
+    needed by a hit.
+    """
+    rules = CR.load_rules(RULES_PATH)
+    entries = sorted((r.id, a.path) for r in rules for a in r.allow)
+    assert entries == ALLOW_ENTRIES_AT_RECORDING, (
+        f"the allow list is {entries}, not the "
+        f"{len(ALLOW_ENTRIES_AT_RECORDING)} entries of ALLOW_ENTRIES_AT_RECORDING: a "
+        "soak record has no licence to exempt a file. An exception needs a hit the "
+        "matcher reports, which is measurable, not a shape a reader believes is harmless")
+    missing_why = [(r.id, a.path) for r in rules for a in r.allow if not a.why.strip()]
+    assert missing_why == [], f"allow entries with no why: {missing_why}"
