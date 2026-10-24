@@ -160,9 +160,9 @@ ARM_A, ARM_RETRY, ARM_B = "A", "A-retry", "B"
 #: 40-turn cap — so the ceiling is sized against the recorded worst case, and if a
 #: 60-turn dispatch costs more than 199,283 the next live pass says so with a ceiling
 #: row instead of this comment having guessed. `run --ceiling` is the per-pass knob,
-#: and note that the live launcher `~/lloyd-data/eval/2258/launch-pass.sh` passes
-#: `--ceiling 200000` explicitly: raising this default does not by itself raise the
-#: next real pass.
+#: and the live launcher `~/lloyd-data/eval/2258/launch-pass.sh` passes `--ceiling`
+#: explicitly, so raising this default does not by itself raise the next real pass.
+#: Its figure is read from that file, never quoted here: `grep -n -- '--ceiling'`.
 DEFAULT_TOKEN_CEILING = 600_000
 
 #: Per-theory dispatch turn budget — the other half of the ONE arithmetic property

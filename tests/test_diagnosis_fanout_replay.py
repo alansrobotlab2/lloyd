@@ -1598,6 +1598,48 @@ def test_both_budget_settings_cite_both_measured_anchors():
             "are the only reason the value is what it is")
 
 
+def test_the_ceiling_block_names_the_launcher_but_never_quotes_its_figure():
+    """#3242: the text that sets the ceiling may not hold the live launcher's figure.
+
+    The block used to read `the live launcher ... passes `--ceiling 200000` explicitly`.
+    True the day `38b5ad15` (2026-10-18T15:50:15-07:00) wrote it, false ever since,
+    because what it quotes is runtime data under `~/lloyd-data/` — outside this repo's
+    diff, outside the vault, edited by nobody who is reading this comment. Its twin
+    rotted the same way: the launcher's own header cites the constant at
+    `eval/diagnosis_fanout_replay.py:145`, which is where `DEFAULT_TOKEN_CEILING` sat at
+    `46c8cc95` (`145:DEFAULT_TOKEN_CEILING = 200_000`) and is `:166` now. So the block
+    keeps the mechanism, which cannot rot — an explicit `--ceiling` outranks the argparse
+    default at `:1835`, so a raised default never reaches a pass by itself — and sends the
+    reader to the command that answers the figure instead. That is also the only shape of
+    test surviving the owed launcher edit: a node asserting `200000` is in the text goes
+    red the moment a human raises the launcher to 600000, and one asserting `600000` is
+    in it is false until they do.
+
+    The 200,000/600,000 pair stays in the block ABOVE that sentence, where it is this
+    constant's own history ("600,000, up from 200,000") and not a quote of another file,
+    so the scan below is scoped to lines naming `--ceiling`, and runs over the whole
+    module because `launch-pass.sh` is mentioned twice in it.
+    """
+    src = (REPO / "eval" / "diagnosis_fanout_replay.py").read_text(encoding="utf-8")
+    block = _comment_block_above("DEFAULT_TOKEN_CEILING = ")
+
+    # Positive control first: an extraction that found nothing would satisfy every
+    # absence below, so pin that this IS the ceiling's own block, and that the reader
+    # still learns which file outranks the default and with what flag.
+    assert "600,000" in block, "the extraction is not the ceiling's block"
+    assert "launch-pass.sh" in block, (
+        "the block no longer names the live launcher, so its reader never learns that "
+        "raising this default does not by itself raise the next real pass")
+    assert "--ceiling" in block, "the block no longer names the flag that outranks it"
+
+    offenders = [ln.strip() for ln in src.splitlines()
+                 if "--ceiling" in ln and re.search(r"\d{3}[,_]?\d{3}", ln)]
+    assert not offenders, (
+        f"the module quotes a launcher ceiling figure ({offenders}) — that number is "
+        "owned by ~/lloyd-data/eval/2258/launch-pass.sh, which no diff here can update, "
+        "so it is a claim nothing will re-run (#3242)")
+
+
 def test_the_generation_budget_cites_both_measured_arm_b_runs():
     """Clauses 1-4 of #3170: arm B's generation step is cited to its own measurements.
 
