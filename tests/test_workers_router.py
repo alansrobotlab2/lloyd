@@ -2551,3 +2551,67 @@ def test_a_failing_aggregate_read_publishes_no_numbers(monkeypatch, tmp_path):
     assert row["judgement"] is None, (
         "a failed read was rendered as an aggregate, so the page now claims "
         "something about a week it could not read: " + str(row.get("judgement")))
+
+
+# ── #3211: /api/workers/health carries the silent count ─────────────────────
+
+def test_the_health_endpoint_serves_the_silent_count_for_a_source(monkeypatch, tmp_path):
+    """Clause 4: the figure crosses the HTTP boundary unchanged.
+
+    The process boundary this change crosses is the one that matters: the rollup's
+    dict is put into the response by `app/routers/workers.py` verbatim as
+    `health`, so the endpoint's key set IS the rollup's key set and there is no
+    router-side place to add a field. A test that stopped at `run_rollup_by_source`
+    would therefore be testing half the path — the Background page reads
+    `.sources[].health['scheduled-task'].silent` out of the fetched JSON, and the
+    thing that could go wrong between the two is the router.
+
+    So: one silent autonomy fire and one ordinary one on a real `WorkQueue` (not
+    the in-memory `_WmQueue` above, which fabricates a rollup and would test the
+    router's formatting rather than the column), then the HTTP response.
+
+    `skipped` is asserted at 0 beside `silent` at 1 because that pairing is the
+    item's whole premise: on the live store `scheduled-task` has 1,063 runs, 0
+    skipped and 1 silent, which is why the page reading "0 skipped" has been
+    reporting "autonomy never fires empty" for the source that fires most.
+    """
+    from datetime import datetime, timezone
+
+    from workers.queue import WorkQueue, new_run_id
+
+    queue = WorkQueue(tmp_path / "workers.db")
+    now = datetime.now(timezone.utc).isoformat()
+    for meta in ('{"silent": true}', "{}"):
+        queue.record_run(run_id=new_run_id("scheduled-task"), queue_id=None,
+                         source="scheduled-task", status="success",
+                         started_at="2000-01-01T00:00:00+00:00", completed_at=now,
+                         duration_seconds=60.0, meta_json=meta)
+    # A second source that never goes silent, so the additive shape is visible in
+    # the payload and not inferred: 0 is a reading, a missing key is not.
+    queue.record_run(run_id=new_run_id("autotriage"), queue_id=None,
+                     source="autotriage", status="success",
+                     started_at="2000-01-01T00:00:00+00:00", completed_at=now,
+                     duration_seconds=30.0, meta_json="")
+
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    monkeypatch.setattr(
+        router, "CONFIG",
+        {"workers": {"sources": {"scheduled-task": {"enabled": True,
+                                                    "interval_seconds": 900},
+                                 "autotriage": {"enabled": True,
+                                                "interval_seconds": 900}}}},
+        raising=False)
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    rows = {s["name"]: s for s in body["sources"]}
+    health = rows["scheduled-task"]["health"]
+
+    assert health is not None, "the router answered null for a parseable store"
+    assert health["silent"] == 1, health
+    assert health["skipped"] == 0, (
+        f"the endpoint is supposed to show an autonomy no-op WITHOUT it reading as "
+        f"a pool skip: {health}")
+    assert health["total"] == 2 and health["ok"] == 2, health
+    assert isinstance(health["silent"], int), type(health["silent"])
+    assert rows["autotriage"]["health"]["silent"] == 0, rows["autotriage"]["health"]

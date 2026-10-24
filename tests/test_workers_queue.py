@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1955,3 +1956,148 @@ def test_claims_by_source_counts_claims_inside_the_window_and_skips_one_source(q
     assert after == [("autotriage", 3), ("board-steward", 1)], (
         f"two rows finished and the counts of claims moved: a claim is a fact that "
         f"happened, not a state a row is in now — {after}")
+
+
+# ── #3211: the rollup counts a silent autonomy fire ─────────────────────────
+
+def _seed_meta_run(q, source: str, status: str, meta_json: str,
+                   duration: float = 60.0) -> None:
+    """One completed run in the current window with `meta_json` as its stored meta.
+
+    `_seed_run` above seeds `response_json`, which is where a round's own matrix
+    verdict lives; an autonomy no-op lives in the OTHER blob. `workers/pool.py`
+    writes `runs.meta_json` from the adapter's `out["meta"]`, and for
+    `scheduled-task` that is `app/autonomy.py`'s meta dict carrying `silent` —
+    the same value `run_is_silent` returned to the Discord gate. `duration` is a
+    parameter because gpu_hours has to be comparable between two seedings of the
+    same shape.
+    """
+    q.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                 status=status, started_at="2000-01-01T00:00:00+00:00",
+                 completed_at=datetime.now(timezone.utc).isoformat(),
+                 duration_seconds=duration, meta_json=meta_json)
+
+
+def test_the_rollup_counts_a_silent_run_beside_one_that_was_not(q):
+    """#3211 clause 1: `silent` is a per-source integer read from `meta_json`.
+
+    Two runs of one source: one whose meta says the turn surfaced nothing, one
+    with an ordinary empty meta. The rollup must say 2 runs and 1 silent. The
+    number matters more than the key — an autonomy fire that looked and found
+    nothing is recorded `status='success'`, so until now the only way to see it
+    was `json_extract` by hand against `runs.meta_json`, which is why #3207's
+    no-op cost was a triage exercise rather than a column on the page.
+    """
+    _seed_meta_run(q, "scheduled-task", "success", '{"silent": true}')
+    _seed_meta_run(q, "scheduled-task", "success", "{}")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["scheduled-task"]
+
+    assert rollup["total"] == 2, rollup
+    assert rollup["silent"] == 1, rollup
+    assert isinstance(rollup["silent"], int), f"{rollup['silent']!r} is not an int"
+
+
+def test_every_source_in_the_window_gets_a_silent_key(q):
+    """#3211 clause 1's other half: the key is PRESENT-and-0 where it never applies.
+
+    A source whose adapter never writes `meta.silent` must not come back with the
+    key missing, because the Background page's value is `health['silent']` and a
+    missing key renders as nothing while a 0 reads as "looked, never went quiet" —
+    the same distinction this file makes about `unfinished_matrix`: a source with
+    no run in the window gets no dict at all, and a source that ran and never went
+    quiet gets a 0. `autotriage` here has no meta whatsoever, which is also
+    `record_run`'s default (`meta_json=""`, not valid JSON) — see the guard node
+    below for why that shape has to answer 0 rather than raise.
+    """
+    _seed_meta_run(q, "scheduled-task", "success", '{"silent": true}')
+    _seed_meta_run(q, "autotriage", "success", "")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+
+    assert set(rollup) == {"scheduled-task", "autotriage"}, rollup
+    assert rollup["scheduled-task"]["silent"] == 1, rollup
+    assert rollup["autotriage"]["silent"] == 0, (
+        f"a source that never goes silent came back {rollup['autotriage']['silent']!r}")
+
+
+def test_the_silent_count_is_additive_and_never_moves_a_skipped_run(q):
+    """#3211 clause 2: `silent` and `skipped` count different runs, and neither moves.
+
+    Two runs of one source: a silent success, and a run the POOL recorded
+    `skipped`. `skipped` must stay 1 — this column adds a number, it does not
+    reinterpret the pool's verdict — and `silent` must be 1, because a silent run
+    is a run that SUCCEEDED and is already inside `ok`.
+
+    The rest of the dict is pinned against a second source seeded with the same
+    two runs and no silent flag at all: every field except `silent` and
+    `gpu_hours` must be identical, which is the only way to show "additive" means
+    the same numbers the same rows produce without this column. If `silent` ever
+    started subtracting from `ok` or adding to `skipped`, this comparison catches
+    it; a node that just asserted `ok == 1` would not, because it could be wrong by
+    one and still look self-consistent.
+    """
+    _seed_meta_run(q, "with-silent", "success", '{"silent": true}')
+    _seed_meta_run(q, "with-silent", "skipped", "{}")
+    _seed_meta_run(q, "no-silent", "success", "{}")
+    _seed_meta_run(q, "no-silent", "skipped", "{}")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    a, b = rollup["with-silent"], rollup["no-silent"]
+
+    assert a["skipped"] == 1, f"the pool's own verdict moved: {a}"
+    assert a["silent"] == 1, a
+    assert (a["total"], a["ok"], a["failed"]) == (2, 1, 0), a
+    assert a["fail_rate"] == pytest.approx(0.0), a
+
+    shared = ("total", "ok", "failed", "skipped", "unfinished_matrix",
+              "deadline_cut", "matrix_shrunk", "fail_rate", "gpu_hours")
+    assert all(a[k] == b[k] for k in shared), {k: (a[k], b[k]) for k in shared}
+    assert a["silent"] - b["silent"] == 1, (
+        f"the two sources differ by one silent run and by more than that: {a} vs {b}")
+
+
+def test_an_unparseable_meta_json_row_cannot_blind_the_whole_rollup(q):
+    """#3211 clause 3: the `json_valid` guard on `meta_json` is load-bearing.
+
+    One row whose meta is `{not json`, beside one well-formed silent row, on one
+    source. `json_extract` is evaluated PER ROW, so an unguarded expression does
+    not return 0 for that row — it raises `malformed JSON` through the SELECT, the
+    router's except-arm swallows it, and EVERY source comes back `health: null`:
+    one bad row costs the whole panel, which is the outcome this file's rollup has
+    been careful about since #1401. The node therefore proves both edges — the
+    guarded rollup answers with `silent` == 1, and the unguarded expression over
+    the same rows raises. Without the second half this test would pass with or
+    without the guard, which is exactly how a guard on a column nobody has yet
+    seen break becomes decoration (measured 2026-10-23: `json_valid(meta_json)=0
+    AND meta_json<>''` matches 0 rows across all 15 live sources and all 14,851
+    runs, so live data cannot demonstrate the guard at all — `''`,
+    `record_run`'s default, is likewise invalid, which is why the second seeded
+    source below matters).
+    """
+    _seed_meta_run(q, "scheduled-task", "success", "{not json")
+    _seed_meta_run(q, "scheduled-task", "success", '{"silent": true}')
+    # A row with NO meta at all — `record_run`'s own default — is invalid JSON
+    # too, and it is the shape a new adapter writes by accident.
+    _seed_meta_run(q, "other-source", "success", "")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+
+    assert isinstance(rollup.get("scheduled-task"), dict), (
+        f"one unparseable meta_json took the source's dict away: {rollup}")
+    assert rollup["scheduled-task"]["silent"] == 1, rollup["scheduled-task"]
+    assert rollup["scheduled-task"]["total"] == 2, (
+        "the bad row was dropped from the count; a row that ran is a row that ran")
+    assert rollup["other-source"]["silent"] == 0, rollup["other-source"]
+
+    # The control: the SAME rows, the same SUM, no `json_valid` — this is what the
+    # guard is preventing, executed rather than asserted about.
+    con = sqlite3.connect(str(q.db_path))
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            con.execute(
+                "SELECT source, SUM(json_extract(meta_json, '$.silent')) "
+                "FROM runs WHERE completed_at >= ? GROUP BY source",
+                ("2000-01-01T00:00:00+00:00",)).fetchall()
+    finally:
+        con.close()

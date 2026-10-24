@@ -1434,6 +1434,23 @@ class WorkQueue:
         — and nothing at all about whether it works. A source failing every
         run looked exactly like a source succeeding at every run.
 
+        Three counts of "nothing happened" have to stay apart, and this
+        dashboard is where they get read. `skipped` is a POOL statement: the
+        worker took the lease and returned the bare `{"skipped": reason}` the pool
+        defines. `unfinished_matrix` and its two causes are a RUNTIME statement
+        read out of the row's own `response_json`. `silent` (#3211) is a third,
+        also a runtime statement, read out of `meta_json` — and for
+        `scheduled-task` it is the ONLY no-op that exists: 1063 runs of that source
+        in the store on 2026-10-23, `skipped` 0, `silent` 1 — the committed witness
+        `backlog/data/2026-10-23.3211-lloyd-data-workers.db` re-derives all three —
+        because that source's status is
+        app.autonomy.run_task's and run_task never says `skipped` for a turn that
+        looked and found nothing. The key is additive both ways: it is present and
+        0 for every source whose adapter never writes `meta.silent`, and it leaves
+        `total`, `ok`, `failed`, `skipped` and `fail_rate` exactly as they are —
+        a silent run is a success, counted in `ok`, not a skipped one moved
+        somewhere else.
+
         Aggregated in SQL rather than by walking rows in Python, because the
         Background tab polls this beside everything else and `runs` is the
         table that grows fastest.
@@ -1511,6 +1528,33 @@ class WorkQueue:
                               AND json_extract(response_json,
                                                '$.matrix_dropped_tasks') <> '[]'
                            ELSE 0 END)                            AS matrix_shrunk,
+                      -- #3211: the no-op an autonomy fire makes, which `skipped`
+                      -- above cannot ever report for that source. Every other
+                      -- source reports a bare {"skipped": reason} that the pool
+                      -- turns into status='skipped'; the scheduled-task adapter
+                      -- copies app.autonomy.run_task's status verbatim, and
+                      -- run_task returns 'skipped' on exactly two routes (the task
+                      -- is already in_progress; an unconfigured-model refusal) --
+                      -- neither of which is "looked and found nothing". A turn that
+                      -- surfaced nothing ends on the [SILENT] sentinel, is recorded
+                      -- status='success', and leaves its verdict in meta_json as
+                      -- $.silent, written by app/autonomy.py from the same
+                      -- run_is_silent the Discord notify gates on. So it is read
+                      -- here as its OWN count, and nothing above is reinterpreted.
+                      -- Guarded for the same reason `response_json` is, with a
+                      -- sharper edge: `json_extract` evaluates PER ROW, so one
+                      -- unparseable `meta_json` raises through the whole SELECT and
+                      -- the router's answer to a raising rollup is `health: null`
+                      -- for EVERY source -- including the ones that never go
+                      -- silent. Every row of every source parses on live data today
+                      -- (measured 2026-10-23: `json_valid(meta_json)=0 AND
+                      -- meta_json<>''` matches 0 rows across all 15 sources), which
+                      -- is a fact about the rows that exist, not a property to lean
+                      -- on: `meta_json` is written by adapters, and a future one may
+                      -- write anything the pool's `out["meta"]` happened to hold.
+                      SUM(CASE WHEN json_valid(meta_json)
+                              THEN json_extract(meta_json, '$.silent')
+                              ELSE 0 END)                         AS silent,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
                       MAX(completed_at)                           AS last_completed
                FROM runs WHERE completed_at >= ? GROUP BY source"""
@@ -1525,6 +1569,21 @@ class WorkQueue:
                 "ok": int(r["ok"] or 0),
                 "failed": failed,
                 "skipped": int(r["skipped"] or 0),
+                # #3211, additive on purpose. `skipped` is the POOL's verdict, and
+                # it stays 0 for `scheduled-task` however many turns found nothing,
+                # because that source's status comes from run_task rather than from
+                # a `{"skipped": reason}` result. This is the count of turns that
+                # ran, succeeded, and surfaced nothing — the number #3207's "is
+                # polling costing us?" decision needs, which until now existed only
+                # in runs.meta_json and had to be derived by hand with SQL. It reads
+                # the same source of truth the Discord gate trusts
+                # (app/autonomy.py's run_is_silent -> meta["silent"]), so the two
+                # cannot drift. Read it with `total` beside it: 1 of 1062 and 1 of 2
+                # are opposite readings of one integer, as `unfinished_matrix` says
+                # of itself above. A silent run IS an ok run, so this count sits
+                # inside `ok` and outside `skipped` — never a subtraction from
+                # either.
+                "silent": int(r["silent"] or 0),
                 # Emitted beside `total` on purpose: the same integer is the
                 # opposite reading at 2 of 40 and at 2 of 2, and a source with no
                 # run in the window gets no dict at all from this method rather
@@ -1664,7 +1723,7 @@ class WorkQueue:
             )
             conn.commit()
 
-    # -- operator-hold history (#2615) --------------------------------------
+    # — operator-hold history (#2615) --------------------------------------
 
     def pause_journal_append(self, *, value: str, holder_kind: str, actor: str,
                              at: str | None = None) -> int:
