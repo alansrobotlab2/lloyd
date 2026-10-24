@@ -61,6 +61,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from app.data_root import PRODUCTION_DATA_ROOT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +104,20 @@ HEADING_RE = re.compile(r"^## ", re.M)
 FENCE_RE = re.compile(r"^[ \t]*```bash\n(.*?)\n[ \t]*```", re.S | re.M)
 BULLET_RE = re.compile(r"^(?=[-*] )", re.M)
 RULED_CITE_RE = re.compile(r"backlog\.py:(\d+)")
+# The two lines of `scripts/automod/backlog.py` the Step 2.5 prose may legitimately name by
+# number, each pinned here by an ANCHOR that has to occur exactly once rather than by a
+# number written down: the constant's own assignment, and the line inside
+# `_rederive_command` that builds the read-only-URI sqlite open whose command the witness
+# bullet quotes. #3228: the guard used to admit ONE cite in the whole 820-line section and
+# demand it be the constant's, so a prose edit that legitimately cited the emitter failed a
+# test outside its own diff.
+WITNESS_CONSTANT_ANCHOR = "WITNESS_MAX_BYTES = 1_048_576"
+READONLY_URI_ANCHOR = "sqlite3.connect(f'file:"
+READONLY_URI_MODE = "?mode=ro"
+# The number this file's falsifier leg (a) re-points the section's cite at. It is the figure
+# the guard was BUILT on — 28 lines off the constant — and it must not coincide with either
+# derived line, which the node that uses it asserts before it substitutes.
+UNDERIVED_CITE = "1240"
 STORE_FIGURE_RE = re.compile(r"vault-derived/kg\.sqlite` is \*\*([\d,]+)\*\* bytes")
 STAMP_RE = re.compile(r"read at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z)")
 
@@ -650,41 +666,176 @@ def test_the_live_store_figure_is_a_measurement_not_a_backup_listing():
         "the superseded figure is no longer tied to the file it was actually measured on")
 
 
-def test_the_witness_ceiling_cite_resolves_in_the_tree_it_names():
-    """`backlog.py:1240` was 28 lines off; the cite must land on the constant it names.
+def _backlog_lines() -> list[str]:
+    """`scripts/automod/backlog.py` as lines, the tree every derived cite resolves against."""
+    return BACKLOG_PY.read_text(encoding="utf-8").splitlines()
 
-    The line is DERIVED from the tree, the way the applying check's line already is
-    at the bottom of this node, rather than written down here. This node hard-coded
-    one number, which meant any round that inserted module-level lines above the
-    constant failed it for a reason outside its own diff — #3027 added a documented
-    constant block up there, and what had to move was the SKILL's cite, not this
-    assertion. Nothing is weakened by deriving it: the number the prose carries must
-    still EQUAL the line the constant really sits on, so `:1240` cannot pass, a
-    second `backlog.py:<n>` cite in the section still fails, and a constant that was
-    renamed or deleted fails here instead of green."""
-    lines = BACKLOG_PY.read_text(encoding="utf-8").splitlines()
-    witness = [i + 1 for i, l in enumerate(lines) if "WITNESS_MAX_BYTES = 1_048_576" in l]
-    assert witness, (
-        f"no `WITNESS_MAX_BYTES = 1_048_576` assignment in {BACKLOG_PY}: the cite the "
-        "skill carries points at nothing, and re-measuring the line is not the fix")
-    assert len(witness) == 1, (
-        f"WITNESS_MAX_BYTES is assigned on more than one line ({witness}), so the cite "
-        "has no single line to resolve to")
-    cited = str(witness[0])
+
+def _derived_backlog_line(lines: list[str], what: str, *anchors: str) -> str:
+    """The one line of `backlog.py` carrying every string in `anchors`, as a cite.
+
+    DERIVED rather than written down, so a round that inserts module-level lines above the
+    constant or above the emitter moves the number the assertion expects instead of failing
+    a prose edit outside its own diff (#3228). Deriving costs nothing in strength: the
+    anchor must sit on EXACTLY one line — a constant that was renamed or deleted, or an
+    emitter whose read-only open doubled, names itself as the failure rather than going
+    green — and the number the prose carries must still EQUAL the derived line, so a stale
+    number cannot pass on being a plausible line number.
+    """
+    hits = [i + 1 for i, l in enumerate(lines) if all(a in l for a in anchors)]
+    assert hits, (
+        f"no line of {BACKLOG_PY} carries {anchors}: {what} has no line for the skill's "
+        "cite to resolve to, and a rename or a deletion is not fixed by re-measuring the "
+        "number the prose carries")
+    assert len(hits) == 1, (
+        f"{anchors} occurs on {len(hits)} lines of {BACKLOG_PY} ({hits}), so the cite for "
+        f"{what} has no single line to resolve to")
+    return str(hits[0])
+
+
+def _witness_ceiling_lines(lines: list[str]) -> tuple[str, str, str]:
+    """The three line numbers the ceiling's prose may name, all three derived from the tree.
+
+    `(constant, emitter, applying_check)`. The third is cited in the bullet's shorthand
+    spelling — `` `:1473` ``, filename dropped — which is precisely why it is never a
+    `RULED_CITE_RE` match and is checked as text beside the cite set rather than inside it.
+    """
+    return (_derived_backlog_line(lines, "the WITNESS_MAX_BYTES constant",
+                                  WITNESS_CONSTANT_ANCHOR),
+            _derived_backlog_line(lines, "the read-only-URI open _rederive_command builds",
+                                  READONLY_URI_ANCHOR, READONLY_URI_MODE),
+            _derived_backlog_line(lines, "the check that applies the ceiling",
+                                  "size <= WITNESS_MAX_BYTES"))
+
+
+def _assert_ceiling_cites_resolve(section: str, lines: list[str]) -> None:
+    """Grade a Step 2.5 section's `backlog.py:<n>` cites against the lines just derived.
+
+    Factored out of the node below so the two falsifier legs can put a SYNTHETIC section —
+    live prose with one cite edited, built in memory, never written to the vault — through
+    the same rule the real prose is graded on. Three things must hold, and each is a
+    different way the prose can be wrong:
+
+    * every fully-qualified `backlog.py:<n>` cite anywhere in the section must be ONE OF
+      the two derived lines — a subset, not a one-element list, because the constant and
+      the emitter are both real and the section is 820 lines long (#3228). It is a set
+      because the rule is over WHICH lines are named: one true line cited twice is one
+      fact stated twice, and the thing worth refusing is a number no line of this tree
+      carries;
+    * the witness bullet must still carry the constant's OWN cite, and that cite must
+      EQUAL the derived constant line, so a stale or invented number is still caught even
+      though a second cite is no longer one;
+    * the bullet must still name the check that APPLIES the ceiling, in its shorthand
+      spelling, so the companion cite cannot quietly go missing.
+    """
+    constant, emitter, size_check = _witness_ceiling_lines(lines)
+    derived = {constant, emitter}
+    cites = set(RULED_CITE_RE.findall(" ".join(section.split())))
+    assert cites <= derived, (
+        f"the Step 2.5 section cites backlog.py {sorted(cites - derived)}, which is neither "
+        f"the WITNESS_MAX_BYTES constant (scripts/automod/backlog.py:{constant}) nor the "
+        f"read-only-URI open _rederive_command builds (:{emitter}) — a cite that is neither "
+        "derived line is stale or invented, so move the cite, not the constant")
+    para = _witness_paragraph(section)
+    para_cites = set(RULED_CITE_RE.findall(" ".join(para.split())))
+    assert constant in para_cites, (
+        f"the witness bullet cites backlog.py {sorted(para_cites)} but not "
+        f"backlog.py:{constant}, where WITNESS_MAX_BYTES actually sits — admitting the "
+        "emitter's cite was never a licence to drop the constant's")
+    assert f":{size_check}" in para, (
+        f"the skill cites the applying check as something other than :{size_check}")
+
+
+def _section_citing(*numbers: str) -> str:
+    """The live Step 2.5 section, with its ONE fully-qualified cite rewritten to name `numbers`.
+
+    A synthetic section built this way is the real prose — same bullets, same fenced blocks,
+    the same `_witness_paragraph` — with the cite text substituted and NOTHING else, so a leg
+    that disagrees with it disagrees about a number and not about a fixture that drifted from
+    the file. The vault is READ, never written: this returns a string built in memory.
+    """
     section = _step_2_5_section(_skill_text())
-    cites = set(RULED_CITE_RE.findall(" ".join(_witness_paragraph(section).split())))
-    assert cites == {cited}, (
-        f"the witness bullet cites backlog.py {sorted(cites)}, but WITNESS_MAX_BYTES is the "
-        f"constant at scripts/automod/backlog.py:{cited} — move the cite, not the constant")
-    assert RULED_CITE_RE.findall(" ".join(section.split())) == [cited], (
-        f"a second backlog.py line cite appeared in the Step 2.5 section: "
-        f"{RULED_CITE_RE.findall(' '.join(section.split()))}")
-    size_check = [i + 1 for i, l in enumerate(lines) if "size <= WITNESS_MAX_BYTES" in l]
-    assert size_check, (
-        f"no `size <= WITNESS_MAX_BYTES` check in {BACKLOG_PY}: the skill's companion "
-        "cite to the check that applies the ceiling has nothing to point at")
-    assert f":{size_check[0]}" in _witness_paragraph(section), (
-        f"the skill cites the applying check as something other than :{size_check[0]}")
+    constant = _witness_ceiling_lines(_backlog_lines())[0]
+    cite = f"backlog.py:{constant}"
+    assert section.count(cite) == 1, (
+        f"the Step 2.5 section names {cite} {section.count(cite)} times, so a synthetic "
+        "section built from it would be rewriting the wrong text")
+    return section.replace(cite, "` and `scripts/automod/".join(f"backlog.py:{n}"
+                                                                for n in numbers), 1)
+
+
+def test_the_witness_ceiling_cite_resolves_in_the_tree_it_names():
+    """`backlog.py:1240` was 28 lines off; the cite must land on a line derived from here.
+
+    Every number is DERIVED from the tree — the constant's assignment, the read-only-URI
+    open `_rederive_command` builds, and the applying check as it already was — rather than
+    written down here. Deriving them is what makes the prose editable: #3027 added a
+    documented constant block above the constant and `da1ab7bb` added 493 module lines, so
+    any such insertion moves a number the bullet has to carry, and a hard-coded one turns
+    that edit into a red test in a round that never touched this file. Nothing is weakened
+    by it either: the number the prose carries must still EQUAL the derived line, so
+    `:1240` cannot pass, an anchor that went missing or doubled names itself instead of
+    going green, and the emitter line must still sit inside the function whose command the
+    bullet quotes."""
+    lines = _backlog_lines()
+    _assert_ceiling_cites_resolve(_step_2_5_section(_skill_text()), lines)
+    emitter = _witness_ceiling_lines(lines)[1]
+    fn = next((n for n in ast.walk(ast.parse(BACKLOG_PY.read_text(encoding="utf-8")))
+               if isinstance(n, ast.FunctionDef) and n.name == "_rederive_command"), None)
+    assert fn is not None, (
+        f"no `_rederive_command` in {BACKLOG_PY}: the derived emitter line :"
+        f"{emitter} is supposed to be the read-only open that function builds, and the "
+        "witness bullet quotes that function BY NAME")
+    assert fn.lineno <= int(emitter) <= fn.end_lineno, (
+        f"the derived emitter line :{emitter} is outside `_rederive_command` "
+        f"(:{fn.lineno}-:{fn.end_lineno}): the read-only-URI anchor matched somewhere else, "
+        "so the cite the prose carries does not name the command the bullet quotes")
+
+
+def test_a_witness_ceiling_cite_of_both_derived_lines_passes():
+    """Falsifier leg (b) of #3228: a second cite naming the real emitter must be ADMITTED.
+
+    `aaa98599` (#3225) added exactly this — a TRUE cite for the read-only-URI branch of
+    `_rederive_command`, at `scripts/automod/backlog.py:1437-1441` — and the one-cite rule
+    could not hold it: the guard red-ed the base probe of round `SM_20261024_035952` at
+    `cade1351`, which filed #3226, and #3226's fix was pure prose (name the function, drop
+    the line range). This node is the half that fix never had: with the section carrying
+    BOTH derived lines, the guard has to pass.
+    """
+    lines = _backlog_lines()
+    constant, emitter, _ = _witness_ceiling_lines(lines)
+    assert emitter != constant, (
+        f"the emitter and the constant both derived to line :{constant}, so this leg would "
+        "be passing one cite wearing two names")
+    _assert_ceiling_cites_resolve(_section_citing(constant, emitter), lines)
+
+
+def test_a_witness_ceiling_cite_of_an_underived_number_reds():
+    """Falsifier leg (a) of #3228: the guard must still bite on the number it was built for.
+
+    The pair to the node above — same rule, same fixture, opposite verdict — so neither leg
+    is satisfied by a check that simply never fires. Two underived numbers are tried,
+    because the guard holds two things over the bullet: a fully-qualified cite that is
+    neither derived line (`backlog.py:1240`, 28 lines off the constant, the error that made
+    this guard necessary) must red, and the bullet's companion cite to the check that
+    APPLIES the ceiling — the shorthand `:1473`, spelled without the filename and so
+    invisible to `RULED_CITE_RE` — must not be replaceable by one either.
+    """
+    lines = _backlog_lines()
+    constant, emitter, size_check = _witness_ceiling_lines(lines)
+    assert UNDERIVED_CITE not in (constant, emitter, size_check), (
+        f"a derived line has moved onto :{UNDERIVED_CITE}, the number this leg falsifies "
+        "with; pick another, or the leg would be calling a real line a fake one")
+    with pytest.raises(AssertionError, match=UNDERIVED_CITE):
+        _assert_ceiling_cites_resolve(_section_citing(UNDERIVED_CITE), lines)
+    section = _section_citing(constant)
+    para = _witness_paragraph(section)
+    assert f":{size_check}" in para, (
+        f"the witness bullet does not carry the companion cite :{size_check}, so there is "
+        "nothing here to drop and this leg would be asserting nothing about it")
+    dropped = section.replace(para, para.replace(f":{size_check}", f":{UNDERIVED_CITE}", 1), 1)
+    with pytest.raises(AssertionError, match=rf":{size_check}"):
+        _assert_ceiling_cites_resolve(dropped, lines)
 
 
 # --------------------------------------------- clause 5: the record an empty run leaves
