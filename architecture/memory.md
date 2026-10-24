@@ -284,6 +284,25 @@ baseline stamps, `seed_top_k` and `semantic_seeding` among them — because
 | *unguarded wide pass, for contrast* | 649 | 205,738 → 205,087 | 0.375 |
 | *before the one-fact-per-action guard* | 33, **25 of them collateral** | `Assistant` 29 → 4 | 0.375 |
 
+Those five cells predate both of the metric's redefinitions, so they are not a
+baseline for anything measured after them. Every row is a pass of 2026-09-08
+(`824ef4d6`), scored before `RECALL_SEED_TOP_K` went 5→10 (`c6be048c`, 2026-09-19)
+and before semantic seeding #1486 (`dbfde750`, 2026-09-25); each of the two changed
+what `fact_entity_recall` counts while leaving the shape of the number untouched. A score taken today is therefore **not comparable**
+with any row above: not as a gain, not as a regression, and not as the `Δ 0.000` the
+third row reports. Nothing here corrects the cells. They are honest measurements of a
+metric that no longer exists; what was missing was the sentence saying so.
+
+**The current figure, re-measured 2026-10-24**, for the reader who wants a number to
+compare against: `fact_entity_recall` **0.421** — 20 queries, 19 answered, `errors=0`
+— against the live fact tree on the code of `ccab22a8`. The arm the record stamps:
+`seed_top_k=10`, `semantic_seeding={'enabled': True, 'k': 3}`, and `expand_graph=True`
+(the one knob above that is not production's). Command:
+`cd ~/lloyd && PYTHONDONTWRITEBYTECODE=1 .venvs/lloyd/bin/python -c 'from agent_mcp import fact_improvement as fi; d = fi._fact_entity_recall_detail(20); print(d["score"], d["queries_answered"], d["errors"], d["run_config"])'`.
+One measurement of a corpus that moves daily, not a trend line — and while #3004
+stands the nightly record keeps no score at all, so this paragraph is where today's
+number lives.
+
 An intermediate unguarded pass over the four entities that dominate the
 queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
 clearest evidence in this whole change that "delete more" is not "improve".
@@ -378,7 +397,7 @@ a day before its code half).
 |---|---|
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
 | `scripts/memory/fact-improvement.py` | CLI; exits 2 on an unreadable store, 3 when the run's action budget is overrun, **4** when the apply loop halted on the blast-radius guard, with `LLOYD_SCRIPT_EXIT: fact-improvement.py exit=4` on both streams so the halt reaches `meta_json.script_alarm` / `script_alarm_runs` instead of exiting 0 unseen (#3006). The halt is reachable only from the **text route whose `loser_source_file` is empty** — scope `entity_dir.glob("*.md")`, one mark per file, so a phrase two category files share marks one in each; the `(file, id)` identity route is capped at one mark and cannot trip it (§3) |
-| `tests/test_memory_improvement.py` | 129 tests (2026-10-19), incl. the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), the exit-code ladder and the blast-radius halt's 4 + sentinel line (#3006), and the schedule wiring (task armed + script named by the skill exists) |
+| `tests/test_memory_improvement.py` | the suite that pins the loop. **No count is stated for it here** — every count this page has carried for it has been contradicted by the collector within days of its own date stamp, and nothing on this box enforces a count, so ask the collector instead: `PYTHONDONTWRITEBYTECODE=1 .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py --collect-only -q`, whose last line is the number. What it pins: the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), the exit-code ladder and the blast-radius halt's 4 + sentinel line (#3006), and the schedule wiring (task armed + script named by the skill exists) |
 | `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |
 
 ## Review log
@@ -391,7 +410,9 @@ a day before its code half).
   `expand_graph=True` against a production that defaults it False), the
   corrections channel (three surfaces since #2789, `lloyd/MEMORY.md` the live
   dated one), and four pointers/counts (`facts.py:159`, `vault.py:2637`, the
-  drift corpus at 15,243 dirs, 124 tests). Filed #3004 (the nightly never scores
+  drift corpus's directory count, and the suite's test count — the last two are
+  named without their figures hereafter, because a stale figure in a list of stale
+  figures is still a stale figure). Filed #3004 (the nightly never scores
   the metric this doc calls the acceptance bar), #3005 (the metric's arm is not
   production's, undistinguishable from a knob bug), #3006 (a blast-radius halt
   exits 0) and #3007 (a partial hub scan publishes pair counts with no fact

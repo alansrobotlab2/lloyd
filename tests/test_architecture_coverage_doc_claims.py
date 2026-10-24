@@ -7056,18 +7056,27 @@ _RETIRED_PARITY_CLAIMS = ("reads False for it", "scores an arm nothing serves",
                           "arm nothing serves")
 
 
-def _memory_section_4() -> str:
-    """§4 of `architecture/memory.md`, flattened.
+def _memory_section_4_raw() -> str:
+    """§4 of `architecture/memory.md`, byte for byte as the page wraps it.
 
     Selected by section number, so a re-titled heading fails here rather than
     narrowing the graded window to nothing and passing on an empty extraction.
+    #3269's node needs the UNWRAPPED text: what it grades is a paragraph's
+    POSITION (the annotation has to sit beside the table it captions) and a
+    table's row count, and `_flat()` erases both by collapsing the blank lines
+    that separate blocks into single spaces.
     """
     sections = _h2_sections((ARCH / "memory.md").read_text(encoding="utf-8"))
     hits = [head for head in sections if head.startswith("4.")]
     assert len(hits) == 1, f"§4 of memory.md resolved to {hits}, not exactly one section"
-    body = _flat(sections[hits[0]])
-    assert body, "§4 of memory.md read back empty"
+    body = sections[hits[0]]
+    assert body.strip(), "§4 of memory.md read back empty"
     return body
+
+
+def _memory_section_4() -> str:
+    """§4 of `architecture/memory.md`, flattened — see `_memory_section_4_raw`."""
+    return _flat(_memory_section_4_raw())
 
 
 def _parity_claim_is_a_named_field(body: str) -> bool:
@@ -7103,6 +7112,385 @@ def test_memory_doc_states_the_graph_arm_non_parity_as_a_named_field():
         body + " So `matches_production_defaults` reads False for it.")
     assert not _parity_claim_is_a_named_field(
         body.replace("expand_graph_matches_production", "that field"))
+
+
+# ── #3269: §4's flat 0.375 table is dated, armed and marked non-comparable ───
+#
+# Five passes, five identical `0.375` cells. They are the passes of 2026-09-08
+# (`824ef4d6`); since then `RECALL_SEED_TOP_K` went 5→10 (`c6be048c`) and semantic
+# seeding #1486 (`dbfde750`) landed, and each changed what `fact_entity_recall`
+# COUNTS while leaving the shape of the number alone — the very trap #3009 added
+# `run_config` for. §4 said only that the record now stamps its arm; it never said
+# these five rows predate the change, so the page read as one trend line spanning two
+# different metrics: anyone comparing a score taken today with `0.375` was reading
+# movement the commits, not the loop, had produced. The page now says that beside the
+# table, and carries one re-measured figure with its arm and its command so that
+# "today" is a number too.
+#
+# Four nodes below, one per clause, so each clause has a node id of its own to cite:
+# clauses 1+2 in `test_memory_doc_dates_and_arms_section_4_s_flat_0_375_table`,
+# clause 3 in `test_memory_doc_leaves_section_4_s_five_0_375_cells_untouched`, clause 4
+# in `test_memory_doc_states_no_test_count_for_the_improvement_suite`, and clause 5 —
+# that the rails above are rails — in
+# `test_the_section_4_annotation_rail_reddens_on_every_named_mutation`.
+#
+# What none of them grade: the VALUE of any figure. The five cells are history
+# (clause 3 keeps them byte-identical); today's score moves with a corpus that grows
+# daily, and comparing it with a pinned number would turn a doc edit red because a
+# nightly ingestion added facts. The SHAPE is graded — both grounds named by commit,
+# non-comparability stated outright, exactly one dated and armed figure with the
+# command that produced it — and no number is compared with anything.
+
+#: Both commits that redefined `fact_entity_recall`; the annotation has to name both.
+#: `c6be048c` is the ground the item's own text re-dated: it is the commit that
+#: introduced `RECALL_SEED_TOP_K = 10` (`git log -S'RECALL_SEED_TOP_K = 10' --
+#: agent_mcp/vault.py` → 2026-09-19), while §4's older prose says 2026-09-11. Which
+#: date the page should carry is #3269's owed-check ruling; naming the commit is not a
+#: date claim, so the annotation cites the commit and these nodes ask for the commit.
+_METRIC_REDEFINING_COMMITS = ("c6be048c", "dbfde750")
+
+#: The verdict the annotation has to reach about its own rows, in as few words as the
+#: page can manage — and the phrase that carries clause 3's other half, that the cells
+#: are stale rather than WRONG. Without it the annotation would read as a retraction,
+#: which clause 3 forbids, and nothing would tell an annotation from a correction.
+_NON_COMPARABILITY_PHRASE = "not comparable"
+_CELLS_NOT_WRONG_PHRASE = "honest measurements"
+
+#: §4's pass/facts/recall table, located by its header rather than a line number, and
+#: its `fact_entity_recall` column exactly as the page spells it — the em dash, the Δ
+#: and the bold on rows one and three included. "Byte-identical" is the clause, and a
+#: pinned tuple is the only way this file can say that.
+_TABLE_HEADER_LEAD = "| pass | facts expired | active facts"
+_TABLE_RECALL_CELLS = ("**0.375**", "0.375", "**0.375** (Δ 0.000)", "0.375", "0.375")
+
+#: The one paragraph allowed to state a score for the corpus as it stands, and what it
+#: must state with it: a date, the arm, and the command. A figure without its arm is
+#: the shape #3009 was filed about; a figure without a date is the shape THIS item was
+#: filed about.
+_CURRENT_FIGURE_MARK = "The current figure"
+_CURRENT_FIGURE_ARMS = ("seed_top_k", "semantic_seeding")
+_CURRENT_FIGURE_COMMAND = ("fact_improvement", "_fact_entity_recall_detail")
+_DATED = re.compile(r"20\d\d-\d\d-\d\d")
+_A_SCORE = re.compile(r"0\.\d{2,3}")
+
+#: §5's suite, the count shape #2606 already removed from `retrieval.md`, and the four
+#: tokens that make the command §5 publishes a command rather than a shrug. The
+#: subprocess in clause 4's node is what proves it runs; these pin its shape, because
+#: `--collect-only` alone would also appear in a line that cannot run anywhere.
+_MEMORY_SUITE = "tests/test_memory_improvement.py"
+_A_TEST_COUNT = re.compile(r"\b\d+ tests\b")
+_PUBLISHED_COMMAND_PARTS = (".venvs/lloyd/bin/python", "-m pytest", _MEMORY_SUITE,
+                            COLLECT_COMMAND)
+
+
+def _section_4_paragraphs() -> list[str]:
+    """§4 as the page itself breaks it, blank line by blank line."""
+    return [p for p in _memory_section_4_raw().split("\n\n") if p.strip()]
+
+
+def _section_4_table_index(paras: list[str]) -> int:
+    """Where §4's table sits among its paragraphs — asserted to be exactly one.
+
+    A page that grew a second such table, or lost the one here, has changed what the
+    annotation is beside, and that is a different failure than "no annotation".
+    """
+    hits = [i for i, p in enumerate(paras)
+            if p.lstrip().startswith(_TABLE_HEADER_LEAD)]
+    assert len(hits) == 1, (
+        f"{len(hits)} paragraphs of §4 open with {_TABLE_HEADER_LEAD!r}; these nodes "
+        "grade the annotation beside exactly one table")
+    return hits[0]
+
+
+def _annotation_beside_the_table(paras: list[str], table_index: int) -> str:
+    """The paragraph IMMEDIATELY after §4's table, when it is the binding annotation.
+
+    Returns "" for every other state: no next paragraph, a next paragraph that says
+    nothing about comparability, or one that names only one of the two commits. The
+    adjacency is the clause and not decoration — an annotation exiled to the bottom of
+    §4 stops being a caption for the rows a reader is actually looking at.
+    """
+    if table_index + 1 >= len(paras):
+        return ""
+    flat = _flat(paras[table_index + 1])
+    if _NON_COMPARABILITY_PHRASE not in flat:
+        return ""
+    if not all(sha in flat for sha in _METRIC_REDEFINING_COMMITS):
+        return ""
+    return flat
+
+
+def _annotation_clears_the_cells_of_being_wrong(paras: list[str],
+                                                table_index: int) -> bool:
+    """True when the binding caption also says the rows are stale-but-correct.
+
+    Clause 3's second half — "the page does not restate 0.375 as wrong". A caption can
+    bind (date the rows, name both commits, declare non-comparability) while calling
+    the cells mistaken; only this predicate sees that, because everything else about
+    the paragraph is exactly as required.
+    """
+    flat = _annotation_beside_the_table(paras, table_index)
+    return bool(flat) and _CELLS_NOT_WRONG_PHRASE in flat
+
+
+def _table_cells_are_untouched(paras: list[str], table_index: int) -> bool:
+    """§4's `fact_entity_recall` column, cell by cell, against the pinned tuple.
+
+    Re-value a cell and the tuple differs; drop a row and it is four long; add one and
+    it is six. None of the three is an edit #3269 allows, and all three read as an
+    innocent prose change to anyone comparing paragraphs by eye.
+    """
+    rows = [ln for ln in paras[table_index].splitlines()
+            if ln.strip().startswith("|")][2:]          # past header and rule
+    return tuple(ln.split("|")[-2].strip() for ln in rows) == _TABLE_RECALL_CELLS
+
+
+def _current_figure(paras: list[str]) -> str:
+    """§4's one dated, armed, reproducible current figure — or "" if 0 or 2+.
+
+    "More than one" is a failure and not a bonus: two current figures is two dates and
+    two arms, and the page has exactly one measurement to publish.
+    """
+    hits = [_flat(p) for p in paras if _CURRENT_FIGURE_MARK in p]
+    if len(hits) != 1:
+        return ""
+    flat = hits[0]
+    if not _DATED.search(flat) or not _A_SCORE.search(flat):
+        return ""
+    if not all(arm in flat for arm in _CURRENT_FIGURE_ARMS):
+        return ""
+    if not all(part in flat for part in _CURRENT_FIGURE_COMMAND):
+        return ""
+    return flat
+
+
+def _memory_section_5_row(needle: str) -> str:
+    """§5's Files-table row for `needle`, located by heading like every other window.
+
+    Asserts the row exists: a suite that left the table lost the thing these nodes
+    grade, which is a different problem from asserting a count of it.
+    """
+    sections = _h2_sections((ARCH / "memory.md").read_text(encoding="utf-8"))
+    hits = [head for head in sections if head.startswith("5.")]
+    assert len(hits) == 1, f"§5 of memory.md resolved to {hits}, not exactly one section"
+    rows = [ln for ln in sections[hits[0]].splitlines()
+            if needle in ln and ln.strip().startswith("|")]
+    assert len(rows) == 1, f"{needle} is named by {len(rows)} §5 rows, not exactly one"
+    return rows[0]
+
+
+def _moved_to_end(paras: list[str], i: int) -> list[str]:
+    """`paras` with block `i` moved to the very end — the exile that must unbind it."""
+    out = list(paras)
+    out.append(out.pop(i))
+    return out
+
+
+def test_memory_doc_dates_and_arms_section_4_s_flat_0_375_table():
+    """#3269 clauses 1 and 2: the paragraph IMMEDIATELY after §4's table names both
+    redefinitions of `fact_entity_recall` by commit — `c6be048c` (`RECALL_SEED_TOP_K`
+    5→10) and `dbfde750` (#1486, semantic seeding) — and states that a score taken
+    today is therefore not comparable with those rows; and §4 carries exactly ONE
+    current figure, dated, re-measured by the implementer, stating its arm
+    (`seed_top_k`, `semantic_seeding`) and the command that produced it.
+
+    Why adjacency is part of clause 1: the item says "BESIDE the table". A predicate
+    that searched all of §4 for the two shas would stay green with the caption pasted
+    under the Review log, where a reader of the rows never meets it — so
+    `_annotation_beside_the_table` binds only for the block the table is attached to,
+    and the caption's deletion, softening, partial naming and exile are each reddened
+    in `test_the_section_4_annotation_rail_reddens_on_every_named_mutation`.
+
+    Why no figure is compared with anything: the five cells measure a metric that no
+    longer exists, and today's score moves with a corpus that grows daily. Grading the
+    figure's SHAPE — dated, armed, singular, reproducible — is what stops this page
+    silently re-becoming a trend line; grading its value would let an unrelated
+    nightly ingestion redden a doc rail. What the page publishes was measured on
+    2026-10-24 at `ccab22a8`; this node never asserts what the number says.
+    """
+    body = _memory_section_4()
+    paras = _section_4_paragraphs()
+    table_index = _section_4_table_index(paras)
+
+    annotation = _annotation_beside_the_table(paras, table_index)
+    assert annotation, (
+        "nothing IMMEDIATELY beside §4's table says its five 0.375 cells predate the "
+        "two commits that redefined the metric, so the page still reads as one flat "
+        "trend line spanning two different metrics")
+    assert all(sha in body for sha in _METRIC_REDEFINING_COMMITS), (
+        f"§4 no longer names both redefinitions {_METRIC_REDEFINING_COMMITS}")
+
+    figure = _current_figure(paras)
+    assert figure, (
+        "§4 states no single dated current fact_entity_recall figure carrying its arm "
+        "(seed_top_k, semantic_seeding) and the command that produced it")
+
+
+def test_memory_doc_leaves_section_4_s_five_0_375_cells_untouched():
+    """#3269 clause 3: the five `fact_entity_recall` cells of §4's table are the ones
+    `824ef4d6` published — `("**0.375**", "0.375", "**0.375** (Δ 0.000)", "0.375",
+    "0.375")`, byte for byte, bold and em dash included — and the page does not restate
+    them as WRONG.
+
+    The tuple is the whole clause: re-value a cell and it differs, delete a row and it
+    is four long, add one and it is six. All three read as an innocent prose change to
+    anyone comparing paragraphs by eye, and all three are refused in
+    `test_the_section_4_annotation_rail_reddens_on_every_named_mutation`.
+
+    "Not wrong" is graded too, and it is a real half of the clause rather than a
+    flourish: a caption can bind perfectly — date the rows, name both commits, declare
+    non-comparability — while calling the cells mistaken, which #3269 forbids outright.
+    The rows are honest measurements of a metric that no longer exists;
+    `_annotation_clears_the_cells_of_being_wrong` reads the caption for that phrase and
+    reddens when it is swapped for "mistaken".
+    """
+    paras = _section_4_paragraphs()
+    table_index = _section_4_table_index(paras)
+    assert _table_cells_are_untouched(paras, table_index), (
+        f"§4's recall column is no longer {_TABLE_RECALL_CELLS}: the rows are history "
+        "and #3269 edits the prose beside them, never the cells")
+    assert _annotation_clears_the_cells_of_being_wrong(paras, table_index), (
+        f"§4's caption no longer calls the cells {_CELLS_NOT_WRONG_PHRASE} of a retired "
+        "metric; clause 3 forbids restating 0.375 as wrong")
+
+
+def test_memory_doc_states_no_test_count_for_the_improvement_suite():
+    """#3269 clause 4: §5's `tests/test_memory_improvement.py` row asserts no count, no
+    `NNN tests` figure survives anywhere on the page, and the row publishes the command
+    that produces one — which runs here.
+
+    Why the number had to go rather than be re-stamped: this page has published counts
+    of that suite and the collector contradicted each within days of its own date — it
+    read "129 tests (2026-10-19)" five days before #3269 was filed, and a detached
+    worktree at `ccab22a8` collects 144. Nothing on this box enforces a count, so
+    re-stamping one only schedules its own rot; #2606 removed exactly this shape from
+    `retrieval.md` for exactly that reason, and this page's Review log carries a second
+    stale count (`124 tests`) that a row-only check would have walked past — which is
+    why the assertion is page-wide, and why the page now carries no test-count figure at
+    all, for that suite or any other.
+
+    The subprocess is the seam. `COLLECT_COMMAND` in the row only proves the shape —
+    that is why all four of `_PUBLISHED_COMMAND_PARTS` are demanded rather than the one
+    flag, which a line that runs nowhere would also satisfy. What proves the published
+    command RUNS is pytest's own exit code and node ids out of a child interpreter, the
+    same boundary the gate crosses to run this file.
+    """
+    row = _memory_section_5_row(_MEMORY_SUITE)
+    assert not _A_TEST_COUNT.search(row), f"§5's row asserts a count again: {row}"
+    for part in _PUBLISHED_COMMAND_PARTS:
+        assert part in row, f"§5's published command is missing {part!r}: {row}"
+    page = (ARCH / "memory.md").read_text(encoding="utf-8")
+    for para in page.split("\n\n"):
+        assert not _A_TEST_COUNT.search(para), (
+            f"a test count survives on the page: {_flat(para)[:200]}")
+    ran = _pytest(["--collect-only", "-q", _MEMORY_SUITE])
+    assert ran.returncode == 0, (
+        f"the command §5 publishes does not run: exit {ran.returncode} "
+        f"{(ran.stdout + ran.stderr)[-400:]}")
+    assert any("::" in ln for ln in ran.stdout.splitlines()), (
+        f"the command §5 publishes collected no node ids: {ran.stdout[:300]}")
+
+
+def test_the_section_4_annotation_rail_reddens_on_every_named_mutation():
+    """#3269 clause 5: the predicates the three nodes above lean on are rails. Fourteen
+    named mutations of the page's own bytes are applied one at a time — never to the
+    file, always to an in-memory list — and every one must un-satisfy its predicate.
+    The first five are the shapes the clause itself names: deleting the annotation,
+    dropping either ground's commit reference, and the states in which a caption stops
+    binding (verdict softened, caption exiled from beside the table).
+
+    Why a mutation node and not three positive assertions: a predicate written to accept
+    the shas *anywhere* in §4 passes for every state the page can be in and still looks
+    exactly like the rail #3269 asked for. The only evidence that separates the two is a
+    mutation that must fail, so each is named here beside the predicate it reddens, and
+    `len(cases)` is pinned to fourteen so an edit cannot quietly drop one and keep the
+    node green.
+
+    The positives come first: unmutated, all four predicates hold. Without them a
+    universally-false predicate would prove the mutations beautifully and mean nothing.
+    """
+    paras = _section_4_paragraphs()
+    table_index = _section_4_table_index(paras)
+    figure_hits = [j for j, p in enumerate(paras) if _CURRENT_FIGURE_MARK in p]
+    assert len(figure_hits) == 1, (
+        f"{len(figure_hits)} paragraphs of §4 carry {_CURRENT_FIGURE_MARK!r}: clause 5 "
+        "mutates the ONE figure clause 2 publishes, so it needs exactly one to mutate")
+    figure_index = figure_hits[0]
+    row = _memory_section_5_row(_MEMORY_SUITE)
+
+    def replace(i: int, new: str) -> list[str]:
+        return [p if j != i else new for j, p in enumerate(paras)]
+
+    def caption_binds(pars: list[str]) -> bool:
+        return bool(_annotation_beside_the_table(pars, table_index))
+
+    # Positives: the page as it stands satisfies everything the mutations take away.
+    assert caption_binds(paras), "the caption does not bind even unmutated"
+    assert _annotation_clears_the_cells_of_being_wrong(paras, table_index)
+    assert _table_cells_are_untouched(paras, table_index)
+    assert _current_figure(paras), "the current figure is unshaped even unmutated"
+    assert not _A_TEST_COUNT.search(row), "§5's row holds a count even unmutated"
+
+    dropped_row = "\n".join(
+        ln for ln in paras[table_index].splitlines()
+        if "*before the one-fact-per-action guard*" not in ln)
+    cases: list[tuple[str, bool]] = [
+        ("the annotation is deleted outright",
+         caption_binds([p for j, p in enumerate(paras) if j != table_index + 1])),
+        ("the comparability verdict is softened",
+         caption_binds(replace(table_index + 1, paras[table_index + 1].replace(
+             _NON_COMPARABILITY_PHRASE, "in the same units")))),
+        ("RECALL_SEED_TOP_K's commit goes unnamed",
+         caption_binds(replace(table_index + 1, paras[table_index + 1].replace(
+             _METRIC_REDEFINING_COMMITS[0], "that commit")))),
+        ("semantic seeding's commit goes unnamed",
+         caption_binds(replace(table_index + 1, paras[table_index + 1].replace(
+             _METRIC_REDEFINING_COMMITS[1], "that commit")))),
+        ("the caption is exiled to the bottom of §4",
+         caption_binds(_moved_to_end(paras, table_index + 1))),
+        ("the caption calls the cells mistaken, not stale",
+         _annotation_clears_the_cells_of_being_wrong(replace(
+             table_index + 1, paras[table_index + 1].replace(
+                 _CELLS_NOT_WRONG_PHRASE, "mistaken")), table_index)),
+        ("a row's score is re-valued",
+         _table_cells_are_untouched(replace(
+             table_index,
+             paras[table_index].replace("**0.375** (Δ 0.000)", "**0.412** (Δ 0.037)")),
+             table_index)),
+        ("a row is deleted",
+         _table_cells_are_untouched(replace(table_index, dropped_row), table_index)),
+        ("the figure loses its marker",
+         bool(_current_figure(replace(figure_index, paras[figure_index].replace(
+             _CURRENT_FIGURE_MARK, "An older figure"))))),
+        ("the figure loses its date",
+         bool(_current_figure(replace(figure_index, re.sub(
+             _DATED, "some date", paras[figure_index]))))),
+        ("the figure loses its seed_top_k arm",
+         bool(_current_figure(replace(figure_index, paras[figure_index].replace(
+             "seed_top_k", "the seed knob"))))),
+        ("the figure loses its semantic_seeding arm",
+         bool(_current_figure(replace(figure_index, paras[figure_index].replace(
+             "semantic_seeding", "the seeding switch"))))),
+        ("the figure loses its command",
+         bool(_current_figure(replace(figure_index, paras[figure_index].replace(
+             "_fact_entity_recall_detail", "measured somehow"))))),
+        ("a second current figure is published",
+         bool(_current_figure(paras + [paras[figure_index]]))),
+    ]
+    for label, still_passes in cases:
+        assert not still_passes, (
+            f"{label}, and the predicate passed anyway — that predicate is not a rail")
+    assert len(cases) == 14, (
+        f"{len(cases)} mutations, not fourteen: the docstring's count and the clause-5 "
+        "coverage are this node's whole claim, and a dropped case is a clause quietly "
+        "unpinned")
+
+    # The one mutation that must go the other way: §5's count rail is a refusal, so its
+    # control is that the figure the row used to carry is the shape it refuses.
+    assert _A_TEST_COUNT.search(row.replace("**No count is stated for it here**",
+                                            "129 tests")) is not None, (
+        "the count regex would not have caught 129, the figure §5's row carried before "
+        "#3269 de-numbered it")
 
 
 # ── #3008: §2 cannot credit the detail field with a state it never had ───────
