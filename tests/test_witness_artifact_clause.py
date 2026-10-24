@@ -923,12 +923,41 @@ def test_the_read_only_store_command_leaves_a_dirty_wal_witness_untouched(tmp_pa
             f"the relative-path open of a .{ext} witness rewrote the witness")
 
 
-#: The two lines #2960 added to the VAULT's `.gitignore`, spelled here so a scratch
-#: tree can be swept under exactly the rule the vault carries. The vault does not
-#: travel into a round with the code, so the mechanism is measured against this
-#: constant and `test_the_vault_index_carries_no_witness_sidecar_anymore` pins the
-#: same two strings against the real file.
-_SIDECAR_IGNORE_RULES = ("backlog/data/*.db-wal", "backlog/data/*.db-shm")
+#: The four lines the VAULT's `.gitignore` carries for witness sidecars, spelled here so
+#: a scratch tree can be swept under exactly the rule the vault carries. The vault does
+#: not travel into a round with the code, so the mechanism is measured against this
+#: constant and `test_the_vault_index_carries_no_witness_sidecar_anymore` pins the same
+#: strings against the real file.
+#:
+#: The first two are #2960's. The second two are #3230's and they exist because the first
+#: two did not cover the witness that went on to leak: `kg.sqlite` grew a `-wal`/`-shm`
+#: pair and pre-flight commit `b625896b` ("nightly-reflection: pre-flight 2026-10-24
+#: (unattributed dirty state)") put BOTH in the index seven days after #2960 shipped —
+#: the recurrence this file's live-vault node exists to catch, arriving one extension
+#: outside the reach of a pair whose own vault comment said it was leaving that gap open.
+#: `*.sqlite*` and not `*.sqlite`, because `_SIDECAR_RX` below names three extensions
+#: (`.db`, `.sqlite`, `.sqlite3`) and a `.sqlite3` frames file would dodge the narrow
+#: spelling exactly as `.sqlite` dodged the `.db` pair.
+#: `test_the_sqlite_sidecar_pair_holds_a_removal_against_the_next_sweep` is the node
+#: that makes the second pair load-bearing rather than merely present; the node of a
+#: nearly identical name above is #2960's `.db` scratch node and does not cover `.sqlite`.
+_SIDECAR_IGNORE_RULES = ("backlog/data/*.db-wal", "backlog/data/*.db-shm",
+                         "backlog/data/*.sqlite*-wal", "backlog/data/*.sqlite*-shm")
+
+#: #2960's pair alone: the rule set the vault actually carried when #3230 was filed, so
+#: it is the control a `.sqlite` sidecar has to leak through. A node that asserts the new
+#: lines work without running this half cannot tell them from lines that never mattered.
+_DB_ONLY_IGNORE_RULES = _SIDECAR_IGNORE_RULES[:2]
+
+#: One path per rule in `_SIDECAR_IGNORE_RULES`, in the same order, every one a sidecar a
+#: real vault index has carried — `usage.db-wal`/`-shm` are the pair #2960 untracked,
+#: `kg.sqlite-wal`/`-shm` the pair #3230 untracked. Both `check-ignore -v` probes assert
+#: the resolved patterns equal `sorted(_SIDECAR_IGNORE_RULES)`, which closes only if each
+#: rule resolves for its own path and no path resolves to two rules.
+_SIDECAR_PROBE_PATHS = (f"{B.WITNESS_ARTIFACT_DIR}/usage.db-wal",
+                        f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm",
+                        f"{B.WITNESS_ARTIFACT_DIR}/kg.sqlite-wal",
+                        f"{B.WITNESS_ARTIFACT_DIR}/kg.sqlite-shm")
 
 #: The witness #2960 protects, by the relative path its owed note carries —
 #: `WITNESS_ARTIFACT_DIR` plus the one name the vault pins a blob for.
@@ -1029,11 +1058,20 @@ def test_the_shipped_sidecar_rule_holds_a_removal_against_the_next_sweep(tmp_pat
     assert _git_ok(repo, "status", "--porcelain") == "", (
         "a present-and-untracked sidecar shows up as dirty, which is the sweep's "
         "cue to commit it: " + _git_ok(repo, "status", "--porcelain"))
-    named = _git_ok(repo, "check-ignore", "-v", shm, wal).split("\n")
-    # `check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`.
+    # `check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`. Probed over all
+    # four paths and not the two this node untracks, because an equality with the
+    # four-rule constant closes only if each rule resolves for a path of its own and none
+    # resolves to two. `--no-index` matches the witness probe in the vault node and is not
+    # load-bearing at this point in this tree: none of the four paths is tracked here yet,
+    # and a path that is merely absent still prints its rule either way. What the flag
+    # protects against is trackedness, which
+    # `test_check_ignore_goes_silent_on_a_tracked_sidecar_without_no_index` demonstrates
+    # in a tree that actually has a tracked sidecar.
+    named = _git_ok(repo, "check-ignore", "--no-index", "-v",
+                    *_SIDECAR_PROBE_PATHS).split("\n")
     matched = sorted(n.split("\t")[0].rsplit(":", 1)[-1] for n in named if n)
     assert matched == sorted(_SIDECAR_IGNORE_RULES), (
-        f"the sidecars are matched by a rule other than the shipped pair: {named}")
+        f"the sidecar paths do not resolve to the four shipped rules one-for-one: {named}")
     # `--no-index` is what makes this assertion able to fail, and it is the finding
     # this line carries. `git check-ignore` WITHOUT it never reports a path the
     # index already carries: `backlog/data/usage.db` is committed in this repo, so a
@@ -1229,23 +1267,53 @@ def test_the_vault_index_carries_no_witness_sidecar_anymore():
         encoding="utf-8").split("\n") if ln.strip() and not ln.startswith("#")]
     for shipped in _SIDECAR_IGNORE_RULES:
         assert shipped in rules, (
-            f"the vault's .gitignore no longer carries the rule #2960 added: "
-            f"{shipped!r} missing from {rules}")
-    for rule in (r for r in rules if _SIDECAR_RX.search(r.replace("*", "x"))):
+            f"the vault's .gitignore no longer carries a shipped sidecar rule "
+            f"(#2960's `.db` pair, #3230's `.sqlite*` pair): {shipped!r} missing "
+            f"from {rules}")
+    # The filter that picks which rules this loop inspects is itself spelling-sensitive,
+    # and #2960's spelling (`*` -> `x`) is wrong in the way this item exists to catch:
+    # `backlog/data/*.sqlite*-wal` becomes `backlog/data/*.sqlitex-wal`, where the `-wal`
+    # is no longer preceded by `sqlite` but by `x`, so `_SIDECAR_RX` cannot match it and
+    # the loop silently inspected 2 of the 4 shipped rules. Measured both ways:
+    # `.replace("*", "x")` matches the `.db` pair only, `.replace("*", "")` matches all
+    # four. Empty-deleting is the right normalisation because the property asked is
+    # "does this rule name a sidecar suffix", and it keeps the `.db` pair matching while
+    # adding a rule the loop previously never saw. The assertion below is what stops the
+    # filter from going blind a second time: it fails the day a shipped rule is not in
+    # the loop's own view, which is the only way anyone notices.
+    inspected = [r for r in rules if _SIDECAR_RX.search(r.replace("*", ""))]
+    assert set(_SIDECAR_IGNORE_RULES) <= set(inspected), (
+        f"the scoping loop's own filter no longer sees every shipped rule, so an "
+        f"unscoped twin of one could enter the vault unnoticed: shipped="
+        f"{_SIDECAR_IGNORE_RULES} inspected={inspected}")
+    for rule in inspected:
         assert rule.startswith(f"{B.WITNESS_ARTIFACT_DIR}/"), (
             f"an unscoped sidecar rule entered the vault's .gitignore, and the "
             f"vault holds witness stores outside {B.WITNESS_ARTIFACT_DIR}/: {rule!r}")
 
-    # `git check-ignore -v` naming the shipped rule is the clause's own check, and
-    # it exits 1 when the path is tracked again — which is the regression that
-    # would make the whole node meaningless, so it is asserted here rather than
-    # assumed.
-    named = _git_ok(vault, "check-ignore", "-v",
-                    f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm",
-                    f"{B.WITNESS_ARTIFACT_DIR}/usage.db-wal").split("\n")
+    # `git check-ignore -v` naming the shipped rule is the clause's own check, over one
+    # path per rule, as a complement to the first assertion of this node
+    # (`_sidecars(tracked) == []`), which is what actually catches a re-tracked path by
+    # reading the index. It is not itself that catch, and the earlier version of this
+    # comment claimed it was ("exits 1 when a path is tracked again, asserted here rather
+    # than assumed") — it asserts no such thing. What the flag is for is measured in
+    # `test_the_sqlite_sidecar_pair_holds_a_removal_against_the_next_sweep`, where a
+    # sidecar really is tracked and the flag-less probe goes silent on it; this vault is
+    # read-only, so the demonstration lives in the scratch tree and not here.
+    #
+    # The four-path equality is the point of the call: it closes only if each rule
+    # resolves for a path of its own and no path resolves to two rules, which is what
+    # makes the two `.sqlite*` lines #3230 adds actually checked rather than merely
+    # present in the file. Measured on the live vault, `--no-index` and plain `-v` print
+    # the same four rules today — no probe path is tracked since a2030eb1 unlinked the
+    # `.sqlite` pair — so the flag costs nothing and buys the property that a future
+    # re-tracking cannot silently drop a line from the output this equality reads.
+    named = _git_ok(vault, "check-ignore", "--no-index", "-v",
+                    *_SIDECAR_PROBE_PATHS).split("\n")
     matched = sorted(n.split("\t")[0].rsplit(":", 1)[-1] for n in named if n)
     assert matched == sorted(_SIDECAR_IGNORE_RULES), (
-        f"the sidecar paths resolve to a rule other than the shipped pair: {named}")
+        f"the four sidecar paths do not resolve one-for-one to the four shipped rules: "
+        f"{named}")
 
     # `test_the_vault_index_carries_no_witness_sidecar_anymore` stops here: every
     # assertion above is about the SHAPE #2960 landed, which the shipped pair keeps
@@ -3163,3 +3231,141 @@ def test_a_basename_the_vault_already_holds_is_refused_not_overwritten(tmp_path,
     assert "already" in res["note"] and res["note"].strip()
     assert held.read_bytes() == kept, "the refusal overwrote the witness it refused onto"
     assert _head_tree(vault) == before
+
+
+def test_the_sqlite_sidecar_pair_holds_a_removal_against_the_next_sweep(tmp_path):
+    """#3230: the pair #2960 shipped let the next witness leak, and the pair #3230
+    ships is what stops it — replayed end to end through the real sweep producer.
+
+    `b625896b` ("nightly-reflection: pre-flight 2026-10-24 (unattributed dirty
+    state)") put `backlog/data/kg.sqlite-wal` (0 B) and `backlog/data/kg.sqlite-shm`
+    (32,768 B) into the vault index seven days after #2960 untracked its pair and
+    opened the witness read-only. Nothing #2960 did was wrong; its rule pair matches
+    `.db-wal`/`.db-shm` and its own vault comment names the `.sqlite` gap and leaves
+    it open. The live-vault node in this file caught the leak exactly as designed —
+    which is why the fix has to be measured as a *rule*, not as a state: a node that
+    only asserts the index is clean today passes on the vault's current shape and
+    tells nobody when the next extension leaks.
+
+    Sequence, all four sidecars of both witnesses, and both halves run the real
+    `scripts/util/vault-commit.sh` with no pathspec:
+
+    1. under #2960's `.db`-only pair, the `kg.sqlite` pair is NOT matched —
+       `check-ignore` exits 1 — and the producer commits both. That is `b625896b`,
+       reproduced, and it is this node's control: without it, "the producer named
+       neither sidecar" in step 3 would be indistinguishable from a producer that
+       never commits anything.
+    2. #3230's two lines are added and all four sidecars leave the index.
+    3. SQLite puts the bytes back on disk (which is what any open does, `?mode=ro`
+       included, and is why the code-side half could never have closed this) and the
+       producer runs again. Its commit names none of them, the index holds no
+       sidecar, and the tree is clean — present-and-ignored is the state the sweep
+       used to eat.
+    """
+    repo = _witness_sweep_repo(tmp_path)
+    _git_ok(repo, "config", "user.email", "nightly-reflection@lloyd.invalid")
+    _git_ok(repo, "config", "user.name", "nightly-reflection")
+    d = B.WITNESS_ARTIFACT_DIR
+    kg_wal, kg_shm = f"{d}/kg.sqlite-wal", f"{d}/kg.sqlite-shm"
+    all_four = [f"{d}/usage.db-wal", f"{d}/usage.db-shm", kg_wal, kg_shm]
+
+    # (1) The state the vault was actually in when it leaked: #2960's pair, nothing
+    # else. `_DB_ONLY_IGNORE_RULES` is that set spelled from the constant, so this
+    # half moves if someone widens the pair here without widening the vault file.
+    (repo / ".gitignore").write_text("\n".join(_DB_ONLY_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    # The witness the pair leaked beside. The fixture commits only `usage.db` (it is the
+    # one #2960's owed note names), and the live vault carries five tracked `.sqlite`
+    # witnesses — `kg.sqlite` is the one that grew the pair — so the replay adds it rather
+    # than testing a sidecar with no store to belong to. The last assertion below is what
+    # it is for: a rule wide enough to hide a witness from the sweep is the failure the
+    # vault's own comment says a `*.db` rule would have caused, and it can only be caught
+    # if a `.sqlite` witness is present to be hidden.
+    (repo / d / "kg.sqlite").write_bytes(b"SQLite format 3\x00" + b"\0" * 65507)
+    _git_ok(repo, "add", "--", ".gitignore", f"{d}/kg.sqlite")
+    _git_ok(repo, "commit", "-qm", "the vault's ignore file as #2960 shipped it")
+    (repo / kg_wal).write_bytes(b"")                # 0 B, exactly as found
+    (repo / kg_shm).write_bytes(b"\0" * 32768)      # 32,768 B, exactly as found
+
+    not_matched = _git(repo, "check-ignore", "--no-index", "--", kg_wal, kg_shm)
+    assert not_matched.returncode == 1 and not_matched.stdout.strip() == "", (
+        f"#2960's pair matched the `.sqlite` pair, which contradicts the leak this "
+        f"node replays: {not_matched.stdout!r}")
+
+    leaked = _real_pre_flight_sweep(repo)
+    assert leaked.returncode == 0, (
+        f"the control sweep did not even run: {leaked.stderr[-400:]}")
+    tracked = _git_ok(repo, "ls-files", "--", f"{d}/kg.sqlite-wal",
+                      f"{d}/kg.sqlite-shm").split()
+    assert sorted(tracked) == sorted([kg_wal, kg_shm]), (
+        f"the control did NOT reproduce the leak, so nothing below proves anything: "
+        f"index carries {tracked}")
+
+
+    # (2) #3230's fix: the two lines, then the four paths leave the index. The
+    # `.sqlite*` rules are inert until this point, so the pair above is what they
+    # are being tested against.
+    (repo / ".gitignore").write_text("\n".join(_SIDECAR_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    _git_ok(repo, "rm", "-q", "--cached", "--", *all_four)
+    _git_ok(repo, "add", "--", ".gitignore")
+    _git_ok(repo, "commit", "-qm", "untrack the sidecars and ship the sqlite pair")
+    for p in all_four:                              # any open re-creates them
+        (repo / p).write_bytes(b"")
+
+    swept = _real_pre_flight_sweep(repo)
+    assert swept.returncode == 0, (
+        f"the sweep did not run over the fixed state: {swept.stderr[-400:]}")
+    swept_out = swept.stdout + swept.stderr
+    for p in all_four:
+        assert p not in swept_out, (
+            f"the next sweep wrote a sidecar into its own commit output again: {p}")
+    after = _git_ok(repo, "ls-files", "--", f"{d}").split()
+    assert not [p for p in after if _SIDECAR_RX.search(p)], (
+        f"sidecars are back in the index after the fix: "
+        f"{[p for p in after if _SIDECAR_RX.search(p)]}")
+    assert f"{d}/kg.sqlite" in after and f"{d}/usage.db" in after, (
+        f"the fix also hid a witness store from the sweep: {after}")
+    dirty = _git_ok(repo, "status", "--porcelain").strip()
+    assert dirty == "", (
+        f"the four sidecars are on disk and the sweep left them unhandled: {dirty}")
+
+
+def test_check_ignore_goes_silent_on_a_tracked_sidecar_without_no_index(tmp_path):
+    """Why the vault node's rule probe passes `--no-index`, measured where a sidecar can
+    actually be tracked — because the flag-less form is a weaker probe exactly when the
+    thing it guards has gone wrong.
+
+    `#2960`'s node pinned the shipped pair with `check-ignore -v` and no flag, and the
+    comment there said it "exits 1 when the path is tracked again", as though that were
+    the catch. It is the opposite: a path the index carries prints NO line and exits 1, so
+    the moment a sidecar is re-committed — the precise failure every node in this file
+    exists to catch — a flag-less rule probe reports "no rule matched", which is
+    indistinguishable from the rule having been deleted. This is the same one-spelling
+    blindness as #3230 itself, sitting in the file's own probe, and it is the reason the
+    live-vault node and the scratch replay both pass `--no-index`.
+
+    The demonstration needs `git add -f` on an ignored path, which the live vault must
+    never see, so it runs in a scratch tree with the four shipped rules installed.
+    """
+    repo = _witness_sweep_repo(tmp_path)
+    _git_ok(repo, "config", "user.email", "witness@lloyd.invalid")
+    _git_ok(repo, "config", "user.name", "witness")
+    shm = f"{B.WITNESS_ARTIFACT_DIR}/usage.db-shm"
+    (repo / ".gitignore").write_text("\n".join(_SIDECAR_IGNORE_RULES) + "\n",
+                                     encoding="utf-8")
+    _git_ok(repo, "add", "--", ".gitignore")
+    _git_ok(repo, "commit", "-qm", "the four shipped rules")
+    (repo / shm).write_bytes(b"\0" * 32768)
+    _git_ok(repo, "add", "-f", "--", shm)           # tracked AND ignored: the failure shape
+    assert shm in _git_ok(repo, "ls-files", "--", B.WITNESS_ARTIFACT_DIR).split()
+
+    flagless = _git(repo, "check-ignore", "-v", shm)
+    assert flagless.returncode == 1 and flagless.stdout.strip() == "", (
+        f"flag-less check-ignore answered for a tracked path (rc="
+        f"{flagless.returncode}, out={flagless.stdout!r}), so the `--no-index` "
+        "reasoning in the vault node is stale and the flag should go")
+
+    named = _git_ok(repo, "check-ignore", "--no-index", "-v", shm)
+    assert named.split("\t")[0].rsplit(":", 1)[-1] == "backlog/data/*.db-shm", (
+        f"`--no-index` did not resolve a tracked, ignored path to its rule: {named!r}")
