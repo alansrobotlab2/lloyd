@@ -998,17 +998,21 @@ def test_the_ruling_is_a_comment_and_the_module_surface_is_untouched():
     between a note a round reads and a rule the leg enforces.
     """
     # Clause 5's other half, added by #3197: a round that wants more skip room has to be
-    # pointed at a person, not at the constant. `#2214` is the item that rules raising the
-    # figure human-only, and its note lives in `gate.py`'s comment on the floor, so the block
-    # in `skip_inventory.py` has to carry the citation itself — a round that opened only this
-    # file is exactly the round that would otherwise reach for the number.
+    # pointed at a person, not at the constant, and the block in `skip_inventory.py` has to
+    # carry that prohibition itself — a round that opened only this file is exactly the
+    # round that would otherwise reach for the number. #3251 recast the sentence it pins:
+    # #2214 is an item that ASKED for a bigger figure and closed as unnecessary once #3143
+    # derived the margin, so nothing on the board is waiting on a person, and the block has
+    # to say that in the past tense. The prohibition is unchanged and stays the half a
+    # round acts on — the figure is no round's to edit.
     flat = " ".join(_non_convertible_block().split())
     assert "#2214" in flat, \
-        "the block no longer cites #2214, so a round reading only skip_inventory.py has " \
-        "no note that raising the floor is not its ruling to make"
+        "the block no longer cites #2214, so a round reading only skip_inventory.py " \
+        "loses the record that raising the floor was asked for and closed, not left " \
+        "open for the round to take"
     assert re.search(r"PYTEST_MAX_SKIPPED.{0,200}human ruling", flat), \
         "the block lost the sentence tying `PYTEST_MAX_SKIPPED` to a human ruling; the " \
-        "citation alone does not say WHICH figure #2214 reserves"
+        "citation alone does not say WHICH figure is out of a round's reach"
 
     assert S.BEFORE_TOTAL == 40 and S.BEFORE_MACHINE == 21
     for fn in ("is_machine_fact", "read_inventory", "skip_sites", "machine_rows",
@@ -1021,11 +1025,50 @@ def test_the_ruling_is_a_comment_and_the_module_surface_is_untouched():
     assert re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", gate, re.M) == ["40"], \
         "the floor constant moved while this ruling was being written; the block's bound " \
         "and test_the_pinned_before_total_is_the_ceiling_the_rung_uses both need the same " \
-        "number, and #2214 reserves raising it to a person"
+        "number, and raising it is on no open item — #2205 and #2214 closed as " \
+        "unnecessary when #2233's fix took the wall they named away, and #3143 " \
+        "derived the margin without moving it"
 
     same, why = _executable_ast_matches_round_base()
     assert same, (
         f"#2920 is meant to be a comment-only change and it is not: {why}")
+
+
+def test_the_block_records_the_asking_as_closed_not_as_an_outstanding_ruling():
+    """#3251 clause 3: the block cites #2214 as a closed asking, not as a live ruling.
+
+    #2214 is `status: done` — closed by owed-check on 2026-10-05 as "closed as
+    unnecessary: the wall this blocker names is gone" — and #2205 closed the same way,
+    so a present-tense sentence pointing at either one is an ownership citation into a
+    dead item: the next round reads a human decision still pending and defers, which is
+    the belief that kept the 55 parked on its branch. Correcting the tense must not
+    soften the prohibition, though, so this node pins both edges at once — no
+    outstanding-ruling claim, and the round still may not edit the number.
+
+    The fragments are assembled at runtime so this file never spells a phrase it
+    refuses. Whether the block still satisfies #3197's citation and figure pins is
+    left to `test_the_ruling_is_a_comment_and_the_module_surface_is_untouched` and
+    `test_the_block_names_the_derived_bound_in_both_trees_and_no_figure_in_either`,
+    which grade those; this node grades only the tense.
+    """
+    flat = " ".join(_non_convertible_block().split())
+    low = flat.lower()
+    for claim in ("remains a" + " human ruling",
+                  "still a" + " human ruling",
+                  "human ruling" + " outstanding",
+                  "#2214" + " reserves",
+                  "#2214" + "'s ruling"):
+        assert claim.lower() not in low, (
+            f"the block says {claim!r} again: that item is closed, so the sentence "
+            f"points a round at a dead item instead of at the board")
+    assert "closed as unnecessary" in low, (
+        "the block no longer says in the past tense that the items which asked for a "
+        "bigger figure closed, so the citation alone reads as an open decision")
+    assert "#3143" in flat, (
+        "the block lost the item whose derived margin is why that asking closed")
+    assert "may not edit it" in flat, (
+        "the block lost the prohibition itself: fixing the tense must not leave a "
+        "round reading the correction as permission to widen the bound")
 
 
 def _strip_docstrings(tree: ast.AST) -> ast.AST:

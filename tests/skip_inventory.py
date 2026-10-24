@@ -112,10 +112,12 @@ BEFORE_MACHINE = 21
 # that have already drifted twice. They stay untaken until a round with zero failures
 # is actually refused by that derived ceiling — `_skip_ceiling`, the max above, and not
 # any fixed figure — and no such refusal is on record, so a round sitting under the
-# bound has no business touching them either. Neither is making room a way in: raising
-# the FLOOR `PYTEST_MAX_SKIPPED` remains a human ruling (#2214), and a round that
-# widens the bound by editing a number has answered the question by putting away the
-# measuring stick, which is the lottery #2205 named.
+# bound has no business touching them either. Neither is making room a way in:
+# raising the FLOOR `PYTEST_MAX_SKIPPED` is not an outstanding human ruling — #2214
+# asked for a bigger figure and closed as unnecessary, as did #2205, when the wall
+# they named went away, and #3143 has since derived the margin — and a round still
+# may not edit it: widening the bound by editing a number is answering the question
+# by putting away the measuring stick.
 def _git(root: Path, *args: str) -> str:
     import subprocess
     r = subprocess.run(["git", "-C", str(root), *args],

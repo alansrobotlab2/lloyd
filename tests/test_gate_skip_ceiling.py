@@ -8,8 +8,11 @@ reported 39 skips against that 40 — a margin of one — and the two refusals t
 names (`SM_20261012_084845`, `SM_20261013_022036`) are both in the rounds store as
 `41 tests skipped (limit 40)`, which is a round refused for a fact about the box.
 Every past near-miss had been answered by a bigger literal, which is the lottery
-#2205 named, and #2214's `PYTEST_MAX_SKIPPED = 55` (`dbfddc60`) is still unlanded
-because raising the figure is a human ruling.
+#2205 named. Raising the figure is on no open item: #2205 and #2214 asked for a
+bigger one and closed as unnecessary on 2026-10-05 when #2233's fix took the wall
+away, #3143 landed the derived margin on 2026-10-21 without moving it, and #2214's
+`PYTEST_MAX_SKIPPED = 55` (`dbfddc60`) never left its branch
+`automod/SM_20261005_024736`, unreferenced by `main`.
 
 What landed instead derives the margin: `max(PYTEST_MAX_SKIPPED, base +
 PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the newest green
@@ -38,6 +41,9 @@ from scripts.automod import gate as G
 ROOT = Path(__file__).resolve().parents[1]
 GATE_SRC = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
 GUARD_SRC = (ROOT / "scripts" / "maintenance" / "guard_vacuity.py").read_text(
+    encoding="utf-8")
+THIS_SRC = Path(__file__).read_text(encoding="utf-8")
+PARALLEL_SRC = (ROOT / "tests" / "test_gate_parallel_tests.py").read_text(
     encoding="utf-8")
 
 
@@ -150,7 +156,9 @@ def test_the_ceiling_is_the_base_plus_headroom_and_not_the_floor(tmp_path, monke
     """
     assert G.PYTEST_SKIP_HEADROOM == 8, "clause 1 fixes the headroom at 8"
     assert G.PYTEST_MAX_SKIPPED == 40, (
-        "#3143 keeps 40 as the FLOOR; raising the figure is #2214's human ruling")
+        "#3143 keeps 40 as the FLOOR; raising the figure is on no open item — "
+        "#2205 and #2214 asked for a bigger one and closed as unnecessary when "
+        "#2233's fix took the wall they named away")
     g = _gate(tmp_path, monkeypatch, {
         **_five_at(39),
         "SM_20261001_000009": _green("SM_20261001_000009", 38),
@@ -596,3 +604,160 @@ def test_the_partial_branch_still_applies_no_whole_suite_floor(tmp_path, monkeyp
     assert "skip ceiling" not in detail, (
         f"a partial run measured one file; a ceiling clause there would be a number "
         f"it cannot support: {detail}")
+
+
+# --------------------------------------------------------------------------- #
+# Clause 4 (#3251) — the PROSE a round reads about this figure
+# --------------------------------------------------------------------------- #
+#
+# Every node above grades the arithmetic. These grade the sentences, because a
+# sentence is the half that gets acted on. #2205 and #2214 are both `status: done`,
+# #2214 closed by owed-check on 2026-10-05 as "closed as unnecessary: the wall this
+# blocker names is gone", yet `gate.py` asserted, in the present tense, that raising
+# the figure REMAINED such a ruling and named #2214 as its owner. A triage or
+# owed-check pass that reads that concludes a person still has to decide and defers.
+# The wall #2214 named went away on 2026-10-05, which is why owed-check closed it as
+# unnecessary, and #3143 derived the margin on 2026-10-21 — so the sentence was
+# already false when it was still the only thing on disk saying a ruling was owed.
+# A refusal message fails the same way in a smaller space: the round refused for
+# bumping the constant reads its next move out of the text printed at it.
+#
+# The banned spellings are assembled from fragments, so no line of this file spells
+# a phrase this file refuses. The ban is a text property, and a test carrying the
+# phrase whole would itself be the third surface #3251 exists to correct.
+
+#: Claims that a human ruling on the figure is still owed, or that a closed item
+#: owns it. Each is assembled from fragments: a node that banned a phrase could not
+#: otherwise grep for it without carrying the very surface #3251 exists to correct.
+_STALE_RULING_CLAIMS = (
+    "remains a" + " human ruling",
+    "still a" + " human ruling",
+    "human ruling" + " outstanding",
+    "raising the ceiling is" + " Alan",
+    "#2214" + " reserves",
+    "#2214" + "'s human ruling",
+    "human" + "-promotion route",
+)
+
+
+def _floor_comment_block() -> str:
+    """The contiguous `#` block sitting directly above the `PYTEST_MAX_SKIPPED` assignment.
+
+    Located from the assignment upward rather than by line number: the citations inside
+    this very comment have drifted before, and a range pin quietly grades whatever text
+    has since moved into the range.
+    """
+    lines = GATE_SRC.splitlines()
+    at = next(i for i, ln in enumerate(lines)
+              if re.match(r"^PYTEST_MAX_SKIPPED = \d+$", ln))
+    start = at
+    while start - 1 >= 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at])
+
+
+def _floor_block_prose() -> str:
+    """The floor comment block as PROSE: every `#` marker and the wrap folded away.
+
+    The nodes that grade sentences read this rather than the raw lines. A comment's
+    eighty-column wrap is a typesetting fact, and a check written against the raw text
+    grades where the line happened to break: fold the markers in and a re-wrapped
+    sentence still says the same thing, while a check that left them in would go red on
+    a re-wrap that changed no claim — and, worse, could go GREEN on a sentence split
+    around a banned phrase.
+    """
+    stripped = (ln.lstrip().removeprefix("#").strip()
+                for ln in _floor_comment_block().splitlines())
+    return " ".join(" ".join(stripped).split())
+
+
+def test_the_floor_block_owes_the_figure_to_no_open_item():
+    """#3251 clause 1: the block above the floor assignment owes the figure to nobody.
+
+    Two halves, one red each way. Nothing in the block may claim in the present tense
+    that a human ruling is outstanding, and the block must say positively that the
+    asking happened and closed: naming #2205 and #2214 as items that ASKED and CLOSED
+    is what replaces the dead-owner citation, so a reader who knows the number is 40
+    and wants it bigger learns the decision is behind them rather than ahead.
+
+    Both nodes in this section read `_floor_block_prose()`, so a sentence counts as
+    itself however the comment is wrapped.
+    """
+    flat = _floor_block_prose()
+    low = flat.lower()
+    for claim in _STALE_RULING_CLAIMS:
+        assert claim.lower() not in low, (
+            f"the block above PYTEST_MAX_SKIPPED says {claim!r} again — #2205 and "
+            f"#2214 are closed, so a present-tense ruling there reads as an open "
+            f"human decision and the next triage pass defers to it")
+    assert "on no open item" in low, (
+        "the block no longer says outright that raising the figure is on no open "
+        "item, which is the sentence standing in for the dead-owner citation")
+    assert "#2205" in flat and "#2214" in flat, (
+        "the block names neither of the items that asked for a bigger figure, so the "
+        "past tense it goes on to use has no subject")
+    assert "asked for" in low and "closed as unnecessary" in low, (
+        "the block lost the past-tense shape — asked for a bigger figure, closed as "
+        "unnecessary — that tells a reader the decision is behind, not ahead")
+    assert "#3143" in flat, (
+        "the block lost the item whose derived margin is why that asking closed")
+
+
+def test_the_floor_block_still_records_where_the_unlanded_55_lives():
+    """#3251 clause 2: correcting the ownership claim must not lose the pointer.
+
+    The branch is worth keeping precisely because the figure is not: `dbfddc60` holds
+    the 55 together with the measurement arithmetic behind it, which is the thing to
+    read if the count ever does climb. So the block has to carry the commit, the
+    branch, and the fact that `main` never took it — and still separate what #3143
+    did, derive the margin, from the raise it did not make, because a reader who can
+    only find "the 55" and "40" will otherwise conclude one of them is stale.
+
+    The block is read as prose, wrap and `#` markers folded away, so what is pinned is
+    the sentence and not the column it happens to break at.
+    """
+    block = _floor_block_prose()
+    assert "dbfddc60" in block, (
+        "the block stopped naming the commit holding the 55, so the number a future "
+        "round would need is undiscoverable from the tree it is reading")
+    assert "automod/SM_20261005_024736" in block, (
+        "the block stopped naming the branch that commit sits on; `dbfddc60` alone is "
+        "unreachable once the round's worktree is gone")
+    assert re.search(r"unreferenced by `?main`?", block), (
+        "the block no longer says the 55 never reached main, which is the half that "
+        "makes 40 in this tree and 55 on a branch one consistent story rather than a "
+        "contradiction")
+    assert re.search(r"\b55\b", block), (
+        "the block no longer names the figure it is pointing at, so the pointer has "
+        "no subject")
+    assert "#3143 derived the margin" in block, (
+        "the block lost the statement that #3143 derived the margin")
+    assert "without moving this figure" in block, (
+        "the block lost the point that deriving the margin did not move the figure — "
+        "the distinction the whole rail rests on")
+    assert re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", GATE_SRC, re.M) == ["40"], (
+        "the 55 is a pointer to a branch, so this tree's figure has to stay the "
+        "floor 40 or the block's story is false")
+
+
+def test_the_ceiling_refusals_name_no_closed_owner():
+    """#3251 clause 4: what a round reads when it is refused routes it to the board.
+
+    Both modules are read as bytes on disk, the way the three `PYTEST_MAX_SKIPPED = 40`
+    pins read `gate.py` — the artefact at risk is text that lands in a round's own
+    failure output, and an imported object cannot show it. Each file must carry the new
+    wording and none of the old: the assert message that fires on a bump in
+    `tests/test_gate_parallel_tests.py`, and this file's own module docstring and floor
+    assert, all three of which used to hand the ruling to #2214.
+    """
+    for name, src in (("tests/test_gate_skip_ceiling.py", THIS_SRC),
+                      ("tests/test_gate_parallel_tests.py", PARALLEL_SRC)):
+        low = src.lower()
+        for claim in _STALE_RULING_CLAIMS:
+            assert claim.lower() not in low, (
+                f"{name} still prints {claim!r}: a round refused for bumping the "
+                f"constant reads its next move out of that message, and the item it "
+                f"is pointed at is closed")
+        assert "on no open item" in low, (
+            f"{name} lost the wording that puts raising the figure on no open item, "
+            f"so its refusal now names no route at all")

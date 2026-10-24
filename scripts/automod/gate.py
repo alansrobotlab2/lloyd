@@ -160,10 +160,10 @@ PYTEST_FLOOR_FRACTION = 0.25
 # whenever a worktree has no vite), so a fixed rail refuses rounds for a fact
 # nobody changed. Refusing on that is the #2637 failure all over again, and every
 # past near-miss was answered by a bigger literal, which is the lottery #2205
-# named. Raising the FIGURE remains a human ruling (#2214, `dbfddc60` is still
-# unlanded); deriving the margin from the base tree is not, and it cannot drift
-# upward on its own — see `_skip_base_median` for why a median of five green
-# rounds has to be dragged before the rail moves at all.
+# named. Raising the FIGURE is on no open item: #2205 and #2214 asked for a bigger
+# one and closed as unnecessary when #2233's fix took the wall they named away, and
+# #3143 derived the margin without moving this figure. The 55 stays unreferenced by
+# `main`, on `automod/SM_20261005_024736` (`dbfddc60`), if the count ever climbs.
 #
 # The name and the exact spelling of this assignment are load-bearing for two
 # readers that match on text rather than on behaviour: the nodes in

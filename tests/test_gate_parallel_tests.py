@@ -1210,11 +1210,15 @@ def test_the_skip_ceiling_the_pins_now_live_under_is_still_forty(tmp_path, monke
     still bites at forty-one.
 
     This matters because the ceiling is the thing three sibling items (#2205, #2211,
-    #2214) proposed raising to 55 instead, and #2214's `PYTEST_MAX_SKIPPED = 55`
-    (`dbfddc60`) is a human-promotion route this change is the alternative to. Running
-    the pins is the route that keeps the number at 40, so the number being 40 is part of
-    this diff's contract, not an absence of change: if a later edit quietly widened it,
-    the round that did it would have to say so here.
+    #2214) proposed raising to 55 instead; owed-check closed all three as
+    unnecessary on 2026-10-05 when #2233's fix took the wall they named away,
+    #3143 landed the derived margin on 2026-10-21 without moving the figure, and
+    #2214's `PYTEST_MAX_SKIPPED = 55` (`dbfddc60`) is still unreferenced by `main`,
+    on `automod/SM_20261005_024736`, so raising the figure is on no open item.
+    Running the pins is the route that keeps the number
+    at 40, so the number being 40 is part of this diff's contract, not an absence of
+    change: if a later edit quietly widened it, the round that did it would have to
+    say so here.
 
     Forty-one skips fails and forty passes, both read out of the rung's own sentence, so
     the boundary is pinned at the value rather than beside it. The vacuity guard's
@@ -1227,7 +1231,8 @@ def test_the_skip_ceiling_the_pins_now_live_under_is_still_forty(tmp_path, monke
     g, _calls, _script = _gate(tmp_path, monkeypatch)
     assert G.PYTEST_MAX_SKIPPED == 40, (
         "#2233's fix is that the pins run, not that the ceiling rises; raising it here "
-        "would be the #2214 route wearing this item's clothes")
+        "would be the bigger-figure move #2205 and #2214 closed as unnecessary, "
+        "wearing this item's clothes")
 
     def counts_with(skipped: int) -> dict:
         return {"passed": 5800, "failed": 0, "errors": 0, "xfailed": 0,
@@ -1268,8 +1273,9 @@ def test_the_skip_ceiling_survives_a_round_that_buys_headroom_elsewhere(tmp_path
     ceiling = re.findall(r"^PYTEST_MAX_SKIPPED = (\d+)$", src, re.M)
     assert ceiling == ["40"], (
         f"gate.py should assign PYTEST_MAX_SKIPPED = 40 exactly once, got "
-        f"{ceiling} — raising the ceiling is Alan's ruling (#2214), not a "
-        "round's convenience")
+        f"{ceiling} — raising the figure is on no open item: #2205 and #2214 asked "
+        "for a bigger one and closed as unnecessary when #2233's fix took the wall "
+        "they named away, so it is never a round's convenience")
     assert G.PYTEST_MAX_SKIPPED == 40
 
     def counts_with(skipped: int) -> dict:
