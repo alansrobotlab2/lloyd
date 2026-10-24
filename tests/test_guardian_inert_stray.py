@@ -148,6 +148,16 @@ def _guardian(tmp_path, monkeypatch, tree, data, strays):
     # — rather than by patching the guardian's own accessor. Patching `resolve_move_root`
     # here would have this file's nodes pass on a resolver that was never called.
     monkeypatch.setenv("LLOYD_DATA", str(data))
+    # #3210's arrivals leg reads `datawatch.DATA_ROOT` (an import-time constant, which the
+    # `policy.DATA_ROOT` patch and the env var above do not move) and persists its baseline
+    # under `policy.GUARDIAN_STATE`. Both are pinned to this test for the same reason
+    # `state_dir=tmp_path` is: conftest gives a whole pytest SESSION one scratch data root, so
+    # a name some other test left at that root's top level would ARRIVE as this test's finding
+    # — and an alert here fails `alerts == []`, which is how
+    # `test_the_hourly_check_moves_residue_and_raises_no_incident` came up FLAKY at
+    # SM_20261023_230422's gate. Pointed at `data`, this tick's first pass is the leg's arm.
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(data))
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", str(tmp_path / "guardian-state"))
     monkeypatch.setattr(gmod.datawatch, "stray_in_tree", lambda _tree: list(strays))
     g = gmod.Guardian.__new__(gmod.Guardian)
     g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,

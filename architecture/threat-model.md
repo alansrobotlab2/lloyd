@@ -142,7 +142,7 @@ appears in this table: those threats are in the next one.
 | T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py::check_scope` |
 | T-24 | B11 | E | A round edits its own gate to let itself through | `scripts/automod/gate.py:3532` |
 | T-25 | B11 | T | An agent-authored change weakens a guard and the suite stays green | `scripts/automod/gate.py:2648` |
-| T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:869` |
+| T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:879` |
 | T-27 | B11 | T | A promotion silently deletes data and looks like a clean landing | `agent-services/guardian/vaultwatch.py` |
 | T-28 | B9 | E | An unattended turn reaches a tool it was never allowed to hold | `app/tool_bans.py:23` |
 | T-29 | B10 | E | An unattended turn mints itself the authority it was banned from using | `app/tool_bans.py:35` |

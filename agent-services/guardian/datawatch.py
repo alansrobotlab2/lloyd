@@ -688,6 +688,181 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Names that newly appear at the data root's top level (#3210)
+# ---------------------------------------------------------------------------
+#
+# The four detectors that look at this directory answer four other questions. This one
+# asks WHAT IS NEW HERE, which none of them asks, and answers it as data for a person.
+#
+# `data_root_shadows` above answers "is this 0-byte file SHADOWING a populated store of
+# the same name", and to do that cheaply it drops every name that does not end in a
+# database suffix (`_DB_SUFFIXES`, applied before the pairing test) — so a file named
+# `false` or `sqlite3`, which is what a mistyped command actually leaves behind, is never
+# even learned by that walk. `_bash_tree_strays` snapshots the root's top level per Bash
+# call and then narrows to new directories holding a checkout and new 0-byte files whose
+# name ends in a database extension, ruling the rest out on purpose ("a placeholder… left
+# alone"). `inert_residue`/`quarantine_inert` is scoped to the CODE tree. And the tripwire
+# only ever speaks of names that VANISHED.
+#
+# So `~/lloyd-data/false` (0 bytes, mtime 2026-10-12) and `~/lloyd-data/sqlite3` (0 bytes,
+# mtime 2026-10-22) have stood at the live root's top level for weeks, inside every hourly
+# snapshot, named by nothing. The residue of a mistyped `sqlite3 <db>` is not dangerous;
+# it is informative — it says a command in this system is writing a file nobody intended —
+# and the root's inventory is the thing the snapshot timer, the tripwire's baseline and
+# `data_root_shadows` all measure, so a name that arrives silently moves all three.
+#
+# Report-only, and that is load-bearing: #3109 ruled the same for the half of this walk
+# that found shadows, because the guardian cannot know whether a file in a person's root
+# is theirs or a mistake. `quarantine_inert`'s "provably inert" tests are for git-ignored
+# CODE-TREE residue and are never offered a data-root name. Nothing here unlinks, renames,
+# moves or creates; the decision to delete the live pair stays a human action under
+# `~/lloyd-data`, exactly as `data_root_shadows`' docstring rules for the pair it named.
+
+#: The leg's own previous scan, persisted. Not the tripwire's snapshot: `VaultWatch.tick`
+#: runs every `TICK_SECONDS = 5.0`, so a snapshot would already hold a file created
+#: minutes before this hourly leg runs, and "absent from the previous measurement" would
+#: degrade to "created in the last five seconds" — naming almost nothing, forever.
+ARRIVALS_STATE_FILE = "data-root-arrivals.json"
+
+
+def top_level_regular_files(data_root: str = DATA_ROOT) -> dict[str, float]:
+    """{name: mtime} for every regular file standing directly under `data_root`.
+
+    No name filter of any kind — that is the whole point of this leg, whose subject is a
+    name shaped like `false` or `sqlite3`. Symlinks, directories, sockets and devices are
+    not regular files and are not this question; `follow_symlinks=False` so a link is
+    never followed or read, and the size is deliberately NOT part of the key because
+    `false` and `sqlite3` are 0 bytes and the class does not stop being interesting when
+    it grows.
+
+    #2056's rule, and #3109's for exactly this walk: a root that cannot be read RAISES.
+    An empty mapping here would mean "nothing is new", which is the value that CLOSES an
+    alert — the same confusion that made the shadow walk raise instead of answering `[]`,
+    where a root that could not be opened reported a root that had nothing to quarantine.
+    A missing root raises too: `app.data_root` exists because an absent data root reading
+    as empty is the larger version of this same bug.
+    """
+    out: dict[str, float] = {}
+    with os.scandir(data_root) as it:                  # OSError propagates: unreadable ≠ clean
+        for de in it:
+            try:
+                st = de.stat(follow_symlinks=False)
+            except OSError:
+                continue                               # a name that will not stat is not a finding
+            if stat.S_ISREG(st.st_mode):
+                out[de.name] = st.st_mtime
+    return out
+
+
+def read_arrivals_baseline(state_dir, data_root: str = DATA_ROOT) -> "dict | None":
+    """The names this leg has already seen, or `None` when it has never run.
+
+    `None` is a real third state and must not collapse to `{}`: a leg that re-armed from
+    an empty baseline would, on every restart, report the entire legitimate inventory
+    (sessions marker, `workers.db`, the snapshot marker) as a fresh human decision, which
+    is the noise that gets a new alert switched off. The recorded root is part of the
+    state — a baseline measured against one root is not a baseline for another, and #1415
+    is about a guardian answering about the wrong root — so a root change re-arms.
+    """
+    p = Path(state_dir) / ARRIVALS_STATE_FILE
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or state.get("root") != os.path.realpath(data_root):
+        return None
+    seen = state.get("seen")
+    return seen if isinstance(seen, dict) else None
+
+
+def write_arrivals_baseline(state_dir, files: "dict[str, float]", now: float,
+                            data_root: str = DATA_ROOT) -> None:
+    """Record what the leg saw, MONOTONICALLY: the union of what it saw before and now.
+
+    A snapshot of this hour alone would make a sqlite sidecar that legitimately comes and
+    goes (`usage.db-wal` removed at checkpoint, recreated by the next writer) a recurring
+    human-decision alert. A name the leg has once seen stays seen, so an arrival really is
+    a first appearance. `V._atomic_write` is the tmp+rename the rest of this file's state
+    uses, so a crash cannot leave a half-written baseline that would re-arm the leg.
+    """
+    state_dir = Path(state_dir)
+    previous = read_arrivals_baseline(state_dir, data_root) or {}
+    seen = {**previous, **files}
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # tmp + `os.replace`, the same shape `VaultWatch._persist` uses for its own state file:
+    # a partially-written baseline would parse as corrupt, and a corrupt baseline re-arms
+    # the leg, which is the one failure that hides a real arrival for an hour.
+    tmp = state_dir / f"{ARRIVALS_STATE_FILE}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({
+        "root": os.path.realpath(data_root), "seen": seen, "updated": now}, indent=1),
+        encoding="utf-8")
+    os.replace(tmp, state_dir / ARRIVALS_STATE_FILE)
+
+
+def _days_ago(mtime: float, now: float) -> int:
+    return max(0, int((now - mtime) // 86400))
+
+
+def new_top_level_names(files: "dict[str, float]", previous: "dict | None",
+                        *, now: "float | None" = None) -> list[dict]:
+    """The regular files at the root's top level that `previous` does not already hold.
+
+    One rule, and no gate on it: novelty. `data_root_shadows` gates on `_DB_SUFFIXES` and
+    on a populated same-basename copy elsewhere, `_bash_tree_strays` gates its file half
+    on `EMPTY_DB_SUFFIXES`; both gates are the reason the live `false` and `sqlite3` are
+    unnamed today, so this leg must not re-introduce either.
+
+    `previous=None` means no previous measurement, and the answer is NOTHING: the leg
+    ARMS on the world as it stands and reports no arrivals. That is what clause 5's "a
+    name already present when the watcher armed" requires, and the alternative is worse
+    than silent — a baseline seeded from `KNOWN_GOOD_TOPLEVEL` would report the live
+    root's seventeen legitimate residents (the marker, `workers.db`, `usage.db`, a dozen
+    state files) as news on the first pass, and a wall of expected names buries the two
+    this leg exists for. Consequence, stated rather than hidden: two stubs that were
+    standing BEFORE this leg shipped are never named by it. `false` and `sqlite3` are
+    therefore owed to whoever deletes them, which is where #3210's own acceptance already
+    puts them ("removal of the two live 0-byte files is a human action", datawatch.py:543).
+    A first pass must still WRITE the baseline, or every guardian restart would re-arm
+    against a fresh empty file and the leg would never see a second measurement.
+    """
+    if previous is None:
+        return []
+    out = [{"name": name, "mtime": mtime}
+           for name, mtime in sorted(files.items()) if name not in previous]
+    if out and now is not None:
+        for f in out:
+            f["age_days"] = _days_ago(f["mtime"], now)
+    return out
+
+
+def arrivals_alert(arrivals: list[dict]) -> "dict | None":
+    """The `state["strays"]` dict for these findings, or None when there are none.
+
+    `needs_human=True` is the #3109 routing and it is the whole alert: a name in a
+    person's data root is their decision, and the guardian's job is to say which name and
+    since when, not to act. No `quarantine` key and no `staged` key is emitted, so there
+    is nothing for the resolve path to consume — those two keys are what a STRAY carries,
+    and an arrival is not a stray. The date is rendered because a stub that has been
+    standing for nine days and a file made this turn are different questions asked of
+    different people; a bare "a new file appeared" about a ten-day-old `false` invites the
+    correct answer, which is "then it is not news".
+    """
+    if not arrivals:
+        return None
+    detail = "; ".join(
+        f"{f['name']} — mtime "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(f['mtime']))}"
+        + (f" ({f['age_days']} days ago)" if "age_days" in f else "")
+        for f in arrivals)
+    return {
+        "needs_human": True,
+        "reason": (f"{len(arrivals)} new name(s) at the data root's top level: {detail}. "
+                   "Report-only: the guardian moves nothing, and the decision is yours."),
+        "evidence": detail,
+    }
+
+
 class DataWatch(V.VaultWatch):
     what = "data"
     skip_top = CACHE_DIRS

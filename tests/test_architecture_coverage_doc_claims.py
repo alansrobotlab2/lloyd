@@ -2107,11 +2107,22 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` shows those two
     # hunks and nothing else, and `grep -n '^    def evaluate_liveness\|^def main'
     # agent-services/guardian/guardian.py` still prints 869 with 2839 below it.
-    assert heads[guardian]["main"] == 2839, (
-        f"`main` moved off :2839 ({heads[guardian]['main']}) — if it is gone "
+    # 2839 → 2942 AND 869 → 879 is #3210: two hunks, `@@ -207,6 +207,16 @@` (+10, the
+    # arrivals alert title and the comment on why it must not share the shadow heading) and
+    # `@@ -1801,6 +1811,99 @@` (+93, the data-root arrivals measure/alert/retract block inside
+    # `_runtime_data_incident`). The first is above `evaluate_liveness`, the second below it
+    # and above `main`, so `evaluate_liveness` moves by +10 and `main` by the whole +103 —
+    # which is why this node, and not a per-method one, is where a new hourly leg gets
+    # noticed. `architecture/threat-model.md:145`'s T-26 cell cites the `evaluate_liveness`
+    # head and moved in the same commit. Re-check as before: `git diff <base> <head> --
+    # agent-services/guardian/guardian.py | grep '^@@'` shows those two hunks and nothing
+    # else, and `grep -n '^    def evaluate_liveness\|^def main'
+    # agent-services/guardian/guardian.py` prints 879 with 2942 below it.
+    assert heads[guardian]["main"] == 2942, (
+        f"`main` moved off :2942 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 869, (
-        f"`evaluate_liveness` moved off :869 "
+    assert heads[guardian]["evaluate_liveness"] == 879, (
+        f"`evaluate_liveness` moved off :879 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89

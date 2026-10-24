@@ -25,9 +25,11 @@ store that still must.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -656,3 +658,574 @@ def test_the_horizon_outlasts_the_history_ring_it_cannot_be_read_from():
     assert D.SCRATCH_HORIZON_SECONDS >= 24 * 3600.0, (
         "a job that runs overnight has to be able to clean up after itself without "
         "halting the fleet")
+
+
+
+
+# ── names that newly appear at the data root's top level (#3210) ──────────────
+#
+# Four detectors look at this directory and none of them asks this question.
+# `data_root_shadows` answers "is this 0-byte file SHADOWING a populated store of the same
+# name": it drops every name that does not end in a database suffix (`_DB_SUFFIXES`,
+# datawatch.py:444, applied at :571) BEFORE its paired-populated-copy test, so a file
+# named `false` or `sqlite3` is never even learned by the walk. `_bash_tree_strays` does
+# snapshot the root's top level per Bash call, then narrows to new directories holding a
+# checkout and new 0-byte files carrying one of `EMPTY_DB_SUFFIXES` (:557, the drop at
+# :673) — its docstring rules the rest out on purpose: "a new 0-byte file that does not
+# end in a database extension is a placeholder… left alone". `inert_residue` and
+# `quarantine_inert` are scoped to the CODE tree (`RUNTIME_NAMES`, no "/" in the name).
+# And the tripwire only ever speaks of names that VANISHED. So a mistyped shell argument —
+# `sqlite3 <db>` with the argument in the wrong place, a redirect whose target expanded to
+# nothing — leaves a permanent entry in the root, and the root's inventory, which the
+# snapshot timer and the tripwire's baseline both measure, silently gains names.
+#
+# This leg asks the one question none of them asks — WHAT IS NEW HERE — and answers it as
+# data for a person. Two rulings it inherits rather than invents: #3109's
+# `needs_human=True` for this half of the walk (a file in a person's root is theirs;
+# `quarantine_inert`'s "provably inert" tests are for git-ignored tree residue, and
+# nothing here moves or unlinks), and #2056's raise-instead-of-`[]` (a root that cannot be
+# read is not a root that is clean).
+#
+# The diff reference is this leg's OWN previous scan, which the guardian persists between
+# hourly passes; it is deliberately not the tripwire's snapshot. `VaultWatch.tick` runs
+# every `TICK_SECONDS = 5.0`, so a snapshot would already contain a file created minutes
+# before this leg ran, and "absent from the previous measurement" would then mean "created
+# in the last five seconds" — the leg would name almost nothing and read as clean forever.
+
+
+def _stubs(root: Path, age_seconds: float = 9 * 86400.0) -> dict[str, float]:
+    """The live root's two residents, in miniature: 0-byte files whose names carry no
+    database suffix, left standing for weeks by mistyped commands — 0 bytes at mtime
+    2026-10-12 (`false`) and 2026-10-22 (`sqlite3`) on the live box when this was filed.
+
+    Returns {name: mtime} as it writes them, so a node can compare against the clock it
+    seeded rather than against a literal. The age is backdated on purpose: a stub's DATE is
+    what distinguishes it in an alert from a file created this turn.
+    """
+    out: dict[str, float] = {}
+    for name in ("false", "sqlite3"):
+        f = root / name
+        f.write_bytes(b"")
+        stamp = time.time() - age_seconds
+        os.utime(f, (stamp, stamp))
+        out[name] = stamp
+    return out
+
+
+def test_a_new_top_level_file_is_named_whether_or_not_its_name_ends_in_a_database_suffix(
+        tmp_path):
+    """Clause 1: the question is novelty, so the shape of the name cannot be a gate.
+
+    Both halves come off one scan of one root. A file whose name carries a database suffix
+    and one whose name carries none must both come back, because the gate this leg replaces
+    is precisely a suffix test — `_DB_SUFFIXES` in `data_root_shadows`,
+    `EMPTY_DB_SUFFIXES` in `_bash_tree_strays` — and a rule that named only the suffixed
+    one would leave `false` and `sqlite3` exactly as unnamed as they are today. Nor may a
+    populated same-basename copy elsewhere be required: that pairing question belongs to
+    the shadow leg, and neither stub has a twin.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    (root / "usage.db").write_bytes(b"")                          # suffix, 0 bytes
+    (root / "notes.txt").write_text("kept\n", encoding="utf-8")   # no suffix, NOT empty
+    (root / "workers.db").write_bytes(b"x" * 4096)                # populated, not a stub
+    previous = D.top_level_regular_files(str(root))
+
+    (root / "false").write_bytes(b"")
+    (root / "sqlite3").write_bytes(b"")
+    (root / "kg.sqlite").write_bytes(b"")                         # suffixed, same shape
+    arrivals = {a["name"] for a in D.new_top_level_names(
+        D.top_level_regular_files(str(root)), previous)}
+
+    assert arrivals == {"false", "sqlite3", "kg.sqlite"}, (
+        "the leg must name every newly-present regular file whatever its name's shape: "
+        "`false` and `sqlite3` carry no database suffix and no populated twin, which is "
+        f"the whole class it exists for. Got {sorted(arrivals)}")
+    held = previous | {"false": 0.0, "sqlite3": 0.0, "kg.sqlite": 0.0}
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)), held) == [], (
+        "a scan over a baseline that already holds these names must be empty, or the leg "
+        "alerts on the world as it stands")
+
+
+def test_the_arrivals_leg_measures_without_touching_anything(tmp_path):
+    """Clause 2: report-only is a property of the code, not of this run's luck.
+
+    The two stubs are still on disk afterwards — a check that resolved the question by
+    deleting the evidence would be worse than the silence it replaced, which is why #3109
+    ruled the removal of the live pair a human action. And no mutating call is reachable
+    from the leg at all: the shadow leg keeps a rail for the same reason, phrased as a
+    source scan, because a green suite cannot prove the absence of a side effect it never
+    triggered.
+    """
+    import inspect
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    _stubs(root)
+    previous = D.top_level_regular_files(str(root))
+    (root / "third-stub").write_bytes(b"")
+    files = D.top_level_regular_files(str(root))
+    assert [a["name"] for a in D.new_top_level_names(files, previous)] == ["third-stub"]
+    assert D.arrivals_alert(D.new_top_level_names(files, previous)), (
+        "the report must be built from the same scan the findings come from")
+
+    for name in ("false", "sqlite3", "third-stub"):
+        assert (root / name).exists(), f"the leg removed {name!r} instead of reporting it"
+
+    # Whole sections, not just the three functions. A `getsource(fn)` scan alone leaves the
+    # reachable surface open: an `unlink` at module level between the functions, or in a
+    # helper the leg calls, is invisible to it — and "just add a cleanup helper beside the
+    # leg" is exactly the shape a later edit takes. Two scans, because the section DOES
+    # legitimately write: `write_arrivals_baseline` puts the baseline in the guardian's own
+    # state directory.
+    section = Path(D.__file__).read_text(encoding="utf-8")
+    leg = section[section.index("def top_level_regular_files"):
+                  section.index("class DataWatch")]
+    for verb in (".unlink(", ".rename(", "shutil.move", "os.remove", "os.rmdir",
+                                     "quarantine_inert", "inert_residue"):
+        assert verb not in leg, (
+            f"the arrivals leg is report-only and must not reach {verb!r} anywhere in its "
+            "section — not in a helper beside it either: it found someone's file, and the "
+            "ruling is theirs (#3109)")
+    writer = leg[leg.index("def write_arrivals_baseline"):
+                 leg.index("def new_top_level_names")]
+    for verb in ("os.replace", ".mkdir("):
+        assert verb in writer, (
+            f"{verb} is allowed only inside `write_arrivals_baseline`, which writes the "
+            "guardian's OWN state file; it has vanished from there, so the split below "
+            "no longer describes what is permitted where")
+    for fn in (D.top_level_regular_files, D.new_top_level_names, D.arrivals_alert):
+        for verb in ("os.replace", ".mkdir("):
+            assert verb not in inspect.getsource(fn), (
+                f"{fn.__name__} must not create or replace anything ({verb!r}): the one "
+                "write in this leg is the baseline, and it is its own function")
+
+
+def test_an_arrival_is_reported_as_a_human_decision_and_never_as_an_action(tmp_path):
+    """Clause 3: the routing is data, and it is the #3109 routing.
+
+    `needs_human=True` is what makes the guardian ask and stop. The shadow findings got
+    that flag because "the guardian cannot know whether a shadow is the live one", and a
+    name that newly appeared is less knowable still: it is a mistyped command, a scratch
+    file, or a store being born, and only a person holding the session that made it can
+    tell which. The quarantine path is asserted closed from both ends — no action in the
+    report, and no quarantine call in the guardian block that consumes it.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    previous = D.top_level_regular_files(str(root))
+    (root / "stray-config.json").write_text("{}\n", encoding="utf-8")
+    report = D.arrivals_alert(D.new_top_level_names(
+        D.top_level_regular_files(str(root)), previous))
+
+    assert report["needs_human"] is True, (
+        f"a new name in a person's root is their decision to make: {report}")
+    assert not report.get("quarantine") and not report.get("remove"), (
+        f"the report must carry no action for the guardian to take: {sorted(report)}")
+    assert "stray-config.json" in report["reason"], (
+        f"the alert must name the file it is asking about: {report}")
+
+    guardian = (Path(__file__).resolve().parents[1]
+                / "agent-services" / "guardian" / "guardian.py").read_text(encoding="utf-8")
+    # The arrivals leg's OWN span: from where it measures to where the strays leg's block
+    # begins. The whole method is the wrong slice and would make this assertion
+    # unsatisfiable — `quarantine_inert` legitimately appears a few lines below, in the
+    # stray block the arrivals leg shares this hourly check with. What has to be true is
+    # that the arrivals span never reaches it.
+    start = guardian.index("arrivals: list[dict] = []")
+    block = guardian[start:guardian.index("if strays and self.data.armed:", start)]
+    assert block.count("new_top_level_names") == 1, (
+        "the span is meant to BE the arrivals leg; if the call moved out of it, the two "
+        "assertions below are checking a block that no longer contains the leg")
+    # `needs_human=True` has to be on the CALL, not merely somewhere in the block: the
+    # block's own prose quotes the literal to explain the routing, and a substring test
+    # would read that comment as the flag and pass an alert that sends none.
+    calls = [ln for ln in block.splitlines() if "needs_human" in ln
+             and not ln.lstrip().startswith("#")]
+    assert any("needs_human=True" in ln for ln in calls), (
+        "the guardian's arrivals alert must be raised as a human decision on the alert "
+        f"call, the way the shadow findings it shares this hourly leg with are: {calls}")
+    assert "strays =" not in block, (
+        "the arrivals leg must not write to `strays`: that name is the stray scan's, and "
+        "the block that consumes it is the one that offers the quarantine")
+    assert "quarantine_inert" not in block and "inert_residue" not in block, (
+        "an arrival is not a stray: the quarantine offer belongs to the scan that reasons "
+        "about strays, and folding a new name into it would hand a person's file to a rule "
+        "built for git-ignored tree residue")
+
+
+def test_an_unreadable_data_root_raises_rather_than_reporting_no_arrivals(tmp_path,
+                                                                          monkeypatch):
+    """Clause 4: an unreadable root is never a clean root (#2056, and #3109 for this walk).
+
+    The failure this rails is the loud-once-then-silent kind. The scan returns a name set,
+    and swallowing a permission error into an empty one makes "I could not look" and
+    "nothing is new here" the same value — the second being the value that ENDS an alert.
+    The unreadability is provoked by wrapping `scandir` rather than by `chmod`, because this
+    suite runs as a user who can read anything it creates: a permission-based premise would
+    quietly `return` here and prove nothing.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    (root / "false").write_bytes(b"")
+    real = os.scandir
+
+    def barred(path, *a, **k):
+        if Path(str(path)).resolve() == root.resolve():
+            raise OSError(13, "Permission denied", str(path))
+        return real(path, *a, **k)
+
+    # A root that is simply absent is the same class of failure and needs its own
+    # assertion: an `if not os.path.isdir(root): return {}` short-circuit answers the
+    # permission case correctly and the missing one wrongly, and the wrong answer is the
+    # empty set that closes an alert.
+    import errno as _errno
+    try:
+        D.top_level_regular_files(str(root.parent / "no-such-root-at-all"))
+    except OSError as exc:
+        assert exc.errno in (_errno.ENOENT, _errno.ENOTDIR), (
+            f"a missing root raised the wrong thing: {exc!r}")
+    else:
+        raise AssertionError(
+            "a missing data root returned a name set. This leg's own default is "
+            "`DATA_ROOT`, so a wrong resolver turns 'no data root' into 'nothing is new'")
+
+    monkeypatch.setattr(os, "scandir", barred)
+    try:
+        D.top_level_regular_files(str(root))
+    except OSError:
+        pass
+    else:
+        raise AssertionError(
+            "an unreadable data root returned a name set. An empty one reads to the "
+            "guardian as 'nothing new here', which closes the alert the only detector "
+            "asking this question was raising")
+    # And a failed measure must not be papered over by passing an empty baseline: `{}`
+    # means "armed and seen nothing", so every current name becomes an arrival. That is the
+    # opposite failure from the raise above — a flood instead of a silence — and it is why
+    # the caller persists a baseline only from a pass that actually measured.
+    assert D.new_top_level_names({"false": 1.0}, {}) == [{"name": "false",
+                                                          "mtime": 1.0}], (
+        "an EMPTY baseline is the post-arm case with nothing seen, so a bare `false` is an "
+        "arrival; recovering from a failed measure by passing {} would flood the alert")
+
+
+def test_an_arrival_carries_its_date_and_a_name_is_never_named_twice(tmp_path):
+    """Clause 5, first half: a week-old stub and a file made this turn are different
+    questions, and a name already asked about is not asked about again next tick.
+
+    The date is what lets the reader tell them apart without opening a shell. `false` has
+    been standing since 2026-10-12 and `sqlite3` since 2026-10-22; an alert that said only
+    "a new file appeared" about a ten-day-old stub would be dismissed, correctly. So the
+    mtime rides on the finding and the report renders it as an ISO date.
+
+    The two stubs here are seeded AFTER the baseline, which is how the live pair will be
+    met: an arrival, named once and then held by the persisted baseline. What the leg
+    cannot do is name a file that stood at the root before it shipped — clause 5's arm is
+    silent, so `false` and `sqlite3` on the live root are owed to whoever deletes them,
+    exactly where the item already puts them.
+    """
+    import datetime as dt
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    # A baseline holding only what the root had before the stubs: the state the live leg is
+    # in the hour after its silent arm. `{}` would see the root marker as an arrival too,
+    # and `None` would BE the arm, which is silent.
+    previous = D.top_level_regular_files(str(root))
+    seeded = _stubs(root)
+    arrivals = D.new_top_level_names(D.top_level_regular_files(str(root)), previous)
+
+    named = {a["name"]: a for a in arrivals}
+    assert set(named) == set(seeded), (
+        "arming against the known-good inventory must surface the two residents exactly "
+        f"once and add nothing: {sorted(named)}")
+    for name, stamp in seeded.items():
+        assert abs(named[name]["mtime"] - stamp) < 2, (
+            f"{name!r}'s finding carries no usable date: {named[name]}")
+        assert dt.date.fromtimestamp(named[name]["mtime"]).isoformat() == \
+            dt.date.fromtimestamp(stamp).isoformat(), (
+            f"the date carried for {name!r} must be the date the file carries")
+
+    report = D.arrivals_alert(arrivals)
+    dates = [dt.date.fromtimestamp(s).isoformat() for s in seeded.values()]
+    assert all(d in report["reason"] + report["evidence"] for d in dates), (
+        f"the alert text must render each file's date, not merely carry a field: "
+        f"{report!r}")
+
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)),
+                                 D.top_level_regular_files(str(root))) == [], (
+        "a second pass over unchanged state must name nothing: one name per arrival, not "
+        "one per hour")
+
+
+def test_the_persisted_baseline_is_what_makes_the_next_hour_quiet(tmp_path):
+    """Clause 5, second half, across the boundary the leg actually crosses.
+
+    The previous scan lives in the guardian's state directory, not in memory: the check
+    runs in the hourly leg of a long-lived daemon and its baseline has to survive a
+    restart, because a leg that re-armed from an empty baseline at every start would
+    re-alert on every file created since the last one. So this is the real hand-off —
+    write what was scanned, read it back next hour — and a name alerted in hour one must
+    be absent from hour two's findings because the baseline now holds it.
+    """
+    root = _root(tmp_path)
+    _fill(root / "sessions", STORE_FILES)
+    state = tmp_path / "state"
+    assert D.read_arrivals_baseline(state, str(root)) is None, (
+        "no baseline yet is NOT an empty baseline: it is the arm case, and the leg has to "
+        "be able to tell the two apart or every restart re-alerts the root's inventory")
+
+    # No baseline on disk at all: the ARM case, and the arm is silent. A first pass that
+    # listed the world as it stands would report every store the system owns as news and
+    # bury the arrivals the leg exists for.
+    files = D.top_level_regular_files(str(root))
+    assert D.new_top_level_names(files, None) == [], (
+        "no baseline yet must report nothing: a first pass that listed the root as "
+        "it stands would call every legitimate resident a new arrival")
+    D.write_arrivals_baseline(state, files, now=time.time(), data_root=str(root))
+    assert D.read_arrivals_baseline(state, str(root)) == files, (
+        "the persisted baseline must round-trip the scan exactly: a truncated one would "
+        "make files that were already there look new next hour")
+
+    (root / "sqlite3").write_bytes(b"")
+    second = D.top_level_regular_files(str(root))
+    found = D.new_top_level_names(second, D.read_arrivals_baseline(state, str(root)))
+    assert [a["name"] for a in found] == ["sqlite3"], (
+        f"hour two names only what hour one did not see: {found}")
+    D.write_arrivals_baseline(state, second, now=time.time(), data_root=str(root))
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)),
+                                 D.read_arrivals_baseline(state, str(root))) == [], (
+        "after the alert was sent and the baseline advanced, the same file must not be "
+        "alerted on the following pass")
+
+    # The monotone half: sqlite writes `usage.db-wal` and removes it at checkpoint, so a
+    # baseline that is a SNAPSHOT of the last scan would call the returning sidecar a new
+    # arrival every time the file came back. The baseline is therefore everything the leg
+    # has ever seen, not just what it saw last hour.
+    (root / "usage.db-wal").write_bytes(b"w")
+    with_wal = D.top_level_regular_files(str(root))
+    D.write_arrivals_baseline(state, with_wal, now=time.time(), data_root=str(root))
+    (root / "usage.db-wal").unlink()
+    assert "usage.db-wal" not in D.top_level_regular_files(str(root)
+    ), "the sidecar has to be gone for this to be the case it describes"
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)),
+                              now=time.time(), data_root=str(root))
+    assert "usage.db-wal" in D.read_arrivals_baseline(state, str(root)), (
+        "a name the leg has already seen must stay seen: a snapshot baseline would make "
+        "every checkpoint-and-return of a sqlite sidecar a fresh human-decision alert")
+
+
+def test_the_two_stub_names_the_live_root_carries_are_named_where_the_shadow_leg_is_silent(
+        tmp_path):
+    """The boundary the item measured, kept as a control beside the rule that closes it.
+
+    A synthetic root shaped like the live one: the two 0-byte stubs at top, and a populated
+    same-basename copy of a real store deeper down so the shadow leg has something to fire
+    on. `data_root_shadows` names the shadow and neither stub — the triage measurement,
+    reproduced — and the arrivals leg names both stubs. If a later edit makes the shadow
+    leg suffix-free, this node is where the two instruments' division of labour gets
+    re-read rather than quietly merged.
+    """
+    root = _root(tmp_path, "root")
+    _fill(root / "_pipeline" / "vault-derived", STORE_FILES)
+    (root / "_pipeline" / "vault-derived" / "kg.sqlite").write_bytes(b"y" * 4096)
+    (root / "kg.sqlite").write_bytes(b"")
+    _stubs(root)
+
+    shadows = D.data_root_shadows(data_root=str(root), repo=str(root), now=10 ** 12)
+    assert [s["name"] for s in shadows if s["name"] in ("false", "sqlite3")] == [], (
+        f"the shadow leg is a pairing check and is NOT this round's to widen: {shadows}")
+    assert any(s["name"] == "kg.sqlite" for s in shadows), (
+        "the control has to fire, or this node proves nothing about the pair it names — a "
+        f"shadow leg that found nothing here would make the line above vacuous: {shadows}")
+
+    # A baseline that has seen the root's expected residents but not these two: the state
+    # the live leg reaches the hour after its silent arm, with the stubs still standing.
+    # `None` would BE that arm, and the arm is silent by clause 5.
+    armed = {".": 0.0, D.ROOT_MARKER: 0.0}
+    arrivals = {a["name"] for a in D.new_top_level_names(
+        D.top_level_regular_files(str(root)), armed)}
+    assert {"false", "sqlite3"} <= arrivals, (
+        f"the leg that exists for these two names does not name them: {sorted(arrivals)}")
+
+
+# ── the hourly check itself, across the guardian → datawatch → notify seam ───
+#
+# Everything above this line calls `datawatch` functions directly, which is where the RULE
+# lives. The acceptance is about what the guardian does while it is running, and that claim
+# crosses a module boundary: the scan measures, the guardian decides whether to speak, the
+# notifier decides what lands in the daily note. A node that only calls the scan is green on
+# a `DataWatch` leg whose findings the guardian drops on the floor, so these three drive
+# `Guardian._runtime_data_incident` itself with a real Notifier over a tmp vault.
+
+_DAY = 86400.0
+_NOW = 1_790_000_000.0          # a fixed epoch: the alert's dates are computed from it
+
+
+def _watcher(tmp_path, monkeypatch, *, armed=True):
+    """A `Guardian` over a data root, a code tree and a state dir that are all this test's.
+
+    `policy.GUARDIAN_STATE` and `datawatch.DATA_ROOT` are both per-test for the same reason
+    `state_dir=tmp_path` is: the leg persists a baseline, and a baseline written into the
+    live guardian's state directory — or into the scratch data root conftest gives a whole
+    pytest session — is one test's name set becoming another test's arrival.
+    """
+    import guardian as G
+    import notify
+
+    tree = tmp_path / "lloyd"
+    tree.mkdir()
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    monkeypatch.setattr(G.policy, "REPO", str(tree))
+    monkeypatch.setattr(G.datawatch, "DATA_ROOT", str(data))
+    monkeypatch.setattr(G.policy, "GUARDIAN_STATE", str(tmp_path / "guardian-state"))
+
+    quarantined: list = []
+
+    def _never_quarantine(*a, **k):
+        quarantined.append(a)
+        raise AssertionError("quarantine_inert ran, so a data-root name could be moved")
+
+    monkeypatch.setattr(G.datawatch, "quarantine_inert", _never_quarantine)
+
+    g = G.Guardian.__new__(G.Guardian)
+    g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                                 vault_root=str(vault),
+                                 backend_url="http://127.0.0.1:1")
+    g.data = __import__("types").SimpleNamespace(armed=armed)
+    g._alert_seen = {}
+    g.last_alert = ""
+    news: list[tuple[str, str]] = []
+    g.notifier.announce = lambda title, body="", level="info": news.append((title, body)) or {}
+    alerts: list[tuple[str, str, dict]] = []
+    real_alert = g.notifier.alert
+
+    def _alert(level, title, body, **kw):
+        alerts.append((title, body, kw))
+        return real_alert(level, title, body, **kw)
+
+    g.notifier.alert = _alert
+    cleared: list[tuple[str, bool]] = []
+    real_resolve = g.notifier.resolve
+
+    def _resolve(title, note, **kw):
+        ok = real_resolve(title, note, **kw)
+        cleared.append((title, ok))
+        return ok
+
+    g.notifier.resolve = _resolve
+    return G, g, data, alerts, cleared, quarantined
+
+
+def test_the_hourly_check_names_a_new_stub_once_with_its_date_and_moves_nothing(
+        tmp_path, monkeypatch):
+    """Clauses 1, 2, 3 and 5, on the surface the acceptance names: the running guardian.
+
+    Three hourly ticks. The first ARMS and says nothing in either direction; between the
+    first and second, two 0-byte files whose names carry no database extension appear in the
+    root — `false` and `sqlite3`, the class the item is about, with `false` nine days old and
+    `sqlite3` one day old; the second tick alerts; the third is the following hour and must
+    not repeat it. `ALERT_REPEAT_SECONDS` is 900 s and the ticks here are an hour apart, so
+    the absence of a second alert is NOT the repeat guard doing it — the baseline is.
+    """
+    import time
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+
+    g._runtime_data_incident(_NOW)
+    assert alerts == [], f"the pass that only recorded a baseline alerted: {alerts}"
+    # Scoped to this leg's own heading. The stray/shadow walk retracts its two headings on
+    # every clean pass (#2056, #3124) and that is behaviour this round does not own; what
+    # clause 5 rules on is THIS leg's first pass, which compared nothing.
+    assert [t for t, _ in cleared if t == ARR] == [], (
+        "the pass that compared nothing retracted: an all-clear is a verdict about a "
+        f"comparison, and this pass made none: {cleared}")
+
+    for name, age_days in (("false", 9), ("sqlite3", 1)):
+        p = data / name
+        p.write_bytes(b"")
+        stamp = _NOW - age_days * _DAY
+        os.utime(p, (stamp, stamp))
+
+    g._runtime_data_incident(_NOW + _DAY)
+    hits = [a for a in alerts if a[0] == G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE]
+    assert len(hits) == 1, f"the arrivals heading was raised {len(hits)} times: {alerts}"
+    title, body, kw = hits[0]
+    assert kw.get("needs_human") is True, (
+        f"clause 3 is the routing, and the alert went out without it: {kw}")
+    assert "quarantine" not in kw and "staged" not in kw, (
+        f"an arrival is not a stray; these keys are what the resolve path consumes: {kw}")
+    assert "false" in body and "sqlite3" in body, body
+    for name, age_days in (("false", 9), ("sqlite3", 1)):
+        want = time.strftime("%Y-%m-%d", time.localtime(_NOW - age_days * _DAY))
+        assert want in body, (
+            f"clause 5: the alert must distinguish a nine-day-old stub from one made this "
+            f"turn, and {want} ({name}) is not in it: {body}")
+    assert (data / "false").is_file() and (data / "sqlite3").is_file(), (
+        "clause 2: the leg is report-only — the two stubs must still be standing after the "
+        "measurement that named them")
+    assert quarantined == [], "clause 2: quarantine_inert was applied to this root at all"
+
+    before = len(alerts)
+    g._runtime_data_incident(_NOW + 2 * _DAY)
+    assert len(alerts) == before, (
+        "clause 5: a name that was already alerted on alerted again an hour later, and this "
+        f"is 24 h after the first alert, well past ALERT_REPEAT_SECONDS: {alerts}")
+    # Exactly one retraction of this leg's heading across all three ticks: the arming pass
+    # compares nothing, the alerting pass has something open, and only the following
+    # measured-and-clean pass closes it.
+    assert [t for t, _ in cleared if t == ARR] == [ARR], (
+        "the following measured pass must retract this leg's own heading so the note does "
+        f"not go on ordering a person about a file they have already dealt with: {cleared}")
+
+
+def test_a_name_that_arrives_while_disarmed_is_still_reported_after_rearming(
+        tmp_path, monkeypatch):
+    """A pause is silence in BOTH directions, so it may not absorb what it heard.
+
+    The alert is gated on `armed`. A pass that is disarmed and advances the baseline anyway
+    marks the pause's new names as seen without ever reporting them, and the tick that
+    re-arms then has nothing left to say: the arrival is swallowed by the pause rather than
+    closed by a person. This is #2056 clause 2's partition read on the persist side.
+    """
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    g._runtime_data_incident(_NOW)                       # arm, armed
+
+    g.data.armed = False
+    (data / "made-during-the-pause").write_bytes(b"")
+    os.utime(data / "made-during-the-pause", (_NOW + _DAY, _NOW + _DAY))
+    g._runtime_data_incident(_NOW + _DAY)
+    assert alerts == [], f"a paused guardian alerted: {alerts}"
+
+    g.data.armed = True
+    g._runtime_data_incident(_NOW + 2 * _DAY)
+    hits = [a for a in alerts if a[0] == G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE]
+    assert len(hits) == 1, (
+        "the name created while the watcher was disarmed never reached a human: the "
+        f"disarmed pass advanced the baseline behind the silent alert: {alerts}")
+    assert "made-during-the-pause" in hits[0][1], hits[0][1]
+
+
+def test_a_data_root_the_check_cannot_read_neither_alerts_nor_retracts(
+        tmp_path, monkeypatch):
+    """Clause 4 at the caller: an unreadable root may not read as a clean one.
+
+    `data_root_shadows` raising is already pinned elsewhere; this is the other half — the
+    hourly block must not treat a scan that could not run as a scan that found nothing, in
+    EITHER direction. A root removed out from under a baseline that exists is the case that
+    would otherwise write a retraction over an open section.
+    """
+    G2, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    g._runtime_data_incident(_NOW)                       # arm, and leaves a baseline behind
+    assert [t for t, _ in cleared if t == G2.RUNTIME_DATA_ARRIVALS_ALERT_TITLE] == []
+    data.rmdir()                                          # the root is gone; the baseline is not
+    monkeypatch.setattr(G2.datawatch, "DATA_ROOT", str(data))
+
+    g._runtime_data_incident(_NOW + _DAY)
+    assert alerts == [], f"a root that could not be read alerted: {alerts}"
+    assert [t for t, _ in cleared if t == G2.RUNTIME_DATA_ARRIVALS_ALERT_TITLE] == [], (
+        "clause 4 / #2056: a measurement that did not happen retracted the heading anyway "
+        f"— unreadable read as clean: {cleared}")

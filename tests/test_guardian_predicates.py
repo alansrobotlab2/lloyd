@@ -2004,6 +2004,17 @@ def _stray_incident_with(tmp_path, monkeypatch, detector):
     clock = {"t": 1_700_000_000.0}
     monkeypatch.setattr(gmod.time, "time", lambda: clock["t"])
     monkeypatch.setattr(gmod.datawatch, "stray_in_tree", detector)
+    # #3210 adds a third, independently-measured condition to this hourly check, and both of
+    # its inputs are made per-test here for the same reason `state_dir=tmp_path` is. The
+    # arrivals leg reads `datawatch.DATA_ROOT` and persists its baseline under
+    # `policy.GUARDIAN_STATE`, and conftest gives a whole pytest SESSION one scratch data
+    # root: left shared, a name another test put at that root's top level ARRIVES in this
+    # test's tick, which is how `test_the_hourly_check_moves_residue_and_raises_no_incident`
+    # went flaky at SM_20261023_230422's gate — one test's file became the next test's human
+    # decision. Pointed at `tmp_path`, the first tick here is always the leg's silent arm.
+    (tmp_path / "lloyd-data").mkdir(exist_ok=True)
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(tmp_path / "lloyd-data"))
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", str(tmp_path / "guardian-state"))
     # The detector is synthetic and `policy.REPO` is not: left real, the inert-residue
     # move would `lstat` — and could unlink — a name in the production checkout.
     # `tests/test_guardian_inert_stray.py` drives it against a tree of its own.
@@ -2163,7 +2174,15 @@ def test_the_set_emptying_writes_one_cleared_line_and_stays_silent_after(
     # from a swallowed error — the heartbeat reads that True, and a False every hour
     # would read as a broken notifier. Two titles per check is the walk, not two
     # retractions: only the heading with an open section writes anything.
-    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES) * 3, clears
+    #
+    # Scoped to the two headings THIS incident could be open under. #3210 added a third
+    # condition to this hourly check with a heading of its own, and a clear under THAT
+    # heading is not a second retraction of this incident — folding it into this walk is the
+    # #3124 error (a sentence about stores and shadows sealing a section about a name
+    # appearing). Its own rate is pinned in tests/test_guardian_datawatch.py, where the tick
+    # pattern is the subject rather than borrowed from this harness.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == \
+        list(gmod.RUNTIME_DATA_ALERT_TITLES) * 3, clears
     assert [ok for _, ok in clears] == [True] * len(clears), clears
 
 
@@ -2272,7 +2291,14 @@ def test_a_failed_stray_check_clears_nothing_and_keeps_the_note_open(tmp_path, m
     tick()
     tick()
 
-    assert clears == [], f"a check that raised retracted the incident: {clears}"
+    # Scoped to the two headings THIS check measures. #3210 added a third condition to the
+    # same hourly method with its own measurement and its own heading, and its own leg
+    # measured cleanly on these ticks, so its retraction is legitimate — the #2056 rule is
+    # "a failed measurement retracts nothing", not "no leg of the method may speak while one
+    # leg failed". What would be a regression is a clear under either heading this check did
+    # not measure, which is exactly what the first line below pins and the second records.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == [], (
+        f"a check that raised retracted the incident: {clears}")
     text = note.read_text(encoding="utf-8")
     assert notify.DAILY_STILL_OPEN in text, "the still-open marker did not survive"
     assert f"{notify.DAILY_CLEARED_PREFIX} " not in text, text
@@ -2314,7 +2340,14 @@ def test_a_finding_while_disarmed_neither_alerts_nor_retracts(tmp_path, monkeypa
     g.data.armed = True
     tick()
     assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), "armed + strays did not alert"
-    assert clears == [], f"armed + strays retracted: {clears}"
+    # Scoped to the headings this cell is about. #3210's arrivals condition is a separate
+    # measurement with a partition of its own — its alert is `arrivals and armed`, its clear
+    # is `measured and not arrivals and armed` — and on this tick it measured an empty arrival
+    # set while armed, so its own retraction firing here says nothing about the stray clear
+    # this node pins. The disarmed cell below, where NEITHER leg may speak, is the cell an
+    # `else`-shaped clear gets wrong, and it still asserts on the full list.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == [], (
+        f"armed + strays retracted: {clears}")
 
     g.data.armed = False
     g._alert_seen.clear()          # drop the repeat guard: this cell's subject is the
@@ -2354,8 +2387,12 @@ def test_the_cleared_line_names_the_tree_the_check_measured(tmp_path, monkeypatc
 
     # Two entries because the all-clear walks every heading this incident could have been
     # opened under (#3124), and only the one with an open section writes anything: the claim
-    # below is about the sealed section, which stays exactly one.
-    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    # below is about the sealed section, which stays exactly one. Scoped to the two headings
+    # THIS incident could sit under; #3210's arrivals heading is a third condition of the same
+    # hourly method, and its retraction is that leg's own subject
+    # (tests/test_guardian_datawatch.py), not a third retraction of this incident.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == \
+        list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
     assert all(ok for _, ok in clears), clears
     line = next(ln for ln in note.read_text(encoding="utf-8").splitlines()
                 if ln.startswith(notify.DAILY_CLEARED_PREFIX))
@@ -2397,7 +2434,13 @@ def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_pa
         "edges of one check can be reading different measurements")
     # One detector call per check, one all-clear walk per check — and the walk carries every
     # heading, not one per condition (#3124), so its length is not a second measurement.
-    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    # Scoped to the headings THIS check owns: #3210's arrivals leg is a separate measurement
+    # of a separate condition in the same hourly method, and its retraction (or its silence
+    # on the pass that armed) is that leg's own subject, pinned in
+    # tests/test_guardian_datawatch.py. Counting it in here would make a node about ONE
+    # MEASUREMENT OF THE TREE depend on how many times a different leg spoke.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == \
+        list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
     assert all(ok for _, ok in clears), clears
 
     detector.fails = True
@@ -2406,9 +2449,11 @@ def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_pa
         f"a check whose detector raised measured the tree {detector.calls - 2} times; one "
         "failed measurement is the answer, and calling again is how a check starts "
         "reporting a verdict it cannot justify")
-    # Still exactly one walk's worth of resolves: the raised check retracts nothing, so the
-    # list has not grown since the tick above (#2056's claim, unchanged by #3124's walk).
-    assert len(clears) == len(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    # Still exactly one walk's worth of resolves: the raised check retracts nothing, so this
+    # check's own headings have not grown since the tick above (#2056's claim, unchanged by
+    # #3124's walk, and scoped to the same two headings as the assertion above).
+    assert len([t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES]) == \
+        len(gmod.RUNTIME_DATA_ALERT_TITLES), clears
 
 
 # ── #2308: a retained stray reaches the backlog channel ──────────────────────
@@ -4416,7 +4461,12 @@ def test_a_cleared_data_root_retracts_the_open_alert(tmp_path, monkeypatch):
     # One all-clear walk, one `resolve` per heading this incident could have been opened
     # under (#3124) — the shadow section is the one that gets sealed, and the walk past
     # it is what retracts a section an older guardian opened under the code-tree heading.
-    assert [t for t, _ in clears] == list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
+    # Scoped to the two headings THIS incident could sit under: #3210's arrivals leg is a
+    # third condition of the same hourly check with its own heading, and its own retraction
+    # is in `clears` too. Folding that heading into THIS walk is what #3124 forbids — a
+    # sentence about stores and shadows must not seal a section about a name appearing.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == \
+        list(gmod.RUNTIME_DATA_ALERT_TITLES), clears
     assert all(ok for _, ok in clears), clears
     sections = _sections(note, gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE)
     assert len(sections) == 1, "one incident must not leave two sections"
@@ -4474,7 +4524,11 @@ def test_a_failed_shadow_scan_claims_nothing_and_retracts_nothing(tmp_path, monk
     tick()
 
     assert len(alerts) == 1, f"a failed scan raised anyway: {alerts}"
-    assert clears == [], (
+    # Scoped to the two headings THIS scan measures: #2056's rule is that a FAILED
+    # measurement retracts nothing, and the shadow walk is what failed here. #3210's arrivals
+    # leg measured the same root on its own terms and found nothing new, so its own
+    # all-clear is legitimate and is pinned in tests/test_guardian_datawatch.py.
+    assert [t for t, _ in clears if t in gmod.RUNTIME_DATA_ALERT_TITLES] == [], (
         f"a check that could not measure the data root retracted it: {clears}")
     # The section this incident opened is the shadow one: the raise that wrote it measured
     # a data root and no stray (#3124).

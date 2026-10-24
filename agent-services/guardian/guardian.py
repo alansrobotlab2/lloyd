@@ -207,6 +207,16 @@ RUNTIME_DATA_SHADOW_ALERT_TITLE = (
 RUNTIME_DATA_ALERT_TITLES = (RUNTIME_DATA_ALERT_TITLE,
                              RUNTIME_DATA_SHADOW_ALERT_TITLE)
 
+#: The third condition reported by the same hourly leg, and deliberately NOT in the tuple
+#: above (#3210). That tuple exists because #3124 found ONE heading's retraction sealing
+#: the other's section, which is a hazard born of the two conditions sharing a title; the
+#: arrivals leg has a title of its own, so the fix for that hazard is precisely not to
+#: share it. An arrivals all-clear that resolved the shadow heading would close a live
+#: "0-byte shadow of a real store" section on the strength of a root with no NEW names —
+#: and the shadow pair at the live root's top level is by definition NOT new, which is the
+#: whole reason this leg had to be added beside that one rather than inside it.
+RUNTIME_DATA_ARRIVALS_ALERT_TITLE = "A new name appeared at the data root's top level"
+
 #: The one cause sentence the stray alert may print, and the only reading of its
 #: own numbers that earns it: a stray `mtime` inside the window between this
 #: check and the previous one. Before #2057 this sentence sat in a constant body
@@ -1801,6 +1811,99 @@ class Guardian:
             shadow_measured = True
         except Exception as exc:  # noqa: BLE001
             log(f"data-root shadow check failed (continuing): {exc}")
+        # ── new names at the data root's top level (#3210) ──────────────────────────
+        # Measured BEFORE the quarantine below, and clause 2 of the item pins that order as
+        # an index inside this method: a scan that is report-only has to be provably
+        # ordered ahead of the tree's one move rather than merely written earlier in the
+        # file, because the file's order is exactly what a later refactor rearranges.
+        #
+        # It is a separate condition with a separate heading, not a fourth arm of the
+        # shadow check: `data_root_shadows` is a same-basename pairing over a bounded
+        # depth walk, and an unpaired new-name rule bolted onto it would fight its whole
+        # structure. `false` and `sqlite3` are invisible to that leg one step before its
+        # pairing test — the walk drops every name without a database suffix — so this
+        # scan starts from the top level's name set with no suffix filter at all.
+        arrivals: list[dict] = []
+        arrivals_measured = False
+        arrivals_baselined = False
+        arrivals_error = ""
+        arrivals_files: dict[str, float] = {}
+        # `policy.GUARDIAN_STATE` is read HERE and not at import because it is the seam the
+        # incident harnesses patch: an hourly leg that persists has to be pointable at the
+        # test's own directory, or a unit test writes its baseline into the live guardian's
+        # state and the next real tick arms against a name set some test invented.
+        arrivals_state = Path(policy.GUARDIAN_STATE)
+        try:
+            _seen = datawatch.read_arrivals_baseline(arrivals_state, datawatch.DATA_ROOT)
+            arrivals_files = datawatch.top_level_regular_files(datawatch.DATA_ROOT)
+            arrivals = datawatch.new_top_level_names(arrivals_files, _seen, now=now)
+            arrivals_measured = True
+            # No baseline under THIS root: this pass records a name set and compares nothing.
+            arrivals_baselined = _seen is None
+        except OSError as exc:
+            # The #2056 rule read from the caller's side, which is where it has teeth: the
+            # scan refuses to answer "no names" for a root it could not read precisely so
+            # this branch cannot mistake unreadable for clean. `arrivals_measured` stays
+            # False, and the block below neither alerts nor resolves — a failure claims
+            # nothing in either direction.
+            arrivals_error = str(exc)[:200]
+            log(f"data-root arrivals scan could not run: {arrivals_error[:120]}")
+        if arrivals_measured and self.data.armed:
+            # Persisted only from a pass that measured, and from the SAME snapshot the diff
+            # was computed over — #2056's "one measurement, consumed by whichever edge
+            # fires". Re-scanning here would advance the baseline with a name that arrived
+            # between the two scans: it was absent from the set the alert was built from, so
+            # it was never reported, and marking it seen loses it for good rather than for an
+            # hour. A failed pass that wrote anything at all has the same defect one level
+            # up: it would mark unseen names as seen and lose the arrival for the whole hour.
+            #
+            # And only while ARMED, which is #2056 clause 2's partition read on the persist
+            # side rather than the alert side. The alert is gated on `armed`, so a pass that
+            # is disarmed and advanced the baseline anyway would mark the pause's new names
+            # as seen without ever reporting them: the arrival is swallowed by the pause
+            # instead of closed by a person, and the tick that re-arms says nothing. A paused
+            # guardian makes no statement in either direction, so it records nothing either.
+            try:
+                datawatch.write_arrivals_baseline(arrivals_state, arrivals_files, now,
+                                                  datawatch.DATA_ROOT)
+            except OSError as exc:
+                # The alert still goes out; a baseline that will not write means the next
+                # hour re-alerts, which is the loud direction and the one to prefer.
+                log(f"data-root arrivals baseline not written (continuing): {exc}")
+        arrivals_report = datawatch.arrivals_alert(arrivals) if arrivals else None
+        if arrivals_report and self.data.armed:
+            # The scan's own flag is load-bearing, so it is checked rather than trusted:
+            # a report that arrived without it must not be alerted as an action the
+            # guardian could take. Then the raise itself carries the literal
+            # `needs_human=True` the way #3109's shadow findings do, so the routing is
+            # readable at the call and not only through a value. Its OWN title, and no
+            # `resolve` from this block's alert path, so it cannot seal a shadow
+            # section (#3124).
+            if not arrivals_report.get("needs_human"):
+                log("data-root arrivals report arrived without needs_human; alerting "
+                    "as a human decision anyway")
+            self.alert("error", RUNTIME_DATA_ARRIVALS_ALERT_TITLE,
+                       arrivals_report["reason"] + "\n\n" + arrivals_report["evidence"],
+                       evidence=arrivals_report["evidence"],
+                       coalesce=True,
+                       needs_human=True)
+        elif (arrivals_measured and not arrivals_baselined and not arrivals
+                and self.data.armed):
+            # Only a pass that COMPARED two name sets retracts, and only this leg's own
+            # heading. The pass that armed has read the root but compared it to nothing, so
+            # "no new name at the data root's top level" would be a verdict about a
+            # comparison it did not perform — the shape of instrument that reads its own
+            # missing input and reports anyway. It stays silent in both directions, and the
+            # hour that follows is when it first earns a statement; `resolve` writes nothing
+            # unless one of our sections is actually open, so a section left by a previous
+            # process waits an hour, not longer.
+            self.notifier.resolve(
+                RUNTIME_DATA_ARRIVALS_ALERT_TITLE,
+                "No new name at the data root's top level as of "
+                f"{time.strftime('%Y-%m-%d %H:%M')}. "
+                "_resolved by the next measured pass; a name this leg reported is still "
+                "yours to delete or explain — it is not moved._")
+
         if strays and self.data.armed:
             # Residue first: an empty, idle second copy of a store that lives in the
             # data root is moved there and reported as news, not as an incident — on
