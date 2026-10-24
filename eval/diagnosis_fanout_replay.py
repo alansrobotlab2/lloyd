@@ -77,6 +77,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -664,6 +665,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: The clock every DURATION in this module is measured with (#3243). Held as a
+#: module attribute rather than called as `time.monotonic()` at each site, so a
+#: test can substitute a stubbed clock and assert the recorded figure is exactly
+#: the stubbed delta — every call below reads this name at call time.
+#:
+#: A duration is never read off `_now()`: that stamp is `timespec="seconds"`, so a
+#: stamp pair answers a ±1 s question when the fastest arm here is sub-second, and
+#: a wall clock adjusted mid-run makes the difference negative.
+monotonic = time.monotonic
+
+
+def elapsed_since(started: float) -> float:
+    """Seconds spent since the `started` reading of `monotonic`.
+
+    One place rounds durations, so the figure on a row and the figure on stdout
+    are the same number to the same precision (#3243).
+    """
+    return round(monotonic() - started, 6)
+
+
 def validate_theories(theories: Sequence[Any]) -> list[str]:
     """Exactly `THEORIES_PER_CASE` disjoint candidate causes, or no record."""
     texts = [str(t or "").strip() for t in theories]
@@ -992,7 +1013,8 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
                      rank_fn: Callable[[str, Sequence[str]], Any],
                      writer: RowWriter, run_id: str,
                      token_ceiling: int = DEFAULT_TOKEN_CEILING,
-                     slots: Sequence[str] | None = None) -> dict:
+                     slots: Sequence[str] | None = None,
+                     started: float | None = None) -> dict:
     """Arm B for one case: three theories first, evidence second, ranking last.
 
     The order is the clause, not an implementation detail: `generate` runs and
@@ -1025,6 +1047,12 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
     answered nothing) and `uncitable-claim` (answered, pointed at nothing).
     """
     case_key = case["key"]
+    # `cmd_run` hands the arm the same instant its own guard timed the arm-run from,
+    # so the `elapsed_s` on this arm's verdict row and the seconds on the pass's
+    # stdout are one measurement read at two ends of it (#3243). Called directly —
+    # the way every node in `tests/test_diagnosis_fanout_replay.py` does — the arm
+    # starts its own clock instead of recording nothing.
+    started = monotonic() if started is None else started
     seq = 0
 
     def next_seq() -> int:
@@ -1136,7 +1164,14 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
     verdict = {"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                "arm": ARM_B, "kind": "verdict", "ts": _now(),
                "chosen_cause": ranking.get("chosen_cause") or "",
-               "order": ranking.get("order") or [], "tokens": spent}
+               "order": ranking.get("order") or [], "tokens": spent,
+               # The whole arm: generation, every theory's dispatch, the refusals that
+               # were recorded and the ranking. On this row and no other — `score`
+               # reaches a case through `latest_verdicts`, which reads `kind:
+               # "verdict"` alone, so a duration stamped anywhere else is invisible to
+               # `report`, and a duration on one theory's tool row would be a cost that
+               # row cannot account for (#3243).
+               "elapsed_s": elapsed_since(started)}
     if refused:
         # Which of the three the top-1 was actually chosen among. `report` scores
         # this verdict like any other, so the denominator stays honest by counting
@@ -1149,7 +1184,8 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
 
 async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable[dict]],
                      writer: RowWriter, run_id: str, arm: str = ARM_A,
-                     token_ceiling: int = DEFAULT_TOKEN_CEILING) -> dict:
+                     token_ceiling: int = DEFAULT_TOKEN_CEILING,
+                     started: float | None = None) -> dict:
     """Arm A: today's single linear trace, one hypothesis under the same ceiling.
 
     Exactly one dispatch, because that is what the arm is measuring — the
@@ -1159,6 +1195,9 @@ async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable
     rather than assumed, and `report` refuses to judge without it.
     """
     case_key = case["key"]
+    # The same instant `cmd_run`'s guard is timing this arm-run from, so the seconds
+    # it prints and the `elapsed_s` on this row are one measurement (#3243).
+    started = monotonic() if started is None else started
     result = await investigate(case, case.get("claimed_cause") or "")
     tokens = int(result.get("tokens") or 0)
     # The investigator is a tool-reading trace, not an essayist. `investigate_live`, the
@@ -1214,7 +1253,11 @@ async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable
                        "tokens_spent": tokens, "token_ceiling": token_ceiling})
     verdict = {"seq": 3, "run_id": run_id, "case_key": case_key, "arm": arm,
                "kind": "verdict", "ts": _now(), "chosen_cause": chosen,
-               "tokens": tokens}
+               "tokens": tokens,
+               # Same contract as arm B's verdict row: the duration rides on the one
+               # row `score` reads, and an arm that raised above never gets here, so
+               # an unmeasured arm still records no row at all (#3243).
+               "elapsed_s": elapsed_since(started)}
     writer.append(verdict)
     return verdict
 
@@ -1493,12 +1536,21 @@ def score(rows: Sequence[dict], cases: Sequence[dict], *,
                    if key in by_key and agrees(by_key[key], row.get("chosen_cause") or ""))
         arm_rows = [r for r in rows if r.get("arm") == arm]
         cites = verify_citations(citation_rows(arm_rows), root=citation_root)
+        # Wall clock off the SAME verdict rows the top-1 is counted from — the rows
+        # this arm actually completed — and only from the ones carrying the figure, so
+        # a corpus recorded before #3243 reports its rows as untimed rather than as a
+        # mean dragged down by zeroes for cells that never existed.
+        timed = [float(r["elapsed_s"]) for r in verdicts.values()
+                 if isinstance(r.get("elapsed_s"), (int, float))]
         arms[arm] = {
             "n": len(verdicts),
             "top1_hits": hits,
             "citations": cites,
             "token_spend": sum(int(r.get("tokens") or 0) for r in arm_rows
                                if r.get("kind") != "verdict"),
+            "elapsed_total": sum(timed),
+            "elapsed_n": len(timed),
+            "elapsed_mean": (sum(timed) / len(timed)) if timed else 0.0,
         }
     return {"arms": arms,
             "unscored": sorted({k[0] for k in latest_verdicts(rows)} - set(by_key))}
@@ -1542,6 +1594,19 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
                  f"{a['citations']['n']}   B: {b['citations']['passed']}/"
                  f"{b['citations']['n']}   (bar: B >= {CITATION_BAR:.0%})")
     lines.append(f"  token spend       A: {a['token_spend']}   B: {b['token_spend']}")
+    # Wall clock beside the token spend, because the study's cost claim has two axes and
+    # the ceiling matches only one of them: equal tokens under a very different latency
+    # is still a different answer, and per-case cost was previously inferable only from
+    # the ±1 s `ts` stamps. Both figures come off the recorded verdict rows — `report`
+    # re-derives them from `rows.jsonl` and never from somebody's stdout — and they sit
+    # ABOVE the baseline branch, so a refused headline still states what it cost to
+    # produce (#3243).
+    lines.append(f"  wall clock (s)    A: {a['elapsed_total']:.3f}   "
+                 f"B: {b['elapsed_total']:.3f}   "
+                 f"total A+B: {a['elapsed_total'] + b['elapsed_total']:.3f}")
+    lines.append(f"  wall clock mean   A: {a['elapsed_mean']:.3f} over "
+                 f"{a['elapsed_n']} timed verdict(s)   B: {b['elapsed_mean']:.3f} over "
+                 f"{b['elapsed_n']} timed verdict(s)")
 
     problem = baseline_problem(baseline, corpus=corpus, n=len(cases), model=model,
                               token_ceiling=token_ceiling)
@@ -1709,36 +1774,60 @@ async def cmd_run(args) -> int:
     failed: list[str] = []
 
     async def attempt(label: str, make):
+        """One arm-run: timed, and contained. Returns `(result, elapsed_s)`.
+
+        The clock brackets the `try` rather than sitting at the three call sites
+        because this frame is the only one that sees BOTH edges of a failed arm: the
+        arm that raised hands back no value at all, so a timer started outside here
+        could only be read after a `None` and the cost of the arm that died — the
+        expensive kind, since it spent its dispatches before failing — would appear
+        nowhere (#3243). The `started` reading is passed INTO the arm
+        (`make(started)`), so the row the arm writes and the line printed here come
+        off one clock, not two.
+        """
+        started = monotonic()
         try:
-            return await make()
+            result = await make(started)
         except Exception as exc:  # noqa: BLE001 — #2635: the pass outlives one arm
+            cost = elapsed_since(started)
             failed.append(label)
-            print(f"[2258] FAILED {label}: {type(exc).__name__}: {exc}")
+            print(f"[2258] FAILED {label} (cost {cost:.3f}s): "
+                  f"{type(exc).__name__}: {exc}")
             print(f"[2258] {label} recorded no verdict row, so `report` will not "
                   f"count it; the remaining cases continue")
+            return None, cost
+        return result, elapsed_since(started)
 
     for case in cases:
         key = case["key"]
         if ARM_A in arms:
             await attempt(f"{key} {ARM_A}",
-                          lambda c=case: run_case_a(c, investigate=investigate_live,
-                                                    writer=writer, run_id=run_id,
-                                                    token_ceiling=ceiling))
+                          lambda started, c=case: run_case_a(
+                              c, investigate=investigate_live,
+                              writer=writer, run_id=run_id,
+                              token_ceiling=ceiling, started=started))
         if ARM_RETRY in arms:
             await attempt(f"{key} {ARM_RETRY}",
-                          lambda c=case: run_case_a(c, investigate=investigate_live,
-                                                    writer=writer, run_id=run_id,
-                                                    arm=ARM_RETRY,
-                                                    token_ceiling=ceiling))
+                          lambda started, c=case: run_case_a(
+                              c, investigate=investigate_live,
+                              writer=writer, run_id=run_id,
+                              arm=ARM_RETRY,
+                              token_ceiling=ceiling, started=started))
         if ARM_B in arms:
-            verdict = await attempt(
+            verdict, elapsed = await attempt(
                 f"{key} {ARM_B}",
-                lambda c=case: run_case_b(c, generate=generate_theories_live,
-                                          investigate=investigate_live,
-                                          rank_fn=rank_live, writer=writer,
-                                          run_id=run_id, token_ceiling=ceiling))
+                lambda started, c=case: run_case_b(
+                    c, generate=generate_theories_live,
+                    investigate=investigate_live,
+                    rank_fn=rank_live, writer=writer,
+                    run_id=run_id, token_ceiling=ceiling, started=started))
             if verdict is not None:
-                print(f"[2258] {key} B chose: {str(verdict['chosen_cause'])[:90]}")
+                # The row's own figure when the arm recorded one, so the pass's stdout
+                # and `rows.jsonl` never disagree about what the arm cost; the guard's
+                # reading only for an arm that returned a verdict without one (#3243).
+                print(f"[2258] {key} B chose: "
+                      f"{str(verdict['chosen_cause'])[:90]} "
+                      f"(cost {float(verdict.get('elapsed_s', elapsed)):.3f}s)")
     print(f"[2258] rows appended to {args.rows} (run {run_id})")
     if failed:
         # Non-zero, and `launch-pass.sh` logs it as `PASS_EXIT=n`. `set -u` is the

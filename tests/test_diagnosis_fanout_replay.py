@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2362,7 +2363,8 @@ THEORY_SET = ["the flake", "the config", "the slot collision"]
 
 
 def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=False,
-                fail_case=None, fail_arm=None, fail_stop=None):
+                fail_case=None, fail_arm=None, fail_stop=None, clock=None,
+                advance_s=0.0):
     """Run the real `cmd_run` over several cases with only its ENGINE calls replaced.
 
     The arm functions themselves are NOT stubbed: `run_case_a`, `run_case_b`,
@@ -2378,6 +2380,12 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
     arm's own guard. `fail_stop=("max_turns", 40)` is that same arm A failure in the
     shape the live investigator hands back (#2807): an EMPTY claim list carrying the
     `stop_reason`/`num_turns` pair, which is what the raise's message is built from.
+
+    `clock` replaces the module's `monotonic` for the whole pass, and every engine
+    call this driver makes advances it by `advance_s` seconds BEFORE it answers —
+    including the call whose answer is the one the arm goes on to refuse. An arm's
+    cost is then exactly `advance_s` times the calls that arm made, which is the
+    figure the #3243 nodes check the recorded seconds against.
     """
     import argparse
 
@@ -2387,8 +2395,14 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
     calls: list[tuple[str, str]] = []
     good = [{"claim": "the config drifted", "citations": [{"path": "p.py", "line": 1}]}]
 
+    def spend() -> None:
+        """Charge the fake engine its cost, before it answers (#3243)."""
+        if clock is not None:
+            clock.advance(advance_s)
+
     async def generate(case):
         calls.append(("generate", case["key"]))
+        spend()
         if fail_arm == ARM_B and fail_case == case["key"] and fail_theory_set:
             return [THEORY_SET[0], THEORY_SET[0], THEORY_SET[2]]   # not disjoint
         return list(THEORY_SET)
@@ -2404,6 +2418,7 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
             raise AssertionError(f"arm B was handed an unexpected theory {theory!r}")
         slot = "single" if arm_a else slot_labels(case["key"])[THEORY_SET.index(theory)]
         calls.append((slot, case["key"]))
+        spend()
         if fail_arm == ARM_A and fail_case == case["key"] and arm_a:
             if fail_stop is not None:
                 # The live truncated shape (#2807): no claims AT ALL, plus the pair
@@ -2423,6 +2438,8 @@ def _drive_pass(tmp_path, monkeypatch, capsys, *, arms, keys, fail_theory_set=Fa
     monkeypatch.setattr(replay, "generate_theories_live", generate)
     monkeypatch.setattr(replay, "investigate_live", investigate)
     monkeypatch.setattr(replay, "rank_live", rank)
+    if clock is not None:
+        monkeypatch.setattr(replay, "monotonic", clock)
     rows_path = tmp_path / "pass.jsonl"
     # `--only` is `nargs="*"` at the parser (:1483): a list of keys, not the comma
     # string `launch-pass.sh` builds with `$(cat graded-keys.txt)`.
@@ -2931,3 +2948,204 @@ def test_the_live_route_records_the_refusal_and_the_pass_still_exits_zero(
     assert verdict[0]["chosen_cause"] and verdict[0]["refused"] == [slots[1]], verdict[0]
     assert replay.score(rows, [_one_case(key)])["arms"]["B"]["n"] == 1, (
         "the scored denominator still excludes the case the refusal was meant to save")
+
+
+# ── #3243: per-case wall clock, durable in the rows and printed on the pass ───
+
+class _StepClock:
+    """A substitutable `time.monotonic` that only moves when the test moves it.
+
+    Every engine call `_drive_pass` makes advances it by a fixed number of seconds
+    before it answers, so an arm's duration is that number times the calls the arm
+    made and the expected figure is exact. A duration read off the ±1 s `ts` stamps,
+    or one measured twice and printed from a different reading than the row carries,
+    cannot survive that assertion.
+    """
+
+    def __init__(self) -> None:
+        self.t = 100.0
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def _verdict_rows_by_arm(rows: list[dict]) -> dict[tuple[str, str], dict]:
+    """The rows `score` reaches a case through: `kind: verdict`, keyed by case+arm."""
+    return {(r["case_key"], r["arm"]): r for r in rows if r.get("kind") == "verdict"}
+
+
+def test_the_clock_is_one_module_attribute_a_test_can_replace(monkeypatch):
+    """Clause 1: the duration primitive is `time.monotonic`, held at module level.
+
+    Held as `replay.monotonic` and read by name at every call rather than spelled
+    `time.monotonic()` at each site, because the nodes below can only pin an EXACT
+    delta if one substitution reaches every measurement. And no duration is datetime
+    arithmetic: `_now()` stamps at `timespec="seconds"`, so a stamp pair answers a
+    ±1 s question when the fastest arm here is sub-second, and a wall clock adjusted
+    mid-run makes the difference negative.
+    """
+    assert replay.monotonic is time.monotonic, (
+        "durations must come from a monotonic primitive — `_now()` is a second-"
+        "resolution wall-clock stamp, which is an ordering field, not a clock")
+    stub = _StepClock()                      # starts at 100.0
+    monkeypatch.setattr(replay, "monotonic", stub)
+    stub.advance(3.25)
+    assert replay.elapsed_since(100.0) == 3.25, (
+        "elapsed_since did not read the substituted module attribute: the recorded "
+        "figure would then be unpin-able by any test")
+
+
+def test_each_arm_records_its_seconds_off_the_stubbed_clock(tmp_path, monkeypatch,
+                                                           capsys):
+    """Clauses 1+2: the verdict row's `elapsed_s` is exactly the stubbed delta.
+
+    One case, both arms, 2.5 s charged per engine call: arm A dispatches once, arm B
+    generates once and dispatches three theories. So 2.5 and 10.0, to the cell — and
+    on the row `latest_verdicts` reads, because a duration anywhere else in the file
+    is invisible to `score` and to `report`.
+    """
+    clock = _StepClock()
+    key = "flaky-SM_20261001_034449"
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,B", keys=(key,), clock=clock,
+        advance_s=2.5)
+    assert code == 0, out
+    assert [len([c for c in calls if c[1] == key and c[0] == "single"]),
+            len([c for c in calls if c[1] == key and c[0] != "single"])] == [1, 4], calls
+    verdicts = _verdict_rows_by_arm(rows)
+    assert sorted(verdicts) == [(key, ARM_A), (key, ARM_B)], verdicts
+    a_row, b_row = verdicts[(key, ARM_A)], verdicts[(key, ARM_B)]
+    assert a_row["elapsed_s"] == 2.5, a_row
+    assert b_row["elapsed_s"] == 10.0, b_row
+    for row in (a_row, b_row):
+        assert isinstance(row["elapsed_s"], float), row
+        assert "tokens" in row, "the seconds belong beside the tokens, not instead of them"
+    # No other row kind carries a duration: a per-theory `tool` row cannot account for
+    # the whole arm, and the ranking row has no kind at all.
+    assert [r for r in rows if "elapsed_s" in r and r.get("kind") != "verdict"] == [], rows
+
+
+def test_the_recorded_seconds_survive_rows_jsonl_into_the_report(tmp_path, monkeypatch,
+                                                                capsys):
+    """Clause 2's whole point: `report` gets the figure out of ROWS, not out of stdout.
+
+    The pass runs against the stubbed clock and its rows file is read back off disk —
+    the same bytes `report` reads — so the printed means are the recorded deltas.
+    Two cases at 2.5 s a call: A 2.5 each, B 10.0 each.
+    """
+    clock = _StepClock()
+    keys = ("flaky-SM_20261001_034449", "flaky-SM_SECOND")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,B", keys=keys, clock=clock,
+        advance_s=2.5)
+    assert code == 0, out
+    lines, _ = format_report(rows, [_one_case(k) for k in keys], baseline=None,
+                             corpus="fp", model="primary", token_ceiling=99_000,
+                             citation_root=tmp_path)
+    text = "\n".join(lines)
+    assert re.search(r"wall clock \(s\)\s+A: 5\.000\s+B: 20\.000\s+total A\+B: 25\.000",
+                     text), text
+    assert re.search(r"wall clock mean\s+A: 2\.500 over 2 timed verdict\(s\)\s+"
+                     r"B: 10\.000 over 2 timed verdict\(s\)", text), text
+
+
+def test_an_arm_that_raised_still_reports_the_seconds_it_cost(tmp_path, monkeypatch,
+                                                             capsys):
+    """Clause 3: the guarded FAILED line names its arm AND the seconds it burned.
+
+    Arm A refuses to record an empty cause and `attempt` swallows that raise, so this
+    is the one frame holding both the start instant and the failure — which is why the
+    clock brackets the `try` rather than sitting at the three call sites, where it
+    could only be read after a `None`. The dispatch cost 2.5 s before the refusal, and
+    the arm still writes no verdict row (#2635's contract is untouched).
+    """
+    clock = _StepClock()
+    keys = ("flaky-SM_20261001_034449", "flaky-SM_SECOND")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms="A,B", keys=keys,
+        fail_arm=ARM_A, fail_case=keys[0], clock=clock, advance_s=2.5)
+    assert code == 1, out
+    failed = [l for l in out.splitlines() if f"FAILED {keys[0]} {ARM_A}" in l]
+    assert len(failed) == 1, out
+    assert "(cost 2.500s)" in failed[0], failed[0]
+    assert "RuntimeError" in failed[0], failed[0]
+    assert [r for r in rows if r["case_key"] == keys[0] and r["arm"] == ARM_A] == [], rows
+    chose = [l for l in out.splitlines() if "B chose:" in l]
+    assert len(chose) == 2, out
+    assert all("(cost 10.000s)" in l for l in chose), chose
+
+
+def test_a_fan_out_cut_short_mid_case_names_its_cost_too(tmp_path, monkeypatch, capsys):
+    """Clause 3 on arm B: a case that dies inside the fan-out is not free.
+
+    A duplicate theory set is arm B's own `RecordError` out of `validate_theories`,
+    raised after the generation call — so the arm burned 2.5 s, and the line reads
+    `FAILED <key> B (cost 2.500s): RecordError: ...`. The other case still runs and
+    still prints its own cost, which is the same exit-code contract #2635 filed.
+    """
+    clock = _StepClock()
+    keys = ("flaky-SM_20261001_034449", "flaky-SM_SECOND")
+    code, calls, rows, out = _drive_pass(
+        tmp_path, monkeypatch, capsys, arms=ARM_B, keys=keys, fail_theory_set=True,
+        fail_arm=ARM_B, fail_case=keys[0], clock=clock, advance_s=2.5)
+    assert code == 1, out
+    failed = [l for l in out.splitlines() if f"FAILED {keys[0]} {ARM_B}" in l]
+    assert len(failed) == 1, out
+    assert "(cost 2.500s)" in failed[0], failed[0]
+    assert "RecordError" in failed[0], failed[0]
+    chose = [l for l in out.splitlines() if "B chose:" in l]
+    assert len(chose) == 1 and "(cost 10.000s)" in chose[0], chose
+
+
+def test_the_wall_clock_lines_sit_beside_the_spend_line_on_both_branches(tmp_path):
+    """Clause 4: total and per-arm means, beside the spend line, on both branches.
+
+    The study's cost claim has two axes and the token ceiling matches only one of
+    them, so latency belongs next to the spend it is read against — and a refused
+    headline still has to state what the refused run cost. Two graded cases, every
+    arm A verdict 2.0 s and every arm B verdict 10.0 s.
+    """
+    cases, rows = _recorded_rows(tmp_path)
+    for row in rows:
+        if row["kind"] == "verdict":
+            row["elapsed_s"] = 2.0 if row["arm"] == ARM_A else 10.0
+    baseline = {"corpus": "fp", "n": 2, "model": "primary", "token_ceiling": 120_000,
+                "token_spend": 11_000, "top1_hits": 0}
+    for given, expected in ((baseline, True), (None, False)):
+        lines, evaluated = format_report(rows, cases, baseline=given, corpus="fp",
+                                         model="primary", token_ceiling=120_000,
+                                         citation_root=tmp_path)
+        text = "\n".join(lines)
+        assert evaluated is expected, text
+        assert re.search(r"wall clock \(s\)\s+A: 4\.000\s+B: 20\.000\s+"
+                         r"total A\+B: 24\.000", text), text
+        assert re.search(r"wall clock mean\s+A: 2\.000 over 2 timed verdict\(s\)\s+"
+                         r"B: 10\.000 over 2 timed verdict\(s\)", text), text
+        spend = [i for i, l in enumerate(lines) if "token spend       A:" in l]
+        wall = [i for i, l in enumerate(lines) if "wall clock (s)" in l]
+        assert len(spend) == len(wall) == 1, lines
+        assert wall[0] == spend[0] + 1, (
+            "the latency line has to be read against the spend line, not filed in a "
+            "different part of the artifact")
+        assert lines[wall[0] + 1].startswith("  wall clock mean"), lines
+
+
+def test_rows_recorded_before_the_clock_print_as_untimed(tmp_path):
+    """The means divide by the TIMED verdict count, never by `n`.
+
+    Rows recorded before #3243 have no `elapsed_s` cell at all. Reading that absence as
+    a zero would print an arm as instant on an artifact that also says it graded 2
+    verdicts, which is the invented-number failure this instrument keeps refusing.
+    """
+    cases, rows = _recorded_rows(tmp_path)
+    lines, _ = format_report(rows, cases, baseline=None, corpus="fp", model="primary",
+                             token_ceiling=120_000, citation_root=tmp_path)
+    text = "\n".join(lines)
+    assert "total A+B: 0.000" in text, text
+    assert "over 0 timed verdict(s)" in text, text
+    assert replay.score(rows, cases)["arms"][ARM_B]["elapsed_n"] == 0, text
