@@ -1747,6 +1747,65 @@ def test_a_directory_holding_only_the_live_trio_records_zero_stray_bytes(
     assert report["stray_bytes"] == 0
 
 
+def test_qmd_own_lock_files_are_measured_out_of_the_strays_and_everything_else_is_not(
+        tmp_path):
+    """#3247 clause 1: `.qmd-*.lock` is out of both `files` and `bytes`; nothing else is.
+
+    The 2026-10-24 run reported `stray files: 4 file(s), 0.99 GB` with `.qmd-embed.lock`
+    (8 B, mtime one second before the run) among them, and that lock was the ONLY entry in
+    `stray_retention.held_for_person` — an 8-byte file that had already unlinked by the
+    time anyone read the artifact, which is the same shape as a guard reading its own
+    transient input. An embed lock is an embed in progress, so it is not inventory at all,
+    and #3247 removes it from the ONE inventory rather than from one of its readers:
+    `stray_files` is what both the classifier's `outside` list and the report's
+    `stray`/`stray_bytes` figures are built from.
+
+    Three near-misses are seeded beside it because the exclusion is a name pattern, and a
+    pattern that widened by accident would start hiding real backups: `qmd-embed.lock`
+    without the leading dot, `.qmd-embed.lock.old` that does not END in `.lock`, and
+    `.qmd-embed.LOCK` in another case. All three stay counted, in the list and in `bytes`.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-z", 2000, 30.0),
+        ("other-eval.sqlite", 4096, 1.0),
+        (".qmd-embed.lock", 8, 0.0),
+        (".qmd-watch.lock", 6, 0.0),
+        ("qmd-embed.lock", 11, 1.0),
+        (".qmd-embed.lock.old", 12, 1.0),
+        (".qmd-embed.LOCK", 13, 1.0)])
+    sf = m.stray_files(d / "index.sqlite")
+    names = [f["name"] for f in sf["files"]]
+    assert ".qmd-embed.lock" not in names and ".qmd-watch.lock" not in names, names
+    assert {"index.sqlite.bak-z", "other-eval.sqlite",
+            "qmd-embed.lock", ".qmd-embed.lock.old",
+            ".qmd-embed.LOCK"} == set(names), names
+    assert sf["bytes"] == 2000 + 4096 + 11 + 12 + 13, sf["bytes"]
+
+
+def test_the_lock_exclusion_reaches_the_report_and_not_just_the_classifier(tmp_path,
+                                                                          capsys,
+                                                                          monkeypatch):
+    """#3247 clause 1's seam: the headline a person reads is the same measurement.
+
+    The report's `stray`/`stray_bytes` and the retention block's queue are two different
+    readers of `stray_files`, so excluding the lock inside the inventory is what keeps them
+    from disagreeing — a lock hidden from the queue but still in the headline would keep
+    overstaking the backlog and merely stop answering for it. This is a whole `main()`
+    line, so the figures below are the artifact's, not a function's.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-z", 2000, 30.0),
+        (".qmd-embed.lock", 8, 0.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", ())
+    rep = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=True,
+                         capsys=capsys)
+    assert [f["name"] for f in rep["stray"]] == ["index.sqlite.bak-z"], \
+        rep["stray"]
+    assert rep["stray_bytes"] == 2000, rep["stray_bytes"]
+    assert ".qmd-embed.lock" not in json.dumps(rep["stray_retention"]), \
+        rep["stray_retention"]
+
+
 # --- clause 2: the newest backup is kept, an older one is a candidate ---------
 
 def test_an_acting_run_keeps_the_newest_backup_by_mtime_and_deletes_the_older_ones(
@@ -5854,6 +5913,106 @@ def test_a_ruling_that_lost_a_field_releases_nothing(monkeypatch, tmp_path, bad)
     assert (d / "rebuild-fixture.sqlite").is_file()
 
 
+def test_a_live_embed_lock_leaves_the_person_s_queue_to_the_files_that_are_ones(
+        monkeypatch, tmp_path):
+    """#3247 clause 2: the queue holds `other-eval.sqlite`, and never the lock.
+
+    The fixture is the shape of the 2026-10-24 report: the live trio, an embed lock stamped
+    at the run's own instant, and one unreleased non-series database with no open handle.
+    Measured before the fix, `held_for_person` was `['.qmd-embed.lock',
+    'other-eval.sqlite']`; the artifact that day had the lock as its ONLY entry with
+    `live_side_indexes: []`, so the entire human delete queue was one 8-byte lock that had
+    already unlinked — a question a person cannot answer about a file that is gone.
+
+    The handle witness is deliberately empty, and that is load-bearing rather than lazy:
+    `qmd/src/cli/embed-lock.ts:44` creates the lock with `{flag: "wx"}` and closes the
+    descriptor, liveness being the name plus the PID inside it. So #2481's
+    `open_handle_holders` can never report a live embed lock — which is why the exclusion is
+    by name here, and why a handle check is not the safety net consequence 2 depends on.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        (".qmd-embed.lock", 8, 0.0),
+        ("other-eval.sqlite", 4096, 1.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", ())
+    monkeypatch.setattr(m, "open_handle_holders", lambda paths: {})
+    out = m.plan_stray_retention()
+    assert [e["name"] for e in out["held_for_person"]] == ["other-eval.sqlite"], \
+        out["held_for_person"]
+    assert "#844:141-142" in out["held_for_person"][0]["because"], out["held_for_person"]
+    assert out["live_side_indexes"] == [], out["live_side_indexes"]
+    assert ".qmd-embed.lock" not in json.dumps(out), json.dumps(out)[:400]
+    assert (d / ".qmd-embed.lock").is_file(), "a report-only fix never unlinks the lock"
+
+
+def test_the_lock_being_present_or_absent_changes_no_backup_s_classification(
+        monkeypatch, tmp_path):
+    """#3247 clause 3: hiding the lock moves no real backup between buckets.
+
+    One fixture, seeded twice, the lock added on one side only, and the four figures a
+    person acts on — `bak_series`, `kept`, `held`, `planned` — compared between the two. A
+    `.bak` changing bucket because a lock stopped being counted would mean the inventory
+    was load-bearing for a retention decision, and the item's consequence 2 is exactly
+    about what such a coupling could do. All four are lists of names, so the comparison is
+    name-for-name with nothing normalised away.
+    """
+    def snap(with_lock: bool) -> dict:
+        specs = [
+            *LIVE_TRIO,
+            ("index.sqlite.bak-z", 2000, 30.0),
+            ("index.sqlite.bak-a", 1500, 10.0),
+            ("other-eval.sqlite", 4096, 1.0),
+        ]
+        if with_lock:
+            specs.append((".qmd-embed.lock", 8, 0.0))
+        root = tmp_path / ("with" if with_lock else "without")
+        _release_env(monkeypatch, root, specs)
+        monkeypatch.setattr(m, "RELEASED_STRAYS", ())
+        monkeypatch.setattr(m, "open_handle_holders", lambda paths: {})
+        out = m.plan_stray_retention()
+        # All four are lists of NAMES, so the comparison is name-for-name; `held` and
+        # `kept` are the two the release ruling and the mtime decide between them.
+        return {k: list(out[k]) for k in ("bak_series", "kept", "held", "planned")}
+
+    with_lock, without = snap(True), snap(False)
+    assert with_lock == without, (with_lock, without)
+    # The identity assertion above is the clause; these pin that it is comparing a plan
+    # that actually classifies something, not two empty ones. The newest file on disk is
+    # `bak-a` (10 days old against `bak-z` at 30), so mtime — not the name's date — keeps it.
+    assert with_lock["kept"] == ["index.sqlite.bak-a"], with_lock["kept"]
+    assert with_lock["planned"] == ["index.sqlite.bak-z"], \
+        with_lock["planned"]
+    assert with_lock["held"] == [], with_lock["held"]
+    assert len(with_lock["bak_series"]) == 2, with_lock["bak_series"]
+
+
+def test_a_lock_name_pushed_into_planned_is_still_refused_by_the_delete_rail(
+        monkeypatch, tmp_path):
+    """#3247 clause 4: the exclusion is report-only, and the delete rail stayed put.
+
+    Pinned rather than assumed because of the item's consequence 2: widening the rule from
+    "outside the series ⇒ hold" to "outside the series with no open handle ⇒ delete" would
+    unlink every LIVE lock, not merely a stale one, since the holder keeps no descriptor to
+    measure. This pushes the name into `planned` by hand — the state such a widening would
+    produce — and asserts the deletable-name test refuses it, deletes nothing, and leaves
+    the file on disk for its holder to remove.
+    """
+    d = _release_env(monkeypatch, tmp_path, [
+        *LIVE_TRIO,
+        ("index.sqlite.bak-z", 2000, 30.0),
+        (".qmd-embed.lock", 8, 0.0)])
+    monkeypatch.setattr(m, "RELEASED_STRAYS", ())
+    monkeypatch.setattr(m, "open_handle_holders", lambda paths: {})
+    out = m.plan_stray_retention()
+    assert ".qmd-embed.lock" not in out["planned"], out["planned"]
+    out["planned"] = [".qmd-embed.lock"]
+    done = m.apply_stray_retention(out)
+    assert any(".qmd-embed.lock" in e for e in done["errors"]), done["errors"]
+    assert done["deleted"] == [], done["deleted"]
+    assert done["deleted_bytes"] == 0, done["deleted_bytes"]
+    assert (d / ".qmd-embed.lock").is_file()
+
+
 def test_an_unreleased_stray_keeps_the_844_sentence_and_the_live_bucket_is_unchanged(
         monkeypatch, tmp_path):
     """The release channel changes nothing for a name it was not told about.
@@ -5864,13 +6023,24 @@ def test_an_unreleased_stray_keeps_the_844_sentence_and_the_live_bucket_is_uncha
     of `live_side_indexes`, and either way the queue figure and the safety story both change
     with nobody deciding it. The `#844:141-142` text is asserted as a substring because that
     citation is the sentence a person reads.
+
+    #3247 moved this node's witness from `.qmd-embed.lock` to `embedding-worker.pid` and
+    kept its 7 bytes, so every figure below is unchanged. The lock cannot stand in for "an
+    unreleased stray" any more than a person can rule on it: once the inventory stopped
+    counting qmd's own lock files, this node would have been asserting a bucket the
+    classifier can no longer see. A `.pid` an embedding worker left behind is the shape the
+    #844 sentence was written for, and the release rule's own wording — a name in the
+    `index.sqlite.bak*` series — cannot catch it either, which is the half this node still
+    measures. `test_a_live_embed_lock_leaves_the_person_s_queue_to_the_files_that_are_ones`
+    and `test_a_lock_name_pushed_into_planned_is_still_refused_by_the_delete_rail` carry the
+    lock now.
     """
     d = _release_env(monkeypatch, tmp_path, [
         *LIVE_TRIO,
         ("rebuild-fixture.sqlite", 4096, 20.0),
         ("other-eval.sqlite", 4096, 1.0),
         ("other-eval.sqlite-shm", 32768, 0.5),
-        (".qmd-embed.lock", 7, 1.0)])
+        ("embedding-worker.pid", 7, 1.0)])
     monkeypatch.setattr(m, "RELEASED_STRAYS", GOOD)
     monkeypatch.setattr(m, "open_handle_holders",
                         _reader_of(**{"other-eval.sqlite": [4242]}))
@@ -5878,12 +6048,12 @@ def test_an_unreleased_stray_keeps_the_844_sentence_and_the_live_bucket_is_uncha
     assert {e["name"] for e in out["live_side_indexes"]} == {"other-eval.sqlite",
                                                              "other-eval.sqlite-shm"}, \
         out["live_side_indexes"]
-    assert [f["name"] for f in out["held_for_person"]] == [".qmd-embed.lock"], \
+    assert [f["name"] for f in out["held_for_person"]] == ["embedding-worker.pid"], \
         out["held_for_person"]
     assert "#844:141-142" in out["held_for_person"][0]["because"], out["held_for_person"]
     assert {r["name"] for r in out["release"]["released"]} == {"rebuild-fixture.sqlite"}
     assert out["planned"] == ["rebuild-fixture.sqlite"]
-    assert (d / ".qmd-embed.lock").is_file()
+    assert (d / "embedding-worker.pid").is_file()
 
 
 def test_a_descriptor_on_a_released_database_holds_every_path_of_that_name(monkeypatch,
@@ -6161,13 +6331,23 @@ def test_a_config_only_release_moves_no_stray_byte(monkeypatch, tmp_path):
     `~/.config/qmd`. A check that folded it into the byte total would read as a
     contradiction of the release, and a release that appeared to move bytes it did not move
     is the kind of claim that makes the next one doubted.
+
+    #3247 re-seeded the 7 bytes from `.qmd-embed.lock` to `embedding-worker.pid` and left a
+    lock in the directory beside it, so the figure is measured on a pile where an embed is
+    running. Before this change the lock WAS those 7 bytes, which made the node's witness a
+    file that unlinks within seconds of the run — and once the inventory stopped counting
+    qmd's own locks, `before` would have read 0 and the node would have been asserting an
+    empty pile. The two figures it compares are now 7 either way, and the extra assertion
+    pins why: the lock's 8 bytes are not in them.
     """
     d = _release_env(monkeypatch, tmp_path, [
-        *LIVE_TRIO, (".qmd-embed.lock", 7, 1.0)])
+        *LIVE_TRIO, ("embedding-worker.pid", 7, 1.0), (".qmd-embed.lock", 8, 0.0)])
     (tmp_path / "config-only.yml").write_text("sources: []\n")
     monkeypatch.setattr(m, "RELEASED_STRAYS",
                         _ruled(("config-only", "only its config survives", "#2723")))
     before = m.stray_files()["bytes"]
+    assert not any(f["name"].startswith(".qmd-") for f in m.stray_files()["files"]), \
+        "an embed lock is back inside the pile this node measures bytes from"
     rep = _retention_run(monkeypatch, tmp_path, d, tmp_path, dry_run=False)
     sr = rep["stray_retention"]
     assert sr["release"]["released"] == [] and sr["planned"] == [], sr

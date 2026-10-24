@@ -485,6 +485,23 @@ def index_footprint(index: Path) -> dict:
 #
 # LIVE_SIDECARS are sqlite's own companions, not separate copies of anything.
 LIVE_SIDECARS = ("-wal", "-shm")
+#: qmd's own lock files, as they appear in the index directory. Not inventory: `~/.cache/qmd
+#: /.qmd-embed.lock` is created by an embed for the seconds it runs and unlinked by its
+#: holder, so a run overlapping a watcher cycle finds one there and finds nothing of the
+#: sort it is being asked to triage. #3247 measured what counting it cost: the 2026-10-24
+#: report's entire human delete queue — `held_for_person` had exactly one entry, that
+#: 8-byte lock, already unlinked by the time anyone read the artifact — and its `stray`
+#: headline overstated the backlog by a file no person can rule on.
+#:
+#: They are excluded from the inventory rather than classified as someone's call, for two
+#: reasons. A held entry that names a file which no longer exists is a question nobody can
+#: answer, and the file is not a candidate for deletion either: `qmd/src/cli/embed-lock.ts:44`
+#: creates it with `{flag: "wx"}` and **closes the descriptor**, keeping liveness in the
+#: name plus the PID inside it — so #2481's open-handle witness, which measures descriptors,
+#: can never report a live embed lock as a `live_side_index`. Whatever safety a widening of
+#: the delete rule leans on has to be this exclusion and the deletable-name rail in
+#: `apply_stray_retention`, not a handle check.
+QMD_LOCK_GLOBS = (".qmd-*.lock",)
 # The side-copy series a rebuild leaves behind (`index.sqlite.bak-<something>`).
 BACKUP_INFIX = ".bak"
 #: How much newer than its own main file a `-wal`/`-shm` may be and still be the copy
@@ -572,13 +589,31 @@ def _live_index_names(index: Path) -> set[str]:
     return {index.name, *(index.name + s for s in LIVE_SIDECARS)}
 
 
+def _is_qmd_lock(name: str) -> bool:
+    """Is this index-directory name one of qmd's own lock files (#3247)?
+
+    Case-sensitive on purpose: `fnmatchcase`, because the names on disk are written by
+    qmd and a pattern that folded case would also match a `.QMD-EMBED.LOCK` nobody
+    recognises as infrastructure.
+    """
+    return any(fnmatch.fnmatchcase(name, g) for g in QMD_LOCK_GLOBS)
+
+
 def stray_files(index: Path | None = None) -> dict:
     """Measure every regular file in the index directory that is not the live index.
 
     Directories are excluded (`models/` and `dist.prev-*/` are qmd's own, and their
     contents are not this job's to count), as are symlinks, which are not regular
-    files. A missing directory is a measured empty pile, never an exception: this
-    runs on every report, including a night that found no index at all.
+    files, as are qmd's own lock files (`QMD_LOCK_GLOBS`), which are neither a backup
+    nor an index but an embed in progress. A missing directory is a measured empty
+    pile, never an exception: this runs on every report, including a night that found
+    no index at all.
+
+    Excluding the locks here rather than in `plan_stray_retention` is what makes the
+    two halves agree: this is the only inventory, and both its readers — the
+    classifier's `outside` list and the report's `stray`/`stray_bytes` — take their
+    numbers from it, so a lock cannot be missing from one headline and present in the
+    other.
     """
     index = INDEX if index is None else index
     d = index.parent
@@ -586,7 +621,7 @@ def stray_files(index: Path | None = None) -> dict:
     if d.is_dir():
         live = _live_index_names(index)
         for p in sorted(d.iterdir()):
-            if p.name in live or p.is_symlink() or not p.is_file():
+            if p.name in live or _is_qmd_lock(p.name) or p.is_symlink() or not p.is_file():
                 continue
             st = p.stat()
             files.append({
