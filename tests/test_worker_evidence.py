@@ -1797,11 +1797,12 @@ def test_the_claims_instruction_tells_a_pilot_run_to_bind_a_closed_set():
     """#2817 clause 5: the rule is in the prompt every pilot job is handed.
 
     The closed-set discipline existed only as prose in the 2026-10-16 reflection
-    report, and skill prose binds only the jobs that read it — `skills/
-    nightly-reflection-config/SKILL.md` still prescribes the recursive form. This
-    block reaches every member of the pilot whether or not its skill says anything,
-    so it is asserted through the seam that ships it (`autonomy._evidence_prompt`),
-    not just against the constant.
+    report, and skill prose binds only the jobs that read it. The vault skill
+    `skills/nightly-reflection-config/SKILL.md` — a vault path, not a file in this
+    checkout — was itself prescribing the recursive glob until vault commit `5cc7a93a`
+    (#2997) re-pointed it to the closed-set form. This block reaches every member of
+    the pilot whether or not its skill says anything, so it is asserted through the
+    seam that ships it (`autonomy._evidence_prompt`), not just against the constant.
 
     Asserted as a rule about the shape plus the outcome the run is told to expect, and
     that it stayed prose: a seventh worked example would change what a model imitates,
