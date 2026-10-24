@@ -1213,7 +1213,19 @@ def reopen(reopen_raw, cfg) -> dict:
 #: day NOT in this map raises rather than falling back to a default: an unpinned denominator
 #: is a filing condition that was never computed, and §10's qualifying set may not rest on
 #: one.
-NO_BOOT_POOL = {"2026-10-15": 844969}
+#:
+#: 2026-10-23 is the second day that needs a pin, for the same reason: `#2665`'s windowing finds
+#: no boot in its window or its lookback, so its extract ships `pool_tokens: []` — which
+#: `derive` reports as no measured pool — and the per-event walk has no denominator. The size is
+#: the boot that served it, read from the SAME
+#: committed witness as the paragraph above — that file's first record is `(EngineCore
+#: pid=7382) INFO 10-19 17:59:37 [kv_cache_utils.py:2320] GPU KV cache size: 844,969 tokens`. It
+#: is the same integer 2026-10-15 divides by and it is NOT the same boot: this one postdates the
+#: `INFO 10-12 16:21:06` engine by a week, so the two days were served by different engines whose
+#: caches happened to size alike — which is why the entry is dated per-day rather than a shared
+#: default. `test_the_tenth_pinned_pool_is_a_committed_boot_line_too` re-derives the integer from
+#: those bytes and pins that it falls before this window, not inside it.
+NO_BOOT_POOL = {"2026-10-15": 844969, "2026-10-23": 844969}
 
 
 def _with_pool(ex: dict) -> dict:
@@ -4332,6 +4344,263 @@ def test_the_ninth_extract_moves_no_graded_reading(ninth_raw, ninth, cfg):
         "2026-09-25 belongs in its own round, with every figure in those bullets re-derived "
         "from `EXTRACT` the way the nodes above do, not smuggled into a commit that added a "
         "fixture for a different day")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #3271: the tenth counted day — 2026-10-23, the daily job's extract committed.
+#
+# What this block does NOT do is write a word into architecture/vllm.md. Whether this day
+# displaces 2026-10-09 as the newest bar-clearing day is owed-check's ruling under #3101's
+# `owed:` entry (that clause lives in the backlog item, not in the page's prose); a round that
+# committed the fixture and re-cut §10 in the same diff would have made an editorial decision by
+# arithmetic, which is the thing #2005's per-day route exists to keep separate. What could not
+# wait for that ruling is the retention clock: the data-root directory the extract came from
+# reaches back only to 2026-09-30, and the day's own status lines leave the ~11-file log
+# rotation around 2026-11-06, after which the file pinned below is the only copy of the reading.
+#
+# The day is admitted to the tracked family; nothing already graded moves — see
+# `test_the_tenth_extract_moves_no_graded_reading`. The day-range re-derivation the item quotes
+# (every day 2026-10-11…10-22 failing criterion (b), twelve days) was taken on stdout from this
+# script and is NOT pinned here: those days have no committed extract, so a node asserting their
+# numbers would be grading the rotation, which is what just expired.
+# ─────────────────────────────────────────────────────────────────────────────
+TENTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-23.json"
+
+
+@pytest.fixture(scope="module")
+def tenth_raw() -> dict:
+    return json.loads(TENTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def tenth(tenth_raw, cfg) -> dict:
+    """2026-10-23 as `derive` reports it on the committed bytes, at the gate `config.yaml`
+    carries.
+
+    `NO_BOOT_POOL` is deliberately NOT applied here: `derive` reads the window's own
+    `pool_tokens` and reports `None` for a day that booted no engine, and it is the per-event
+    free-pool walk in `_gap_events` that needs the denominator — which is the division of labour
+    the pin exists to draw. A node that fed the pin to `derive` would report a pool the script
+    never measured and hide the fact that the window has no boot line in it.
+    """
+    return W.derive(tenth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def test_the_tenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(tenth_raw):
+    """#3271 clause 1: 2026-10-23 is on disk, tracked by git, one canonical line, and identical
+    to the copy the standing daily job wrote.
+
+    The four checks are the ones every predecessor in this family makes, and the hazard is the
+    one the family was built for: autonomy task #92 writes only under the data root and never
+    stages (#2006's ruling), so the day is counted whether or not anybody commits it, and
+    `tests/fixtures/.gitignore` negates the name family so a dropped-but-unadded file is
+    invisible to `git status`. Byte identity is asked of the daily job's file rather than of a
+    re-derive for #2852's and #2912's reason: what is worth pinning is that nobody re-cut the
+    numbers between the job that finds a day and the round that commits it. The window check is
+    what catches a fixture for some other day wearing this name, which byte identity cannot.
+    """
+    assert tenth_raw["window"] == ["2026-10-23", "2026-10-24"], (
+        "the tenth reading is pinned to a 00:00→00:00 UTC window like every other reading; a "
+        "fixture from another window is a different day wearing this day's file name")
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(TENTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{TENTH_EXTRACT.name} is on disk but not in git. The engine status lines it was counted "
+        f"from leave the rotation around 2026-11-06 and {DAILY_EXTRACT_DIR} reaches back only to "
+        "2026-09-30, so an untracked extract is that day lost rather than a tidy tree")
+    raw = TENTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(tenth_raw, separators=(",", ":")) + "\n", (
+        f"{TENTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one line by construction; more than one means a hand-edited fixture")
+    daily = DAILY_EXTRACT_DIR / TENTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; its extract is the other half of "
+                    "this identity and only the job can produce it")
+    assert raw == daily.read_text(encoding="utf-8"), (
+        f"the committed fixture and the daily job's copy at {daily} differ; one of them is not "
+        "the reading, and the figures quoted for this day cite them as one file")
+    assert TENTH_EXTRACT in _tracked_extracts(), (
+        "the extract family no longer enumerates this day, so the derived evidence set cannot "
+        "see the counted day it is supposed to include")
+
+
+def test_the_tenth_pinned_pool_is_a_committed_boot_line_too(tenth_raw, cfg):
+    """#3271 clause 2: the denominator `NO_BOOT_POOL` hands this day is a boot line in the
+    committed witness, it falls BEFORE the window, and `_qualifying` therefore answers instead
+    of raising.
+
+    Two separate failures are pinned apart here. A pin that named a number absent from the
+    witness would be the #3191 failure mode again — an integer right for the wrong reason — so
+    the integer, its stamp and its `pid` are all read off the vault's bytes. And a pin for a boot
+    INSIDE the window would be a second, different error: the window's own boot is what the
+    script measures and ships, so anything in-range means the extract has a pool and the pin is
+    shadowing a measurement. The positive control at the bottom is what keeps the first pair of
+    asserts from being vacuous: `_with_pool` must still refuse a day the map does not name.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    pinned = NO_BOOT_POOL["2026-10-23"]
+    assert pinned == NO_BOOT_POOL["2026-10-15"] == 844_969, (
+        f"the two pinned days now divide by different pools ({pinned:,} and "
+        f"{NO_BOOT_POOL['2026-10-15']:,}); the witness carries one boot line per engine, so a "
+        "difference here is a re-cut of one of them, not a second engine")
+
+    quoted = [ln for ln in _vault_witness(_ROTATION_WITNESS).read_text(
+                  encoding="utf-8").splitlines()
+              if "pid=7382" in ln and "GPU KV cache size: 844,969 tokens" in ln
+              and "INFO 10-19 17:59:37" in ln]
+    assert len(quoted) == 1, (
+        f"the witness holds {len(quoted)} line(s) matching pid=7382 / 10-19 17:59:37 / 844,969 "
+        "tokens, so the provenance quoted above the constant no longer names one boot")
+
+    boots = _boot_lines()
+    hits = [b for b in boots if b.tokens == pinned
+            and b.moment.strftime("%m-%d %H:%M:%S") == "10-19 17:59:37"]
+    assert len(hits) == 1, (
+        f"{len(hits)} parsed boot line(s) carry {pinned:,} tokens at 10-19 17:59:37; the pin has "
+        "to be one boot, and `_boot_lines` parses the whole extract, so 0 means the integer "
+        "drifted from the bytes it cites")
+
+    day_start, day_end = _Moment(_BOOT_YEAR, 10, 23), _Moment(_BOOT_YEAR, 10, 24)
+    inside = [b for b in boots if day_start <= b.moment < day_end]
+    assert inside == [], (
+        f"the window now carries its own boot line ({[str(b.moment) for b in inside]}), so this "
+        "day no longer needs a pinned pool and NO_BOOT_POOL is carrying a denominator nobody "
+        "asked for")
+    assert all(b.moment < day_start for b in hits), (
+        f"the boot the pin names ({hits[0].moment}) is not before the window, so it is not the "
+        "engine that served the day")
+
+    assert tenth_raw["pool_tokens"] == [], (
+        f"the extract ships {tenth_raw['pool_tokens']!r}, not an empty list: with a measured pool "
+        "in it this day no longer needs the pin, and `_with_pool` returns such an extract "
+        "untouched, so the entry above would be shadowing a measurement")
+    assert _qualifying(tenth_raw, gate) == [], (
+        "`_qualifying` over the committed bytes returns a non-empty set for a day whose 3 chat "
+        "turns carry no miss at all, which is the derivation contradicting itself")
+
+    try:
+        _with_pool({"window": ["2099-01-01", "2099-01-02"], "pool_tokens": None})
+    except KeyError as exc:
+        assert "2099-01-01" in str(exc), (
+            f"the no-boot guard raised {exc}, which does not name the day it refused — the "
+            "message is what tells a future round to add a measured size and not a guess")
+    else:
+        pytest.fail("_with_pool divided an unpinned no-boot day by some default, so NO_BOOT_POOL "
+                    "is advisory and every pin in it is decoration")
+
+
+def test_the_tenth_day_figures_are_the_derivation(tenth_raw, tenth, cfg, s10):
+    """#3271 clause 3: every figure quoted for 2026-10-23 is `derive`'s own, at the gate
+    `config.yaml` carries, recomputed from the committed bytes — and so are the four criteria.
+
+    Nothing below is quoted from the item that filed it. The criteria are re-checked as
+    arithmetic rather than matched as prose, because the claim about this day is that all four
+    HOLD, and a node that only matched its digits would still pass on a day that stopped clearing
+    them. §6.1's per-day budget is read out of §10's own (b) bullet rather than restated here, so
+    a re-cut of §6.1 moves this node and that sentence together instead of silently re-scaling a
+    percentage. The three `two_request_under_stall_cold_*` counts overlap (2 + 1 + 3 ≠ 3), so the
+    criterion read is `_cold_admission` and `_not_cold`, which is how §10's (d) clause is
+    written; the overlapping two are pinned as figures and are not used as a verdict.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert tenth["turns"] == 496 and tenth["measured"] == 496
+    assert tenth["turns_with_misses"] == 35
+    assert tenth["misses"] == 79 and tenth["reprefill_tokens"] == 8_482_836
+    assert tenth["worst_turn_tokens"] == 631_217
+    assert tenth["chat_turns"] == 3 and tenth["chat_turns_with_misses"] == 0
+    assert tenth["by_kind"] == {"autocode": [76, 8_179_267], "autonomy": [3, 303_569]}, (
+        "the split of the day's misses by kind moved, and the item's reading names both kinds")
+    assert tenth["miss_events"] == 75 and tenth["cold_events"] == 41
+    assert tenth["kv_samples"] == 6_831
+    assert round(tenth["kv_p50"], 3) == 0.16
+    assert round(tenth["kv_p90"], 3) == 0.35
+    assert round(tenth["kv_max"], 3) == 0.758
+    assert tenth["misses_with_gap"] == 75
+    assert round(tenth["gap_s_p50"], 1) == 11.5
+    assert tenth["misses_gap_over_gate"] == 5
+    assert tenth["two_request_windows"] == 2_391
+    assert round(tenth["two_request_tok_s_p50"], 1) == 2_037.3
+    assert round(tenth["two_request_tok_s_min"], 1) == 10.3
+    assert tenth["two_request_under_stall"] == 3
+    assert tenth["two_request_under_stall_cold_in_flight"] == 2
+    assert tenth["two_request_under_stall_cold_prefill"] == 1
+    assert tenth["two_request_under_stall_cold_admission"] == 3
+    assert tenth["two_request_under_stall_not_cold"] == 0
+    assert tenth["pool_tokens"] is None, (
+        "derive now reports a pool for a window that booted no engine, so the day's free-block "
+        "figures would be dividing by the pin without anyone saying so")
+
+    baseline = re.search(r"(\d+) misses and ([\d.]+)M tokens a day", s10)
+    assert baseline, (
+        "§10 no longer states §6.1's per-day baseline in the (b) bullet, so the percentage quoted "
+        "for this day has no denominator on the page to be measured against")
+    per_day_misses = int(baseline.group(1))
+    per_day_tokens = round(float(baseline.group(2)) * 1_000_000)
+    assert (per_day_misses, per_day_tokens) == (97, 10_300_000), (
+        f"§6.1's per-day baseline now reads {per_day_misses} / {per_day_tokens:,}, so (b) is a "
+        "different budget than the one this day's figures were measured against")
+
+    # The four criteria, as arithmetic on the derivation rather than as prose.
+    assert tenth["chat_turns"] > 0 and tenth["chat_turns_with_misses"] == 0, (
+        "(a): a non-zero chat population with none of it carrying a miss")
+    assert (tenth["misses"] <= per_day_misses
+            and tenth["reprefill_tokens"] <= per_day_tokens), "(b)"
+    assert tenth["kv_p50"] < gate, "(c)"
+    assert tenth["two_request_under_stall_not_cold"] == 0, (
+        "(d): every under-stall two-request window is a cold admission")
+    assert 100 * tenth["misses"] / per_day_misses == pytest.approx(81.4, abs=0.05), (
+        "the misses side of (b) no longer sits at 81.4% of the per-day budget")
+    assert 100 * tenth["reprefill_tokens"] / per_day_tokens == pytest.approx(82.4, abs=0.05), (
+        "the token side of (b) no longer sits at 82.4% of the per-day budget")
+
+
+def test_the_tenth_extract_moves_no_graded_reading(tenth_raw, tenth, cfg):
+    """#3271 clause 4: admitting the day to the tracked family moves nothing §10 already grades.
+
+    Family membership needed no node edited: `_tracked_extracts()` enumerates by name family,
+    which is how #1921, #2005, #2248, #2852, #2912 and #3101 each arrived. What has to be
+    asserted is the other half — membership is not counting, and neither is meeting the bar. The
+    day carries no chat miss at all, so `_qualifying` returns the empty list over its bytes and
+    the filing-condition evidence set stays exactly the four days §10's composed prose names. The
+    digest is the strictest form of the same promise: the 2026-09-25 reading and its four
+    criterion bullets are the densest prose on the page, this round was told to write nothing in
+    §10, so it is checked as bytes rather than as phrases that could survive a re-cut of the
+    numbers between them.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert TENTH_EXTRACT in _tracked_extracts()
+    assert _qualifying(tenth_raw, gate) == [], (
+        "a 2026-10-23 chat miss now meets the filing condition, so this day stops being "
+        "bar-evidence-only and becomes a counted day — which is owed-check's ruling, not this "
+        "fixture's")
+    assert tenth["chat_turns_with_misses"] == 0, (
+        "the day now carries a chat miss, and the empty `_qualifying` above is no longer "
+        "explained by the derivation")
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15"], (
+        "the derived §10 evidence set moved under a commit that promised to touch no graded "
+        "reading, so either the criteria changed or one of these days' bytes did")
+    assert "2026-10-23" not in days, (
+        "a bar-clearing day has been admitted to the filing-condition evidence set, which is a "
+        "different question with a different owner")
+    assert EXTRACT.name == "vllm_prefix_miss_2026-09-25.json", (
+        "the suite's counted-reading extract moved; #1812's triage names the traps in "
+        "re-pointing it and this round is not that round")
+    windows = {c.name: json.loads(c.read_text(encoding="utf-8"))["window"][0]
+               for c in _tracked_extracts()}
+    assert windows[TENTH_EXTRACT.name] == "2026-10-23"
+    assert len(set(windows.values())) == len(windows), (
+        f"two extracts now carry one day: {windows}")
+    block = _september_counted_reading()
+    assert hashlib.sha256(block.encode("utf-8")).hexdigest() == _SEPTEMBER_READING_SHA, (
+        "the 2026-09-25 counted reading and its (a)/(b)/(c)/(d) bullets changed bytes. #3271 "
+        "commits a fixture and writes nothing into §10: a real re-read of 2026-09-25 belongs in "
+        "its own round, with every figure in those bullets re-derived from `EXTRACT` the way the "
+        "nodes above do, not smuggled into a commit that added a fixture for a different day")
 
 
 # ── the venv paths the docs tell a human to switch to have to be on the box ──
