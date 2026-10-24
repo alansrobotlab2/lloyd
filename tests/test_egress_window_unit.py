@@ -1038,7 +1038,7 @@ def test_the_drain_still_has_no_self_exclusion_so_the_unit_is_still_needed():
         "the canary host literal the leak witness counts on moved; the unit comment is stale"
 
 
-# ── #2971: numeric `workers/queue.py:<n>` citations are retired corpus-wide ────────────
+# ── #2971: numeric `workers/queue.py:<n>` citations are retired across the tracked tree ──
 #
 # `_resolve_pool_query_pointer` above can re-read a NUMBER, but only where a caller hands
 # it the text: its one caller walks `agent-services/systemd` comments, and the absence it
@@ -1052,18 +1052,31 @@ def test_the_drain_still_has_no_self_exclusion_so_the_unit_is_still_needed():
 # DDL above them.
 #
 # A resolver has to be handed the corpus, so it cannot outlast it; an absence can. The ban
-# is therefore TOTAL over the six roots, including the citations that currently resolve —
-# a partial retirement is not greppable, and today's live number is next release's dead
-# one. What is NOT done here: the resolver's NUMBER branch is left in place (deleting it is
-# an owed ruling on #2971), and `tests/test_architecture_coverage_doc_claims.py`'s span
-# sweep is untouched — it asks whether a line falls inside some definition, which is a
-# different property, and it passes all three dead architecture anchors today.
-
-#: The six roots the ban covers. Exhaustive at filing: `git grep -c -E
-#: 'workers/queue[.]py:[0-9]+'` over the base commit named 18 files — 13 of them here
-#: (17 citations) and 5 under the record roots (12 citations). Nothing outside these
-#: seventeen files, in `web/` or `docs/` or the repo root, carried one.
-CORPUS_ROOTS = ("app", "agent-services", "architecture", "eval", "scripts", "tests")
+# is therefore TOTAL over every path `git` tracks, including the citations that currently
+# resolve — a partial retirement is not greppable, and today's live number is next release's
+# dead one. The scope is `git ls-files` minus the four record prefixes below, which is also
+# exactly what the ban's own acceptance instrument (`git grep`) reads, so the two cannot
+# disagree about what is banned — and two checkouts of one commit now scan the SAME set of
+# paths, which #2971's `rglob` could not promise: it took whatever files happened to sit in the
+# directory, so its verdict moved with local residue. Each node still reads the bytes of the
+# checkout it runs in, as it always did; what stopped varying is which paths get opened.
+#
+# Two settled rulings from #2971's owed-check pass (ledger entry `20261024_004847_owedcheck_2062`
+# on that item's activity log) decide the shape of this section:
+#   #2, which is the walk below: "WIDEN the walk from the six named roots to every git-tracked
+#   path, keeping RECORD_ROOTS as the only exclusions and the kind filter unchanged". The
+#   six-name tuple #2971 shipped was exhaustive at its filing and exhaustive is a property of a
+#   moment: 241 tracked files sat outside it at #3233's filing (`web/` 126, `agent_mcp/` 58,
+#   `workers/` 26, `chrome-extension/` 18, 13 at the repo root), and `workers/queue.py` — the
+#   very file every banned citation points at — was one of them, so writing a citation into its
+#   own docstring would not have reddened the guard.
+#   #1, which is why `_resolve_pool_query_pointer` still has a NUMBER branch: "KEEP the NUMBER
+#   branch. Deleting it removes a capability for no measured gain and forces a rewrite of the
+#   four #2772 synthetic red-path witnesses". It is kept BY RULING, not left pending, and it is
+#   reachable only from those witnesses now.
+# What is still NOT done here: `tests/test_architecture_coverage_doc_claims.py`'s span sweep is
+# untouched — it asks whether a line falls inside some definition, which is a different
+# property, and it passes all three dead architecture anchors today.
 
 #: The four excluded prefixes, and the ONLY exclusions. By directory prefix rather than a
 #: list of files so no per-citation allowlist can grow: each is a frozen corpus the
@@ -1085,30 +1098,42 @@ def _is_derived(rel: str) -> bool:
     """True for a file the compiler wrote, not a file a person wrote a sentence into.
 
     `__pycache__` and bytecode are excluded from the walk, and they are the ONLY thing
-    excluded besides the four record prefixes. They have to be: `quote`-style bytecode
-    embeds every docstring and comment string constant of the module it was built from, so
-    a stale `app/__pycache__/failure_ledger.cpython-313.pyc` left by a pre-retirement
-    import still holds a `workers/queue.py:` citation that no tracked file contains — a red
-    guard on a clean tree, which is the false alarm this whole item exists to end. The
-    Filter by KIND (a compiled artifact), and the reason there is a filter at all is measured
-    rather than assumed. Bytecode keeps a module's DOCSTRINGS and string constants but drops
-    comments, so a citation survives compilation exactly when it sits in a docstring: compiling
-    the thirteen pre-retirement Python files at 9c913df5 and grepping the resulting `.pyc` keeps
-    8 of the 17 citations (`app/routers/dashboard.py`, `eval/persistence_arms.py`,
-    `scripts/automod/landed_outcomes.py` and the four test files), while `app/failure_ledger.py`
-    and `scripts/step_conformance.py` come back with 0 because theirs sat in a comment. A machine
-    that imported any of the first group before this round holds a numeric citation that no
-    tracked file contains any more, and a reader that reached it would be red on a clean tree
-    depending on what was imported last — the false alarm this item exists to end. The second
-    reason is the ban's own definition: the acceptance check is `git grep`, which reports no
-    lines inside binary files either, and 850 files under these six roots begin with a NUL, so a
-    reader that took every byte would be stricter than the instrument the item names and would
-    redden on a local `agent-services/models/**` blob.
+    excluded besides the four record prefixes. The filter is by KIND (a compiled artifact), and
+    the reason there is a filter at all is measured rather than assumed. Bytecode keeps a
+    module's DOCSTRINGS and string constants but drops comments, so a citation survives
+    compilation exactly when it sits in a docstring: compiling the thirteen pre-retirement
+    Python files at 9c913df5 and grepping the resulting `.pyc` keeps 8 of the 17 citations
+    (`app/routers/dashboard.py`, `eval/persistence_arms.py`, `scripts/automod/landed_outcomes.py`
+    and the four test files), while `app/failure_ledger.py` and `scripts/step_conformance.py`
+    come back with 0 because theirs sat in a comment. An artifact that shares a tree with the
+    corpus can therefore carry a citation no source contains, and a reader that reached it would
+    be red depending on what was imported last.
 
-    Declining by name is still a hole — a hand-written `.py` parked under `__pycache__/` is
-    declined too — and `_prose_declined_by_name` is what closes it. Its edges are proven on a
-    planted tree in the synthetic node, because whether residue exists is a property of a working
-    tree and not of a commit.
+    Widening the corpus to `git ls-files` (#3233) changed how much of that is live, and the
+    change is worth stating exactly rather than leaving the old sentence standing next to a new
+    walk. Untracked residue is now out of the walk's scope entirely — `git ls-files` never names
+    it — and today's tracked tree holds no compiled artifact either: of the 3188 tracked paths at
+    #3233's base, 0 match this filter. The count on the other side of that sentence is deliberately
+    not given, because it is a property of what a box has imported and not of a commit — a working
+    checkout of that same base had several hundred untracked `.pyc` files under the six roots
+    #2971 walked, every one outside the tracked set, and a worktree nobody has imported from has
+    none at all. The tracked count is the only one that describes the ban's scope, and the
+    discrepancy is the point: on any given checkout the filter may decline nothing whatever, and
+    its whole effect is prospective — a force-added artifact, which `git` DOES report and `git
+    grep` DOES match, is still declined by name. The second reason stands as #2971 wrote it: the
+    ban's acceptance check is `git grep`, which reports no lines inside binary files either, so a
+    reader that took every byte would be stricter than the instrument it is meant to reproduce.
+    That parity is not currently load-bearing either — 0 of the 3056 tracked corpus files at
+    #3233's base have a NUL inside their first eight bytes, so no tracked blob is waiting to be
+    reddened on. That is why no content or size exemption is NEEDED, which is not the same as
+    licence to add one: an exemption nobody has observed a case for is the unauthorised hole #2971
+    refused.
+
+    Declining by name is still a hole — a hand-written `.py` parked under `__pycache__/` and
+    committed is declined too — and `_prose_declined_by_name` is what closes it. Because today's
+    tracked tree gives the filter nothing to decline, both of its edges exist only on a planted
+    tree, and the synthetic node manufactures them: a real header waved through, a prose file
+    named.
     """
     return "__pycache__" in rel.split("/") or rel.endswith((".pyc", ".pyo"))
 
@@ -1118,9 +1143,14 @@ def _compiled_by_content(path: Path) -> bool:
 
     CPython writes a four-byte magic number then a four-byte flags word that has been zero
     since 3.7, so every real `.pyc` has a NUL inside its first eight bytes and no text file
-    does. Measured on the live checkout: of the 777 files the name filter declines under these
-    six roots, none lacks that NUL — the two predicates agree over the whole real corpus, and
-    the corpus node asserts the tracked half of that agreement rather than a count quoted here.
+    does. Measured on a working checkout at #3233: of the untracked files the name filter declines
+    there — the exact count is a property of what that box has imported, so it is deliberately not
+    repeated in this file — none lacked that NUL, so the two predicates agree over every file a
+    working tree actually puts them side by side with. On the TRACKED corpus they are never side by
+    side at all, because nothing tracked is name-declined (see `_is_derived`), so this predicate's
+    job is entirely the planted tree's, where a real header has to be waved through and a prose
+    file under the same name has to be named. The corpus node asserts the tracked agreement rather
+    than a count quoted here.
     This function deliberately never calls `_is_derived`, which is what lets it disagree with
     the name filter instead of restating it: restating it was the whole defect of the first
     witness.
@@ -1129,68 +1159,96 @@ def _compiled_by_content(path: Path) -> bool:
 
 
 def _prose_declined_by_name(root: Path) -> list[str]:
-    """Paths declined as bytecode whose own bytes are prose, so a sentence could live there.
+    """Tracked paths declined as bytecode whose own bytes are prose, so a sentence could live
+    there.
 
     The witness this replaces computed the dropped set by subtracting two walks that shared
     `_is_derived`, so the difference was bytecode by construction and the assertion could not
-    fail (review attempt 2). This asks each declined file. Who owns what comes back is the
-    caller's business: `git` residue is not part of a tree a reviewer can read, while a path
-    `git` TRACKS is corpus by definition and no directory name excuses it.
+    fail (review attempt 2). This asks each declined file's own bytes, through a predicate that
+    never calls `_is_derived`.
+
+    It reads the SAME tracked enumeration the corpus walk reads, which is what makes ownership a
+    property of the scope instead of a second guess about it: an unstaged file is not in a tree a
+    reviewer or `git grep` can read, while a path `git` tracks is corpus by definition and no
+    directory name excuses it. #2971 shipped this as an `rglob` over its six roots plus a
+    `set(...) & _tracked(...)` at the call site; with the scope widened to the tracked tree
+    (#3233) that intersection became provably redundant — the function can no longer return a
+    path `_tracked` does not contain — so it moved inside, and the corpus node's rule is simply
+    `declined == []`. Both edges of the move are proven on a planted tree in the synthetic node:
+    unstaged, the witness says nothing is swallowed; staged, it names the file. On today's tracked
+    tree the rule has nothing to decline, so a planted tree is the only place its red edge exists.
+
+    One asymmetry with the corpus walk is deliberate. A tracked, name-declined path with no bytes
+    in this checkout appears in neither answer: `_corpus_files` skips it and this function asks it
+    nothing. The corpus node asserts that gap away for the corpus (`unread == []`) because the
+    corpus is what gets read, and a path skipped there is scope the ban quietly lost; a declined
+    path skipped HERE cannot hide a citation, because nothing reads it either way. So the
+    asymmetry is documented rather than witnessed, and the corpus node's assertion is the one that
+    would notice a checkout whose index and working tree disagree.
     """
     declined: list[str] = []
-    for rel in CORPUS_ROOTS:
-        base = root / rel
-        if not base.is_dir():
+    for rp in _tracked(root):
+        if not _is_derived(rp):
             continue
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            rp = path.relative_to(root).as_posix()
-            if any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS):
-                continue
-            if _is_derived(rp) and not _compiled_by_content(path):
-                declined.append(rp)
-    return declined
+        if any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS):
+            continue
+        path = root / rp
+        if path.is_file() and not _compiled_by_content(path):
+            declined.append(rp)
+    return sorted(declined)
 
 
 def _tracked(root: Path) -> set[str]:
-    """Paths `git` tracks under the six roots — the corpus a reader of the repo can see.
+    """EVERY path `git` tracks in `root` — the corpus a reader of the repo can see.
 
-    This is the same corpus the item's own acceptance check reads, since `git grep` walks
-    tracked files and nothing else, so the two instruments cannot disagree about what is banned.
+    No pathspec and no list of directory names, which is #3233: the six-root pathspec this
+    function used to pass was guarding the wrong property, as owed-check ruling #2 on #2971 put
+    it. The tracked set is also the only feasible bound on a repo root this crowded — `.venvs/`,
+    `qmd/` and `node_modules/` all sit inside it, all hold ZERO tracked files, and an `rglob`
+    from the root would sweep all three.
+
+    And it is the same corpus the ban's own acceptance check reads, since `git grep` walks
+    tracked files and nothing else, so the two instruments cannot disagree about what is banned
+    and the verdict does not depend on which checkout pytest runs in.
     """
-    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", *CORPUS_ROOTS],
+    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
                          capture_output=True, text=True, check=True)
     return {p for p in out.stdout.split("\0") if p}
+
+
+def _corpus_relpaths(root: Path) -> list[str]:
+    """Every path of the ban's corpus inside `root`, repo-relative and sorted.
+
+    `git ls-files`, minus the four record prefixes dropped by path ELEMENT (a file named
+    `eval/iveil.py` is not under `eval/iv`) and minus compiled artifacts dropped by KIND — see
+    `_is_derived`, whose exclusions the corpus node witnesses one by one. This is the one
+    enumeration; `_corpus_files` reads it and `_prose_declined_by_name` asks it who was declined,
+    so the walk and its witness cannot disagree about the scope.
+    """
+    return sorted(
+        rp for rp in _tracked(root)
+        if not any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS)
+        and not _is_derived(rp))
 
 
 def _corpus_files(root: Path):
     """Yield `(relpath, path)` for every file of the ban's corpus inside `root`.
 
-    The six roots walked with `rglob`, the four record prefixes dropped by path element (a
-    file named `eval/iveil.py` is not under `eval/iv`) and compiled artifacts dropped by
-    kind — see `_is_derived`, whose exclusions the corpus node witnesses one by one. Files
-    are decoded with `errors="ignore"` rather than skipped when they are not valid UTF-8: a
-    size or encoding exemption would be an unauthorised hole, and the walk has to be able to
-    say "nothing here" only because nothing here matches.
+    A tracked path with no bytes on disk yields nothing — the same tree `git grep` declines to
+    report on — and the corpus node asserts that set is empty rather than trusting it, because a
+    silent skip is how a walk shrinks below its own scope unnoticed. Files are decoded with
+    `errors="ignore"` rather than skipped when they are not valid UTF-8: a size or encoding
+    exemption would be an unauthorised hole, and the walk has to be able to say "nothing here"
+    only because nothing here matches.
     """
-    for rel in CORPUS_ROOTS:
-        base = root / rel
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            rp = path.relative_to(root).as_posix()
-            if any(rp == ex or rp.startswith(ex + "/") for ex in RECORD_ROOTS):
-                continue
-            if _is_derived(rp):
-                continue
+    for rp in _corpus_relpaths(root):
+        path = root / rp
+        if path.is_file():
             yield rp, path
 
 
 def _numeric_queue_citations(root: Path) -> list[str]:
-    """Every `workers/queue.py:<digits>` citation under the six roots of `root`.
+    """Every `workers/queue.py:<digits>` citation in the tracked corpus of `root`.
 
     One regex, the same `_QUEUE_NUMERIC` the resolver above already uses, so the ban and
     the pointer checker cannot disagree about what a numeric citation is. Returns
@@ -1206,8 +1264,8 @@ def _numeric_queue_citations(root: Path) -> list[str]:
     return hits
 
 
-def test_the_six_roots_hold_not_one_numeric_workers_queue_citation():
-    """#2971 clauses 1-2: the corpus is clean, read from the tree rather than from a list.
+def test_the_tracked_tree_holds_not_one_numeric_workers_queue_citation():
+    """#2971 clauses 1-2, widened by #3233: the tracked corpus is clean, read from the tree.
 
     At filing the scoped grep returned 17 citations in 13 files, and 14 of the 17 were
     dead —
@@ -1215,45 +1273,62 @@ def test_the_six_roots_hold_not_one_numeric_workers_queue_citation():
     `architecture/research-pipeline.md` pointing at `list_runs_joined` on 677 when it is at
     1577, four citations at 1353/1301 landing inside `claims_by_source` and
     `pending_wait_by_source` while `run_rollup_by_source` is at 1428. The property is
-    re-derived from the filesystem here, not from that list, so a fifteenth citation added
-    next month reddens this node without anybody updating it.
+    re-derived from the tracked tree here, not from that list, so a fifteenth citation added
+    next month, in any tracked file, reddens this node without anybody updating it.
 
-    The walk's own reach is asserted alongside the result: roots present, all four record
-    prefixes still directories (so an exclusion cannot be "widened" by renaming the thing
-    it excludes), and a file count large enough to show the walk is not standing in an
-    empty directory. The checker's non-vacuity — the case where the corpus is clean because
-    the reader reads nothing — is the next node's, over a synthetic tree.
+    The walk's own reach is asserted alongside the result: all four record prefixes still
+    directories (so an exclusion cannot be "widened" by renaming the thing it excludes), every
+    tracked corpus path readable in this checkout (so the reader cannot quietly cover less than
+    the ban's scope), a file count above what the six-root walk could reach at all (so the
+    widening is what keeps this green, not a coincidence), and named files from each root #3233
+    added — `workers/`, `web/`, `agent_mcp/`, `chrome-extension/` and the repo root, none of
+    which the old walk ever opened. The checker's non-vacuity — the case where the corpus is
+    clean because the reader reads nothing — is the next node's, over a staged synthetic tree.
     """
-    for rel in CORPUS_ROOTS:
-        assert (REPO / rel).is_dir(), f"the ban's corpus lost a root: {rel}"
     for rel in RECORD_ROOTS:
         assert (REPO / rel).is_dir(), (
             "record root " + rel + " is gone, and its absence would silently widen the "
             "exemption — the exclusion list must move only with a deliberate edit")
     scanned = [rp for rp, _ in _corpus_files(REPO)]
-    assert len(scanned) > 2000, f"the walk reached only {len(scanned)} files"
-    #: Nothing the walker declines by NAME may be a file git tracks. The first draft witnessed
+    #: The reader's scope is the index; its access is the working tree. A tracked path that is
+    #: not a readable file here is a corpus member the regex never opened, and `git grep` — the
+    #: ban's own acceptance instrument — stays silent about it too, so the two would agree on a
+    #: green neither of them had earned. Asserted empty, not assumed.
+    unread = sorted(set(_corpus_relpaths(REPO)) - set(scanned))
+    assert unread == [], (
+        "these tracked corpus paths are not readable files in this checkout, so the walk "
+        "covered less than the ban's scope: " + ", ".join(unread[:10]))
+    #: 3056 files at #3233's base, against 2815 for the six-root `rglob` on the same clean
+    #: checkout, so this floor is one the retired scope could not clear: reverting the widening
+    #: reddens here even if every other assertion stays exactly as it was.
+    assert len(scanned) > 3000, f"the walk reached only {len(scanned)} files"
+    #: Nothing the walker declines by NAME may be a tracked prose file. The first draft witnessed
     #: the kind filter with `set(all) - set(scanned)`, and `_corpus_files` IS that walk minus
     #: `_is_derived`, so the leftovers were bytecode by construction and the assertion could
     #: never fail (review attempt 2, finding 1). `_prose_declined_by_name` instead asks each
-    #: declined file's own bytes, through a predicate that never calls `_is_derived`, and the
-    #: rule below is the one that matters: compiler residue is nobody's corpus, but a TRACKED
-    #: file declined by name is a sentence parked outside the ban. The agreement half of it is
-    #: not vacuous on a box that has ever run the code — 777 files under these roots are
-    #: declined by name, and every one of them has the header that says it was compiled — and
-    #: both edges of the TRACKED half are proven on a planted tree in the next node, because
-    #: whether residue exists is a property of a working tree, not of a commit.
+    #: declined file's own bytes, through a predicate that never calls `_is_derived`, and since
+    #: #3233 it asks them of the same tracked enumeration this walk reads — which is why the
+    #: `& _tracked(...)` #2971 needed at the call site is gone: the function cannot return a path
+    #: the walk did not consider, so the rule is the plain one below. It is not vacuous by
+    #: construction either: `git add -f workers/__pycache__/x.py` is a sentence committed outside
+    #: the ban and it reddens here. On today's tracked tree the filter declines nothing (0 of
+    #: 3188 tracked paths), so both edges of that rule are manufactured on a planted tree in the
+    #: next node — unstaged invisible, staged named.
     declined = _prose_declined_by_name(REPO)
-    hiding = sorted(set(declined) & _tracked(REPO))
-    assert hiding == [], (
-        "the walker declines these as bytecode by name but git tracks them, so they are "
-        "corpus and a citation can hide there: " + ", ".join(hiding[:10]))
-    #: Files the ban must reach, named so a broken root shows up as a missing name rather
-    #: than as a suspiciously clean corpus.
+    assert declined == [], (
+        "the walker declines these as bytecode by name but git tracks them and their bytes are "
+        "prose, so they are corpus and a citation can hide there: " + ", ".join(declined[:10]))
+    #: Files the ban must reach, named so a broken scope shows up as a missing name rather than
+    #: as a suspiciously clean corpus. The first six are #2971's own roots, one file each; the
+    #: last five are the widening — a tracked file from each root outside the six, plus the repo
+    #: root itself. `workers/queue.py` is the pointed one: the file every banned citation names
+    #: was itself outside the ban until #3233.
     for must_see in ("app/routers/dashboard.py", "architecture/threat-model.md",
                      "agent-services/systemd/lloyd-egress-window.timer",
                      "eval/persistence_arms.py", "scripts/step_conformance.py",
-                     "tests/test_persistence_window_unit.py"):
+                     "tests/test_persistence_window_unit.py",
+                     "workers/queue.py", "web/src/App.tsx", "agent_mcp/automod.py",
+                     "chrome-extension/manifest.json", "server.py"):
         assert must_see in scanned, must_see
     assert not any(rp.startswith(("eval/baselines", "eval/iv",
                                   "eval/cross_engine_disagreement_arm1", "tests/fixtures"))
@@ -1261,13 +1336,97 @@ def test_the_six_roots_hold_not_one_numeric_workers_queue_citation():
 
     hits = _numeric_queue_citations(REPO)
     assert hits == [], (
-        "numeric workers/queue.py line citations are banned under the six roots: they rot "
+        "numeric workers/queue.py line citations are banned across every tracked path: they rot "
         "silently (691df24b moved depth_by_source 1226->1253). Re-aim each at the symbol "
         "its own sentence names. Found:\n" + "\n".join(hits))
 
 
+def _ban_section_header() -> str:
+    """The ban's comment preamble, read back out of this file as prose rather than as source.
+
+    Cut from the `# ── #2971` banner to the first statement after it (which takes the `#:` notes on
+    the constants too — they are part of what the rulings decided), then de-commented, joined and
+    whitespace-collapsed. The collapsing matters: a phrase the author happened to wrap across two
+    comment lines must still read as one phrase, or the node below would be pinning the line
+    length rather than the claim.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("# ── #2971"))
+    end = next(i for i in range(start + 1, len(lines))
+               if lines[i].strip() and not lines[i].startswith("#"))
+    return re.sub(r"\s+", " ", " ".join(ln[1:].lstrip() for ln in lines[start:end]))
+
+
+def test_the_ban_s_header_records_the_tracked_scope_and_both_settled_rulings():
+    """#3233 clause 5: the comment that explains the ban cannot go back to the retired scope.
+
+    The other nodes in this section grade code, and the code is right for reasons the header now
+    states: which scope the walk takes, and what the two owed-check rulings decided. That made the
+    header the one artefact in the section a change could quietly contradict — the review caught
+    exactly this, that an edit restoring "TOTAL over the six roots" would redden nothing — so it
+    is read here, as text, and graded.
+
+    Four things are pinned, in the order a later reader would need them:
+      1. the retired claim is absent and the widened one present, in the section's own words;
+      2. the ledger entry that decided them is named, so the ruling is findable and not folklore;
+      3. the scope claim is the operative one (`git ls-files`), not an aspiration;
+      4. the NUMBER branch the header says is kept BY RULING is in fact still there — read out of
+         the resolver's own source, so the header cannot outlive the code it describes. A claim
+         about a branch is worth no more than the `inspect` that finds it.
+    """
+    header = _ban_section_header()
+    assert len(header.split()) > 250, (
+        f"the ban's header ran to {len(header.split())} words — the scope and the two rulings are "
+        "a few hundred words of prose, and a stub cannot carry them")
+    #: 1. The retired scope claim is gone and the widened one is in its place, phrased as the ban
+    #: rather than as an intention.
+    assert "TOTAL over the six roots" not in header, (
+        "the header is back to claiming the six-root scope, which #3233 retired — the walk below "
+        "is `git ls-files`, and a header that contradicts its own guard is worse than no header")
+    assert "TOTAL over every path `git` tracks" in header, header
+    #: 2. Both rulings are recorded as settled, with the ledger entry that settled them.
+    for ruling in ("WIDEN the walk", "KEEP the NUMBER branch"):
+        assert ruling in header, f"owed-check ruling no longer recorded on the ban: {ruling!r}"
+    assert "20261024_004847_owedcheck_2062" in header, (
+        "the rulings are stated without the ledger entry that decided them, so a reader cannot "
+        "tell a settled ruling from a remembered one")
+    assert "BY RULING" in header, header
+    assert "owed ruling" not in header, (
+        "the header is back to describing a ruling as still owed: both were settled by "
+        "20261024_004847_owedcheck_2062, and an open question in a guard's own comment is how "
+        "#2971's NUMBER branch sat undecided between landing and its owed-check pass")
+    #: 3. The scope is named as the instrument that reads it, which is the whole argument for the
+    #: widening and the thing a future narrowing would have to contradict.
+    assert "`git ls-files`" in header and "`git grep`" in header, header
+    #: No list of root names survives anywhere in this file. Pinned as SYNTAX, not as a word: the
+    #: retired tuple's name occurs in the very sentence that would deny it, so a substring check on
+    #: it could only ever fail. What #3233 removed was a constant enumerating directories, so that
+    #: is what is forbidden — a string-tuple/list constant at module level, of which the four record
+    #: prefixes are now the only one in the file. The corpus node proves the walk takes no such
+    #: list; this proves nobody put one back to hand to something else.
+    whole = Path(__file__).read_text(encoding="utf-8")
+    str_lists = {
+        t.id for st in ast.parse(whole).body
+        if isinstance(st, ast.Assign) for t in st.targets
+        if isinstance(t, ast.Name) and isinstance(st.value, (ast.Tuple, ast.List))
+        and st.value.elts
+        and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in st.value.elts)}
+    assert str_lists == {"RECORD_ROOTS"}, (
+        f"a module-level tuple of directory names is back in this file: {sorted(str_lists)} — "
+        "the ban's scope is what `git` tracks, and a list of roots is how it quietly narrows again")
+    #: 4. The header's fourth claim is about code, so it is checked against code and not against
+    #: the sentence: the resolver still branches on a numeric citation.
+    import inspect
+    resolver = inspect.getsource(_resolve_pool_query_pointer)
+    assert "_QUEUE_NUMERIC.finditer" in resolver, (
+        "the header records the NUMBER branch as kept by ruling #1, but "
+        "`_resolve_pool_query_pointer` no longer has one — either restore the branch or rewrite "
+        "the header and the four #2772 synthetic witnesses that depend on it")
+
+
 def test_the_citation_reader_reddens_on_a_synthetic_corpus_and_its_four_prefixes(tmp_path):
-    """#2971 clause 3: the checker is not a no-op, and its exemptions are exactly four.
+    """#2971 clause 3, widened by #3233: the checker is not a no-op and its exemptions are four.
 
     Proven the way #2772 proved the resolver's red paths — with a synthetic tree, so the
     real corpus never has to be damaged. Both directions are needed: a tree carrying one
@@ -1277,14 +1436,18 @@ def test_the_citation_reader_reddens_on_a_synthetic_corpus_and_its_four_prefixes
     lookalike directory is included because prefix matching by string alone would exempt
     `eval/iveil/`: the exclusion is by path element, and that is what is asserted.
 
-    The same node proves the two edges of the KIND filter, which no real tree can show at once
-    (finding 1). A genuine `.pyc` is planted carrying the retired citation and must come back
-    clean — bytecode keeps docstrings, and 8 of the 17 retired citations do survive compilation,
-    so a reader that reached a stale one would be red on a clean tracked tree. And a prose `.py`
-    planted in the same directory must be NAMED by
-    `_prose_declined_by_name`, because declining it by name is exactly the hole a witness has to
-    see. Then `git init` decides who owns it: untracked, it is residue; staged, the corpus node's
-    rule must catch it.
+    The reach plant sits OUTSIDE the six roots #2971 walked — under `workers/` — because a walk
+    that stops at those six is precisely what #3233 retired, and a plant inside the old scope
+    could not tell the two walks apart. And everything the reader is asked about is STAGED
+    before it is read, because the corpus is now `git ls-files`: an unstaged plant is invisible
+    to a tracked walk for the same reason a new root was invisible to a six-root walk, so
+    unstaging the plants would make this node green by construction. That re-sequencing is what
+    leaves both edges of the KIND filter to `git add` (finding 1). A genuine `.pyc`, staged, is
+    planted carrying the retired citation and must come back clean — bytecode keeps docstrings,
+    and 8 of the 17 retired citations do survive compilation, so a reader that reached one would
+    be red on a tree whose sources are clean. And a prose `.py` under the same directory name
+    must be NAMED by `_prose_declined_by_name`, because declining by name is exactly the hole a
+    witness has to see. Unstaged, neither the corpus nor the witness sees it; staged, both must.
     """
     def plant(rel: str, marker: str) -> Path:
         p = tmp_path / rel
@@ -1296,6 +1459,9 @@ def test_the_citation_reader_reddens_on_a_synthetic_corpus_and_its_four_prefixes
     planted = plant("app/synthetic_reader.py", "#")
     plant("architecture/synthetic_reader.md", "<!--")
     plant("eval/synthetic/synthetic_reader.py", "#")
+    #: The #3233 plant. Not an arbitrary directory: `workers/` is where `queue.py` lives, so at
+    #: #3233's filing a citation written into that file's own docstring was outside the ban.
+    outside = plant("workers/synthetic_reader.py", "#")
     for rel in RECORD_ROOTS:
         plant(f"{rel}/synthetic_reader.txt", "")
     #: A genuine bytecode header (this interpreter's four magic bytes, then the zeroed flags
@@ -1308,51 +1474,76 @@ def test_the_citation_reader_reddens_on_a_synthetic_corpus_and_its_four_prefixes
     pyc.parent.mkdir(parents=True, exist_ok=True)
     pyc.write_bytes(importlib.util.MAGIC_NUMBER + b"\x00" * 12
                     + f"see workers/queue.py:{SYNTHETIC_CITED_LINE} for the query\n".encode())
+    #: Stage the plants before reading them: the corpus is the index, not the directory. The two
+    #: plants added below are deliberately left out, because their unstaged edge is the case
+    #: that has to be proven too.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "-A"], check=True)
 
     hits = _numeric_queue_citations(tmp_path)
-    assert len(hits) == 3, hits
+    assert len(hits) == 4, hits
     assert any(h.startswith("app/synthetic_reader.py:") for h in hits), hits
     assert str(planted.relative_to(tmp_path)).replace("\\", "/") in "".join(hits)
+    #: The widened reach, reported by path rather than counted: the failure #3233 fixes was a
+    #: corpus that returned a clean list because it had never opened this directory, and a bare
+    #: count cannot tell "nothing in it" from "never looked".
+    assert any(h.startswith("workers/synthetic_reader.py:") for h in hits), (
+        f"the reader does not reach outside the six roots #2971 walked: {hits}")
+    assert str(outside.relative_to(tmp_path)).replace("\\", "/") in "".join(hits)
     #: The number the reader reports is the number in the text, not a bare count.
     assert any(f":{SYNTHETIC_CITED_LINE}" in h for h in hits), hits
     assert not any("synthetic_reader.txt" in h for h in hits), (
         f"a record prefix was not honoured: {hits}")
-    #: Bytecode is declined, and on purpose: the planted `.pyc` above does carry the citation.
+    #: Bytecode is declined, and on purpose, even now that the artifact is a TRACKED file: the
+    #: planted `.pyc` does carry the citation and `git ls-files` does name it. Only the prose
+    #: witness below is allowed to say a name-declined file is corpus.
     assert not any("__pycache__" in h for h in hits), (
-        f"the reader reached compiled residue, which is the false alarm on a clean tracked "
+        f"the reader reached a compiled artifact, which is the false alarm on a clean tracked "
         f"tree that `_is_derived` exists to prevent: {hits}")
-    #: And the witness agrees nothing was declined under a false name — the planted `.pyc` has
-    #: a header that says it was compiled, so no prose is being swallowed here.
+    #: And the witness agrees nothing was declined under a false name: the staged `.pyc` has a
+    #: header that says it was compiled, so the name filter is telling the truth about it.
     assert _prose_declined_by_name(tmp_path) == [], (
         "a planted file whose bytes are a real bytecode header was reported as swallowed prose")
-    #: Now the disguise: same directory, same citation, but the bytes are prose. The reader
-    #: still declines it — the filter is by name — so `_prose_declined_by_name` naming this one
-    #: file is the only thing between a sentence and the ban. This is the case the set
-    #: difference could never have shown, whatever tree it ran on.
-    disguised = tmp_path / "app/__pycache__/disguised_prose.py"
+    #: Now the disguise, planted under `workers/` and not `app/`: the case the widening exists
+    #: for is a committed prose file in a root the retired scope never enumerated, and a plant
+    #: inside the six roots would leave that half of the witness's new reach unplanted. Same
+    #: directory name, same citation, but the bytes are prose. Unstaged it is residue — outside
+    #: the tree `git` can read, so outside the ban's scope as well — and the witness must say so
+    #: rather than report what the working tree happens to hold.
+    disguised = tmp_path / "workers/__pycache__/disguised_prose.py"
+    disguised.parent.mkdir(parents=True, exist_ok=True)
     disguised.write_text(f"# see workers/queue.py:{SYNTHETIC_CITED_LINE} for the query\n",
                          encoding="utf-8")
-    assert _prose_declined_by_name(tmp_path) == ["app/__pycache__/disguised_prose.py"], (
-        "the witness cannot see a prose file hidden under __pycache__, so the name filter is "
-        "an unwitnessed exemption again and the corpus node's rule is vacuous")
-    #: Untracked, that file is residue the ban does not own. Staged, it is corpus, and the
-    #: corpus node's `set(declined) & _tracked(...)` is what stops a tracked sentence sitting
-    #: outside the walk — so `_tracked` has to answer for a staged file, which is proven here
-    #: rather than assumed.
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    assert "app/__pycache__/disguised_prose.py" not in _tracked(tmp_path), (
-        "git reports an unstaged file as tracked, so the corpus node's rule would excuse "
+    assert "workers/__pycache__/disguised_prose.py" not in _tracked(tmp_path), (
+        "git reports an unstaged file as tracked, so the corpus would excuse "
         "anything left in the working tree")
+    assert _prose_declined_by_name(tmp_path) == [], (
+        "the witness named a path git does not track, so it is no longer reading the same "
+        "enumeration as the corpus walk")
+    #: Staged, the same file is corpus by definition and no directory name excuses it: this is
+    #: exactly what the corpus node's `declined == []` has to catch on a real tree, and it is in
+    #: `workers/`, where #2971's `rglob` never looked — so a witness still bound to the six roots
+    #: would come back `[]` here and read as clean. The reader, meanwhile, still declines it by
+    #: name — its count does not move — which is why the witness is the only thing standing
+    #: between a sentence and the ban.
     subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--",
-                    "app/__pycache__/disguised_prose.py"], check=True)
-    assert "app/__pycache__/disguised_prose.py" in _tracked(tmp_path), (
-        "a staged file is not reported as tracked, so `set(declined) & _tracked(...)` could "
+                    "workers/__pycache__/disguised_prose.py"], check=True)
+    assert "workers/__pycache__/disguised_prose.py" in _tracked(tmp_path), (
+        "a staged file is not reported as tracked, so `declined` could "
         "never fire and the kind filter is unwitnessed after all")
+    assert _prose_declined_by_name(tmp_path) == ["workers/__pycache__/disguised_prose.py"], (
+        "the witness cannot see a tracked prose file hidden under __pycache__, so the name "
+        "filter is an unwitnessed exemption again and the corpus node's rule is vacuous")
+    assert len(_numeric_queue_citations(tmp_path)) == 4, (
+        "the reader started declining by content rather than by name, which makes the prose "
+        "witness below a restatement of it instead of its only witness")
     #: And the near-miss directory is NOT exempt: `eval/iveil/` is under `eval/`, not under
-    #: `eval/iv/`.
+    #: `eval/iv/`. Staged first, for the same reason as every other plant.
     plant("eval/iveil/synthetic_reader.py", "#")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--",
+                    "eval/iveil/synthetic_reader.py"], check=True)
     hits2 = _numeric_queue_citations(tmp_path)
-    assert len(hits2) == 4, hits2
+    assert len(hits2) == 5, hits2
     assert any(h.startswith("eval/iveil/") for h in hits2), hits2
 
 
