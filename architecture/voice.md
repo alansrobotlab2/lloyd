@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, voice, livekit, tts, stt, asr, wakeword, speaker-id, vad, turn-detection]
 type: reference
 status: implemented
-date: 2026-09-24
+date: 2026-10-24
 ---
 
 # Voice
@@ -69,7 +69,7 @@ graph TB
     WW -.->|"POST /api/voice/prewarm"| Backend
     Gate -->|"POST /api/voice/inject {stream:true}"| Backend["backend :8080"]
     Backend -->|"SSE: the turn's own events"| Clauses["ClauseStream<br/>(voice/speakable.py)"]
-    Clauses -->|"POST /v1/audio/speech, per clause"| TTS["Qwen3-TTS :8090"]
+    Clauses -->|"POST /v1/audio/speech, per clause"| TTS["Qwen3-TTS :8093<br/>agent-tts-omni"]
     TTS -->|"s16le PCM"| Shaper["OutputShaper<br/>presence EQ + WSOLA"]
     Shaper -->|"100 ms frames"| SFU
     SFU --> Browser
@@ -189,11 +189,15 @@ built without a room, and was observable only through its log, which is how
 | `resample.py` | `StreamResampler`: one stateful resample to 16 kHz, shared by every model |
 | `wake.py` | `ContinuousWakeWord`, `WakeWordFactory`: openWakeWord fed continuously |
 | `vad.py` | `SileroSegmenter`: speech, not energy |
-| `turn.py` | `SmartTurn`: "was that a finished thought?" |
+| `turn.py` | `SmartTurn`, `Turn1Mini`: "was that a finished thought?" |
 | `asr.py` | `SherpaOfflineRecognizer` (Parakeet), `WhisperRecognizer`, `SherpaStreamingRecognizer` |
 | `pipeline.py` | `HearingPipeline`: owns one stream's clock and emits `HearingEvent`s |
 | `runner.py` | `HearingThread`: one per participant, off the event loop |
 | `speakable.py` | `ClauseStream`: the speaking half's text segmenter (below) |
+| `conversation.py` | the open-microphone state machine and its three vocabularies |
+| `addressee.py` | "is this for me?" — one frozen djev question per candidate |
+| `thinking.py` | the thinking-tone frame generator |
+| `timeline.py` | per-spoken-turn latency marks, and the row they are persisted as |
 
 ### One stream, one clock, one thread
 
@@ -468,9 +472,13 @@ decision. In the window, an utterance it calls unfinished is **held** and
 glued to what comes next, so the silence can be 380 ms without sending half a
 question; `hold_timeout_ms` (2200) releases a held turn when the speaker
 simply trails off, and `hold_max_seconds` (12) bounds how much can
-accumulate. Both detectors fail open — a model that will not load means
-"complete", because answering early beats not answering.
-`turn_detection.backend` picks one (`voice/turn.py::build_turn_detector`).
+accumulate. Both detectors fail open **at inference** — a `predict` that raises
+is logged and answered as "complete", because answering early beats not
+answering. Loading is the other case: a model file that is missing raises in
+`voice/turn.py::build_turn_detector`, which `WorkerManager.__init__` does not
+catch, so the worker dies at boot rather than running deaf. A tree whose
+configured backend's `.onnx` is absent is therefore not startable (see
+"What a rebuild has to restore"). `turn_detection.backend` picks the detector.
 
 **Since 2026-10-09 the detector is turn-1-mini** (p99lab, Apache-2.0, 5.3M
 parameters; `Turn1Mini`), a *streaming* model: the hearing pipeline feeds it
@@ -609,7 +617,7 @@ on CPU, and nothing clears both halves. The EOU 120M is the only one under
 200 ms, at +64% WER; Nemotron 0.6B and Moonshine medium are the closest on WER
 (+19%) at 370 and 862 ms, and Nemotron costs most of a core per stream.
 Against Parakeet run fresh on the 33 room utterances where it hears 4+ words
-(`~/.lloyd/ww_diag`; far-field, mostly the TV), every streaming model disagrees
+(`~/lloyd-data/ww_diag`; far-field, mostly the TV), every streaming model disagrees
 with it on 43–54% of words (EOU fp32 43%, Nemotron 47%, Moonshine 49%, CTC
 480 ms 54%) — nothing here is close to replacing the final pass on room audio
 either. `stt_text` in `scores.jsonl` is not a usable reference: it was written
@@ -875,10 +883,11 @@ monitor speakers, the second stage is server-side AEC3 (`pywebrtc-audio`)
 fed the TTS frames as far-end; until then a device that leaks gets
 half-duplex from Settings.
 
-Note that the code defaults and the config disagree in two places, and
+Note that a code default and the config still disagree in one place, and
 config.yaml wins: `WakeState.continuation_seconds` defaults to 12.0 against the
-configured 6.0, and `RoomBridge.anchor_threshold` defaults to 0.65 against the
-configured 0.4.
+configured 6.0. (`RoomBridge.anchor_threshold` used to be the second — 0.65
+against a configured 0.4, in the Resemblyzer days — but `22d873a6` moved the
+default to 0.25, which is what config.yaml now says, so the two agree.)
 
 ### Who is speaking: profiles and enrollment
 
@@ -929,7 +938,7 @@ ONNX export of its torchaudio front end, so CAM++ ships.
   and "What's the good word?" at 0.24–0.25 — nothing in that corpus is Lloyd.
   21 windows from 7 renders is thin; re-measure through the room before
   trusting the margin on a loudspeaker.
-- **The room corpus** (`~/.lloyd/ww_diag`, 500 clips, mostly Alan plus TV) is
+- **The room corpus** (`~/lloyd-data/ww_diag`, 500 clips, mostly Alan plus TV) is
   unlabelled, so it measures spread, not accuracy. CAM++ spreads it over
   −0.02–0.50 where Resemblyzer crowded it into 0.34–0.74 — which is why
   Resemblyzer's 0.4 anchor threshold let 89% of different-speaker LibriSpeech
@@ -1149,7 +1158,11 @@ next thing the user says is still heard.
   `first_delta` → `first_clause` → `first_tts_byte` → `first_pushed` →
   `first_played` (push time plus audio already queued, from the streamer's
   audio clock), with `eos→audio` total and `max_gap` — the longest silence
-  between audio the turn spoke. `scripts/voice/e2e_voice.py` prints them.
+  between audio the turn spoke. `scripts/voice/e2e_voice.py` prints them, and
+  since `01c6f1f4` every *spoken* turn also writes one row to
+  `<data root>/voice/turns.jsonl` (`app/voice_turns.py`), which
+  `scripts/maintenance/voice_turn_trend.py` folds into a nightly stage p50/p90 —
+  that file, not a log grep, is the witness for a latency claim about production.
 
 ### Prewarm: the prefill happens before the words arrive
 
@@ -1368,14 +1381,23 @@ it lived only in a gitignored tree, and nothing written down at the time even
 named the channel. Back it up with the tree; a lost profile means TTS starts
 happily and every synthesis request 404s.
 
-Falling back to a built-in voice is a real escape hatch, but **check
-`/v1/voices`, not the source** — and verify with a round trip, since a bad voice
-name still returns HTTP 200:
+A built-in voice is **not** an escape hatch on this tree. The serving model is
+Base, so asking for `Ryan` is refused with `invalid_voice` and HTTP 400 (#2300,
+and verified against `:8090` on 2026-10-24), and a clone profile that is not
+there is a 404 — which means a bare HTTP 200 with bytes in it is now genuine
+evidence that an engine can speak a name, where the older advice here said a bad
+name "still returns HTTP 200". **Ask the engine voice actually uses**:
+`livekit.tts.api_url` is `:8093`, whose list route is `/v1/audio/voices`, while
+the vendored `:8090` answers `/v1/voices` — and the two keep separate voice
+stores (omni's `SPEAKER_SAMPLES_DIR` versus the profile directory), so a voice
+proven on one says nothing about the other. `scripts/voice/register_tts_voice.py`
+is the round trip that proves it on the room's engine.
 
 ```bash
-curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
-curl -s localhost:8090/v1/audio/speech -H 'content-type: application/json' \
-  -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' \
+curl -s localhost:8093/v1/audio/voices | jq -r '.voices[]'   # what the room can speak
+curl -s localhost:8090/v1/voices | jq -r '.voices[].id'      # what the fallback can
+curl -s localhost:8093/v1/audio/speech -H 'content-type: application/json' \
+  -d '{"model":"qwen3-tts","voice":"clone:dave_cullen","input":"test"}' \
   -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
 ```
 
@@ -1892,10 +1914,13 @@ stage). The package's `run` is still not used:
 
 **`lloyd_stop.onnx`** (`lloyd_stop.yaml`) is the interrupt word, armed only
 while Lloyd is speaking (`voice.wake.build_stop_factory`, config
-`livekit.acoustic_wake.stop`, `enabled: false` until the worker wires it).
-Phrases: "stop", "Lloyd stop", "stop talking", "stop stop", "okay stop", "hold
-on", "wait", "wait wait", "Lloyd wait". Measured by `scripts/voice/stop_eval.py`
-through the detector the worker will run: held-out positives and near-misses
+`livekit.acoustic_wake.stop`). It is **on** — `enabled: true` shipped in
+`888845f9`, and `_sync_stop_arming` arms each stream's detector while
+`tts.is_speaking` and disarms it otherwise, so the wake gate is never fed
+through Lloyd's own voice. Phrases: "stop", "Lloyd stop", "stop talking", "stop
+stop", "okay stop", "hold on", "wait", "wait wait", "Lloyd wait". Measured by
+`scripts/voice/stop_eval.py` through the detector the worker runs: held-out
+positives and near-misses
 are Qwen3-TTS x-vector clones (the ten wake_eval voices, LibriSpeech 1272 and
 Alan from the room corpus — an engine no training clip came from); Lloyd's own
 voice is 30 replies disjoint from the 60 trained on, most saying "stop",
@@ -1970,6 +1995,7 @@ voice.
 |---|---|
 | `agent-services/models/{wakeword,wakeword/stop,openwakeword,silero-vad}/*.onnx` | **yes**, force-added past `models/` |
 | `agent-services/models/{smart-turn,parakeet-tdt-v3,nemo-streaming-480ms}/` (~1.1 GB) | **no** — `bash agent-services/setup/fetch-voice-models.sh`, size-checked |
+| `agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx` (22 MB, plus a 6 MB int8 sibling) | **no — and nothing fetches it.** `turn_detection.backend` has been `turn-1-mini` since `fed5ad3f` (2026-10-09), the file is untracked, and `fetch-voice-models.sh` does not list it, so `--check` passes on a tree where the worker cannot boot (a missing model raises in `build_turn_detector`). Copy it from a backup, or set `backend: smart-turn`, until the fetch list catches up |
 | `agent-services/models/parakeet-realtime-eou-120m/` (optional, not configured; ~480 MB fp32) | **no** — `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt` from `huggingface.co/adityakalro/sherpa-onnx-parakeet-eou-120m`, then the `tokens.txt` repair under "Streaming bake-off". Only the bake-off and `tests/test_voice_streaming_asr.py` (which skips without it) read it |
 | `agent-services/services/tts/qwen3-tts-local.patch` + `-upstream-commit.txt` | **yes** |
 | `agent-services/conf/livekit.yaml` (template) | **yes** |
@@ -2070,8 +2096,9 @@ voice.
 - `tests/test_guardian_speak.py` — the spoken alert channel (unchanged).
 - `tests/test_tts_bakeoff.py` — the bake-off harness: lossless LLM-paced
   tokens, the first-clause cut, and presence gated on sub-1 kHz energy.
-- `tests/test_tts_bakeoff.py` — the bake-off harness: lossless LLM-paced
-  tokens, the first-clause cut, and presence gated on sub-1 kHz energy.
+- `tests/test_voice_stop_word.py` — the stop detector's arming contract, which is
+  what keeps `_sync_stop_arming` from feeding the wake gate through Lloyd's voice.
+- `tests/test_voice_turn_trend.py` — the latency row and its nightly p50/p90.
 
 `scripts/voice/`: `replay.py` (the pipeline over WAVs; `compare-wake`) —
 which replaces `scripts/ww_replay.py`, a replay of the retired per-utterance
@@ -2216,3 +2243,13 @@ and is history, not reference.
   over `voice_profiles`, and a gate round writes its own copy instead of
   appending through its home's dot-directory into the live one. Pinned by
   `tests/test_data_home.py` and `tests/test_protected_paths.py`.
+- 2026-10-24 — reviewed against `281fe0ee`: **stale**, corrected in place. The
+  acoustic stop word is wired and on (`888845f9`, `_sync_stop_arming`), not
+  "`enabled: false` until the worker wires it"; `RoomBridge.anchor_threshold`'s
+  default is 0.25, so only `continuation_seconds` still disagrees with config;
+  the room corpus paths are `~/lloyd-data/ww_diag`, not `~/.lloyd/`; a built-in
+  voice is no escape hatch (`invalid_voice`/400, verified on `:8090`), and the
+  room's engine lists voices at `/v1/audio/voices`; a missing end-of-turn model
+  is a boot error rather than a fail-open, and turn-1-mini — the configured
+  detector — has no restore route, so it is in the rebuild table now. Module
+  table, latency-row destination and a doubled test bullet also fixed.
