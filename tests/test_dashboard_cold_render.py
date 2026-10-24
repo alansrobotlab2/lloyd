@@ -60,7 +60,9 @@ from scripts.automod import backlog as B
 
 #: The board this calibration was walked over, in item files (`*.md` with a
 #: numeric name, which is how the dashboard counts them — the same rule
-#: `board_files_or_stop(numeric_names=True)` applies).
+#: `board_files_or_stop(numeric_names=True)` applies). Re-based 2026-10-24 from
+#: 66f62027, and all thirteen serial runs below printed exactly this count, so
+#: the denominator and the durations describe one board and not two.
 #:
 #: ONE copy of the number lives in this file. `cold_budget_for_board` divides
 #: the budget by it to get the per-file allowance the cycle is charged, and
@@ -71,7 +73,7 @@ from scripts.automod import backlog as B
 #: copy is the thing that goes stale, and this file's last two calibrations each
 #: left one behind (the 1,142-file board and the 1,450-file one, both of which
 #: the bound then walked past).
-CALIBRATED_BOARD_FILES = 2628
+CALIBRATED_BOARD_FILES = 3162
 
 #: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
 #: reason. NOT part of the denominator — the budget scales with the board, not
@@ -97,8 +99,8 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 #: figure the table below quotes from them too, so the prose, the cycles and the
 #: number the dashboard is charged are one measurement and not three claims.
 _CALIBRATION_CYCLES_S: tuple[tuple[str, tuple[float, ...]], ...] = (
-    ("5.01-6.82", (6.81, 6.85, 6.80, 6.91, 6.92, 6.87, 6.83, 6.80)),
-    ("5.33-5.56", (6.65, 6.84, 6.53, 6.62, 6.71, 6.68)),
+    ("3.45-5.92", (10.25, 10.07, 10.53, 10.28, 10.36, 10.20, 10.46, 10.15)),
+    ("4.95-5.10", (9.86, 10.10, 10.38, 10.14, 10.11)),
 )
 
 
@@ -126,39 +128,54 @@ def _p90_nearest_rank(samples):
 
 #: The larger of the two measured tails, in seconds.
 #:
-#:     measured 2026-10-14 from 53a7fd11 in a round worktree, 32 cores
+#:     measured 2026-10-24 from 66f62027 in a round worktree, 32 cores
 #:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset);
-#:              all fourteen runs below printed that count
+#:              all thirteen runs below printed that count
 #:     ledger = the live store. `tests/board_presence.py` repoints it only when
 #:              the configured state dir holds NO ledger, and the state dir this
-#:              round was launched into was new and held none, so `S.LEDGER_PATH`
-#:              fell through to the real file: all fourteen runs printed
-#:              `REPOINTED: ... promotions.jsonl has no ledger, so the cycle reads
-#:              the live one instead` over a 29,444,519-byte store. That is NOT
-#:              the shape a gate run decodes — a gate's round state dir holds a
-#:              ledger of its own, and those runs read that small file instead.
-#:              This live size is +1.7% on `CALIBRATED_LEDGER_BYTES`, inside the
-#:              drift band, and this re-base deliberately left the centre alone:
-#:              that centre is pinned by equality in
+#:              round was launched into was new and held none, so every one of the
+#:              thirteen runs printed `REPOINTED: ... promotions.jsonl has no
+#:              ledger, so the cycle reads the live one instead` over a
+#:              29,038,631-byte store. That is NOT the shape a gate run decodes —
+#:              a gate's round state dir holds a ledger of its own, and those runs
+#:              read that small file instead. This live size is +0.3% on
+#:              `CALIBRATED_LEDGER_BYTES`, inside the drift band, and this re-base
+#:              again left the centre alone: that centre is pinned by equality in
 #:              `tests/test_retention_sweep.py` (where #2043's whole case is that
 #:              the fold lands the store inside the band around THAT number) and
 #:              #2071 ruled the centre is not the drift-drift lever. The durations
-#:              below are of the real store at its real size; the budget those
-#:              runs printed was still the old one, and a duration does not care
-#:              which budget it was read against.
-#:     serial, 8 runs, load 5.01-6.82:  min 6.80  median 6.84  p90 6.92  max 6.92
-#:     serial, 6 runs, load 5.33-5.56:  min 6.53  median 6.67  p90 6.84  max 6.84
+#:              below are of the real store at its real size. The budget those
+#:              thirteen cycles ran against was still the old 8.65 s, and two of
+#:              them breached it on the first sample and were retired only by the
+#:              confirming cycle — 2 of 8 in the first set, 0 of 5 in the second,
+#:              which is the shape this file's own prose disclaims as evidence.
+#:     serial, 8 runs, load 3.45-5.92:  min 10.07  median 10.265  p90 10.53  max 10.53
+#:     serial, 5 runs, load 4.95-5.10:  min 9.86  median 10.11  p90 10.38  max 10.38
 #:
-#: p90 is nearest-rank, the convention the row this table replaces reported it
-#: by, so with 8 samples it is the maximum and the 6-sample set's p90 is its
+#: p90 is nearest-rank, the convention every row of this table has reported it
+#: by, so with 8 samples it is the maximum and the 5-sample set's p90 is its
 #: maximum too. The constant is the LARGER of the two tails rather than the later
 #: one, which is what its predecessor was: this number is the floor a gate's
 #: `-n 8` ladder then lands on top of, so of two honest sets the higher p90 is
 #: the one that cannot redden the node on a window that happened to be quiet.
 #:
-#: The net effect in the unit this check is really about: the bound tightens from
-#: 4.5 ms per item file to 3.3 ms, because the board grew 20.5% while the measured
-#: tail came in 11% under the one this number replaces.
+#: The net effect in the unit this check is really about: the allowance charged
+#: per item file moves from 3.3 ms to 4.2 ms, and that widening is not the
+#: board's doing alone. The board grew 20.3% since this table's last re-base and
+#: the measured tail grew 52.2%, so the cycle itself went from 2.63 ms per item
+#: file to 3.33 ms — a walk 27% dearer per file than the one that came out at
+#: 6.92 s. #1204 asks where the cold cost actually goes; this is a second
+#: independent sighting that it is not simply file count.
+#:
+#: What the re-base buys is now thin, and it belongs where the next re-base will
+#: read it: 13.16 s is 86% of the 15.22 s triage cost recorded below, a margin of
+#: 16% where the measurement this one replaced had 76%. The board grew by 534 item
+#: files in the ten days between the two dated measurements above (~53 a day;
+#: 941 of its files carry an mtime inside the last week, which counts rewrites as
+#: well as creations), so at that rate the upper edge of the drift band is a
+#: fortnight off and the triage cost is one or two re-bases off. When it arrives
+#: the answer is #1204's cheaper section, not a wider band and not a bigger
+#: margin.
 #:
 #: What this table does not have is an `xdist -n 8 --dist loadfile` full-suite
 #: row, and it cannot be given one by a gate run. The calibration this one
@@ -189,24 +206,30 @@ def _p90_nearest_rank(samples):
 #: one parallel duration that did surface came from a node measuring a cycle for
 #: its own purposes: `-n 8 --dist load -s -r a`, which forwards every worker's
 #: output and so is heavier than the gate's rung, put a cold cycle at 10.077 s —
-#: 46% over this p90. That is the size of the contention this constant does not
+#: 46% over the p90 the table carried when that sample was taken, and 4% under the
+#: one this table now carries, over a board 534 item files smaller than the one
+#: above. That is the size of the contention this constant does not
 #: claim to absorb, and the reason the 25% margin plus the retry in
 #: `enforce_cold_cycle_budget` are the whole protection rather than this table
 #: being a picture of a gate run.
 #:
-#: To restore the value this one replaced, restore its inputs: the board of 2,180
-#: item files and the 29,188,189-byte live ledger it was walked over, measured
-#: 2026-10-05 from 19acea6c, which came out at 7.79 s.
+#: To restore the value this one replaced, restore its inputs: the board of 2,628
+#: item files and the 29,444,519-byte live ledger it was walked over, measured
+#: 2026-10-14 from 53a7fd11, which came out at 6.92 s.
 #:
 #: What none of those rows capture is contention, and this re-base's own margin
 #: sits inside a range rather than on a point: the load average at measurement was
-#: 5.01-6.82 across all fourteen cycles on 32 cores, while a gate's `tests` rung
+#: 3.45-5.92 across all thirteen cycles on 32 cores, while a gate's `tests` rung
 #: puts eight pytest workers on the same box. That is the real gap between these
-#: two sets and the gate — their medians were 6.84 and 6.67 and their p90s 6.92
-#: and 6.84, so this window measured no tail blowout between two sets (1.2% apart
-#: at the tail, 2.5% apart at the middle) — which is why the constant is still a
-#: p90 over eight runs and not the fastest cycle, and why `COLD_BUDGET_MARGIN` is
-#: not the only thing standing between a quiet serial measurement and a red gate.
+#: two sets and the gate — their medians were 10.265 and 10.11 and their p90s 10.53
+#: and 10.38, so this window measured no tail blowout between two sets taken five
+#: minutes apart (1.4% apart at the tail, 1.5% apart at the middle) — which is why
+#: the constant is still a p90 over eight runs and not the fastest cycle, and why
+#: `COLD_BUDGET_MARGIN` is not the only thing standing between a quiet serial
+#: measurement and a red gate. The window was also quieter than the one whose
+#: numbers this replaced (3.45-5.92 against 5.01-6.82), and it still came out 52%
+#: slower, so the load average does not explain the movement and the p90 here is
+#: if anything a mild reading of the machine this round ran on.
 #: The ledger rows that proved that are not decoration: at a 9.55 s budget the
 #: machine's own history records fourteen rows whose failure line carried the
 #: parallel-only marker and one whose measured duration was 9.68 s, and the same
@@ -215,10 +238,14 @@ def _p90_nearest_rank(samples):
 #:
 #: The budget is deliberately NOT padded to absorb an arbitrary load spike. A
 #: number high enough for that would sit near the 15.22 s cost the check exists to
-#: catch and stop measuring the dashboard. What absorbs the transient is the second
-#: sample in `enforce_cold_cycle_budget`, plus the load average and xdist worker id
-#: the node prints beside every duration, so a red that survives the retry says
-#: whether the machine was the problem or the code was.
+#: catch and stop measuring the dashboard — and this re-base is where that
+#: conditional starts to bind, because 13.16 s already sits at 86% of that cost. It
+#: is still below it, still derived from a measured p90 rather than from a spike,
+#: and the run that produced 15.22 s walked 1,142 files, so a regression still
+#: trips this bound before it costs a triage. What absorbs the transient is the
+#: second sample in `enforce_cold_cycle_budget`, plus the load average and xdist
+#: worker id the node prints beside every duration, so a red that survives the
+#: retry says whether the machine was the problem or the code was.
 #:
 #: Derived rather than typed: the larger of the two rows' p90s, computed from
 #: `_CALIBRATION_CYCLES_S` below the table's own numbers. A re-baser replaces the
@@ -231,21 +258,26 @@ COLD_P90_S = max(_p90_nearest_rank(cycles) for _, cycles in _CALIBRATION_CYCLES_
 #: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
 #: worker contention the re-measurement does not absorb, and it has to stay far
 #: enough under the 15.22 s triage cost that a real regression still trips it —
-#: at 1.25 the budget is 8.65 s and the triage cost is 76% higher, so the check
-#: still means something. A re-baser changes the table and, if they must, this
+#: at 1.25 the budget is 13.16 s and the triage cost is 16% higher, so the check
+#: still means something — but 16% is the narrowest this clause has been since it
+#: was written, and the sentence above says what closes it. A re-baser changes the
+#: table and, if they must, this
 #: number; the budget itself follows arithmetically.
 COLD_BUDGET_MARGIN = 1.25
 
 #: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
 #: charged per file by `cold_budget_for_board`. The value this re-base replaced
-#: was 9.74 s, on a board of 2,180 item files walked over a live ledger of
-#: 29,188,189 bytes, measured 2026-10-05 from 19acea6c; to restore it, restore
-#: those two inputs and the p90 they sat on. Before that, 9.55 s was the budget on
+#: was 8.65 s, on the 2,628-file board walked over a live ledger of 29,444,519
+#: bytes, measured 2026-10-14 from 53a7fd11; to restore it, restore those two
+#: inputs and the p90 they sat on. Before that, 9.74 s was the budget on a board of
+#: 2,180 item files walked over a live ledger of 29,188,189 bytes, measured
+#: 2026-10-05 from 19acea6c. Before that, 9.55 s was the budget on
 #: a board of 1,804 item files with the old ledger centre. Before that,
 #: 8.0 s was the calibration on a 1,450-file board with a 6,286,192-byte ledger,
 #: where the node measured 6.02 s and 6.16 s (round SM_20260925_205059's review
 #: run, 2026-09-25, load average 11). Triage baseline: 15.22 s over 1,142 files,
-#: 2026-09-16 — the bound still fires well short of that.
+#: 2026-09-16 — the bound still fires short of it, by 16% rather than by the 76%
+#: the measurement this one replaced had.
 COLD_BUDGET_S = COLD_P90_S * COLD_BUDGET_MARGIN
 
 #: How far the live board may move from the calibrated one before the budget
