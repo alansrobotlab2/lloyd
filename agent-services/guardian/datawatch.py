@@ -804,14 +804,43 @@ def _days_ago(mtime: float, now: float) -> int:
     return max(0, int((now - mtime) // 86400))
 
 
+def _sidecar_of_store_in_this_scan(this_name: str, files: "dict[str, float]") -> bool:
+    """True when `this_name` is `<base><suffix>` for a store standing in this same scan.
+
+    SQLite makes these names itself: opening a store in WAL mode creates `<store>-wal` and
+    `<store>-shm` beside it, and the last connection to close cleanly removes them again.
+    So a first-time `usage.db-wal` beside a `usage.db` the root already carries is not a
+    name that arrived — it is a bookkeeping file of a store the alert would name by its own
+    base, and the decision it asks for cannot be made by the person reading it: by the time
+    they do, the file is either gone on its own or it is a live database's write-ahead log,
+    where deleting it loses committed writes (#3229, which filed `#3227` for
+    `research.db-wal`/`-shm` and cost the two-day-old snapshot incident its ALERT.md slot).
+
+    The pairing is the rule, NOT the suffix. #3210's clause 1 rejects a suffix filter
+    outright, and a suffix-only mute would be that filter wearing a different name: it would
+    also hush a `-wal` whose store is nowhere at the root, which is exactly the unexplained
+    name this leg exists for. `base in files` is therefore required, from the SAME scan the
+    findings come out of — no new filesystem call, and no reliance on what `previous` held:
+    a store that is new too has its OWN name reported, which is the news worth having.
+    """
+    for suffix in _SQLITE_SIDECARS:
+        if this_name.endswith(suffix):
+            base = this_name[:-len(suffix)]
+            return bool(base) and base in files
+    return False
+
+
 def new_top_level_names(files: "dict[str, float]", previous: "dict | None",
                         *, now: "float | None" = None) -> list[dict]:
     """The regular files at the root's top level that `previous` does not already hold.
 
-    One rule, and no gate on it: novelty. `data_root_shadows` gates on `_DB_SUFFIXES` and
-    on a populated same-basename copy elsewhere, `_bash_tree_strays` gates its file half
-    on `EMPTY_DB_SUFFIXES`; both gates are the reason the live `false` and `sqlite3` are
-    unnamed today, so this leg must not re-introduce either.
+    Novelty is the rule, with the one exception `_sidecar_of_store_in_this_scan` explains:
+    a WAL sidecar whose own store stands in this same scan is that store, not a new name.
+    `data_root_shadows` gates on `_DB_SUFFIXES` and on a populated same-basename copy
+    elsewhere, `_bash_tree_strays` gates its file half on `EMPTY_DB_SUFFIXES`; both gates
+    are the reason the live `false` and `sqlite3` are unnamed today, so this leg must not
+    re-introduce either — and the sidecar exception is not a suffix test, because it holds
+    only for a base the same scan also carries.
 
     `previous=None` means no previous measurement, and the answer is NOTHING: the leg
     ARMS on the world as it stands and reports no arrivals. That is what clause 5's "a
@@ -828,8 +857,13 @@ def new_top_level_names(files: "dict[str, float]", previous: "dict | None",
     """
     if previous is None:
         return []
+    # The sidecar mute reads the CURRENT scan (`files`), not the findings: the pairing that
+    # explains the name is a fact about what stands at the root now. And muting here cannot
+    # lose the baseline, which guardian.py writes from its own `arrivals_files` scan rather
+    # than from this list — so a muted name is still recorded as seen, and never re-reported.
     out = [{"name": name, "mtime": mtime}
-           for name, mtime in sorted(files.items()) if name not in previous]
+           for name, mtime in sorted(files.items())
+           if name not in previous and not _sidecar_of_store_in_this_scan(name, files)]
     if out and now is not None:
         for f in out:
             f["age_days"] = _days_ago(f["mtime"], now)

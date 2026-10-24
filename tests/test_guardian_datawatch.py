@@ -1014,6 +1014,183 @@ def test_the_persisted_baseline_is_what_makes_the_next_hour_quiet(tmp_path):
         "every checkpoint-and-return of a sqlite sidecar a fresh human-decision alert")
 
 
+# ── a sidecar whose store is right there is not a new name (#3229) ────────────
+#
+# The five unit nodes below are one rule and its falsifier halves; two further nodes at the
+# end of this block run the leg itself rather than the function —
+# `test_the_hourly_check_is_quiet_for_a_sidecar_and_still_loud_for_the_name_beside_it` over
+# three real `_runtime_data_incident` ticks, and
+# `test_a_muted_sidecar_files_no_board_item_while_a_real_name_still_files` across the board
+# POST. `usage.db-wal` and
+# `usage.db-shm` are names SQLite writes itself: opening the store in WAL mode creates the
+# pair and the last connection to close cleanly removes it. On 2026-10-23 the arrivals leg
+# reported `research.db-wal`/`-shm` as two new names, `Notifier._backlog_task` filed that
+# as #3227, and the ALERT.md it wrote displaced a two-day-old open error about vault
+# snapshots from the one visible alert slot. The decision it asked for cannot be taken: by
+# the time it is read the file is either gone by itself or it is a live store's write-ahead
+# log, where deleting it loses committed writes.
+#
+# The mute is a PAIRING, never a suffix test — #3210 clause 1 rejected suffix filters, and
+# `orphan.db-wal` with no `orphan.db` at the root is exactly the mistyped-`sqlite3`-argument
+# artefact this leg was built to name. So every node below carries its own positive control:
+# a `[]` from the leg is only evidence when the scan demonstrably contained the name.
+
+
+def _sidecar_pair(root: Path, store: str) -> "list[str]":
+    """Create `<store>-wal` and `<store>-shm` beside `store`, as opening it in WAL mode does.
+
+    Real files, not a hand-built dict: the leg's whole subject is names that physically
+    stand at the root, and a finding of `[]` over a scan that never held the name would be
+    a green node proving nothing (the control assertions below read the same scan back).
+    """
+    made = []
+    for suffix in ("-wal", "-shm"):
+        (root / f"{store}{suffix}").write_bytes(b"w" * 8)
+        made.append(f"{store}{suffix}")
+    return made
+
+
+def test_a_sidecar_beside_its_store_is_not_reported_as_a_new_name(tmp_path):
+    """Clause 1: the pairing explains the name, so it is not an arrival.
+
+    `usage.db` already stands at the root and the baseline already holds it; the pass that
+    follows finds `usage.db-wal` and `usage.db-shm` and must report NOTHING. `False` is not
+    in the previous scan by accident — it is the state of the live root one hour after the
+    leg armed, which is precisely when the sidecar pair shows up.
+    """
+    root = _root(tmp_path)
+    (root / "usage.db").write_bytes(b"x" * 4096)
+    previous = D.top_level_regular_files(str(root))
+    assert "usage.db" in previous, "the store has to be in the baseline for this to be pairing"
+
+    made = _sidecar_pair(root, "usage.db")
+    scan = D.top_level_regular_files(str(root))
+    assert set(made) <= set(scan), (
+        f"the scan does not hold {made}, so a `[]` below is an absent file, not a mute")
+    assert D.new_top_level_names(scan, previous) == [], (
+        "a WAL sidecar of a store standing in the same scan is that store's bookkeeping, "
+        "not a name a person can decide about — it is gone by the time they read it, or "
+        "deleting it loses committed writes (#3227)")
+
+    # `_SQLITE_SIDECARS` carries a third name, and the pairing rule covers the whole
+    # constant, not just the two files WAL mode happens to make: a rollback-journal of a
+    # store at the root is the same explained name.
+    (root / "usage.db-journal").write_bytes(b"w" * 8)
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)), previous) == [], (
+        "`-journal` is in _SQLITE_SIDECARS and a rollback journal beside its store is "
+        f"explained by it: {sorted(D.top_level_regular_files(str(root)))}")
+
+
+def test_a_sidecar_whose_store_is_absent_is_still_reported(tmp_path):
+    """Clause 2: with no base in the scan the name is unexplained, and must still be asked.
+
+    `orphan.db-wal` alone is the artefact the leg exists for — `sqlite3 <db>` with the
+    argument in the wrong place creates the pair and the store, and a store-less `-wal` is
+    what a partially-cleaned-up one leaves behind. A suffix-only mute would swallow it,
+    which is why #3210 clause 1 is stated as a ban on suffix filters.
+    """
+    root = _root(tmp_path)
+    previous = D.top_level_regular_files(str(root))
+    assert "orphan.db" not in previous and "orphan.db-wal" not in previous
+
+    (root / "orphan.db-wal").write_bytes(b"w" * 8)
+    scan = D.top_level_regular_files(str(root))
+    assert "orphan.db-wal" in scan and "orphan.db" not in scan, (
+        "the case needs the sidecar present with NO base beside it: that half is the point")
+    found = D.new_top_level_names(scan, previous)
+    assert [f["name"] for f in found] == ["orphan.db-wal"], (
+        "muting the paired case must not mute the unpaired one: "
+        f"{found}")
+
+
+def test_a_muted_sidecar_never_swallows_a_real_arrival_from_the_same_pass(tmp_path):
+    """Clause 3: the mute is per-name, and one pass can hold both classes at once.
+
+    The failure this rails is not the sidecar coming back — it is `false` failing to come
+    back because a filter aimed at the hour took it with it. Mixed in one scan, the
+    findings must be exactly `{false}`, and the alert the guardian would raise must name
+    `false` and must not carry the sidecar's name at all: an alert that mentions both has
+    not muted anything, and one that mentions neither has lost the arrival.
+    """
+    root = _root(tmp_path)
+    (root / "usage.db").write_bytes(b"x" * 4096)
+    previous = D.top_level_regular_files(str(root))
+
+    made = _sidecar_pair(root, "usage.db")
+    (root / "false").write_bytes(b"")                              # the #3210 class itself
+    scan = D.top_level_regular_files(str(root))
+    assert set(made) <= set(scan) and "false" in scan, (
+        "one scan has to hold both classes for this to be the mixed pass")
+
+    found = D.new_top_level_names(scan, previous)
+    assert {f["name"] for f in found} == {"false"}, (
+        f"exactly the unexplained name may survive a pass that also saw a paired sidecar: "
+        f"{found}")
+    alert = D.arrivals_alert(found)
+    assert "false" in alert["reason"], f"the alert must name the arrival: {alert}"
+    assert "usage.db-wal" not in alert["reason"] + alert["evidence"], (
+        f"the muted sidecar must not reappear in the alert text: {alert}")
+    assert "1 new name(s)" in alert["reason"], (
+        f"the count must be the findings, not the files that appeared: {alert['reason']}")
+
+
+def test_the_arrivals_alert_still_routes_a_surviving_name_as_a_human_decision(tmp_path):
+    """Clause 4: muting is a filter on WHICH names are reported, never on the routing.
+
+    Same alert, same `needs_human=True`, no `quarantine` or `remove` key — for a name that
+    survives the mute. The pair of #3210 nodes this sits beside pins the routing for the
+    unfiltered population; this one pins it for the population the mute produces, because
+    a change that quietly turned the survivors into an actionable stray would leave both of
+    those green (they never see a sidecar) and still break the #3109 ruling.
+    """
+    root = _root(tmp_path)
+    (root / "usage.db").write_bytes(b"x" * 4096)
+    previous = D.top_level_regular_files(str(root))
+    _sidecar_pair(root, "usage.db")
+    (root / "kg.sqlite").write_bytes(b"")                           # unpaired: survives
+    alert = D.arrivals_alert(D.new_top_level_names(
+        D.top_level_regular_files(str(root)), previous))
+
+    assert alert is not None and alert["needs_human"] is True, (
+        f"a surviving arrival is still a person's decision, not the guardian's: {alert}")
+    assert not alert.get("quarantine") and not alert.get("remove"), (
+        f"the mute must not turn a report into an action: {sorted(alert)}")
+    assert "kg.sqlite" in alert["reason"], f"the survivor must be named: {alert}"
+
+
+def test_a_muted_sidecar_is_still_recorded_in_the_arrivals_baseline(tmp_path):
+    """Clause 5: mute the alert, never the record — across the state-file seam.
+
+    This is the boundary the fix could get wrong in the loud-then-silent direction: drop
+    the sidecar from the BASELINE as well and the pair re-arrives every hour SQLite cycles
+    it, which is the recurring-alert failure `write_arrivals_baseline`'s monotone merge
+    exists to prevent. So the muted name must be IN the persisted baseline, and the same
+    scan over that baseline must come back empty. The guardian writes the baseline from its
+    own `top_level_regular_files` scan (guardian.py:1867), not from the findings, which is
+    what makes both halves true at once; `write_arrivals_baseline` is called directly here
+    the way `test_the_persisted_baseline_is_what_makes_the_next_hour_quiet` does, because
+    the state file is the seam and an in-memory dict is not.
+    """
+    root = _root(tmp_path)
+    (root / "usage.db").write_bytes(b"x" * 4096)
+    state = tmp_path / "state"
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)),
+                              now=time.time(), data_root=str(root))
+
+    made = _sidecar_pair(root, "usage.db")
+    scan = D.top_level_regular_files(str(root))
+    assert D.new_top_level_names(scan, D.read_arrivals_baseline(state, str(root))) == [], (
+        "the leg's own check must stop printing the pair, which is the acceptance")
+    D.write_arrivals_baseline(state, scan, now=time.time(), data_root=str(root))
+
+    held = D.read_arrivals_baseline(state, str(root))
+    assert set(made) <= set(held), (
+        f"a muted name that never reaches the baseline will be reported again next hour: "
+        f"{sorted(held)}")
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)), held) == [], (
+        "and the same root over that baseline must stay quiet")
+
+
 def test_the_two_stub_names_the_live_root_carries_are_named_where_the_shadow_leg_is_silent(
         tmp_path):
     """The boundary the item measured, kept as a control beside the rule that closes it.
@@ -1207,6 +1384,102 @@ def test_a_name_that_arrives_while_disarmed_is_still_reported_after_rearming(
         "the name created while the watcher was disarmed never reached a human: the "
         f"disarmed pass advanced the baseline behind the silent alert: {alerts}")
     assert "made-during-the-pause" in hits[0][1], hits[0][1]
+
+
+def test_the_hourly_check_is_quiet_for_a_sidecar_and_still_loud_for_the_name_beside_it(
+        tmp_path, monkeypatch):
+    """#3229 across the seam the harm actually crossed: root → datawatch → guardian → notifier.
+
+    Three hourly ticks over the real `_runtime_data_incident`. Tick one arms and records a
+    baseline with `usage.db` in the root. Between one and two SQLite opens that store, which
+    is what leaves `usage.db-wal` and `usage.db-shm` standing there; tick two must raise
+    NOTHING for this leg, because that alert is the filing that became #3227 and it cost an
+    open two-day-old vault-snapshot error the only ALERT.md slot. `false` then appears, and
+    tick three must raise exactly one arrivals alert naming `false` alone — which is only
+    possible if the muted pair reached the baseline on tick two.
+    """
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    (data / "usage.db").write_bytes(b"x" * 4096)
+    g._runtime_data_incident(_NOW)                        # arms, and records the baseline
+
+    _sidecar_pair(data, "usage.db")                       # SQLite opening the store
+    g._runtime_data_incident(_NOW + _DAY)
+    assert [a for a in alerts if a[0] == ARR] == [], (
+        "the guardian asked a person to decide about SQLite's own write-ahead log, which "
+        f"is the filing that buried an open error: {alerts}")
+    # Read the baseline HERE, not at the end: tick three's scan still holds the pair, so a
+    # later read cannot tell a tick-two persist from a tick-three one, and a leg that muted
+    # the pair by dropping it from the baseline write would still look clean at the end.
+    held_after_two = D.read_arrivals_baseline(tmp_path / "guardian-state",
+                                              os.path.realpath(str(data)))
+    assert {"usage.db-wal", "usage.db-shm"} <= set(held_after_two or {}), (
+        "the muted names did not reach the persisted baseline ON THIS TICK, so next hour "
+        f"they are arrivals again: {sorted(held_after_two or {})}")
+
+    (data / "false").write_bytes(b"")
+    os.utime(data / "false", (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
+    g._runtime_data_incident(_NOW + 2 * _DAY)
+    hits = [a for a in alerts if a[0] == ARR]
+    assert len(hits) == 1, (
+        f"the real arrival that shared a pass with the muted pair never reached a human: "
+        f"{alerts}")
+    assert "false" in hits[0][1] and "usage.db-wal" not in hits[0][1], hits[0][1]
+    assert hits[0][2].get("needs_human") is True, (
+        f"routing is unchanged by the mute: {hits[0][2]}")
+
+
+def test_a_muted_sidecar_files_no_board_item_while_a_real_name_still_files(
+        tmp_path, monkeypatch):
+    """#3229 across the last seam: the alert that fires is what becomes a board item.
+
+    The harm was never a log line. `Notifier.alert` routes a `needs_human` finding to
+    `_backlog_task` (notify.py:312-313), which POSTs `/api/backlog/task-create` — that is
+    how the 2026-10-23 sidecar report became #3227, a `draft` at `high` priority on the
+    lloyd board. Every node above this one runs a notifier pointed at a closed port
+    (`_watcher`), so none of them can see a filing at all; this one puts the loopback board
+    from `tests/test_guardian_predicates.py` behind the same leg and reads its POST log.
+
+    The tick that meets the paired sidecar must POST nothing carrying the arrivals title; the
+    tick that meets `false` must POST exactly one, and that item's description must name
+    `false` without the muted name in it. The board read answers an empty list in this mode,
+    so nothing is suppressed by the exact-name open-duplicate guard and an absent POST is
+    evidence of an absent filing rather than of a suppressed one — the question of what that
+    guard should key on is a ruling this node deliberately does not touch.
+    """
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    with _stub_board(tmp_path, {"success": True, "id": 4242}) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        (data / "usage.db").write_bytes(b"x" * 4096)
+        g._runtime_data_incident(_NOW)
+
+        _sidecar_pair(data, "usage.db")
+        g._runtime_data_incident(_NOW + _DAY)
+        filed = [p for p in seen["posts"] if p.get("name") == f"[guardian] {ARR}"]
+        assert seen["posts"] == [] and filed == [], (
+            "the muted pair still reached the board, which is the filing that became "
+            f"#3227: {filed}")
+        assert [a for a in alerts if a[0] == ARR] == [], (
+            f"a leg that files nothing but still alerts is the same noise one step later: "
+            f"{alerts}")
+
+        (data / "false").write_bytes(b"")
+        os.utime(data / "false", (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
+        g._runtime_data_incident(_NOW + 2 * _DAY)
+        filed = [p for p in seen["posts"] if p.get("name") == f"[guardian] {ARR}"]
+        assert len(filed) == 1, (
+            "the mute stopped at the findings list and never reached the filing of a real "
+            f"arrival: {[p.get('name') for p in seen['posts']]}")
+        post = filed[0]
+        assert "false" in post["description"] and "usage.db-wal" not in post["description"], (
+            f"the filed item must be about the name that needs a decision: "
+            f"{post['description'][:200]}")
+        assert (post["board"], post["status"], post["priority"]) == (
+            "lloyd", "draft", "high"), (
+            f"routing to the board is unchanged by the mute: {post}")
 
 
 def test_a_data_root_the_check_cannot_read_neither_alerts_nor_retracts(
