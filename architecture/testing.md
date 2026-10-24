@@ -3,12 +3,14 @@ segment: architecture
 tags: [architecture, lloyd, testing, gate, pytest]
 type: reference
 status: implemented
-date: 2026-09-24
+date: 2026-10-24
 ---
 
 # Lloyd — the test suite
 
-~9,600 tests under `tests/`, run by every automod round's `tests` rung
+~21,300 tests under `tests/` — the `tests` rung collected 21,298–21,348 across
+the full runs of 2026-10-24, against ~9,600 at this doc's last pass — run by
+every automod round's `tests` rung
 ([[automod]]) and by hand from a throwaway worktree. This doc is about the
 suite's own structure: the two kinds of test in it, the rule for tests that read
 data off the machine, and the isolation the parallel runner requires. The gate's
@@ -138,12 +140,14 @@ go red for a reason no commit caused — and because the `tests` rung is a gate 
 noticed. On 2026-09-22 that was 98 nodes red at base.
 
 Keep both. A file usually holds a synthetic majority and a small live section;
-`test_uptake.py` is the shape to copy — ~70 synthetic tests, and a small live
-section whose baseline cross-checks call the helpers below instead of
-hard-asserting. `test_promotion_fp_rate.py` is what a file looks like *after*
-retirement: 22 all-synthetic tests, its ten live checks deleted on 2026-09-22
-(see below), the marked section headers still standing where they were — its
-module docstring still describes those deleted tests (filed, backlog #1440).
+`test_uptake.py` is the shape to copy — 112 tests (measured 2026-10-24), all but
+a marked handful synthetic, and a small live section whose baseline cross-checks
+call the helpers below instead of hard-asserting. `test_promotion_fp_rate.py` is
+what a file looks like *after* retirement: 26 all-synthetic tests, its ten live
+checks deleted on 2026-09-22 (see below), the marked section headers still
+standing where they were — and its module docstring now carries a section saying
+the published note is no longer machine-checked, which is the annotation #1440
+asked for and has since closed.
 
 ## The rule for live data: `tests/_live_data.py`
 
@@ -166,7 +170,8 @@ require_live_entity_volume(entity_names, root)  # KG store present but a stub ->
   #1394): the entity guard skips only at `0 < rows < KG_ENTITY_FLOOR` (1000,
   declared once beside the helper), because `KGStore(path)` *creates* an absent
   database — "0 rows" is a created-empty false-clean and stays a **failing**
-  verdict. It was a 30-entity stub sitting at `_pipeline/vault-derived/kg.sqlite`
+  verdict. It was a 30-entity stub sitting at
+  `~/lloyd-data/_pipeline/vault-derived/kg.sqlite`
   on 2026-09-23 that blocked every promotion, where total absence had not.
 
 **A guard must never test existence itself and skip on the result.** That is how
@@ -208,10 +213,19 @@ destroyed data — `eval_trend_stats`'s `--strict` exit codes — the contract w
 | `PYTEST_MIN_PASSED` | 1000 | collected ≠ run |
 | `PYTEST_MAX_SKIPPED` | 40 (the **floor**) | *"a round that skips its way to green is not a round that passed"* |
 
+Only the skip rail was made relative. The two 1000s were budgeted when the suite
+was ~9,600 (still what `architecture/index.md` quotes this doc for), where 1000
+was a tenth of it; against ~21,300 they are under 5%, and `collected` here is what
+the run reports having **run plus skipped**, not pytest's collection report
+(`gate._PYTEST_COUNT_WORDS`), so a truncated full run that executed a twentieth of
+the suite and failed nothing clears both (#3250, #3249).
+
 The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
 PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the five newest
 green **full** `tests` rungs in the rounds store (not `REUSED`, no `partial` key)
-and the headroom 8, so the ledger of 2026-10-22 yielded a rail of 47. The absolute
+and the headroom 8, so the ledger of 2026-10-22 yielded a rail of 47, and the
+green full runs of 2026-10-24 report `skip ceiling 48 (base 40, headroom 8,
+floor 40)`. The absolute
 figure had stopped describing the suite — the ledger read 39 skips against 40, a
 margin of one, and the counted set moves with the tree, because the dashboard pins
 skip whenever a worktree has no `web/node_modules`. A fixed rail therefore refused
@@ -224,7 +238,9 @@ skips. That is exactly the move it exists to catch, and the correct response is
 almost never to raise it — it is to ask whether those tests can ever pass again,
 and retire the ones that cannot. Raising the number should be the last resort and
 should say in a comment what it is hiding, and raising the **figure** stays a human
-ruling (#2214, whose `PYTEST_MAX_SKIPPED = 55` commit `dbfddc60` is still unlanded):
+ruling that no open item asks for (`dbfddc60`'s `PYTEST_MAX_SKIPPED = 55` is still
+unreferenced by `main`; #2205 and #2214, which asked for it, closed as unnecessary
+once the margin was derived):
 #3143 derived the margin, it did not move the floor.
 
 ## Marks and selection
@@ -237,19 +253,41 @@ The trap: **a marked test is invisible to the gate but still red in a full run.*
 carried `live_vault`, was red at head for days, and entered no gate report —
 it surfaced only when someone ran the whole suite. Run unmarked periodically.
 
-## Pre-existing failures block everyone
+## Pre-existing failures are subtracted, not tolerated
 
 `rung_tests` probes the base commit before blaming a round: `_failures_at_base`
-re-runs the failing node ids in a throwaway worktree, and failures present at base
-are reported as `external_blocker: true` with the list under `external_failures`.
-The round is re-offered rather than rejected.
+re-runs the failing node ids in a throwaway worktree with this round's diff
+absent, and a failure the base reproduces **and** whose file the diff does not
+touch is subtracted from the round (`_failure_outside_round`); the set is cached
+in the round's `base-red-set.json` because the probe costs a whole suite.
+Everything else — including anything in a file the round touched — stays owned by
+the round and blocks. The reasoning behind that second half is in [[automod]] (a
+test the diff itself touched cannot be excused by a probe), so the rule is stated
+once there and not re-derived here.
 
-Read `external_failures`, not `failed_node_ids` — the latter is empty on an
-external block, which is easy to misread as "the gate did not say which test".
+The subtraction is gated on the probe having reached a conclusion. Failures
+outside the round's own files that the base probe does **not** reproduce leave the
+rung unable to attribute them, and it fails closed — *"every failure outside the
+round's own files was unexplained, and the base probe could not say whose they
+are"* (`gate.py:3574`) — filing nothing. Only a conclusive pass with an inherited
+red files the debt: `_file_red_tree` runs on `pre_existing and conclusive`
+(`gate.py:3545`), and the verdict names the nodes under `pre_existing_failures`
+with the tracker's id in `red_tree_item`. There is no `external_blocker` /
+`external_failures` pair in the gate — that was the pre-#2876 shape, and a round
+whose report contains neither key did not hit an inherited red.
+
+Read those keys rather than `failed_node_ids` alone: a red node id names a test
+and never says why it is red, which is why each red node's own pytest body now
+rides on the verdict in `failure_excerpts` (#2876) — including on the pass, the
+branch that used to leave no output on disk at all. A round that passes with a
+red tree is the signal to go fix base, not a reason to relax about the failure.
 
 ## Parallel isolation is a requirement, not a nicety
 
-The rung runs `-n 8`. Tests from different files share a worker process, so
+The rung runs `-n 8` — the count is `automod.gate.test_workers`
+(`config.yaml:1461`), and `_test_workers` falls back to serial when that key is
+missing or unusable or the venv has no `xdist`, and always for a `--only` subset.
+Tests from different files share a worker process, so
 **anything process-global leaks**: logging levels and propagation, `TMPDIR`, cwd,
 `os.environ`, module state, and any singleton a module caches at import.
 
@@ -355,13 +393,21 @@ tree has no vite, and before this the only thing that ever created one was the g
 non-frontend round skipped ten tests, the suite crossed `PYTEST_MAX_SKIPPED = 40`
 (44-45 observed on 2026-10-05), and the `tests` rung failed rounds for a reason no diff
 could answer. That fix left the ceiling at 40: the fix was that the pins run, not that
-the ceiling rises, which remains the route #2214 asks a human to promote. (#3143 later
+the ceiling rises, and raising the figure has not happened since — the 55 sits on a
+branch (`dbfddc60`, unreferenced by `main`), and the two items that asked for it closed
+as unnecessary once #3143 made the rail move with the tree. (#3143 later
 made the rail the base tree's count plus a headroom over that same 40 — it moved the
 margin, not the figure, and this paragraph's point stands: an unavailable dependency
 must be made to run, not counted into a wider rail.) What the
 hook must never do is turn an unavailable dependency into a failure: on a box where
 nobody ran `npm install`, the ten nodes keep skipping with the reason they always
 named, the `DASHBOARD_PINS_NOT_EXECUTED` finding is still printed, and the run exits 0.
+`LLOYD_FRONTEND_PINS_AVAILABLE` stays unset by the same reasoning: that declaration
+means *on this box the pins really measured*, and `tests/dashboard_pins.py` turns a
+declaration contradicted by an unavailable-pin skip into a failing run
+(`PinNotExecuted`) rather than a quiet pass — a pin that ran and failed is a
+regression, a pin that never ran is a machine fact, and the second must never be
+filed as the first.
 Provisioning therefore happens in `tests/`, not in `scripts/automod/gate.py`: the gate
 imports itself from the live tree, so a gate-side fix could never land itself, while
 pytest runs with `cwd=` the worktree and executes the round's own conftest.
@@ -392,3 +438,21 @@ suite exercises · [[data-home]] for where the live data moved on 2026-09-22.
   header is now stale (#1440). Gate floors (1000/1000/40), `TESTS_MARK_EXPR`, the
   twelve rungs, `-n 8`, the `_refuse_the_production_tree` guard, the c0f12db
   stub story and the 09-22 incident record all verified current.
+- 2026-10-24 — **stale**: the suite has doubled since that pass — a full `tests`
+  rung collected 21,298–21,348 across the rounds of 2026-10-24 — so the opening
+  "~9,600" is out, and `architecture/index.md` still quotes that figure for
+  [[testing]] (#3249). The `external_blocker` / `external_failures` pair no longer
+  exists: a base failure is subtracted only off a **conclusive** probe, an
+  inconclusive one fails the round and files nothing, and a conclusive pass files
+  a `red-tree` item and reports `pre_existing_failures` / `red_tree_item` (#2876).
+  `-n 8` is a config value now (`automod.gate.test_workers`), and the 2026-10-05
+  pins passage still named #2214, which has since closed as unnecessary once
+  #3143 derived the rail. Corrected in place: the KG stub's path is the data root,
+  `test_uptake.py` (112 tests) and `test_promotion_fp_rate.py` (26) recounted,
+  #1440 closed, today's ceiling reading (48) set beside the 47, and `dbfddc60`'s
+  55 recorded as still unreferenced by `main`. Verified current and untouched: the
+  1000/1000/40 constants, `TESTS_MARK_EXPR`, the scratch and `TMPDIR` rules,
+  `tests/frontend_deps.py` and its gitignore line, the vitest sentence, the
+  vacuity probes, tmpwatch's fractions, and both incident records. Filed: the two
+  1000-test floors are under 5% of what they were set for (#3250), and
+  `gate.py:128` names closed #2214 as the live ruling on the figure (#3251).
