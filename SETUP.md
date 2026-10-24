@@ -1044,12 +1044,35 @@ synthesizable while the TTS server's `default_model` is a `type: base` model**, 
 is the case here — `1.7B-Base`, because voice mode always clones. There is no swap on
 a built-in request (#2300): the server refuses a non-`clone:` voice with **HTTP 400**
 and a reason naming the loaded model type, on the non-streaming route *and* on
-`stream:true`, and `GET /v1/voices` lists only the `clone:` profiles:
+`stream:true`, and the voice list of the engine that is actually serving contains only
+the `clone:` voices. **Ask the engine voice runs on** — the one `config.yaml`'s
+`livekit.tts.api_url` names, on this box `http://127.0.0.1:8093` (`agent-tts-omni`,
+vLLM-Omni) — and not the fallback that happens to still be answering:
 
 ```bash
+# The room's engine (:8093, livekit.tts.api_url). Its list route is /v1/audio/voices
+# and its .voices are plain strings; it has no /v1/voices route at all — that 404s.
+curl -s localhost:8093/v1/audio/voices | jq -r '.voices[]'
+# clone:dave_cullen
+# default
+
+# The vendored :8090 fallback — a different server, a different route, a different
+# shape (.voices[].id) AND a different voice store, so this is not the room's list.
 curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
 # clone:dave_cullen
 ```
+
+The two engines keep **separate voice stores**, which is what makes the engine label
+load-bearing rather than cosmetic. vLLM-Omni holds uploaded clones as `.safetensors`
+under `SPEAKER_SAMPLES_DIR` — production `~/lloyd-data/tts/speakers`, set by
+`agent-services/bin/start-qwen3-tts-omni.sh` — while the vendored `agent-tts` reads
+`voice_library/profiles/`. A clone registered on one is invisible to the other, so
+"the voices route lists my voice" says nothing about whether the room can speak it:
+pointing `livekit.tts.api_url` at the other engine is precisely the change that 4xxs
+every turn while the check run against the first engine keeps reading clean. The round
+trip that proves a voice on the room's engine is `scripts/voice/register_tts_voice.py`
+(defaults to `http://127.0.0.1:8093`, posts `/v1/audio/voices`, then synthesizes a clip
+and counts the bytes — it never trusts the status alone).
 
 Before #2300 a built-in name answered `500 processing_error` in ~1 ms while `/health`
 said `ready:true`, and on `stream:true` it answered `200` with **zero bytes** — which
@@ -1060,7 +1083,9 @@ running service rather than a mapping table in the source:
 curl -s -X POST localhost:8090/v1/audio/speech -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
 # 400, typed `invalid_request_error` — on `tts-1` and `qwen3-tts` alike, and never a
-# 200 with an empty body
+# 200 with an empty body. Measured on the vendored :8090 fallback, which is the server
+# #2300 was filed against; the same request on the room's :8093 engine is not on the
+# record, so do not read this line as an omni result.
 ```
 
 The built-in speakers are not missing from the build; they need a **CustomVoice**
@@ -1507,8 +1532,15 @@ curl -s --max-time 2 localhost:8500/health
 qmd status
 qmd query "test" -c obsidian -n 1
 
-# TTS
-curl -s localhost:8090/v1/voices | jq '.[0:3]'
+# TTS — ask the engine voice runs on: config.yaml livekit.tts.api_url is :8093. Its
+# .voices is a list of plain strings, so `.voices[]` prints the names; a range slice
+# like `.[0:3]` is a jq error here, since the response is an object, not a list.
+curl -s localhost:8093/v1/audio/voices | jq -r '.voices[]'
+
+# The vendored :8090 fallback answers /v1/voices (its .voices[] are objects, hence
+# `.id`) and keeps a SEPARATE voice store — a name listed here while :8093 does not
+# list it means the room cannot speak it, and the reverse proves nothing either.
+curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
 
 # LiveKit
 curl -s localhost:7880 && echo OK

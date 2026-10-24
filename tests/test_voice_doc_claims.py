@@ -34,6 +34,19 @@ and `_para` stops at the blank line above that fence, so a paragraph-scoped node
 passes on the very regression it names. Its negative control is the struck
 wording quoted verbatim as a module constant, so the checks are proved against
 the real regression rather than against a summary of it.
+
+#3254 is the same correction one layer down: "ask the running service which voices
+it can speak" had hardened into one literal command, `curl -s localhost:8090/v1/voices`,
+and voice stopped running on :8090 in `d9ff1c0f` (2026-10-09). The intent — ask the
+running service — survived; the command did not, because the route differs per engine
+(:8093's list route is `/v1/audio/voices` and it 404s `/v1/voices`) and the two servers
+keep *separate* voice stores. So the doc's own capability check was probing the fallback
+and reading clean while the room spoke through a different server. The nodes at the end
+of this file pin the command to `livekit.tts.api_url`, pin every surviving `:8090`
+voice-list command to an explicit "fallback" label, and pin the store-separation
+sentence — the one that says why the label matters. The literal that kept the stale
+command alive was this file's own assertion, which is why these read structure
+(fenced block, `## ` section, sentence) rather than one hard-coded command line.
 """
 
 from __future__ import annotations
@@ -197,8 +210,17 @@ def test_setup_md_no_longer_offers_a_builtin_voice_as_a_fallback():
     for required in ("HTTP 400", "stream:true", "zero bytes", "clone:dave_cullen",
                      "CustomVoice"):
         assert required in section, f"corrected section lost {required!r}"
-    assert "curl -s localhost:8090/v1/voices" in section, (
-        "the section must still tell a reader to ask the running service")
+    # #3254: this assertion used to read `assert "curl -s localhost:8090/v1/voices" in
+    # section`, which is what kept the stale command in the tree — the intent is "ask the
+    # running service", and since d9ff1c0f the running service is livekit.tts.api_url.
+    assert "curl -s localhost:8093/v1/audio/voices" in section, (
+        "the section must still tell a reader to ask the running service — and the "
+        "service voice runs on is :8093 (`livekit.tts.api_url`), whose list route is "
+        "/v1/audio/voices; :8090's /v1/voices is a different server with a different "
+        "voice store (#3254)")
+    assert "livekit.tts.api_url" in section, (
+        "the engine has to be named by the config key that selects it, not by a port "
+        "the reader has to go and look up")
     assert "~20 s" in section, (
         "the cost of switching to CustomVoice belongs beside the instruction to do it")
 
@@ -413,3 +435,219 @@ def test_the_retired_escape_hatch_section_still_trips_every_check():
     with pytest.raises(AssertionError) as fenced:
         _assert_no_builtin_voice_asked(_cloned_voice_section() + "\n" + fence)
     assert "Ryan" in str(fenced.value), str(fenced.value)
+
+
+# ── #3254: "ask the server which voices it can speak" has to name the engine ──
+#
+# Voice mode has spoken through `livekit.tts.api_url` — `http://127.0.0.1:8093`,
+# vLLM-Omni, `agent-tts-omni` — since `d9ff1c0f` (2026-10-09). Measured on the box
+# 2026-10-24: `:8093/v1/voices` is 404 (no such route), `:8093/v1/audio/voices` is
+# `{"voices":["clone:dave_cullen","default"],…}` with `.voices` a list of strings, and
+# `:8090/v1/voices` is 200 with `.voices[]` as objects. Both servers answer, but omni
+# keeps its clones as `.safetensors` under `SPEAKER_SAMPLES_DIR` while the vendored
+# server reads `voice_library/profiles/`, so the fallback printing a voice says nothing
+# about the room speaking it. These nodes therefore read *structure* — fenced block,
+# `## ` section, sentence — rather than one hard-coded command line: a literal command
+# in an assertion is exactly how the stale `:8090` one survived being wrong for a year.
+
+ROOM_ENGINE = "localhost:8093"        # whatever livekit.tts.api_url selects; today :8093
+FALLBACK_ENGINE = "localhost:8090"    # the vendored agent-tts, kept running as fallback
+
+_VOICES_ROUTE = re.compile(r"/v1/(?:audio/)?voices")
+_ENGINE_NAMED = re.compile(r"809\d|vendored|omni|fallback|api_url", re.IGNORECASE)
+
+#: How far a route claim may reach backwards for the engine it means, in characters of
+#: the flat comment. Measured, not guessed: the retired claim sits 92 characters from
+#: its engine and must trip, the fixed comment's widest claim sits 54 and must pass,
+#: and the node below asserts all three numbers.
+_ROUTE_ENGINE_WINDOW = 60
+
+#: The run #3254 replaced, verbatim and flat from the pre-round `config.yaml` comment.
+#: It names the vendored server earlier in the same run and still leaves the route the
+#: reader acts on unqualified — which is the ambiguity this node exists to refuse.
+RETIRED_VOICE_COMMENT_CLAIM = (
+    "there is no model swap in the vendored server, so a built-in name is refused with "
+    "HTTP 400 before synthesis (#2300), and `/v1/voices` on this server lists only "
+    "`clone:` profiles.")
+
+#: The same claim as fixed. The control pair pins the window: without this form the
+#: node would be refusing any mention of a route, which nobody can satisfy.
+LABELLED_VOICE_COMMENT_CLAIM = (
+    "the vendored server (:8090, the fallback) answers `/v1/voices` with `clone:` "
+    "profiles only")
+
+
+def _setup_heading_section(heading: str) -> str:
+    """The SETUP.md passage from a `## ` heading to the next one, or fail the test.
+
+    Scoped by `## ` rather than by `_setup_section`'s bold headings because Part 12's
+    body is one long fenced block, and bold-scoped reading would stop at bold text
+    inside the code rather than at the end of the part.
+    """
+    text = SETUP.read_text(encoding="utf-8")
+    i = text.find("\n" + heading + "\n")
+    assert i >= 0, f"SETUP.md has no {heading!r} heading"
+    start = i + 1
+    j = text.find("\n## ", start + len(heading))
+    return text[start:j if j > 0 else len(text)]
+
+
+def _voice_list_label_windows(text: str, span: int = 6) -> list[tuple[int, str]]:
+    """Each `:8090/v1/voices` command in a SETUP.md text, with the label window around it.
+
+    The window is the command line, the run of comment lines directly above it and the
+    line below — what a reader's eye is on while copying one command. Two rejected
+    scopers, both measured: a whole-file grep for "fallback" passes a stale command
+    three screens from the word, and pairing ``` markers into fenced blocks is wrong on
+    SETUP.md as it stands (an odd number of markers precedes the first stale command, so
+    the blocks come out inverted and the command lands in none of them — a node built on
+    that reader was vacuous against the very line it was written for).
+    """
+    lines = text.splitlines()
+    out = []
+    for n, ln in enumerate(lines):
+        if f"{FALLBACK_ENGINE}/v1/voices" not in ln:
+            continue
+        start = n
+        while start > 0 and lines[start - 1].strip().startswith("#") and n - start < span:
+            start -= 1
+        out.append((n + 1, "\n".join(lines[start:n + 2])))
+    return out
+
+
+def _assert_voice_list_windows_are_labelled(text: str) -> None:
+    """Refuse a `:8090/v1/voices` command whose window never says it is the fallback."""
+    for line, window in _voice_list_label_windows(text):
+        assert "fallback" in window.lower(), (
+            f"SETUP.md:{line} documents a {FALLBACK_ENGINE}/v1/voices command with no "
+            "engine label beside it: voice speaks through livekit.tts.api_url (:8093, "
+            "route /v1/audio/voices) and the two engines keep separate voice stores, so "
+            "an unlabelled :8090 check reads clean while the room cannot speak the "
+            f"voice (#3254). Window read: {window!r}")
+
+
+def _assert_voices_routes_are_engine_labelled(comment: str) -> None:
+    """Refuse a voices-route claim with no engine named within `_ROUTE_ENGINE_WINDOW`.
+
+    Windowed rather than sentence-scoped, and measured both ways: the pre-#3254 comment
+    *does* name the vendored server, two clauses earlier, so a sentence-level rule was
+    satisfied by a word the reader never reaches — and a clause-level rule (split on
+    ``,``/``:``/``.``) is satisfied by nothing, since the fixed wording qualifies its
+    route across a comma. A window is the honest shape of "the engine has to be named
+    where the route is named", and its edges are pinned by the two controls in the node.
+    """
+    flat = _flat(comment)
+    for m in _VOICES_ROUTE.finditer(flat):
+        window = flat[max(0, m.start() - _ROUTE_ENGINE_WINDOW):m.end() + _ROUTE_ENGINE_WINDOW]
+        assert _ENGINE_NAMED.search(window), (
+            f"a comment above livekit.tts.voice names a route with no engine within "
+            f"{_ROUTE_ENGINE_WINDOW} characters: ...{window.strip()!r}... That key's own "
+            "api_url is :8093, and :8093 has no /v1/voices route at all, so an unlabelled "
+            "route claim sends a reader to a 404 and lets them read the silence as the "
+            "room's capability (#3254)")
+
+
+def test_no_setup_voice_list_command_can_be_read_as_the_room_s_engine():
+    """Clause 3: each documented `:8090/v1/voices` command is labelled the fallback.
+
+    The label has to be beside the command, not merely somewhere in SETUP.md: a reader
+    pastes one line, and the line's only context is the comment above it.
+    """
+    text = SETUP.read_text(encoding="utf-8")
+    _assert_voice_list_windows_are_labelled(text)
+    windows = _voice_list_label_windows(text)
+    assert windows, (
+        "no :8090 voice-list command is documented anywhere, so this node has nothing to "
+        "check — delete it together with the commands it guards")
+    # Control, in the file rather than a manual paste: the same real windows with the
+    # label word taken out have to trip it. That proves the reader is looking at the
+    # documented commands and that the word "fallback" is what satisfies it.
+    joined = "\n".join(w for _, w in windows)
+    delabelled = re.sub(r"(?i)fallback", "the other box", joined)
+    assert delabelled != joined, "no window carried a fallback label to remove"
+    with pytest.raises(AssertionError) as unlabelled:
+        _assert_voice_list_windows_are_labelled(delabelled)
+    assert "#3254" in str(unlabelled.value), str(unlabelled.value)
+    assert f"{FALLBACK_ENGINE}/v1/voices" in str(unlabelled.value)
+
+
+def test_part_12_verify_asks_the_engine_voice_runs_on_and_slices_nothing():
+    """Clause 1: the fresh-install TTS check probes the configured engine's real route."""
+    section = _setup_heading_section("## Part 12 — Verify")
+    assert f"curl -s {ROOM_ENGINE}/v1/audio/voices | jq -r '.voices[]'" in section, (
+        "Part 12 is the check a fresh install runs last; pointed at :8090's /v1/voices it "
+        "prints the fallback's store, and omni's list route is /v1/audio/voices (#3254)")
+    # Comment lines are exempt: naming the broken form to explain it is the point of the
+    # comment. What may not come back is a runnable command that slices the response.
+    commands = "\n".join(ln for ln in section.splitlines() if not ln.strip().startswith("#"))
+    assert not re.search(r"\.\[\d*:\d*\]", commands), (
+        "a range slice is back on a runnable Part 12 command: a voices response is an "
+        "object, so `.[0:3]` printed `jq: error (at <stdin>:0): Cannot index object with "
+        "object` and exit 5 — a reader cannot tell a dead engine from a jq misuse")
+    # The regex above is only worth having if it still matches the line it replaced.
+    assert re.search(r"\.\[\d*:\d*\]", "curl -s localhost:8090/v1/voices | jq '.[0:3]'")
+
+
+def test_setup_md_says_the_two_tts_engines_keep_separate_voice_stores():
+    """Clause 4: both stores are named, and the round trip that proves a voice is named."""
+    section = _setup_section("**A built-in voice is not served by the default model")
+    flat = _flat(section)
+    for required in ("separate voice stores", "SPEAKER_SAMPLES_DIR",
+                     "~/lloyd-data/tts/speakers", "start-qwen3-tts-omni.sh",
+                     "voice_library/profiles/", "/v1/audio/voices",
+                     "scripts/voice/register_tts_voice.py"):
+        assert required in flat, f"the engine story lost {required!r}"
+    assert "round trip" in flat, (
+        "the sentence naming register_tts_voice.py has to say what it proves: registering "
+        "a voice is only evidence on the engine that will be asked to speak it")
+    # The seam the sentence crosses: the prose names a script and a default port, so the
+    # script has to exist and still default to the engine the prose claims it proves.
+    registrar = (ROOT / "scripts" / "voice" / "register_tts_voice.py")
+    assert registrar.is_file(), f"the section names {registrar} as the round trip; it is gone"
+    reg = registrar.read_text(encoding="utf-8")
+    assert 'default="http://127.0.0.1:8093"' in reg, (
+        "the section says register_tts_voice.py proves a voice on the room's engine, so a "
+        "default that is no longer :8093 makes that sentence false")
+    assert "/v1/audio/voices" in reg, (
+        "the registrar no longer posts the omni list route the section says it posts")
+
+
+def _engine_separation(text: str) -> int:
+    """How far the widest route claim in `text` sits from an engine named before it.
+
+    Max over every voices-route mention, so the number is the one that decides whether
+    `_assert_voices_routes_are_engine_labelled` fires. `len(text) + 1` when a route has
+    no engine named before it at all, so the caller can compare in one direction.
+    """
+    flat = _flat(text)
+    routes = list(_VOICES_ROUTE.finditer(flat))
+    assert routes, f"no voices route in {text!r}"
+    worst = 0
+    for route in routes:
+        named = [m.start() for m in _ENGINE_NAMED.finditer(flat[:route.start()])]
+        worst = max(worst, len(flat) + 1 if not named else route.start() - max(named))
+    return worst
+
+
+def test_config_yaml_voice_comment_names_the_engine_behind_each_voices_route():
+    """Clause 5: every route claim in the loaded comment says which server it means."""
+    comment, voice_line = _livekit_voice_comment()
+    _assert_voices_routes_are_engine_labelled(comment)
+    # Both edges of the window, on text held in this file: the fixed claim has to pass
+    # or the rule refuses every mention of a route, and the retired one has to trip or
+    # the rule refuses nothing.
+    _assert_voices_routes_are_engine_labelled(LABELLED_VOICE_COMMENT_CLAIM)
+    with pytest.raises(AssertionError) as ambiguous:
+        _assert_voices_routes_are_engine_labelled(RETIRED_VOICE_COMMENT_CLAIM)
+    assert "#3254" in str(ambiguous.value), str(ambiguous.value)
+    # And the distances the window constant quotes, re-measured here so they cannot rot
+    # into a claim nobody checked — including the margin the live comment runs with.
+    assert _engine_separation(LABELLED_VOICE_COMMENT_CLAIM) == 19, \
+        _engine_separation(LABELLED_VOICE_COMMENT_CLAIM)
+    assert _engine_separation(RETIRED_VOICE_COMMENT_CLAIM) == 92, \
+        _engine_separation(RETIRED_VOICE_COMMENT_CLAIM)
+    assert _engine_separation(comment) == 54 < _ROUTE_ENGINE_WINDOW, \
+        _engine_separation(comment)
+    # Comment-only by construction: the value line is byte-identical, indentation and
+    # all, so the node cannot be satisfied by moving the voice to dodge the comment.
+    assert voice_line == "    voice: clone:dave_cullen", repr(voice_line)

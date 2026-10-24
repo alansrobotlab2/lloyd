@@ -1080,8 +1080,12 @@ livekit:
     # profile.  Do not switch back to it expecting a fallback: the TTS server loads a
     # `type: base` model (`1.7B-Base`) and that model serves no built-in speaker at
     # all — there is no model swap in the vendored server, so a built-in name is
-    # refused with HTTP 400 before synthesis (#2300), and `/v1/voices` on this server
-    # lists only `clone:` profiles.  A built-in voice needs the TTS server's own
+    # refused with HTTP 400 before synthesis (#2300).  Which route lists the voices is
+    # engine-specific, so read the port and not the route: the vendored server (:8090,
+    # the fallback) answers `/v1/voices` with `clone:` profiles only, while the engine
+    # this key belongs to (`livekit.tts.api_url` above, :8093 vLLM-Omni) has no
+    # `/v1/voices` at all and lists them on `/v1/audio/voices`.  Separate stores, so a
+    # name on one is not on the other.  A built-in voice needs the vendored server's own
     # `default_model` (`agent-services/services/tts/qwen3-tts/config.yaml`) pointed at
     # a CustomVoice model and `agent-tts` restarted, which then costs every later
     # `clone:` request an unload+load+warmup cycle.
