@@ -1862,8 +1862,17 @@ def _one_case(key: str) -> dict:
 
 
 def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
-           refuse=(), spend=None, rank_fn=None, ceiling=99_000, stop=None):
+           refuse=(), spend=None, rank_fn=None, ceiling=99_000, stop=None,
+           uncitable=None):
     """Run arm B once over one case, with the theories in `refuse` answering in prose.
+
+    `uncitable` (#3241) maps a slot to the shape of the claim it hands back that cannot
+    be pointed at anything: `"no-citations"` is a worded claim whose `citations` is
+    `[]`, and `"no-text"` is an empty claim carrying a citation. Both came off the same
+    `validate_investigation` condition on the live pass (`run.log` and `smoke-b3.log`
+    under `~/lloyd-data/eval/2258/`), and they are two different questions — a model
+    that declined to cite versus a model that handed back nothing worded — so the
+    fixture can produce each one alone.
 
     Returns (case, slots, dispatched, rows, verdict). `dispatched` is the slot order
     the investigator was called in, which is how the tests below distinguish "the
@@ -1895,6 +1904,17 @@ def _arm_b(tmp_path, *, key="flaky-SM_20261001_034449", rows_name="rows.jsonl",
             if stop and slot in stop:
                 row["stop_reason"], row["num_turns"] = stop[slot]
             return row
+        shape = (uncitable or {}).get(slot)
+        if shape in ("no-citations", "no-text"):
+            claim = ({"claim": f"{slot}: the retry loop was removed in the refactor",
+                      "citations": []} if shape == "no-citations" else
+                     {"claim": "", "citations": [{"path": "app/retry.py", "line": 44}]})
+            row = {"tool": "Task", "tokens": cost[slot], "claims": [claim]}
+            if stop and slot in stop:
+                row["stop_reason"], row["num_turns"] = stop[slot]
+            return row
+        if shape:
+            raise AssertionError(f"unknown uncitable shape {shape!r}")
         return {"tool": "Task",
                 "claims": [{"claim": f"{slot}: the config drifted",
                             "citations": [{"path": "app/config.py", "line": 12}]}],
@@ -2495,3 +2515,377 @@ def test_a_pass_where_nothing_raises_still_exits_zero(tmp_path, monkeypatch, cap
     assert "arm-run(s) failed" not in out
     assert out.count("B chose:") == len(keys), (
         "the per-case arm-B line is printed once per case, not once per arm")
+
+
+# ── #3241: an uncitable claim is a recorded refusal, not a cancelled case ─────
+#
+# #2635 made "the theory handed back no claims at all" a refusal row and left the
+# neighbouring raise in place, and `run_case_b`'s own comment said why: a claim with
+# no citation is a broken instrument rather than a declined theory. #2985's owed-check
+# ruling 4 reversed that for the live traffic it had just measured
+# (`backlog/2985-give-arm-b-s-fan-out-a-budget-that-can-finish-thre.md`, activity
+# entry `20261024_004847_owedcheck_2062`): "an uncitable claim becomes a recorded
+# refusal row (kind: refusal, reason 'uncitable-claim'), the same route". The
+# evidence for the reversal is on disk: `~/lloyd-data/eval/2258/run.log` and
+# `smoke-b3.log` carry six `FAILED <case> B: RecordError: theory 'cN' has a claim
+# with no citation` lines, each one cancelling a case that had already paid for two
+# other dispatches, and each one ABSENT from `report`'s denominator afterwards.
+#
+# Two shapes reach that one condition, and the row has to tell them apart: 4 of the
+# 6 recorded failures print an EMPTY claim (`no citation: ''` — run.log:32, :62, :86
+# and smoke-b3.log:1) and 2 print a worded claim with `citations: []` (run.log:36,
+# :88). `grep -c "no citation: ''" ~/lloyd-data/eval/2258/{run,smoke-b3}.log`. A
+# detail line that quoted only the claim's first 80 chars would print `''` for the
+# majority of real cases and read as "the model declined to cite" when the model
+# actually handed back nothing worded — the opposite follow-up.
+
+def test_a_claim_with_no_citation_is_recorded_and_the_fan_out_continues(tmp_path):
+    """#3241 clause 1: one claim, `citations: []` — a refusal row, not a cancelled case.
+
+    This is the Oct 18 shape: `~/lloyd-data/eval/2258/smoke-b3.log:1` reads `[2258]
+    FAILED flaky-SM_20261001_034449 B: RecordError: theory 'c2' has a claim with no
+    citation: ''`. The case that produced it wrote a `theories` row, one `tool` row and
+    nothing else, so the study could not tell an arm-B loss from an arm-B that was never
+    measured — the same denominator hole #2635 closed for the no-claims refusal.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    case, _, dispatched, rows, verdict = _arm_b(
+        tmp_path, key=key, uncitable={slots[1]: "no-citations"},
+        spend={slots[1]: 1_500}, rows_name="uncitable.jsonl")
+
+    assert dispatched == slots, (
+        f"the fan-out dispatched {dispatched} of {slots}: an uncitable theory must not "
+        "cancel the dispatch after it, which is the whole complaint")
+    refusals = [r for r in rows if r["kind"] == "refusal"]
+    assert len(refusals) == 1, f"expected one refusal row, got {len(refusals)}"
+    row = refusals[0]
+    assert row["reason"] == replay.REFUSAL_UNCITABLE_CLAIM == "uncitable-claim", (
+        f"the row's reason reads {row['reason']!r}")
+    assert row["slot"] == slots[1] and row["arm"] == "B" and row["case_key"] == key, (
+        "a refusal row that names no slot, arm or case cannot be attributed, which is "
+        "what makes it a row a report can read")
+    assert row["tokens"] == 1_500, (
+        f"the refusal carries {row['tokens']} tokens; the refused dispatch cost 1,500 "
+        "and dropping that spend understates what the case paid to learn nothing")
+    assert {"stop_reason", "num_turns"} <= set(row), (
+        f"the row carries {sorted(row)}: every other refusal row carries the pair its "
+        "own investigation returned, and a reader comparing reasons must not have to "
+        "know which reason writes which keys")
+    assert row["stop_reason"] is None and row["num_turns"] is None, (
+        "an investigator that named no mechanism must not have one invented for it")
+    assert "the retry loop was removed in the refactor" in row["detail"], (
+        f"the detail lost the claim itself: {row['detail']!r} — the row's whole job is "
+        "to say what the model handed back")
+    assert [r["slot"] for r in rows if r["kind"] == "tool"] == [slots[0], slots[2]], (
+        "the two citable theories did not both get a per-theory row")
+    assert not [r for r in rows if r["kind"] == "tool" and r["slot"] == slots[1]], (
+        "an uncitable theory still wrote a `tool` row: its claim would be evidence "
+        "that points at nothing")
+    assert verdict["refused"] == [slots[1]], (
+        "the verdict row must say which slot it did not choose among, or a two-theory "
+        "case reads to a later reader as a three-theory one")
+    scored = replay.score(rows, [case])
+    assert scored["arms"]["B"]["n"] == 1, (
+        f"arm B's N is {scored['arms']['B']['n']}; an uncitable theory may not move "
+        "the denominator, which is the difference between N=1 and N=0 on the Oct 18 pass")
+
+
+def test_the_uncitable_refusal_names_which_of_the_two_shapes_fired(tmp_path):
+    """The majority shape on record has an EMPTY claim, and the row must not call it
+    a refusal to cite.
+
+    Both shapes come off one condition (`not text or not isinstance(cites, list) or not
+    cites`), so a detail line built from the claim's text alone prints `''` for 4 of the
+    6 live failures. Each half of the pair is a different follow-up: an uncited claim is
+    a prompting or schema question, an unworded claim is a truncated or empty tool
+    result. Naming the shape is what lets the next pass count them separately, which is
+    the ruling owed-check cannot make until rows exist that distinguish them.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    _, _, _, cited_rows, _ = _arm_b(
+        tmp_path, key=key, uncitable={slots[0]: "no-citations"},
+        rows_name="shape-cited.jsonl")
+    _, _, _, empty_rows, _ = _arm_b(
+        tmp_path, key=key, uncitable={slots[0]: "no-text"},
+        rows_name="shape-empty.jsonl")
+
+    cited = next(r for r in cited_rows if r["kind"] == "refusal")
+    empty = next(r for r in empty_rows if r["kind"] == "refusal")
+    assert cited["reason"] == empty["reason"] == replay.REFUSAL_UNCITABLE_CLAIM, (
+        "the two shapes are one reason; the follow-up they share is that the claim "
+        "could not be pointed at anything")
+    assert cited["detail"] != empty["detail"], (
+        f"both shapes wrote the same detail — {cited['detail']!r} — so the row cannot "
+        "support the follow-up a reader draws from it")
+    assert "citation" in cited["detail"].lower(), (
+        f"the uncited-claim detail does not say citations are missing: {cited['detail']!r}")
+    assert ("no claim text" in empty["detail"] or "empty" in empty["detail"].lower()), (
+        f"the empty-claim detail reads {empty['detail']!r}, which a reader of the "
+        "Oct 13 pass's `no citation: ''` lines would take for a declined theory")
+    assert "no citations" not in empty["detail"], (
+        "the empty-text row carries the OTHER shape's word, so the two shapes' rows "
+        "cannot be counted separately by the next pass — which is the ruling the shape "
+        "is named for")
+
+
+def test_an_uncitable_theory_is_never_handed_to_the_ranking_engine(tmp_path):
+    """The refusal keeps the raise's whole purpose: nothing unevidenced is ranked, and
+    the two citable theories still produce a verdict that names the refusal.
+
+    `rank_theories` already filters refused slots out of the candidate list (#2635), so
+    the only thing this change could get wrong is refusing without adding the slot to
+    `refused` — which would hand the engine a candidate whose entire text is its own
+    bare label. Also pinned here because it is the case's observable: the rank row is
+    written either way and the VERDICT row carries `chosen_cause` when at least one
+    theory was citable, so a refused slot costs the case a candidate, never a result.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    seen: list[list[str]] = []
+
+    def spy(query, candidates):
+        seen.append(list(candidates))
+        return [{"index": i, "score": 0.9 - 0.1 * i} for i in range(len(candidates))]
+
+    _, _, _, rows, verdict = _arm_b(tmp_path, key=key,
+                                    uncitable={slots[1]: "no-citations"},
+                                    rank_fn=spy, rows_name="ranked.jsonl")
+    assert seen, "the ranking was never called, so the candidate list proves nothing"
+    assert len(seen[0]) == THEORIES_PER_CASE - 1, (
+        f"the engine was handed {len(seen[0])} candidates for {THEORIES_PER_CASE} "
+        "theories, one of which was uncitable")
+    assert not any(c.strip().startswith(f"[{slots[1]}]") and
+                   c.strip() == f"[{slots[1]}]" for c in seen[0]), (
+        f"the refused slot {slots[1]} is still a candidate as a bare label")
+    assert slots[1] not in verdict["order"], (
+        f"the persisted order still names the uncitable slot: {verdict['order']}")
+    rank_row = next(r for r in rows if r["kind"] == "rank")
+    assert rank_row["ok"] is True and rank_row["chosen_cause"], (
+        f"two citable theories produced {rank_row!r} — a case with a survivor still "
+        "reaches a chosen cause, which is what the Oct 18 case never got")
+    assert rank_row.get("refused") == [slots[1]], (
+        "the rank row does not record that a slot was excluded, so the ordering looks "
+        "like a three-way choice")
+    assert [r["kind"] for r in rows] == ["theories", "tool", "refusal", "tool",
+                                         "rank", "verdict"], (
+        f"the run's row sequence was {[r['kind'] for r in rows]}")
+
+
+def test_a_case_whose_only_theory_survived_is_still_scored_and_a_fully_uncitable_one_is_not(
+        tmp_path):
+    """Where the evidence line actually sits: one survivor yields `chosen_cause`, none
+    yields a rank row that says nothing was ranked and a verdict row with an empty
+    cause. Recorded, never raised — the case enters the denominator as the measured
+    zero it is, exactly as an all-`no-claims` case already does since #2635.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    _, _, _, rows, verdict = _arm_b(
+        tmp_path, key=key,
+        uncitable={s: "no-citations" for s in slots}, rows_name="all-uncitable.jsonl")
+    assert [r["reason"] for r in rows if r["kind"] == "refusal"] == \
+        [replay.REFUSAL_UNCITABLE_CLAIM] * THEORIES_PER_CASE, (
+        "a case with three uncitable theories did not record three refusals")
+    rank_row = next(r for r in rows if r["kind"] == "rank")
+    assert rank_row["ok"] is False and rank_row["chosen_cause"] is None, (
+        f"an all-uncitable case was handed to the ranking engine anyway: {rank_row!r}")
+    assert rank_row["reason"].startswith("no-evidence"), rank_row["reason"]
+    assert rank_row["refused"] == sorted(slots), rank_row.get("refused")
+    assert verdict["chosen_cause"] == "" and verdict["refused"] == sorted(slots), (
+        "the verdict row is how this case reaches the denominator; it has to exist "
+        "with an empty cause rather than be absent, which is the Oct 18 bug")
+
+
+def test_the_uncitable_reason_is_never_written_on_a_row_it_does_not_describe(tmp_path):
+    """Three refusals, three words, three shapes — one per fixture, so no reason is
+    read off a case that could not have produced it.
+
+    A turn-capped theory in the SAME case as an uncitable one is the pair that matters:
+    #2807's stop pair has to stay on the turn-cap row untouched, and the uncitable row
+    must not borrow it. Folding the new case into `no-claims` would re-create exactly
+    the unanswerable question #2807 was filed to answer.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    assert replay.REFUSAL_UNCITABLE_CLAIM == "uncitable-claim"
+    assert len({replay.REFUSAL_UNCITABLE_CLAIM, replay.REFUSAL_NO_CLAIMS,
+                replay.REFUSAL_TURN_CAP, "token-ceiling"}) == 4, (
+        "the four refusal words have collided; each one names a different follow-up")
+
+    _, _, _, rows, _ = _arm_b(
+        tmp_path, key=key, refuse=(slots[0],), uncitable={slots[1]: "no-citations"},
+        stop={slots[0]: ("max_turns", 61)}, rows_name="mixed.jsonl")
+    by_slot = {r["slot"]: r for r in rows if r["kind"] == "refusal"}
+    assert set(by_slot) == {slots[0], slots[1]}, sorted(by_slot)
+    capped, uncitable = by_slot[slots[0]], by_slot[slots[1]]
+    assert capped["reason"] == replay.REFUSAL_TURN_CAP, capped
+    assert (capped["stop_reason"], capped["num_turns"]) == ("max_turns", 61), (
+        f"#2807's pair moved on the turn-cap row: {capped['stop_reason']!r}/"
+        f"{capped['num_turns']!r} — a truncated dispatch and an uncitable claim are "
+        "different failures and the row that says so must keep saying so")
+    assert uncitable["reason"] == replay.REFUSAL_UNCITABLE_CLAIM, uncitable
+    assert (uncitable["stop_reason"], uncitable["num_turns"]) == (None, None), (
+        "the uncitable row inherited the other theory's stop pair")
+    assert not [r for r in rows if r["kind"] == "ceiling"], (
+        "an uncitable theory wrote a token-ceiling row: the fan-out's money did not run out")
+
+
+def test_validate_investigation_declines_an_uncitable_claim_instead_of_raising():
+    """The mechanism #2985 ruling 4 ordered, pinned at the function that used to raise.
+
+    `validate_investigation` is arm B's only validator (arm A has its own no-claims
+    raise, #2984), and since this change a claim that cannot be cited is simply not
+    returned — the refusal row is `run_case_b`'s, decided by `uncitable_claims` BEFORE
+    this runs, which is why an uncitable claim can never reach the evidence map even if
+    a future caller forgets to look first: what comes back is the citable subset, and
+    `run_case_b` refuses the slot whenever that subset is not the whole answer.
+    """
+    from eval.diagnosis_fanout_replay import uncitable_claims, validate_investigation
+
+    row = {"slot": "c2", "claims": [
+        {"claim": "the retry loop was removed", "citations": []}]}
+    assert uncitable_claims(row) == [
+        {"claim": "the retry loop was removed", "why": "no citations"}], (
+        "the classifier did not name the shape, so the refusal row cannot either")
+    assert validate_investigation(row) == [], (
+        "the validator still raises, or still returns an uncited claim as evidence")
+
+    mixed = {"slot": "c2", "claims": [
+        {"claim": "citable", "citations": [{"path": "app/a.py", "line": 3}]},
+        {"claim": "", "citations": [{"path": "app/b.py", "line": 9}]}]}
+    assert uncitable_claims(mixed) == [{"claim": "", "why": "no claim text"}], (
+        "the empty-text shape was not classified, so 4 of the 6 live failures would "
+        "be recorded with a detail quoting ''")
+    assert [c["claim"] for c in validate_investigation(mixed)] == ["citable"], (
+        "the citable half of a mixed row must survive the validator intact — whether "
+        "the SLOT is refused is run_case_b's decision, not this one's")
+
+    clean = {"slot": "c1", "claims": [
+        {"claim": "citable", "citations": [{"path": "app/a.py", "line": 3}]}]}
+    assert uncitable_claims(clean) == []
+    assert len(validate_investigation(clean)) == 1
+    # The no-claims raise is arm B's backstop and #2635's refusal route; this change is
+    # about the citation condition only, and it must not have swallowed that one too.
+    with pytest.raises(RecordError, match="no_claims|no claims|c3"):
+        validate_investigation({"slot": "c3", "claims": []})
+
+
+def test_the_replacement_docstrings_no_longer_promise_the_retired_raise():
+    """The module argued the opposite design in three places, and a comment that
+    contradicts its own code is the next reader's false premise.
+
+    `empty_claims` said "a claim with no citation is a broken instrument, not a declined
+    theory, and still raises"; `validate_investigation` said "every other refusal this
+    function makes still raises"; `rank_theories` called the excluded class "a theory
+    that ran and answered nothing". All three are now wrong about the citation
+    condition, and the #2985 ruling that reversed them is cited in the commit message —
+    this node is what keeps the prose from drifting back.
+    """
+    src = (REPO / "eval" / "diagnosis_fanout_replay.py").read_text(encoding="utf-8")
+    for retired in ("and still raises",
+                    "A claim with no citation is a broken instrument"):
+        assert retired not in src, (
+            f"{retired!r} is back in the module, contradicting #2985's ruling that an "
+            "uncitable claim is a recorded refusal")
+    assert "uncitable-claim" in src, "the reason string is gone from the module"
+
+
+def test_a_max_turns_stop_outranks_the_uncitable_claim_it_came_with(tmp_path):
+    """#2807's precedence, restated where a fourth refusal word could have broken it.
+
+    A capped run that somehow carries claims is a contradiction of the harness contract
+    (`FINALIZABLE_STOP_REASONS` — a capped run has nothing finalisable, and the
+    empty-claims branch above catches the ordinary case), so which word it gets is a
+    judgement about the row's follow-up, not about the claim: the harness's own statement
+    that the run never stopped on its own has a different fix (more turns) than a model
+    that finished and forgot to cite, and #2807 was filed precisely because folding those
+    two together made the truncation question unanswerable.
+    """
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    _, _, _, rows, _ = _arm_b(
+        tmp_path, key=key, uncitable={slots[0]: "no-citations"},
+        stop={slots[0]: ("max_turns", 61)}, rows_name="capped-uncitable.jsonl")
+    row = next(r for r in rows if r["kind"] == "refusal")
+    assert row["reason"] == replay.REFUSAL_TURN_CAP, (
+        f"a turn-capped dispatch was booked as {row['reason']!r}, which sends the next "
+        "reader to the prompt instead of the turn budget")
+    assert (row["stop_reason"], row["num_turns"]) == ("max_turns", 61), row
+    assert slots[0] in next(r for r in rows if r["kind"] == "rank")["refused"], (
+        "a slot refused for either reason must be absent from the ranking")
+
+
+def test_the_live_route_records_the_refusal_and_the_pass_still_exits_zero(
+        tmp_path, monkeypatch, capsys):
+    """The seam the Oct 18 log line came through, run end to end: `cmd_run`'s per-arm
+    guard, the real `RowWriter`, and a real `report`-style read of the file afterwards.
+
+    Every other node here drives `run_case_b` directly, so each one pins the writer's
+    output without ever touching the guard that turned a raise into `FAILED <case> B` on
+    stdout, exit 1 and a rows file with no `verdict` row in it — the symptom the Oct 18
+    pass left on disk (`~/lloyd-data/eval/2258/smoke-b3.log:1`, whose rows file holds
+    only `theories` and `tool` lines). This node patches only the three live callables
+    `cmd_run` looks up as module globals, so the validator, the classifier, the refusal
+    branch, the ranking, the verdict row and the writer all run as shipped.
+
+    It is the closest thing to the smoke-b4 run this round can produce, and it is NOT
+    that run: no engine dispatch and no GPU 2 ranking happens here, so the post-landing
+    obligation to fire the single-case arm-B run and record which reason c1/c2/c3 carry
+    stands as owed-check's, not this node's.
+    """
+    import argparse
+
+    key = "flaky-SM_20261001_034449"
+    slots = slot_labels(key)
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text(json.dumps(_one_case(key)) + "\n", encoding="utf-8")
+    seen: list[list[str]] = []
+
+    async def generate(case):
+        return list(THEORY_SET)
+
+    async def investigate(case, theory):
+        slot = slots[THEORY_SET.index(theory)]
+        if slot == slots[1]:
+            return {"tool": "Task", "tokens": 1_200, "claims": [
+                {"claim": "the retry loop was removed in the refactor",
+                 "citations": []}]}
+        return {"tool": "Task", "tokens": 900, "claims": [
+            {"claim": f"{slot}: the config drifted",
+             "citations": [{"path": "p.py", "line": 1}]}]}
+
+    def rank(query, candidates):
+        seen.append(list(candidates))
+        return [{"index": i, "score": 0.9 - 0.1 * i} for i in range(len(candidates))]
+
+    monkeypatch.setattr(replay, "generate_theories_live", generate)
+    monkeypatch.setattr(replay, "investigate_live", investigate)
+    monkeypatch.setattr(replay, "rank_live", rank)
+    rows_path = tmp_path / "smoke-b4.jsonl"
+    code = asyncio.run(replay.cmd_run(argparse.Namespace(
+        cases=str(cases_path), arms="B", ceiling=99_000, only=[key],
+        rows=str(rows_path))))
+    out = capsys.readouterr().out
+    rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()]
+
+    assert code == 0, (
+        f"cmd_run returned {code}: a theory that cannot cite is no longer a failed arm, "
+        "and a non-zero return is the Oct 18 symptom surviving this change")
+    assert "FAILED" not in out, (
+        f"stdout still reads like the Oct 18 log: {[l for l in out.splitlines() if 'FAILED' in l]}")
+    refused_rows = [r for r in rows if r["kind"] == "refusal"]
+    assert [r["reason"] for r in refused_rows] == [replay.REFUSAL_UNCITABLE_CLAIM], (
+        f"the live route wrote {refused_rows} instead of one uncitable-claim row")
+    assert refused_rows[0]["slot"] == slots[1], refused_rows[0]
+    assert len(seen) == 1 and len(seen[0]) == THEORIES_PER_CASE - 1, (
+        f"the real ranking call was handed {seen[0] if seen else 'nothing'}: GPU 2 must "
+        "see the two citable theories and not the refused one")
+    verdict = [r for r in rows if r["kind"] == "verdict"]
+    assert len(verdict) == 1 and verdict[0]["case_key"] == key, (
+        f"the rows file holds {[r['kind'] for r in rows]}: the case has to be present for "
+        "`report` to count it, which is what the raise used to prevent")
+    assert verdict[0]["chosen_cause"] and verdict[0]["refused"] == [slots[1]], verdict[0]
+    assert replay.score(rows, [_one_case(key)])["arms"]["B"]["n"] == 1, (
+        "the scored denominator still excludes the case the refusal was meant to save")

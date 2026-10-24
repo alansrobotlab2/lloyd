@@ -215,6 +215,19 @@ STOP_MAX_TURNS = "max_turns"
 #: single dispatch that was already over its own turn cap).
 REFUSAL_TURN_CAP = "turn-cap"
 
+#: #3241, by #2985's owed-check ruling 4 ("an uncitable claim becomes a recorded refusal
+#: row (kind: refusal, reason 'uncitable-claim'), the same route"). #2635 drew the line
+#: at "no claims at all" and left this neighbouring condition raising, and the comment
+#: that defended it argued a citation-less claim is a broken instrument rather than a
+#: declined theory — a distinction the live pass priced as a cancelled case, not as a
+#: signal: six `FAILED <case> B: RecordError: theory 'cN' has a claim with no citation`
+#: lines under `~/lloyd-data/eval/2258/` (`run.log:32,36,62,86,88`, `smoke-b3.log:1`),
+#: every one of them a case that had already paid for its other two dispatches and then
+#: disappeared from `report`'s denominator. Same route as `no-claims`; a distinct word
+#: for the same reason the others are distinct — an uncitable claim is a prompting or
+#: schema question, a turn cap is a budget question, a ceiling is a money question.
+REFUSAL_UNCITABLE_CLAIM = "uncitable-claim"
+
 
 class RecordError(Exception):
     """A row that would not prove what the clause says it proves."""
@@ -672,11 +685,79 @@ def empty_claims(row: dict) -> bool:
     fails one check and passes the other gets ranked with no evidence under it, or
     gets a refusal label the record cannot support.
 
-    This is deliberately narrower than "the validator raised". A claim with no
-    citation is a broken instrument, not a declined theory, and still raises.
+    This is deliberately narrower than "the theory produced nothing to rank", which is
+    two conditions and now two classifiers: this one, and `uncitable_claims` for a claim
+    that cannot be cited. #3241 moved the second one off the raise path; this function
+    used to argue a citation-less claim is a broken instrument rather than a declined
+    theory and that the raise was what the next reader needed, and the traffic said
+    otherwise: four cases of it in
+    the Oct 13 pass and two more on Oct 18, six cancelled cases in total, none of them a
+    broken instrument anyone acted on and all of them absent from the denominator that
+    would have shown the arm losing cases it had already paid for. Both refusals are read
+    from these two classifiers BEFORE the validator runs, which is why the validator's
+    remaining raise cannot be reached by a row either classifier describes.
     """
     claims = row.get("claims")
     return not isinstance(claims, list) or not claims
+
+
+def stop_pair(result: dict) -> tuple[Any, int | None]:
+    """The harness's `stop_reason` / `num_turns` as #2807 requires them recorded.
+
+    One read for both refusal branches (#3241), because #2807's whole point is that the
+    pair means something precise: `stop_reason` is `None` when the investigator reported
+    no stop (absence is not evidence of a cap), and `num_turns` is `None` unless the
+    harness reported a number — a string turn count coerced to an int here would put a
+    number on the row that the harness never sent.
+    """
+    stop_reason = result.get("stop_reason") or None
+    reported_turns = result.get("num_turns")
+    return (stop_reason,
+            int(reported_turns) if isinstance(reported_turns, (int, float)) else None)
+
+
+def uncitable_claims(row: dict) -> list[dict]:
+    """The claims in a theory's row that cannot be pointed at anything, with why.
+
+    #3241 (#2985's owed ruling 4). This is the condition `validate_investigation` used to
+    raise on — `not text or not isinstance(cites, list) or not cites` — lifted out of the
+    validator so the caller can refuse the slot as data instead of cancelling the case.
+    It classifies each claim separately rather than answering yes/no because ONE
+    condition covers two shapes, and on the recorded traffic they are not even the same
+    majority: 4 of the 6 live failures carry an empty claim (`no citation: ''`) and 2 a
+    worded claim with `citations: []` (`run.log:36,88`). A row that could not tell them
+    apart would print `''` for most real cases and read as "the model declined to cite"
+    when the model handed back nothing worded — the opposite follow-up. Which shape
+    deserves its own `reason` is a ruling owed-check cannot make until rows exist that
+    distinguish them; naming the shape here is what lets that ruling be measured.
+    """
+    claims = row.get("claims")
+    if not isinstance(claims, list):
+        return []
+    findings: list[dict] = []
+    for claim in claims:
+        text = str((claim or {}).get("claim") or "").strip()
+        cites = (claim or {}).get("citations")
+        if text and isinstance(cites, list) and cites:
+            continue
+        findings.append({"claim": text[:80],
+                         "why": "no claim text" if not text else "no citations"})
+    return findings
+
+
+def uncitable_message(slot: Any, findings: Sequence[dict]) -> str:
+    """The refused theory's own words, and which half of the condition it fell through.
+
+    Every refusal word in this file has meant a different follow-up since #2635, so the
+    detail has to be actionable by itself: the slot, how many claims were affected, what
+    is missing from each, and the first 80 characters of the claim so a reader can tell a
+    truncated restatement from a confident one that simply forgot its citations.
+    """
+    subjects = "; ".join(f"{f['why']} ({f['claim']!r})" for f in findings) or \
+        "no claims classified"
+    return (f"theory {slot!r} returned {len(findings)} claim(s) that cannot be cited"
+            f" — {subjects}. A claim that points at nothing is not evidence to rank, so "
+            "the slot is refused and the rest of the fan-out continues (#3241).")
 
 
 def no_claims_message(slot: Any) -> str:
@@ -754,9 +835,21 @@ def validate_investigation(row: dict) -> list[dict]:
 
     Pienaar's fourth failure class is a sub-agent handing back a prose summary;
     the ranking is only over evidence if the record cannot hold anything else.
-    Since #2635 arm B turns the no-claims raise into a recorded refusal row before
-    it gets here — the theory is not ranked either way, it just no longer cancels
-    the case — while every other refusal this function makes still raises.
+    Since #2635 arm B turns the no-claims raise into a recorded refusal row before it
+    gets here, and since #3241 it does the same for a claim that cannot be cited — by
+    #2985's owed ruling 4 ("an uncitable claim becomes a recorded refusal row (kind:
+    refusal, reason 'uncitable-claim'), the same route"), on the evidence of six cases
+    the raise cancelled outright: `~/lloyd-data/eval/2258/run.log:32,36,62,86,88` and
+    `smoke-b3.log:1`, each one a case that had already paid for its other two
+    dispatches and then vanished from `report`'s denominator.
+
+    So the return is the CITABLE SUBSET, not the row: a mixed row gives back the claims
+    that do point somewhere, and unevidenced text cannot enter the evidence map even if a
+    future caller forgets to consult `uncitable_claims` first. Whether the SLOT is refused
+    over it is `run_case_b`'s decision — a theory with one citable claim and one uncitable
+    one answered, and this function has no business deciding otherwise. The empty-row
+    raise stands as arm B's backstop: `cmd_run` is this function's only caller, arm A
+    validates separately (#2984), and #2635's refusal route reads `empty_claims` itself.
     """
     if empty_claims(row):
         raise RecordError(no_claims_message(row.get("slot")))
@@ -765,8 +858,7 @@ def validate_investigation(row: dict) -> list[dict]:
         text = str((claim or {}).get("claim") or "").strip()
         cites = (claim or {}).get("citations")
         if not text or not isinstance(cites, list) or not cites:
-            raise RecordError(f"theory {row.get('slot')!r} has a claim with no citation: "
-                              f"{str(text)[:80]!r}")
+            continue  # #3241: classified by `uncitable_claims`, refused by `run_case_b`
         out.append({"claim": text,
                     "citations": [c if isinstance(c, dict) else {"path": str(c)}
                                   for c in cites]})
@@ -836,17 +928,16 @@ def rank_theories(case: dict, evidence: dict[str, list[dict]], *,
     rotation in `slot_labels` only moves the prior if the position moves with
     the label.
 
-    `refused` (#2635) names the slots recorded with the zero-claim reason — a
-    theory whose investigation handed back prose instead of citable evidence.
-    The evidence map already tolerates their absence (a slot missing from
-    `evidence` simply ranks as empty), so the only thing to change is who is
-    handed to the engine at all: a candidate with no evidence under it is a
-    slot whose only content is its own label, which is precisely what
-    `validate_investigation` used to raise to keep out of the ranking. The
-    exclusion is of REFUSED slots only. A slot the token ceiling cut off before
-    it was dispatched stays in the list, because the ceiling row already says
-    what happened to it and #2258 pinned that fan-out shape; #2635 is about a
-    theory that ran and answered nothing.
+    `refused` (#2635, widened by #3241) names the slots the caller recorded a refusal for:
+    a theory that handed back prose instead of claims at all (`no-claims` / `turn-cap`),
+    and one whose claims could not be cited (`uncitable-claim`). Both classes reach here
+    with nothing in the evidence map for them, so the only thing to decide is who is handed
+    to the engine at all — and it is not nothing: a candidate with no evidence under it is a
+    slot whose only content is its own label, which is exactly the ranking #2250 measured
+    and this file exists to stop. The exclusion is of REFUSED slots only. A slot the token
+    ceiling cut off before it was dispatched stays in the list, because the ceiling row
+    already says what happened to it and #2258 pinned that fan-out shape; the refused
+    classes are about a theory that ran and could not be pointed at anything.
     """
     by_slot = {s: (evidence.get(s) or []) for s in slots}
     pairs = sorted((item for item in by_slot.items() if item[0] not in set(refused)),
@@ -924,6 +1015,14 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
     nothing — so case 1 of a 21-key pass killed the remaining 20 and wrote no
     `verdict` row for itself, which made it invisible to `report`'s denominator
     rather than merely unscored.
+
+    #3241 brought a fourth refusal word into that route, in the same shape and for the
+    same reason: `uncitable-claim`, for a theory whose claims name no file and line, which
+    until then was the one answer that still cancelled a case. A max_turns stop still
+    outranks it — #2807's precedence, since a run that never reached a finalisable answer
+    is a budget question and not a citation question — so the words together are
+    `token-ceiling` (never dispatched), `turn-cap` (stopped by turns), `no-claims` (ran,
+    answered nothing) and `uncitable-claim` (answered, pointed at nothing).
     """
     case_key = case["key"]
     seq = 0
@@ -969,10 +1068,7 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
             # made the truncation question unanswerable from the Oct 13 pass. An
             # investigator that reports no stop leaves both cells null and keeps
             # `no-claims` — absence is not evidence of a cap.
-            stop_reason = result.get("stop_reason") or None
-            reported_turns = result.get("num_turns")
-            num_turns = (int(reported_turns)
-                         if isinstance(reported_turns, (int, float)) else None)
+            stop_reason, num_turns = stop_pair(result)
             turn_capped = stop_reason == STOP_MAX_TURNS
             refused.append(entry["slot"])
             writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
@@ -984,10 +1080,39 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
                            "detail": turn_cap_message(entry["slot"], num_turns)
                            if turn_capped else no_claims_message(entry["slot"])})
             continue
-        # Everything the validator still refuses — a claim with no citation is a
-        # broken instrument rather than a declined theory, and `validate_theories`
-        # still refuses a non-disjoint theory set — keeps raising, and `cmd_run`
-        # now contains it at the arm instead of letting it take the pass.
+        uncitable = uncitable_claims(probed)
+        if uncitable:
+            # #3241, by #2985's owed ruling 4 — the same route as above, decided the same
+            # way: the slot joins `refused` so nothing unevidenced is ranked, its tokens go
+            # on the row, and the other two theories finish the case. What the raise bought
+            # in exchange was a `FAILED <case> B` line in a log and no verdict row, four
+            # times on Oct 13 and twice more on Oct 18.
+            #
+            # A max_turns stop still outranks this, and for the reason #2807 filed: the
+            # harness's own word that the run never reached a finalisable answer has a
+            # different follow-up (a bigger turn budget) from a model that finished and
+            # forgot to cite, and booking the wrong one is what made the Oct 13 pass's
+            # truncation question unanswerable. Such a row is the harness contract's
+            # contradiction — `FINALIZABLE_STOP_REASONS` means a capped run has no claims
+            # at all, which the branch above already caught — so it is labelled for the
+            # stop and keeps its claim text in the detail either way.
+            stop_reason, num_turns = stop_pair(result)
+            turn_capped = stop_reason == STOP_MAX_TURNS
+            refused.append(entry["slot"])
+            writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
+                           "arm": ARM_B, "kind": "refusal", "ts": _now(),
+                           "slot": entry["slot"], "tokens": tokens,
+                           "stop_reason": stop_reason, "num_turns": num_turns,
+                           "reason": REFUSAL_TURN_CAP if turn_capped
+                           else REFUSAL_UNCITABLE_CLAIM,
+                           "detail": turn_cap_message(entry["slot"], num_turns)
+                           if turn_capped
+                           else uncitable_message(entry["slot"], uncitable)})
+            continue
+        # What still raises is what no classifier describes: a non-disjoint theory set
+        # (`validate_theories`) and an empty claims list reaching a caller outside the
+        # fan-out's refusal route. `cmd_run` contains those at the arm rather than
+        # letting one take the pass, which is #2635's own containment argument.
         claims = validate_investigation(probed)
         evidence[entry["slot"]] = claims
         writer.append({"seq": next_seq(), "run_id": run_id, "case_key": case_key,
