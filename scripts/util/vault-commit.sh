@@ -128,6 +128,18 @@ done
 
 VAULT="${VAULT_DIR:-$HOME/obsidian}"
 
+# The interpreter and the script's own directory, for the rungs below. Both used to
+# live next to the first rung; the SQLite sidecar rung (#3236) has to run before the
+# index readback — so that a path this wrapper refused is absent from the commit body
+# and from the #1070 unattributed list, not merely absent from the commit — and a
+# rung cannot define its own interpreter after the point it is called. Same
+# resolution, same fallback, one place: the four rungs now read one `$PY`.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${LLOYD_PYTHON:-$SCRIPT_DIR/../../.venvs/lloyd/bin/python}"
+if [ ! -x "$PY" ]; then
+    PY="$(command -v python3 || true)"
+fi
+
 # Job identity (#668). A commit is attributed to the job that wrote it —
 # `lloyd-<job> <<job>@jobs.lloyd.local>` plus a `Job: <job>` trailer — so
 # `git log` can answer "which job wrote this" without reading the subject.
@@ -299,6 +311,68 @@ else
     git add -A -- "${CHANGED[@]}"
 fi
 
+# 5d. #3236: a live SQLite store's companion files never enter this commit — read
+# out of the INDEX, then unstaged and named. The vault's `.gitignore` pair from
+# #3230 covers `backlog/data/*.db-wal` / `-shm` and `*.sqlite*-wal` / `-shm`, and
+# a pattern list is a hand-list over an open set (the 2026-09-20 class rule), so
+# it misses two ways that are both measurable in the live vault today: the
+# rollback-journal family has no pattern at all (`git check-ignore -v
+# backlog/data/usage.db-journal` exits 1 where the same probe on `usage.db-wal`
+# exits 0 at `.gitignore:48`), and both patterns are anchored at `backlog/data/`
+# while store primaries live elsewhere too (`knowledge/graph.db`). And an ignore
+# file has no authority over a path that is already in the index, so one
+# `git add -f` by any writer commits a WAL regardless of what it matches. Why a
+# rung rather than a tidier pattern: committing a DB next to a copy of its own
+# WAL and SHM yields a snapshot whose restoration against any other copy of that
+# store is a corruption recipe, and the sidecar is not what the commit was for.
+#
+# Report-only, on the ruling recorded at #3248 / #1969 / #2381 below and for the
+# same reason: this wrapper commits other writers' state too, so one job's stray
+# WAL must not strand every later job's snapshot — #2245's ~20 minutes of stranded
+# task #4 commits is the scar. So: drop the companion from the index with
+# `git reset -q --`, which leaves its bytes on disk (deleting a live store's WAL
+# would be the destructive version of this fix), name it on stderr with its
+# primary store and the `git rm --cached` that would untrack it, and commit the
+# rest. The matcher is `sqlite_sidecar_findings.py`, sitting next to this script and
+# imported by name, keyed on the companion suffixes ONLY: 33 tracked store witnesses
+# under `backlog/data/` (`*.db` / `*.sqlite` / `*.sqlite3`, `kg.sqlite` among them)
+# are what this `git add` exists to archive, so a rule keyed on
+# `*.db` / `*.sqlite*` would hide a witness. That module is also imported by the
+# other door — `scripts/automod/vault_round.py`'s `land()`, which has its own
+# `git add` and `git commit` — because #2468 is what guarding one door and
+# calling it coverage costs. `--unstage` performs the drop inside this one call;
+# the module writes its refusals to stderr, which is this wrapper's stderr, and
+# its exit code is informational only (1 = at least one companion found), so it
+# is bounded by `set +e` and never decides whether the commit happens. The shape of
+# the call — a rung beside the script, its SKIPPED line if it is not on disk, its
+# nonzero exit swallowed — is the three existing pre-flight rungs below, and it
+# runs BEFORE the index readback so the commit body and the #1070 unattributed
+# list never name a path this wrapper decided not to take.
+SIDECAR_RUNG="$SCRIPT_DIR/sqlite_sidecar_findings.py"
+if [ ! -f "$SIDECAR_RUNG" ]; then
+    echo "vault-commit.sh: SQLite sidecar CHECK SKIPPED (missing $SIDECAR_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: SQLite sidecar CHECK SKIPPED (no python interpreter)" >&2
+else
+    SIDECAR_ARGS=(--vault "$VAULT" --unstage)
+    if [ "${#PATHSPEC[@]}" -gt 0 ]; then
+        for P in "${PATHSPEC[@]}"; do SIDECAR_ARGS+=(--path "$P"); done
+    fi
+    set +e
+    "$PY" "$SIDECAR_RUNG" "${SIDECAR_ARGS[@]}"
+    SIDECAR_RC=$?
+    set -e
+    # Exit 1 IS the refusal: the module returns 1 when it found a companion, so a
+    # warning there would put a scary line in the log of every run the guard caught
+    # — and only the caught runs. Anything past 1 is the rung itself failing
+    # (argparse's 2, an uncaught exception's 1 after a traceback, an unreadable
+    # vault), which is worth saying because in that case nothing was unstaged and
+    # the commit below will take the WAL with it.
+    if [ "$SIDECAR_RC" -gt 1 ]; then
+        echo "vault-commit.sh: SQLite sidecar CHECK FAILED (exit $SIDECAR_RC); committing whatever the index holds" >&2
+    fi
+fi
+
 # Read the answer back off the index rather than trusting the list above: `git
 # commit` commits the index, so anything another writer left staged is in this
 # commit whether this invocation named it or not, and the message has to account
@@ -396,12 +470,7 @@ fi
 # the task ran nothing for ~30 h. Read only the index, so the finding does not
 # depend on which job is committing. REPORT ONLY: a job claiming its own task
 # (`up_next` -> `in_progress`) is a legitimate write, so nothing here blocks.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNG="$SCRIPT_DIR/autonomy_status_findings.py"
-PY="${LLOYD_PYTHON:-$SCRIPT_DIR/../../.venvs/lloyd/bin/python}"
-if [ ! -x "$PY" ]; then
-    PY="$(command -v python3 || true)"
-fi
 if [ ! -f "$RUNG" ]; then
     echo "vault-commit.sh: autonomy-status CHECK SKIPPED (missing $RUNG)" >&2
 elif [ -z "$PY" ]; then

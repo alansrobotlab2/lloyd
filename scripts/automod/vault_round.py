@@ -659,6 +659,26 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
 # Module scope, not function-local, because the annotations below name the type.
 import datetime
 
+# #3236: the SQLite-sidecar matcher, which BOTH of Lloyd's commit doors read — here,
+# and `scripts/util/vault-commit.sh` (as a subprocess; that door is bash and has no
+# interpreter to share). Same placement rule as the `import datetime` immediately
+# above: module scope, because `land()` reads it on the live write path and the
+# by-path fallback below has to bind a module-level name either way, and below
+# `CONTRACT_PATHS`, because the note cites `vault_round.py:237` by line number and
+# `test_prompt_surface_budget.py` fails a round that moves it. `scripts/util/`
+# carries no `__init__.py`, so the plain import resolves it as a namespace portion
+# (the way `witness_fixture_findings` is read at `land()`'s #2381 rung); the by-path
+# load is the fallback, because an ImportError escaping `land()` would be a land
+# that cannot land rather than a rung that declined.
+try:
+    from scripts.util import sqlite_sidecar_findings as SCF
+except ImportError:  # pragma: no cover - only if the namespace portion fails
+    import importlib.util as _ilu
+    _scf_path = Path(__file__).resolve().parents[1] / "util" / "sqlite_sidecar_findings.py"
+    _scf_spec = _ilu.spec_from_file_location("sqlite_sidecar_findings", _scf_path)
+    SCF = _ilu.module_from_spec(_scf_spec)
+    _scf_spec.loader.exec_module(SCF)  # type: ignore[union-attr]
+
 #: #2437/#3146: the four front-matter fields a run writes into its own task file —
 #: `app/autonomy.py` stamps `last_run`/`last_attempt`/`updated` at every completion
 #: and `next_run` from `_next_run_after`. None is in `SCHEDULE_STATE_FIELDS`: that
@@ -1856,6 +1876,46 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         add = _git("add", "-A", "--", *stage)
         if add.returncode != 0:
             raise VaultRoundError(f"git add failed: {add.stderr.strip()[:300]}")
+    # #3236: a live SQLite store's companion files never enter THIS commit either.
+    # The other door got its rung in the same change, because this function has its
+    # own `git add` and its own `git commit` and never calls `vault-commit.sh`, and
+    # #2468 is what guarding one of two doors and calling it coverage costs. The
+    # rule is not restated here: `scripts/util/sqlite_sidecar_findings.py` is the
+    # one matcher both doors read, keyed on the companion suffixes (`-wal`, `-shm`,
+    # `-journal`) and never on `*.db` / `*.sqlite` / `*.sqlite3`, because a witness
+    # copy of a store's PRIMARY is exactly what a land is often asked to archive
+    # (33 of them are tracked under `backlog/data/`, and #3223 asked for a 34th on
+    # this very item's sibling). The read is the INDEX, not `.gitignore`: the
+    # `backlog/data/*.db-wal` pair #3230 shipped has no journal pattern, does not
+    # reach a primary outside `backlog/data/` (`knowledge/graph.db`), and has no
+    # authority at all over a path some other writer already force-added.
+    #
+    # Refuse-and-report, never refuse-and-abort, on the ruling
+    # `vault-commit.sh:481-488` records (`:412-419` before this item's own wrapper
+    # rung moved it): this vault is one shared tree, so one caller's
+    # stray WAL must not strand another's note. The companion comes out of the index
+    # with `git reset -q --`, which leaves its bytes on disk — deleting the WAL of a
+    # store that has it open would be the corruption this guard exists to prevent.
+    # Placement is load-bearing in both directions: it is after the `git add` so a
+    # companion the caller NAMED is already in the index by the time it is read, and
+    # before the `--cached --quiet` no-change check below so that check sees the
+    # shrunken index and a land asked for nothing but a WAL takes the existing
+    # ledgered `ok: False` refusal instead of reaching `git commit` with nothing
+    # staged. It is also before `_witness_findings()`, whose `index_blobs` reads the
+    # same index: the refused path is not in it, which is the correct answer.
+    sidecars = SCF.refuse_staged(str(VAULT), norm)
+    # One formatted line per companion, used three times: printed here, folded into
+    # the no-change refusal below, and named in the ok row's reason. Formatting it
+    # once is what keeps the stderr a caller reads and the ledger a week later from
+    # disagreeing about what was refused.
+    refused_reasons = [SCF.refusal_line(rec["path"], str(VAULT)) for rec in sidecars]
+    for line in refused_reasons:
+        # `land()` otherwise returns dicts and raises; the refusal is the one thing
+        # it says out loud, because a caller reading only its dict sees the path
+        # missing from `committed` with no reason attached. The ledger row below
+        # carries the same list, and a tool response is not a log.
+        print(line, file=sys.stderr, flush=True)
+    refused = [rec["path"] for rec in sidecars]
     if _git("diff", "--cached", "--quiet").returncode == 0:
         # Every other refusal on this path — validation, code agreement — writes an
         # `ok: False` row before it raises, and this one wrote nothing at all: the
@@ -1866,15 +1926,31 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # (#2175 clause 3).
         held = _held_by_head(norm)
         text = _no_change_refusal(norm, held)
+        if refused:
+            # The #2175 sentence explains a path that EQUALS HEAD; it does not
+            # explain a path this function pulled out of the index on purpose, and a
+            # caller handed only that sentence would go looking for a stale copy of
+            # its own file. The refusal line — path, primary store, the `git rm
+            # --cached` that would untrack it — leads, because it is the actionable
+            # half, and the #2175 text follows unchanged for the paths it does
+            # explain.
+            text = " | ".join([*refused_reasons, text])
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
                         "paths": norm, "errors": [text],
                         # `commit` stays absent: this land made no commit. What HEAD
                         # holds is in `held_by`, keyed path -> sha, so a reader cannot
                         # mistake someone else's sha for this land's output.
                         "held_by": held,
+                        # Named separately because a land that staged NOTHING after
+                        # #3236 refused its only path reads differently from one whose
+                        # bytes merely equal HEAD: the caller has to be told the path
+                        # was refused, not that it was unchanged.
+                        **({"sidecar_refusals": refused} if refused else {}),
                         "review": "skipped",
                         "review_reason": "nothing staged: HEAD already holds the "
-                                         "named paths, or they were never changed",
+                                         "named paths, or they were never changed"
+                                         + (" (after refusing the SQLite sidecar(s) "
+                                            "listed in sidecar_refusals)" if refused else ""),
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(text)
     # The #2381 witness rung, on the door #2381 did not rung it on (#2520). Exactly
@@ -1900,8 +1976,18 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     committed = _committed_paths(sha)
     missing = sorted(set(norm) - committed)
     landing_verdict = "met" if not missing else "unmet"
+    # A refused sidecar is a path this land was asked for and did NOT commit, so it
+    # lands in `missing` and the verdict is `unmet` — which is the derived answer,
+    # not a bug: a clause that names a WAL is a clause asking for a WAL. The note
+    # says WHY, because `missing` alone reads as "the diff silently dropped it", and
+    # #425's whole lesson was that this note has to distinguish the two.
     landing_note = (f"named paths not in this commit: {', '.join(missing[:5])}"
                     if missing else "")
+    if missing and refused:
+        landed_refusals = sorted(set(refused) & set(missing))
+        if landed_refusals:
+            landing_note += (" — refused as SQLite sidecar(s); the primary store "
+                             "stays commit-able, the companion is not")
     landing_rows = [{"clause": i, "verdict": landing_verdict, "commit": sha,
                      **({"note": landing_note} if missing else {})}
                     for i in sorted(landing)]
@@ -1939,6 +2025,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     **({"session_id": session_id} if session_id else {}),
                     **({"skill_gate": skill_gate} if skill_gate else {}),
                     **({"skill_body": skill_body} if skill_body else {}),
+                    # #3236. A companion the caller named is absent from `commit` by
+                    # this function's decision, and nothing else in this row says so:
+                    # `paths` still lists it, `landing_clauses` says unmet. The ledger
+                    # row is the durable copy, because this door otherwise prints
+                    # nothing and the stderr line goes wherever the caller's stdout
+                    # goes — which for an autonomy task is its run record, once.
+                    **({"sidecar_refusals": refused} if refused else {}),
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "guards": _guards_row(guards),
@@ -1949,6 +2042,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
             # caused it and not in a ledger a week later.
             **({"witness_findings": witness} if witness else {}),
             **({"review_findings": review_findings} if review_findings else {}),
+            **({"sidecar_refusals": refused} if refused else {}),
             **({"skill_gate": skill_gate} if skill_gate else {}),
             **({"skill_body": skill_body} if skill_body else {})}
 

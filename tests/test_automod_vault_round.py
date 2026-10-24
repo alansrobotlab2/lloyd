@@ -8535,3 +8535,104 @@ def test_an_unmet_clause_still_refuses_a_vault_grading_beside_an_honesty_entry(v
     assert "test honesty" not in findings.split(";")[0], findings
     assert "advisory tests/test_system_health_check_vault_sync.py:1608" in findings, findings
     assert [c["verdict"] for c in clauses] == ["met", "unmet"], clauses
+
+
+# ---------------------------------------------------------------------------
+# #3236 clause 4 — the SECOND commit door.
+#
+# `land()` has its own `git add` and its own `git commit` and never calls
+# `scripts/util/vault-commit.sh`, so the SQLite-sidecar refusal the wrapper gained
+# had to be wired here as well or the guard would have covered one of two doors.
+# #2468 is the price of exactly that shape: the witness rung shipped on the wrapper
+# and an `automod_vault_land` commit slipped past it. Both doors read one matcher —
+# `scripts/util/sqlite_sidecar_findings.py` — and the third node below is the pin
+# that keeps them from drifting into two rulebooks.
+# ---------------------------------------------------------------------------
+
+
+def _head_paths(vault):
+    out = git(vault, "show", "--name-only", "--format=").stdout
+    return [l for l in out.splitlines() if l.strip()]
+
+
+def _stage(vault, rel, blob=b"BYTES"):
+    p = vault / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(blob)
+    return rel
+
+
+def test_land_refuses_a_sqlite_sidecar_it_was_asked_to_commit(vault, capsys):
+    """A WAL named as the land's own path is refused, named, and not committed."""
+    primary = _stage(vault, "backlog/data/kg.sqlite", b"PRIMARY")
+    sidecar = _stage(vault, "backlog/data/kg.sqlite-wal", b"WAL")
+    with pytest.raises(V.VaultRoundError) as e:
+        V.land([sidecar], "land the store's WAL")
+    msg = str(e.value)
+    assert sidecar in msg and primary in msg, msg
+    assert "git rm --cached" in msg, msg
+    assert "git rm --cached backlog/data/kg.sqlite-wal" in msg, msg
+    # The refusal is spoken where a caller can read it, not only raised.
+    err = capsys.readouterr().err
+    assert sidecar in err and "sidecar REFUSED" in err, err
+    # Nothing was committed: the WAL was the only path, and refusing it leaves an
+    # empty index — the #2175 no-change row, which reports itself, not a silent 0.
+    assert git(vault, "rev-parse", "--verify", "HEAD~1").returncode != 0
+    assert sidecar not in _head_paths(vault)
+    # The file survives: refusing a WAL into a commit is not deleting the store's
+    # live journal out from under the process that owns it.
+    assert (vault / sidecar).read_bytes() == b"WAL"
+
+
+def test_a_vault_round_commit_drops_a_sidecar_another_writer_staged(vault, capsys):
+    """The open set at this door too: an unignored `-journal` sitting in the index
+    is absent from the round's commit, while the note it rode in on still lands."""
+    journal = _stage(vault, "knowledge/graph.db-journal", b"JOURNAL")
+    git(vault, "add", "-f", "--", journal)          # as another writer would
+    note = _stage(vault, "knowledge/note.md", b"# note\n")
+    out = V.land([note], "land a note beside a stranded journal")
+    assert out["ok"] is True, out
+    committed = _head_paths(vault)
+    assert note in committed, committed
+    assert journal not in committed, committed
+    err = capsys.readouterr().err
+    assert "sidecar REFUSED" in err and journal in err, err
+    assert "git rm --cached knowledge/graph.db-journal" in err, err
+    # Ledgered, not just printed: a door that prints to a stream nobody re-reads has
+    # no durable record of the path it decided not to take.
+    ev = _events("vault_land")[-1]
+    assert ev["sidecar_refusals"] == [journal], ev
+    # The refusal is recorded OUTSIDE `paths`: the caller never named the journal,
+    # so a reader diffing `paths` against the commit would find nothing missing and
+    # never learn a WAL was sitting in the index and was pulled.
+    assert ev["paths"] == [note], ev
+    assert journal not in _head_paths(vault)
+
+
+def test_land_and_the_wrapper_read_one_matcher_module():
+    """The two doors must not grow two rulebooks.
+
+    `vault-commit.sh` is bash and cannot import, so it shells out to the module;
+    `land()` imports it. Both are pinned to the SAME file: if this assertion ever
+    fails, someone duplicated the suffix list, which is the #2468 failure with one
+    more step.
+    """
+    assert V.SCF.__file__ == str(
+        Path(V.__file__).resolve().parents[1] / "util" / "sqlite_sidecar_findings.py")
+    assert V.SCF.COMPANION_SUFFIXES == ("-wal", "-shm", "-journal")
+    assert V.SCF.PRIMARY_SUFFIXES == (".db", ".sqlite", ".sqlite3")
+
+
+def test_a_store_primary_still_lands_through_this_door(vault):
+    """#3236's constraint on the fix shape, at the door that does the archiving.
+
+    A witness copy of a store's PRIMARY file is wanted in the index — 33 tracked
+    `backlog/data/` witnesses today, #3223 asking for another — so a refusal that
+    keyed on `*.db` / `*.sqlite*` rather than on the companion suffixes would hide
+    a witness from the very `git add` meant to archive it.
+    """
+    primary = _stage(vault, "backlog/data/kg.sqlite", b"PRIMARY-BYTES")
+    out = V.land([primary], "archive a store witness")
+    assert out["ok"] is True, out
+    assert primary in _head_paths(vault), _head_paths(vault)
+    assert "sidecar_refusals" not in out, out

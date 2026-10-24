@@ -1381,19 +1381,29 @@ VAULT_COMMIT_SH = (Path(__file__).resolve().parents[1]
                    / "scripts" / "util" / "vault-commit.sh")
 
 
-def _real_pre_flight_sweep(repo: Path) -> subprocess.CompletedProcess:
+def _real_pre_flight_sweep(repo: Path, *, sidecar_refusal: str = "on") -> subprocess.CompletedProcess:
     """Run the actual sweep producer over `repo`, the way a pre-flight step does:
     one argument, no ` -- <path>` tail, so the wrapper sweeps the whole tree. The
     env is the minimal one `test_vault_commit_attribution.py` uses for the same
     script — `VAULT_DIR` for the target, no HOME so no `~/.gitconfig` leaks an
     identity, and `LLOYD_PYTHON` naming this interpreter for the rungs the wrapper
-    shells out to."""
+    shells out to.
+
+    `sidecar_refusal="off"` stands the #3236 suffix guard down for a CONTROL run
+    that has to show the leak: those nodes delete the ignore lines and require the
+    WAL+SHM to reach the commit, and the guard refuses the companion pair whatever
+    the ignore file says, so routed through it they would refuse for the very reason
+    the node exists to reproduce. The default is production behaviour, and every
+    MAIN run in this file leaves it at the default.
+    """
     assert VAULT_COMMIT_SH.exists(), f"the sweep producer moved: {VAULT_COMMIT_SH}"
+    env = {"VAULT_DIR": str(repo), "PATH": "/usr/bin:/bin:/usr/local/bin",
+           "LLOYD_PYTHON": sys.executable}
+    if sidecar_refusal == "off":
+        env["LLOYD_VAULT_SIDECAR_REFUSAL"] = "off"
     return subprocess.run(
         ["bash", str(VAULT_COMMIT_SH), "autonomy-data-pipeline: pre-flight 2026-10-18"],
-        capture_output=True, text=True, timeout=240, cwd=str(repo),
-        env={"VAULT_DIR": str(repo), "PATH": "/usr/bin:/bin:/usr/local/bin",
-             "LLOYD_PYTHON": sys.executable})
+        capture_output=True, text=True, timeout=240, cwd=str(repo), env=env)
 
 
 def test_the_real_sweep_producer_cannot_re_admit_the_sidecars_it_committed_once(tmp_path):
@@ -1473,7 +1483,7 @@ def test_the_real_sweep_producer_cannot_re_admit_the_sidecars_it_committed_once(
                                                    encoding="utf-8")
     (data / "usage.db-wal").write_bytes(b"\x75\x7a\x77\x01" + b"\x00" * 8188)
     (data / "usage.db-shm").write_bytes(b"\x00" * 32768)
-    bare = _real_pre_flight_sweep(repo)
+    bare = _real_pre_flight_sweep(repo, sidecar_refusal="off")
     assert bare.returncode == 0, (bare.stdout[-400:], bare.stderr[-400:])
     control = [ln for ln in _git_ok(repo, "show", "--format=", "--name-only",
                                     "HEAD").split("\n") if ln.strip()]
@@ -3292,7 +3302,7 @@ def test_the_sqlite_sidecar_pair_holds_a_removal_against_the_next_sweep(tmp_path
         f"#2960's pair matched the `.sqlite` pair, which contradicts the leak this "
         f"node replays: {not_matched.stdout!r}")
 
-    leaked = _real_pre_flight_sweep(repo)
+    leaked = _real_pre_flight_sweep(repo, sidecar_refusal="off")
     assert leaked.returncode == 0, (
         f"the control sweep did not even run: {leaked.stderr[-400:]}")
     tracked = _git_ok(repo, "ls-files", "--", f"{d}/kg.sqlite-wal",
