@@ -201,6 +201,56 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # tests/test_automod_spec.py's #3162 section pins both halves, including the
     # comment you are reading.
     "agent-services/scripts/qmd-watcher.sh",
+    # #3258 / #3252 (2026-10-24): the shipped end-of-turn detector — three verbatim
+    # paths (the fp32 ONNX, plus the model's Apache-2.0 `LICENSE` and `NOTICE`) and NOT
+    # the directory. The defect this admits a fix for is a clone that cannot boot the
+    # voice worker: the shipped config names `models/turn-1-mini/onnx/turn-1-mini.step.onnx`,
+    # that file is ignored rather than tracked (`git check-ignore -v` resolves it to
+    # `agent-services/.gitignore:68`, the rule `models/`), and `build_turn_detector`
+    # raises `RuntimeError` when it is absent with no `try` around its call site — so
+    # `lloyd-agent-worker` dies at import of the worker manager on any machine that did
+    # not fetch it out of band. #3252's route is to commit those three bytes, and its
+    # triage recorded the path as landable because it appears in neither
+    # `PROTECTED_GLOBS` nor `DENIED_GLOBS`. That premise was false and this entry is
+    # where it stays false: `ALLOWED_GLOBS` is deny-by-default, so a path in no tuple at
+    # all is `unlisted` and rung 0 refuses `unlisted` — measured at this round's base,
+    # `classify` returned `unlisted` for all three and `check_scope` refused them as
+    # `paths outside the writable set`. Two corrections that matter to the next reader,
+    # because both were repeated in prose before anyone measured them: the nested
+    # `agent-services/.gitignore` is `unlisted`, NOT `denied` — `DENIED_GLOBS` holds the
+    # verbatim root name `.gitignore` and `_match` is whole-path `fnmatch` with no
+    # basename component — so it is reachable by a future verbatim grant rather than
+    # permanently walled off; and committing the bytes past the ignore rule is a
+    # separate question from this one, which only decides whether a round may put them
+    # in a diff at all (whether +21.8 MB of weights is the right route at all, against
+    # fetching them from the model's public source, sits on #3252's owed list).
+    # What is NOT admitted is the directory, and here the unwritten collateral is bytes
+    # rather than a script: `agent-services/models/turn-1-mini/**` would also reach
+    # `onnx/turn-1-mini.step.int8.onnx`, `config.json` and `SHA256SUMS` — three files
+    # that sit on this disk untracked and unnamed, the int8 sibling not the model any
+    # config key reads — and a `**` is by definition the #1376 clause 1 violation, since
+    # it stops naming any file it reaches. The wider tree is the same argument with a
+    # bigger denominator: `git ls-files agent-services/models/` is seven files today
+    # (six `.onnx` weights and a `SOURCE` note, five of them the acoustic weights #1376
+    # clause 2 rails) and `agent-services/models/**` reaches all seven, because
+    # `fnmatch`'s `*` crosses `/`, plus every fetched model directory sitting untracked
+    # on this disk — `smart-turn/`, `campplus/`, `parakeet-tdt-v3/`,
+    # `nemo-streaming-480ms/`. #3258's item text asserted that spelling also covers
+    # `agent-services/llm/models/`, the local LLM weight dump, and that is false as
+    # written: `_match` anchors at the repo root and skips no path segment, so
+    # `agent-services/models/**` cannot reach `agent-services/llm/models/…`. Keep the
+    # conclusion and drop the comfort, because the spelling that does reach the dump is
+    # one `**` away — `**/models/**` admits it — and the dump is the worst collateral in
+    # the area precisely because it has no tracked weight for a rail to key on: exactly
+    # one file is tracked under `agent-services/llm/` (`super_v3_reasoning_parser.py`)
+    # against 188 GB of GGUF in the directory. tests/test_automod_spec.py's #3258 section
+    # pins both spellings, including the comment you are reading, and pins that these
+    # three paths are still ABSENT from `git ls-files` after this commit: the grant binds
+    # for the round after the one that writes it, because rung 0 grades with the `spec`
+    # the detached gate process imported from the live tree.
+    "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx",
+    "agent-services/models/turn-1-mini/LICENSE",
+    "agent-services/models/turn-1-mini/NOTICE",
     "web/src/**",
     "web/index.html",
     "web/public/**",

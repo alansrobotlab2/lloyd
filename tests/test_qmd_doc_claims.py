@@ -589,8 +589,23 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
         "no repository")
 
     spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
-    denied = spec.split("DENIED_GLOBS", 1)[1].split(")", 1)[0]
-    assert '".gitignore"' in denied, (
+    # Slice from the DECLARATION, not from the first mention of the name. Those were the
+    # same line until #3258 admitted three `agent-services/models/turn-1-mini/**` paths
+    # into `ALLOWED_GLOBS` and recorded, inside that block's comment, that
+    # `agent-services/.gitignore` is `unlisted` rather than denied — a sentence naming
+    # `DENIED_GLOBS` about fifty-eight lines before the tuple. An unanchored split then
+    # started inside that comment and stopped at the first `)` in it, so this rail graded
+    # prose about the denied list instead of the denied list, and refused a diff that
+    # touched neither `.gitignore` nor any entry of it. A comment explaining the
+    # deny-by-default trap is the exact thing `ALLOWED_GLOBS` needs, so the matcher moved.
+    _, found, tail = spec.partition("DENIED_GLOBS: tuple[str, ...] = (")
+    assert found, (
+        "scripts/automod/spec.py no longer declares the denied tuple with that spelling, "
+        "so there is nothing here to slice: re-point this node at the real declaration "
+        "rather than dropping the check — and do not read the assertion below as a verdict "
+        "on the denied list, because a node that cannot find its own input has no such view")
+    denied = tail.split(")", 1)[0]
+    assert denied.lstrip().startswith('"') and '".gitignore"' in denied, (
         "the round's scope check no longer refuses `.gitignore` outright. That refusal is "
         "what makes 'no ignore file was edited to admit these bytes' a standing property "
         "rather than a promise about this one diff: both negations above are pre-existing "

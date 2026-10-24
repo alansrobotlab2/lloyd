@@ -795,8 +795,17 @@ AGENT_SERVICES_GLOB_PROBES: tuple[str, ...] = (
     "agent-services/models/wakeword/probe.onnx",
 )
 
-#: The acoustic weights themselves, all tracked
-#: (`git ls-files agent-services/models` -> 6 files, these 5 plus a SOURCE note).
+#: Five of the acoustic weights, all tracked. Not the whole tracked model tree, and this
+#: line used to claim it was by saying `git ls-files agent-services/models` prints 6: that
+#: command prints 7 at this round's base — these five, `wakeword/stop/lloyd_stop.onnx` (a
+#: sixth weight no name in this file mentions) and `silero-vad/SOURCE`, a text note.
+#: What keeps the unlisted sixth weight from being a blind spot is
+#: `test_the_acoustic_weight_rail_covers_every_tracked_model_file`: it asserts this tuple is
+#: a subset of the tracked tree, and that the writable model set is exactly the #3258
+#: grant's tracked members — empty in this tree, the three once #3252 commits the bytes. An
+#: unnamed weight is therefore refused the moment a grant or a wildcard makes it writable,
+#: which is the only way a round could edit it at all.
+#:
 #: Named apart from the probes because they are the one `agent-services/**`
 #: content whose bad edit no rung can see: rung 0 matches paths, the drill boots
 #: the stack, and the eval axis is retrieval — none of the three scores whether a
@@ -809,6 +818,64 @@ AGENT_SERVICES_ACOUSTIC_WEIGHTS: tuple[str, ...] = (
     "agent-services/models/openwakeword/melspectrogram.onnx",
     "agent-services/models/silero-vad/silero_vad.onnx",
 )
+
+#: #3258's grant, verbatim: the end-of-turn detector the shipped config names, plus the
+#: two licence files that travel with it. Spelled here rather than at each rail because
+#: four nodes below asserted "no `agent-services/models/` path is `allowed`" before this
+#: grant existed, and that claim is now false by design — so each of them narrows to
+#: "the only model path the tuple admits is one of these three", which is a claim that
+#: holds both before #3252 commits the bytes (none of the three is in the index, so the
+#: set is empty) and after (all three are, and are allowed). Naming the exception once
+#: is also what keeps the narrowing from becoming a hole: a rail that simply dropped the
+#: assertion would stop refusing the weights, and this tuple still refuses them.
+#:
+#: These three paths are deliberately NOT added to `AGENT_SERVICES_ACOUSTIC_WEIGHTS`:
+#: that tuple is the list of files `test_an_acoustic_model_weight_is_never_writable_by_a_round`
+#: asserts are NOT allowed, so a member here would fail that node by construction.
+TURN1MINI_GRANT: tuple[str, ...] = (
+    "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx",
+    "agent-services/models/turn-1-mini/LICENSE",
+    "agent-services/models/turn-1-mini/NOTICE",
+)
+
+#: The turn-1-mini files that sit beside the grant on this disk and stay `unlisted`.
+#: The int8 sibling is the one that matters: it is a second copy of the same model in a
+#: different quantisation, no config key reads it, and a directory grant would admit it
+#: alongside the fp32 the worker loads.
+TURN1MINI_SIBLINGS: tuple[str, ...] = (
+    "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.int8.onnx",
+    "agent-services/models/turn-1-mini/SHA256SUMS",
+    "agent-services/models/turn-1-mini/config.json",
+)
+
+
+def model_paths_allowed() -> list[str]:
+    """Every `agent-services/models/` path in the index that classifies `allowed`.
+
+    The shape all three pre-grant rails share (`test_the_acoustic_weight_rail_covers_every_tracked_model_file`,
+    the tail of `test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict`,
+    and of `test_the_qmd_grant_moved_exactly_one_classification`) asserted this list was
+    empty. It reads from the index for the same reason `tracked_agent_services_paths`
+    does: rung 0 classifies the paths a diff touches, and only a tracked file can be in
+    a diff. Callers compare the result against `TURN1MINI_GRANT` rather than against
+    `[]`, which is what makes the same assertion true in #3258's tree and in the tree
+    #3252 lands into.
+    """
+    return sorted(p for p in tracked_agent_services_paths()
+                  if p.startswith("agent-services/models/")
+                  and spec.classify(p) == "allowed")
+
+
+def expected_allowed_model_paths() -> list[str]:
+    """`TURN1MINI_GRANT` intersected with what the index actually holds.
+
+    Empty until #3252 commits the blob, all three afterwards. Derived from the index
+    rather than hard-coded so the rails above do not have to be edited twice — once by
+    this grant and once by the commit it exists to unblock — which is the failure mode
+    that would leave a model weight writable by a round with no test noticing.
+    """
+    tracked = set(tracked_agent_services_paths())
+    return sorted(p for p in TURN1MINI_GRANT if p in tracked)
 
 
 def tracked_agent_services_paths() -> list[str]:
@@ -902,10 +969,22 @@ def test_an_acoustic_model_weight_is_never_writable_by_a_round(path):
 
 
 def test_the_acoustic_weight_rail_covers_every_tracked_model_file():
-    """The five named weights are the whole tracked corpus, not a sample of it.
+    """The named weights are a subset of the tracked corpus, and nothing else is writable.
 
-    Guards the case the parametrised test above cannot see on its own: a model
-    file added to the repo that no name in this file mentions.
+    Guards the case the parametrised test above cannot see on its own: a model file
+    added to the repo that no name in this file mentions.
+
+    Two claims here were looser than the tree before #3258, and both are now exact
+    rather than restated. The corpus is seven tracked files, not the five named weights:
+    `git ls-files agent-services/models/` also returns `wakeword/stop/lloyd_stop.onnx`
+    and `silero-vad/SOURCE`, which is why the subset assertion below is `<=` and not
+    equality — a stale docstring that promised "the whole tracked corpus" would have had
+    a reader conclude the stop model and the note were untracked. And the last line used
+    to assert no tracked model file classifies `allowed`, which #3258's grant makes false
+    by design once #3252 commits the bytes: it now asserts that the allowed set is
+    exactly the granted paths that are in the index, so the five weights, the stop model
+    and the SOURCE note stay refused in both trees, and a granted path that quietly
+    stopped being allowed is caught in the one tree where that is a regression.
     """
     models = [p for p in tracked_agent_services_paths()
               if p.startswith("agent-services/models/")]
@@ -913,7 +992,11 @@ def test_the_acoustic_weight_rail_covers_every_tracked_model_file():
     assert set(AGENT_SERVICES_ACOUSTIC_WEIGHTS) <= set(models), (
         f"tracked model files this rail does not name: "
         f"{sorted(set(models) - set(AGENT_SERVICES_ACOUSTIC_WEIGHTS))}")
-    assert [p for p in models if spec.classify(p) == "allowed"] == []
+    assert model_paths_allowed() == expected_allowed_model_paths(), (
+        f"the writable set inside agent-services/models/ is {model_paths_allowed()}, "
+        f"expected only the #3258 grant that is in the index "
+        f"{expected_allowed_model_paths()}; anything else in there is a model weight a "
+        f"round may rewrite with no rung scoring whether it still fires")
 
 
 def test_no_grant_in_the_allowed_tuple_reaches_the_models_tree():
@@ -1300,18 +1383,35 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # `test_the_watcher_grant_admits_one_exact_path_and_nothing_else` is the legality
     # check called with the entry shipped. `pre` still strips only TTS_PATCH, so the
     # diff stays exactly one path: the watcher entry is in both tuples.
+    # #3258 added the seventh, eighth and ninth names — the three turn-1-mini paths — and
+    # this pin cannot list them, because they are admitted but not yet tracked: the grant
+    # lands in this file's tree and the bytes land in #3252's, so `allowed_after`, which is
+    # a verdict over `corpus` = the index, does not contain them. The set below is therefore
+    # the six pinned names plus `expected_allowed_model_paths()`, which is empty until
+    # #3252's blob is committed and is exactly those three afterwards. That is the whole
+    # point of splitting a grant from the commit it authorises, and it is why
+    # `test_the_grant_moves_exactly_the_three_admitted_verdicts_in_a_fresh_interpreter`
+    # asks the question of the three paths directly rather than of the index.
     assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
                              QMD_TEMPLATE, VOICE_TIMELINE,
                              "agent-services/setup/install-services.sh",
-                             "agent-services/scripts/qmd-watcher.sh"}, (
-        f"the named grants over tracked agent-services paths are exactly the six "
-        f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
-        f"a legitimate edit — add its path to this pin, and check it against "
-        f"`agent_services_paths_admitted_without_being_named()`, which is the "
+                             "agent-services/scripts/qmd-watcher.sh"} \
+            | set(expected_allowed_model_paths()), (
+        f"the named grants over tracked agent-services paths are the six names this "
+        f"node pins plus whichever of the #3258 turn-1-mini grant is in the index "
+        f"({expected_allowed_model_paths()}); found {sorted(allowed_after)}. A new "
+        f"verbatim grant is a legitimate edit — add its path to this pin (unless it is "
+        f"a turn-1-mini path, which the derived half already covers), and check it "
+        f"against `agent_services_paths_admitted_without_being_named()`, which is the "
         f"rail that actually decides whether a grant is legal")
     models = [p for p in corpus if p.startswith("agent-services/models/")]
     assert models, "no tracked file under agent-services/models/ — this rail guards nothing"
-    assert [p for p in models if after[p] == "allowed"] == []
+    assert [p for p in models if after[p] == "allowed"] == expected_allowed_model_paths(), (
+        f"the before/after diff this node computes is about one grant, not about the "
+        f"model tree: the writable set there is "
+        f"{[p for p in models if after[p] == 'allowed']}, expected "
+        f"{expected_allowed_model_paths()} — a weight beyond the #3258 three became "
+        f"writable, or one of those three stopped being admitted")
     assert not spec.requires_drill([TTS_PATCH])
 
 
@@ -1522,9 +1622,18 @@ def test_the_qmd_grant_moved_exactly_one_classification():
     assert len(unlisted) >= 70, (
         f"{len(unlisted)} tracked agent-services paths still unlisted, below the "
         f"70 the #1376 rail is sized on")
+    # The models line is #3258's narrowing, not a weakening: it used to assert the empty
+    # list, which the turn-1-mini grant contradicts by design the moment #3252 commits the
+    # bytes. It now asserts the writable model set is exactly the granted paths that are
+    # in the index — empty in this tree, the three after #3252, and never a wake-word
+    # weight in either.
     models = [p for p in tracked_agent_services_paths()
               if p.startswith("agent-services/models/")]
-    assert models and [p for p in models if spec.classify(p) == "allowed"] == []
+    assert models and [p for p in models if spec.classify(p) == "allowed"] \
+        == expected_allowed_model_paths(), (
+        f"a model path outside the #3258 grant became writable as collateral of the "
+        f"conf grant this node exists to bound: "
+        f"{[p for p in models if spec.classify(p) == 'allowed']}")
 
 
 def test_the_reconcile_diff_clears_scope_in_an_interpreter_that_imported_the_tuple():
@@ -2421,5 +2530,489 @@ def test_the_watcher_grant_carries_its_reason_beside_the_entry(monkeypatch):
             f"deleting the entry #3162 added leaves {WATCHER} "
             f"{spec.classify(WATCHER)}: some other entry reaches it, so this comment "
             f"documents a refusal that is not the one in force")
+    finally:
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #3258: admit the three turn-1-mini paths, so #3252 can commit the detector it names
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# #3252 is a clone that cannot boot: the shipped config's end-of-turn detector is
+# `agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx`, that file is ignored
+# rather than tracked (`git check-ignore -v` resolves it to `agent-services/.gitignore:68`,
+# rule `models/`), and `build_turn_detector` raises with no `try` at its call site, so
+# `lloyd-agent-worker` dies on any machine that did not fetch the model out of band. Its
+# route (b) is to commit the blob plus the model's `LICENSE` and `NOTICE`.
+#
+# No round could do that, and the reason is the same one #3162 records: #3252's triage
+# called the path landable because it is in neither `PROTECTED_GLOBS` nor `DENIED_GLOBS`,
+# but `ALLOWED_GLOBS` is deny-by-default, so a path no tuple names is `unlisted` and rung
+# 0 refuses `unlisted`. Measured at this round's base: `spec.classify` returned `unlisted`
+# for all three paths and `spec.check_scope([the three])` came back
+# `(False, "paths outside the writable set: […]", {'unlisted': [all three], 'allowed': []})`.
+# So this section grants three verbatim paths and nothing else.
+#
+# Two claims circulating about this area are false and are corrected in the entry's own
+# comment rather than repeated here, because both were written down before anyone
+# measured them. `agent-services/.gitignore` classifies `unlisted`, not `denied`:
+# `DENIED_GLOBS` holds the verbatim root name `.gitignore` and `_match` is whole-path
+# `fnmatch` with no basename component, so a nested ignore file never reaches that entry.
+# Practically it is still out of a round's reach today, but unlike a denied path a future
+# verbatim grant could admit it, and "no route exists" is the wrong sentence to leave
+# standing. And the ignore rule itself is real and untouched by this grant:
+# `agent-services/models/` remains ignored, which is precisely why the blob is
+# force-added by #3252 rather than merely written — a question this item does not settle
+# and does not pretend to.
+#
+# Clause map:
+#   1  `test_the_turn1mini_grant_admits_three_exact_paths_and_nothing_else` — the three
+#      verdicts, each reached by one `*`-free entry.
+#   2  same node (siblings, directory, probes, the #1376 rail executed) plus
+#      `test_a_models_directory_grant_admits_every_weight_and_the_looser_one_the_llm_dump` — the
+#      harm half, run.
+#   3  the three narrowed rails, executed by `tests/test_automod_spec.py -q` and proved
+#      still sharp by `test_the_narrowed_model_rails_stay_sharp_once_the_blob_is_tracked`.
+#   4  `test_the_grant_changes_exactly_three_verdicts_over_the_whole_corpus` and
+#      `test_the_grant_moves_exactly_the_three_admitted_verdicts_in_a_fresh_interpreter`.
+#   5  `test_this_round_granted_the_paths_without_committing_the_blob`.
+
+#: The directory the grant stops outside, and the probes that stand for what a
+#: directory grant would reach. None of these is a file this test creates; each is the
+#: shape a wildcard matches by form rather than by name, which is the only way to ask
+#: the question before the bytes exist.
+TURN1MINI_DIR = "agent-services/models/turn-1-mini"
+TURN1MINI_MODELS_GLOB = "agent-services/models/**"
+#: The other thing a "cover the model trees" grant can mean, and the only one of the two
+#: that reaches the local LLM weight dump: `_match` anchors at the repo root, so the
+#: anchored spelling cannot and this one can. See
+#: `test_a_models_directory_grant_admits_every_weight_and_the_looser_one_the_llm_dump`.
+TURN1MINI_ANY_GLOB = "**/models/**"
+TURN1MINI_LLM_PROBE = "agent-services/llm/models/probe.gguf"
+TURN1MINI_FETCHED_PROBE = "agent-services/models/smart-turn/smart_turn.onnx"
+
+#: #3252's real `changed_paths` (branch `automod/SM_20261024_145851`, commit
+#: `c8562653`): the three admitted bytes plus the restore test that guards them. Rung 0
+#: judges the set together, so this is the thing that has to clear for the next round to
+#: exist — and `tests/test_voice_model_restore.py` is what proves the grant is not being
+#: asked to carry a diff by itself.
+TURN1MINI_DIFF = [*TURN1MINI_GRANT, "tests/test_voice_model_restore.py"]
+
+
+def tracked_model_paths() -> list[str]:
+    """Every tracked `agent-services/models/` file, seven at this round's base.
+
+    Derived rather than listed because #3252 is about to add three more and the rails
+    below have to keep meaning something in both trees without being edited twice.
+    """
+    return sorted(p for p in tracked_agent_services_paths()
+                  if p.startswith("agent-services/models/"))
+
+
+def grant_corpus() -> list[str]:
+    """The corpus the grant is scored against: the rail's own universe plus the six
+    turn-1-mini files and the two directory probes.
+
+    It is `tracked_agent_services_paths() + AGENT_SERVICES_GLOB_PROBES` — the universe
+    #1376 clause 1 walks — with the grant's three targets appended, because they are not
+    in the index: the grant binds for the round after this one, so asking the question of
+    the index alone would score an empty set and read as "the entry moved nothing". The
+    three siblings and the two probes come along for the same reason the shared probes do:
+    they are not files a diff can contain yet, and they are exactly what a wildcard would
+    admit without anyone choosing it.
+    """
+    return (sorted(set(tracked_agent_services_paths())
+                   | set(AGENT_SERVICES_GLOB_PROBES)
+                   | set(TURN1MINI_GRANT)
+                   | set(TURN1MINI_SIBLINGS)
+                   | {TURN1MINI_DIR, TURN1MINI_MODELS_GLOB, TURN1MINI_LLM_PROBE,
+                      TURN1MINI_FETCHED_PROBE}))
+
+
+def test_the_turn1mini_grant_admits_three_exact_paths_and_nothing_else():
+    """#3258 clauses 1 and 2: three verdicts, each from one verbatim entry.
+
+    Every number is checked before it is trusted, in the shape #3162's twin sets: the
+    index holds seven tracked files under `agent-services/models/` at this base and
+    `AGENT_SERVICES_ACOUSTIC_WEIGHTS` names five of them — the sixth is
+    `wakeword/stop/lloyd_stop.onnx`, the seventh `silero-vad/SOURCE` — so "the weights
+    are still refused" is asserted against a corpus that exists rather than a sample. The
+    grant targets are asserted ABSENT from the index on purpose: this grant is the one
+    here whose object is a file it must not contain, and a node that asked only
+    `classify` would stay green on a directory entry.
+
+    `reaching` is the clause-1 question again for the same reason: a `models/**`
+    re-spelling leaves all three verdicts `allowed`, because `fnmatch`'s `*` crosses `/`,
+    so only asking which entries reach each path tells you the grant became a directory.
+    """
+    assert set(TURN1MINI_GRANT) <= set(spec.ALLOWED_GLOBS)
+    for path in TURN1MINI_GRANT:
+        assert spec.classify(path) == "allowed", (
+            f"{path} classifies {spec.classify(path)}, not allowed: #3252's blob round "
+            f"is still unopenable, which is the whole of this item")
+        reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(path, (g,))]
+        assert reaching == [path], (
+            f"{path} is admitted by {reaching}; only its own verbatim name is legal "
+            f"under #1376 clause 1, and any wildcard here reaches its siblings too")
+        assert all("*" not in g for g in reaching), (
+            f"the entry admitting {path} is a wildcard spelling: {reaching}")
+    assert spec.check_scope(list(TURN1MINI_GRANT))[0] is True, (
+        "the three paths classify allowed individually but a diff containing all three "
+        "is refused, which is the shape #3252 actually submits")
+    assert spec.classify(TURN1MINI_DIR) == "unlisted", (
+        f"the directory itself classifies {spec.classify(TURN1MINI_DIR)}: three files "
+        f"were granted, not the folder")
+    for sibling in TURN1MINI_SIBLINGS:
+        assert spec.classify(sibling) == "unlisted", (
+            f"{sibling} became writable as collateral of the #3258 grant; the int8 "
+            f"sibling in particular is a second copy of the same model that no config "
+            f"key reads")
+    assert spec.classify(TURN1MINI_MODELS_GLOB) == "unlisted"
+    assert spec.classify(TURN1MINI_LLM_PROBE) == "unlisted", (
+        "the local LLM weight dump became reachable, which is the collateral a "
+        "`models/**` spelling pays and this grant refuses")
+    assert spec.classify(TURN1MINI_FETCHED_PROBE) == "unlisted"
+    assert [p for p in AGENT_SERVICES_ACOUSTIC_WEIGHTS
+            if spec.classify(p) != "unlisted"] == []
+    models = tracked_model_paths()
+    assert len(models) >= 7, (
+        f"only {len(models)} tracked files under agent-services/models/, against the 7 "
+        f"this grant was priced on — the sibling assertions below would be scoring a "
+        f"corpus that is no longer there")
+    assert model_paths_allowed() == [], (
+        "a tracked model file is writable in the granting round itself, which means "
+        "somebody committed bytes here that #3252 owns")
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    assert agent_services_paths_admitted_without_being_named() == []
+
+
+def test_a_models_directory_grant_admits_every_weight_and_the_looser_one_the_llm_dump(
+        monkeypatch):
+    """#3258 clause 2's harm half: both directory spellings, executed.
+
+    This is the grant the tempting one-line version of #3258 would have written — "admit
+    the model directory" reads as obviously correct — and the two spellings it could mean
+    cost different things, which is why this node runs both rather than one:
+
+    * `agent-services/models/**` makes every tracked file under `agent-services/models/`
+      writable, which the #1376 rail reports. The violation set is derived from the index
+      rather than counted, because #3252 is about to add three paths to it and a
+      hard-coded figure would fail in the tree this grant exists to enable.
+      `agent-services/models/wakeword/probe.onnx`, the shared #1376 probe, is in that set
+      too, and its presence is the tell that `*` crossed `/`. The turn-1-mini siblings,
+      the directory itself and the fetched-model probe become writable without appearing
+      anywhere in the rail's report, because that universe is the tracked files plus five
+      probes — so those verdicts are asked of `classify`, the function rung 0 calls.
+    * the same spelling does NOT reach `agent-services/llm/models/`, and #3258's item text
+      said it did. `_match` anchors at the repo root and skips no path segment, so the
+      pattern's second segment has to be `models` where that path's is `llm`. The claim
+      is measured here rather than carried: it is false, and the reassurance it was
+      offered for ("the dump is out of reach of a models glob") is the reason not to
+      rely on it, because
+    * `**/models/**` — one `**` away, and the spelling a glob that "covers the model
+      trees" suggests — does admit `agent-services/llm/models/`, the 188 GB local dump,
+      and the #1376 rail's report is byte-identical whether or not it does, because that
+      dump has exactly one tracked file and no weight for the rail to key on. That is the
+      collateral the rail cannot see, and it is the strongest single reason this grant is
+      three names.
+
+    Restored in `finally` for the standing reason in this file: a leaked directory grant
+    in a module attribute would poison every later node, and here it would poison the
+    rails that exist to catch it.
+    """
+    assert len(set(TURN1MINI_GRANT) & set(ALLOWED_GLOBS_AS_SHIPPED)) == 3, (
+        "this node simulates the wilder spellings against the shipped tuple; with the "
+        "grant absent the comparison is not the one being made")
+    models = tracked_model_paths()
+    assert agent_services_paths_admitted_without_being_named() == [], (
+        "the shipped spelling already admits something unnamed, so this node's green "
+        "half would prove nothing")
+    assert spec.classify(TURN1MINI_LLM_PROBE) == "unlisted", (
+        "the llm probe is already admitted in the shipped tree, so the harm below would "
+        "not be the directory spelling's doing")
+    expected_violations = sorted(models + [
+        p for p in AGENT_SERVICES_GLOB_PROBES
+        if p.startswith("agent-services/models/")])
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g not in TURN1MINI_GRANT)
+    try:
+        # ── spelling one: `agent-services/models/**` ─────────────────────────────
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre + (TURN1MINI_MODELS_GLOB,))
+        for path in TURN1MINI_GRANT:
+            assert spec.classify(path) == "allowed", \
+                "the directory spelling does not even reach the file it is for"
+        violations = agent_services_paths_admitted_without_being_named()
+        assert violations == expected_violations, (
+            f"the directory spelling admitted {violations}, not the tracked models "
+            f"corpus plus its probe {expected_violations} — the three granted paths are "
+            f"absent from the violation list by construction (a verbatim entry is a "
+            f"name), so a shorter list means the models corpus or the probe set moved")
+        assert len(violations) >= 8, (
+            f"the wilder spelling prices at {len(violations)} violations against the 8 "
+            f"measured at this round's base (7 tracked model files plus the shared "
+            f"`agent-services/models/wakeword/probe.onnx`); the number in this node's "
+            f"prose is stale — update it with the corpus, not the other way round")
+        for path in (*TURN1MINI_SIBLINGS, TURN1MINI_DIR, TURN1MINI_FETCHED_PROBE):
+            assert spec.classify(path) == "allowed", (
+                f"`agent-services/models/**` left {path} unlisted, which means it "
+                f"stopped being a directory grant — the shape this node refuses")
+        assert spec.classify(TURN1MINI_LLM_PROBE) == "unlisted", (
+            "`_match` gained a basename or segment-skipping component since #3258 "
+            "measured it, so the anchored-match reason in the entry's comment is stale "
+            "and the item's original claim about the llm dump may be true after all")
+        try:
+            test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+        except AssertionError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(
+                "the #1376 rail did not fire under the models glob. If the grant was "
+                "narrowed this node needs updating; the helper reports "
+                f"{agent_services_paths_admitted_without_being_named()} right now"
+            ) from None
+        assert "became writable without being named" in message, message
+        # ── spelling two: `**/models/**`, the one that reaches the dump ──────────
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre + (TURN1MINI_ANY_GLOB,))
+        assert spec.classify(TURN1MINI_LLM_PROBE) == "allowed", (
+            "the looser spelling no longer reaches the local LLM weight dump, so the "
+            "measured reason the entry gives for refusing a wildcard needs re-measuring "
+            "and updating, not this assertion")
+        assert agent_services_paths_admitted_without_being_named() == expected_violations, (
+            "the rail's report changed between the two spellings; it is not the "
+            "constant this node contrasts against, so the contrast above needs rewriting")
+    finally:
+        monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    assert agent_services_paths_admitted_without_being_named() == []
+    assert spec.classify(TURN1MINI_LLM_PROBE) == "unlisted"
+    assert spec.classify(TURN1MINI_SIBLINGS[0]) == "unlisted"
+
+
+def test_the_narrowed_model_rails_stay_sharp_once_the_blob_is_tracked(monkeypatch):
+    """#3258 clause 3's real content: the three narrowed rails run AGAINST #3252's tree.
+
+    Each of the four pins this item had to touch asserted something about a world in
+    which no model path was writable. Narrowing them to `expected_allowed_model_paths()`
+    is only defensible if they still bite in the tree the grant enables, and that tree is
+    one edit away and not in this diff — so the blob is put in the index virtually:
+    `tracked_agent_services_paths` is replaced by the real list plus the three granted
+    paths, which is exactly what the index will read once #3252 commits, and the rails
+    are then executed rather than restated.
+
+    The green result is the point of splitting a grant from the commit it authorises: the
+    allowed model set becomes the three granted paths and nothing else, so the five
+    weights, `wakeword/stop/lloyd_stop.onnx` and `silero-vad/SOURCE` are refused in the
+    tree that has the blob. The red direction is proved by
+    `test_a_models_directory_grant_admits_every_weight_and_the_looser_one_the_llm_dump`, which runs
+    the same rails against the spelling that would let a weight through.
+
+    Restoring is automatic (`monkeypatch`), and the shipped tuple is re-asserted at the
+    end because this node leaves two module attributes alone only if nothing raised.
+    """
+    real = tracked_agent_services_paths()
+    with_blob = sorted(set(real) | set(TURN1MINI_GRANT))
+    monkeypatch.setattr(sys.modules[__name__], "tracked_agent_services_paths",
+                        lambda: with_blob)
+    assert expected_allowed_model_paths() == sorted(TURN1MINI_GRANT), (
+        "the simulated index did not take, so the three rails below would be grading "
+        "this tree and not the one they are meant to stand in for")
+    assert model_paths_allowed() == sorted(TURN1MINI_GRANT)
+    test_the_acoustic_weight_rail_covers_every_tracked_model_file()
+    test_the_qmd_grant_moved_exactly_one_classification()
+    test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypatch)
+    assert [p for p in AGENT_SERVICES_ACOUSTIC_WEIGHTS
+            if spec.classify(p) != "unlisted"] == []
+
+
+def test_the_grant_changes_exactly_three_verdicts_over_the_whole_corpus(monkeypatch):
+    """#3258 clause 4: the before/after `allowed` set differs by exactly the three paths.
+
+    `pre` is the shipped tuple minus the three entries — the spec as #3252's triage found
+    it — and `after` is what ships. Over the whole corpus (the #1376 rail's universe plus
+    the turn-1-mini files and the two probes: see `grant_corpus` for why the grant targets
+    have to be appended by hand rather than read from the index) exactly three verdicts
+    move, each `unlisted` to `allowed`, and every probe and every tracked file is where it
+    was. That is the property the four narrowed pins cannot state on their own, because
+    they are each scoped to one directory.
+
+    The floor on the unlisted count is repeated here rather than trusted to the #1376
+    rail: if that count ever fell to the point where "nothing else moved" was about an
+    empty remainder, this node would say so at the grant that caused it.
+    """
+    corpus = grant_corpus()
+    assert len(corpus) >= len(tracked_agent_services_paths()), (
+        "the grant corpus is smaller than the index it is built on, so the equality "
+        "below is comparing a subset with itself")
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g not in TURN1MINI_GRANT)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre)
+    before = {p: spec.classify(p) for p in corpus}
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    after = {p: spec.classify(p) for p in corpus}
+    moved = sorted(p for p in corpus if before[p] != after[p])
+    assert moved == sorted(TURN1MINI_GRANT), (
+        f"the grant moved {len(moved)} verdict(s): {moved}. It is three verbatim paths, "
+        f"so any other answer means the tuple widened past what this item granted")
+    for path in TURN1MINI_GRANT:
+        assert (before[path], after[path]) == ("unlisted", "allowed"), (
+            f"{path} went {before[path]} -> {after[path]}; the refusal this item exists "
+            f"for was `unlisted`, so a different pair means the entry is doing something "
+            f"other than replacing that refusal")
+    assert all(before[p] == after[p]
+               for p in corpus if p not in TURN1MINI_GRANT)
+    unlisted_after = [p for p in tracked_agent_services_paths()
+                      if spec.classify(p) == "unlisted"]
+    assert len(unlisted_after) >= 70, (
+        f"{len(unlisted_after)} tracked agent-services paths still unlisted, below the "
+        f"70 the #1376 rail is sized on")
+
+
+def test_the_grant_moves_exactly_the_three_admitted_verdicts_in_a_fresh_interpreter():
+    """#3258 clause 4's seam: the verdict the NEXT round gets, from a process this test
+    does not own.
+
+    This is the boundary the whole grant sits on. The gate ladder is spawned detached with
+    `cwd=LIVE_ROOT` and rung 0 calls `spec.check_scope` on the `spec` module *that*
+    interpreter imported, so `scripts/automod/spec.py` is read live and only at preflight:
+    nothing in a running gate re-imports it, and nothing in this round's worktree is ever
+    consulted. The consequence is the odd shape of this item — the commit that authorises
+    a blob cannot be the commit that contains it — and this node is the only thing that
+    pins that consequence rather than asserting it in prose: a child interpreter importing
+    the committed file, asked the exact six-path question, with equality against the
+    parent's own answer on the verdicts plus one concrete pin on the diff (in scope, no
+    unlisted bucket, no drill), because an equality between two readings of the same wrong
+    tuple would be vacuously true.
+
+    `requires_drill` False is asserted for #3252's diff, not for this one: this round's
+    diff contains `scripts/automod/spec.py`, which is `PROTECTED_GLOBS[0]`, and it is
+    paying the guardian drill for that edit right now. Mixing the two up would have every
+    model-byte round pay a drill for a weight.
+    """
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]);"
+        "from scripts.automod import spec;"
+        # argv: [1]=repo root, [2:9]=the seven verdict paths (three granted, three
+        # siblings, the directory), [9:]=#3252's changed_paths. The slices are spelled
+        # out because a probe that read one path too few would still print a plausible
+        # comma-joined verdict line.
+        "print(','.join(spec.classify(p) for p in sys.argv[2:9]));"
+        "ok, why, b = spec.check_scope(sys.argv[9:]);"
+        "print(ok, why, sorted(b['allowed']), b['unlisted'], b['protected']);"
+        "print(spec.requires_drill(sys.argv[9:]))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe, str(REPO_ROOT),
+         *TURN1MINI_GRANT, *TURN1MINI_SIBLINGS, TURN1MINI_DIR, *TURN1MINI_DIFF],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == ",".join(
+        ["allowed"] * 3 + ["unlisted"] * 4), (
+        f"a fresh interpreter reads the verdicts {lines[0]}; the in-process answer is "
+        f"{','.join(spec.classify(p) for p in (*TURN1MINI_GRANT, *TURN1MINI_SIBLINGS, TURN1MINI_DIR))}")
+    assert lines[1] == (f"True in scope {sorted(TURN1MINI_DIFF)} [] []"), lines[1]
+    assert lines[2] == "False", lines[2]
+    ok, why, buckets = spec.check_scope(TURN1MINI_DIFF)
+    assert (ok, why) == (True, "in scope"), (ok, why, buckets)
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+
+
+def test_this_round_granted_the_paths_without_committing_the_blob():
+    """#3258 clause 5: the grant is in force and the bytes are still not tracked.
+
+    The two halves are the whole difference between this item and #3252, and only the
+    second one is checkable from the index: `agent-services/models/` is ignored, so the
+    files exist on this disk (`du` reads 21,825,125 bytes for the fp32) while
+    `git ls-files` reports none of them. That asymmetry is the reason the grant had to be
+    a round of its own — a diff cannot contain a path the live spec refuses, and the live
+    spec only changes once a grant has landed.
+
+    Read from the index rather than the working tree for the standing reason in this file:
+    rung 0 classifies the paths a diff touches, so the index is the authority on what this
+    round shipped, and a working-tree check would also read as a failure in the round
+    worktree, where ignored files are not materialised at all.
+    """
+    for path in TURN1MINI_GRANT:
+        assert spec.classify(path) == "allowed"
+    tracked = tracked_agent_services_paths()
+    assert [p for p in TURN1MINI_GRANT if p in tracked] == [], (
+        f"{[p for p in TURN1MINI_GRANT if p in tracked]} is already tracked, so this "
+        f"round carried #3252's diff as collateral — the grant was supposed to be the "
+        f"only thing it landed")
+    assert [p for p in tracked if p.startswith(TURN1MINI_DIR + "/")] == [], (
+        "some turn-1-mini path reached the index; the item states this round's diff "
+        "must contain no path under agent-services/models/")
+    assert spec.classify("agent-services/.gitignore") == "unlisted", (
+        f"the nested ignore file classifies {spec.classify('agent-services/.gitignore')}. "
+        f"The claim repeated in #3252's findings and in b118f05f's commit message was "
+        f"that it is `denied`; it is not — DENIED_GLOBS holds the verbatim root name "
+        f"`.gitignore` and `_match` has no basename component — and this node is where "
+        f"the corrected reading is pinned so the sentence cannot come back")
+    assert not spec.requires_drill(list(TURN1MINI_GRANT)), (
+        "the granted model paths sit in PROTECTED_GLOBS, so #3252 would pay a guardian "
+        "drill for committing a weight, which is not the price this item set")
+
+
+def test_the_turn1mini_grant_carries_its_reason_beside_the_entry(monkeypatch):
+    """#3258 clause 2's prose half: the comment says why, read by this node.
+
+    Five things a later reader cannot reconstruct from three path strings: which item
+    asked and which item granted them; that the grant is three files and not the
+    directory, with a sibling named as staying `unlisted` so the claim is checkable; the
+    collateral a `models/**` spelling reaches that no tracked-file rail would report
+    (`agent-services/llm/models/`, whose directory has exactly one tracked file and no
+    weight); the correction about `agent-services/.gitignore` that was wrong in prose
+    twice; and the thing the entry does NOT settle — whether 21.8 MB of weights is the
+    right route at all, which is on #3252's owed list. The block is then made load-bearing:
+    with the three entries deleted, the first path is back to `unlisted`, so the comment
+    describes the refusal actually in force rather than a historical one.
+    """
+    import re
+
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    for path in TURN1MINI_GRANT:
+        entry = f'    "{path}",'
+        assert src.count(entry) == 1, (
+            f"expected {path} exactly once in spec.py's ALLOWED_GLOBS, found "
+            f"{src.count(entry)} — the comment is read from the block above the first "
+            f"entry, so a duplicate would make this node grade the wrong one")
+    assert TURN1MINI_MODELS_GLOB not in spec.ALLOWED_GLOBS
+    assert TURN1MINI_LLM_PROBE.rsplit("/", 2)[0] + "/**" not in spec.ALLOWED_GLOBS
+    first = f'    "{TURN1MINI_GRANT[0]}",'
+    block: list[str] = []
+    j = src.index(first) - 1
+    while j >= 0 and (src[j].lstrip().startswith("#") or not src[j].strip()):
+        block.append(src[j])
+        j -= 1
+    assert block, "the new entries have no comment block above them"
+    prose = re.sub(r"\s+", " ",
+                   " ".join(ln.strip().lstrip("#").strip() for ln in reversed(block)))
+    assert "#3258" in prose and "#3252" in prose, f"the comment names neither item: {prose}"
+    assert "not the directory" in prose.lower(), (
+        f"the comment does not say the grant is three files and not the directory: {prose}")
+    sibling = TURN1MINI_SIBLINGS[0].rsplit("/", 1)[-1]
+    assert sibling in prose and "unlisted" in prose, (
+        "the comment's 'not the directory' claim is rhetoric: no sibling is named as "
+        f"staying unlisted, so nobody can check it against `classify`: {prose}")
+    assert TURN1MINI_ANY_GLOB in prose, (
+        "the comment lost the measured reason a wildcard is refused: the anchored "
+        f"`agent-services/models/**` cannot reach the llm dump, and `{TURN1MINI_ANY_GLOB}` "
+        f"can — refusing the first while claiming it reaches the second is the "
+        f"comfort that gets a later round to write the one that does: {prose}")
+    assert "agent-services/llm/models/" in prose, (
+        "the comment lost the collateral that no rail reports: a `models/**` spelling "
+        "also reaches the local LLM weight dump, whose directory has one tracked file "
+        "and no weight, so nothing keyed on tracked content would notice")
+    assert "NOT `denied`" in prose and "_match" in prose, (
+        "the comment lost the correction about `agent-services/.gitignore`, which two "
+        "surfaces previously got wrong — it is `unlisted` because DENIED_GLOBS holds the "
+        "verbatim root name and `_match` is whole-path fnmatch")
+    assert "owed" in prose.lower(), (
+        "the comment now reads as if this entry settled whether the bytes belong in git; "
+        f"that ruling is on #3252's owed list: {prose}")
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED
+                              if g not in TURN1MINI_GRANT))
+    try:
+        assert spec.classify(TURN1MINI_GRANT[0]) == "unlisted", (
+            "deleting the three entries leaves the blob allowed, so some other entry "
+            "reaches it and this comment documents a refusal that is not in force")
     finally:
         monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
