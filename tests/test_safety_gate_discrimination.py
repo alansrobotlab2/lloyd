@@ -619,6 +619,53 @@ def test_a_git_write_on_the_operators_own_line_is_judged_around_its_heredoc():
     assert _LIVE in label, label[:120]
 
 
+def test_a_git_write_after_a_heredoc_delimiter_is_judged_by_this_lane_too():
+    """#3244 clause 5's third #2987 arm, and the one that was unpinned.
+
+    `git -C /tmp/x commit -q -F - <<'MSG' … MSG && git -C <live> commit -m y` puts a
+    heredoc on the FIRST segment and the live write on the tail that follows the
+    delimiter. `_split_heredocs` hands the text after a delimiter back as shell, so the
+    tail is judged on its own merits: the first commit is a scratch repo and must not be
+    the reason the whole command is unread, and the second is the live one. The pair is
+    what makes this a test of the split rather than of the lane — a strip that swallowed
+    the tail would answer None here, and the scratch-only arm above it is the control
+    that says a scratch `-C` really is allowed.
+    """
+    scratch_only = "git -C /tmp/x commit -q -F - <<'MSG'\nmsg\nMSG"
+    assert _lane(scratch_only, _LIVE) is None, (
+        "a scratch-repo commit feeding its message by heredoc was refused, so the "
+        "arm below could pass on the wrong lane")
+    tail = (f"git -C /tmp/x commit -q -F - <<'MSG'\nmsg\nMSG"
+            f" && git -C {_LIVE} commit -m y")
+    match = _gate(tail, _LIVE)
+    assert match is not None, "the live commit after a heredoc delimiter was skipped"
+    assert match[0].startswith("live-checkout git write: `git commit` in the live "
+                              "checkout"), match[0][:120]
+    assert _LIVE in match[0], match[0][:120]
+
+
+def test_a_target_named_by_mktemp_or_git_dir_is_judged_at_the_dispatch_gate():
+    """#3244's arms at the boundary a turn actually meets: `check_bash_command`.
+
+    The classifier nodes in `tests/test_live_git_writes.py` prove the walk; this proves
+    the lane is REACHED at dispatch with the same verdicts, which is the level the
+    journalled refusals were written at — `safety.py` stamps the label, and the 5 rows
+    this item is about came through this function on an unattended round's Bash call.
+    One arm of each new shape on each side, because `_lane` answers None for a command
+    no lane saw at all: without the refusal arm below, every None above would be
+    vacuous.
+    """
+    assert _lane("git --git-dir=/tmp/r.git --work-tree=/tmp/w add -A", _LIVE) is None
+    assert _lane('T=$(mktemp -d); cd "$T"; git add -A', _LIVE) is None
+    assert _lane("cd $(mktemp -d) && git init -q r && git add -A", _LIVE) is None
+    # …and the live-named twins, which must be THIS lane refusing them.
+    live_tree = _lane(f"git --git-dir=/tmp/r.git --work-tree={_LIVE} add -A", _LIVE)
+    assert live_tree and live_tree.startswith("live-checkout git write: `git add`"), (
+        live_tree[:120])
+    named = _lane(f"W=$(echo {_LIVE}); cd \"$W\" && git add -A", _LIVE)
+    assert named and named.startswith("live-checkout git write: `git add`"), named[:120]
+
+
 def test_the_same_commit_from_a_chat_session_is_not_refused():
     """Clause 1's other half: this is a guard on *unattended* sessions, so the
     person whose tree it is keeps every verb. `chat_list_sessions` on this box

@@ -40,6 +40,18 @@ was refused. Reading that assignment is what makes the refusal mean "the live tr
 rather than "a path this matcher could not read"; `_assignments` states which
 assignments are believed and which are not.
 
+Two further spellings of *where* were refusals of a target the command had plainly
+stated, and #3244 reads them too: a scratch directory the command made for itself
+(`T=$(mktemp -d); cd $T; git add -A`, and the inline `cd $(mktemp -d) && git init -q
+r && …`), and a repository or a working tree named outright by `--git-dir=` or
+`--work-tree=`, which used to be skipped as a value flag and left the target on the
+dispatch cwd. Measured cost: 5 of the 6 refusals this lane journalled between
+`d43c2072` (2026-10-18T23:40Z) and 2026-10-24 aimed outside the live checkout — 3
+`--git-dir=`/`--work-tree=`, 1 `R=$(mktemp -d)` (a review rung's own probe), 1 inline
+`cd $(mktemp -d)`; the sixth was a true positive. What the lane still falls back to
+the dispatch cwd for is every target it genuinely cannot read, and
+`_substitution_is_outside` names the producers it believes.
+
 It is a *scoped* rail by construction: the
 self-modification loop lands by committing in linked worktrees of this very repo
 (`scripts/automod/round.py:111` — `git worktree add … /home/alansrobotlab/lloyd-
@@ -135,7 +147,9 @@ _STASH_READ_FORMS = frozenset({"list", "show", "branch"})
 #: subcommand is the token after that. Read off git's own usage rather than
 #: guessed: a matcher that skipped only `-C` would read `git --namespace ns log`
 #: as a subcommand called `ns` — harmless here, but `git -c x=y commit` is not,
-#: and `-c` is how a scripted commit sets an author.
+#: and `-c` is how a scripted commit sets an author. `--git-dir` and `--work-tree` are
+#: the two whose value is a location rather than a setting, so `_write_target` reads
+#: them for the target as well as skipping them here (#3244).
 _GIT_VALUE_FLAGS = frozenset({
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
     "--resolve-git-dir", "--config-env", "--super-prefix",
@@ -334,12 +348,32 @@ def _var_ref(name: str) -> re.Pattern:
 #: The stand-in a believed command substitution resolves to (#2987). A path that
 #: cannot be inside the live checkout by construction, so the target built on it
 #: (`/command-substitution-outside-live/…`) is an ordinary location and nothing later in
-#: the lane has to know the name.
+#: the lane has to know the name. Two producers resolve to it: an assignment
+#: (`T=$(mktemp -d)`, #2987 and #3244) and a `cd`'s own argument spelled as a
+#: substitution (`cd $(mktemp -d)`, #3244), which `_retarget_substituted_cd` rewrites to
+#: it before the text is tokenised.
 _CMDSUB_OUTSIDE = "/command-substitution-outside-live"
 
 #: Absolute paths named inside a substitution's own text: what decides whether the
 #: substitution can be trusted to be somewhere else.
 _ABS_PATH = re.compile(r"/(?:[^\s\"'`;|&()<>])+")
+
+#: A substitution whose producer is a BARE `mktemp -d`, matched on its whole text. This
+#: is the only producer believed when the text names no path at all, and the match is
+#: exact for a reason: `mktemp` puts the directory in the current directory whenever the
+#: name it is given is relative, so `mktemp -d -p .`, `mktemp -d x.XXXX` and
+#: `TMPDIR=. mktemp -d` all answer a directory INSIDE the cwd — the live tree from a live
+#: dispatch — while naming no absolute path for the live-path test to catch. Anything
+#: beyond `mktemp -d`, or an assignment prefix whose value is not absolute, therefore
+#: stays unbuilt and fails closed onto the dispatch cwd. That covers every spelling in
+#: the journalled traffic this item is about (`T=$(mktemp -d)`, `R=$(mktemp -d)`,
+#: `cd $(mktemp -d)`), and it is why `$(pwd)` and `$(git rev-parse --show-toplevel)` are
+#: out by the same test rather than by an exception: they answer the repository root,
+#: which from a live dispatch cwd IS the live tree. Leading whitespace is normalised by
+#: the caller; `env TMPDIR=/tmp mktemp -d` does not match, since an extra word is a
+#: producer this lane does not recognise.
+_MKTEMP_PRODUCER = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=/\S*\s+)*mktemp -d$")
 
 #: `NAME=$(…)`, the form `_VAR_ASSIGN` excludes by design. Same delimiters and same
 #: trailing lookahead, so it recognises an assignment of a pure substitution and nothing
@@ -352,23 +386,87 @@ _CMDSUB_ASSIGN = re.compile(
 def _substitution_is_outside(body: str, live: str) -> bool:
     """True only when a command substitution CANNOT name the live tree.
 
-    The rule reads what the text *names*, not what it runs. `mktemp -d /tmp/ci-XXXX`
-    names `/tmp/ci-XXXX` and no live path, so it is believed; `echo <live>` names the
-    live tree, so it is not, and the name stays unresolved — which puts the target back
-    on the dispatch cwd, the fail-closed direction #2801 clause 4 pinned and the arm
-    that keeps a substitution from becoming a way to smuggle a live path past the lane.
+    Two tests, in this order, both read on the substitution's **whole text**:
 
-    A substitution naming NO absolute path at all is not believed either: `$(pwd)` and
-    `$(git rev-parse --show-toplevel)` are named from the repo root and answer the root,
-    so refusing them costs a background round a retry while believing them would open the
-    lane. Widening this to path-free substitutions is a ruling on post-landing traffic
-    (#2987's owed entry 2), not a call a diff gets to make.
+      * A text that names any path inside the live tree is never believed, and that
+        comes first so it cannot be talked past by a producer the lane trusts:
+        `mktemp -d <live>/x.XXXX` and `TMPDIR=<live> mktemp -d` are both `mktemp`, and
+        both name live, so both stay unresolved. `echo <live>` is the smuggling arm
+        #2987 clause 4 pinned, and it still fails closed onto the dispatch cwd.
+      * A text that names at least one path and none of them live is believed
+        (`mktemp -d /tmp/ci-XXXX` names `/tmp/ci-XXXX`), and #3244 added the second
+        way in: a text naming NO path at all is believed when it is exactly
+        `mktemp -d`, because that one command cannot answer a directory inside the
+        checkout — it creates a fresh directory under `TMPDIR` or `/tmp`, and creates
+        nothing at all if `TMPDIR` is not there. Exactness is the whole of it: `mktemp`
+        honours a RELATIVE name by putting the directory in the current directory, so
+        `mktemp -d -p .`, `mktemp -d x.XXXX` and `TMPDIR=. mktemp -d` answer a directory
+        inside the live tree from a live dispatch while naming no path the first test
+        could catch. Those stay unbuilt.
+
+    A path-free substitution from any other producer is still not believed: `$(pwd)`
+    and `$(git rev-parse --show-toplevel)` are named at the repo root and answer the
+    root, which from a live dispatch cwd is the live tree. Whether belief should widen
+    past `mktemp` to those is #2987's owed entry 2, a ruling on post-landing traffic
+    that this change deliberately does not make — only the `mktemp` head is ruled on.
 
     Every path in the body is checked rather than the first, so a substitution that
     mentions a scratch template AND a live path is not believed by luck of ordering.
     """
     names = _ABS_PATH.findall(body or "")
-    return bool(names) and not any(_is_live_root(p, live) for p in names)
+    if any(_is_live_root(p, live) for p in names):
+        return False
+    if names:
+        return True
+    return _MKTEMP_PRODUCER.match(" ".join((body or "").split())) is not None
+
+
+#: A `cd`/`pushd` standing at a command boundary, and a command substitution standing
+#: as its argument (#3244). The tokeniser cannot carry this case: it treats `$(…)` as a
+#: command boundary in its own right, so `cd $(mktemp -d) && git init -q r && …`
+#: arrives at `_walk` as the segments `cd`, `mktemp -d`, `git init -q r`, … — a `cd`
+#: with NO argument, which `_norm` answers "stay where you are", and a `cd` dispatched
+#: from the live checkout that stays there is a refusal of a write aimed at /tmp. The
+#: quoted spelling is worse: `cd "$(mktemp -d)"` tokenises to the literal
+#: ` ; mktemp -d)`. So the argument is read off the raw text at the one position where
+#: it is certainly the `cd`'s own, and a single-quoted argument is deliberately not
+#: matched — to a shell that is a literal directory name, not a producer.
+_CD_HEAD = re.compile(r"(^|[;&|\n(])\s*(cd|pushd)\s+")
+#: No anchors: every alternative is applied by `_CD_SUBST_ARG.match(text, pos)`, which
+#: is already anchored at `pos`, and a `^` there would assert the start of the *string*.
+_CD_SUBST_ARG = re.compile(
+    r"\"(?:\$\(([^()]*)\)|`([^`]*)`)\"|\$\(([^()]*)\)|`([^`]*)`")
+
+
+def _retarget_substituted_cd(text: str, live: str) -> str:
+    """Spell a `cd $(mktemp -d)` argument as the placeholder path, or leave it alone.
+
+    The rewrite runs before tokenising, and only on a producer
+    `_substitution_is_outside` believes. Everything else is left exactly as it was, so
+    `cd $(pwd) && git add -A` keeps its pre-existing answer — an unreadable `cd`
+    argument that leaves the running directory at the dispatch cwd, which is the
+    fail-closed side #2801 clause 4 pinned and the reason an unknown producer is not
+    rewritten to a placeholder: a placeholder it does not know would be a path outside
+    the tree, and that is a belief this lane has not earned.
+    """
+    pieces: list[str] = []
+    pos = 0
+    for m in _CD_HEAD.finditer(text or ""):
+        arg = _CD_SUBST_ARG.match(text, m.end())
+        if arg is None:
+            continue
+        body = next((g for g in arg.groups() if g is not None), None)
+        if body is None or not _substitution_is_outside(body, live):
+            continue
+        pieces.append(text[pos:m.start()])
+        sep = m.group(1)
+        pieces.append((f"{sep} {m.group(2)}" if sep else m.group(2))
+                      + f" '{_CMDSUB_OUTSIDE}'")
+        pos = arg.end()
+    if not pieces:
+        return text
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _assignments(text: str, live: str) -> dict[str, str]:
@@ -548,6 +646,10 @@ def _walk(text: str, cwd: str, live: str, depth: int) -> str | None:
     from app.harness.protected_paths import _segments, _split_heredocs, _tokens
 
     shell_text, _heredoc_bodies = _split_heredocs(text)
+    # A `cd $(mktemp -d)` is retargeted before anything is tokenised, because the
+    # tokeniser is what loses it: `$(…)` is a boundary to it, so by the time `_walk`
+    # sees a segment the `cd` has no argument left to read (#3244).
+    shell_text = _retarget_substituted_cd(shell_text, live)
     assigns = _assignments(shell_text, live)
     running = cwd
     try:
@@ -649,7 +751,7 @@ def _segment_hit(argv: list[str], cwd: str, live: str, depth: int = 0) -> str | 
     sub, nxt = _subcommand(argv)
     if not sub:
         return None
-    target = _dash_c_target(argv[:nxt], cwd)
+    target = _write_target(argv[:nxt], cwd, live)
     if sub == _STASH:
         form = _stash_form(argv[nxt:])
         verb = f"stash {form}".strip()
@@ -666,23 +768,77 @@ def _segment_hit(argv: list[str], cwd: str, live: str, depth: int = 0) -> str | 
                 f"`stash list`) are unaffected.")
     return None
 
-def _dash_c_target(tokens: list[str], cwd: str) -> str:
-    """Where a `git -C <dir>` runs, or `cwd` when it names no directory."""
+def _write_target(tokens: list[str], cwd: str, live: str) -> str:
+    """Where a git write lands, from the flags that say so, or `cwd`.
+
+    Called with the global-option slice only (`argv[:nxt]`), so every flag here is
+    git's own and none of it is a subcommand argument. A git write touches TWO
+    directories — the repository (its index, its refs) and the working tree its
+    subcommand rewrites — and the two flags name them independently, so the
+    composition below is git's own, measured on this box rather than reasoned:
+
+      * `-C <dir>` runs there, and still wins outright: the pre-existing rule, kept
+        because it is the fail-closed one too.
+      * `--git-dir=<dir>` moves the repository there. If that directory is inside the
+        live checkout the write is a live write whatever the work tree claims — the
+        index and the refs live in it — so it is refused here, before the tree is
+        chosen. `--git-dir=.git` from a live cwd is the same write with a relative
+        label, which is why both values resolve through `_norm` against `cwd`.
+      * `--work-tree=<dir>` names the tree the subcommand operates on, so a value
+        inside the live checkout is a live write whatever the repository is. What the
+        pair does depends on the subcommand — measured, `git --git-dir=<repo>/.git
+        --work-tree=<T> reset --hard HEAD` rewrote `<T>`'s tracked files outright, while
+        the same pair with `add -A` left `<T>`'s mtimes alone and wrote `<repo>`'s index
+        — which is why the refusal is on the tree the command states and not re-derived
+        per subcommand: the lane refuses the mutating family, and half of it rewrites
+        the tree it is pointed at.
+      * `--git-dir` alone leaves the work tree where the process stands, so the target
+        stays `cwd` and `git --git-dir=/tmp/r.git add -A` from a live cwd keeps
+        refusing. `--work-tree` alone does NOT move the repository — discovery still
+        roots it at the cwd, and `git --work-tree=/tmp/w add -A` from inside a checkout
+        rewrites THAT checkout's index, index mtime measured before/after — so with no
+        `--git-dir` the answer stays `cwd` as well.
+
+    What #3244 actually changed is that both flags used to be skipped with their value
+    and the target fell back for the wrong reason, which is how
+    `git --git-dir=/tmp/r.git --work-tree=/tmp/w add -A` — a write aimed wholly at /tmp,
+    the shape of 3 of the 5 journalled false refusals — refused from a live dispatch
+    cwd. Everything the loop reads no value for answers `cwd`, the fall-back the whole
+    lane rests on.
+    """
     j = 1
+    git_dir = ""
+    work_tree = ""
     while j < len(tokens):
         tok = tokens[j]
         if not tok.startswith("-"):
             break
-        flag = tok.partition("=")[0]
+        flag, eq, val = tok.partition("=")
         if flag == "-C":
-            if "=" in tok:
-                return _norm(tok.partition("=")[2], cwd)
+            if eq:
+                return _norm(val, cwd)
             return _norm(tokens[j + 1], cwd) if j + 1 < len(tokens) else cwd
-        if flag in _GIT_VALUE_FLAGS and "=" not in tok:
+        if flag in ("--git-dir", "--work-tree"):
+            value = val if eq else (tokens[j + 1] if j + 1 < len(tokens) else "")
+            if value:
+                resolved = _norm(value, cwd)
+                if flag == "--git-dir":
+                    if _is_live_root(resolved, live):
+                        return resolved
+                    git_dir = resolved
+                else:
+                    if _is_live_root(resolved, live):
+                        return resolved
+                    work_tree = resolved      # the last one wins, as in git
+            j += 1 if eq else 2
+            continue
+        if flag in _GIT_VALUE_FLAGS and not eq:
             j += 2
             continue
         j += 1
-    return cwd
+    if not git_dir:
+        return cwd        # no --git-dir: discovery roots the repository at the cwd
+    return work_tree or cwd
 
 
 def _stash_form(rest: list[str]) -> str:

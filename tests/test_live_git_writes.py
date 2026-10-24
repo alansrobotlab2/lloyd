@@ -353,7 +353,11 @@ def test_a_variable_assigned_only_inside_a_stripped_body_is_not_believed():
 
 
 def test_a_command_substitution_is_outside_only_when_it_cannot_name_the_live_tree():
-    """Clause 5: the scratch-clone recipe, and the two arms that must not come with it.
+    """#2987 clause 5: the scratch-clone recipe, and the arms that must not come with it.
+
+    #3244 widened the producer test this node pins (its clause 1 pins the bare
+    `mktemp -d` here and its clause 4 pins the arms that stay refused), so every
+    sentence below says which item's clause it is.
 
     `d=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init; git add -A` is the fleet's own
     recipe for a scratch clone — the same one `tests/test_live_git_writes.py`'s header
@@ -361,15 +365,17 @@ def test_a_command_substitution_is_outside_only_when_it_cannot_name_the_live_tre
     resolved. Dispatched from the live checkout it refused, because an unresolved `$d`
     is joined onto the dispatch cwd and the cwd was live.
 
-    The rule that fixes it without becoming a bypass is that a substitution counts as
-    an outside location ONLY WHEN its own text names at least one absolute path and
-    none of the paths it names is inside the live tree. `mktemp -d /tmp/ci-XXXX` names
+    The rule that fixes it without becoming a bypass has two halves, and both read the
+    substitution's WHOLE TEXT. A text naming any path inside the live tree is never
+    believed, whatever its producer; a text naming at least one absolute path and none
+    of them live is believed (#2987); and since #3244 a text naming no path at all is
+    believed when its producer is `mktemp`. `mktemp -d /tmp/ci-XXXX` names
     `/tmp/ci-XXXX`: outside, believed. `$(echo <live>)` names the live tree: not
     believed, and the fall-back to the dispatch cwd stands, which is what keeps a
     substitution from being a way to smuggle a live path past the lane — measured at the
     base commit, that arm refused, and it has to refuse for the same reason afterwards.
     A name the command NEVER assigns is untouched by all of this and still falls back
-    (#2801 clause 4), which the third arm re-pins in this clause's own words.
+    (#2801 clause 4), which the last arm re-pins in this clause's own words.
     """
     recipe = ('d=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init -q -b main .; '
               "git add -A")
@@ -389,26 +395,183 @@ def test_a_command_substitution_is_outside_only_when_it_cannot_name_the_live_tre
         f"W=$(echo {_LIVE}); cd \"$W\" && git add -A", _BG, cwd=_LIVE, live=_LIVE)
     assert smuggled, "a substitution naming the live tree stopped falling back"
     assert _LIVE in smuggled, smuggled[:160]
-    # A substitution naming no path at all is not believed either — `$(pwd)` and
-    # `$(git rev-parse --show-toplevel)` are named at the repo root and answer the
-    # ROOT, and widening to them is an owed ruling on post-landing traffic, not a
-    # judgement this diff gets to make.
+    # A substitution naming no path at all is believed ONLY when its producer is
+    # `mktemp`, and the arms that are not mktemp are the point of pinning the pair.
+    # `$(pwd)` and `$(git rev-parse --show-toplevel)` answer the repo root — the live
+    # tree from a live dispatch cwd — so they stay unresolved. Widening belief to them
+    # is #2987's owed entry 2, a ruling on post-landing traffic that #3244 deliberately
+    # did not make: only the `mktemp` head was ruled on.
     assert check_live_git_writes(
         "W=$(pwd); cd \"$W\" && git add -A", _BG, cwd=_LIVE, live=_LIVE), (
-        "a substitution naming no path started being believed as outside")
-    # …and the same is true of the BARE `mktemp -d`, which names no template and so
-    # gives the lane nothing to read. #2801 pinned this command's twin from a scratch
-    # cwd (an unresolved name there falls back to a scratch cwd, so it is not a write
-    # to production); this is its fail-closed half from a live one.
+        "a non-mktemp substitution naming no path started being believed as outside")
+    # The same two producers in the INLINE form, which is the arm that discriminates the
+    # new `_retarget_substituted_cd` rather than `_assignments`: with no assignment to
+    # read, the only thing standing between `cd $(pwd)` and a None verdict is the
+    # producer test applied to the `cd`'s own argument, so deleting that check would let
+    # all four of these through. `_MKTEMP_PRODUCER` is what says no, and these are its
+    # proof — the mktemp inline arms above clear on the same call site.
+    for inline in ("cd $(pwd) && git add -A",
+                   "cd $(git rev-parse --show-toplevel) && git add -A",
+                   'cd "$(pwd)" && git add -A',
+                   'cd "$(git rev-parse --show-toplevel)" && git add -A'):
+        refused_inline = check_live_git_writes(inline, _BG, cwd=_LIVE, live=_LIVE)
+        assert refused_inline, f"a non-mktemp inline cd was retargeted: {inline}"
+        assert _LIVE in refused_inline, refused_inline[:160]
+    # …and the BARE `mktemp -d` now answers None where #2987 pinned a refusal. That
+    # assertion is REPLACED here, not kept beside it (#3244 clause 1): the command is
+    # the fleet's own CI recipe with its template dropped, and `mktemp -d` creates a
+    # fresh directory under `TMPDIR` or `/tmp` — it cannot hand back the checkout, so
+    # the refusal was only ever the lane reading "I cannot parse this" as "this is
+    # live". #2801's twin from a scratch cwd is untouched: an unresolved name there was
+    # never a write to production either.
     assert check_live_git_writes(
-        'W=$(mktemp -d); cd "$W" && git add -A', _BG, cwd=_LIVE, live=_LIVE), (
-        "a substitution naming no path at all was believed as outside")
+        'W=$(mktemp -d); cd "$W" && git add -A', _BG, cwd=_LIVE, live=_LIVE) is None, (
+        "a substitution whose producer is mktemp was still refused from a live cwd")
+    # The fail-open arm a producer test opens, and that closes it: `mktemp` is the
+    # head, but the TEXT names the live tree, so the text test runs first and the
+    # producer test never gets to believe it. Both spellings, because `TMPDIR` is how a
+    # turn redirects a scratch dir and a template is how it names one.
+    for smuggled_head in (
+            f'W=$(TMPDIR={_LIVE} mktemp -d); cd "$W" && git add -A',
+            f'W=$(mktemp -d {_LIVE}/x.XXXX); cd "$W" && git add -A'):
+        refused = check_live_git_writes(smuggled_head, _BG, cwd=_LIVE, live=_LIVE)
+        assert refused, f"a mktemp naming live was believed: {smuggled_head}"
+        assert _LIVE in refused, refused[:160]
+    # A mktemp redirected to an OUTSIDE TMPDIR is believed, which is what makes the two
+    # arms above a measurement of the live-path test and not of the producer test.
+    assert check_live_git_writes('W=$(TMPDIR=/tmp mktemp -d); cd "$W" && git add -A',
+                                 _BG, cwd=_LIVE, live=_LIVE) is None
+    # …and the arms the exact match exists for, which a name-anything-after-`mktemp`
+    # test would have believed: `mktemp` honours a RELATIVE name by creating it in the
+    # current directory, so each of these answers a directory INSIDE the live tree from a
+    # live dispatch cwd while naming no absolute path for the live-path test to catch.
+    for relative in ('W=$(mktemp -d -p .); cd "$W" && git add -A',
+                     'W=$(mktemp -d x.XXXX); cd "$W" && git add -A',
+                     'W=$(TMPDIR=. mktemp -d); cd "$W" && git add -A',
+                     "cd $(mktemp -d -p .) && git add -A"):
+        refused_relative = check_live_git_writes(relative, _BG, cwd=_LIVE, live=_LIVE)
+        assert refused_relative, f"a relative mktemp target was believed: {relative}"
+        assert _LIVE in refused_relative, refused_relative[:160]
     # A name the command never assigns: unchanged, and still fail-closed.
     unassigned = check_live_git_writes("cd $D_2987 && git add -A", _BG, cwd=_LIVE,
                                        live=_LIVE)
     assert unassigned and _LIVE in unassigned, unassigned
     assert check_live_git_writes("cd $D_2987 && git add -A", _BG, cwd="/tmp/scratch",
                                  live=_LIVE) is None
+
+
+# ── #3244: a target the command states, in the two shapes #2987 left unread ────────
+#
+# 5 of the 6 refusals this lane journalled between `d43c2072` (2026-10-18T23:40Z) and
+# 2026-10-24 pointed OUTSIDE the live checkout, and none of the five was a shape the
+# lane could read: 3 named their repository with `--git-dir=`/`--work-tree=`, 1 assigned
+# a bare `R=$(mktemp -d)`, and 1 wrote `cd $(mktemp -d)` with no assignment at all. One
+# of the five was a review rung's own probe (`set -e; R=$(mktemp -d); cd $R; git init
+# -q -b main; …`), which is how a round grading a diff about this guard became the
+# guard's own false positive. All three shapes say where the write goes; all three fell
+# back to the dispatch cwd, which for an unattended round IS the live tree. The arms
+# below are the item's, in the item's spellings, at cwd = the live checkout.
+
+
+def test_a_scratch_directory_the_command_makes_for_itself_is_not_the_dispatch_cwd():
+    """#3244 clauses 1 and 2: one /tmp directory, three spellings, one verdict.
+
+    The assigned form (`T=$(mktemp -d); cd $T; git add -A`) and the bare-`set -e` form
+    the review rung ran are resolved by `_assignments` through the producer test; the
+    INLINE form (`cd $(mktemp -d) && git init -q r && cd r && git add -A`) has no
+    assignment to find, and is retargeted by `_retarget_substituted_cd` because the
+    tokeniser hands `_walk` a `cd` with no argument at all — `$(…)` is a boundary to it.
+
+    The control that makes each arm a measurement and not a stub is the `mktemp -d
+    /tmp/ci-XXXX` recipe from #2987, which was already None and has to stay None, and
+    the two refusals below: a rewrite that retargeted everything would clear the third
+    arm of each pair as well, and those must still refuse.
+    """
+    # Clause 1, the two commands the item names, plus the quoted reference.
+    for cmd in (
+            'T=$(mktemp -d); cd $T; git add -A',
+            'T=$(mktemp -d); cd "$T"; git add -A',
+            "set -e; R=$(mktemp -d); cd $R; git init -q -b main; git add -A",
+            # #2987's recipe, unchanged: the template-named twin of the arms above.
+            'd=$(mktemp -d /tmp/ci-XXXX); cd "$d"; git init -q -b main .; git add -A',
+    ):
+        assert check_live_git_writes(cmd, _BG, cwd=_LIVE, live=_LIVE) is None, cmd
+    # Clause 2, the non-assignment form, unquoted and quoted, and the `cd`-then-commit
+    # shape the same recipe reaches for.
+    for cmd in (
+            "cd $(mktemp -d) && git init -q r && cd r && git add -A",
+            'cd "$(mktemp -d)" && git init -q r && cd r && git add -A',
+            "cd $(mktemp -d) && git commit -q -m x",
+    ):
+        assert check_live_git_writes(cmd, _BG, cwd=_LIVE, live=_LIVE) is None, cmd
+    # A `cd` with no argument at all still falls back to the dispatch cwd. `cd ;
+    # mktemp -d && git add -A` tokenises to the SAME segments as the unquoted arm above
+    # (`cd`, then `mktemp -d`, then the git), so this pins that the retargeting works off
+    # the raw text and does not fire when the `cd` has no argument: the shell goes to
+    # `$HOME` and the write stays where it was dispatched. That is all it pins — the
+    # command carries no substitution, so `_CD_SUBST_ARG` never matches it whatever the
+    # producer test does. The arm that discriminates the producer test on a `cd`'s own
+    # argument is `cd $(pwd)`, pinned in
+    # `test_a_command_substitution_is_outside_only_when_it_cannot_name_the_live_tree`.
+    fallback = check_live_git_writes("cd ; mktemp -d && git add -A", _BG, cwd=_LIVE,
+                                     live=_LIVE)
+    assert fallback, "a cd with no argument stopped falling back to the dispatch cwd"
+    assert _LIVE in fallback, fallback[:160]
+    # And retargeting the `cd` does not launder a live target that arrives later in the
+    # same command by its own explicit `-C`.
+    assert check_live_git_writes(f"cd $(mktemp -d) && git -C {_LIVE} add -A", _BG,
+                                 cwd=_LIVE, live=_LIVE), (
+        "a believed cd hid a live -C that followed it")
+
+
+def test_the_git_dir_and_work_tree_the_command_names_are_its_write_target():
+    """#3244 clauses 3 and 4: the flags that say where, read for their values.
+
+    `--git-dir` and `--work-tree` sit in `_GIT_VALUE_FLAGS`, so the walk used to skip
+    each with its value and answer the dispatch cwd. That shape — a write aimed wholly
+    at /tmp — is 3 of the 5 false refusals in the 5.5-day window to 2026-10-24, one of
+    them with both values held in believed `mktemp` variables, so even #2987's
+    substitution rule could not save it: the lane never read the flags to put the values
+    anywhere.
+
+    The refusals below are not the lane failing to read the flags: each command states a
+    tree or a repository inside the checkout, and the lane refuses the mutating family on
+    the target the command gives it. Measured on this box, the two flags write different
+    things depending on the subcommand they are handed — `git --git-dir=<repo>/.git
+    --work-tree=<T> add -A` leaves `<T>`'s file mtimes alone and writes `<repo>`'s index,
+    while the same flags with `reset --hard HEAD` rewrite `<T>`'s tracked files outright;
+    so a live `--work-tree` is a live write for part of the family and a live read for the
+    rest, which is why the refusal is on the stated tree and not re-derived per
+    subcommand. The rest, checked the same way: `--git-dir=<live>/.git` names the live
+    index and refs whatever the work tree says; `--git-dir=.git` is that arm spelled
+    relatively against a live cwd; `--git-dir=/tmp/r.git` with NO `--work-tree` leaves the
+    work tree where the process stands, which is the live checkout; and
+    `--work-tree=/tmp/w` with no `--git-dir` leaves the REPOSITORY where it stands —
+    `git --work-tree=/tmp/w add -A` from inside a checkout rewrote that checkout's own
+    index.
+    """
+    for cmd in (
+            "git --git-dir=/tmp/r.git --work-tree=/tmp/w add -A",
+            'R=$(mktemp -d /tmp/a.XXXX); W=$(mktemp -d /tmp/b.XXXX); '
+            'git --git-dir="$R" --work-tree="$W" add -A',
+            "R=$(mktemp -d); git --git-dir=$R --work-tree=/tmp/w add -A",
+    ):
+        assert check_live_git_writes(cmd, _BG, cwd=_LIVE, live=_LIVE) is None, cmd
+    for cmd in (
+            f"git --git-dir=/tmp/r.git --work-tree={_LIVE} add -A",
+            f"git --git-dir={_LIVE}/.git --work-tree=/tmp/w add -A",
+            "git --git-dir=.git --work-tree=/tmp/w add -A",
+            "git --git-dir=/tmp/r.git add -A",
+            "git --work-tree=/tmp/w add -A",
+    ):
+        refused = check_live_git_writes(cmd, _BG, cwd=_LIVE, live=_LIVE)
+        assert refused, f"a flag-named live write was let through: {cmd}"
+        assert _LIVE in refused, refused[:160]
+    # The same outside flags from a scratch dispatch cwd are nobody's live write — the
+    # control that keeps the two None arms above from being the dispatch cwd agreeing
+    # by accident.
+    assert check_live_git_writes("git --git-dir=/tmp/r.git --work-tree=/tmp/w add -A",
+                                 _BG, cwd="/tmp/scratch", live=_LIVE) is None
 
 
 if __name__ == "__main__":
