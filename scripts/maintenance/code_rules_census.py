@@ -30,13 +30,28 @@ a read it could not do, and it is the one state where printing zero hits would b
 lie: #679 was closed on exactly that, "a green nobody can interrogate is worse than no
 green". Exit 2 therefore means "the instrument is broken", never "the tree is dirty".
 
-ONE ROW PER UTC DAY, AND THE RUN THAT CANNOT WRITE STILL REPORTS. A row exists for
-today's date, this run writes nothing and files nothing: the day's first measurement
-is the one the next week diffs against, and letting a late re-run replace it is the
-#1576 failure (three rows 39 s apart, the following day diffed against the wrong one).
-The report it prints is the fresh one, so a re-run is informative without being
-durable. Nothing here writes inside the git tree: rows live under the data home
-(`_pipeline/code-rules-census/`), and the only git command run is `ls-files`.
+ONE ROW PER UTC DAY, AND A RUN THAT CANNOT WRITE NEITHER FILES NOR OVERWRITES. A row
+exists for today's date, so this run writes no row and files nothing: the day's first
+measurement is the one the next week diffs against, and letting a late re-run replace
+it is the #1576 failure (three rows 39 s apart, the following day diffed against the
+wrong one). Filing sits BEHIND that guard rather than in front of it, so the same
+refusal also stops a second backlog item for one signature — which is what #3257 is:
+filing used to happen before `write_row` was reached, and `prior_rows` skips today's
+row by design, so a same-day re-run on a hit tree could not see the filing the day had
+already made and opened another item that no row records.
+
+What a rejected run prints instead is a fresh report of its own scan, plus a line
+naming what the day's row already carries (`filed backlog item #<id>`, or why this run
+files nothing) and the path of the row it declined to write. A filing this run dropped
+is reported, never silent.
+
+The deferral has a cost worth stating where the rule is stated: because a rejected run
+neither writes nor files, a signature the tree acquired AFTER the day's first row
+appears in no row and opens no item until the next pass — at most seven days later on a
+weekly job. That is the deliberate half of the design, since the alternative is the
+duplicate this item exists to stop, and it is what owed-check is asked to rule on
+rather than rediscover. Nothing here writes inside the git tree: rows live under the
+data home (`_pipeline/code-rules-census/`), and the only git command run is `ls-files`.
 
 Driven weekly. The item offered a repo timer as the alternative and triage rejected
 it: `scripts/maintenance/check-unit-enabledness.sh` enumerates every timer in the
@@ -194,6 +209,61 @@ def prior_rows(out_dir: Path, *, before: str) -> list[dict]:
     return out
 
 
+def read_filing_of_day(out_dir: Path, date: str) -> dict:
+    """What the day's own row says about filing — the question `prior_rows` cannot ask,
+    because it skips today by design (:200). That blind spot is exactly how a same-day
+    re-run came to file a second item for one signature (#3257): it could not see the
+    filing the day had already made.
+
+    Read to REPORT, never to merge counts: the day's first measurement is the one the next
+    week diffs against (#1576). Absent, unreadable or corrupt reads as "nothing on
+    record", because this feeds one courtesy line on a run that has already declined to
+    write and must not raise on top of that refusal.
+    """
+    try:
+        data = json.loads(row_path(out_dir, date).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    filing = (data or {}).get("filing") if isinstance(data, dict) else None
+    return filing if isinstance(filing, dict) else {}
+
+
+def finalize_row(path: Path, filing: dict) -> str | None:
+    """Record this run's filing in the row it just claimed. Returns a reason on failure.
+
+    Two writes, in that order, and the order is the whole fix: `write_row` creates the
+    row with `filing: null`, so the O_EXCL claim is decided before any item exists (a run
+    that filed first would be reading back its own number, which is how #3257 doubled),
+    and this is the record that follows the claim. The stored bytes are read back and only
+    its `filing` key is replaced, so the measurement this day made cannot be rewritten
+    here (#1576) — the thing on disk is the record, and this run's dict is not
+    re-serialised over it.
+
+    A failure is returned and reported, not swallowed: the item is on the board either
+    way, and a row that does not know about it means next week files a second one. That is
+    the one bad half of splitting claim from record, so it has to be loud.
+    """
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(stored, dict):
+            return f"the row at {path} is not a JSON object"
+    except (OSError, ValueError) as exc:
+        return f"the row at {path} could not be read back: {exc}"
+    stored["filing"] = filing
+    tmp = path.with_name(f"{path.name}.tmp")
+    try:
+        tmp.write_text(json.dumps(stored, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return f"the filing could not be recorded in {path}: {exc}"
+    return None
+
+
 def write_row(out_dir: Path, row: dict) -> tuple[Path, bool]:
     """Create today's row. Returns `(path, written)`; a day that has one keeps it.
 
@@ -292,14 +362,34 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     prior = prior_rows(out_dir, before=row["date"])
-    if args.no_file:
-        filing: dict = {"item": None, "hits": len(row["hits"]), "skipped": "--no-file"}
-    else:
-        filing = file_hits(row, backlog_dir=(Path(args.backlog_dir).expanduser()
-                                             if args.backlog_dir else None),
-                           prior=prior)
-    row["filing"] = filing
+    # The O_EXCL claim below decides whether this run may file anything, so it is taken
+    # first. Before #3257 the order was the other way round: `file_hits` ran and only then
+    # did `write_row` discover the day was already claimed — by which point the second
+    # item existed, and `prior_rows` had skipped today's row (by design, :193) so
+    # `_already_filed` could not have seen the day's first filing anyway.
     path, written = write_row(out_dir, row)
+    if args.no_file:
+        row["filing"] = {"item": None, "hits": len(row["hits"]), "skipped": "--no-file"}
+    elif not row["hits"]:
+        row["filing"] = {"item": None, "hits": 0, "skipped": "no hits"}
+    elif written:
+        row["filing"] = file_hits(
+            row, backlog_dir=(Path(args.backlog_dir).expanduser()
+                              if args.backlog_dir else None),
+            prior=prior)
+    else:
+        # The day belongs to an earlier run, so this one files nothing — and says so, with
+        # the filing that row already carries. A dropped filing that reads as silence is
+        # the failure mode this branch exists to remove.
+        row["filing"] = {"item": None, "hits": len(row["hits"]), "deferred": True,
+                         "prior": read_filing_of_day(out_dir, row["date"])}
+    if written:
+        # Only the run that holds the claim records into the row, and only the filing that
+        # claim authorised. A failure is reported, not swallowed: the item is on the board
+        # either way, and a row that does not know it is how next week files twice.
+        problem = finalize_row(path, row["filing"])
+        if problem:
+            row["filing"]["record_error"] = problem
 
     if not args.quiet:
         print(json.dumps(row, indent=1, sort_keys=True) if args.json else _report(
@@ -324,8 +414,21 @@ def _report(row: dict, path: Path, written: bool) -> str:
         lines.append(f"  filed backlog item #{filing['item']}")
     elif filing.get("skipped"):
         lines.append(f"  filing skipped: {filing['skipped']}")
+    if filing.get("deferred"):
+        # The non-silent half of #3257: name what the day's row already carries. When that
+        # row records no item, say that too rather than printing `#None` — a fabricated
+        # citation in a report a human reads before acting is worse than the silence.
+        carried = (filing.get("prior") or {}).get("item")
+        lines.append(
+            f"  filing deferred: this run did not write {row['date']}'s row, which "
+            f"already filed backlog item #{carried}" if carried else
+            f"  filing deferred: this run did not write {row['date']}'s row and that row "
+            f"records no filing, so these {filing.get('hits')} hit(s) wait for the next "
+            f"pass")
     if filing.get("error"):
         lines.append(f"  filing FAILED: {filing['error']}")
+    if filing.get("record_error"):
+        lines.append(f"  filing NOT RECORDED: {filing['record_error']}")
     lines.append(f"  row {'written' if written else 'already existed'}: {path}")
     return "\n".join(lines)
 
