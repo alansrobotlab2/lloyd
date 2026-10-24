@@ -25,12 +25,23 @@ and both generation paths load `self._base_model_key()` — so the default
 `stream:true`, a 200 with zero bytes). Those three sentences are the nodes below,
 each with the same positive control as #1446's: the measurements and the
 load-bearing ordering rules have to survive the correction.
+
+A fourth site of the same claim — `architecture/voice.md`'s own "The cloned
+voice" section — was corrected on 2026-10-24 by `2e9fe880` and had no node at
+all until the section-scoped ones at the end of this file. It is not a
+`_para` job: the retired advice was a sentence *and* the fenced `curl` under it,
+and `_para` stops at the blank line above that fence, so a paragraph-scoped node
+passes on the very regression it names. Its negative control is the struck
+wording quoted verbatim as a module constant, so the checks are proved against
+the real regression rather than against a summary of it.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "voice.md"
@@ -201,3 +212,204 @@ def test_config_yaml_voice_comment_no_longer_promises_a_fallback():
         assert required in comment, f"corrected comment lost {required!r}: {comment}"
     # The item rules the voice/model choice out of scope: comment-only, by construction.
     assert voice_line.strip() == "voice: clone:dave_cullen", voice_line
+
+
+# ── #2300's fourth site: voice.md's own "### The cloned voice" section ──
+#
+# The nodes above never named this section: before these were added, a search of
+# this file for "escape hatch", "cloned voice" and "invalid_voice" hit nothing,
+# while the corrected prose sat in the file the whole time. `_para` is the wrong
+# scoper here rather than a shorter one — its first `\n\n` is the blank line
+# above the fenced `curl`, and the half of the retired advice that actually sends
+# a reader to a refused speaker was the request body inside that fence.
+
+CLONED_VOICE_HEADING = "### The cloned voice"
+CLONED_VOICE_MARKER = "A built-in voice is **not** an escape hatch"
+
+#: What the section may never say again, matched on the flat view (`_flat`).
+_STALE_CLONED_VOICE_CLAIMS = (
+    "Falling back to a built-in voice",
+    "real escape hatch",
+    "check `/v1/voices`, not the source",
+)
+
+#: The paragraph and fence `2e9fe880` struck, verbatim out of
+#: `git show 2e9fe880^:architecture/voice.md`. This is the negative control: the
+#: checks below take a string, so the constant is what proves they can fail.
+RETIRED_CLONED_VOICE_SECTION = r"""Falling back to a built-in voice is a real escape hatch, but **check
+`/v1/voices`, not the source** — and verify with a round trip, since a bad voice
+name still returns HTTP 200:
+
+```bash
+curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
+curl -s localhost:8090/v1/audio/speech -H 'content-type: application/json' \
+  -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' \
+  -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
+```
+"""
+
+_QUOTED_200_CLAIM = "still returns HTTP 200"
+
+
+def _flat(text: str) -> str:
+    """The text with every run of whitespace collapsed to one space.
+
+    The doc wraps prose at ~80 columns, so on disk the retired instruction is split
+    between its bold `check` and the quoted route it names, and the retired sentence
+    is split between `a bad voice name` and `still returns HTTP 200`. A raw substring
+    test misses both — and would keep missing them if somebody only re-wrapped the
+    stale claim. The flat view is the claim; the line breaks are the markup.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def _cloned_voice_section_in(text: str) -> str:
+    """The `### The cloned voice` section of a voice.md text, heading to next heading.
+
+    A section, not a paragraph: the scope has to reach the fenced `curl` block at
+    the end of it. Both failure messages name the heading, because a re-titled
+    section and a reworded marker are the same accident — the correction is still
+    on the page and nothing points at it any more.
+    """
+    i = text.find("\n" + CLONED_VOICE_HEADING + "\n")
+    assert i >= 0, (
+        f"architecture/voice.md has no {CLONED_VOICE_HEADING!r} heading, so nothing scopes "
+        f"the #2300 built-in-voice correction any more ({CLONED_VOICE_MARKER!r} has to be "
+        "guarded by a node, not just left in the file)")
+    start = i + 1
+    j = text.find("\n### ", start + len(CLONED_VOICE_HEADING))
+    section = text[start:j if j > 0 else len(text)]
+    assert CLONED_VOICE_MARKER in section, (
+        f"architecture/voice.md {CLONED_VOICE_HEADING} no longer states "
+        f"{CLONED_VOICE_MARKER!r} — the sentence that replaced the built-in escape hatch "
+        "has left the section it belongs to")
+    return section
+
+
+def _cloned_voice_section() -> str:
+    return _cloned_voice_section_in(DOC.read_text(encoding="utf-8"))
+
+
+def _assert_no_retired_phrasing(section: str) -> None:
+    """Refuse the three sentences `2e9fe880` struck, wherever in the section they sit."""
+    flat = _flat(section)
+    for stale in _STALE_CLONED_VOICE_CLAIMS:
+        assert stale not in flat, (
+            f"the {CLONED_VOICE_HEADING} section promises a built-in voice again: {stale!r}")
+
+
+def _assert_no_builtin_voice_asked(section: str) -> None:
+    """Refuse a request body that asks for a speaker the served model will not speak.
+
+    Matched structurally rather than as the literal `"voice":"Ryan"` because what a
+    reader copies out of this section is the curl: a built-in name in a fence is an
+    instruction to ask the served Base model for a speaker it refuses with HTTP 400
+    `invalid_voice` (#2300), whatever the prose above it now says. The whole section
+    is scanned, so the fence below the marker paragraph is inside the check — which
+    is the whole reason this node is not a `_para` node.
+    """
+    asked = [v for v in re.findall(r'"voice"\s*:\s*"([^"]*)"', _flat(section))
+             if not v.startswith("clone:")]
+    assert not asked, (
+        f'the {CLONED_VOICE_HEADING} section asks a non-clone voice again: {asked} — the '
+        'served model is Base and refuses a built-in name with HTTP 400 invalid_voice '
+        '(#2300), which is the `"voice":"Ryan"` request this node exists to keep out')
+
+
+def _assert_no_builtin_escape_hatch(section: str) -> None:
+    """Both halves of the struck advice: the promise in the prose and the name in the curl."""
+    _assert_no_retired_phrasing(section)
+    _assert_no_builtin_voice_asked(section)
+
+
+def _assert_the_base_refusal_facts_survive(section: str) -> None:
+    """Positive control: the correction's own evidence has to stay in the section.
+
+    Without it the guard is satisfiable by deleting the paragraph, which is how the
+    #1446 measurements got lost once already.
+    """
+    flat = _flat(section)
+    for required in ("HTTP 400", "invalid_voice", "404", "/v1/audio/voices", "#2300"):
+        assert required in flat, (
+            f"the {CLONED_VOICE_HEADING} section lost {required!r}: what a built-in name "
+            "is answered with has to stay beside the instruction not to ask for one")
+    assert re.search(r"bare HTTP 200[^.]*genuine evidence", flat), (
+        "the section no longer says a bare HTTP 200 is genuine evidence — that is the "
+        "consequence of the 400/404 pair, and the reason the retired advice is retired")
+
+
+def _assert_200_claim_is_only_a_quotation(section: str) -> None:
+    """Allow `still returns HTTP 200` in the section only inside a double quote.
+
+    The landed correction keeps the phrase on purpose, quoted, as the claim it is
+    retiring, so `assert PHRASE not in section` would be red against the fixed
+    prose. What may not come back is the unquoted sentence the retired paragraph
+    ran. Both directions are judged on the flat view so that a line break after
+    the opening quote is not read as an unquoted claim, and the sentence check is
+    run on the raw text with `\\s+` so the wrapped form is refused too.
+    """
+    flat = _flat(section)
+    for m in re.finditer(re.escape(_QUOTED_200_CLAIM), flat):
+        assert m.start() > 0 and flat[m.start() - 1] == '"', (
+            f'{_QUOTED_200_CLAIM!r} is stated as a live claim again, not a quotation: '
+            f'...{flat[max(0, m.start() - 70):m.end() + 10]}...')
+    assert not re.search(r"a bad voice name\s+still returns HTTP 200", section), (
+        "the retired sentence 'a bad voice name still returns HTTP 200' is back: the "
+        "server answers a bad built-in name with HTTP 400 invalid_voice and a missing "
+        "clone profile with 404 (#2300), so a bare 200 is evidence now")
+
+
+def test_voice_md_cloned_voice_section_no_longer_offers_a_builtin_escape_hatch():
+    """The fourth #2300 site: voice.md's cloned-voice section, its fence included."""
+    section = _cloned_voice_section()
+    _assert_no_builtin_escape_hatch(section)
+    _assert_the_base_refusal_facts_survive(section)
+    _assert_200_claim_is_only_a_quotation(section)
+
+
+def test_the_cloned_voice_scoper_fails_loudly_when_the_section_moves():
+    """The scoper's own two failure modes, both naming the heading.
+
+    Built by rewriting the live doc in memory: a renamed heading and a reworded
+    marker are how the correction stops being guarded while still reading well.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    with pytest.raises(AssertionError) as heading:
+        _cloned_voice_section_in(text.replace(CLONED_VOICE_HEADING, "### Voice assets"))
+    assert CLONED_VOICE_HEADING in str(heading.value), str(heading.value)
+    with pytest.raises(AssertionError) as marker:
+        _cloned_voice_section_in(text.replace(CLONED_VOICE_MARKER, "Built-ins are not served"))
+    assert CLONED_VOICE_HEADING in str(marker.value), str(marker.value)
+
+
+def test_the_retired_escape_hatch_section_still_trips_every_check():
+    """Negative control, pinned in this file: the refused wording is still refusably there.
+
+    `RETIRED_CLONED_VOICE_SECTION` is the struck paragraph and fence verbatim, so
+    the checks are proved against the regression rather than a paraphrase of it —
+    and the positive control on the constant is what stops the control being
+    softened into something harmless, which is how a control stops being one.
+    """
+    flat = _flat(RETIRED_CLONED_VOICE_SECTION)
+    for stale in _STALE_CLONED_VOICE_CLAIMS:
+        assert stale in flat, f"the retired constant no longer holds {stale!r}"
+    assert '"voice":"Ryan"' in flat, "the retired constant lost the built-in curl it is for"
+    assert "invalid_voice" not in flat, "the constant has drifted into the corrected wording"
+
+    with pytest.raises(AssertionError) as stale_claim:
+        _assert_no_builtin_escape_hatch(RETIRED_CLONED_VOICE_SECTION)
+    assert "Falling back to a built-in voice" in str(stale_claim.value)
+    with pytest.raises(AssertionError) as lost_facts:
+        _assert_the_base_refusal_facts_survive(RETIRED_CLONED_VOICE_SECTION)
+    assert "HTTP 400" in str(lost_facts.value)
+    with pytest.raises(AssertionError) as unquoted:
+        _assert_200_claim_is_only_a_quotation(RETIRED_CLONED_VOICE_SECTION)
+    assert _QUOTED_200_CLAIM in str(unquoted.value)
+
+    # The scope control, for the one thing `_para` could never see: keep today's
+    # corrected section and swap in only the retired request body. A node scoped to
+    # the marker paragraph passes that; this fails it.
+    fence = RETIRED_CLONED_VOICE_SECTION[RETIRED_CLONED_VOICE_SECTION.index("```bash"):]
+    with pytest.raises(AssertionError) as fenced:
+        _assert_no_builtin_voice_asked(_cloned_voice_section() + "\n" + fence)
+    assert "Ryan" in str(fenced.value), str(fenced.value)
