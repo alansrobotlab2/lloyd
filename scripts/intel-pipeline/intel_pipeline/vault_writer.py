@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -604,6 +605,99 @@ def _digest_target(item: ScoredItem, vault_path: Path) -> Path:
     return vault_path
 
 
+# ── one `## <date>` heading per file, per day (backlog #3259) ────────────────
+#
+# Every entry used to carry its own date heading: `write_item_to_vault` built
+# `f"## {today}\n\n### …"` and appended the whole block, and `write_all_to_vault`
+# calls it once per item. A six-item day therefore opened SIX `## 2026-10-24`
+# headings. Measured 2026-10-24, the shipped `knowledge/ai-llms/youtube-digest.md`
+# held 313 dated headings over 68 distinct dates (47 of them carrying more than one,
+# 16 on 2026-10-10 alone) and `knowledge/feeds/youtube-uncategorized.md` 2,598 over 85.
+#
+# The cost is not tidiness, it is a false negative for every reader that treats one
+# heading as the day: the 2026-10-24 run verified its own write by reading
+# `## 2026-10-24`, found ONE entry, and reported "5 of 6 writes missing". All six had
+# landed. One date heading per file per day is what makes `grep -A` over a digest
+# mean that day's output.
+_DATE_HEADING_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+
+#: Both digest read and rewritten through this codec. The read side has to be the same
+#: handler the write side uses: a digest is months of other people's feed text, and one
+#: byte strict `utf-8` cannot decode would make the read raise, which upstream would
+#: report as a failed write for an entry the file has carried since before the fix.
+#: `surrogateescape` round-trips those bytes unchanged.
+_DIGEST_CODEC = "utf-8"
+
+
+def _day_section_end(text: str, day: str) -> Optional[int]:
+    """Where an entry stamped `day` belongs in `text`; None if there is no such section.
+
+    The returned offset is the END of the LAST `## <day>` section in the file: the
+    start of the next `## <date>` heading when one follows it, otherwise `len(text)`.
+    Since entries are only ever appended, today's section is the file's tail, so the
+    ordinary answer is `len(text)` — precisely where the old unconditional append put
+    its bytes, minus the duplicate heading. A `## <day>` section that is NOT the tail
+    (a day an earlier mis-dated run filed elsewhere in the file) is the reason the
+    answer is an offset and not a boolean: appending there would publish today's
+    entry under some other day's heading, which is a worse defect than the duplicate
+    heading this function exists to suppress.
+
+    Sections are delimited by DATE headings only, never by any line starting `## `:
+    a GitHub PR description published through this writer carries its own
+    `## Type of change` heading, and treating that as a boundary would insert a new
+    entry into the middle of an existing entry's body.
+    """
+    starts = [(m.start(), m.group(1)) for m in _DATE_HEADING_RE.finditer(text)]
+    mine = [i for i, (_pos, dated) in enumerate(starts) if dated == day]
+    if not mine:
+        return None
+    last = mine[-1]
+    return starts[last + 1][0] if last + 1 < len(starts) else len(text)
+
+
+def _replace_text(path: Path, text: str) -> None:
+    """Write a whole digest — a new one, or one rewritten around a mid-file merge.
+
+    Both callers here write the file as one object rather than appending, and
+    truncating-then-writing a whole digest is a failure mode the old append-only path
+    could not produce: a crash mid-write would take every entry the file ever held.
+    `os.replace` is atomic within a filesystem, so a reader sees either the old bytes
+    or the new ones, never half.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=_DIGEST_CODEC, errors="surrogateescape") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _merge_entry_into_section(vault_path: Path, day: str, entry: str) -> None:
+    """Put `entry` at the end of `vault_path`'s `## <day>` section, heading untouched."""
+    text = vault_path.read_text(encoding=_DIGEST_CODEC, errors="surrogateescape")
+    offset = _day_section_end(text, day)
+    if offset is None:                       # no section for this day yet: open one
+        _append_text(vault_path, f"## {day}\n\n{entry}")
+    elif offset >= len(text):                # the day's section is the tail: append
+        _append_text(vault_path, entry)
+    else:                                    # mid-file section: insert into it
+        head = text[:offset]
+        gap = "" if head.endswith("\n\n") else ("\n" if head.endswith("\n") else "\n\n")
+        _replace_text(vault_path, head + gap + entry + text[offset:])
+
+
+def _append_text(vault_path: Path, text: str) -> None:
+    """Append `text` to `vault_path`, the same way the writer always has."""
+    with open(vault_path, "a", encoding=_DIGEST_CODEC, errors="surrogateescape") as f:
+        f.write(text)
+
+
 def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     """Write a single scored item to the vault."""
     # Both new guards run here as well as in the batch filter above
@@ -645,8 +739,10 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     # different writer already put this video in `knowledge/youtube/**`.
     note = resolve_video_note(item)
 
-    # Prepare content
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Prepare content. `today` is the ONE day variable this function has: it is both
+    # the key the merge below looks up and the heading the new section gets, so a
+    # second `utcnow()` here could straddle midnight UTC and merge an entry into a
+    # section while labelling it with the next day.
     source = item.source
     relevance = item.relevance
     category = item.category or "general"
@@ -666,9 +762,11 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
         return False
     body_block = f"{body}\n\n" if body else ""
 
-    content = f"""## {today}
-
-### {item.title}
+    # The entry alone, WITHOUT a date heading: the heading belongs to the day, not to
+    # the item, and this function runs once per item (#3259). `_merge_entry_into_section`
+    # puts it inside that day's section, and opens the section only when the file has
+    # none yet.
+    entry = f"""### {item.title}
 
 **Source:** {source} | **Relevance:** {relevance}/10
 
@@ -677,12 +775,10 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
 ---
 
 """
-    
-    # Append or create file
+
+    # Append into the day's section, or create the file
     if vault_path.exists():
-        # Append to existing file
-        with open(vault_path, "a") as f:
-            f.write(content)
+        _merge_entry_into_section(vault_path, today, entry)
     else:
         # Create new file with frontmatter and header
         header = f"""---
@@ -695,8 +791,9 @@ tags:
 # {category.title()} Updates
 
 """
-        with open(vault_path, "w") as f:
-            f.write(header + content)
+        # A brand-new digest gets its one dated section with its first entry, exactly
+        # the bytes the old code appended for that first item.
+        _replace_text(vault_path, header + f"## {today}\n\n{entry}")
     
     print(f"  Written: {vault_path.relative_to(VAULT_ROOT)}")
     return True

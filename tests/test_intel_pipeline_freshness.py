@@ -422,7 +422,11 @@ def test_a_populated_state_writes_the_same_oversized_day_normally(redirect_paths
     assert written == STATE_LOSS_DAY_ITEMS
     assert "STATE LOSS" not in out
     digest = redirect_paths / "obsidian" / "knowledge" / "ai-llms" / "youtube-digest.md"
-    assert digest.read_text().count("\n## ") == STATE_LOSS_DAY_ITEMS
+    # `### ` and not `\n## `: #3259 clause 1 makes a date heading belong to the DAY, so
+    # 258 items now share one section, and the entry block is the only reading left that
+    # can tell "all 258 landed" from "one did".
+    assert digest.read_text().count("\n### ") == STATE_LOSS_DAY_ITEMS
+    assert digest.read_text().count("\n## ") == 1, "the day opened a heading per item"
 
 
 def test_an_empty_state_below_the_floor_is_a_normal_day(redirect_paths, capsys):
@@ -525,4 +529,9 @@ def test_cli_write_stage_blocks_on_state_loss_then_writes_across_the_process_bou
     written = sorted(p.name for p in (home / "obsidian" / "knowledge").rglob("*.md"))
     assert written == ["youtube-digest.md"], (allowed.stdout[-1500:], written)
     digest = (home / "obsidian" / "knowledge" / "ai-llms" / "youtube-digest.md")
-    assert digest.read_text().count("\n## ") == STATE_LOSS_DAY_ITEMS
+    # The subprocess published the whole day: 258 entry blocks. Counted on `### ` because
+    # #3259 made `## <date>` one heading per DAY, not one per item — the day's entire
+    # backlog now shares a section, which is the point of the change.
+    assert digest.read_text().count("\n### ") == STATE_LOSS_DAY_ITEMS
+    assert digest.read_text().count("\n## ") == 1, (
+        "a day's whole backlog opened one heading each")

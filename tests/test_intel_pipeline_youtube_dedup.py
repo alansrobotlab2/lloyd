@@ -175,8 +175,15 @@ def _tree_fingerprint(tree: Path) -> dict:
             for p in sorted(tree.rglob("*")) if p.is_file()}
 
 
-def _blocks(path: Path) -> list:
-    return re.split(r"\n## ", path.read_text(encoding="utf-8"))
+def _entries(path: Path) -> list:
+    """The digest's entry blocks — the unit one published item writes.
+
+    Split on `### `, the block the writer emits once per item. This used to split on the
+    `## <date>` heading, and before #3259 the two readings were interchangeable because
+    every item opened a section of its own. Now a day's items share their one heading, so
+    the entry block is the only reading that still counts items.
+    """
+    return re.split(r"\n### ", path.read_text(encoding="utf-8"))
 
 
 # ── clause 1: a noted video gets a pointer, resolved on front matter ──────────
@@ -196,7 +203,7 @@ def test_a_video_the_monitor_already_noted_gets_a_pointer_not_a_stub(scratch_vau
     assert str(rel) in text, f"the entry does not name the note {rel}:\n{text}"
     assert "(No description)" not in text
     assert "watch?v=7c9FSUVcXR0" in text, "the entry lost the link it indexes"
-    assert len(_blocks(digest)) == 2, "one item must add exactly one entry"
+    assert len(_entries(digest)) == 2, "one item must add exactly one entry"
 
 
 def test_resolution_reads_front_matter_and_never_the_filename(scratch_vault):
@@ -209,7 +216,7 @@ def test_resolution_reads_front_matter_and_never_the_filename(scratch_vault):
     vw_mod.write_item_to_vault(_yt_item("REALID99xyz", 6), PROFILE)
 
     digest = _digest(scratch_vault)
-    first, second = _blocks(digest)[1:]
+    first, second = _entries(digest)[1:]
     assert note_rel not in first, "an id that only appears in a filename deduped"
     assert "(No description)" not in first, "a first-time write lost its `why` body"
     assert note_rel in second, "the declared video_id did not resolve to its note"

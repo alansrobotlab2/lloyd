@@ -648,6 +648,24 @@ def _sections(path: Path) -> int:
     return sum(1 for line in path.read_text().splitlines() if line.startswith("## "))
 
 
+def _entries(path: Path) -> int:
+    """How many items a digest holds: one `### ` block each.
+
+    Not `## `: since #3259 clause 1 a date heading belongs to the DAY and a whole day of
+    writes shares one, so the heading count stopped being a proxy for items written. The
+    `### ` block is what the writer emits once per item, which is what the two assertions
+    that used `_sections` for this meant all along. `_sections` stays for the noise-file
+    reading, whose subject really is how many `## ` sections that file has.
+    """
+    if not path.exists():
+        return 0
+    return sum(1 for line in path.read_text().splitlines() if line.startswith("### "))
+
+
+def _knowledge_entries(tmp_path) -> int:
+    return sum(_entries(p) for p in (tmp_path / "obsidian" / "knowledge").rglob("*.md"))
+
+
 def _uncategorized_sections(tmp_path):
     return _sections(tmp_path / "obsidian" / "knowledge" / "feeds"
                      / "youtube-uncategorized.md")
@@ -2776,8 +2794,10 @@ def test_cli_run_past_the_call_cap_writes_only_what_the_model_graded(tmp_path):
     assert day2 == day and write_proc.returncode == 0, write_proc.stderr[-2000:]
     assert "Held 2 item(s) the stage-2 model was never asked about" in write_proc.stdout
     knowledge = home / "obsidian" / "knowledge"
-    assert sum(_sections(p) for p in knowledge.rglob("*.md")) == cap, (
+    assert sum(_entries(p) for p in knowledge.rglob("*.md")) == cap, (
         "the digest grew past the graded set")
+    assert sum(_sections(p) for p in knowledge.rglob("*.md")) == 1, (
+        "the graded day opened a `## <date>` heading per item (#3259 clause 1)")
     text = "\n".join(p.read_text() for p in knowledge.rglob("*.md"))
     refused_urls = [r["url"] for r in rows if r["grade_source"] == "call_cap"]
     assert len(refused_urls) == 2
@@ -2851,7 +2871,11 @@ def test_a_spent_budget_refuses_the_unasked_and_keeps_the_asked_junk(redirect_pa
     written = vw_mod.write_all_to_vault(_write_day(redirect_paths, scored))
 
     assert written == 2, f"the asked-but-junk items did not survive: {written}"
-    assert _knowledge_sections(redirect_paths) == 2
+    # Two entries, ONE dated section: #3259 clause 1. `_sections` here used to read 2, which
+    # was the per-item heading this item removes; the entry count is what says both asked
+    # items were written.
+    assert _knowledge_entries(redirect_paths) == 2
+    assert _knowledge_sections(redirect_paths) == 1
     out = capsys.readouterr().out
     assert "Held 2 item(s) the stage-2 model was never asked about" in out, out
 

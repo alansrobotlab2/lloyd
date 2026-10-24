@@ -1448,8 +1448,9 @@ def test_a_write_run_publishes_those_bodies_with_no_heading_under_the_dated_sect
     `clean_body` and `vault_writer` share a process, but the digest they build is the
     artefact, and only a subprocess with `HOME` redirected proves the entry that reaches
     disk carries no heading — which is what 450 sections of the live corpus say it did not
-    do on 2026-09-30. Each entry appends its own `## <date>` section, so the section count
-    is the entry count: exactly one per run.
+    do on 2026-09-30. Since #3259 every entry of a day shares that day's ONE `## <date>`
+    section, so the entry count is the per-run reading and the section count stays 1 no
+    matter how many runs the day gets.
     """
     home = tmp_path / "home"
     feeds = home / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds"
@@ -1492,13 +1493,18 @@ def test_a_write_run_publishes_those_bodies_with_no_heading_under_the_dated_sect
                            item_id="8183").to_dict()])
     assert second.returncode == 0, second.stderr[-2000:]
 
-    # One more run, one more entry, and exactly one more dated section in the same file:
-    # the strip does not swallow the entry, duplicate it, or nest it under the last one.
+    # One more run, one more entry — and NOT one more dated section. #3259 clause 1 makes
+    # the heading belong to the day rather than to the item, so the second run's entry
+    # merges into the section the first run opened. The reading that stood here,
+    # `^## 2026- == 2`, was the per-item heading this item exists to remove, so it is the
+    # assertion the acceptance makes wrong — and the entry itself is what the strip has
+    # always been about: it must not swallow, duplicate, or nest it under the last one.
     assert _digest_for(COMMIT_8183_TITLE) == target
     text2 = target.read_text(encoding="utf-8")
-    assert len(re.findall(r"^## 2026-", text2, re.M)) == 2, text2
-    assert re.search(
-        rf"^## {day}\n\n### {re.escape(COMMIT_8183_TITLE)}\n", text2, re.M), text2
+    assert len(re.findall(r"^## 2026-", text2, re.M)) == 1, text2
+    assert len(re.findall(r"^### ", text2, re.M)) == 2, text2
+    assert re.search(rf"^### {re.escape(COMMIT_8183_TITLE)}\n", text2, re.M), text2
+    assert text2.index(PR_8128_TITLE) < text2.index(COMMIT_8183_TITLE), text2
     assert not re.findall(r"^#{1,3} (Description|Summary|Type of change)$", text2, re.M)
     assert "## Summary" not in text2 and "## Type of change" not in text2, text2
 
@@ -4760,3 +4766,360 @@ def test_real_channel_copy_is_still_published_verbatim(tmp_path, intel_state):
     assert body_mod.footer_residue_shape("Watch the full walkthrough") is None
     assert body_mod.footer_residue_shape("Related Videos:") == "footer-section-label", (
         "the colon form must keep the shape that already owned it")
+
+
+# ── #3259: one `## <date>` heading per digest, per day ────────────────────────
+#
+# Every entry used to arrive carrying its own date heading, because `write_item_to_vault`
+# built `f"## {today}\n\n### …"` as ONE string and appended the whole thing, and
+# `write_all_to_vault` calls it once per item. `knowledge/ai-llms/youtube-digest.md` grew to
+# 313 dated headings over 68 distinct dates — 47 of those dates carrying more than one, 16 on
+# 2026-10-10 — and `knowledge/feeds/youtube-uncategorized.md` to 2,598 over 85 dates.
+#
+# The cost is not tidiness, it is a false negative in every reader that takes one heading as
+# that day's output. The 2026-10-24 intelligence-pipeline run verified its own writes by
+# reading `## 2026-10-24`, found ONE entry, and reported "5 of 6 writes missing". All six had
+# landed. One heading per date per file is what makes reading a digest section mean the day.
+#
+# What the writer does now: the entry is appended into that day's section, and the section is
+# opened only when the file holds no heading for that day yet. One node per acceptance
+# clause, in clause order.
+
+
+def _date_headings(text: str) -> list:
+    """The dated headings in a digest, in the order they stand.
+
+    `_DATE_SECTION_RE` applied per line — the same pattern the digest's own section reader
+    uses, so this node and that reader cannot disagree about what a dated heading is. A bare
+    `^## ` count would include an entry body's own `## Type of change`, and a substring count
+    of `## 2026-10-24` would match inside a heading it is not asking about.
+    """
+    return [m.group(1) for line in text.splitlines()
+            if (m := _DATE_SECTION_RE.match(line))]
+
+
+def _today_utc() -> str:
+    """The day the writer stamps, from the same clock call the writer makes.
+
+    `write_item_to_vault` derives the heading from `datetime.utcnow()` and no argument moves
+    it: `write_all_to_vault(date_str)`'s date picks which `intel-<date>.jsonl` to READ, not
+    which heading to write (that mis-dating is a separate defect, recorded on #3259 and out
+    of these clauses). So a node that needs a particular day moves the clock — `_freeze_the_clock`.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _freeze_the_clock(monkeypatch, day: str) -> str:
+    """Park the writer's `utcnow()` on `day` (`YYYY-MM-DD`, 09:00) and hand the day back.
+
+    A fresh subclass per call rather than a mutable module-level constant, so the freeze ends
+    with the node instead of leaking its day into the next one's heading. Two days of writes
+    in one digest cannot be produced any other way, and hand-writing the older section would
+    put a shape this file invented under the readings instead of the bytes the writer emits.
+    """
+    class Frozen(datetime):
+        @classmethod
+        def utcnow(cls):
+            return datetime.strptime(day, "%Y-%m-%d").replace(hour=9)
+
+    monkeypatch.setattr(vw_mod, "datetime", Frozen)
+    return day
+
+
+def test_a_second_entry_the_same_day_shares_the_day_s_one_heading(intel_state):
+    """Clause 1: two items, one UTC day, ONE `## <date>` heading — and both entries.
+
+    The same two calls produced two `## <today>` sections before #3259, which is the shape
+    that made the 2026-10-24 run report five of six writes missing when it read the day's
+    first heading and saw one entry under it.
+    """
+    digest = intel_state / "vault" / DIGEST_FILE
+
+    _publish(intel_state,
+             _yt_item("An agent that holds its scratch pad across turns",
+                      "An agent kept a block reference across turns and reused it on the "
+                      "next request, which is what the memory layer needed.", "share1"),
+             _yt_item("An agent retrieval stack on a one-GPU budget",
+                      "A team running its own model indexed a full corpus for an agent with "
+                      "the vector leg kept on the same card.", "share2"))
+
+    text = digest.read_text(encoding="utf-8")
+    assert _date_headings(text) == [_today_utc()], (
+        f"two entries on one day did not leave exactly one dated heading: "
+        f"{_date_headings(text)}")
+    assert _digest_structure(text.splitlines())[:2] == (2, 2), (
+        "the merged entries did not each keep their own `### ` block and terminating `---`")
+    assert text.index("scratch pad across turns") < text.index("one-GPU budget"), (
+        "merging into the day's section reordered the entries")
+
+
+def test_a_digest_already_doubling_the_day_gains_no_third_heading_and_loses_no_entry(
+        intel_state):
+    """Clauses 1 and 3, on the shipped shape: the file arrives holding TWO `## <day>`
+    headings for today, one entry each — the exact residue of the old write path, 47 dates'
+    worth of it in the shipped digest — and a merge write adds an entry without adding a
+    heading and without touching the entries that were already there.
+
+    The two pre-existing headings are left standing on purpose: collapsing what a day
+    already holds is the backfill ruling #3259 explicitly does not make, and this node would
+    pass on a merge that quietly rewrote history if it asserted `== 1` here.
+    """
+    day = _today_utc()
+    digest = intel_state / "vault" / DIGEST_FILE
+    digest.parent.mkdir(parents=True, exist_ok=True)
+
+    def _legacy_entry(n: int) -> str:
+        return (f"### Legacy agent digest {n}\n\n"
+                "**Source:** youtube | **Relevance:** 6/10\n\n"
+                "An agent entry seeded to reproduce the duplicate-heading shape the writer "
+                f"used to leave, number {n}.\n\n"
+                f"[Link](https://www.youtube.com/watch?v=legacy{n})\n\n---\n\n")
+
+    seeded = ("---\nsegment: knowledge\ntype: notes\n---\n\n# Ai-Llms Updates\n\n"
+              f"## {day}\n\n" + _legacy_entry(1)
+              + f"## {day}\n\n" + _legacy_entry(2))
+    digest.write_text(seeded, encoding="utf-8")
+
+    assert vw_mod.write_item_to_vault(
+        _yt_item("An agent entry published into the doubled day",
+                 "An agent entry published after the merge landed, into a file whose day "
+                 "already carried two headings for it.", "merge3"),
+        DIGEST_PROFILE) is True
+
+    text = digest.read_text(encoding="utf-8")
+    assert _date_headings(text).count(day) == 2, (
+        f"a merge into a legacy day either added a heading or silently collapsed one: "
+        f"{_date_headings(text)}")
+    assert text.startswith(seeded), (
+        "the merge rewrote the bytes that were already in the file")
+    assert _digest_structure(text.splitlines())[:2] == (3, 3), (
+        "three entries and three terminating rules is the whole of what a merge must keep")
+    assert text.index("digest 1") < text.index("digest 2") < text.index("published into"), (
+        "an appended entry took a position ahead of the ones already published")
+
+
+def test_the_first_entry_of_a_new_day_opens_exactly_one_section(intel_state, monkeypatch):
+    """Clause 2, first half: suppressing a duplicate heading must not suppress the section.
+
+    One item published on 2026-10-20, two on 2026-10-21: the file ends up with two dated
+    headings — one per day, in the order the days came — and three entries. A merge keyed too
+    loosely (any heading, not this day's) would leave the 21st's two items under the 20th,
+    which is the mis-dating failure #2566 already cost this pipeline a backfill.
+    """
+    digest = intel_state / "vault" / DIGEST_FILE
+
+    _freeze_the_clock(monkeypatch, "2026-10-20")
+    _publish(intel_state, _yt_item(
+        "An agent published on the twentieth",
+        "An agent entry published on the first of the two days this node writes across.",
+        "day20a"))
+    _freeze_the_clock(monkeypatch, "2026-10-21")
+    _publish(intel_state,
+             _yt_item("An agent published on the twenty-first",
+                      "An agent entry published on the second day, opening a new section.",
+                      "day21a"),
+             _yt_item("Another agent published on the twenty-first",
+                      "A second agent entry on the same second day, merging into the "
+                      "section the first one opened.", "day21b"))
+
+    text = digest.read_text(encoding="utf-8")
+    assert _date_headings(text) == ["2026-10-20", "2026-10-21"], (
+        f"one heading per day is the whole of clause 2: {_date_headings(text)}")
+    assert _digest_structure(text.splitlines())[:2] == (3, 3)
+
+
+def test_a_brand_new_digest_is_created_with_front_matter_one_h1_and_one_section(
+        intel_state):
+    """Clause 2, second half: the create path still creates. A first-ever entry has no
+    section to merge into, so the file it produces has front matter, exactly one H1, and
+    exactly one dated heading — the bytes the old code appended for that first item.
+    """
+    digest = intel_state / "vault" / DIGEST_FILE
+
+    _publish(intel_state, _yt_item(
+        "An agent digest created from nothing",
+        "An agent entry that is the first thing ever written to this digest file.",
+        "create1"))
+
+    lines = digest.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "---", "the created file has no front matter to open it"
+    fm_end = _front_matter_end(lines)
+    assert fm_end > 0, "the front matter never closes, so every reading below is off"
+    h1 = [line for line in lines if re.match(r"^# ", line)]
+    assert h1 == ["# Ai-Llms Updates"], f"exactly one H1: {h1}"
+    assert _date_headings("\n".join(lines)) == [_today_utc()]
+    assert _digest_structure(lines)[:2] == (1, 1)
+
+
+def test_entries_published_over_two_days_keep_their_own_headings_and_rules(
+        intel_state, monkeypatch):
+    """Clause 4: the merge touches the date heading and nothing else.
+
+    Three items spread over two days: `### ` headings == `---` rules == 3 == the item count,
+    and `_digest_structure` reports no orphaned heading and no URL-bearing body — the four
+    readings #2509 pins, which the merge must move by exactly one per item and no more. If
+    the entry block had kept its `---` while losing its heading, or opened a heading without
+    its rule, this is the node that says so.
+    """
+    digest = intel_state / "vault" / DIGEST_FILE
+
+    _freeze_the_clock(monkeypatch, "2026-10-19")
+    _publish(intel_state, _yt_item(
+        "An agent eval that keeps its baseline",
+        "An agent baseline that moved under the runner could not show a regression, so the "
+        "nightly run pinned its commit and reported.", "two1"))
+    _freeze_the_clock(monkeypatch, "2026-10-20")
+    _publish(intel_state,
+             _yt_item("An agent memory layer with one writer",
+                      "An agent memory layer written by one process at a time keeps the "
+                      "index and the prose from disagreeing.", "two2"),
+             _yt_item("An agent tool router on a small model",
+                      "An agent router that hands each call to a small local model by shape "
+                      "keeps the big model out of the loop.", "two3"))
+
+    lines = digest.read_text(encoding="utf-8").splitlines()
+    entries, rules, orphans, link_bodies = _digest_structure(lines)
+    assert (entries, rules) == (3, 3), (
+        f"three published items must leave three `### ` blocks and three rules: "
+        f"{entries} headings, {rules} rules")
+    assert orphans == [], f"an entry lost its `**Source:**` line: {orphans}"
+    assert link_bodies == [], f"a body line carries a URL again: {link_bodies}"
+    assert _date_headings("\n".join(lines)) == ["2026-10-19", "2026-10-20"]
+
+
+def test_a_merge_write_over_a_copy_of_the_shipped_digest_loses_no_entry(intel_state):
+    """Clause 3: the merge runs against a copy of the shipped digest, and the shipped
+    entries come out of it once each, in the same relative order.
+
+    Two readings, because clause 3 has both halves in it. First the count: `grep -c '^### '`
+    over the copy moves by exactly the entries the run writes — one — and a merge write that
+    the writer REFUSES (the same item again, refused by `url_exists_in_file`) leaves it equal
+    before and after, byte for byte, which is the "does not duplicate an already-present
+    entry" half. Second the headings: a day that had none gains one, a day that had one keeps
+    one, so `max(before, 1)` is the only heading count a merge may leave. This node reads the
+    published file rather than a fixture, and writes only the copy.
+    """
+    shipped = _shipped_digest()
+    assert shipped.is_file(), shipped
+    copy = intel_state / "vault" / DIGEST_FILE
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_bytes(shipped.read_bytes())
+
+    day = _today_utc()
+    before = copy.read_text(encoding="utf-8")
+    headings_before = _date_headings(before).count(day)
+
+    probe = _yt_item(
+        "An agent merge probe written against the shipped digest",
+        "An agent entry written into a copy of the published digest to prove the merge loses "
+        "no entry, whose URL no run has ever published.", "mergeprobe1")
+
+    assert vw_mod.write_item_to_vault(probe, DIGEST_PROFILE) is True
+    after = copy.read_text(encoding="utf-8")
+
+    def _entry_lines(text: str) -> list:
+        return [line for line in text.splitlines() if line.startswith("### ")]
+
+    assert _entry_lines(after) == _entry_lines(before) + [f"### {probe.title}"], (
+        "a shipped entry vanished, moved, or was duplicated by the merge")
+    assert after.count(f"### {probe.title}") == 1
+    assert _date_headings(after).count(day) == max(headings_before, 1), (
+        f"today's heading count moved {headings_before} -> "
+        f"{_date_headings(after).count(day)}: a merge adds an entry, never a heading")
+
+    assert vw_mod.write_item_to_vault(probe, DIGEST_PROFILE) is False, (
+        "re-writing the same URL was not refused")
+    assert copy.read_text(encoding="utf-8") == after, (
+        "a refused merge write still changed the file — the entry would be duplicated")
+
+
+@pytest.mark.parametrize("route", ["batch", "direct"],
+                         ids=["write_all_to_vault", "write_item_to_vault"])
+def test_both_public_write_routes_yield_one_dated_heading_per_day(intel_state,
+                                                                  monkeypatch, route):
+    """Clause 5: the batch route and the direct route are two doors to one file, and each
+    used to open a section per item.
+
+    The same two items, the same day, either way. `write_all_to_vault` is the process
+    boundary the autonomy worker actually takes: it re-reads `intel-<day>.jsonl` from disk,
+    runs the floor, the call cap and the written-state dedup, then calls the per-item writer
+    once per survivor — so a heading fix that only worked on the direct call would ship the
+    bug down the route that runs unattended.
+    """
+    day = _today_utc()
+    items = [
+        _yt_item("An agent entry through the batch route",
+                 "An agent entry reaching the digest through write_all_to_vault and the "
+                 "day file on disk.", "route1"),
+        _yt_item("An agent entry through the direct route",
+                 "An agent entry reaching the digest through a direct write_item_to_vault "
+                 "call, with no batch filter in front of it.", "route2"),
+    ]
+
+    if route == "batch":
+        (intel_state / "feeds" / f"intel-{day}.jsonl").write_text(
+            "\n".join(i.to_json() for i in items) + "\n", encoding="utf-8")
+        monkeypatch.setattr(vw_mod, "load_profile", lambda: DIGEST_PROFILE)
+        assert vw_mod.write_all_to_vault(day) == 2
+    else:
+        _publish(intel_state, *items)
+
+    text = (intel_state / "vault" / DIGEST_FILE).read_text(encoding="utf-8")
+    assert _date_headings(text) == [day], (
+        f"the {route} route opened one heading per item: {_date_headings(text)}")
+    assert _digest_structure(text.splitlines())[:2] == (2, 2)
+
+
+def test_an_entry_is_never_filed_under_another_day_s_heading(intel_state):
+    """The one case a plain append gets wrong, and the only reason the merge returns an
+    offset instead of a boolean.
+
+    Entries are appended, so a day's section is normally the file's tail and merging is an
+    append. It stops being the tail the moment the digest is not monotonic — a heading
+    collapsed by hand, a section re-sorted, the backfill ruling #3259 leaves open — and then
+    "the last `## <today>` section" sits in the MIDDLE of the file. Appending there would
+    publish today's entry under `## 2026-12-31`, which is the mis-dating #2566 already cost
+    this pipeline a backfill: a worse defect than the duplicate heading the merge exists to
+    suppress. So the entry goes inside today's section, and the later section is untouched.
+    """
+    day = _today_utc()
+    digest = intel_state / "vault" / DIGEST_FILE
+    digest.parent.mkdir(parents=True, exist_ok=True)
+
+    def _entry(title: str, vid: str) -> str:
+        return (f"### {title}\n\n**Source:** youtube | **Relevance:** 6/10\n\n"
+                f"An agent entry standing under its own day heading, {vid}.\n\n"
+                f"[Link](https://www.youtube.com/watch?v={vid})\n\n---\n\n")
+
+    digest.write_text(
+        "---\nsegment: knowledge\ntype: notes\n---\n\n# Ai-Llms Updates\n\n"
+        "## 2026-10-01\n\n" + _entry("An agent entry from October the first", "mid1")
+        + f"## {day}\n\n" + _entry("An agent entry of today already filed", "mid2")
+        + "## 2026-12-31\n\n" + _entry("An agent entry of a later day", "mid3"),
+        encoding="utf-8")
+
+    assert vw_mod.write_item_to_vault(
+        _yt_item("An agent entry filed into the middle of the digest",
+                 "An agent entry whose day has a later day's heading below it, so a plain "
+                 "append at end of file would file it under the wrong date.", "mid4"),
+        DIGEST_PROFILE) is True
+
+    text = digest.read_text(encoding="utf-8")
+    assert _date_headings(text) == ["2026-10-01", day, "2026-12-31"], (
+        f"the merge added or moved a heading instead of filling today's section: "
+        f"{_date_headings(text)}")
+    assert text.index("entry of today already filed") \
+        < text.index("filed into the middle") \
+        < text.index("## 2026-12-31") \
+        < text.index("entry of a later day"), (
+        "today's entry did not land inside today's section, ahead of the later heading")
+    assert _digest_structure(text.splitlines())[:2] == (4, 4), (
+        "the whole-file rewrite the mid-file merge needs lost or merged an entry")
+    for vid in ("mid1", "mid3"):
+        assert text.count(f"https://www.youtube.com/watch?v={vid}") == 1, (
+            f"a section the merge had no business with changed: {vid}")
+    # The mid-file merge rewrites the whole digest, so it goes through a rename rather than
+    # truncating a 146 KB file in place — see `_replace_text`.
+    assert not list(digest.parent.glob(f"{digest.name}.*.tmp")), (
+        "the atomic rewrite left its temporary file behind")
+    assert digest.read_text(encoding="utf-8") == text
