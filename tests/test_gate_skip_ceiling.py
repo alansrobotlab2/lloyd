@@ -556,7 +556,11 @@ def test_the_other_floors_still_fire_under_a_derived_rail(tmp_path, monkeypatch)
     ok, detail, _ = g._tests_pass(_counts(10, collected=5), None, {})
     assert ok is False and "collected" in detail and "1000" in detail, (
         f"the collected floor stopped firing: {detail}")
-    ok2, detail2, _ = g._tests_pass(_counts(10, passed=5, collected=1015), None, {})
+    # `collected` has to clear the DERIVED collected floor for the passed floor to be
+    # the figure that answers (#3250): the seeded base is 20,039 collected, so that
+    # floor is int(0.25 x 20,039) = 5,009 and a 1,015-collected run now refuses as
+    # "deleted tests", which is the right answer for a different guard.
+    ok2, detail2, _ = g._tests_pass(_counts(10, passed=5, collected=20_100), None, {})
     assert ok2 is False and "collected but not run" in detail2, (
         f"the passed floor stopped firing: {detail2}")
 

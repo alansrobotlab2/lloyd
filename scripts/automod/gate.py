@@ -116,6 +116,41 @@ PYTEST_MIN_COLLECTED = 1000
 # hold, or the rung's own guarantee ("the suite still passes") is satisfied by
 # a suite that did nothing.
 PYTEST_MIN_PASSED = 1000
+# Neither 1000 above is the figure the `tests` rung applies any more (#3250); both
+# are the FLOOR of a figure derived per run by `_pytest_floors`, the treatment #3143
+# gave the skip rail below. They were budgeted against a ~9,600-test suite —
+# `architecture/testing.md`'s 2026-09-24 review log records `collected` 9,583-9,620,
+# so 1000 was a tenth of it — while the green full rungs of 2026-10-24 report
+# `collected` 21,298-21,348, which makes the bare literal under 5% of the suite it
+# bounds. And `collected` here is the run's own run-plus-skipped total, not pytest's
+# collection report (`_PYTEST_COUNT_WORDS`), so it cannot tell a full run from a
+# twentieth of one: a run that executed 1,200 of ~21,300 nodes and failed nothing
+# cleared both floors until the figure moved with the suite.
+PYTEST_FLOOR_FRACTION = 0.25
+# The ONE fraction both pytest floors are derived by, named rather than spelled
+# twice — two literals tuned apart is the lottery #2205 named. A quarter of the
+# recent green full median, which on the ledger of 2026-10-24 (bases 21,341 collected /
+# 21,300 passed) yields floors of 5,335 and 5,325: 5.3x the literals, and a tenth of the
+# suite refused outright.
+#
+# What bounds this number is the vacuity probe, and the bound is conditional in a way
+# that has to be stated exactly. `scripts/maintenance/guard_vacuity.py` drives the real
+# `Gate.rung_tests` over ABSOLUTE suite shapes — `HEALTHY = suite(6289, 6274, 13, 2)`
+# and `skipped_1600 = suite(6000, 4300, 1600, 100)` — and its driver scrubs
+# `gate_mod.S.ROUNDS_DIR`, so the figure it measures is the literal and the fraction
+# cannot move the probe at all. That scrub is load-bearing, and measured: without it the
+# probe reads the live store, the guard is measured at 5,325 against a mutant holding
+# 1,000, `PYTEST_MIN_PASSED class=collected_not_run` and `PYTEST_MAX_SKIPPED
+# class=skipped_1600` both go guard=BLOCK mutant=BLOCK, and the reported rate moves
+# 3/13 -> 5/13 on an unchanged commit. If it is ever removed the ceiling becomes the
+# tighter of two figures computed against today's bases — 6289 / 21337 = 0.294 (the
+# healthy fixture must still PASS) and 4300 / 21300 = 0.20 (skipped_1600 must fail on
+# the skip rail, not on the passed floor) — which is BELOW 0.25. So the fraction is
+# pinned by a test, not by this comment:
+# `tests/test_gate_tests_floors.py::test_the_probe_measures_its_rung_fixtures_with_no_rounds_store_behind_them`
+# asserts the scrub exists and re-derives both bounds. What bounds 0.25 unconditionally
+# is the real suite: a green full run reports ~21,300 passed against a 5,325 floor, 4x
+# margin, and a truncated run at a tenth of the suite is refused.
 # The FLOOR of the tests rung's skip ceiling, not the ceiling it applies (#3143).
 # What the rung now refuses is `max(this, base_skips + PYTEST_SKIP_HEADROOM)`,
 # computed per run by `_skip_ceiling`, because the absolute figure had stopped
@@ -1669,6 +1704,147 @@ def _skip_ceiling_note(ceiling: int, base: int | None) -> str:
     """
     return (f"skip ceiling {ceiling} (base {'none' if base is None else base}, "
             f"headroom {PYTEST_SKIP_HEADROOM}, floor {PYTEST_MAX_SKIPPED})")
+
+
+def _pytest_base_median(field: str, exclude_round: str | None = None) -> int | None:
+    """Median `field` of the newest green FULL `tests` rungs, or None (#3250).
+
+    `field` is `collected` or `passed`. Each is read from the rung's own `data` dict
+    for the reason `_green_full_tests_data` gives: a detail string spells a green
+    run's numbers differently from a refusal's, so a base built by parsing prose would
+    mix two kinds of row into one median.
+
+    The same walk as `_skip_base_median`, with the same reasons: newest-first by round
+    ID and never by mtime, because a re-gate rewrites an OLD directory's mtime while
+    leaving its round ID alone and a time-sorted base would silently re-include rows
+    the ID sort has already superseded; stop at `PYTEST_SKIP_BASE_SAMPLES` accepted
+    rows; read at most `PYTEST_SKIP_BASE_SCAN_CAP` directories, since the store holds
+    ~2,070 of them and a full stat+read walk is 1.47s against 0.03s for the capped one
+    and 0.08s for the whole listing. The accepted set is exactly what the skip rail
+    accepts (rung `ok`, detail not `REUSED`, no `partial` key), so the two derived rails
+    cannot disagree about which rounds the ledger is talking about.
+
+    The round being gated is excluded from its own base: a round that could join its
+    own base sets the floor it is then judged against, and one green full round is
+    enough to pin it at its own `collected` forever.
+
+    `S.ROUNDS_DIR` is read as an attribute of the imported `state` MODULE at call time,
+    the same way the skip rail reads it, so a test moves the ledger with one
+    `monkeypatch.setattr` and `scripts/maintenance/guard_vacuity.py` can point it at
+    scratch between calls. Deliberately not memoized: #3143 found that a cached base
+    makes a derived rail un-movable from the store, and a floor the probe cannot move
+    is a floor the probe cannot prove. A rung whose `field` is absent or not an int is
+    dropped from the median and does not consume a sample, so an unreadable summary
+    lowers a floor rather than inventing one.
+    """
+    rounds_dir = S.ROUNDS_DIR
+    if not rounds_dir.is_dir():
+        return None
+    try:
+        dirs = sorted((d for d in rounds_dir.iterdir() if d.is_dir()),
+                      key=lambda d: d.name, reverse=True)
+    except OSError:
+        return None
+    rows: list[int] = []
+    for d in dirs[:max(0, int(PYTEST_SKIP_BASE_SCAN_CAP))]:
+        if exclude_round and d.name == exclude_round:
+            continue
+        data = _green_full_tests_data(d / "gate.json")
+        if data is None:
+            continue
+        value = data.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            rows.append(value)
+            if len(rows) >= max(1, int(PYTEST_SKIP_BASE_SAMPLES)):
+                break
+    if not rows:
+        return None
+    return int(statistics.median(rows))
+
+
+#: Which module constant arms which derived floor, by name. `globals()[…]` below is how
+#: the figure stays movable from the module: a dict of VALUES would be a snapshot, and a
+#: snapshot is the thing #3143's note at `:131` forbids for a derived rail.
+FLOOR_CONSTANT_NAMES = {"collected": "PYTEST_MIN_COLLECTED", "passed": "PYTEST_MIN_PASSED"}
+
+
+def _one_pytest_floor(field: str, exclude_round: str | None) -> int:
+    """The figure the `tests` rung applies for one count: `max(literal, fraction x base)`.
+
+    The literal is looked up HERE, by name, in this module's own `globals()` at call
+    time — not taken as a parameter. #3143's note at `:131` demands that a derived rail
+    be movable from the module so `scripts/maintenance/guard_vacuity.py` can mutate
+    `PYTEST_MIN_COLLECTED` / `PYTEST_MIN_PASSED` on the live module and the mutant's
+    verdict actually diverges; a mutation that landed only in `_pytest_floors`, three
+    frames up, would leave this function computing its fallback from the pre-mutation
+    number and the probe's floor-at-0 mutant would still BLOCK the zero-pass case. The
+    review of this round's first commit caught exactly that: `floor` as a parameter made
+    the fallback read the unmutated 1000 and the clause could not be exercised from the
+    store, so the node the review ran to grade it failed at the mutant half. Reading the
+    name in the frame that applies it is what makes `monkeypatch.setattr(gate,
+    "PYTEST_MIN_PASSED", 0)` mean what it says.
+
+    Truncated with `int`, never `round`: rounding up would let a base that dipped by
+    half a node lift the floor, and a rail a flaky week moves is the thing #2999
+    refused for the skip margin. With no base the figure is the literal exactly, so a
+    run with no ledger to read — every unit test here, and the probe's own scratch
+    store — sees the number it saw before this derivation existed.
+    """
+    # An unarmed floor is not a floor, and the derivation may not invent one. A literal
+    # of 0 is the documented "this guard never objects" (it is exactly what
+    # `guard_vacuity.py`'s mutant sets, and it is what a person would set to take the
+    # rail off), so a derived figure resurrecting it would make the constant unwritable
+    # from the module — the same property #3143's note at `:131` protects by refusing to
+    # cache the skip rail. Production arms both literals at 1000, so this branch is the
+    # probe's and a human's, never a run's; without it the floor-at-0 mutant BLOCKS on
+    # the live ledger like the guard does, and the two guards it exists to prove would
+    # score DEAD-BRANCH instead of witnessed (#3250, measured on the live store:
+    # `PYTEST_MIN_PASSED class=collected_not_run` went guard=BLOCK mutant=BLOCK).
+    floor = globals()[FLOOR_CONSTANT_NAMES[field]]
+    if floor <= 0:
+        return floor
+    base = _pytest_base_median(field, exclude_round)
+    if base is None:
+        return floor
+    return max(floor, int(PYTEST_FLOOR_FRACTION * base))
+
+
+def _pytest_floors(exclude_round: str | None = None) -> tuple[int, int, int | None, int | None]:
+    """The two floors the `tests` rung applies: (collected, passed, base_coll, base_pass).
+
+    `max(literal, PYTEST_FLOOR_FRACTION x median-of-five)` for each figure, so the
+    literal is a floor on the floor: a suite that genuinely shrinks cannot take the
+    applied figure below what it was when 1000 was a tenth of it, and the figure can
+    only rise with the suite it is a fraction of. Both module globals are read here,
+    at call time, for the reason spelled at their definitions — the vacuity probe
+    mutates the live module and a figure captured once would blind it.
+
+    With no readable base both are the literals exactly, which is what every unit
+    test here sees (conftest points `LLOYD_AUTOMOD_STATE` at scratch) and what keeps
+    the probe's floor-at-0 mutant diverging on a collected-but-not-run input: no base
+    means the mutant really is a guard that never objects.
+
+    Returned as a 4-tuple rather than cached, and the two bases come back with the
+    two floors so `_tests_pass` can refuse naming the figure it applied — a rail
+    nobody can read off `gate.json` is a rail nobody can debug a week later.
+    """
+    return (_one_pytest_floor("collected", exclude_round),
+            _one_pytest_floor("passed", exclude_round),
+            _pytest_base_median("collected", exclude_round),
+            _pytest_base_median("passed", exclude_round))
+
+
+def _pytest_floor_note(figure: int, floor: int, base: int | None, field: str) -> str:
+    """The clause that names the pytest floor's derivation in one rung detail (#3250).
+
+    The same four numbers `_skip_ceiling_note` has always printed — figure applied,
+    base it came from, the multiplier, the literal it may not go under — because the
+    lesson #3143 recorded is that a derived rail has to be readable from `gate.json`
+    alone: `(base none, …)` is the only spelling that tells a reader a rail was
+    derived and one that tells them it silently fell back to the literal.
+    """
+    return (f"{field} floor {figure} (base {'none' if base is None else base}, "
+            f"fraction {PYTEST_FLOOR_FRACTION}, floor {floor})")
 
 
 class Gate:
@@ -3271,18 +3447,44 @@ class Gate:
 
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
         # simply deleted the test that was failing.
-        if counts["collected"] < PYTEST_MIN_COLLECTED:
+        # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
+        # simply deleted the test that was failing. The figure compared is no longer
+        # the bare literal (#3250) but `max(literal, PYTEST_FLOOR_FRACTION x median of
+        # the five newest green FULL rungs)`, read from the ledger per call: 1000 was
+        # budgeted against a ~9,600-test suite where it was a tenth of it, and the
+        # green full rungs of 2026-10-24 report `collected` 21,298-21,348, so held
+        # absolute it had fallen under 5% of the thing it bounds. `collected` here is
+        # the run's own run-plus-skipped total, not pytest's collection report
+        # (`_PYTEST_COUNT_WORDS`), so it cannot tell a full run from a twentieth of
+        # one, and a worker that dies without printing a FAILED line is exactly that
+        # shape (#2999, #3205) — with `_refused_whole_suite_rerun` refusing the re-run
+        # that used to catch it. Each literal is kept for two jobs: it is the FLOOR the
+        # derived figure may never go under, and it is the whole figure when no ledger
+        # is readable, which is every unit test here and the vacuity probe's floor-at-0
+        # mutant. The detail keeps naming the literal as `floor N` and adds the base and
+        # the fraction beside it, the way `_skip_ceiling_note` spells the skip rail: a
+        # rail nobody can read off `gate.json` is a rail nobody can debug a week later.
+        min_collected, min_passed, base_collected, base_passed = _pytest_floors(
+            self.round_id)
+        if counts["collected"] < min_collected:
             return False, (f"only {counts['collected']} tests collected "
-                           f"(floor {PYTEST_MIN_COLLECTED}) — did the round delete tests?"), {
-                               **counts, **extra}
+                           f"(floor {min_collected}) — did the round delete tests? "
+                           + _pytest_floor_note(min_collected, PYTEST_MIN_COLLECTED,
+                                                base_collected, "collected")), {
+                               **counts, "collected_floor": min_collected,
+                               "collected_floor_base": base_collected, **extra}
         # ...and it exits 0 just as happily having collected everything and RUN
         # nothing. A collected-count floor alone is satisfied by a suite that
         # skipped itself wholesale, which is a one-line conftest change away.
-        if counts["passed"] < PYTEST_MIN_PASSED:
+        if counts["passed"] < min_passed:
             return False, (f"only {counts['passed']} tests passed "
-                           f"(floor {PYTEST_MIN_PASSED}) of {counts['collected']} "
+                           f"(floor {min_passed}) of {counts['collected']} "
                            f"collected, {counts['tests_skipped']} skipped — the suite "
-                           "was collected but not run"), {**counts, **extra}
+                           "was collected but not run "
+                           + _pytest_floor_note(min_passed, PYTEST_MIN_PASSED,
+                                                base_passed, "passed")), {
+                               **counts, "passed_floor": min_passed,
+                               "passed_floor_base": base_passed, **extra}
         # The rail is derived for this run (#3143): the base tree's own skip count
         # plus a fixed headroom, floored at the absolute `PYTEST_MAX_SKIPPED`. Read
         # here, after the collected and passed floors have had their say, so a run

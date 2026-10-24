@@ -340,6 +340,49 @@ def test_the_collected_floor_matches_the_doc():
     assert gate.PYTEST_MIN_COLLECTED == 1000
 
 
+def test_both_pytest_floors_are_documented_as_derived_with_their_ledger_figures():
+    """#3250 clause 5: the floor table states both pytest floors as derived, and the
+    figures it prints are the ones the fraction yields on the bases the doc itself names.
+
+    `architecture/testing.md` used to say "Only the skip rail was made relative". That
+    sentence is the premise this round refuted, so the node pins three things: the
+    sentence is gone, all three rails are now stated as relative, and every figure the
+    doc prints for a pytest floor is recomputed from the doc's OWN named bases and
+    `gate.PYTEST_FLOOR_FRACTION` — a doc that drifts from the code fails here, and a doc
+    that quietly drops its bases fails too.
+    """
+    from scripts.automod import gate
+
+    doc = (ROOT / "architecture" / "testing.md").read_text(encoding="utf-8")
+    assert "Only the skip rail was made relative" not in doc, (
+        "the refuted sentence is still the doc's answer about the two pytest floors")
+    assert "PYTEST_FLOOR_FRACTION" in doc, (
+        "the doc must name the one constant both floors are derived by, not two literals")
+    assert "All three are relative now" in doc, (
+        "the table has to say the skip rail is no longer the only derived rail")
+    assert gate.PYTEST_MIN_COLLECTED == 1000 and gate.PYTEST_MIN_PASSED == 1000
+
+    # Read the doc's own numbers out of its prose, whitespace-tolerantly: the paragraph
+    # wraps, and a parse that broke on a line break would silently skip the check.
+    bases = re.search(r"the bases are\s+collected ([\d,]+) and passed ([\d,]+),"
+                      r"\s+which yields floors of ([\d,]+) and ([\d,]+)", doc)
+    assert bases, ("the doc no longer states both bases and both derived floors in one "
+                   "sentence, so nothing ties its figures to the fraction")
+    base_coll, base_pass, fig_coll, fig_pass = (
+        int(x.replace(",", "")) for x in bases.groups())
+    figures = [fig_coll, fig_pass]
+    assert figures == [
+        int(gate.PYTEST_FLOOR_FRACTION * base_coll),
+        int(gate.PYTEST_FLOOR_FRACTION * base_pass),
+    ], (f"the doc's figures are not the fraction applied to the doc's own bases: doc "
+        f"states {figures} for bases {base_coll}/{base_pass} at fraction "
+        f"{gate.PYTEST_FLOOR_FRACTION}")
+    assert "each floor is exactly its literal" in doc, (
+        "the no-ledger edge is the one every unit test and the vacuity probe run in; the "
+        "doc has to state it and the code has to hold it "
+        "(`test_with_no_ledger_both_floors_are_the_literals_read_from_the_module_at_call_time`)")
+
+
 # ── §8.1 regression detector ────────────────────────────────────────────────
 
 def test_latency_is_never_armed():

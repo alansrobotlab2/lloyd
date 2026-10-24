@@ -509,6 +509,21 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
         # AttributeError and both verdicts printed ERROR — scoring a live guard
         # VACUOUS for a reason that had nothing to do with the guard.
         g.home_isolation = "not requested"
+        # Read the floors with NO rounds store behind them (#3250). Both pytest floors
+        # are derived per run from the rounds ledger, and this driver imports
+        # `scripts.automod.gate` in-process, so with the live `ROUNDS_DIR` reachable the
+        # guard would be measured with a derived floor (5,335 / 5,325 on 2026-10-24)
+        # while the mutant, which only moves the literal, keeps 1,000 — the fixtures
+        # below are absolute suite shapes, so the pair then disagrees on neither class
+        # and three live guards score DEAD-BRANCH or VACUOUS. Measured: with the store
+        # reachable `PYTEST_MIN_PASSED class=collected_not_run` and
+        # `PYTEST_MAX_SKIPPED class=skipped_1600` both went guard=BLOCK mutant=BLOCK and
+        # the rate moved 3/13 -> 5/13, on the same commit. That is this report measuring
+        # its environment, which is exactly what :88 promises it does not do. Pointing
+        # the attribute at a directory that does not exist is the same state
+        # `tests/conftest.py` puts pytest-mode in, so the fixtures are measured against
+        # the literals they were written against, and the mutant's literal move lands.
+        gate_mod.S.ROUNDS_DIR = rung_tmp / "no-rounds-store"
         # Tolerant of the real signature's keyword-only args: c0f12db added
         # `isolate_home` to Gate._child_env and updated its call sites but not
         # the stubs that fake it, so rung_tests raised TypeError in here and

@@ -207,18 +207,34 @@ destroyed data — `eval_trend_stats`'s `--strict` exit codes — the contract w
 
 `scripts/automod/gate.py`:
 
-| Floor | Value | Catches |
+| Floor | Value (the **floor** of a derived figure) | Catches |
 |---|---|---|
 | `PYTEST_MIN_COLLECTED` | 1000 | a conftest import failure collecting everything and running none of it |
 | `PYTEST_MIN_PASSED` | 1000 | collected ≠ run |
-| `PYTEST_MAX_SKIPPED` | 40 (the **floor**) | *"a round that skips its way to green is not a round that passed"* |
+| `PYTEST_MAX_SKIPPED` | 40 | *"a round that skips its way to green is not a round that passed"* |
 
-Only the skip rail was made relative. The two 1000s were budgeted when the suite
-was ~9,600 (still what `architecture/index.md` quotes this doc for), where 1000
-was a tenth of it; against ~21,300 they are under 5%, and `collected` here is what
-the run reports having **run plus skipped**, not pytest's collection report
-(`gate._PYTEST_COUNT_WORDS`), so a truncated full run that executed a twentieth of
-the suite and failed nothing clears both (#3250, #3249).
+All three are relative now, each as `max(<its literal>, <derived from the ledger>)`,
+so every literal above is a floor and not the figure the rung applies (#3143 made the
+skip rail relative; #3250 gave the two pytest floors the same treatment). Both pytest
+floors are `max(literal, PYTEST_FLOOR_FRACTION x base)`, one fraction named once at
+`gate.PYTEST_FLOOR_FRACTION = 0.25`, with `base` the median `collected` / `passed` of
+the five newest green **full** `tests` rungs in the rounds store — the same accepted
+set the skip rail reads (rung `ok`, detail not `REUSED`, no `partial` key), and the
+round being gated excluded from its own base. On the ledger of 2026-10-24 the bases are
+collected 21,341 and passed 21,300, which yields floors of 5,335 and 5,325 (against the
+literals' 1000).
+
+Why the absolute 1000 stopped being enough: it was budgeted when the suite was ~9,600
+(still what `architecture/index.md` quotes this doc for), where 1000 was a tenth of it;
+against ~21,300 it is under 5%. And `collected` here is what the run reports having
+**run plus skipped**, not pytest's collection report (`gate._PYTEST_COUNT_WORDS`), so it
+cannot tell a full run from a twentieth of one: a truncated full run that executed 1,200
+of ~21,300 nodes and failed nothing cleared both floors and the rung still printed "all
+green" (#3250, #3249). With no readable ledger each floor is exactly its literal, which
+is what every unit test here and the vacuity probe's floor-at-0 mutant see, because
+`tests/conftest.py` points `LLOYD_AUTOMOD_STATE` at scratch before
+`scripts.automod.state` is imported. A rung detail says which happened in the same words
+the skip rail uses: `collected floor 5335 (base 21341, fraction 0.25, floor 1000)`.
 
 The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
 PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the five newest
