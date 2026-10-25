@@ -93,6 +93,31 @@ def _states_a_ledger_cap_at_32768(line: str) -> bool:
     """
     return "ledger" in line.lower() and bool(THIRTY_TWO_K.search(line))
 
+#: Every spelling of the cap the 3x multiple produced, comma or no comma — the figure
+#: #3015 retired on 2026-10-19 when it raised `LEDGER_MULTIPLIER` to 4, and the one
+#: `step-2a-ter-curation.md` went on teaching for six more days (#3282). Both spellings
+#: because the skill carried the product comma-separated in §1/§5's prose and unseparated
+#: inside its `at ceiling (...)` template, and a ban covering only one of the two would
+#: read clean over the half that actually reaches a completion note.
+RETIRED_LEDGER_CAPS = re.compile(r"76[,_ ]?800|49[,_ ]?152")
+
+
+def _states_a_ledger_cap_at_a_retired_figure(line: str) -> bool:
+    """True if THIS line attaches a cap the retired 3x multiple produced to a ledger.
+
+    #3282 clause 1, in `_states_a_ledger_cap_at_32768`'s shape for the same reason: the
+    unit is the line, so a correct sentence about an ordinary topic file or about the
+    multiplier's own history stays free, and both halves of the claim have to meet on the
+    line that makes it.
+
+    The conservative direction is the same one that file already took and states: a line
+    that merely *discusses* the old product while naming a ledger fires even if it means
+    to retire it. That is the wanted failure — prose that still spells 76,800 next to the
+    word "ledger" is prose a curator will read as the cap, which is precisely how the
+    figure outlived the multiple by a week.
+    """
+    return "ledger" in line.lower() and bool(RETIRED_LEDGER_CAPS.search(line))
+
 #: A fixture that is NOT a ledger, for the half of the rule that says the derived
 #: bound must not spread.
 ORDINARY = "voice-loop"
@@ -197,11 +222,14 @@ def test_no_repo_module_quotes_the_old_ledger_cap_as_the_live_bound():
     from the file it was quoted out of. `scripts/memory/memory_ledger.py`'s line is in
     `OLD_CAP_PROSE` because that is the only way to know the search string is real.
 
-    Deliberately NOT in scope: the committed witness fixture and the live curation
-    skill, which both still say 76,800 and are pinned doing so by
-    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling`. A
-    skill edit needs a re-frozen fixture in the same commit (#2468/#2628's pairing) and
-    the vault half is this item's follow-on round, not this one's.
+    Deliberately NOT in scope, and never scanned from here: the committed witness fixture
+    and the live curation skill. Those two said 76,800 until #3282 — vault `90dd3f84`
+    moved the prose and the paired repo commit re-froze the copy, which a vault commit
+    cannot stage (#2468/#2628's pairing) — and they are pinned by
+    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` and its
+    `live_vault` twin, one line at a time. This node keeps the narrower job it was written
+    for: the two modules that ENFORCE a bound, which no skill edit can reach and whose
+    prose a curator reads as the number itself.
     """
     old = "76,800"
     assert old in ("(76,800 B for `memory-md-ledger`, 49,152 B for `user-md-ledger`), "
@@ -372,17 +400,24 @@ def test_the_validator_measures_a_ledger_against_the_same_bound(tmp_path):
 # ── clause 5: the prose a curator follows states the bound the code enforces ──
 
 def _assert_no_ledger_ceiling_claim(rel: str, text: str) -> None:
-    """Fail if any line of `text` states a ledger's cap as the shared topic ceiling,
-    and prove the check can fire AND can hold its peace.
+    """Fail if any line of `text` states a ledger's cap as a figure the guard does not
+    enforce — the shared topic ceiling (32,768) or either product of the retired 3x
+    multiple (76,800 / 49,152) — and prove the check can fire AND can hold its peace.
 
-    Two controls, one per direction, because a narrowed ban has two ways to be wrong
-    and the corpus proves neither. The first is the positive control — the pattern must
-    match a synthetic sentence of exactly the shape clause 5 bans, or the 0-hit result
-    below is the grep that reads as a clean bill of health while matching nothing. The
-    second is the negative one: the same predicate must stay silent on the correct
+    Two controls per arm, one per direction, because a narrowed ban has two ways to be
+    wrong and the corpus proves neither. The first is the positive control — the pattern
+    must match a synthetic sentence of exactly the shape the ban forbids, or the 0-hit
+    result below is the grep that reads as a clean bill of health while matching nothing.
+    The second is the negative one: the same predicate must stay silent on the correct
     sentence about an ordinary topic file, which is the over-broad ban the review of
     round SM_20261006_015104 refused this file for. A check with only the first control
     would have passed with the over-broad version still in it.
+
+    The second arm is #3282's, and it is what the first arm alone could not catch: §1 and
+    §5 of the curation skill were corrected off the 32,768 claim in #2212 and then taught
+    the NEXT wrong number for a week, because a ban on one stale figure is silent about its
+    successor. Both arms carry their own controls for that reason — a retired-cap arm with
+    no positive control is a 0-hit nobody can distinguish from a typo.
     """
     assert _states_a_ledger_cap_at_32768(
         "the ledger is bounded by the 32,768 B topic-file ceiling"), (
@@ -392,11 +427,29 @@ def _assert_no_ledger_ceiling_claim(rel: str, text: str) -> None:
         "an ordinary topic file is bounded by the 32,768 B topic-file ceiling"), (
         "the predicate fires on a correct sentence about a non-ledger topic, which is "
         "the over-broad ban the review of SM_20261006_015104 named")
+    # #3282's arm. The positive control is the retired skill's own §1 wording, quoted from
+    # vault 4a5cba3f's copy of the file, so the pattern is proven against the sentence this
+    # item actually retired rather than against a made-up one. The negative control is the
+    # corrected §5 wording, which names the derivation and no product.
+    assert _states_a_ledger_cap_at_a_retired_figure(
+        "Its cap is derived: 76,800 B for `memory-md-ledger` (3 x `MEMORY.md`'s ceiling)"), (
+        "the retired-cap predicate does not fire on the sentence #3282 removed, so the "
+        "0-hit below is a pattern nobody has shown can fire")
+    assert not _states_a_ledger_cap_at_a_retired_figure(
+        "Its cap is whatever ledger_ceiling() answers tonight: LEDGER_MULTIPLIER x "
+        "MEMORY.md's ceiling"), (
+        "the retired-cap predicate fires on the corrected sentence, which states the "
+        "derivation and no product — the over-broad ban this file already refuses twice")
     assert text, f"{rel} is empty, so the 0-hit result below proves nothing"
     hits = [line for line in text.splitlines() if _states_a_ledger_cap_at_32768(line)]
     assert not hits, (
         f"{rel} still states a live ledger's cap as the shared topic ceiling: "
         f"{hits[0].strip()[:200]!r}")
+    retired = [line for line in text.splitlines()
+               if _states_a_ledger_cap_at_a_retired_figure(line)]
+    assert not retired, (
+        f"{rel} still states a live ledger's cap as a figure the 3x multiple produced, "
+        f"which #3015 retired on 2026-10-19: {retired[0].strip()[:200]!r}")
 
 
 def _module_docstring(rel: str) -> str:
@@ -461,9 +514,9 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (22,287 B / 82 lines), and it
-        names `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an
-        empty slice;
+      * the corpus is the whole file at its exact bytes (22,788 B / 82 lines, as
+        re-measured by the #3282 re-freeze), and it names `topics/memory-md-ledger`, so a
+        0-hit below cannot be a wrong path or an empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
         carries its own positive and negative control, so the pattern is proven able to
         fire and unable to fire on the correct ordinary-topic sentence;
@@ -473,9 +526,15 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         names no cap and must stay silent;
       * the phrase the false instruction ended with ("split owed") is gone, which is the
         behaviour §1 was sending a curator off to do;
-      * the numbers that REPLACE it are present (76,800, 49,152, and `ledger_ceiling` as
-        the thing to ask rather than remember), because clause 5 asks that the prose
-        "name the new cap", not merely omit the old one;
+      * the derivation that REPLACES every cap figure is present (`LEDGER_MULTIPLIER`,
+        `memory_ceiling` and `ledger_ceiling`), because clause 5 asks that the prose name
+        where the cap comes from rather than merely omit an old one — and since #3282 the
+        thing it names is the derivation, not the product of a multiple that has since
+        moved once already;
+      * no line states a ledger's cap as either product the retired 3x multiple produced
+        (76,800 or 49,152), which is #3282 clause 1's half of the same ban: a corpus can
+        be clean of 32,768 and still teach the next wrong number, which is exactly what
+        this one did for the six days between #3015 raising the multiple and this item;
       * the text each later re-freeze carried in is present verbatim: the §2a-ter bullet
         vault `e45a6b6c` added, both hunks vault `5c6793be` (#2425) added, and the two
         sentences vault `acede7e9` (#2626) added — §4's same-run orphan-ownership
@@ -522,9 +581,16 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # after the copy — a `wc -c` of 22,287 and 82 newlines from `tr -cd '\n' | wc -c` — and
     # not carried from #2628, whose 22,287 / 82 was a snapshot at `acede7e9` and would have
     # been a false receipt if a nightly had appended to the skill before this landed.
-    assert len(raw) == 22_287 and text.count("\n") == 82, (
+    # 2026-10-25, #3282: the fifth such pairing after #2284 (`3c1c9515`), #2415
+    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`) and #2628. Vault `90dd3f84`
+    # rewrote §1 and §5 so the cap is what `ledger_ceiling()` answers rather than the
+    # product the retired 3x multiple produced, and grew the skill by 501 B on the same
+    # 82 lines. Both literals below are this copy's own, re-measured from the copy after
+    # it was written — `wc -c` 22,788 and `tr -cd '\n' | wc -c` 82 — not carried from the
+    # item, which quoted the pre-fix 22,287 / 82 and would have been a false receipt.
+    assert len(raw) == 22_788 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "22,287 B / 82 lines of the whole skill file — a partial copy would make the "
+        "22,788 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -565,10 +631,15 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     assert "split owed" not in text, (
         "the completion-note instruction is back to telling a curator to split a live "
         "ledger, which `LEDGERS` reads only one file per index")
-    for figure in ("76,800", "49,152", "ledger_ceiling"):
+    # The figures the corrected prose states (#3282 clause 4): the three names of the
+    # derivation, and no retired product. This arm exists because a 0-hit ban is satisfied
+    # by prose that simply dropped every cap sentence, and the derivation is what the
+    # curator has to be left with to go and ask for the number.
+    for figure in ("LEDGER_MULTIPLIER", "memory_ceiling", "ledger_ceiling"):
         assert figure in text, (
-            f"the witness never states {figure!r}, so the ban above has nothing it "
-            "replaced the false cap with")
+            f"the witness never states {figure!r}, so the bans above could be reading "
+            "prose that dropped every cap sentence — a coverage gap reporting itself as "
+            "a clean bill of health, which is the failure #3015 is about")
     # The sentence #2284's own re-freeze carried into this corpus. It retires nothing the
     # ban cares about and states no cap, so it is safe to pin — and pinning it is what
     # makes "we kept the prose rather than reverting it" a fact about these bytes.
@@ -618,6 +689,88 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "sends a curator to file a ledger bug over a 3-character authoring typo")
 
 
+#: The shape of a completion-note at-ceiling template: `ledger: at ceiling (<bytes> /
+#: <denominator>)`. Only the denominator is adjudicated below — the numerator is the run's
+#: own byte count, which is the half that is always right.
+AT_CEILING_TEMPLATE = re.compile(r"at ceiling \([^/)]*/([^)]*)\)")
+
+#: A byte figure written into that denominator: 4+ digits, comma or no comma. Deliberately
+#: looser than the two retired literals, because the defect is a cap REMEMBERED into a
+#: template, not the particular number — the next multiplier bump makes `102,400` in a
+#: template just as stale as `76,800` became six days after #3015.
+BARE_BYTE_FIGURE = re.compile(r"\d[\d,]{3,}")
+
+
+def _denominator_remembered_a_cap(denominator: str) -> bool:
+    """True if an at-ceiling template's denominator states a byte figure of its own.
+
+    The predicate #3282 clause 2 needs, kept as a function so the node below can prove it
+    fires. §1's and §5's templates both carried one (`/ 76800 for `memory-md-ledger`,
+    49152 for `user-md-ledger`` and `/ 76800 B`), which is how a §4 completion note ends up
+    publishing a bound the guard stopped measuring against — the note is written from the
+    template, not from the refusal.
+    """
+    return bool(BARE_BYTE_FIGURE.search(denominator))
+
+
+def test_the_completion_note_templates_quote_the_guard_rather_than_a_remembered_cap():
+    """#3282 clause 2: neither at-ceiling template may hand the §4 note a cap of its own.
+
+    §1's `ledger: at ceiling (<bytes> / <that file's cap — 76800 …>)` and §5's
+    `(<bytes> / 76800 B)` are the only route by which a cap reaches a completion note, and
+    both hardcoded the figure #3015 retired on 2026-10-19. The harm is dated, not
+    hypothetical: `memory-md-ledger` measured 75,906 B on 2026-10-25 — 894 B short of the
+    RETIRED 76,800 and 26,494 B short of the 102,400 the guard enforces — so the next pass
+    that fills that gap files `at ceiling` against a number nobody checks it against,
+    while 26 KB of room stands open. That is #3015's own false-at-ceiling class, reproduced
+    one level down: prose corrected in #2212 and a template left quoting the old product.
+
+    Five arms, in falsifiable order:
+      * the predicate fires on §5's retired denominator, quoted from the frozen file's own
+        template — the positive control that makes the 0-hit below a result, not a typo
+        (this is `_assert_no_ledger_ceiling_claim`'s discipline, applied to the new ban);
+      * the template exists, TWICE, so a pass cannot be bought by deleting the templates —
+        §1 and §5 each contribute one, and the denominators are read out of them rather
+        than restated here;
+      * neither denominator states a byte figure;
+      * and each names where its number comes from (the guard, the refusal, or the command
+        it quotes), so the ban cannot be satisfied by a denominator that says nothing;
+      * the predicate stays silent on the corrected denominators themselves, which is the
+        over-broad-ban direction SM_20261006_015104 refused this file for.
+
+    Read over the committed witness, like clause 5's gate node: `live_vault` byte-equality
+    is what makes these bytes the live skill's, and this node is gate-visible precisely so
+    a round that breaks the template is caught without a vault to open.
+    """
+    assert _denominator_remembered_a_cap("76800 B for `memory-md-ledger`"), (
+        "the predicate does not fire on §5's retired denominator, so the 0-hit below "
+        "proves nothing about the template this item exists to fix")
+    assert _denominator_remembered_a_cap(
+        "<that file's cap — 76800 for `memory-md-ledger`, 49152 for `user-md-ledger`>"), (
+        "the predicate does not fire on §1's retired denominator either, so the ban is "
+        "reading only one of the two places the figure was written")
+
+    text = SKILL_WITNESS.read_text(encoding="utf-8")
+    denominators = AT_CEILING_TEMPLATE.findall(text)
+    assert len(denominators) == 2, (
+        f"{SKILL_WITNESS.name} carries {len(denominators)} at-ceiling templates, not the "
+        "two §1 and §5 each contribute — a corpus stripped of the templates would satisfy "
+        "every absence below by having nothing to check")
+
+    remembered = [d for d in denominators if _denominator_remembered_a_cap(d)]
+    assert not remembered, (
+        f"an at-ceiling template still hardcodes the figure to report: {remembered[0]!r} "
+        "— a §4 completion note written from it states a bound the guard does not enforce")
+
+    for denominator in denominators:
+        assert re.search(r"guard|refusal|command|printed", denominator, re.I), (
+            f"the template denominator {denominator!r} names no source for its number, so "
+            "the ban above could be satisfied by prose that dropped the instruction too")
+        assert not _denominator_remembered_a_cap(denominator), (
+            f"the predicate fires on the corrected denominator {denominator!r}, which "
+            "states a source and no figure — the over-broad ban this file refuses")
+
+
 #: Same reason as the gate node, opposite question: is the file the nightly reads still
 #: the file that was frozen? A frozen corpus with no drift check pins yesterday's prose
 #: and reports it as today's.
@@ -644,8 +797,9 @@ def test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads(
     Then the ban re-runs over the live text, so the reading of "no line states a ledger cap
     at 32,768 B" is checked against the file that is actually loaded into the nightly's
     prompt, not only against this tree's copy — and the third check asks the opposite
-    question of that same text, that it still STATES what the ban replaced (76,800, 49,152,
-    `ledger_ceiling`, and no `split owed`). The ban alone cannot answer it: prose stripped of
+    question of that same text, that it still STATES the derivation the ban left behind
+    (`LEDGER_MULTIPLIER`, `memory_ceiling`, `ledger_ceiling`, and no `split owed`). The ban
+    alone cannot answer it: prose stripped of
     every cap sentence passes a 0-hit, which is a coverage gap reporting itself as a clean
     bill of health, and after #2468's re-freeze the live corpus is the only copy a gate
     cannot open.
@@ -662,13 +816,15 @@ def test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads(
         "#2284, #2415 and #2468 each had to move both, and a copy that moves only one "
         "trades this green for the node above going red.")
     _assert_no_ledger_ceiling_claim("step-2a-ter-curation.md (live vault)", live)
-    # The same three figures the gate node names, asserted against the live corpus: byte
-    # equality makes the two copies one text, but only this copy is the one the nightly
-    # loads, and a 0-hit ban says nothing about prose that was simply dropped.
-    for figure in ("76,800", "49,152", "ledger_ceiling"):
+    # The same three figures the gate node names — the derivation's three names, not the
+    # products #3015 retired — asserted against the live corpus: byte equality makes the
+    # two copies one text, but only this copy is the one the nightly loads, and a 0-hit ban
+    # says nothing about prose that was simply dropped.
+    for figure in ("LEDGER_MULTIPLIER", "memory_ceiling", "ledger_ceiling"):
         assert figure in live, (
-            f"the live corpus no longer states {figure!r}, so the ban above has nothing "
-            "it replaced the false cap with")
+            f"the live corpus no longer states {figure!r}, so the bans above could be "
+            "reading prose that dropped every cap sentence — a coverage gap reporting "
+            "itself as a clean bill of health")
     assert "split owed" not in live, (
         "the live completion-note instruction is back to telling a curator to split a "
         "live ledger, which `LEDGERS` reads only one file per index")
