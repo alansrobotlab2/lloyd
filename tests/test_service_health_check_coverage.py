@@ -652,22 +652,49 @@ def test_the_cli_run_is_a_health_report_that_can_fail(tmp_path):
     box, not the tree — so the family tuple widened. Nothing about the invariant
     weakened: every row outside these families must still be healthy, and within them
     the count and the heading are still pinned exactly.
+
+    #3300 widened that tuple's *selection*, not the invariant: it read the family by the
+    two name prefixes, which left the `deployed:` rows of `DEPLOYED_COPIES` — the byte-
+    compared pairs, printed under the same heading — outside it, so the count of unhealthy
+    rows silently required both installed copies to match the tree. That is the one
+    installed-copy fact the suite cannot own, because updating them needs root: editing
+    `agent-services/systemd/nvidia-power-limit.service`'s `Documentation=` line for #3300
+    reddened this node with `21 == 20` on a box whose `/etc` copy was still owed the
+    reinstall. The family is now selected by the category the heading itself prints, and
+    the pairs' row names are pinned to the script's declaration so the widening cannot hide
+    a pair that stopped being graded.
     """
     r, doc = _cli(tmp_path)
     assert r.returncode == 0, doc["services"]
     assert doc["total_services"] == len(doc["services"])
     assert doc["total_services"] >= 12, \
         f"only {doc['total_services']} rows; the fleet is 12 programs"
-    units = [s for s in doc["services"]
-             if s["name"].startswith(("unitlink:", "orphanunit:"))]
-    assert any(s["name"].startswith("unitlink:") for s in units), \
+    # The family is every row the `Deploy:` heading prints, which the payload spells
+    # `category == "deploy"` and which has three spellings: `unitlink:`, `orphanunit:`,
+    # and `deployed:` — one row per pair in the script's `DEPLOYED_COPIES`. Selecting it by
+    # the two name prefixes instead left the `deployed:` rows out of the family, so the
+    # equation below silently demanded that both byte-compared pairs be in sync — host
+    # state again, and the demand #3300 is the first repo edit to break on purpose: the
+    # tracked copy of `nvidia-power-limit.service` now points `Documentation=` at the real
+    # report under `~/rma/`, and the copy systemd reads is reinstalled only by a person, so
+    # exactly one `deployed:` row reports `drift:` between landing that line and the
+    # reinstall. It is host state like the other two spellings, and the count reads it as
+    # such. Nothing here asserts that the pair is healthy or unhealthy: which way that row
+    # falls is the reinstall's, and the assertion is that the heading and the total agree
+    # with it whichever way it falls.
+    deploy_rows = [s for s in doc["services"] if s["category"] == "deploy"]
+    assert any(s["name"].startswith("unitlink:") for s in deploy_rows), \
         "the #2714 unit-file rows are absent from the default run"
-    assert doc["unhealthy"] == sum(1 for s in units if not s["healthy"]), [
+    # Widening the family must not be able to read as green because the pairs stopped
+    # being reported at all: their names are pinned to the script's own declaration, in
+    # declaration order, which is a denominator no box's sync state can move.
+    assert [s["name"] for s in deploy_rows if s["name"].startswith("deployed:")] == [
+        f"deployed:{deployed.name}" for _, deployed in _load().DEPLOYED_COPIES], \
+        "the byte-compared deployed pairs are not every one graded"
+    assert doc["unhealthy"] == sum(1 for s in deploy_rows if not s["healthy"]), [
         s for s in doc["services"] if not s["healthy"]]
-    # "deploy" spelled as the payload spells it: this file drives the CLI as a
-    # subprocess and holds no module object to read the constant off.
     assert doc["summary"]["deploy"] == (
-        "healthy" if all(s["healthy"] for s in units) else "degraded"), doc["summary"]
+        "healthy" if all(s["healthy"] for s in deploy_rows) else "degraded"), doc["summary"]
 
 
 def test_an_undeclared_program_in_fatal_reaches_the_verdict(tmp_path):

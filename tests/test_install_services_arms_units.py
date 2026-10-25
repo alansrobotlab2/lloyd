@@ -40,6 +40,15 @@ WHAT NO NODE HERE CLAIMS, because no diff can produce it: that this box's
 `timers.target.wants/` gained its eighth link, or that the Monday fire arrives. That is host
 state, measured after the fix is actually run (the owed check), and `HOME` is redirected
 into `tmp_path` in every node precisely so that nothing here touches it.
+
+WHAT THIS FILE ALSO PINS SINCE #3300, on a different seam: a unit's `Documentation=`
+target. `nvidia-power-limit.service` spent weeks pointing `systemctl status` at a copy of
+the Xid 79 report that git never tracked, and no node here or anywhere else had ever
+opened a `Documentation=` line to see whether its target existed. The last three nodes
+parse every `file://` target in `agent-services/systemd/` — recursively, so the `system/`
+subtree is inside the scan — and judge the parsed path by whether it exists, never by
+comparing it to an absolute string, plus one planted-dead-target node so an empty scan
+cannot be mistaken for a passing one.
 """
 
 from __future__ import annotations
@@ -168,6 +177,66 @@ ARMED_ELSEWHERE = sorted(p.name for p in ALL_UNITS
                          if p.name not in SYSTEM_SCOPE
                          and _declares_install(p)
                          and _started_by_a_timer(p))
+
+#: The one unit whose `Documentation=` target was dead on this box: it named a copy
+#: of the Xid 79 report inside the checkout that git never tracked (#3214/#3300).
+NVIDIA_UNIT = UNIT_DIR / "nvidia-power-limit.service"
+
+#: One `Documentation=` value per line, the way `systemd.unit(5)` reads the setting:
+#: several lines are allowed and each holds one whitespace-separated URL.
+_DOC_VALUE = re.compile(r"^Documentation=(\S+)", re.M)
+
+_FILE_SCHEME = "file://"
+
+
+def _main_checkout() -> Path:
+    """The main worktree's root — the checkout a linked worktree is a copy of.
+
+    A round runs these nodes from `~/lloyd-work/<round>/home/lloyd`, where `ROOT` is a
+    worktree and an absolute path from a unit file is inside nothing there. Judging
+    "inside the checkout" against `ROOT` would therefore call the dead
+    `<home>/lloyd/gpu-xid79-falloff-report.md` target outside it and pass the node on
+    the exact line this round exists to fix. `git rev-parse --git-common-dir` answers
+    `<main>/.git` from any linked worktree, so its parent is that checkout — and
+    nothing here spells the account name, which is what let the line rot: an absolute
+    path written down once in a test would break the day the home directory moves.
+    """
+    proc = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"git rev-parse failed: {proc.stderr}"
+    common = Path(proc.stdout.strip())
+    if not common.is_absolute():
+        common = ROOT / common
+    return common.resolve().parent
+
+
+def _doc_targets(unit_dir: Path) -> dict[Path, list[Path]]:
+    """Every unit under this directory, keyed to the `file://` targets it declares.
+
+    Recursive on purpose. `agent-services/systemd/system/lloyd-data-snapshot-prune.service`
+    exists, so a top-level `iterdir()` (which `ALL_UNITS` above legitimately uses,
+    because the installer's own glob is top-level) sees nine of the ten `file://`
+    targets on this box and reports a clean bill of health on a tenth it never
+    opened. Every unit scanned is a key, with an empty list when it declares
+    nothing, so a caller can tell "looked and found no target" from "never looked".
+    A value that is not a `file://` URL is not a path and is left to the node that
+    counts the values, which asserts nothing was dropped without being graded.
+    """
+    found: dict[Path, list[Path]] = {}
+    for unit in (sorted(unit_dir.rglob("*.service"))
+                 + sorted(unit_dir.rglob("*.timer"))):
+        values = _DOC_VALUE.findall(unit.read_text(encoding="utf-8"))
+        found[unit] = [Path(v[len(_FILE_SCHEME):]) for v in values
+                       if v.startswith(_FILE_SCHEME)]
+    return found
+
+
+def _dead_doc_targets(unit_dir: Path) -> list[tuple[Path, Path]]:
+    """The `(unit, target)` pairs whose `Documentation=file://` target does not exist."""
+    return [(unit, target)
+            for unit, targets in _doc_targets(unit_dir).items()
+            for target in targets
+            if not target.exists()]
 
 
 def _run(installer: Path, tmp_path: Path, *, config: dict | None = None,
@@ -497,3 +566,125 @@ def test_the_health_check_still_reads_the_scope_array_the_installer_declares():
 
     assert shc._system_scope_units(INSTALLER) == {"nvidia-power-limit.service"}, \
         "the health check no longer reads the installer's exclusion list"
+
+
+def test_every_documentation_file_target_in_the_unit_tree_resolves_on_this_box():
+    """Clause 2: every `file://` target under `agent-services/systemd/`, `system/` included.
+
+    The process boundary is systemd itself: a unit file is read by PID 1 long after
+    this suite is green, and `systemctl status` is the only reader that ever complains
+    — which is how `nvidia-power-limit.service` shipped a target that had never
+    existed while this file stayed green (#3214 → #3300, three filings, no attempt).
+    Nothing outside the repo is touched, so the honest test is to read the real tree
+    the way systemd does and ask each parsed target whether it is there.
+
+    Two things make the green mean something. The nested-coverage check below is what
+    a top-level glob fails: without it, `iterdir()` would satisfy every other
+    assertion in this node while silently leaving out the `system/` subtree. And the
+    target count is asserted before the verdict, so a helper that stopped parsing
+    (`file://` spelled differently, the regex anchored wrong) cannot report "zero
+    dead targets" as a pass — the planted-dead case is in its own node, below.
+    """
+    scanned = _doc_targets(UNIT_DIR)
+    n_targets = sum(len(targets) for targets in scanned.values())
+    assert n_targets > 0, (
+        "not one Documentation=file:// target was parsed under agent-services/systemd/, "
+        "so the verdict below is a report about nothing")
+
+    nested = sorted(p for p in UNIT_DIR.rglob("*")
+                    if p.suffix in (".service", ".timer")
+                    and p.is_file() and p.parent != UNIT_DIR)
+    assert nested, f"{UNIT_DIR} has nothing below it, so the recursion claim is vacuous"
+    unseen = [str(p.relative_to(UNIT_DIR)) for p in nested if p not in scanned]
+    assert not unseen, (
+        f"the scan stopped at the top level and never opened: {unseen} — a dead target "
+        "there would be invisible to this node")
+
+    dead = _dead_doc_targets(UNIT_DIR)
+    assert not dead, "dead Documentation= targets: " + "; ".join(
+        f"{unit.relative_to(UNIT_DIR)} -> {target}" for unit, target in dead)
+
+    # Every value the parser saw was either graded as a path above or is a web link
+    # that names no path. A third kind of scheme would have been dropped by
+    # `_doc_targets` without a word, and this is where that shows up.
+    values = [v for unit in scanned
+              for v in _DOC_VALUE.findall(unit.read_text(encoding="utf-8"))]
+    web = [v for v in values if v.startswith("https://")]
+    assert len(values) == n_targets + len(web), (
+        f"{len(values)} Documentation= values, {n_targets} graded as paths and "
+        f"{len(web)} as links: something was skipped without being graded")
+    assert web, "no web documentation left to compare against; the split above is vacuous"
+
+
+def test_the_power_limit_unit_names_a_report_that_exists_outside_the_checkout():
+    """Clauses 1 and 5: the parsed target resolves, and no copy of it was committed.
+
+    No assertion below compares the target to a written-down path. That is the
+    clause's point, and the mechanism of the original bug: `/home/alansrobotlab/lloyd/
+    gpu-xid79-falloff-report.md` was a copy that was never committed, and a test that
+    re-asserted that literal would have passed on the dead line and broken on a
+    renamed home directory. So the value is parsed out of the unit and judged on what
+    is true of the report and of nothing else that could stand in for it — it is a
+    file, its first line names the fault the unit mitigates, and it is not inside the
+    checkout. `git ls-files` then closes the cheapest wrong fix: committing a copy
+    into the tree to make the target resolve, which #3214 ruled against (the report
+    is RMA paperwork and lives beside the rest of it, in `~/rma`).
+    """
+    scanned = _doc_targets(UNIT_DIR)
+    assert NVIDIA_UNIT in scanned, f"{NVIDIA_UNIT.name} was never scanned"
+    targets = scanned[NVIDIA_UNIT]
+    assert len(targets) == 1, f"expected one Documentation= target, parsed {targets}"
+    target = targets[0]
+
+    assert target.is_file(), (
+        f"{NVIDIA_UNIT.name} points `systemctl status` at {target}, which is not a "
+        "file on this box")
+    assert "Xid 79" in target.read_text(encoding="utf-8").splitlines()[0], (
+        f"{target} exists but its first line does not name Xid 79, so this is not the "
+        "falloff report the unit exists to explain")
+
+    main = _main_checkout()
+    assert not target.is_relative_to(main), (
+        f"{target} lies inside the checkout at {main}, where the report is not "
+        f"tracked — a Documentation= line pointing into the tree is a dead path again")
+
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files",
+                             "*gpu-xid79-falloff-report*"],
+                             capture_output=True, text=True, timeout=60)
+    assert tracked.returncode == 0, tracked.stderr
+    assert tracked.stdout.strip() == "", (
+        "a copy of the report was committed to the checkout to make the target "
+        f"resolve instead of the line being repointed: {tracked.stdout.strip()}")
+
+
+def test_a_dead_target_planted_under_a_throwaway_unit_dir_is_the_one_reported(tmp_path):
+    """Clause 3: the helper's silence means "no dead target", never "I found nothing".
+
+    An absence assertion on the live tree is one broken parser away from permanent
+    green, so the same two functions are pointed at a throwaway unit directory built
+    here: one unit whose target is a file this repo really has, and one planted under
+    `system/` — nested, because that subtree is where the live scan could go wrong —
+    whose target is never written. The planted pair must be the exact report, and the
+    real tree must come back clean in the same node, so a helper that reports nothing
+    at all fails here on the day it breaks rather than in the next month a unit ships
+    a dead path.
+    """
+    units = tmp_path / "units"
+    (units / "system").mkdir(parents=True)
+    live = units / "ok.service"
+    live.write_text(f"[Unit]\nDocumentation={_FILE_SCHEME}{INSTALLER}\n", encoding="utf-8")
+    planted = units / "system" / "planted-dead.service"
+    missing = tmp_path / "report-nobody-wrote.md"
+    planted.write_text(f"[Unit]\nDocumentation={_FILE_SCHEME}{missing}\n", encoding="utf-8")
+    assert not missing.exists() and INSTALLER.is_file()
+
+    scanned = _doc_targets(units)
+    assert len(scanned) == 2, (
+        f"the throwaway tree holds two units; the scan returned {sorted(scanned)}")
+    dead = _dead_doc_targets(units)
+    assert dead == [(planted, missing)], (
+        "the planted dead target under system/ was not what the helper reported: "
+        f"{dead} — a green on the live tree means nothing until this fires")
+
+    assert _dead_doc_targets(UNIT_DIR) == [], \
+        "the real unit tree reads as dead alongside a passing fixture: a real regression"

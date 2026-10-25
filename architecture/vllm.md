@@ -165,13 +165,19 @@ and since 2026-07-18 reproducible on demand in **~11 minutes** with a
 saturation workload. The card is stable only when clamped below spec. RMA
 open; the report is `~/rma/gpu-xid79-falloff-report.md`.
 
-The unit's own `Documentation=` line points at
-`file:///home/alansrobotlab/lloyd/gpu-xid79-falloff-report.md`, which has
-never existed in this tree. Harmless, but do not go looking for it there — the
-line is the one route from `systemctl status nvidia-power-limit.service` to why
-the clamp exists at all, so a reader under an incident takes a dead path: #3138
-is pointing it at the report above, in both the repo copy and the installed
-one.
+The unit's own `Documentation=` line is the one route from `systemctl status
+nvidia-power-limit.service` to why the clamp exists at all, so it has to reach
+`~/rma/gpu-xid79-falloff-report.md`, the report named just above. It did not
+until 2026-10-25 (#3300): the line named a copy inside this checkout that git
+never tracked, and a reader under an incident got a dead path out of
+`systemctl status`. `tests/test_install_services_arms_units.py` now parses the
+target out of every unit and timer under `agent-services/systemd/` and fails on
+one that does not exist, so a documentation path that rots reddens the gate
+instead of an incident. What no test can close is the gap to the copy systemd
+actually reads: `/etc/systemd/system/` follows the repo only when a person
+reinstalls it (the recipe is the comment block in the unit file itself), so on
+a box that has not been reinstalled, `systemctl status` still prints the old
+target while the repo copy is right.
 
 ### 2.2 Why it needs a unit at all
 

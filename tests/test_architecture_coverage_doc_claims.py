@@ -8470,3 +8470,102 @@ def test_the_unreadable_line_citation_check_sees_every_kind_it_names():
         f"the control swept {len(swept)} docs while the glob finds {on_disk} and "
         "#3292 measured 36, so a green seeded run says nothing about the corpus "
         "the claim node grades")
+
+
+# --------------------------------------------------------------------------- #
+# architecture/vllm.md §2.1 — where the Xid 79 report lives (#3300)
+# --------------------------------------------------------------------------- #
+
+#: The three claims §2.1 made about the unit's `Documentation=` line, in the
+#: whitespace-collapsed spelling `_flat` produces. The page is hand-wrapped, so all
+#: three cross a newline in the bytes and none of them may be matched raw (the
+#: failure #2194 lost a node to). Each is a sentence the page sent a reader away
+#: with while the line it discusses was dead: the report was findable, the prose told
+#: them not to look, and the work of repointing it was forwarded to an item that
+#: closed 2026-10-24 with the repo half unattempted.
+RETIRED_XID79_DOC_CLAIMS = (
+    "which has never existed in this tree",
+    "do not go looking for it there",
+    "is pointing it at the report above",
+)
+
+#: §2.1 as the shipped page carried those claims, quoted from `architecture/vllm.md`
+#: before #3300 rewrote the paragraph. It is a fixture, not a live citation, and it is
+#: the only place in this repo where the dead `/home/alansrobotlab/lloyd/…` target is
+#: still written down — deliberately, because the node below proves the absence check
+#: can fire by firing on this instead.
+XID79_STALE_PARAGRAPH = (
+    "The unit's own `Documentation=` line points at\n"
+    "`file:///home/alansrobotlab/lloyd/gpu-xid79-falloff-report.md`, which has\n"
+    "never existed in this tree. Harmless, but do not go looking for it there — the\n"
+    "line is the one route from `systemctl status nvidia-power-limit.service` to why\n"
+    "the clamp exists at all, so a reader under an incident takes a dead path: #3138\n"
+    "is pointing it at the report above, in both the repo copy and the installed\n"
+    "one."
+)
+
+
+def _vllm_subsection(heading_prefix: str) -> str:
+    """One `### N.N …` subsection of `architecture/vllm.md`, up to the next heading.
+
+    `_section()` windows on `## `, and #1787's lesson is that a `### ` child read
+    through it runs to the next `## ` — here that would be §2.2 onward, so a retired
+    sentence that survived in §2.5 would pass as §2.1's. The §2.5 decoy paragraph is
+    explicitly not this node's business (#3138 ruled it a separate change), and the
+    narrow window is what keeps that true rather than merely claimed.
+    """
+    text = _text("vllm.md")
+    m = re.search(rf"^### {re.escape(heading_prefix)}.*?$(.*?)(?=^### |^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    assert m, f"no '### {heading_prefix}…' subsection in vllm.md"
+    return m.group(1)
+
+
+def _xid79_claim_gaps(text: str) -> list[str]:
+    """Which retired §2.1 claims this text still makes, read through `_flat`."""
+    flat = _flat(text)
+    return [phrase for phrase in RETIRED_XID79_DOC_CLAIMS if phrase in flat]
+
+
+def test_vllm_section_2_1_sends_the_reader_to_the_report_and_names_no_forward():
+    """Clause 4: the paragraph about the unit's doc line states where the report is.
+
+    The positive half is the one thing an incident reader needs: the path, spelled
+    `~/rma/gpu-xid79-falloff-report.md`, resolving against the passwd home for the
+    same reason `_resolve` gives — inside a gate `Path.home()` is the round's symlink
+    farm, which holds no `rma/`. The negative half retires the three phrases above,
+    and the item's third requirement is the one a reword most easily loses: forwarding
+    a reader to `#3138` as work in progress. That item closed 2026-10-24 with the repo
+    half unattempted, and a closed item is not an owner, so the whole subsection is
+    checked for the number rather than for one phrasing of the forward.
+
+    The fixture is what makes this a test rather than a description. It is the retired
+    paragraph quoted off the page, and if the reader stopped flagging on it, the
+    absence asserted first would be a pattern that could never have been violated —
+    the green light fixed on.
+    """
+    body = _vllm_subsection("2.1")
+
+    assert "`~/rma/gpu-xid79-falloff-report.md`" in body, (
+        "§2.1 no longer states where the Xid 79 report lives, so the paragraph "
+        "discussing the unit's documentation line has lost the target it points at")
+    assert (ACCOUNT_HOME / "rma/gpu-xid79-falloff-report.md").is_file(), (
+        "the path §2.1 states does not resolve against the account home, which is the "
+        "same dead-path bug this round exists to close")
+
+    assert not _xid79_claim_gaps(body), (
+        f"§2.1 still sends a reader away from the report: {_xid79_claim_gaps(body)}")
+    assert "#3138" not in body, (
+        "§2.1 still forwards to a closed item as if the repointing were in progress; "
+        "#3138 closed 2026-10-24 with the repo half unattempted")
+    assert "systemctl status nvidia-power-limit.service" in _flat(body), (
+        "the reason the line matters at all is that it is what `systemctl status` "
+        "prints under an incident; the paragraph has to keep saying so")
+
+    assert _xid79_claim_gaps(XID79_STALE_PARAGRAPH) == list(RETIRED_XID79_DOC_CLAIMS), (
+        "the three retired phrases did not all fire on the paragraph they were taken "
+        "out of, so the absence asserted above is a pattern that could never have "
+        "matched this page")
+    assert "#3138" in XID79_STALE_PARAGRAPH, (
+        "the fixture no longer carries the forward the section is required to drop, "
+        "so the check on the live page would pass on a paragraph that kept it")

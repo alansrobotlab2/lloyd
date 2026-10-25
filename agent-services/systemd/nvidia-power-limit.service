@@ -1,6 +1,10 @@
 [Unit]
 Description=Clamp all NVIDIA GPU board power limits (Xid 79 mitigation)
-Documentation=file:///home/alansrobotlab/lloyd/gpu-xid79-falloff-report.md
+# The Xid 79 falloff report. Deliberately NOT a path inside the checkout: the
+# report lives in ~/rma beside the RMA paperwork and is not committed to git
+# (#3214/#3300), and `tests/test_install_services_arms_units.py` now parses
+# every unit's Documentation= target and fails on one that does not exist.
+Documentation=file:///home/alansrobotlab/rma/gpu-xid79-falloff-report.md
 After=multi-user.target
 Wants=nvidia-persistenced.service
 
