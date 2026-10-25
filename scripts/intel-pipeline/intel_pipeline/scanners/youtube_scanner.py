@@ -50,6 +50,17 @@ def load_youtube_channels_config() -> List[Dict[str, Any]]:
 # State keys for YouTube scanner
 YOUTUBE_STATE_KEY = "youtube_channels"
 
+# How many scans in a row every feed attempt for a channel returned nothing,
+# keyed by channel_id in a top-level state dict. Backlog #3328: one dead id out
+# of 64 is 63/64 coverage, nowhere near the half-coverage DEGRADED floor, so the
+# run printed `Pipeline Complete` while that channel had delivered nothing for an
+# unbounded stretch — and `channel_state[cid]` is written only when a channel
+# returns videos, so a dead channel's entry never advanced and dead was
+# indistinguishable from idle. A sibling top-level key rather than a field inside
+# `youtube_channels[cid]` because those values are the last-seen video id as a
+# plain string, read as one by the loop's own `stored_last_video`.
+FEED_STREAK_STATE_KEY = "youtube_feed_failure_scans"
+
 # Per-run feed coverage, written by every scan: how many of the feeds it tried
 # to read it actually read. Without this the state file cannot distinguish
 # "channels idle" from "feed endpoint unreachable", which is how a run that
@@ -331,6 +342,17 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
     today = datetime.utcnow().strftime("%Y-%m-%d")
     feeds_fetched = 0
     feeds_attempted = 0
+    # channel_id -> handle for channels whose feed returned nothing on every
+    # attempt this scan (`dead`), and the ids of channels whose feed did return
+    # bytes (`reached`). Both are filled at the event and applied once, after the
+    # loop, where the streak is a property of the whole scan and a channel that
+    # fetches clears what an earlier one accumulated. A channel the sleeping
+    # budget cut off before its attempts were spent is in neither set: it got
+    # fewer than FETCH_ATTEMPTS tries, which is a blackout's doing and is already
+    # said by the coverage line and `budget.describe_reduction()`, not evidence
+    # about that channel (backlog #3328, against #739/#1281's conflation).
+    dead_this_scan: dict[str, str] = {}
+    reached_this_scan: set[str] = set()
     # One sleeping ceiling for the whole scan (backlog #1281): the retry ladder is
     # bounded by cumulative waiting, not per channel, so a blackout costs at most
     # the budget and the run still reaches scoring and the vault writer inside the
@@ -361,6 +383,7 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
         # Fetch RSS feed under the scan's sleeping budget. Each channel the
         # budget refuses to back off for is counted there, and the count is
         # reported once, after the loop, where the total is known.
+        reduced_before = budget.channels_reduced
         videos, fetched = fetch_channel_rss(channel_id, budget=budget)
 
         # Counted before the empty-feed branch below: that branch is where
@@ -369,6 +392,12 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
         feeds_attempted += 1
         if fetched:
             feeds_fetched += 1
+            reached_this_scan.add(channel_id)
+        elif budget.channels_reduced == reduced_before:
+            # Nothing came back AND the sleeping budget was not what stopped the
+            # retrying: all FETCH_ATTEMPTS went out and all of them failed. Named
+            # after the loop, and only ever with this scan's own evidence.
+            dead_this_scan[channel_id] = handle
         
         if not videos:
             continue
@@ -443,6 +472,26 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
     # blackout still reads as a blackout (backlog #1281).
     if budget.channels_reduced:
         print(budget.describe_reduction())
+
+    # Per-channel feed streaks, applied once the whole scan is known (#3328).
+    # A channel that fetches clears its own count even when it posted nothing,
+    # which is precisely the idle case this must not be confused with.
+    streaks = {k: v for k, v in (current_state.get(FEED_STREAK_STATE_KEY) or {}).items()
+               if isinstance(v, int) and not isinstance(v, bool)}
+    for cid in reached_this_scan:
+        streaks.pop(cid, None)
+    for cid in dead_this_scan:
+        streaks[cid] = streaks.get(cid, 0) + 1
+    current_state[FEED_STREAK_STATE_KEY] = streaks
+
+    # Name the dead feeds where the totals are, not only in the mid-loop
+    # `Error fetching RSS` line: at 63 of 64 the aggregate coverage line below
+    # cannot distinguish one permanently-dead channel from a healthy night, and
+    # the scan exited 0. The count carried is consecutive scans, so one line on
+    # two different runs is one dead channel, not two events.
+    for cid, handle in dead_this_scan.items():
+        print(f"  DEAD FEED: channel {handle or '(no handle)'} ({cid}) failed all "
+              f"{FETCH_ATTEMPTS} attempts for {streaks[cid]} consecutive scan(s)")
 
     # Save updated state, including this run's feed coverage
     coverage = FeedCoverage(fetched=feeds_fetched, attempted=feeds_attempted)

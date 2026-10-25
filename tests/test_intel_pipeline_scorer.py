@@ -1563,7 +1563,8 @@ def _shipped_channel_count() -> int:
 
     `load_youtube_channels_config` is monkeypatched in the scan tests and resolves
     from `Path.home()` in production, so a bound over "the full config" has to
-    count the file the scheduled run actually reads: 64 lines carry `channel_id:`.
+    count the file the scheduled run actually reads: 63 lines carry `channel_id:`
+    since #3328 removed the one whose feed 404s on every attempt (64 before it).
     """
     cfg = INTEL_DIR / "config" / "youtube-channels.yml"
     return sum(1 for line in cfg.read_text().splitlines() if "channel_id:" in line)
@@ -1595,13 +1596,17 @@ def test_the_default_backoff_budget_keeps_a_full_blackout_under_the_task_timeout
     A scan stops sleeping once cumulative waiting reaches the module budget, so
     the most it can sleep over the whole shipped config is
     `min(channels × per-channel ladder, BACKOFF_BUDGET_SECONDS)` — 240 s today,
-    against the 64 × 35 = 2240 s the unbounded ladder would spend.
+    against the 63 × 35 = 2205 s the unbounded ladder would spend.
     """
     monkeypatch.delenv(yt_mod.RETRY_WAIT_ENV, raising=False)
     monkeypatch.delenv(yt_mod.BACKOFF_BUDGET_ENV, raising=False)
 
     channels = _shipped_channel_count()
-    assert channels >= 64, f"expected the 64-channel config, counted {channels}"
+    # 63 since #3328 took the one 404-ing feed out of the config (64 before it).
+    # The floor is here to prove the scenario is shipped-size rather than a two
+    # channel stub, where the budget would never bind and this node would pass
+    # for the wrong reason, so it tracks the file rather than a magic number.
+    assert channels >= 63, f"expected the 63-channel config, counted {channels}"
     ladder_per_dead_channel = sum(
         yt_mod.RETRY_BASE_WAIT_SECONDS * (2 ** n) for n in range(yt_mod.FETCH_ATTEMPTS - 1))
     assert ladder_per_dead_channel == 35.0, (
@@ -5106,3 +5111,147 @@ def test_the_row_this_change_brings_back_is_stored_and_published_with_its_addres
 
     rendered = vw_mod._entry_body(models_mod.ScoredItem.from_dict(row))
     assert rendered == LINE_FINAL_URL_DESCRIPTION, repr(rendered)
+
+
+# --- #3328: one dead feed must not be invisible inside a green run ----------------
+#
+# Fauna Robotics' channel_id 404s on every attempt of every scan while its
+# neighbours return 200, so the aggregate coverage line reads 63 of 64 — nowhere
+# near the half-coverage DEGRADED floor #739 built — and the run prints
+# `Pipeline Complete` at exit 0 forever. Three nodes: the entry is out of the
+# shipped config with a comment naming what stood there; a scan names every
+# channel that failed all its attempts, after the loop, carrying the number of
+# consecutive scans it has failed; and that count is in scanner state, cleared by
+# a feed that fetches. None of them re-tunes COVERAGE_FLOOR or the #1281 budget:
+# this item's premise is that both work as designed and the gap is per-channel
+# visibility.
+
+DEAD_FAUNA_CHANNEL_ID = "UCLcYVpBD0O8NkQI-A8qAvfQ"
+_STUB_CHANNELS = [
+    {"channel_id": DEAD_FAUNA_CHANNEL_ID, "name": "Fauna Robotics",
+     "handle": "FaunaRobotics"},
+    {"channel_id": "UCidle", "name": "Idle Watch", "handle": "IdleWatch"},
+]
+
+
+def test_the_404ing_fauna_robotics_feed_is_out_of_the_shipped_config():
+    """#3328 clause 1: the entry is gone, and the file says what stood there.
+
+    The comment is part of the clause, not decoration: a `channel_id:` line
+    disappearing from this file is otherwise indistinguishable from "never
+    tracked", and the id is the one thing needed to re-check the channel in a
+    browser or to revert the removal from git history. Asserted as text, because a
+    YAML parse drops the comment the clause is about.
+    """
+    import yaml
+    path = INTEL_DIR / "config" / "youtube-channels.yml"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert f"channel_id: {DEAD_FAUNA_CHANNEL_ID}" not in text, \
+        "the config still attempts the channel whose feed 404s on every attempt"
+    assert "handle: FaunaRobotics" not in text, \
+        "the entry was renamed rather than removed, so the scan still tries it"
+    # Still parses, and the id survives only inside a comment.
+    channels = yaml.safe_load(text)["channels"]
+    assert DEAD_FAUNA_CHANNEL_ID not in [c["channel_id"] for c in channels]
+    assert len(channels) == _shipped_channel_count(), \
+        "the file's channel_id lines and its parsed entries disagree"
+    # The CONTIGUOUS comment block holding the marker, not just the lines that
+    # carry it: the sentence naming the 404 wraps across lines that name neither
+    # the item nor the id, and a scan for markers alone fails a correct note.
+    at = next(i for i, l in enumerate(lines) if "#3328" in l)
+    head = at
+    while head > 0 and lines[head - 1].lstrip().startswith("#"):
+        head -= 1
+    tail = at
+    while tail + 1 < len(lines) and lines[tail + 1].lstrip().startswith("#"):
+        tail += 1
+    joined = " ".join(lines[head:tail + 1])
+    assert "#3328" in joined, "the why-line does not name the item that removed it"
+    assert "404" in joined, "the why-line does not say the feed 404s"
+    assert "every" in joined.lower(), "the why-line does not say every attempt failed"
+    # Ordered where the entry stood, between the two neighbours it sat between, so
+    # a reader of the Robotics block meets the reason there and not at the file's
+    # foot — which is where a "do not re-add this" note does no good.
+    assert text.index("handle: ArticulatedRobotics") < text.index(DEAD_FAUNA_CHANNEL_ID) \
+        < text.index("handle: sheenrobotics"), "the why-line is not where the entry was"
+
+
+def test_a_channel_that_fails_every_attempt_is_named_after_the_loop_with_a_count(
+        monkeypatch, redirect_paths, feed_stub, capsys):
+    """#3328 clause 2: attributable in the scan summary, not only mid-loop.
+
+    The mid-loop `Error fetching RSS … after 4 of 4 attempts` line exists, but the
+    summary is what a reader of a run actually sees, and the coverage line cannot
+    carry it: 63 of 64 is the healthy-looking number #739 deliberately allows. Two
+    facts are pinned — the channel's HANDLE (an id is not what anyone searches
+    YouTube with) and the consecutive-scan count, so a second run reads `2` and a
+    dead feed is told apart from one bad night.
+    """
+    monkeypatch.setattr(yt_mod, "RSS_FEED_URL", _stub_rss_url(feed_stub))
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: list(_STUB_CHANNELS))
+    feed_stub.outcomes = {DEAD_FAUNA_CHANNEL_ID: 404, "UCidle": []}
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+    _items, coverage = yt_mod.scan_youtube_channels()
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    dead = [l for l in lines if "DEAD FEED" in l]
+    assert len(dead) == 1, f"expected exactly one dead-feed line, got {dead!r}"
+    assert "FaunaRobotics" in dead[0], f"the line omits the handle: {dead[0]!r}"
+    assert DEAD_FAUNA_CHANNEL_ID in dead[0], "the line omits the channel_id"
+    assert "1 consecutive scan" in dead[0], \
+        f"the line carries no consecutive-scan count: {dead[0]!r}"
+    # The idle channel is the other half of this node: its feed ANSWERED with an
+    # empty list, so it belongs in the coverage numerator, and the pair is the
+    # `FeedCoverage` the scanner hands `__main__.py`, which is what renders the
+    # `YouTube feed coverage:` line a reader of the run reads. Asserted on the
+    # returned object because the scanner function itself does not print that line.
+    assert (coverage.fetched, coverage.attempted) == (1, 2), \
+        f"the channel that fetched an empty feed is not counted as fetched: {coverage!r}"
+    assert "IdleWatch" not in dead[0], \
+        f"the idle channel is named on a DEAD FEED line: {dead[0]!r}"
+    errs = [i for i, l in enumerate(lines) if "Error fetching RSS" in l]
+    assert errs, "the stub never produced the mid-loop error to compare position with"
+    assert lines.index(dead[0]) > errs[-1], \
+        "the dead-feed line is inside the loop, not in the summary where totals are"
+    assert coverage.degraded is False, \
+        "#739's half-coverage gate moved: one dead feed of two must not degrade"
+
+
+def test_the_dead_feed_count_survives_the_run_and_clears_when_the_feed_fetches(
+        monkeypatch, redirect_paths, feed_stub):
+    """#3328 clause 3: the count is state, so dead stays distinct from idle.
+
+    Across runs, because the alternative is re-deriving it from run logs and
+    `ls ~/lloyd-data/_pipeline/intel-runs/` holds one file written by autonomy
+    #30's own redirect, never by repo code. Cleared by a FETCH and not by a video:
+    a channel that returns bytes and posted nothing is idle, and counting that
+    would flag every quiet channel as dying. The stub's outcomes are re-armed
+    between scans against the SAME state file, the way a real run reloads state.
+    """
+    key = yt_mod.FEED_STREAK_STATE_KEY
+    monkeypatch.setattr(yt_mod, "RSS_FEED_URL", _stub_rss_url(feed_stub))
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: list(_STUB_CHANNELS))
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+
+    def scan(outcomes):
+        feed_stub.outcomes = outcomes
+        yt_mod.scan_youtube_channels()
+        return _state_json()
+
+    st = scan({DEAD_FAUNA_CHANNEL_ID: 404, "UCidle": []})
+    assert st[key][DEAD_FAUNA_CHANNEL_ID] == 1, "the first failed scan went uncounted"
+    assert "UCidle" not in st[key], \
+        "the channel whose feed returned an EMPTY list is counted as dead"
+    assert st["youtube_coverage"] == {"fetched": 1, "attempted": 2}, \
+        "the aggregate coverage this count is reported beside drifted"
+    st = scan({DEAD_FAUNA_CHANNEL_ID: 404, "UCidle": []})
+    assert st[key][DEAD_FAUNA_CHANNEL_ID] == 2, \
+        "the count did not survive the run, so every run looks like its first"
+    st = scan({DEAD_FAUNA_CHANNEL_ID: [], "UCidle": []})
+    assert DEAD_FAUNA_CHANNEL_ID not in st[key], \
+        "a feed that fetched again still carries its dead-feed count"
+    assert st["youtube_coverage"] == {"fetched": 2, "attempted": 2}, \
+        "the recovering scan stopped counting its own coverage"

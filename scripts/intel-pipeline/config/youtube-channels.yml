@@ -63,9 +63,19 @@ channels:
   - handle: ArticulatedRobotics
     name: Articulated Robotics
     channel_id: UCx9vSJTSZGFrErfPtut5GNQ
-  - handle: FaunaRobotics
-    name: Fauna Robotics
-    channel_id: UCLcYVpBD0O8NkQI-A8qAvfQ
+  # Removed 2026-10-25 (backlog #3328): handle FaunaRobotics, name "Fauna
+  # Robotics", channel_id UCLcYVpBD0O8NkQI-A8qAvfQ. Its RSS feed
+  # (https://www.youtube.com/feeds/videos.xml?channel_id=UCLcYVpBD0O8NkQI-A8qAvfQ)
+  # returned HTTP 404 on every one of the 4 attempts in every scan, while
+  # neighbouring ids from this file returned 200 in the same minute — so the
+  # endpoint works and this id is the one YouTube does not serve. It was NOT a
+  # never-worked entry: scanner state still holds 6 seen items and last-seen
+  # video aDybW8n0ZkY under it, so the feed served items and stopped. One dead
+  # id out of 64 never trips the half-coverage DEGRADED gate, which is why it
+  # was silent. Whether the channel still exists under a different id could not
+  # be re-derived from this box (youtube.com serves bot-limited HTML here), so
+  # no replacement id was guessed; re-add it, from git history, only once a
+  # browser-side check names one.
   - handle: sheenrobotics
     name: Sheen Robotics
     channel_id: UC4w9c62YARISDdsrfoEhZKg
