@@ -1261,3 +1261,144 @@ def test_board_health_lists_a_pending_hand_run_beside_the_outside_list(isolated)
     assert [o["item_id"] for o in owed["outside"]] == [96], "the two lists sit side by side"
     assert owed["items"] == 1 and owed["entries"] == 1, \
         "the hand-run item still owes its apply; the outside answer emptied the other"
+
+
+# ---------------------------------------------------------------------------
+# #3320: the LIVE carrier's OWN receipt, executed. Every hand-run test above
+# writes its own probe (`receipt: "exit 1"`), so none ever asked whether the
+# command #3320 actually carries can hold and release. Triage 2026-10-25 found
+# the item asserting it carried a `hand_run:` block while the file carried
+# none — `hand_run_of(fm) -> {}` — so dispatch offered it and `close_item`
+# would have closed it around a corpus `stats()` says is absent. These run the
+# real receipt: the registry probe, in a subprocess, inheriting an `LLOYD_DATA`
+# pointed at a private tmp root (`app.paths` rule 1), so production
+# `~/lloyd-data/research.db` is never opened. Held while `archived` < 314,
+# silent at 314 — the same two readings #3289 pinned as a class rule, measured
+# now through the block this round attached to the live item. And the held
+# close, whose 300-char note bound measured on 2026-10-25 cut the live
+# receipt's own text off mid-command (`…sys.exit(0 if n >= 314 els`), losing
+# the reading `exited 1: ARCHIVED=0 …` that the line exists to record.
+
+
+CARRIER_CMD = ("cd ~/lloyd && .venvs/lloyd/bin/python -m app.research_store import "
+               "~/obsidian/lloyd/research-queue-archive.md")
+CARRIER_RECEIPT = (
+    "cd ~/lloyd && /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python -c "
+    "\"import sys; from app.research_store import store; s = store().stats(); "
+    "n = s['by_status'].get('archived', 0); print('ARCHIVED=%d TOTAL=%d' % (n, "
+    "s['total'])); sys.exit(0 if n >= 314 else 1)\"")
+CARRIER_SET = ["314 archived rows from lloyd/research-queue-archive.md (the #3046 dedup corpus)"]
+
+
+def _carrier_item(tmp_path, *, status="draft"):
+    """An item carrying #3320's block verbatim: the restore `cmd`, the registry
+    probe as `receipt`, `since` = the vault commit that attached it."""
+    p = write_item(tmp_path, 3320, status=status, name="Hand-run carrier item")
+    B.update_frontmatter(p, {"hand_run": {"set": CARRIER_SET, "cmd": CARRIER_CMD,
+                                          "receipt": CARRIER_RECEIPT,
+                                          "since": "2026-10-25T16:48:09Z"}})
+    return p
+
+
+def _seed_archived(root: Path, n: int, start: int = 0) -> None:
+    """`n` topics settled `archived` in the registry under `root` — the corpus
+    role, filled through the store's real API (`propose` + `finish`) so the
+    receipt's `stats()` sees exactly what production's will after the import."""
+    from app.research_store import ResearchStore
+    st = ResearchStore(root / "research.db")
+    for i in range(start, start + n):
+        tid = st.propose(f"carrier seed {i} for the #3320 receipt",
+                         proposed_by="test")["id"]
+        st.finish(tid, "archived", note="seed for the #3320 receipt test")
+
+
+def test_the_carrier_block_is_a_block_naming_the_import_and_the_probe(tmp_path):
+    """#3320 clause 1 (the shape): `hand_run_of` returns a block, not `{}` — the
+    failure mode #3320 was triaged from was the item ASSERTING this block while
+    its front matter held none."""
+    block = O.hand_run_of(fm_of(_carrier_item(tmp_path)))
+    assert block, "hand_run_of returned {} — the exact #3320 triage failure"
+    assert "python -m app.research_store import ~/obsidian/lloyd/research-queue-archive.md" \
+        in block["cmd"], "the cmd names the #3085 restore, not a paraphrase of it"
+    assert block["cmd"].startswith("cd ~/lloyd &&"), \
+        ("from any other tree app.paths opens <worktree>/.lloyd-data/research.db, "
+         "a gitignored store whose `existing: 0` is that empty file's answer, not "
+         "production's (item clause 2)")
+    assert "n >= 314" in block["receipt"] and "archived" in block["receipt"], \
+        "the receipt probes the archived count and names its release bound"
+
+
+def test_the_carrier_receipt_holds_the_item_while_the_corpus_is_absent(tmp_path, monkeypatch):
+    """#3320 clause 2, holding half: the real receipt run against a registry
+    with no corpus exits 1, so `hand_run_pending` returns the block WITH the
+    receipt's own reading — `exited 1: ARCHIVED=0 …` — which is production's
+    exact state (measured `ARCHIVED=0 TOTAL=134`, exit 1, 2026-10-25) until the
+    operator runs the import."""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    block, why = O.hand_run_pending(fm_of(_carrier_item(tmp_path)))
+    assert block and block["cmd"] == CARRIER_CMD, \
+        "the hold must be lifted by running the command, not by settling the entry"
+    assert why.startswith("exited 1:") and "ARCHIVED=0" in why, \
+        ("the why is the probe's own output — `exit 1` is only allowed as a "
+         "receipt the test wrote, never as a result the carrier produces")
+
+
+def test_the_carrier_receipt_releases_only_at_314_archived_rows(tmp_path, monkeypatch):
+    """#3320 clause 2, release half: 313 archived rows still hold the item and
+    say so; the 314th — the count the import reports (`inserted: 314`) — is the
+    only thing that clears it."""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    p = _carrier_item(tmp_path)
+    _seed_archived(tmp_path, 313)
+    block, why = O.hand_run_pending(fm_of(p))
+    assert block and "ARCHIVED=313" in why, \
+        "the bound is >= 314, not > 0: three quarters of a corpus is still a missing corpus"
+    _seed_archived(tmp_path, 1, start=313)
+    assert O.hand_run_pending(fm_of(p)) == ({}, ""), \
+        "at 314 archived rows the block is spent: dispatch may offer the item and closes may land"
+
+
+def test_a_held_close_on_the_carrier_keeps_draft_and_names_the_receipt_reading(tmp_path, monkeypatch):
+    """#3320 clause 3: while the receipt fails, `close_item` leaves
+    `status: draft` and writes an activity line naming BOTH the receipt command
+    and its reading. Measured pre-fix, the 300-char note bound cut the live
+    #3320 receipt (260 chars) off mid-command and dropped the reading entirely
+    — the held close then recorded only that a command existed, which is one
+    character short of distinguishing it from a close nobody attempted. (The
+    `status` half was pinned for `exit 1` receipts by #3017's
+    `test_close_item_refuses_a_pending_hand_run_and_leaves_the_status_alone`;
+    this is that shape pinned for the carrier's real block at `status: draft`
+    with the reading half added.)"""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    p = _carrier_item(tmp_path, status="draft")
+    assert O.close_item(p, "round reported every acceptance clause met") is False
+    raw = p.read_text(encoding="utf-8")
+    assert "\nstatus: draft\n" in raw, \
+        "the held close moves nothing: the status line survives byte-for-byte"
+    assert fm_of(p)["status"] == "draft"
+    acts = "\n".join(str(a) for a in (fm_of(p).get("activity_log") or []))
+    assert "pending hand-run unexecuted" in acts
+    assert "exited 1: ARCHIVED=0" in acts, "the line carries the receipt's reading"
+    assert CARRIER_RECEIPT in acts, \
+        "and the receipt command whole — the old bound cut it at `n >= 314 els`"
+    assert O.hand_run_of(fm_of(p))["since"] == "2026-10-25T16:48:09Z", \
+        "the held close leaves the block itself untouched"
+
+
+@pytest.mark.live_vault
+def test_the_live_3320_item_carries_the_carrier_block():
+    """#3320 clause 1, on the artifact the clause names: the live item's own
+    front matter, not a test's copy of it. Marked `live_vault` (excluded from
+    the gate): the item file is vault-owned and later writers append activity
+    to it — but the `hand_run` block must survive those writes byte-equal to
+    the shape these tests pin, and if an editor changes the restore command or
+    drops the block, this line goes red naming the file. That is the tripwire
+    for the failure #3320 was triaged from: an item whose prose promised the
+    block while its front matter had none."""
+    import os
+    vault = Path(os.environ.get("LLOYD_OBSIDIAN_VAULT") or (Path.home() / "obsidian"))
+    p = vault / "backlog" / "3320-run-the-3085-dedup-corpus-restore-as-a-hand-run-ca.md"
+    block = O.hand_run_of(B._split_frontmatter(p.read_text(encoding="utf-8"))[0])
+    assert block, f"{p} carries no hand_run block — the #3320 premise has returned"
+    assert block["cmd"] == CARRIER_CMD and block["receipt"] == CARRIER_RECEIPT, \
+        f"{p}'s block diverged from the shape tests/test_owed_check.py pins"

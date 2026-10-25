@@ -451,8 +451,21 @@ def hand_run_pending(fm: dict) -> tuple[dict, str]:
 def _hold_note(block: dict, why: str) -> str:
     """The line an entry or an activity log carries when a receipt holds it:
     names the receipt command and what running it said, so a reader of the item
-    can tell a held close from one nobody attempted."""
-    return _text(f"pending hand-run unexecuted — receipt {block['receipt']!r} {why}", 300)
+    can tell a held close from one nobody attempted.
+
+    #3320: the reading must survive the line. Measured 2026-10-25, the live
+    #3320 receipt is 260 chars, and the old 300-char bound cut the note off
+    mid-command (`…sys.exit(0 if n >= 314 els`), dropping its own
+    `exited 1: ARCHIVED=0 …` — a held close that recorded the command but not
+    the reading, which is the state this line exists to distinguish. The
+    receipt part is now capped at 400 and `why` is bounded by
+    `_receipt_passes` at ~170, so the 650 bound can only ever cut the tail of
+    a pathological receipt, never the reading; and the receipt is quoted
+    verbatim instead of `repr`'d, so a receipt containing a single quote
+    still appears in the log as its own text."""
+    return _text(
+        f"pending hand-run unexecuted — receipt "
+        f"'{_text(block['receipt'], 400)}' {why}", 650)
 
 
 def close_item(path: Path, why: str) -> bool:
