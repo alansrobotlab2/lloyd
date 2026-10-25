@@ -35,13 +35,29 @@ job a bigger budget without spending anyone else's.
 
 Why the declared value is FLOORED and not simply honoured
 ---------------------------------------------------------
-Two task files already declare a number that cannot be an iteration budget:
-`autonomy/48-entity-resolution-sweep.md:22` says `max_turns: 6` and
-`autonomy/84-fact-improvement.md:19` says `max_turns: 4`, both added believing
-the key capped something else. Honouring either as-is would take a task that
-works today and give it the exact death this item exists to fix — a run stopped
-at 5 or 3 iterations with nothing reported. So a declaration below the global is
-raised to the global and logged at WARNING, never applied.
+Two task files carried a number that cannot be an iteration budget —
+`autonomy/48-entity-resolution-sweep.md` carried `max_turns: 6` and
+`autonomy/84-fact-improvement.md` carried `max_turns: 4`, both added believing
+the key capped something else — until vault `10665afa` (#3018) removed both keys
+on 2026-10-19. Honouring either as-is would have taken a task that works today
+and given it the exact death this item exists to fix — a run stopped at 5 or 3
+iterations with nothing reported. So a value below the global is raised to the
+global and logged at WARNING, never applied, and the two clause-3 tests below
+keep driving that floor with 6 and 4 fed in by the fixture: no task file hands
+the scheduler either number any more, so both are synthetic here and say so out
+loud.
+
+Why the last section exists
+---------------------------
+Nothing else in this repo reads the vault, so a sentence that attributes a
+frontmatter key to a task file goes false the day the vault drops that key and
+nothing re-checks it. That is what happened to the wording above: it stood in the
+present tense from `#3018` deleting the keys on 2026-10-19 until this round
+rewrote it, across four commits that touched the very same two files. The last
+section therefore derives its expectation from the live vault through
+`board_presence.vault_root()` and the scheduler's own parser, not from the prose,
+and fails when repo prose attributes a `max_turns` to a task file that does not
+have one.
 
 The tests drive the real `run_task` and assert on the `RunOptions` it built: the
 cap only means anything through what the harness enforces, and a test that
@@ -53,11 +69,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 import pytest
 
 from app import autonomy
+from tests.board_presence import vault_root
 
 GLOBAL_MAX_TURNS = 60                  # config.yaml:2 `agent.max_turns`
 
@@ -185,14 +203,18 @@ def test_a_budget_above_the_global_is_applied_without_a_warning(store, monkeypat
 
 # ── clause 3: a below-global declaration is floored, and said out loud ─────
 
-def test_the_real_max_turns_6_declaration_cannot_shrink_the_task(store, monkeypatch,
-                                                                 caplog):
-    """`autonomy/48-entity-resolution-sweep.md:22` declares `max_turns: 6`.
+def test_a_synthetic_max_turns_6_below_the_global_cannot_shrink_the_task(
+        store, monkeypatch, caplog):
+    """A task fed `max_turns: 6`: floored to the global, and said out loud.
 
-    Applied as-is that is a task stopped at iteration 7 with no report — the
-    failure #823 exists to fix, manufactured by the config meant to help. The
-    floor is the global, and the mismatch has to be visible because the
-    declaration is still wrong and nobody is reading the run.
+    The 6 is synthetic: it is the number `autonomy/48-entity-resolution-sweep.md`
+    carried until vault `10665afa` (#3018) removed the key, so this fixture hands
+    the resolver a budget no task file gives it any more, and the floor's
+    regression is pinned by a number of the test's own making. Applied as-is that
+    is a task stopped at iteration 7 with no report — the failure #823 exists to
+    fix, manufactured by the config meant to help. The floor is the global, and
+    the mismatch has to be visible because a below-global budget stays wrong
+    whoever asks for it, and nobody is reading the run.
     """
     with caplog.at_level(logging.WARNING, logger="lloyd-autonomy"):
         options = _run_options(store, monkeypatch, _task(48, max_turns=6))
@@ -205,10 +227,13 @@ def test_the_real_max_turns_6_declaration_cannot_shrink_the_task(store, monkeypa
     assert "60" in message, message
 
 
-def test_the_real_max_turns_4_declaration_cannot_shrink_the_task(store, monkeypatch,
-                                                                caplog):
-    """`autonomy/84-fact-improvement.md:19` declares `max_turns: 4` — the same
-    mistake one step further from the global."""
+def test_a_synthetic_max_turns_4_below_the_global_cannot_shrink_the_task(
+        store, monkeypatch, caplog):
+    """The same floor one step further from the global, driven by `max_turns: 4`.
+
+    `autonomy/84-fact-improvement.md` carried that number until vault
+    `10665afa` (#3018) removed the key, so the 4 here is synthetic: from now on
+    the fixture, not the board, is the only thing handing task 84 a budget of 4."""
     with caplog.at_level(logging.WARNING, logger="lloyd-autonomy"):
         options = _run_options(store, monkeypatch, _task(84, max_turns=4))
     assert options.max_turns == GLOBAL_MAX_TURNS
@@ -304,3 +329,184 @@ def test_a_task_file_with_broken_yaml_still_yields_its_declared_budget(store,
     captured = _stub_run(monkeypatch, parsed, store)
     asyncio.run(autonomy.run_task(24))
     assert captured["options"].max_turns == 90
+
+
+# ── clause 5: repo prose may not attribute a budget the board denies ────────
+
+#: This tree — the one pytest collected this file from. Inside a round's worktree
+#: that is the round, so the scan judges the prose the gate is promoting rather
+#: than production's copy of the same filenames.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The two trees whose prose clause 5 covers.
+CLAIM_SCAN_ROOTS = (REPO_ROOT / "app", REPO_ROOT / "tests")
+
+#: A citation of one scheduler task file: an optional directory, the numeric id,
+#: the slug. The bare form is load-bearing, not a nicety — one of the six false
+#: sentences cited `84-fact-improvement.md` with no directory in front of it, so
+#: a guard that insisted on the `autonomy/` prefix would sleep through half the
+#: drift it exists to catch.
+TASK_FILE_CITE = re.compile(
+    r"(?:(?P<dir>[A-Za-z0-9_.-]+)/)?(?P<id>\d+)-(?P<slug>[a-z][a-z0-9-]*)\.md")
+
+#: The verbs that mean "this file has this key right now". The false sentences
+#: #3018 left behind used `declare` and `say`; `carry` and `set` are the same
+#: attribution in the words this repo's prose otherwise reaches for. Past forms
+#: are absent on purpose: `carried` is the only truthful wording once a key is
+#: gone — it is what this file now says about both numbers — and a guard that
+#: flags the true sentence gets switched off rather than obeyed.
+PRESENT_ATTRIBUTION = re.compile(
+    r"\b(declare|declares|say|says|carry|carries|set|sets)\b")
+
+#: Lines on either side of a citation for a claim still to be about it. All six
+#: drifted sentences kept citation, verb and key on one or two adjacent lines; a
+#: window as wide as "the docstring" pairs one fixture's budget with an unrelated
+#: citation and reports a drift that exists only in the reader.
+CLAIM_WINDOW_LINES = 2
+
+#: Built by substitution rather than written out, because this file is itself one
+#: of the trees the scan walks: a literal copy of the drifted sentence would become
+#: the violation it is the fixture for (`%s-%s.md` cites nothing, because the id and
+#: slug arrive by substitution). The budget in it is 7 and not the 6 or 4 of the
+#: real drift for the same reason: this file's own text is exactly what the
+#: acceptance witness greps for a present-tense attribution of those two dead
+#: numbers to a task file, and a fixture quoting them would fail the check it is
+#: the fixture for. The number is not what the fixture tests — the tense and the
+#: citation are.
+_DRIFT_SENTENCE = ('"""Task autonomy/%s-%s.md declares `max_turns: 7`, so each of '
+                   'its runs gets 7 turns."""\n')
+_TRUTH_SENTENCE = ('"""Task autonomy/%s-%s.md carried `max_turns: 7` until vault '
+                   '`10665afa` (#3018) removed the key."""\n')
+
+
+def _citation_claims(roots, task_dir: Path) -> tuple[list[str], list[str]]:
+    """Split every task-file citation this Python makes into `(judged, violations)`.
+
+    `judged` is the witness that the scan reached the board at all: citations that
+    resolve to a real file under `task_dir` whose front matter loads. `violations`
+    are the judged ones whose sentence attributes a `max_turns` to that file in the
+    present tense while the file carries no such key — the statement #3018 left in
+    six places, false since 2026-10-19 and unchanged until this round because no
+    check read the vault.
+
+    Two silences are deliberate. A citation whose id is not on the board (a test
+    naming a synthetic `1-task.md` it wrote into tmp_path) is a fixture, and the
+    board has no opinion to check it against. A file that DOES declare the key is
+    judged but never a violation, in any tense: this check holds the prose to the
+    board, never the board to the prose.
+
+    The board is asked through `autonomy._parse_task_file`, the scheduler's own
+    graduated loader, because the statement on trial is about what the scheduler
+    reads — a budget the regex fallback recovers from a broken file is a key a
+    docstring may truthfully name.
+    """
+    parsed_by_id: dict[str, object] = {}
+
+    def parsed_for(task_file: Path):
+        key = task_file.name
+        if key not in parsed_by_id:
+            parsed_by_id[key] = autonomy._parse_task_file(task_file)
+        return parsed_by_id[key]
+
+    by_id = {p.name.split("-", 1)[0]: p
+             for p in sorted(task_dir.glob("*.md")) if re.match(r"\d+-", p.name)}
+    judged: list[str] = []
+    violations: list[str] = []
+    for root in roots:
+        for src in sorted(root.rglob("*.py")):
+            lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
+            for no, line in enumerate(lines, 1):
+                for cite in TASK_FILE_CITE.finditer(line):
+                    if cite["dir"] not in (None, "autonomy"):
+                        continue   # `backlog/3018-slug.md` is an item, not a task
+                    task_file = by_id.get(cite["id"])
+                    if task_file is None:
+                        continue   # a synthetic path; the board cannot judge it
+                    fm = parsed_for(task_file)
+                    if fm is None:
+                        continue   # unreadable board file: nothing to attribute
+                    where = f"{src.relative_to(root.parent)}:{no}"
+                    judged.append(f"{where} -> {task_file.name}")
+                    window = "\n".join(
+                        lines[max(0, no - 1 - CLAIM_WINDOW_LINES):
+                              no + CLAIM_WINDOW_LINES])
+                    verb = (PRESENT_ATTRIBUTION.search(window)
+                            if "max_turns" in window else None)
+                    if verb is None or "max_turns" in fm:
+                        continue
+                    violations.append(
+                        f'{where} attributes `max_turns` to {task_file.name} in the '
+                        f'present tense ("{verb.group(1)}": {line.strip()!r}), but '
+                        f"{task_file} has no `max_turns` in its front matter. Put the "
+                        "sentence in the past tense and name the vault commit that "
+                        "removed the key.")
+    return judged, violations
+
+
+def test_no_repo_prose_attributes_a_turn_budget_the_live_board_denies():
+    """The drift class this item exists for, pinned against the live board.
+
+    Six sentences in this repo said two task files declared a turn budget; vault
+    `10665afa` (#3018) deleted both keys on 2026-10-19, and five days of commits
+    over the same two files did not notice — because nothing here reads the vault,
+    and `test_autonomy_jobs_doc_claims.py`'s checks are deliberately internal. So
+    this node reads it: every `app/`/`tests/` citation of a task file is judged
+    against that file's real front matter, through `board_presence.vault_root()`
+    so the `LLOYD_OBSIDIAN_VAULT` override is honoured.
+
+    Unmarked rather than `live_vault`, for the reason that file gives for its own
+    vault read: a check the gate deselects cannot pin the drift this clause names,
+    the read is read-only over front matter, and the only writer that could redden
+    it is a vault edit that has just made a repo sentence false — which is the
+    finding, not a flake. The skip below is clause 5's, for a box with no vault at
+    all; the mechanism node beside it needs no board, so a skipped run here still
+    cannot read as "the guard was checked".
+    """
+    task_dir = vault_root() / "autonomy"
+    if not task_dir.is_dir():
+        pytest.skip(
+            f"{task_dir} does not exist, so no citation can be judged against it. "
+            "Clause 5 is NOT pinned by this run; "
+            "test_the_prose_guard_fires_on_a_sentence_that_attributes_a_deleted_key "
+            "is what proves the scan itself works without a board.")
+    judged, violations = _citation_claims(CLAIM_SCAN_ROOTS, task_dir)
+    assert judged, (
+        f"not one task-file citation under {[str(p) for p in CLAIM_SCAN_ROOTS]} "
+        f"resolved against {task_dir}, so this scan judged nothing and its green is "
+        "worthless: the citation pattern, the board path or the board itself moved")
+    assert violations == [], "\n".join(violations)
+
+
+def test_the_prose_guard_fires_on_a_sentence_that_attributes_a_deleted_key(tmp_path):
+    """The node above can fail, and here is where: same scan, synthetic trees.
+
+    Three citations, three outcomes, so no arm of the guard can pass by being
+    deaf. A present-tense attribution of a budget to a task file whose front
+    matter has no such key is the drift, and must be reported. The same sentence
+    in the past tense — the wording this file was rewritten into — must not be,
+    or the truthful sentence becomes unwriteable. And a present-tense attribution
+    to a file that really does declare the key must not be either, which is the
+    positive control that keeps the first assertion from being a match on
+    anything that mentions a task file at all.
+    """
+    task_dir = tmp_path / "board" / "autonomy"
+    task_dir.mkdir(parents=True)
+    (task_dir / "7-keyless-task.md").write_text(
+        "---\nid: 7\nname: Keyless\nstatus: draft\n---\n\n# body\n", encoding="utf-8")
+    (task_dir / "8-declaring-task.md").write_text(
+        "---\nid: 8\nname: Declaring\nstatus: draft\nmax_turns: 90\n---\n\n# body\n",
+        encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    (repo / "app" / "drifted.py").write_text(_DRIFT_SENTENCE % (7, "keyless-task"))
+    (repo / "app" / "truthful.py").write_text(_TRUTH_SENTENCE % (7, "keyless-task"))
+    (repo / "tests" / "declares.py").write_text(
+        _DRIFT_SENTENCE % (8, "declaring-task"))
+
+    judged, violations = _citation_claims((repo / "app", repo / "tests"), task_dir)
+
+    assert len(judged) == 3, judged
+    assert len(violations) == 1, violations
+    assert violations[0].startswith("app/drifted.py:1"), violations[0]
+    assert "7-keyless-task.md" in violations[0], violations[0]

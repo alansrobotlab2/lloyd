@@ -3025,15 +3025,17 @@ def _resolve_task_max_turns(task: dict, global_max_turns: int) -> int:
     larger budget without costing the fleet anything.
 
     A declared value is FLOORED at the global, never honoured as-is when it is
-    smaller. Two task files carry a number that cannot mean an iteration budget —
-    `autonomy/48-entity-resolution-sweep.md` declares `max_turns: 6` and
-    `84-fact-improvement.md` declares `max_turns: 4`, each added believing the key
-    capped something else — and a too-small budget is precisely the failure this
-    item exists to fix: `app/harness/loop.py` breaks at the cap,
+    smaller. Two task files carried a number that cannot mean an iteration
+    budget — `autonomy/48-entity-resolution-sweep.md` carried `max_turns: 6` and
+    `84-fact-improvement.md` carried `max_turns: 4`, each added believing the key
+    capped something else — until vault `10665afa` (#3018) removed both keys on
+    2026-10-19. The floor outlives those two keys because it defends the shape of
+    the mistake, not the two files: a too-small budget is precisely the failure
+    this item exists to fix — `app/harness/loop.py` breaks at the cap,
     `app/harness/finalizer.py` records no verdict for that death, and the run
-    reports nothing after minutes of GPU. Honouring a 4 would hand two working
-    tasks that exact death, so the mismatch is logged at WARNING naming the task
-    and both numbers instead of being applied or swallowed.
+    reports nothing after minutes of GPU. Honouring a below-global number would
+    hand a working task that exact death, so the mismatch is logged at WARNING
+    naming the task and both numbers instead of being applied or swallowed.
 
     The other direction is unbounded on purpose: a declared 5,000 is still cut
     off by `asyncio.timeout(timeout_seconds)` around the run, so the wall clock —
