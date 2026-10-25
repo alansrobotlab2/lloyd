@@ -1512,3 +1512,201 @@ def test_the_judgement_reader_lives_in_the_watcher_and_names_the_writers_keys():
         "the backend route imports the board-steward source module again, which is "
         "the co-presence the placement exists to avoid — the guard in "
         "tests/test_worker_capability_allowlist.py fails with it")
+
+
+# ── #3322: a quiet tick may not rewind the watermark ─────────────────────────
+#
+# `newest` is a max over `events`, and `events` is the `for_items`-widened list:
+# `execute` calls `events_since(..., for_items={i.id for i in shown})` at
+# `workers/sources/board_steward.py:641-643`, and `events_since` appends up to
+# `per_item` rows for each shown item "whatever their age" (:383-387). So a tick
+# whose window holds NOTHING newer than `last_ts` can still be handed a shown
+# item's history, the plain max over that list lands BELOW `since_ts`, and the
+# single `last_ts` write (:702) moves the watermark backwards.
+#
+# `default=since_ts` is not a clamp: it fires only on an empty list, and the
+# quiet tick's list is not empty — that is precisely the case the skip at :649
+# does not catch, because it fires on `not events` and the widened list is full.
+#
+# Live on 2026-10-25, as #3322 records it: the tick at 16:41:54Z left `last_ts`
+# at 03:49:23Z where it had been 16:36:32Z (the item measures that rewind as
+# 12 h 49 m and counts 172 already-consumed events re-exposed), and the same
+# re-exposure shape appears three times that day — 132 events at 13:03:38, 180 at
+# 16:38:19, 181 at 16:58:13, against a same-day norm of 9-41.
+
+
+def _quiet_window_with_one_item_of_history(board, *, hours_old: float = 12.0):
+    """Seed `board` so its ONLY events are one shown item's history, all older
+    than the watermark. Returns `(since_ts, history_ts)`.
+
+    The three rows are the kinds the live rewind rode — a `status_moved`, an
+    `item_landed` and a `backlog_implement`, all on item 7 — stamped
+    `hours_old` BELOW the watermark. Item 7 is `up_next`, which does two jobs: it
+    puts the item in `board_view`, and `board_view` membership is the only reason
+    `events_since` is asked for its history at all; and the same status is what
+    keeps the `not events` skip at :649 from firing on an empty window.
+
+    The watermark is an hour back rather than `0.0` of a missing state file, so
+    `since_ts` is a number the assertion can be exact about.
+    """
+    since = time.time() - 3600.0
+    history_ts = since - hours_old * 3600.0
+    _write(board, 7, "up_next")
+    _ev(event="status_moved", item_id=7, ts=history_ts, to="up_next", by="owed-check")
+    _ev(event="item_landed", item_id=7, ts=history_ts + 1.0, commit="deadbeef")
+    _ev(event="backlog_implement", item_id=7, ts=history_ts + 2.0, phase="finished",
+        round_id="SM_QUIET")
+    W._write_state({"last_ts": since, "last_run": since, "last_session": "seeded"})
+    return since, history_ts
+
+
+def _drive_a_success_tick(board, monkeypatch) -> str:
+    """One board-steward tick that answers, over whatever `board` holds now.
+
+    Only the turn is canned; the ledger, `events_since`, `board_view`,
+    `parse_steward`, the state write and the ledger row are production. Returns
+    the prompt the steward was shown, so a caller can see what the tick really
+    read rather than what it was said to read.
+    """
+    from workers.sources import _common as C
+    seen: dict[str, str] = {}
+
+    async def turn(prompt, **kw):
+        seen["prompt"] = prompt
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [], "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today, nothing to move this pass"}}
+
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success", out
+    return seen["prompt"]
+
+
+def test_a_quiet_tick_with_history_on_a_shown_item_leaves_last_ts_where_it_was(board,
+                                                                               monkeypatch):
+    """Clause 1: the watermark can never move backwards.
+
+    The window holds no event newer than `last_ts`, item 7's history is older than
+    it, and the tick still runs and still answers — so the write happens, and the
+    clamp is the only thing that can keep `last_ts` at `since_ts`.
+    """
+    since, history_ts = _quiet_window_with_one_item_of_history(board)
+    # The precondition, from the real `events_since`: the window is empty, yet the
+    # tick is handed three rows. A test that only asserted the resulting
+    # `last_ts` would also pass on a `events_since` that returned nothing.
+    widened = W.events_since(S.LEDGER_PATH, since_ts=since, for_items={7})
+    assert [d["event"] for d in widened] == ["status_moved", "item_landed",
+                                             "backlog_implement"], widened
+    assert max(d["ts"] for d in widened) == history_ts + 2.0 < since, widened
+    assert W.events_since(S.LEDGER_PATH, since_ts=since, for_items=frozenset()) == [], (
+        "the control: no shown item, no events — so the three rows above are the "
+        "per-item history and not the window")
+
+    prompt = _drive_a_success_tick(board, monkeypatch)
+
+    state = W._read_state()
+    assert state["last_ts"] == since, (
+        f"a quiet tick rewound the watermark by {since - state['last_ts']:.0f} s, "
+        f"from {since} to {state['last_ts']}")
+    assert state["last_session"] == "s", state
+    row = _steward_rows()[-1]
+    assert row["events"] == 3, f"the tick recorded {row['events']} events: {row}"
+    assert "event=status_moved item_id=7" in prompt, prompt[-400:]
+
+
+def test_a_tick_shown_one_newer_event_still_advances_last_ts_to_its_newest_ts(board,
+                                                                             monkeypatch):
+    """Clause 2: the clamp is a floor, not a freeze.
+
+    Same seeded history twelve hours under the watermark, plus two events inside
+    the window. `last_ts` has to land on the newest event the tick was SHOWN
+    (`since + 200`), not on `since_ts`, not on the last row of a list sorted
+    oldest-first, and not on the newest row of the window if history were newer.
+    """
+    since, history_ts = _quiet_window_with_one_item_of_history(board)
+    newest_ts = since + 200.0
+    _ev(event="item_landed", item_id=7, ts=since + 100.0, commit="cafebdd0")
+    _ev(event="backlog_implement", item_id=7, ts=newest_ts, phase="started",
+        round_id="SM_LIVE")
+
+    _drive_a_success_tick(board, monkeypatch)
+
+    state = W._read_state()
+    assert state["last_ts"] == newest_ts, (
+        f"last_ts={state['last_ts']} but the newest event shown was {newest_ts} "
+        f"(watermark before the tick: {since}, oldest history: {history_ts})")
+    assert state["last_ts"] > since, "a tick with new events stalled the watermark"
+
+
+def test_a_diverged_quiet_tick_writes_no_last_ts_and_its_record_is_unchanged(board,
+                                                                             monkeypatch):
+    """Clause 3: #3088's divergence path is untouched by the clamp.
+
+    The same quiet window, drawn twice into the captured divergence through the
+    real finalizer. Two things must stay exactly as they are today: the watermark
+    is not written at all on the failure path, and the record it publishes is
+    UNCLAMPED — `divergent_newest_ts` and the ledger row's `newest_ts` are the
+    plain max over the shown events, twelve hours BELOW the watermark. Clamping
+    the value passed at :681 would lift both of them to `since_ts`, which is the
+    change #3322's triage explicitly dropped from its own contract.
+    """
+    since, history_ts = _quiet_window_with_one_item_of_history(board)
+    out, posted = _drive_steward_tick(board, monkeypatch,
+                                      [_DIVERGED_TICK, _DIVERGED_TICK], seed=False)
+    assert out["status"] == "failed", out
+    assert len(posted) == 2, f"{len(posted)} finalizer draws: the re-sample moved"
+
+    state = W._read_state()
+    assert state["last_ts"] == since, "a failed tick moved the watermark"
+    assert state["divergent_since_ts"] == since, state
+    assert state["divergent_streak"] == 1, state
+    assert state["divergent_newest_ts"] == history_ts + 2.0, state
+
+    rows = _steward_rows()
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["diverged"] is True and row["streak"] == 1, row
+    assert row["since_ts"] == since, row
+    assert row["newest_ts"] == history_ts + 2.0 == state["divergent_newest_ts"], row
+    assert row["newest_ts"] < state["last_ts"], (
+        "the divergence record is clamped: its newest_ts is no longer below the "
+        "watermark it was recorded over")
+    assert row["events"] == 3, row
+    assert row["summary"] == (f"tick diverged, no structured answer "
+                             f"({row['events']} events shown)"), row
+    assert out["summary"].startswith("no structured answer: "), out["summary"]
+
+
+def test_the_clamp_left_every_input_of_the_stewards_tick_alone(board, monkeypatch):
+    """Clause 4: the fix is the clamp at the write and nothing else.
+
+    The discriminating half is the first assertion. Dropping the old rows inside
+    `events_since` would ALSO stop the rewind and would satisfy clause 1 — and it
+    would take from the steward exactly what the widening exists to give it: "an
+    item the steward is shown with none of its history is one it can only guess
+    about" (`workers/sources/board_steward.py:361-362`). So the quiet tick must
+    still SEE the twelve-hour-old rows while the watermark stays put. The rest
+    pins the numbers the item names as out of scope: the 300-event and 80-item
+    caps, `events_since`'s own `per_item` default, and the schema whose caps
+    `parse_steward` shares (#2197).
+    """
+    import inspect
+
+    since, history_ts = _quiet_window_with_one_item_of_history(board)
+    prompt = _drive_a_success_tick(board, monkeypatch)
+
+    assert "event=status_moved item_id=7" in prompt, (
+        "the quiet tick no longer sees the shown item's history: the fix moved out "
+        "of the last_ts write and into events_since")
+    assert 'events="3"' in prompt, prompt[:400]
+
+    assert (W.DEFAULT_MAX_EVENTS, W.DEFAULT_MAX_ITEMS) == (300, 80), (
+        "the event and item caps moved with the clamp")
+    assert inspect.signature(W.events_since).parameters["per_item"].default == 6, (
+        "events_since's per-item history width moved with the clamp")
+    assert W.STEWARD_SCHEMA["properties"]["moves"]["maxItems"] == W.MOVES_MAX == 40, (
+        "the schema and the parser's move cap are no longer one number, or the "
+        "number is no longer 40 (#2197)")
+    assert W.STEWARD_SCHEMA["properties"]["summary"]["maxLength"] == W.SUMMARY_MAX == 400
+    assert W.STEWARD_STATUSES == ("draft", "up_next", "in_progress")

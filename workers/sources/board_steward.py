@@ -698,7 +698,19 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                                       "reason": parsed["next_pick_reason"],
                                       "ts": time.time()}), encoding="utf-8")
 
-    newest = max((float(d.get("ts") or 0) for d in events), default=since_ts)
+    # #3322: `events` is the `for_items`-widened list from :641-643, so it can
+    # carry a shown item's history of any age while the window itself is empty. A
+    # plain max over it is then BELOW `since_ts`, and this write — the only
+    # `last_ts` write in the file — moves the watermark backwards: the live tick at
+    # 2026-10-25T16:41:54Z left it at 03:49:23Z where it had been 16:36:32Z, which
+    # #3322 measures as a 12 h 49 m rewind that re-exposed 172 already-consumed
+    # events. `default=since_ts` is not a clamp: it fires only on an EMPTY list,
+    # and the quiet tick's list is not empty — which is exactly the case the
+    # `not events` skip above does not catch. The floor is the clamp. The
+    # divergence path's `newest` at :681 is deliberately NOT clamped: it records
+    # what a failed tick was shown and never writes a watermark (#3088).
+    max_ts = max((float(d.get("ts") or 0) for d in events), default=since_ts)
+    newest = max(max_ts, since_ts)
     _write_state({"last_ts": newest, "last_run": time.time(),
                   "last_session": run.get("session_id")})
     S.append_event({"event": "board_steward", "apply": apply, "events": len(events),
