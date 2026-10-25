@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import ast
 import inspect
 from types import SimpleNamespace
 
@@ -3285,3 +3286,160 @@ def test_the_startup_reconciliation_of_a_dead_machines_hold_keeps_its_attributio
     assert len(rows) == 2, f"the reconciled release is a transition: {rows}"
     assert rows[1][1] == "0" and rows[1][2] == "machine", rows
     assert rows[1][3] == "startup-reconcile", rows
+
+
+def _stall_factor_comment() -> str:
+    """The `#:` block that documents ``STALL_FACTOR``, de-commented and collapsed.
+
+    Same shape as `_ban_section_header` in `tests/test_egress_window_unit.py:1344`,
+    for the same reason: a comment that wraps at ~79 columns cannot be needle-checked
+    line by line, because the phrase you want straddles a newline. Collapsing the
+    whitespace means a rewrap of the comment never breaks the pin, and a pin that
+    breaks on a rewrap gets deleted instead of respected.
+    """
+    lines = inspect.getsource(dispatch_watch).splitlines()
+    try:
+        idx = next(i for i, ln in enumerate(lines)
+                   if ln.startswith("STALL_FACTOR ="))
+    except StopIteration:
+        raise AssertionError(
+            "STALL_FACTOR is no longer a module-level assignment, so the comment "
+            "that records its ruling is no longer readable where it is documented")
+    end = idx
+    while end > 0 and lines[end - 1].lstrip().startswith("#:"):
+        end -= 1
+    assert end < idx, "STALL_FACTOR has no `#:` comment block above it at all"
+    header = " ".join(ln.lstrip()[2:].strip() for ln in lines[end:idx])
+    return " ".join(header.split())
+
+
+def test_stall_factor_comment_records_the_ruling_and_not_the_question():
+    """#3307: the ~190 s alarm question is CLOSED in the comment, with its ruling.
+
+    #3061's owed-check pass `20261025_060328_owedcheck_b7fe` (2026-10-25,
+    `follow_up: 3307`) ruled that a ~190 s whole-process event-loop block gets no
+    alarm, and the block above `STALL_FACTOR` still described that as a question
+    waiting on someone. An open question written into a hot-path module is a question
+    the next owed-check pass re-files — which is exactly what produced this item — so
+    what is pinned here is the DECISION and the reasons a reader needs so the factor
+    is not re-litigated from memory:
+
+    * no alarm for a transient block, because the streak rail drops a source that
+      reads clean at the next measurement (`self._since.pop(name)`), so a block has
+      to be measured twice past the window before it can announce;
+    * 3.0 held BY RULING, with its price named — a factor of 4 moves the 60 s
+      source's real-stall delay from 180 s to 240 s to buy silence the grace already
+      gives;
+    * the >=240 s case is a different failure and belongs outside the loop;
+    * the falsification that opened the question survives (six events, 2026-10-17 to
+      2026-10-19, 186-209 s), because a decision that erases the evidence for the
+      question reads as a decision that never needed making;
+    * and the ruling is PROSPECTIVE — 0 log gaps >=150 s in the 4.2 post-landing days
+      — which the comment says rather than lets a reader assume.
+    """
+    header = _stall_factor_comment()
+
+    # Clause 1: the question is not left open anywhere in the block.
+    assert "owed ruling" not in header, (
+        "the STALL_FACTOR comment still defers the ~190 s alarm question to an owed "
+        "ruling, which is the sentence that made the next owed-check pass file #3307")
+    # Scoped to sentences about THIS question. A whole-block substring sweep would
+    # fail on any unrelated future sentence — "the 900 s source is untouched by this"
+    # is a legitimate sentence in the same block — and a node that fails for unrelated
+    # reasons is a node that gets deleted rather than respected.
+    sentences = [s.strip() for s in header.split(". ") if s.strip()]
+    open_phrases = ("still open", "remains open", "is open", "open question",
+                    "undecided", "unresolved", "untouched", "to be decided", "TBD")
+    about = [s for s in sentences
+             if "alarm" in s or "question" in s or "factor" in s]
+    assert about, (
+        "no sentence in the block mentions the alarm, the question or the factor, so "
+        "this node has nothing to check — the ruling paragraph has been restructured "
+        "out of existence")
+    for sentence in about:
+        for open_phrase in open_phrases:
+            assert open_phrase not in sentence, (
+                f"the block still calls the alarm question {open_phrase!r}: "
+                f"{sentence!r} — a recorded decision has to read as one, or the next "
+                "triage pass re-files it")
+    assert "ruled" in header, (
+        "the block no longer says the question was ruled on, so a reader cannot tell "
+        "a settled threshold from an unexamined default")
+
+    # Clause 2: the decision and the mechanism that carries it.
+    assert "get NO alarm" in header, (
+        "the block does not state the decision affirmatively (a ~190 s whole-process "
+        "event-loop block gets NO alarm)")
+    assert "self._since.pop(name)" in header, (
+        "the block dropped the mechanism the ruling rests on: the per-process streak "
+        "rail forgets a source whose age reads clean at the next measurement, so a "
+        "one-pass stall cannot announce — cite the call, not a line number, because a "
+        "line number here moves on the next unrelated edit")
+    assert "measured twice past the window can announce" in header, (
+        "the block no longer says what it takes to announce: a block has to be read "
+        "past the window on two consecutive measurements")
+    assert "DispatchWatch.tick" in header, (
+        "the block no longer names the rail that retires the transient shape")
+    # And the symbol it names has to exist. The first draft of this citation said
+    # `WorkerPool._check_stalls`, a method this repo has never had — the gate's review
+    # caught it, and a reader following it would have found nothing. A comment that
+    # cites a mechanism is only worth pinning if the mechanism is real, so the
+    # citation is resolved against the module rather than against my memory.
+    tree = ast.parse(inspect.getsource(dispatch_watch))
+    klass = next((n for n in tree.body
+                  if isinstance(n, ast.ClassDef) and n.name == "DispatchWatch"), None)
+    assert klass is not None, (
+        "there is no DispatchWatch class, so the comment's rail citation is stale")
+    assert any(isinstance(n, ast.FunctionDef) and n.name == "tick" for n in klass.body), (
+        "`DispatchWatch.tick` does not exist: the comment cites a rail that is not in "
+        "the module, which is how a documented mechanism becomes folklore")
+
+    # Clause 3: held by ruling, and the price that ruled it.
+    assert "BY RULING" in header, (
+        "3.0 must read as held BY RULING, not as the untouched default #3061 left it")
+    assert "Raising the factor to 4" in header, (
+        "the block no longer names the alternative that was weighed and refused")
+    assert "from 180 s to 240 s" in header, (
+        "the ruling's whole argument is a price: a factor of 4 delays the 60 s "
+        "source's real-stall announcement from 180 s to 240 s. Without the number a "
+        "future reader re-raises the factor for free")
+    assert "buy silence the grace already provides" in header, (
+        "the block must say what the extra delay would have bought: silence the "
+        "grace pass already provides")
+
+    # Clause 4: the ledger entry, so a settled ruling is distinguishable from a
+    # remembered one.
+    assert "20261025_060328_owedcheck_b7fe" in header, (
+        "the block must name the owed-check entry that decided this; an uncited "
+        "decision is indistinguishable from a developer's preference")
+
+    # Clause 5: the falsification survives, and the value did not move.
+    assert "186-209 s" in header, (
+        "the falsifying measurements were deleted with the question they falsified")
+    assert "2026-10-17" in header and "2026-10-19" in header, (
+        "the falsification lost its dates, so it can no longer be re-checked")
+    assert "no boot and no failed enqueue behind them" in header, (
+        "the falsification lost what ruled out the two innocent explanations")
+    assert "each recovering on the next pass" in header, (
+        "the falsification lost the recovery that makes these events the shape the "
+        "grace rail exists to swallow")
+    assert "watchdog outside the loop" in header, (
+        "the block no longer says where a block measured twice past the window "
+        "(>=240 s) belongs, which is the boundary that keeps this threshold from "
+        "being asked to cover a dead loop")
+    assert "Prospective rather than measured" in header and "0 log gaps >=150 s" in header, (
+        "the ruling is prospective by its own record; the comment has to say so or a "
+        "reader takes it for a measured tolerance")
+
+    # Comment-only change: the constant is still the ruled value, read out of the
+    # AST rather than by line number.
+    tree = ast.parse(inspect.getsource(dispatch_watch))
+    value = next((node for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(getattr(t, "id", "") == "STALL_FACTOR" for t in node.targets)),
+                 None)
+    assert value is not None, "the STALL_FACTOR assignment disappeared"
+    assert isinstance(value.value, ast.Constant) and value.value.value == 3.0, (
+        "STALL_FACTOR moved off 3.0: this item records a ruling that KEPT the value, "
+        "so any drift here is a behaviour change smuggled into a comment edit")
+    assert dispatch_watch.STALL_FACTOR == 3.0

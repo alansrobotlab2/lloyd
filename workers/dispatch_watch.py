@@ -93,13 +93,21 @@ OK_WM_KEY = "last_enqueue_ok"
 #: source and the 900-second one have to be judged on their own clocks: 180 s for
 #: ``scheduled-task``, 2700 s for ``autocode``.
 #:
-#: Three was chosen as the smallest multiple that could not fire on one skipped
-#: interval plus one slow tick. On this box that has been measured false at 3 x 60 s:
-#: six events between 2026-10-17 and 2026-10-19 sat at 186-209 s with no boot and no
-#: failed enqueue behind them, each recovering on the next pass — a whole-process block
-#: of ~190 s is enough. #3061's first-measurement rail is what keeps those transient
-#: ones off the page; whether a block that long deserves its own alarm is still open
-#: (#3061's owed ruling), so the factor is untouched.
+#: Three is held BY RULING as much as by derivation, and its derivation is
+#: falsified on this box: 3 x 60 s does fire on one skipped interval plus one slow
+#: tick. Six events between 2026-10-17 and 2026-10-19 sat at 186-209 s with no boot
+#: and no failed enqueue behind them, each recovering on the next pass — a
+#: whole-process block of ~190 s is enough. #3061's first-measurement rail keeps
+#: those transient ones off the page, and owed-check
+#: `20261025_060328_owedcheck_b7fe` ruled on 2026-10-25 that the rest of them get NO
+#: alarm: the streak rail in ``DispatchWatch.tick`` forgets a source whose age reads
+#: clean at the next measurement (`self._since.pop(name)`), so only a block measured
+#: twice past the window can announce. Raising the factor to 4 would
+#: push the 60 s source's real-stall delay from 180 s to 240 s to buy silence the
+#: grace already provides. A block long enough to be measured twice past the window
+#: (>=240 s here) is a different failure — the loop did not run at all — and belongs
+#: to a watchdog outside the loop, not to this threshold. Prospective rather than
+#: measured: 0 log gaps >=150 s in the 4.2 post-landing days to 2026-10-25.
 STALL_FACTOR = 3.0
 
 #: The interval a source is judged on when its config carries no
