@@ -61,7 +61,7 @@ the useful part of the doc.
   line pointer, because the pointer that sat here was stale and this doc copied it on.
   What the constant does *not* cover is the vault lane's own answer to "is this path
   allowed" —
-  `agent_mcp/vault.py:1608` decides by containment under `VAULT` alone and never
+  `agent_mcp/vault.py:1614` decides by containment under `VAULT` alone and never
   asks `write_deny_reason`, so membership in the set does not mean the file is
   closed. The prompt's copy of the same rule is still prose, and prose is checked by
   `tests/test_prompt_surface_guard.py`, not by the code.

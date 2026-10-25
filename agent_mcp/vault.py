@@ -1570,6 +1570,12 @@ def _vault_read(params: dict) -> dict:
                 return _err(f"File not found: {path}", ErrorCode.NOT_FOUND)
             target = resolved
         text = target.read_text(encoding="utf-8", errors="replace")
+        # The read half of #3291's clobber gate: seeing a note is what makes writing it
+        # over legitimate, and the record goes into the registry `Write`'s gate consults
+        # (`builtin_fs._read_records`, keyed by realpath), not a vault-private copy. A
+        # partial read counts, exactly as a partial `Read` counts there — the caller needed
+        # to see what is there, not to have memorised the file.
+        _record_note_seen(target)
         start_line = int(params.get("start_line", 0))
         num_lines = int(params.get("num_lines", 0))
         if start_line > 0 or num_lines > 0:
@@ -2061,6 +2067,119 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
         f"and let a human or a granted call move `{field}`.", ErrorCode.PROTECTED_PATH)
 
 
+#: The one path segment whose wholesale overwrite is gated (#3291). Chosen by count, not
+#: by feel: of the 5402 rows in `~/obsidian/memory/audit/writes.jsonl`, 2875 carry a
+#: non-empty `pre_sha256` (an overwrite of an existing file), and by first segment those
+#: are `lloyd` 2714, `knowledge` 52, `memory` 50, `skills` 26, `backlog` 17, `autonomy` 9.
+#: The `lloyd/` population is the nightly loaded-memory lane, which rewrites `MEMORY.md`
+#: and its ledger whole without reading them first — a gate on every overwrite would
+#: refuse the memory writer every night. On `knowledge/` it covers the class that was
+#: actually clobbered, at ~2% of overwrite traffic.
+_CLOBBER_GUARDED_SEGMENT = "knowledge/"
+
+
+def _record_note_seen(target: Path) -> None:
+    """Say that THIS session has now seen `target`, in the registry `Write` consults.
+
+    One registry, not a second one. `agent_mcp/builtin_fs.py` keys `_read_records` by
+    `os.path.realpath`, holds the read-before-overwrite rule for `Write`/`Edit`, and
+    records both after a `Read` (:883) and after its own write (:1506). If this lane kept
+    its own copy the two would answer "has this session looked at that file?" differently
+    for the same file — and the lane with the weaker answer is the one callers end up on,
+    which is how #3291's overwrite happened on the lane the skills are told to use.
+
+    Never raises: a write that fails because its own bookkeeping failed would be worse
+    than an unrecorded one, and the guard degrades to asking for one read.
+    """
+    try:
+        from agent_mcp.builtin_fs import _record_seen, _stat_key
+        _record_seen(get_bound_session(), os.path.realpath(target), _stat_key(str(target)))
+    except Exception:  # noqa: BLE001
+        logger.warning("vault clobber guard: read-record failed for %s", target,
+                       exc_info=True)
+
+
+def _note_clobber_refusal(path: str, target: Path, pre_bytes: "bytes | None",
+                          session_id: str) -> "dict | None":
+    """Refuse a wholesale overwrite of a `knowledge/` note this session never read (#3291).
+
+    Returns an error payload — nothing written, no ledger entry, no audit row — or None to
+    proceed. The rule is the sibling lane's, transplanted: `_gate_check` asks
+    `_seen(session_id, realpath)` and refuses `Write` over a file the session has not Read.
+    `vault_write` had every other guard on that lane — protected-path, bench-assertion,
+    autonomy dispatch, research route, both OKF vocabulary guards, the memory ceiling —
+    and not that one, so the note an interactive session had never opened was replaced by
+    `write_text_durable` with `{"success": true}` as the only signal. The 2026-10-24 case:
+    `knowledge/papers/2610.14224-harness2-…md`, over a `digest: full` note the
+    youtube-digest worker authored 2026-10-15.
+
+    Four exemptions, each one a lane that would break without it:
+      * outside `knowledge/` (see `_CLOBBER_GUARDED_SEGMENT`), and non-`.md` — the two OKF
+        guards beside this take the same shape, and a binary under `knowledge/` has no
+        `vault_read` half to clear the gate with, so a refusal there would be a dead end;
+      * a create (`pre_bytes is None`): nothing is being clobbered, exactly `Write`'s
+        `mut.kind == "write" and not mut.existed`;
+      * no bound session — the 2703 turn-less rows are the in-process nightly writers, and
+        there is no caller standing there to instruct;
+      * `harness.edit_gates.enabled` false: one switch for both lanes, or `vault_write`
+        becomes the route around a switch an operator has already thrown.
+
+    A recorded read whose stat no longer matches is refused too, which is the second half
+    of the sibling's rule and the same reasoning: the file moved under the caller after it
+    looked, so the bytes it is about to write were composed against something gone.
+    """
+    if not path.startswith(_CLOBBER_GUARDED_SEGMENT) or not path.endswith(".md"):
+        return None
+    if pre_bytes is None:
+        return None
+    if not session_id:
+        return None
+    try:
+        from agent_mcp.builtin_fs import _gates_enabled, _seen, _stat_key
+    except Exception as exc:  # noqa: BLE001
+        # Fail open, and say so: this guard protects a note, and the same failure in the
+        # module it borrows from means the whole Write/Edit lane is down too. A guard that
+        # cannot read its rule reports a verdict it cannot justify — but unlike a
+        # vocabulary guard, refusing every knowledge write over a rule that failed to
+        # import would break the digest and research lanes to protect one file.
+        logger.warning("vault clobber guard: builtin_fs unimportable (%s), allowing", exc)
+        return None
+    if not _gates_enabled():
+        return None
+
+    real = os.path.realpath(target)
+    rec = _seen(session_id, real)
+    if rec is None:
+        reason = (f"{path} already exists ({len(pre_bytes)} B) and has not been read in "
+                  f"this session")
+    else:
+        current = _stat_key(str(target))
+        if current is None or current == rec:
+            return None
+        reason = (f"{path} changed on disk since this session read it "
+                  f"({len(pre_bytes)} B now)")
+
+    try:  # one durable row per refusal; never a second verdict
+        from app.harness import denial_journal
+        denial_journal.record(guard="vault_note_clobber", where="dispatch",
+                              session_id=session_id, tool="vault_write",
+                              reason=reason[:600], excerpt=str(path),
+                              label="unread wholesale overwrite of a knowledge/ note")
+    except Exception:  # noqa: BLE001
+        pass
+    return _err(
+        f"vault_write refused: {reason}. Nothing was written — the file on disk is the "
+        f"version someone else authored. Call `vault_read` on `{path}` (a partial read "
+        f"with start_line/num_lines is enough), read what is actually there, then write "
+        f"again — and if what is there is a finished note another job wrote, merging "
+        f"into it is usually the right answer, not replacing it. #962's change ledger "
+        f"holds the pre-image of any write this lane does land.",
+        # INVALID_PARAM, not PROTECTED_PATH: PROTECTED_PATH tells the caller the target is
+        # un-writable by policy for every session, which is false here — the file becomes
+        # writable the moment the session reads it.
+        ErrorCode.INVALID_PARAM, path=path)
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
@@ -2122,6 +2241,17 @@ def _vault_write(params: dict) -> dict:
                 refusal = _autonomy_schedule_move_refusal(path, content, pre_bytes)
                 if refusal is not None:
                     return refusal
+                # #3291's clobber gate, on the same bytes and inside the same critical
+                # section: after `_read_pre_bytes`, so "does this file already exist" is
+                # answered about the file the write is about to replace and nobody can
+                # overtake the comparison; before `write_text_durable`, so a refusal
+                # changes no bytes and reaches neither `_ledger_record` nor `_audit_write`.
+                # The `mkdir` above is a no-op on this path: an overwrite means the
+                # directory already holds the file.
+                refusal = _note_clobber_refusal(path, target, pre_bytes,
+                                                get_bound_session())
+                if refusal is not None:
+                    return refusal
                 write_text_durable(target, content)
         except TimeoutError as exc:
             return _err(str(exc), ErrorCode.LOCK_TIMEOUT, path=path)
@@ -2133,6 +2263,12 @@ def _vault_write(params: dict) -> dict:
         audit_session, audit_turn = _audit_keys(scope)
         _audit_write(path, byte_count, session=audit_session, turn=audit_turn,
                      pre_sha256=pre_sha, post_sha256=post_sha)
+        # The session has now seen this file, by authoring it. `Write`'s handler records
+        # its own post-write stat for the identical reason (`_record_seen` on
+        # `mut.post_stat`), and without the same recording a digest worker would be
+        # refused the note it had created minutes earlier in its own run — a new failure
+        # mode invented to fix an old one.
+        _record_note_seen(target)
         result = {"success": True, "path": path, "bytes": byte_count}
         if replaced:
             # Say so: a writer that asked for one spelling and got another needs
