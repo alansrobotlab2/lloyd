@@ -4190,9 +4190,11 @@ def test_a_sealed_alert_never_reports_an_out_of_window_note_as_cleared(tmp_path,
     CLEARED banner); the out-of-window note is byte-identical and gains no `cleared:`
     line — claiming a recovery nobody observed is the #1590 defect this repo already
     refused; and the run says so in its own verdict rather than reporting `sealed`.
-    The historical sweep cannot take the note either: `guardian_note_sweep.py`
-    declines tmpwatch's disk figures by design, which is why the leftover is left to a
-    human and not quietly relabelled.
+    The sweep is not a way around this: `guardian_note_sweep.py` grew a `/tmp` refuter
+    under #3277, but it is a hand-run pass that writes `dated:` from a fresh
+    `tmpwatch.measure` reading and never a `cleared:` — the seal's own obligation, which
+    this node owns, is to leave an unreachable note byte-identical rather than relabel it
+    with a recovery nobody watched.
     """
     import guardian as gmod
     import notify as N
