@@ -1710,3 +1710,261 @@ def test_the_clamp_left_every_input_of_the_stewards_tick_alone(board, monkeypatc
         "number is no longer 40 (#2197)")
     assert W.STEWARD_SCHEMA["properties"]["summary"]["maxLength"] == W.SUMMARY_MAX == 400
     assert W.STEWARD_STATUSES == ("draft", "up_next", "in_progress")
+
+
+# ── #3321: a tick killed on the wire is recorded, and still dies in the pool ──
+#
+# `execute` catches `DrainActive` and `TurnTimeout` and nothing else, and
+# `workers/sources/_common.py` opens its stream with `httpx.AsyncClient` /
+# `client.stream` and no `except httpx.*` in the module, so a connect failure
+# leaves `execute` entirely and the promotion ledger never learns the window was
+# tried. Triage measured it on 2026-10-25: 13 board-steward runs in the trailing
+# 30 days died that way (11 `ConnectTimeout` + 2 `ConnectError`; 12 = 11 + 1 since
+# 2026-10-05), and ZERO `board_steward` rows fall inside any of those 13
+# [started_at, completed_at] windows — while `_record_divergence` (#3088) does
+# fire on the parse path, with 4 `diverged: True` rows on 10-20, 10-23 and
+# 10-25. So the ledger can show a tick the finalizer never answered and cannot
+# show a tick the network never delivered.
+#
+# Only `run_prompt_in_session` is replaced below. The events, the board view, the
+# ledger and `board_steward.json` are the real ones, because the thing under test
+# is what a dead tick LEAVES BEHIND, not what it was shown.
+
+import httpx  # noqa: E402  (the class the live deaths are all instances of)
+
+
+def _dying_engine(board, monkeypatch, exc_cls, *, message, seed=True):
+    """`run_prompt_in_session` replaced by one that raises `exc_cls` on the wire.
+
+    `execute` imports it from `workers.sources._common` inside the function, so
+    patching the module attribute is the seam production uses, not a copy of it.
+    """
+    from workers.sources import _common as C
+
+    async def turn(prompt, **kw):
+        raise exc_cls(message)
+
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    if seed:
+        _ten_item_board(board)
+
+
+def _seed_window_an_hour_back():
+    """A watermark an hour back, so `since_ts` is a window and not `0.0`."""
+    since = time.time() - 3600.0
+    W._write_state({"last_ts": since, "last_run": since, "last_session": "seeded"})
+    return since
+
+
+def test_a_tick_killed_on_the_wire_appends_one_row_naming_the_error_class(board, monkeypatch):
+    """Clause 1: the death of a tick on the wire is one `board_steward` row, and
+    it is on disk before the exception leaves `execute`.
+
+    `since_ts` is the join key that makes a retried window readable, and the
+    `events` count is cross-checked against the same window driven to success, so
+    the number in a death row is the number a living tick would have been shown —
+    not a count of nothing.
+    """
+    since = _seed_window_an_hour_back()
+    _dying_engine(board, monkeypatch, httpx.ConnectTimeout, message="connect timed out")
+    with pytest.raises(httpx.ConnectTimeout):
+        asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+
+    rows = _steward_rows()
+    assert len(rows) == 1, f"one dead tick, {len(rows)} board_steward rows: {rows}"
+    row = rows[0]
+    assert row["error_class"] == "ConnectTimeout", row
+    assert "ConnectTimeout" in row["summary"], row
+    assert row["since_ts"] == since, row
+    assert row["events"] > 0 and row["items_shown"] > 0, row
+    assert row["apply"] is False, row
+    # A death judged nothing, so it must not read as a verdict.
+    assert row["moves"] == [] and row["applied"] == [] and row["next_pick"] == 0, row
+    # The same window, this time answered: the counts must agree, or the death
+    # row is describing a window nobody could re-derive.
+    out, _ = _drive_steward_tick(
+        board, monkeypatch,
+        [_Resp(json.dumps({"moves": [], "next_pick": 0, "next_pick_reason": "",
+                           "summary": "net 0 today"}), "stop", 40)], seed=False)
+    assert out["status"] == "success", out
+    rows = _steward_rows()
+    assert len(rows) == 2, rows
+    assert rows[0]["events"] == rows[1]["events"], (
+        f"the death row counted {rows[0]['events']} events, the living tick over "
+        f"the same window was shown {rows[1]['events']}")
+    assert rows[0]["items_shown"] == rows[1]["items_shown"], rows
+
+
+def test_a_tick_killed_on_the_wire_still_raises_it_to_the_pool_unchanged(board, monkeypatch):
+    """Clause 2: recording must not convert the death into a returned record.
+
+    This is the correction triage put on the item's own proposal. The pool's
+    generic arm (`workers/pool.py:2043`, `error_msg = f"{type(e).__name__}: {e}"`)
+    is what calls `mark_failed` and stamps `meta.failure_kind`; a returned dict
+    goes to `mark_completed` with no retry. Live proof the retry is load-bearing:
+    11 of the 13 failed queue rows carry `attempts=2` and their SECOND run
+    succeeded — the pool recovers these windows inside about a minute, and a
+    swallowed exception would trade that for the next 900 s tick.
+
+    The stamping is checked through the real classifier the pool uses, not a copy
+    of its rule: `_failure_kind_of` reads `type(exc).__name__` against
+    `_INFRA_EXC_NAMES`, which holds both transport names.
+    """
+    from app.autonomy import _failure_kind_of
+    _seed_window_an_hour_back()
+    _dying_engine(board, monkeypatch, httpx.ConnectError, message="connection refused")
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    # The class survives the record, so the pool's arm still sees the transport
+    # error and not a recorder's own failure.
+    assert _failure_kind_of(httpx.ConnectError("connection refused")) == "infra"
+    assert _failure_kind_of(httpx.ConnectTimeout("connect timed out")) == "infra"
+
+
+def test_two_wire_deaths_over_one_window_count_1_then_2_without_moving_last_ts(
+        board, monkeypatch):
+    """Clause 3: `last_ts` stays exactly where the tick read it, and the streak is
+    per window, so two deaths over one window read 1 then 2 and a death over a
+    different `since_ts` restarts at 1.
+
+    The watermark must not move: the immediate retry is what recovers these
+    deaths, and advancing the window would silently drop the events the dead tick
+    was never shown. #3322 is the same rule on the success path from the other
+    side — a write may never move `last_ts` backwards.
+    """
+    since = _seed_window_an_hour_back()
+    for expect_streak in (1, 2):
+        _dying_engine(board, monkeypatch, httpx.ConnectTimeout,
+                      message="connect timed out", seed=(expect_streak == 1))
+        with pytest.raises(httpx.ConnectTimeout):
+            asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+        state = W._read_state()
+        assert state["last_ts"] == since, (
+            f"death {expect_streak} moved the watermark from {since} to "
+            f"{state['last_ts']}")
+        assert state["death_streak"] == expect_streak, state
+        assert state["death_since_ts"] == since, state
+    rows = _steward_rows()
+    assert [r["streak"] for r in rows] == [1, 2], rows
+    assert [r["since_ts"] for r in rows] == [since, since], rows
+    # The counter is keyed on the window, not global: a death over another
+    # `since_ts` starts again at 1 rather than inheriting this one's streak.
+    W._write_state({**W._read_state(), "death_since_ts": since + 5.0})
+    _dying_engine(board, monkeypatch, httpx.ConnectTimeout, message="t", seed=False)
+    with pytest.raises(httpx.ConnectTimeout):
+        asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    after = W._read_state()
+    assert after["death_streak"] == 1, after
+    assert after["last_ts"] == since, "resetting the counter moved the watermark"
+
+
+@pytest.mark.parametrize("surface", ["state", "ledger"])
+def test_a_broken_record_cannot_replace_the_error_the_pool_receives(board, monkeypatch,
+                                                                    surface):
+    """Clause 4: if the record itself fails, the class the pool catches is still
+    the transport error.
+
+    Both write surfaces are driven, because a guard on only one of two is not a
+    guard: `_write_state` can fail on a full disk and `S.append_event` RAISES by
+    design (`scripts/automod/state.py`, unlike autoresearch's best-effort append).
+    On the ledger surface the row is legitimately absent — that is the record
+    failing — but the death still travels.
+
+    The window and the ten-item board are seeded BEFORE the surface is poisoned:
+    `_ten_item_board` writes its events through `S.append_event`, so poisoning
+    first would break the setup instead of the path under test.
+    """
+    since = _seed_window_an_hour_back()
+    _dying_engine(board, monkeypatch, httpx.ConnectTimeout, message="connect timed out")
+    if surface == "state":
+        def boom(*a, **kw):
+            raise OSError("state disk full")
+        monkeypatch.setattr(W, "_write_state", boom)
+    else:
+        def boom(*a, **kw):
+            raise RuntimeError("ledger locked")
+        monkeypatch.setattr(S, "append_event", boom)
+    with pytest.raises(httpx.ConnectTimeout):
+        asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    if surface == "ledger":
+        assert _steward_rows() == [], "a refused append cannot manufacture a row"
+    else:
+        assert W._read_state()["last_ts"] == since, (
+            "the state write failed, so the file must still hold the tick's own read")
+
+
+def test_a_wire_death_row_is_not_a_divergence_row_and_the_divergence_row_is_unchanged(
+        board, monkeypatch):
+    """Clause 5: the two failure kinds are distinguishable from the row alone, and
+    the #3088 row's keys and summary are the ones it writes today.
+
+    A transport death stamped `diverged: True` with the `tick diverged, no
+    structured answer` summary would publish a network failure as a statement
+    about the finalizer — which never ran. `ts` and `created_at` are excluded from
+    the key sets because `S.append_event` stamps them on every row.
+    """
+    appended = {"ts", "created_at"}
+    since = _seed_window_an_hour_back()
+    _dying_engine(board, monkeypatch, httpx.ConnectTimeout, message="connect timed out")
+    with pytest.raises(httpx.ConnectTimeout):
+        asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    dead = _steward_rows()[0]
+    assert "diverged" not in dead, dead
+    assert dead["died"] is True, dead
+    assert "no structured answer" not in dead["summary"], dead["summary"]
+
+    # The same window, this time reaching the finalizer and diverging there.
+    _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK, _DIVERGED_TICK], seed=False)
+    rows = _steward_rows()
+    assert len(rows) == 2, rows
+    div = rows[1]
+    assert div["diverged"] is True and "died" not in div, div
+    assert div["summary"] == (f"tick diverged, no structured answer "
+                             f"({div['events']} events shown)"), div["summary"]
+    assert set(div) - appended == {
+        "event", "apply", "diverged", "streak", "structured_error", "since_ts",
+        "newest_ts", "events", "items_shown", "moves", "next_pick", "next_pick_reason",
+        "applied", "session_id", "summary"}, sorted(set(div) - appended)
+    assert set(dead) - appended == {
+        "event", "apply", "died", "error_class", "error", "streak", "since_ts",
+        "events", "items_shown", "moves", "next_pick", "next_pick_reason",
+        "applied", "session_id", "summary"}, sorted(set(dead) - appended)
+    # Two counters, one per failure kind: a death does not lengthen a divergence
+    # streak, and does not shorten or replace it.
+    state = W._read_state()
+    assert (state["death_streak"], state["divergent_streak"]) == (1, 1), state
+    assert state["last_ts"] == since, state
+
+
+def test_the_drain_skip_still_writes_neither_state_nor_a_row(board, monkeypatch):
+    """Clause 5's other half, and the path this diff must not touch: a 503 drain
+    is a `skipped` tick that already promised to leave no trace — the backend is
+    busy, not broken, and the window is re-read by the next tick anyway.
+    """
+    from workers.sources._common import DrainActive
+    _seed_window_an_hour_back()
+    before = W._read_state()
+    _dying_engine(board, monkeypatch, DrainActive, message="backend draining (503)")
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "skipped", out
+    assert out["summary"] == "backend draining (503)", out
+    assert _steward_rows() == [], "the drain path promised to write no row"
+    assert W._read_state() == before, "the drain path promised to write no state"
+
+
+def test_the_timeout_branch_still_returns_the_string_it_returned_before(board,
+                                                                        monkeypatch):
+    """The scope line this round did not cross, pinned rather than asserted in
+    prose: the dead `TurnTimeout` branch keeps its own returned string.
+
+    Whether it should get the same recording treatment is owed-check's ruling from
+    #3088's owed entry, not this diff's — and the branch is measurably dead, 0
+    fires in 1071 board-steward runs as triage counted on 2026-10-25. Pinning the
+    string is what makes that ruling a change someone has to make on purpose.
+    """
+    from workers.sources._common import TurnTimeout
+    _seed_window_an_hour_back()
+    _dying_engine(board, monkeypatch, TurnTimeout, message="120s")
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out == {"status": "failed", "summary": "steward turn timed out: 120s"}, out
+    assert _steward_rows() == [], "the timeout branch writes no row today, still"

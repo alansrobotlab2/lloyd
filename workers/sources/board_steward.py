@@ -352,6 +352,73 @@ def _record_divergence(*, state: dict, apply: bool, since_ts: float, newest: flo
         logger.warning("board steward: diverged ledger append failed: %s", exc)
 
 
+def _record_death(*, state: dict, apply: bool, since_ts: float, events: int,
+                  items_shown: int, exc: BaseException) -> None:
+    """Publish a tick whose turn never survived, and leave its window alone.
+
+    #3321. `execute` caught `DrainActive` and `TurnTimeout` and nothing else, and
+    `workers/sources/_common.py` opens its stream with `httpx.AsyncClient` /
+    `client.stream` and no `except httpx.*` anywhere in that module, so a connect
+    failure left `execute` entirely and was recorded only by the pool's generic arm
+    (`workers/pool.py:2043`). Triage counted the cost on 2026-10-25: 13
+    board-steward runs in the trailing 30 days died that way (11 `ConnectTimeout` +
+    2 `ConnectError`), and ZERO `board_steward` rows fall inside any of those 13
+    [started_at, completed_at] windows — while `_record_divergence` above
+    demonstrably does fire on the parse path (4 `diverged: True` rows on 10-20,
+    10-23 and 10-25×2). The ledger could show a tick the finalizer never answered
+    and could not show a tick the network never delivered.
+
+    This is deliberately NOT `_record_divergence` under a new label. That row
+    asserts `diverged: True` with the `tick diverged, no structured answer`
+    summary — a statement about the FINALIZER, which a transport death never
+    reached; publishing one as the other would send the next reader to the wrong
+    component. Its counters are separate for the same reason: `death_streak` and
+    `divergent_streak` measure different failures over one window, and a death must
+    not lengthen a divergence streak.
+
+    `last_ts` is passed through untouched, exactly as in the divergence record.
+    Here the retry is the pool's, not the next tick's: 11 of the 13 live rows are
+    `attempts=2` and their second run SUCCEEDED, usually inside a minute, so
+    moving the watermark would hand that retry a window the dead tick was never
+    shown. #3322 is the same rule on the success path, from the other side.
+
+    `session_id` is None because there is no `run` dict to read one out of: the
+    stream never opened. Both writes are swallowed as #3088 swallows them
+    (`S.append_event` RAISES on failure by design), because the caller RE-RAISES
+    and a recorder's own failure must never become the exception the pool
+    classifies.
+    """
+    from scripts.automod import state as S
+    cls = type(exc).__name__
+    # Per window, like the divergence streak: two deaths over one `since_ts` read
+    # 1 then 2, and a death over a different window restarts at 1.
+    streak = (int(state.get("death_streak") or 0) + 1
+              if float(state.get("death_since_ts") or 0.0) == since_ts else 1)
+    try:
+        _write_state({**state,
+                      "last_run": time.time(),
+                      "death_since_ts": since_ts,
+                      "death_ts": time.time(),
+                      "death_class": cls,
+                      "death_streak": streak})
+    except Exception as rec_exc:  # noqa: BLE001 — the record is extra, the death is not
+        logger.warning("board steward: death state write failed: %s", rec_exc)
+    try:
+        S.append_event({"event": "board_steward", "apply": apply,
+                        "died": True, "error_class": cls,
+                        # Same 400-character budget as a divergence row: one
+                        # column, one cap, and the class name is in front of it.
+                        "error": f"{cls}: {exc}"[:DIVERGENCE_ERROR_MAX],
+                        "streak": streak,
+                        "since_ts": since_ts,
+                        "events": events, "items_shown": items_shown,
+                        "moves": [], "next_pick": 0, "next_pick_reason": "",
+                        "applied": [], "session_id": None,
+                        "summary": f"tick died: {cls} ({events} events shown)"})
+    except Exception as rec_exc:  # noqa: BLE001 — same reason: never mask the death
+        logger.warning("board steward: death ledger append failed: %s", rec_exc)
+
+
 # ── input ────────────────────────────────────────────────────────────────
 
 def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVENTS,
@@ -669,6 +736,19 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "skipped", "summary": str(exc)}
     except TurnTimeout as exc:
         return {"status": "failed", "summary": f"steward turn timed out: {exc}"}
+    except Exception as exc:  # noqa: BLE001 — record it, then let it kill the run
+        # #3321: everything the two named branches do not cover — in the live
+        # store always an httpx transport error out of `_common.py`'s
+        # `client.stream` (11 `ConnectTimeout` + 2 `ConnectError` in the trailing
+        # 30 days as triage counted). Record that the window was tried, then
+        # RE-RAISE: returning a record instead would route the item to
+        # `mark_completed` with no retry and no `meta.failure_kind`, when it is the
+        # pool's retry that recovers these deaths (11 of the 13 live rows are
+        # `attempts=2` with the second run succeeded). `asyncio.CancelledError`
+        # derives from `BaseException`, so a shutdown cancel is not a death.
+        _record_death(state=state, apply=apply, since_ts=since_ts,
+                      events=len(events), items_shown=len(shown), exc=exc)
+        raise
 
     parsed = parse_steward(run.get("structured"))
     if parsed is None:
