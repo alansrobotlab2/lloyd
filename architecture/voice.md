@@ -2148,8 +2148,8 @@ lines and a thinking sound for tool turns, a notice for a queued turn, typed
 turns spoken through a session tap, backchannels that are not turns, full
 duplex (half-duplex off, barge-in on: pause, decide, resume or stop, own voice
 rejected, what was heard told to the next turn), conversation mode with a djev
-addressee judge, and CAM++ in place of Resemblyzer. Plan and research:
-`~/.claude/plans/i-want-lloyd-to-wiggly-garden.md`.
+addressee judge, and CAM++ in place of Resemblyzer. The plan and the research
+behind it are the sections above: "Conversation mode", "Barge-in", "Prewarm".
 
 **2026-09-17 — the rework.** A review measured what the pipeline did and found
 it barely working: 5 wake fires in 949 utterances since 2026-08-22, no spoken
