@@ -2956,3 +2956,131 @@ def test_workers_md_no_longer_states_that_the_pin_is_owed():
     assert "#3286" in doc, (
         "`#3286` has vanished from the page entirely, so the ban above was widened "
         "into a deletion and a dated review row was edited to satisfy a test")
+
+
+# ── #3288: the evidence denominator is read off a route, never off this page ─
+
+#: The six counters, and the six only. A rename on either surface lands here.
+_EVIDENCE_FIELDS = ("runs_with_bundle", "runs_without_bundle", "claims_checked",
+                    "claims_verified", "claims_refuted", "claims_insufficient")
+
+#: Shapes a measured bundle/claim figure takes in prose, and what each one is.
+#: Every pattern is spliced-and-proved below, because a ban that matches nothing
+#: would pass this node and re-license the very sentence #3288 was filed over.
+_EVIDENCE_BANS = (
+    (r"\d[\d,]*\s+(?:rows|runs)\b[^.]{0,80}?\bbundle",
+     "a bundled-row count"),
+    (r"\bbundled?\b[^.]{0,60}?\d[\d,]*\s+(?:rows|runs)\b",
+     "a bundled-row count stated the other way round"),
+    (r"\d[\d,]*\s+bundles?\b", "a bundle count"),
+    (r"\d[\d,]*\s+claims\b", "a claim tally"),
+    (r"\d[\d,]*\s+(?:verified|refuted|insufficient)\b", "a claim tally by verdict"),
+    (r"(?:runs_with_bundle|runs_without_bundle|claims_checked|claims_verified"
+     r"|claims_refuted|claims_insufficient|EVIDENCE_PILOT_TASK_IDS)[^\n]{0,25}\d",
+     "a figure sitting next to a field name"),
+)
+
+
+def _evidence_sec() -> str:
+    """§3 of `workers.md`, heading line excluded, asserted to hold the pilot.
+
+    The whole section, not just its `### Evidence` subsection: the ban is on §3
+    carrying a measured figure, and a slice that stopped at the next `###` would
+    let the same sentence be pasted one heading down and read as compliant.
+    """
+    doc = _workers_md()
+    sec = _md_section("## 3.", doc)
+    assert "### Evidence" in sec, (
+        "`### Evidence` has vanished from `## 3. What a source is` — the pilot's "
+        "rules and its denominator pointer lived there, so a section shuffle "
+        "that dropped it silently unmakes #525's contract")
+    return sec
+
+
+def test_the_evidence_denominators_are_read_off_the_routes_not_off_the_page():
+    # Raw docstring: this one quotes the ban's own regex (`#\d+`), and in a
+    # plain string `\d` is an invalid escape sequence — the static rung refuses
+    # the SyntaxWarning, and the prose has to show the pattern as written.
+    r"""Clause 5: §3 names the route and the six fields, and carries no count.
+
+    Half of this node is a positive assertion. The pilot has exactly one
+    readable size — the DB — and §3 is the page an operator reads before
+    querying it, so the section has to send them somewhere: `GET
+    /api/workers/health`, and the six field names it now serves per source. A
+    section that only said "read the route" without the names would be a pointer
+    to a payload nobody knows the shape of, which is the reason the prose count
+    was written in the first place.
+
+    The other half is the ban, and it is the reason this item exists. §3 once
+    read "3 rows in `runs` carry one … every rate the health view derives from a
+    bundle rests on a sample of three", and that sentence stood for six weeks
+    after it stopped being true — widened to seven tasks and 202 rows by #2675
+    with no code failing anywhere. #3288's arch-review pass moved the numbers
+    into the route and *still* left both measurements in prose, hedged with "Read
+    the denominator rather than this sentence". A hedge is not a rail: nobody
+    re-runs a dated figure that is sitting right there looking like the answer.
+    So a measured bundle count or claim tally in this section is now a failure,
+    not an invitation.
+
+    Item ids stay legal — `#\d+` is stripped before the patterns run, and a
+    clause that banned citing the item that filed it would be banned itself.
+    The pilot's seven task ids are likewise not banned here (this is not a
+    no-digits-in-prose rule); they are simply not in this section any more,
+    because they belong to `app/autonomy.py`, pinned verbatim by
+    tests/test_worker_evidence.py and quoted in `architecture/autonomy-jobs.md`.
+    """
+    ev = _evidence_sec()
+
+    assert "GET /api/workers/health" in ev, (
+        "§3 stopped naming the route the denominator is read from, so the only "
+        "place left to state it is prose again")
+    for field in _EVIDENCE_FIELDS:
+        assert f"`{field}`" in ev, (
+            f"`{field}` is no longer named in the Evidence section: an operator "
+            "reading this page before querying the store would not know the "
+            "payload's shape")
+    assert "denominator" in ev.lower()
+
+    stripped = re.sub(r"#\d+", "", ev)
+    for pattern, what in _EVIDENCE_BANS:
+        hit = re.search(pattern, stripped)
+        assert hit is None, (
+            f"§3's Evidence section carries {what} as prose again: "
+            f"…{ev[max(0, hit.start() - 60):hit.end() + 60]}… — the whole point "
+            "of #3288 is that this figure has a route (`GET "
+            "/api/workers/health`), because the prose version of it stood for "
+            "six weeks after it stopped being true")
+
+
+def test_the_ban_on_measured_evidence_figures_actually_bites():
+    """Every pattern above must catch the real sentence it was written for.
+
+    These examples are not invented for the test: each is the exact wording a
+    dated pass left in this section — the 2026-10-25 arch-review paragraph that
+    replaced the stale one while still quoting both measurements, and the
+    sentence before it. They are spliced into the section IN MEMORY and the ban
+    re-run, so the node proves the rail holds without leaving a single one of
+    the figures in the committed doc. Without this, one mistyped escape in
+    `_EVIDENCE_BANS` — `\\b` in the wrong place, a greedy `[^.]` that can never
+    reach the word — turns the node above into a green light over the exact
+    regression it names, and that is the failure this file's own header warns
+    about: a doc test that asserts a shape rather than the fact.
+    """
+    ev = _evidence_sec()
+    banned_examples = (
+        "202 rows in `runs` carry a bundle as measured 2026-10-25",
+        "3 rows in `runs` carry one, so every rate the health view derives "
+        "from a bundle rests on a sample of three",
+        "the 7-day fleet read 78 bundles over 253 runs",
+        "919 claims checked, 877 verified, 16 refuted, 26 insufficient",
+        "`runs_with_bundle` is 78 today, over 253 runs",
+    )
+    for example in banned_examples:
+        spliced = ev + "\n" + example + "\n"
+        stripped = re.sub(r"#\d+", "", spliced)
+        hits = [what for pattern, what in _EVIDENCE_BANS
+                if re.search(pattern, stripped)]
+        assert hits, (
+            f"the §3 prose ban accepted {example!r}, which is the measured "
+            f"figure this node exists to refuse; every pattern missed it "
+            f"({[p for p, _ in _EVIDENCE_BANS]})")

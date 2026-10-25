@@ -2101,3 +2101,151 @@ def test_an_unparseable_meta_json_row_cannot_blind_the_whole_rollup(q):
                 ("2000-01-01T00:00:00+00:00",)).fetchall()
     finally:
         con.close()
+
+
+# ── #3288: the rollup publishes each source's evidence denominator ──────────
+
+def _seed_claim_run(q, source: str, claims_json: str, status: str = "success",
+                    duration: float = 60.0,
+                    completed_at: str | None = None) -> None:
+    """One completed run carrying `claims_json` verbatim, in the given window slot.
+
+    `completed_at` defaults to now because `run_rollup_by_source` windows on
+    `completed_at >= ?`, and a row stamped in 2000 is outside every window the
+    route is ever called with. `_seed_meta_run` above does the same for the
+    OTHER blob; the evidence bundle is a third one (`claims_json`), written by
+    `workers/pool.py` from `workers/evidence.py`'s graded output.
+    """
+    q.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                 status=status, started_at="2000-01-01T00:00:00+00:00",
+                 completed_at=completed_at or datetime.now(timezone.utc).isoformat(),
+                 duration_seconds=duration, claims_json=claims_json)
+
+
+def _bundle_of(*statuses: str) -> str:
+    """A graded bundle in the stored shape, one claim per status given."""
+    return json.dumps({"claims": [
+        {"claim": "c", "check": {"path": "p"}, "status": s,
+         "observed": "o", "detail": "d"} for s in statuses]})
+
+
+def test_the_rollup_reports_the_bundle_split_and_claim_tallies(q):
+    """#3288 clause 4 (values): the per-source dict gains the six evidence counters.
+
+    Three bundled runs and two bare ones on one source, plus the shapes the
+    decoder refuses. The numbers below are the decoder's own reading of those
+    rows: `{not json` and `[1,2]` are NOT bundles (`_row_claims` answers None
+    for both — valid JSON that is not an object is not a graded bundle), and the
+    claim whose status is outside `_ROLLUP_STATUSES` is counted by none of the
+    four. `app/autonomy.py` has published exactly these six keys per task since
+    #525; this method now publishes them per SOURCE, which is the number
+    `/api/workers/health` has never had and the reason a rate on that page could
+    not be read as a measurement.
+    """
+    _seed_claim_run(q, "scheduled-task", _bundle_of("verified", "refuted"))
+    _seed_claim_run(q, "scheduled-task", _bundle_of("insufficient", "verified"))
+    _seed_claim_run(q, "scheduled-task", _bundle_of("definitely_not_a_status"))
+    _seed_claim_run(q, "scheduled-task", "{not json")
+    _seed_claim_run(q, "scheduled-task", "[1,2]")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["scheduled-task"]
+
+    assert (rollup["runs_with_bundle"], rollup["runs_without_bundle"]) == (3, 2), rollup
+    assert (rollup["claims_checked"], rollup["claims_verified"],
+            rollup["claims_refuted"], rollup["claims_insufficient"]) == (4, 2, 1, 1), rollup
+    assert rollup["runs_with_bundle"] + rollup["runs_without_bundle"] == rollup["total"]
+    for field in ("runs_with_bundle", "runs_without_bundle", "claims_checked",
+                  "claims_verified", "claims_refuted", "claims_insufficient"):
+        assert type(rollup[field]) is int, f"{field} is {rollup[field]!r}"
+
+
+def test_the_evidence_fields_move_no_existing_rollup_number(q):
+    """#3288 clause 4 (additivity): every key the rollup had keeps its value.
+
+    Two sources seeded with the SAME three runs — one success carrying a bundle,
+    one success without, one skipped, one duration each — differing only in
+    whether the first run's `claims_json` holds anything. Every pre-existing key
+    must be byte-identical between them. Without this comparison "additive" is a
+    claim: `total`, `ok`, `failed`, `skipped`, `silent`, the three matrix counts,
+    `fail_rate`, `gpu_hours` and `last_completed` could each have quietly moved
+    with a new `SUM` in the SELECT and still looked self-consistent on their own.
+    """
+    pre_existing = ("total", "ok", "failed", "skipped", "silent",
+                    "unfinished_matrix", "deadline_cut", "matrix_shrunk",
+                    "fail_rate", "gpu_hours", "last_completed")
+    stamp = datetime.now(timezone.utc).isoformat()
+    _seed_claim_run(q, "pilot", _bundle_of("verified"), completed_at=stamp)
+    _seed_claim_run(q, "pilot", "", completed_at=stamp)
+    _seed_claim_run(q, "pilot", "", status="skipped", completed_at=stamp)
+    _seed_claim_run(q, "outside-pilot", "", completed_at=stamp)
+    _seed_claim_run(q, "outside-pilot", "", completed_at=stamp)
+    _seed_claim_run(q, "outside-pilot", "", status="skipped", completed_at=stamp)
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    a, b = rollup["pilot"], rollup["outside-pilot"]
+
+    differing = {k: (a[k], b[k]) for k in pre_existing if a[k] != b[k]}
+    assert not differing, (
+        f"adding the evidence fields moved {differing}; the bundle split is "
+        "supposed to be a new number beside them, not a reinterpretation of one")
+    assert a["runs_with_bundle"] - b["runs_with_bundle"] == 1, (a, b)
+    assert (a["claims_checked"], a["claims_verified"]) == (1, 1), a
+    assert all(b[f] == 0 for f in _EVIDENCE_KEYS
+               if f != "runs_without_bundle") and \
+        b["runs_without_bundle"] == b["total"], (
+        f"the source with no bundle anywhere came back with evidence: {b}")
+
+
+#: The six keys, read off the method rather than typed twice. A literal list in
+#: this file would let a rename pass the tests above and still break the route.
+_EVIDENCE_KEYS = ("runs_with_bundle", "runs_without_bundle", "claims_checked",
+                  "claims_verified", "claims_refuted", "claims_insufficient")
+
+
+def test_the_claim_decode_touches_only_rows_sql_selected_as_bundled(q, monkeypatch):
+    """#3288 clause 4 (cost): the window's unbundled rows are never deserialised.
+
+    `runs` held 15,150 rows when this was filed and the live 7-day window 3,697
+    of them, against 202 bundled rows LIFETIME — so a Python pass that decoded
+    every row in the window would put thousands of `json.loads` on every
+    Background-tab poll, which is the table `run_rollup_by_source`'s own comment
+    says it aggregates in SQL to avoid.
+
+    The node therefore counts decodes. `app.autonomy._row_claims` is wrapped
+    before the rollup runs — the method imports it by name at call time, which
+    is what makes the patch visible and is also the proof that there is no
+    second parse: a rollup that parsed `claims_json` itself would call this
+    wrapper zero times and still answer, and the `SUM` assertion below is what
+    catches that. 43 seeded rows, three of them bundled, so a whole-window decode
+    would be `43` here and the bounded one is `3`.
+    """
+    import re
+
+    import app.autonomy as autonomy
+
+    calls: list[str] = []
+    real = autonomy._row_claims
+
+    def _counting(row):
+        calls.append(str(row.get("claims_json")))
+        return real(row)
+
+    monkeypatch.setattr(autonomy, "_row_claims", _counting)
+
+    for _ in range(40):
+        _seed_claim_run(q, "scheduled-task", "")
+    for statuses in (("verified",), ("refuted", "insufficient"), ("verified",)):
+        _seed_claim_run(q, "scheduled-task", _bundle_of(*statuses))
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["scheduled-task"]
+
+    assert (rollup["runs_with_bundle"], rollup["total"]) == (3, 43), rollup
+    assert len(calls) == 3, (
+        f"{len(calls)} rows were decoded for a source with 43 runs and 3 bundles; "
+        "the decode must be bounded by the pilot's scope, not by `runs` growth")
+    assert all(c.startswith('{"claims"') for c in calls), (
+        f"rows with no bundle were handed to the decoder: {calls}")
+    src = inspect.getsource(WorkQueue.run_rollup_by_source)
+    assert re.search(r"SUM\(\s*claims_json", src), (
+        "the bundle split is no longer a SQL count, so the bounded decode has no "
+        "selection to be bounded by and the window is walked in Python again")

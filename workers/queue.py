@@ -1451,9 +1451,24 @@ class WorkQueue:
         a silent run is a success, counted in `ok`, not a skipped one moved
         somewhere else.
 
+        The six evidence keys (#3288) answer a question the rest of this dict
+        cannot: `claims_verified` alone does not say how many runs it rests on,
+        and `architecture/workers.md` §3 carried that denominator as prose until
+        the prose went stale. They are the same six `app.autonomy.py` publishes
+        per task and in `/api/autonomy/health`'s `fleet` block, decoded by the
+        same two functions, and this route publishes no claim rate of its own —
+        the rate with the unevaluable rule on it stays the autonomy route's.
+
         Aggregated in SQL rather than by walking rows in Python, because the
         Background tab polls this beside everything else and `runs` is the
-        table that grows fastest.
+        table that grows fastest. The one exception is deliberate and bounded:
+        the rows SQL has just counted as carrying a `claims_json` are fetched and
+        decoded in Python, because the bundle's verdicts are read by
+        `app.autonomy`'s decoder and reimplementing it in `json_extract` would be
+        a second parser of one column. That pass is bounded by the pilot's scope
+        (202 bundled rows lifetime against 3,697 rows in the live 7-day window as
+        measured 2026-10-25), not by `runs`, and the split it publishes is still
+        the SQL count — the decoder only subtracts the rows it refuses.
         """
         # `interrupted` is billed as a failure here, not as a fourth bucket:
         # #1137's rows are runs whose process died, and a rollup that left them
@@ -1555,16 +1570,113 @@ class WorkQueue:
                       SUM(CASE WHEN json_valid(meta_json)
                               THEN json_extract(meta_json, '$.silent')
                               ELSE 0 END)                         AS silent,
+                      -- #3288: how many of this source's runs carry an evidence
+                      -- bundle at all, which is the denominator every claim
+                      -- tally on either health route is computed over. The five
+                      -- counters lived only on /api/autonomy/health -- per task
+                      -- and in its `fleet` block -- so the route this doc's
+                      -- section 7 sends an operator to, and the one Mission
+                      -- Control's Background view reads, published a source's
+                      -- runs with no way to say how many of them were ever
+                      -- checked. Same table, same window, one more SUM.
+                      --
+                      -- This is a SELECTION, not the verdict. `runs` held 15,150
+                      -- rows at filing and the live 7-day window 3,697 of them,
+                      -- against 202 bundled rows LIFETIME, so a Python pass over
+                      -- every window row would put thousands of json.loads on
+                      -- each Background poll -- the growth this method's
+                      -- docstring says it aggregates in SQL to stay ahead of.
+                      -- Counting candidates here and fetching only those bounds
+                      -- the decode by the pilot's scope instead.
+                      --
+                      -- It cannot be the published number either, and `[1,2]` is
+                      -- the shape that proves it: SQL calls a JSON array a
+                      -- non-empty column, while _row_claims -- the one decoder,
+                      -- shared with the autonomy route so one claim cannot be
+                      -- counted two ways -- refuses anything that is not an
+                      -- object, as it refuses `{not json`. So the figure printed
+                      -- below is this count MINUS the rows the decoder refuses,
+                      -- and `runs_without_bundle` is the remainder of `total`.
+                      -- Deriving `with` from the decode pass alone would make the
+                      -- two halves of the partition come from two statements,
+                      -- which is the twice-computed denominator this file has
+                      -- been burned on before (see app/autonomy.py's note on the
+                      -- fleet block quoting the rollup instead of summing again).
+                      SUM(claims_json IS NOT NULL
+                          AND claims_json <> '')                  AS bundle_rows,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
                       MAX(completed_at)                           AS last_completed
                FROM runs WHERE completed_at >= ? GROUP BY source"""
         with self._connect() as conn:
             rows = [dict(r) for r in conn.execute(q, (since_iso,)).fetchall()]
+            # The bounded second read named by the `bundle_rows` comment above:
+            # exactly the rows that SQL just counted as carrying something, and
+            # nothing else from the window. 202 rows lifetime on the live store
+            # against 3,697 rows in the live 7-day window, so what this loop
+            # deserialises is bounded by the #525 pilot's scope and not by how
+            # fast `runs` grows. It shares the window predicate with `q`, byte for
+            # byte, because a second window edge would be a second denominator.
+            bundled = [dict(r) for r in conn.execute(
+                "SELECT source, claims_json FROM runs"
+                " WHERE completed_at >= ?"
+                "   AND claims_json IS NOT NULL AND claims_json <> ''",
+                (since_iso,)).fetchall()]
+
+        def _tally_zero() -> dict:
+            """The four claim counts at zero. Written once, used by both passes."""
+            return {"claims_checked": 0, "claims_verified": 0,
+                    "claims_refuted": 0, "claims_insufficient": 0}
+
+        claims_by_source = {str(r["source"]): _tally_zero() for r in rows}
+        refused: dict[str, int] = {}
+        if bundled:
+            # THE decoder, not a second one. `_row_claims` decides what counts as
+            # a bundle and `_claim_status` which verdicts are countable, and both
+            # are the functions `/api/autonomy/health` tallies with — so the two
+            # routes' denominators can only disagree if one of them stops calling
+            # them, which is the same reason `app/routers/workers.py` imports
+            # `_health_window_fields` out of `app.autonomy` rather than
+            # re-deriving the clamp. Function-local because `app.autonomy` is the
+            # fleet's top module and reaches this file from inside its own
+            # functions; a module-level import would put that cycle on every
+            # `workers.pool` boot for one call site.
+            from app.autonomy import _claim_status, _row_claims, _tally_add
+
+            for row in bundled:
+                src = str(row["source"])
+                bundle = _row_claims(row)
+                if bundle is None:
+                    # Absent is not the same as empty, and neither is a clean
+                    # check: `{not json` and `[1,2]` both land here, and each is
+                    # subtracted from the SQL count below so the row reads as a
+                    # run WITHOUT a bundle rather than as a run that verified
+                    # nothing. Counting it as a bundle would inflate the
+                    # denominator a verified rate rests on, which is the
+                    # reads-its-own-missing-input-as-zero defect #525 exists to
+                    # retire.
+                    refused[src] = refused.get(src, 0) + 1
+                    continue
+                tally = claims_by_source.setdefault(src, _tally_zero())
+                for claim in bundle.get("claims") or []:
+                    # A status outside `_ROLLUP_STATUSES` answers "" and is
+                    # counted by none of the four — including `claims_checked`,
+                    # which `_tally_add` moves with the verdict rather than
+                    # letting this file decide.
+                    status = _claim_status(claim)
+                    if status:
+                        _tally_add(tally, status)
+
         out: dict[str, dict] = {}
         for r in rows:
             total = int(r["total"] or 0)
             failed = int(r["failed"] or 0)
-            out[str(r["source"])] = {
+            src = str(r["source"])
+            # See the `bundle_rows` comment: the SQL count is the figure, and the
+            # decoder only ever subtracts from it, so the split partitions `total`
+            # from one statement's arithmetic.
+            with_bundle = int(r["bundle_rows"] or 0) - refused.get(src, 0)
+            ev = claims_by_source.get(src) or _tally_zero()
+            out[src] = {
                 "total": total,
                 "ok": int(r["ok"] or 0),
                 "failed": failed,
@@ -1597,6 +1709,29 @@ class WorkQueue:
                 # reason the union above does.
                 "deadline_cut": int(r["deadline_cut"] or 0),
                 "matrix_shrunk": int(r["matrix_shrunk"] or 0),
+                # #3288: the evidence pilot's coverage, per source. The six keys
+                # are `app.autonomy`'s — same names, same decoder, so a figure
+                # read here and one read off `/api/autonomy/health` are the same
+                # measurement of the same rows. They are the DENOMINATOR, not a
+                # rate: `claims_verified` printed alone is the number that made
+                # the pilot unreadable, because it does not say how many runs it
+                # rests on, and `architecture/workers.md` §3 carried that
+                # sentence as prose until it stopped being true. This route
+                # deliberately gains no claim RATE of its own — the
+                # unknown-not-zero rule and the unevaluable rule (a window whose
+                # runs mostly carry no bundle reports no rate at all) belong to
+                # `refuted_or_insufficient_rate` on the autonomy route, and a
+                # second rate here would be a second place to get that wrong.
+                # Present-and-zero is the shape for a source outside the pilot:
+                # `runs_with_bundle` of 0 says "every run in the window was
+                # unchecked", which is a reading, where a missing key is a gap
+                # (the #3211 argument, applied one column over).
+                "runs_with_bundle": with_bundle,
+                "runs_without_bundle": total - with_bundle,
+                "claims_checked": int(ev["claims_checked"]),
+                "claims_verified": int(ev["claims_verified"]),
+                "claims_refuted": int(ev["claims_refuted"]),
+                "claims_insufficient": int(ev["claims_insufficient"]),
                 # A rate over zero runs is not 0.0, it is unknown — and
                 # rendering "0% failing" for a source that has never run is
                 # the reading this panel exists to prevent.

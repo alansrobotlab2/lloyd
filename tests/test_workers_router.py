@@ -2615,3 +2615,224 @@ def test_the_health_endpoint_serves_the_silent_count_for_a_source(monkeypatch, t
     assert health["total"] == 2 and health["ok"] == 2, health
     assert isinstance(health["silent"], int), type(health["silent"])
     assert rows["autotriage"]["health"]["silent"] == 0, rows["autotriage"]["health"]
+
+
+# ── #3288: the evidence denominator is readable per source ──────────────────
+
+#: The six counters, in the order the autonomy route publishes them. Named once
+#: here because all three nodes below read them off every source's `health`.
+_EVIDENCE_FIELDS = ("runs_with_bundle", "runs_without_bundle", "claims_checked",
+                    "claims_verified", "claims_refuted", "claims_insufficient")
+
+
+def _bundle_of(*statuses: str) -> str:
+    """One stored `claims_json` holding one claim per status given.
+
+    The shape is the one `workers/pool.py` writes through `workers/evidence.py`
+    and the one read off the newest live `runs.claims_json`: a `claims` list of
+    `{claim, check, status, observed, detail}` objects. Only `status` is graded
+    by the rollup, so the other four fields are the same fixed strings in every
+    claim — this node is about the tally, not about the wording.
+    """
+    return json.dumps({"claims": [
+        {"claim": "c", "check": {"path": "p"}, "status": s,
+         "observed": "o", "detail": "d"} for s in statuses]})
+
+
+def _evidence_client(monkeypatch, tmp_path: Path, rows) -> _TestClient:
+    """A health client over a REAL `WorkQueue` seeded with `rows`.
+
+    Real rather than the `_WmQueue` double used above: the six figures are a SQL
+    count beside a bounded decode, so a fabricated rollup would test only the
+    router's pass-through and would pass even if the rollup computed nothing.
+    Each row is `(source, claims_json, age_days)`; the stamp is written as an
+    aware ISO string because that is what the route's own window predicate
+    compares against.
+    """
+    from workers.queue import WorkQueue, new_run_id
+
+    queue = WorkQueue(tmp_path / "workers.db")
+    now = datetime.now(timezone.utc)
+    for source, claims_json, age_days in rows:
+        stamp = (now - timedelta(days=age_days)).isoformat()
+        queue.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                         status="success", started_at=stamp, completed_at=stamp,
+                         duration_seconds=60.0, claims_json=claims_json)
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    monkeypatch.setattr(
+        router, "CONFIG",
+        {"workers": {"sources": {
+            "scheduled-task": {"enabled": True, "interval_seconds": 900},
+            "autotriage": {"enabled": True, "interval_seconds": 900}}}},
+        raising=False)
+    return client
+
+
+def test_the_health_endpoint_serves_the_bundle_split_and_claim_tallies(monkeypatch, tmp_path):
+    """Clause 1: the six evidence counters reach the HTTP payload for every source.
+
+    The boundary this change crosses is the one that has no router-side hook:
+    `app/routers/workers.py` assigns `health: rollup.get(name)` verbatim, so the
+    endpoint's key set IS the rollup's key set and a test that stopped at
+    `run_rollup_by_source` would have tested half the path — the Background page
+    reads `.sources[].health` out of the fetched JSON.
+
+    Two sources are seeded, and the second one is the clause's other half:
+    `autotriage` has never written a bundle, so all six keys arrive for it too —
+    `runs_with_bundle` and the four claim tallies at `0`, and
+    `runs_without_bundle` equal to its `total`, because that is what the
+    partition clause requires and it is the sentence "this source is outside the
+    pilot" stated as numbers. A missing key and a zero are different readings on
+    that page (the #3211 node above makes the same argument about `silent`), and
+    the zero here says "looked at every run in the window, none carried a
+    bundle", which is the reading a source's verified rate needs.
+
+    The last assertion is the acceptance's "no new rate field is invented on
+    this route": the unknown-not-zero rule is carried by `runs_with_bundle`
+    sitting beside `claims_verified`, not by a second rate the workers surface
+    would have to justify. `fail_rate` is the only rate key that may be there.
+    """
+    client = _evidence_client(monkeypatch, tmp_path, [
+        ("scheduled-task", _bundle_of("verified", "refuted"), 0),
+        ("scheduled-task", _bundle_of("insufficient"), 0),
+        ("scheduled-task", "", 0),
+        ("autotriage", "", 0),
+    ])
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    rows = {s["name"]: s for s in body["sources"]}
+    pilot, plain = rows["scheduled-task"]["health"], rows["autotriage"]["health"]
+
+    assert pilot is not None and plain is not None, (
+        f"the router answered null for a parseable store: {body}")
+    for health in (pilot, plain):
+        for field in _EVIDENCE_FIELDS:
+            assert field in health, f"{field} absent; keys are {sorted(health)}"
+            assert type(health[field]) is int, (
+                f"{field} came back {health[field]!r}, which is not an int")
+
+    assert (pilot["runs_with_bundle"], pilot["runs_without_bundle"]) == (2, 1), pilot
+    assert (pilot["claims_checked"], pilot["claims_verified"],
+            pilot["claims_refuted"], pilot["claims_insufficient"]) == (3, 1, 1, 1), pilot
+    assert all(plain[f] == 0 for f in _EVIDENCE_FIELDS
+               if f != "runs_without_bundle") and \
+        plain["runs_without_bundle"] == plain["total"], (
+        f"a source that never wrote a bundle came back with evidence: {plain}")
+    assert pilot["runs_with_bundle"] + pilot["runs_without_bundle"] == pilot["total"], pilot
+    assert {k for k in pilot if "rate" in k} == {"fail_rate"}, (
+        f"this route grew a rate field of its own: {sorted(pilot)}")
+
+
+def test_the_served_figures_are_the_shared_decoder_s_on_the_same_rows(monkeypatch, tmp_path):
+    """Clause 2: the six figures are `_row_claims` + `_claim_status`'s own answer.
+
+    The expected dict below is not hand-typed: it re-runs `app.autonomy`'s two
+    decoder primitives over the same stored `claims_json` values the seeded rows
+    carry. That is the whole point of the node — `claims_json` is decoded by ONE
+    decoder, so if the rollup grew a second parse of its own (a `json_valid`
+    count, a `json.loads` in the router) the two answers diverge here.
+
+    Three shapes make the divergence visible, and all three are in the store:
+      * `{not json` — unparseable, so `_row_claims` returns None. It lands in
+        `runs_without_bundle` and moves no tally. A SQL-only count would call it
+        a bundle, because the column is neither NULL nor empty.
+      * `[1,2]` — VALID JSON that is not an object, which `_row_claims` also
+        refuses. This is the shape a `json_valid`-based count cannot get right,
+        which is why the count is only the selection and the decoder is the
+        verdict.
+      * `definitely_not_a_status` — a claim whose status is outside
+        `_ROLLUP_STATUSES`, which `_claim_status` answers `""` for. It is counted
+        by none of the four, exactly as the autonomy route already behaves.
+    """
+    from app.autonomy import _claim_status, _row_claims
+
+    raws = (_bundle_of("verified", "refuted", "definitely_not_a_status"),
+            _bundle_of("insufficient", "verified"),
+            "{not json", "[1,2]", "")
+    client = _evidence_client(monkeypatch, tmp_path,
+                              [("scheduled-task", r, 0) for r in raws])
+
+    expected = {f: 0 for f in _EVIDENCE_FIELDS}
+    for raw in raws:
+        bundle = _row_claims({"claims_json": raw})
+        if bundle is None:
+            expected["runs_without_bundle"] += 1
+            continue
+        expected["runs_with_bundle"] += 1
+        for claim in bundle.get("claims") or []:
+            status = _claim_status(claim)
+            if status:
+                expected[f"claims_{status}"] += 1
+                expected["claims_checked"] += 1
+    assert (expected["runs_with_bundle"], expected["runs_without_bundle"]) == (2, 3), expected
+    assert (expected["claims_checked"], expected["claims_verified"],
+            expected["claims_refuted"], expected["claims_insufficient"]) == (4, 2, 1, 1), expected
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    health = {s["name"]: s for s in body["sources"]}["scheduled-task"]["health"]
+
+    assert {f: health[f] for f in _EVIDENCE_FIELDS} == expected, (
+        f"the route published {health} where the shared decoder says {expected} "
+        "for the same rows — two readers of `claims_json` have diverged")
+    assert health["claims_checked"] == 4, (
+        "the out-of-`_ROLLUP_STATUSES` claim was counted, so the workers route's "
+        f"denominator is 5 against the autonomy route's 4: {health}")
+    assert health["runs_without_bundle"] == 3, (
+        "an unparseable or non-object `claims_json` was counted as a bundle, which "
+        f"makes a rate rest on a run nothing decoded: {health}")
+
+
+def test_the_evidence_fields_are_window_scoped_and_partition_total(monkeypatch, tmp_path):
+    """Clause 3: the six fields answer for the request's `days`, and only that.
+
+    One bundled run sits twenty days back. On `?days=7` none of the six may know
+    about it; on `?days=30` all of them must. A field that quietly read the whole
+    store would look identical to a windowed one on the live box — where almost
+    every bundled row is inside a week — and would then be a fleet-wide number
+    printed under a per-week label, which is the #1401 blindness this route
+    already names with `oldest_input`.
+
+    `runs_with_bundle + runs_without_bundle == total` is asserted for EVERY
+    source in the payload, not just the pilot's: the split is a partition of the
+    window, so a bundled row that escaped `total`, or a source whose `without`
+    was summed across sources, fails here. `autotriage`'s only run is the old
+    one, so in the 7-day window it gets `health: null` — the unchanged
+    no-runs-in-window shape the Background page's `h === null` guard reads — and
+    it reappears, split `0`/`1`, once the window covers its run.
+    """
+    client = _evidence_client(monkeypatch, tmp_path, [
+        ("scheduled-task", _bundle_of("verified"), 0),
+        ("scheduled-task", _bundle_of("verified"), 0),
+        ("scheduled-task", _bundle_of("verified", "verified"), 20),
+        ("scheduled-task", "", 0),
+        ("autotriage", "", 20),
+    ])
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    rows = {s["name"]: s for s in body["sources"]}
+    pilot = rows["scheduled-task"]["health"]
+
+    assert (pilot["runs_with_bundle"], pilot["runs_without_bundle"],
+            pilot["total"]) == (2, 1, 3), pilot
+    assert pilot["claims_verified"] == 2, (
+        f"a bundled run twenty days back moved the 7-day tally: {pilot}")
+    assert rows["autotriage"]["health"] is None, (
+        "a source whose every run predates the window lost its null and gained a "
+        f"zero-filled dict: {rows['autotriage']['health']}")
+    for name, row in rows.items():
+        health = row["health"]
+        if health is None:
+            continue
+        assert health["runs_with_bundle"] + health["runs_without_bundle"] == health["total"], (
+            f"{name}'s bundle split does not partition its own total: {health}")
+
+    wide = {s["name"]: s for s in
+            client.get("/api/workers/health?days=30&runs=0").json()["sources"]}
+    pilot30 = wide["scheduled-task"]["health"]
+    assert (pilot30["runs_with_bundle"], pilot30["runs_without_bundle"],
+            pilot30["total"]) == (3, 1, 4), pilot30
+    assert pilot30["claims_verified"] == 4, pilot30
+    assert (wide["autotriage"]["health"]["runs_with_bundle"],
+            wide["autotriage"]["health"]["runs_without_bundle"]) == (0, 1), (
+        "the window widened and the bundle-less source's split did not follow it")

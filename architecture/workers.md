@@ -433,19 +433,30 @@ Two rules carry it:
 Whatever failed to verify is carried into the next run of that same task, as a
 `gaps:<task_id>` watermark — a gap that lives only in the prose of the last run
 is a gap nobody reads — and an empty list is written on a clean run so a
-resolved gap stops being re-litigated. Still a pilot, no longer a small one:
-its scope is `app/autonomy.py`'s `EVIDENCE_PILOT_TASK_IDS`, seven task ids
-(24, 38, 39, 40, 42, 53, 56) since #2675 widened it on 2026-10-13, all of them
-nightly `scheduled-task` runs — 202 rows in `runs` carry a bundle as measured
-2026-10-25. Read the denominator rather than this sentence: the per-task and
-`fleet`-block counters `runs_with_bundle` / `runs_without_bundle` and
-`claims_checked` / `claims_verified` / `claims_refuted` / `claims_insufficient`
-are published by `GET /api/autonomy/health` (that is the "health view" above —
-the worker route publishes none of them, #3288), and the 7-day fleet measured
-2026-10-25 read 78 bundles over 253 runs, 919 claims checked, 877 verified, 16
-refuted, 26 insufficient. The sentence this one replaces ("3 rows carry one …
-a sample of three") stood for six weeks after it stopped being true, which is
-the reason a count belongs on a route and not in prose.
+resolved gap stops being re-litigated. Still a pilot, and no longer a small
+one: its scope is `app/autonomy.py`'s `EVIDENCE_PILOT_TASK_IDS`, seven task ids
+since #2675 widened it from three, every one of them a nightly
+`scheduled-task` fire. There is no config key for it, so the scope is readable
+in the code and in the store and nowhere else.
+
+**No denominator is stated on this page, and that is deliberate.** The
+paragraph this one replaces named a bundled-row count and one week's claim
+tallies as prose; its predecessor stated that count as three and stood for six
+weeks after it stopped being true. A count in prose is a claim nobody re-runs
+(#3288). Read it off a route instead: `GET /api/workers/health` puts
+`runs_with_bundle`, `runs_without_bundle`, `claims_checked`,
+`claims_verified`, `claims_refuted` and `claims_insufficient` in every source's
+`health` object, beside `total`, over the request's `days` window — which is the
+sentence "this source's verified rate rests on N bundled runs" said without
+leaving the workers surface. `GET /api/autonomy/health` publishes the same six
+per task and in its `fleet` block. Both come from one decoder
+(`app/autonomy.py`'s `_row_claims` and `_claim_status`), so the two routes can
+only disagree if one of them stops calling it, and a source whose
+`runs_with_bundle` reads zero is outside the pilot: its tallies are then zero
+because nothing was checked, which is the unknown-not-zero rule above stated as
+a shape. This route publishes no claim rate, deliberately — the rate with the
+unevaluable rule on it, `refuted_or_insufficient_rate`, stays the autonomy
+route's, where a window whose runs mostly carry no bundle yields no rate at all.
 
 ### Event-loop discipline
 
