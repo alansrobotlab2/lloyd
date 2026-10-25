@@ -259,9 +259,11 @@ mechanism and apply to every edge above:
 ## Ingest: #68, #30, #53
 
 What the outside world did while nobody was looking. #30 and #53 write into
-`knowledge/`; #68 writes no vault file at all — it is the only job in the fleet
-whose output is a *conversation* (an inject that expires) rather than a file,
-which is why it has a write tier of its own. It was also the only task file that
+`knowledge/`; #68 writes no knowledge note — what it produces for a human is a
+*conversation* (an inject that expires) rather than a file, which is why it has
+a write tier of its own. That tier answers the knowledge-prose question, not the
+"does it touch a file" one: Step 5 rewrites `scripts/state.json` inside its own
+skill directory, which is under the vault tree (#3334). It was also the only task file that
 named the **secondary** engine, the slot retired 2026-09-20: that line read
 `model: secondary` until #2632 set it to `primary` on 2026-10-13 — the value the
 job already ran at, because `resolve_model_alias` rewrites it (§#68). The park is
@@ -312,8 +314,9 @@ overnight reports and announce a synthesis" job — no longer runs at all and no
 autonomy task binds it. Its skill is archived; an unbound copy survives as
 `~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
 daily" and "Use announce mode", and **there is no announce delivery mode for
-autonomy tasks anywhere in the code** — the only `announce()` in the tree is the
-guardian's alert fan-out, a different mechanism for a different purpose. Its
+autonomy tasks anywhere in the code** — the `announce()`s that do exist (the
+guardian's alert fan-out, `scripts/automod/promote.py:676`, `announce_breach` in
+`scripts/iv_metrics_record.py`) are notification helpers for other purposes. Its
 documented output, `memory/reflection/morning-briefing-latest.md`, exists nowhere
 on disk. Today's run writes no report file at all: its output is the injected
 signal plus its own `scripts/state.json`, and the durable record is the run record
@@ -327,9 +330,15 @@ holds already-surfaced ids, pruned to 24 h each cycle. Calendar comes from
 advertised only while Thunderbird and its bridge are up. Filters run blocklist
 first, then `ignore_subjects`, then the allowlist and `priority_keywords`, then
 per-item dedup, then a soft reject of anything newsletter-shaped; at most 3
-calendar items and 5 emails survive. Each is classed `act-now` (an event inside
-~3 hours, a deadline inside 48 hours, a personally addressed ask) or `fyi`, and
-**a single `act-now` changes the routing of the whole signal**:
+calendar items and 5 emails survive. The classing has no numeric deadline rule in
+it, whatever a paraphrase once said: the only calendar `act-now` trigger is an
+event starting within ~3 hours, and a cancellation outranks even that (3.5g); an
+email reaches `act-now` only if this same run called `email_read` on it (3.5a), it
+carries no broadcast transport evidence (3.5b), it is addressed to Alan beyond the
+`To:` field (3.5c), **and** its 🔔 line names the body phrase proving a date,
+request, question or obligation. An allowlist or `priority_keywords` hit raises
+salience *inside* `fyi` and never crosses the line (3.5d). **A single `act-now`
+changes the routing of the whole signal**:
 
 - **`ambient`** (nothing is act-now) → `POST /api/sessions/{id}/inject-prefetch`.
   No turn, no tokens, no transcript noise: the entry waits in a queue and is
@@ -351,29 +360,43 @@ typing does. The fix is one definition of "a human reads this":
 a platform this code has never heard of stays eligible, because silently losing a
 brief is worse than delivering one to an unexpected session. Two details that are
 easy to get backwards: `/inject` answers **409, not a 200 "skipped"**, so no
-producer records a lost brief as delivered; and `/inject-prefetch` carries no such
-gate, so the ambient path is protected at *resolution* rather than at the
-endpoint, which is sufficient only because the producer lets the server resolve
-the session.
+producer records a lost brief as delivered; and since `af5f9082` (2026-09-20)
+`/inject-prefetch` answers **the same 409** for a `NON_USER_PLATFORMS` session
+(`app/routers/sessions.py:1408-1418`), so the ambient path is gated at
+*resolution* **and** at the endpoint. The endpoint half is what catches a producer
+that passes an explicit worker id instead of leaving the server to resolve it —
+before that commit such a producer got a 200 and an entry queued in a session that
+takes no user turn, which nothing reclaimed until expiry ran inside the drain.
 
 **`[SILENT]` is what keeps a 15-minute job from being a 15-minute notification.**
 Every task is told to answer with exactly `[SILENT]` and nothing else when there
-is nothing new. Three checks, two semantics: the run record and
-`discord_notify.py` both test for an **exact** `[SILENT]`, while the call site
-above the latter skips the notification when `[SILENT]` appears **anywhere** in
-the preview. So a response that merely mentions the token is still recorded as a
-real run while its Discord post is dropped. The skill's own last line is written
-against the equality reading, because the loose one cost a delivery: a paragraph
-ending in `[SILENT]` was delivered to Alan in full, as noise (2026-09-03).
+is nothing new. It used to be read two ways — the run record and the Discord
+helper by **exact** match, the worker adapter and the `/api/autonomy/health`
+rollup by **substring** — so a report that merely *mentioned* the token was
+recorded as a real run, lost its Discord post, and was counted as a declined run
+in `silent_rate`. #1507 (`9147db78`, 2026-09-25) collapsed the four readers onto
+one predicate, `is_silent_response` in `app/silent_sentinel.py` — exact match on
+the stripped text, which `app/discord_notify.py:66` now calls — with
+`run_is_silent` deferring to the run record's own `meta.silent` so no downstream
+text slice can re-decide a verdict made on the terminal block. Exact is canonical
+because it is what the prompt states, and the skill's own last line is written
+against equality for the reason that started the whole thing: a paragraph ending
+in `[SILENT]` was delivered to Alan in full, as noise (2026-09-03).
 
-**Known defect — backlog #481.** Step 2 tells the agent to skip a missing calendar
-source **silently** ("do not retry, do not treat it as an error"), which
-contradicts the degraded-run attribution guardrail at the bottom of the same file
-— a run whose source died must name it. Both instructions are live in one document
-about 150 lines apart, and Step 3 has no missing-tool branch at all. The
-2026-08-29 "succeeding but blind" run (0 emails against a normal 15–21, after a
-~24 h IMAP/Thunderbird bridge gap) is the shape of failure that then reproduces by
-instruction rather than by accident.
+**Backlog #481 is closed, and it closed the contradiction rather than only the
+heading.** Step 2 used to tell the agent to skip a missing calendar source
+**silently** ("do not retry, do not treat it as an error"), which contradicted the
+degraded-run attribution guardrail at the foot of the same file — a run whose
+source died must name it. #1504 renamed that heading to "may be unavailable —
+record the absence, never skip silently" and gave Step 2 a `CALENDAR_SOURCE`
+branch, and Step 3 gained the matching `EMAIL_SOURCE` branch it never had: a call
+returning 0 messages is stamped `email: 0 returned — suspect (baseline ~15-21)`
+instead of being read as a quiet morning. Step 5 writes both to
+`state.json → sources` and Step 4 prints any non-`ok` one, so the 2026-08-29
+"succeeding but blind" run (0 emails against a normal 15–21, after a ~24 h
+IMAP/Thunderbird bridge gap) is now the shape the skill refuses by instruction
+rather than the shape it reproduced by it — and a zero-item run that finds a source
+*newly* degraded answers with those source lines instead of `[SILENT]`.
 
 ---
 
