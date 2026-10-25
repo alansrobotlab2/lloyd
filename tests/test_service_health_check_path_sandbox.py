@@ -379,3 +379,279 @@ def test_the_row_rides_the_default_run_and_the_json_flag_matches_the_text_row(mo
     doc = _drive(shc_mod, monkeypatch, capsys, ENFORCING_SIX,
                  argv_extra=("--category", shc_mod.PATH_SANDBOX_CATEGORY))
     assert [s["name"] for s in doc["services"]] == [ROW_NAME], doc["services"]
+
+
+# ---------------------------------------------------------------------------------------------
+# #3327: what the block above `PATH_SANDBOX_CATEGORY` is allowed to SAY about the policy.
+#
+# Everything above pins what the row DOES with a `/state` answer. These nodes pin the comment a
+# future editor reads before touching that behaviour, and that comment told the truth about the
+# code while lying about the policy: it presented #2109's fail-open question as one nobody had
+# answered. It was wrong from the minute it landed — `431ef5d2`, the commit that shipped #2320,
+# wrote it at 2026-10-07T01:46:19Z, thirty minutes AFTER the owed-check pass recorded the ruling
+# at 01:16:07Z, copying the question from #2109's still-owed list instead of from the settled
+# entry that pass had just appended. The same defect class #2957 pinned at
+# `tests/test_funnel_census.py:873` and #2958 at `tests/test_corpus_shape.py:1026`; the node
+# shape is #3092's at `tests/test_component_manifest_retention.py:812`.
+# ---------------------------------------------------------------------------------------------
+
+#: The owed-check pass that ruled #2109's fail-open question, read out of vault
+#: `backlog/2109-enforce-protected-paths-in-the-bash-substrate-unsh.md`'s `owed_settled`. The
+#: `outcome: ruling` entry (owed item 3, `at: '2026-10-07T01:16:07.640517'`, `follow_up: 2320`)
+#: carries NO `artifact:` key at all, so the id comes from the sibling `outcome: settled` entry
+#: whose `at` is byte-identical — the same pass writing both. The session is witnessed on disk at
+#: `~/lloyd-data/sessions/20261006_181232_owedcheck_fbd7.json`. This constant is the only place
+#: the literal is spelled in the repo, which is what makes an invented id fail below rather than
+#: merely read badly.
+SHC_RULING_OWED_CHECK = "20261006_181232_owedcheck_fbd7"
+
+#: The three spellings the block used for a question that had already been settled. FRAGMENTS on
+#: purpose, not phrases: #3327's own acceptance check is that a `git grep` of the contiguous
+#: phrase this list refuses prints nothing repo-wide, so a refusal list that spelled the phrase
+#: out would itself be the surviving hit and the clause could never pass. #3092 escaped the same
+#: collision by storing the fragment `open ruling`, and the comment there says it is the only
+#: place its phrases appear. Applied to THIS block only: the first fragment is a verdict token in
+#: `agent-services/guardian/guardian.py` and ordinary prose in `architecture/automod.md`, neither
+#: of which this item owns.
+SHC_PENDING_MARKERS = ("still-open", "takes no position",
+                       "only its wording may move")
+
+#: The phrase no tracked file may hold, assembled at runtime from the fragments above so that
+#: naming it here does not put it back into the corpus this suite is checking.
+SHC_REFUSED_PHRASE = SHC_PENDING_MARKERS[0] + " ruling"
+
+#: The shape a real owed-check pass id has, so a plausible-looking invention cannot satisfy a
+#: node that only asks for "some token that looks like a pass".
+_OWED_CHECK_ID = re.compile(r"^\d{8}_\d{6}_owedcheck_[0-9a-f]{4}$")
+
+
+def _shc_prose_of(block: str) -> str:
+    """A comment block as the continuous prose a reader actually reads.
+
+    `#:` is markup, not text, and a comment wraps mid-sentence: a phrase pinned against the lines
+    joined whole would grade the column the comment happened to wrap at instead of the sentence.
+    `_prose_of` at `tests/test_component_manifest_retention.py:799` does the identical fold.
+    """
+    return " ".join(re.sub(r"^\s*#+:?\s*", "", line) for line in block.splitlines())
+
+
+def _shc_sentences(block: str) -> "list[str]":
+    """That prose cut into sentences, which is the scope every claim below is graded in.
+
+    A block-wide search is satisfiable by any sentence in the neighbourhood: a block that says
+    the question is UNRULED still contains the letters `ruled` inside `unruled`, and the #3092
+    review caught exactly that shape.
+    """
+    flat = _shc_prose_of(block)
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", flat) if s.strip()]
+
+
+def _comment_above_shc(symbol: str) -> str:
+    """The comment block sitting directly above `symbol` in the shipped script."""
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+    at = next((i for i, ln in enumerate(lines) if ln.startswith(f"{symbol} =")), None)
+    assert at is not None, (
+        f"`{symbol}` is not a module-level constant of the script any more, so this block has "
+        "no address and the checks below have no subject")
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at])
+
+
+def _assert_decided(sentences: "list[str]", *, where: str) -> str:
+    """Clause 2 and 3: the sentence that records the ruling has to record all of it.
+
+    One sentence carries the pass id, and that same sentence must name the item, be dated, say
+    the question was ruled, and say WHICH WAY it went. Sentence-scoped, so deleting it fails
+    rather than leaving the claim to some other line that never made it.
+    """
+    hits = [s for s in sentences if SHC_RULING_OWED_CHECK in s]
+    assert hits, (
+        f"no sentence of {where} names the owed-check pass {SHC_RULING_OWED_CHECK} that ruled "
+        "#2109's fail-open question, so the ruling in this block has no witness a reader can go "
+        "and read")
+    decided = hits[0]
+    assert "#2109" in decided, (
+        f"the sentence naming the pass does not name the item that decided, so the ruling has "
+        f"no owner: {decided}")
+    assert re.search(r"\bruled\b", decided, re.IGNORECASE), (
+        f"the sentence that cites the pass never says the question was ruled — `unruled` and "
+        f"`overruled` both contain the letters, which is why this is a word-boundary match: "
+        f"{decided}")
+    assert "2026-10-07" in decided, (
+        f"the ruling has to arrive dated in the sentence that records it, or a reader cannot "
+        f"tell it from the open question it replaced: {decided}")
+    for way in ("keep fail-open as shipped", "decline refusing Bash outright"):
+        assert way in decided, (
+            f"the sentence records that something was ruled but not that it went {way!r}, so "
+            f"the direction of the decision is left to guesswork: {decided}")
+    return decided
+
+
+def _assert_grade_tied_to_ruling(sentences: "list[str]", *, where: str) -> str:
+    """Clause 4's prose half: the red grade is stated as the ruling's other half."""
+    hits = [s for s in sentences if "advisory" in s]
+    assert hits, (
+        f"no sentence of {where} says what an `advisory` row would do, so the block no longer "
+        "explains why this row is graded FAIL — the grade starts looking like this script being "
+        "strict on its own account")
+    grade = hits[0]
+    assert "FAIL" in grade, (
+        f"the sentence about `advisory` does not name the grade the row gives instead: {grade}")
+    assert re.search(r"\brul(ing|ed)\b", grade, re.IGNORECASE), (
+        f"the grade is no longer attributed to the ruling, which is the whole of clause 4: "
+        f"{grade}")
+    assert "visible where a human reads" in grade, (
+        f"the ruling's own condition — the degraded state must be visible where a human reads — "
+        f"is what makes the red row the ruling rather than a preference, and it is gone: {grade}")
+    assert "`_scored_rows`" in grade and "`Overall:`" in grade, (
+        f"the mechanism has to be named for the claim to be checkable: `advisory` rows are "
+        f"dropped by `_scored_rows`, which is what would leave `Overall:` green: {grade}")
+    return grade
+
+
+def test_the_block_above_the_category_no_longer_shows_the_ruling_as_pending():
+    """#3327 clause 1: three phrases that read "nobody has decided this yet" are gone.
+
+    Folded first, because the block wraps: `still-open` was hyphenated across no line but the
+    other two markers were, and a line-wise search would grade the wrap column.
+    """
+    block = _comment_above_shc("PATH_SANDBOX_CATEGORY")
+    assert block.strip(), (
+        "`PATH_SANDBOX_CATEGORY` has no comment block above it any more, so the row's policy "
+        "rationale is gone with it")
+    prose = _shc_prose_of(block)
+    for marker in SHC_PENDING_MARKERS:
+        assert marker not in prose, (
+            f"the block calls #2109's fail-open policy pending again with {marker!r}, but the "
+            f"owed-check pass {SHC_RULING_OWED_CHECK} ruled it on 2026-10-07 — a reader who "
+            "believes this sentence books work that is already done")
+
+
+def test_the_block_records_the_ruling_as_made_and_attributed_to_its_pass():
+    """#3327 clause 2: the block says the question is RULED, and which way it went.
+
+    Deleting the stale sentence would not be enough on its own: a block that merely stops asking
+    leaves a reader who meets this constant in a year unable to tell whether the fail-open branch
+    was examined and kept or simply inherited — which is how #2958's and #2957's stale sentences
+    got re-filed as new work.
+    """
+    _assert_decided(_shc_sentences(_comment_above_shc("PATH_SANDBOX_CATEGORY")),
+                    where="the block above PATH_SANDBOX_CATEGORY")
+
+
+def test_the_ruling_names_the_owed_check_pass_that_recorded_it_and_no_invented_id_passes():
+    """#3327 clause 3: the literal, and the reason it is THAT literal.
+
+    The pass id is not this round's to compose. #2109's `outcome: ruling` entry carries no
+    `artifact:` key, so the id is the sibling `owed_settled` entry's — the one whose `at` is
+    byte-identical to the ruling's `2026-10-07T01:16:07.640517`, which is the same pass:
+    `20261006_181232_owedcheck_fbd7`. Two rails keep an invented id out: the constant's own shape
+    (a date, a time, the literal `owedcheck`, four hex digits), and the requirement that the
+    id-bearing sentence is the ruling-bearing sentence, so a plausible token parked in some
+    unrelated line satisfies nothing.
+    """
+    assert _OWED_CHECK_ID.match(SHC_RULING_OWED_CHECK), (
+        f"{SHC_RULING_OWED_CHECK!r} is not shaped like an owed-check pass id, so this test's "
+        "own constant is the invented thing it exists to refuse")
+    block = _comment_above_shc("PATH_SANDBOX_CATEGORY")
+    sentences = _shc_sentences(block)
+    with_id = [s for s in sentences if SHC_RULING_OWED_CHECK in s]
+    assert len(with_id) == 1, (
+        f"the pass id appears in {len(with_id)} sentences; one ruling wants exactly one "
+        "sentence carrying its witness, or a second, unruled claim can borrow the id")
+    assert with_id[0] == _assert_decided(sentences, where="the block above PATH_SANDBOX_CATEGORY")
+    assert SHC_RULING_OWED_CHECK in _shc_prose_of(block), (
+        "the id folded out of the block is not the id in the constant — a wrap inside the id "
+        "would break every grep a reader follows")
+
+
+def test_the_block_ties_the_red_grade_to_the_ruling_and_the_row_honours_it():
+    """#3327 clause 4, both halves: the sentence says the red row IS the ruling, and the code
+    still behaves the way that sentence says.
+
+    The seam this crosses is the one #2320 opened: a `/state` payload read over HTTP becomes a
+    graded row, and `_scored_rows` is the gate that decides whether `Overall:` sees it. The
+    comment now claims the red grade is the ruling's bound — visible where a human reads — so the
+    claim is checked against the shipped function rather than left as prose: a fallback payload
+    must still yield one graded-FAIL row with NO `advisory` key. That is the same property
+    `test_a_fallback_payload_is_a_graded_fail_that_names_the_error` pins for #2320; re-asserting
+    the minimum here is what makes THIS sentence falsifiable, and it edits nothing above.
+
+    The tuple half of the clause is checked with the phrase assembled from its own fragments: no
+    entry may contain the contiguous phrase, and neither the script nor this file may contain it,
+    because the refusal list being the surviving hit is how the grep fails while the rule passes.
+    """
+    _assert_grade_tied_to_ruling(_shc_sentences(_comment_above_shc("PATH_SANDBOX_CATEGORY")),
+                                 where="the block above PATH_SANDBOX_CATEGORY")
+
+    for marker in SHC_PENDING_MARKERS:
+        assert SHC_REFUSED_PHRASE not in marker, (
+            f"{marker!r} spells the whole phrase it exists to refuse, so the refusal list is "
+            "itself the repo-wide hit and clause 4 can never pass")
+    for path in (SCRIPT, Path(__file__)):
+        text = path.read_text(encoding="utf-8")
+        assert SHC_REFUSED_PHRASE not in text, (
+            f"{path.name} holds the contiguous phrase again, which is the string #3327's "
+            "acceptance check greps for repo-wide")
+
+    row = _only(_rows(payload=FALLBACK))
+    assert row["healthy"] is False, row
+    assert "advisory" not in row, (
+        "the block says a fallback is graded rather than advisory; an `advisory` key would be "
+        f"dropped by `_scored_rows` and the sentence would be a lie: {row}")
+
+
+def test_the_pending_wording_check_refuses_the_wording_it_exists_to_refuse():
+    """The red side, without which clauses 1-4 are unfalsifiable.
+
+    The seed is the block as #3327 found it — reconstructed from the fragments rather than quoted,
+    because quoting it would reintroduce the very phrase the clause forbids anywhere in the repo.
+    It must trip the pending-marker guard AND both claim guards; a guard that had gone deaf would
+    sail through it. The paired green half is the shipped block, so a guard that had gone deaf
+    fails here as well.
+    """
+    shipped = ("It reports the state and " + SHC_PENDING_MARKERS[1] + " on #2109's "
+               + SHC_PENDING_MARKERS[0] + " ruling (whether a fallback should refuse Bash "
+               "outright the way `_tool_sandbox.refusal` does, or keep failing open with a "
+               "warning): whichever way that goes, \"is it enforcing\" is the question this row "
+               "answers, and " + SHC_PENDING_MARKERS[2] + " afterwards.")
+    assert SHC_REFUSED_PHRASE in shipped, (
+        "the seed is no longer the sentence #3327 was filed on, so refusing it proves nothing")
+
+    for marker in SHC_PENDING_MARKERS:
+        assert marker in shipped, (
+            f"the seed no longer carries {marker!r}, so the green half below is all this node "
+            "would be checking")
+    seed = _shc_sentences(shipped)
+    with pytest.raises(AssertionError):
+        _assert_decided(seed, where="the seed")
+    with pytest.raises(AssertionError):
+        _assert_grade_tied_to_ruling(seed, where="the seed")
+
+    live = _shc_sentences(_comment_above_shc("PATH_SANDBOX_CATEGORY"))
+    for marker in SHC_PENDING_MARKERS:
+        assert marker not in _shc_prose_of(_comment_above_shc("PATH_SANDBOX_CATEGORY"))
+    _assert_decided(live, where="the block above PATH_SANDBOX_CATEGORY")
+    _assert_grade_tied_to_ruling(live, where="the block above PATH_SANDBOX_CATEGORY")
+
+
+def test_the_ruling_prose_is_a_comment_and_no_path_sandbox_value_moved():
+    """#3327 clause 5: this item's edit is prose, and the bound it sits on is untouched.
+
+    Every line of the block is a comment line, which is what makes the edit reviewable as prose;
+    and the three constants the row is built from keep the exact values #2320 shipped, because
+    "only its wording may move" is a promise the next reader can no longer make and this is where
+    it is enforced instead. The regex, the verdict vocabulary and the exit codes are the same
+    objects the nodes above already drive, and none of them is named here a second time with a
+    looser value.
+    """
+    block = _comment_above_shc("PATH_SANDBOX_CATEGORY")
+    for ln in block.splitlines():
+        assert ln.lstrip().startswith("#"), (
+            f"a line of the block is not a comment, so prose and behaviour are now the same "
+            f"edit: {ln!r}")
+    assert shc.PATH_SANDBOX_CATEGORY == "path-sandbox", shc.PATH_SANDBOX_CATEGORY
+    assert shc.PATH_SANDBOX_KEY == "protected_path_sandbox", shc.PATH_SANDBOX_KEY
+    assert shc.PATH_SANDBOX_TIMEOUT_S == 10.0, shc.PATH_SANDBOX_TIMEOUT_S

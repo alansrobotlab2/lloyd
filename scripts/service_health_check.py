@@ -644,10 +644,25 @@ GPU_POWER_LIVE_ROW = re.compile(r"^\s*(\d+)\s*,\s*([0-9]+(?:\.[0-9]+)?)\s*W?\s*$
 # monitor greps — while this script printed `Overall: 23/23 services healthy`. The absence of a
 # guard was indistinguishable from a guard that works, which is the failure this row closes.
 #
-# It reports the state and takes no position on #2109's still-open ruling (whether a fallback
-# should refuse Bash outright the way `_tool_sandbox.refusal` does, or keep failing open with a
-# warning): whichever way that goes, "is it enforcing" is the question this row answers, and
-# only its wording may move afterwards.
+# Whether a fallback should refuse Bash outright the way `_tool_sandbox.refusal` does, or keep
+# failing open with a warning, is #2109's question and it is RULED. Owed-check pass
+# 20261006_181232_owedcheck_fbd7 ruled it on 2026-10-07 to keep fail-open as shipped and decline
+# refusing Bash outright: a fallback is a degradation to the pre-#2109 status quo, where
+# `check_bash_command` and the catastrophic table still run in front of the bare shell, and
+# refusing on a bwrap/unprivileged-userns hiccup would black out every attended and worker turn
+# to protect one layer — a larger capability removed than the one at risk.
+#
+# That ruling is also why this row is a graded FAIL on a fallback rather than an `advisory` one:
+# the same pass bounded its own decision by requiring the degraded state be visible where a human
+# reads, not only in a `/state` key nothing polls, and an `advisory` row is dropped by
+# `_scored_rows` before `Overall:` is computed — so the red grade is the ruling's other half and
+# not this script being strict on its own account. "Is it enforcing" is the question this row
+# answers; the policy behind that answer is settled and closed with follow-up #2320, which
+# shipped the reading half in `431ef5d2`. That same commit wrote the sentence this one replaces,
+# thirty minutes AFTER the ruling was recorded, copying the question from #2109's still-owed list
+# instead of from the settled entry the pass had just appended — so this block was wrong from
+# the minute it landed, which is the defect class #2957 and #2958 pinned for the funnel census
+# and the corpus-shape skip sets.
 PATH_SANDBOX_CATEGORY = "path-sandbox"
 #: The key `/state` carries the answer under — named to READ it, never to copy out of it. The
 #: PASS row's count is `len()` of the payload's own `entries`, so the bound list, the port and
