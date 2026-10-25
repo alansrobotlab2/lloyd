@@ -272,7 +272,7 @@ Alan's ruling of 2026-09-17, not that line.
 | ID | Freq | Role |
 |----|------|---|
 | #68 | every 15 min | Calendar + unread mail, filtered and classified, injected as ambient context |
-| #30 | 3×/day | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
+| #30 | daily | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
 | #53 | daily | Changelogs and release notes for the stack; compare each source's latest version against last-checked; only process actual changes, then write `knowledge/stack-updates/YYYY-MM-DD-<source>.md` |
 
 **The three paper digests held rows here until 2026-10-12.** #87 #88 #89 were
@@ -897,7 +897,7 @@ find.
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | weekly | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
+| #79 | daily | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | no | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |

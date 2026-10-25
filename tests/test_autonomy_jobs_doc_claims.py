@@ -5139,3 +5139,295 @@ def test_the_measure_membership_guard_fires_on_a_seeded_100(tmp_path, monkeypatc
         f"§Measure's section rows read {after} against the control {before}: the seeded "
         f"row did not arrive inside that table as seen through the helper clause 5's "
         f"node reads, so a real membership move would sit through it too")
+
+
+# ── #3333 — the two group tables' Freq cells are pinned, not free prose ───────
+#
+# §Ingest and §Bound entropy are the two job-group tables that put a cadence in a
+# column of its own, and both were wrong at once while nothing graded either: this
+# file pinned cadence for §Watch the machinery (`WATCH_JOBS`) and for #86 alone. So
+# `| #30 | 3×/day |` outlived by seventeen days the edit that made it false, and
+# `| #79 | weekly |` understated a daily job sevenfold in the other direction. The
+# values are typed here rather than parsed off `~/obsidian/autonomy/` for the reason
+# #2630 gives for §Watch: a node that opens the task directory is a `live_vault` read,
+# `TESTS_MARK_EXPR` (`scripts/automod/gate.py:719`) deselects `live_vault`, and a
+# cadence check the promotion gate never runs is exactly the hole these two cells fell
+# through — every round that could have caught them ran a suite that did not look.
+
+CADENCE_TABLES = ("Ingest", "Bound entropy")
+
+#: Each row's `Freq` cell as the table must spell it, read off the task file's own
+#: `frequency:` on 2026-10-25. #68 declares `frequency: every-15min`, which the table
+#: spells for a human reader as `every 15 min`; every other value is the declared word.
+#:
+#: The two that moved, and why the cell is the place to catch it. #30's `3×/day` died
+#: by vault commit `1cc570a7` ("autonomy(#2445): task #30's runs_per_day 3 -> 1 so it
+#: matches frequency: daily", 2026-10-08), and `_frequency_interval_seconds`
+#: (`app/autonomy.py`) is `86400.0 / runs_per_day`, so 3 → 1 is a 3× cadence change
+#: with no other visible effect: the run rows carry 3 fires on each UTC day through
+#: 2026-10-08, none on 10-09, and exactly 1 on each of 10-10…10-25. #79 declares
+#: `frequency: daily` with no `runs_per_day` at all, so the same helper resolves
+#: 86400 s, and it ran exactly once on each of the 23 days 2026-10-03…10-25.
+CADENCE_CELLS: dict[str, dict[str, str]] = {
+    "Ingest": {"#68": "every 15 min", "#30": "daily", "#53": "daily"},
+    "Bound entropy": {"#81": "daily", "#79": "daily", "#78": "weekly",
+                      "#80": "weekly", "#90": "daily"},
+}
+
+_CADENCE_CASES = [(g, j) for g in CADENCE_TABLES for j in CADENCE_CELLS[g]]
+_CADENCE_IDS = [f"{g.lower().replace(' ', '-')}-{j.lstrip('#')}"
+                for g, j in _CADENCE_CASES]
+
+#: The five nodes this section adds, located by name by the two checks below: the
+#: parametrisation, the row-set half, the seeded copy, and the pair that pins clause 4.
+_CADENCE_NODES = (
+    "test_a_group_row_states_the_cadence_its_task_file_declares",
+    "test_the_cadence_rows_pinned_are_exactly_the_group_table_rows",
+    "test_widening_a_freq_cell_fails_the_cadence_pin",
+    "test_the_gate_s_mark_expression_selects_the_cadence_pin",
+    "test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here",
+)
+
+#: The nodes that actually go looking for a cadence, as opposed to the pair that
+#: watches the first three: a helper plus the parametrisation, its row-set half and the
+#: seeded copy. These are the ones the "no path outside the tracked tree" scan applies,
+#: because the two clause-4 nodes read this file's own syntax tree and shell out a
+#: `--collect-only`, which is tracked work that would trip the verb list.
+_CADENCE_READERS = frozenset(_CADENCE_NODES[:3]) | {"_cadence_rows"}
+
+#: A name whose appearance in a reading node's body means it opens something outside the
+#: tracked tree — the vault constants this file declares (`TASK_90_FILE`,
+#: `DIGESTER_SKILL`) and the filesystem calls that reach a live `~/obsidian`.
+_OUTSIDE_THE_TREE = {"TASK_90_FILE", "DIGESTER_SKILL", "home", "read_text", "glob",
+                     "iterdir", "is_file", "open", "write_text"}
+
+
+def _cadence_rows(text: str, group: str) -> dict[str, str]:
+    """That group's `| ID | Freq | … |` rows as `{id: Freq cell}`, read out of `text`.
+
+    Scoped to the group's own section: `weekly` is also §Canonicalize's #67 and
+    §Measure's #70, so a whole-document scan for "the row that says weekly" would
+    match rows this item is not about. `text` is a parameter, not `_text()`, so the
+    seeded node below can run the identical reader over a copy of the doc with one
+    cell widened — the demonstration #2806's seeded heading and #2833's re-mark guard
+    establish, in place of a description that the check could fail.
+    """
+    assert group in CADENCE_TABLES, f"{group!r} is not a pinned cadence table"
+    m = re.search(rf"^## {re.escape(group)}: .*$", text, re.M)
+    assert m, (
+        f"architecture/autonomy-jobs.md has no `## {group}:` group heading, so the "
+        f"{len(CADENCE_CELLS[group])} cadence cells pinned for it have no table to be "
+        f"read out of. The reader fails loudly rather than returning no rows, because "
+        f"a table it can no longer parse is not a group with nothing in it.")
+    rows: dict[str, str] = {}
+    for line in text[m.end():].split("\n## ", 1)[0].splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and re.fullmatch(r"#\d+", cells[0]):
+            rows[cells[0]] = cells[1]
+    assert rows, (
+        f"§{group}'s section was found but yielded no `| #NN | … |` rows, so the "
+        f"cadence pin has nothing to read where its {len(CADENCE_CELLS[group])} typed "
+        f"cells expect {sorted(CADENCE_CELLS[group])}")
+    return rows
+
+
+@pytest.mark.parametrize("group,job", _CADENCE_CASES, ids=_CADENCE_IDS)
+def test_a_group_row_states_the_cadence_its_task_file_declares(group: str, job: str):
+    """Clauses 1 and 2, in the shape #1102 left for #86 and #2630 for §Watch: one node
+    per row, the `Freq` cell against the cadence the task file declares.
+
+    The cell is checked against the declared `frequency:` and never against a run
+    record, for #1102's reason: the two are meant to agree, and the cell is the only
+    place they can be caught disagreeing. That distinction is load-bearing here rather
+    than academic — on the day #3333 was filed the run rows said 1/day, `backlog/2445`'s
+    `closure_reason` still read "The cadence is real and current" over 3/day three runs
+    a UTC day, and the doc said `3×/day`. The task file is the one of those three the
+    scheduler reads.
+    """
+    want = CADENCE_CELLS[group][job]
+    have = _cadence_rows(_text(), group).get(job)
+    assert have is not None, (
+        f"§{group} has no row for {job}, so its cadence is unstated in the document "
+        f"whose job is to say what each scheduled task is; the table reads "
+        f"{sorted(_cadence_rows(_text(), group))}")
+    assert have == want, (
+        f"§{group}'s {job} row states its cadence as {have!r} where "
+        f"`~/obsidian/autonomy/{job.lstrip('#')}-*.md` declares {want!r} — the drift "
+        f"#3333 was filed for, in both directions: #30 kept a `3×/day` cell past vault "
+        f"commit `1cc570a7` cutting its runs_per_day 3 → 1, and #79 read `weekly` "
+        f"against a daily retention sweep")
+
+
+@pytest.mark.parametrize("group", CADENCE_TABLES,
+                         ids=[g.lower().replace(" ", "-") for g in CADENCE_TABLES])
+def test_the_cadence_rows_pinned_are_exactly_the_group_table_rows(group: str):
+    """Clause 3's "every row" half: the pinned set and the table's row set are one set.
+
+    Without it the node above stays green when the table gains a row, because a
+    parametrisation over a typed dict cannot see a row the dict never named. That is
+    the symmetric-omission hole #2630 records for the membership tables — the two
+    tables cross-checked each other and neither checked the fleet — arriving here in a
+    smaller shape: an eighth group member would have a cadence nothing re-checks.
+    """
+    have = sorted(_cadence_rows(_text(), group))
+    want = sorted(CADENCE_CELLS[group])
+    assert have == want, (
+        f"§{group}'s cadence pin covers {want} while its table has rows for {have}; a "
+        f"row in the document and not in `CADENCE_CELLS` is a cadence no node will "
+        f"ever read, which is how both of #3333's cells got written and stayed")
+
+
+def test_widening_a_freq_cell_fails_the_cadence_pin():
+    """Clause 3's teeth, demonstrated on a seeded copy rather than described — the
+    convention #2806 sets ("its failure is demonstrated on a seeded heading rather than
+    described") and #2833 and the §Measure seeded-#100 node both keep.
+
+    Three seeds, each an edit that either happened or happens next: #30's cell back to
+    the `3×/day` a reader holding #2445's stale `closure_reason` would widen it to, #79's
+    back to the `weekly` it was filed at, and one row §Ingest gains without anyone
+    typing its cadence. Each seed is read back through `_cadence_rows`, the same reader
+    the two pinned nodes call, so what fails below is what would fail in the gate. The
+    live doc is read first as the control: a probe that reports the same disagreement
+    with nothing seeded is not a probe of the seed.
+    """
+    doc = _text()
+    for group in CADENCE_TABLES:
+        assert _cadence_rows(doc, group) == CADENCE_CELLS[group], (
+            f"§{group}'s live Freq cells already disagree with `CADENCE_CELLS`, so "
+            f"every seeded disagreement below would be weighing a seed against a "
+            f"region the typed values do not describe")
+
+    for group, job, stale in (("Ingest", "#30", "3×/day"),
+                              ("Bound entropy", "#79", "weekly")):
+        seeded, n = re.subn(rf"(?m)^\| {re.escape(job)} \| [^|]+ \|",
+                            f"| {job} | {stale} |", doc, count=1)
+        assert n == 1, (
+            f"rewriting {job}'s Freq cell matched {n} rows, so the seed landed "
+            f"nowhere and the disagreement read from it would describe nothing")
+        got = _cadence_rows(seeded, group)[job]
+        assert got == stale, (
+            f"after {job} was widened to {stale!r} the reader still saw {got!r}, so "
+            f"the reader feeds the pin a value the doc no longer holds")
+        assert got != CADENCE_CELLS[group][job], (
+            f"widening {job} to {stale!r} still agreed with the typed value, which "
+            f"means the typed value has already rotted and the pin is green for free")
+
+    # The id is a real-looking `#NN` on purpose: the reader only accepts a row whose
+    # first cell is `#\d+`, so a placeholder like `#53x` would be skipped and the row-set
+    # comparison would come out equal for the wrong reason — the check reading as green
+    # while its own seed never entered the table.
+    gained = re.sub(r"(?m)^\| #53 \| daily \|.*$",
+                    lambda m: m.group(0) + "\n| #110 | daily | seeded row |", doc,
+                    count=1)
+    assert gained != doc, (
+        "the seeded §Ingest row never arrived, so the row-set half of clause 3 went "
+        "untested rather than passing")
+    assert "| #110 |" not in doc, "`#110` is already a §Ingest row, so it seeds nothing"
+    after = sorted(_cadence_rows(gained, "Ingest"))
+    assert after == sorted(list(CADENCE_CELLS["Ingest"]) + ["#110"]), (
+        f"§Ingest reads {after} after gaining a row nobody typed a cadence for; the "
+        f"row-set comparison must see the extra id, or an eighth member's cadence "
+        f"would go unchecked exactly as #3333's two cells did")
+
+
+def test_the_gate_s_mark_expression_selects_the_cadence_pin():
+    """Clause 4, asked of a real pytest rather than asserted from a substring.
+
+    Selection is a separate process from this run: the gate shells out
+    `pytest -m TESTS_MARK_EXPR` (`scripts/automod/gate.py:1213`), so the only thing that
+    can say whether the cadence pin is in the promotion gate's run is asking pytest with
+    the shipped expression — read out of `gate.py`, never retyped, because the defect
+    #2806 names for the review-unit check is a copy of such a value that drifted from the
+    shipped one. `--collect-only` stops before any body runs, so nothing is injected and
+    the whole node costs two collections of this one file (~0.4 s each).
+    """
+    import sys
+
+    from scripts.automod import gate as G
+
+    rel = str(Path(__file__).resolve().relative_to(ROOT))
+
+    def _collect(*extra: str) -> set[str]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header",
+             "-p", "no:cacheprovider", *extra, rel],
+            cwd=ROOT, capture_output=True, text=True, check=True)
+        return {ln.strip() for ln in proc.stdout.splitlines() if "::" in ln}
+
+    selected = _collect("-m", G.TESTS_MARK_EXPR)
+    collected = _collect()
+    # The control: the expression has to be doing work in this file, or "my nodes were
+    # not deselected" would be a fact about a no-op. It drops six `live_vault` nodes
+    # today, so every id kept below is earned rather than unopposed.
+    assert len(collected) > len(selected), (
+        f"`-m {G.TESTS_MARK_EXPR!r}` deselected nothing here ({len(selected)} of "
+        f"{len(collected)} ids), so it was never asked a question and the presence "
+        f"below would prove nothing")
+    expected = {f"{rel}::{_CADENCE_NODES[0]}[{i}]" for i in _CADENCE_IDS}
+    expected |= {f"{rel}::{_CADENCE_NODES[1]}[{g.lower().replace(' ', '-')}"
+                 f"]" for g in CADENCE_TABLES}
+    expected |= {f"{rel}::{n}" for n in _CADENCE_NODES[2:]}
+    missing = sorted(expected - selected)
+    assert not missing, (
+        f"{missing} is not selected by the gate's own {G.TESTS_MARK_EXPR!r} — the "
+        f"cadence pin would then sit in the file and out of the run, which is the "
+        f"exact condition #3333's two cells rotted under")
+
+
+def test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here():
+    """Clause 4's other half, checked against this file's own syntax tree: none of the
+    five new nodes carries a mark the gate deselects on, and none of the three that go
+    looking for a cadence names a path outside the tracked tree.
+
+    Clause 4 forbids two edits that are both invisible to a green run: putting the pin
+    under `live_vault` (or `skip`/`xfail`, the other ways #2833 lists) so the gate stops
+    seeing it, and having it read `~/obsidian/autonomy/` directly — which would make it
+    a `live_vault` read in substance while the decorator stayed clean, and a nightly
+    that retypes a `frequency:` would then redden an unrelated author's round, which is
+    exactly why that mark exists. #2833's own guard does this for two other nodes; the
+    same `_decorator_names`/`_QUIETING_MARKS` pair is used here rather than a copy.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    wanted = set(_CADENCE_NODES) | {"_cadence_rows"}
+    found: dict[str, tuple[set[str], set[str]]] = {}
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in wanted:
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+            names |= {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+            found[fn.name] = (_decorator_names(fn), names)
+    assert wanted == set(found), (
+        f"{sorted(wanted - set(found))} is gone from this file — #2833 names deletion "
+        f"as one of the four ways not to fix a red node, and a node nobody collected "
+        f"is the quietest of them")
+    # Positive control: the walker sees a vault read and a quieting mark when they are
+    # there, or the absence below would be a blind spot rather than a finding.
+    control = next((fn for fn in tree.body
+                    if isinstance(fn, ast.FunctionDef)
+                    and fn.name == "test_the_corpus_shape_task_description_says_at_most_"
+                                  "one_row_per_day"), None)
+    assert control is not None, "the §#90 vault node this control needs is gone"
+    control_names = {n.id for n in ast.walk(control) if isinstance(n, ast.Name)}
+    control_names |= {n.attr for n in ast.walk(control) if isinstance(n, ast.Attribute)}
+    assert _OUTSIDE_THE_TREE & control_names, (
+        "the walker found no outside-the-tree name in a node that reads the live task "
+        "file, so the absence asserted below proves nothing")
+    assert "live_vault" in _decorator_names(control), (
+        "the control node lost its `live_vault` mark, so the decorator half of the "
+        "check below has stopped discriminating")
+
+    for name, (decorators, names) in sorted(found.items()):
+        quieted = _QUIETING_MARKS & decorators
+        assert not quieted, (
+            f"{name} carries {sorted(quieted)}: a node marked out of the gate's "
+            f"selection is a green promotion run that never read a cadence cell")
+        # Only the reading nodes are searched for paths. The clause-4 pair is the check
+        # rather than the checked: one parses this file's own syntax tree through
+        # `Path(__file__)`, which is tracked, and the other shells out a `--collect-only`
+        # — both would trip the verb list for work that stays inside the tree.
+        if name not in _CADENCE_READERS:
+            continue
+        reached = _OUTSIDE_THE_TREE & names
+        assert not reached, (
+            f"{name} names {sorted(reached)}, which reaches outside the tracked tree — "
+            f"clause 4 requires the pin to read the doc and the values typed above, "
+            f"because a vault-reading cadence node is a live_vault node in substance")
