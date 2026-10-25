@@ -5265,3 +5265,178 @@ def test_a_round_reporting_every_clause_met_still_cannot_close_a_pending_hand_ru
         "the exit code is the guard, not the presence of a block"
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"]
     assert [e["closed"] for e in ev] == [False, True], "the ledger row says it too"
+
+
+# ── #3289: an item whose hand-run receipt still fails is held at dispatch ────
+
+#: #3163's own shape: a stranded-pipeline carrier whose whole contract is a
+#: command an attended session must run over runtime data, naming the runtime
+#: path in its text as every carrier does.
+_PS5_SET = "stranded-pipeline PS-4 -> ~/lloyd-data/_pipeline/ps-tasks"
+_PS5_CMD = "test -e ~/lloyd-data/_pipeline/ps-tasks/PS-5.md"
+
+
+def _carrier(d: Path, item_id: int, *, receipt: str | None = "exit 1",
+             cmd: str | None = _PS5_CMD) -> Path:
+    """A confirmed `up_next` carrier, its `hand_run:` block as specified.
+
+    `receipt=None` leaves the key off (the #3017 ruling: an absent receipt is
+    pending, never a clean zero), and `cmd=None` writes the item with no block at
+    all, which is the #3027 case — a contract that merely names a runtime path
+    and still expects a diff.
+    """
+    path = d / f"{item_id}-ps-5-apply-carrier.md"
+    fm = {"status": "up_next", "priority": "low", "board": "lloyd",
+          "created": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+          "tags": ["backlog", "spawned-by-pipeline-steward"]}
+    if cmd is not None:
+        block = {"since": "2026-10-25T00:00:00Z", "set": _PS5_SET, "cmd": cmd,
+                 "schema": "a filed task with a mechanical check",
+                 "report": "~/lloyd-data/_pipeline/ps-tasks/PS-5-report.md"}
+        if receipt is not None:
+            block["receipt"] = receipt
+        fm["hand_run"] = block
+    path.write_text(f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n"
+                    "# PS-5 apply carrier\n\n"
+                    "Blocks #3021. Contract: re-run the stranded apply over "
+                    "`~/lloyd-data/_pipeline/ps-tasks`, verify the schema on disk, "
+                    "write the report, and rule `PS-5` into RULED.\n",
+                    encoding="utf-8")
+    _confirm(item_id, acceptance="- re-run the apply, verify the schema on disk, "
+                                 "write the report, rule PS-5 into RULED")
+    return path
+
+
+def test_a_carrier_whose_hand_run_receipt_fails_is_never_offered_to_a_round(isolated):
+    """Clauses 1 + 2: the receipt decides the offer, both directions.
+
+    #3027 is why this is a bug and not a nicety: it made runtime-data heads
+    readable through a round's home, and the moment an item's whole clause was
+    an unexecuted `hand_run:` write, dispatch started offering it. Three rounds
+    were spent on exactly that (#3163 twice, #3167 once), each ending in the
+    implementer's own "No diff can satisfy…" — an implement turn that runs the
+    hand-run command is not an attended session by definition, so the offer
+    could never be taken.
+
+    The assertion is on `ready_confirmed`'s PAIRS and on `select_confirmed`, not
+    on one of them: `select_confirmed` only re-orders this list and the board
+    steward's `steward_pick` is restricted to it, so `ready_confirmed` is the
+    single choke point — and the depth gate and `board_health` count the same
+    list, which is the other reason a fix belongs here and nowhere downstream.
+
+    The positive control is the same item with `receipt: exit 0` written as a
+    SECOND file, not by editing the first: the point is that the carrier is held
+    by its receipt alone, so an identical contract that has been run must be
+    offered, and nothing about the file's name or path may decide it.
+    """
+    held = _carrier(isolated, 3163)
+    done = _carrier(isolated, 3164, receipt="exit 0",
+                    cmd="test -e /etc/hostname")
+    assert held != done
+
+    ids = [item.id for item, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 3164 in ids, f"the carrier whose receipt passed was not offered: {ids}"
+    assert 3163 not in ids, (
+        "a carrier whose receipt exits 1 is still offered a round, which is the "
+        f"turn that cannot succeed: {ids}")
+
+    picked = B.select_confirmed(S.LEDGER_PATH)
+    assert picked is not None and picked[0].id == 3164, (
+        f"select_confirmed returned {None if picked is None else picked[0].id}")
+
+    # And the same file, receipt flipped in place: held again, immediately.
+    done.write_text(done.read_text(encoding="utf-8").replace("receipt: exit 0",
+                                                             "receipt: exit 1"),
+                    encoding="utf-8")
+    ids = [item.id for item, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 3164 not in ids, (
+        "editing only the `receipt:` line left the item offerable, so the skip "
+        f"keyed on something other than the exit code: {ids}")
+    assert B.select_confirmed(S.LEDGER_PATH) is None, (
+        "with both carriers held a round was still picked")
+
+
+def test_the_dispatch_hold_keys_on_the_receipt_and_never_on_the_path(isolated):
+    """Clause 3: #3027's property survives, and an unproven block is held.
+
+    Two half-clauses, both needed. A carrier's contract ALWAYS names a runtime
+    path — that is what makes it a carrier — so a skip that keyed on the path
+    would re-break #3027: an item that merely mentions `~/lloyd-data/...` and
+    still expects a diff must be offered, or the round that could fix it is
+    blocked by the item's prose rather than by its receipt.
+
+    The other half is the no-`receipt` block. #3017 ruled that an absent receipt
+    is pending, never a clean zero, and the two closers already refuse to close
+    over it; dispatch has to give the same answer or a block nobody has run yet
+    is offered a round and an unattended session ends up deciding whether to run
+    it. One predicate, three readers: this asserts the dispatch answer IS
+    `owed.hand_run_pending`'s answer, so the pair cannot drift apart into a
+    fourth opinion of what a failing receipt means.
+    """
+    _carrier(isolated, 3165, cmd=None)                  # names the path, no block
+    _carrier(isolated, 3166, receipt=None)              # cmd, receipt never run
+    _carrier(isolated, 3167, receipt="exit 1")          # the held one
+
+    ids = [item.id for item, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 3165 in ids, (
+        "an item naming ~/lloyd-data/... with no hand_run block was withheld, "
+        "which is #3027's readable-heads property undone by prose: " + str(ids))
+    assert 3166 not in ids, (
+        f"a block with no `receipt:` was offered: {ids}")
+    assert 3167 not in ids, f"a failing receipt was offered: {ids}"
+
+    for item_id, offered in ((3165, True), (3166, False), (3167, False)):
+        fm, _ = B._split_frontmatter(
+            (isolated / f"{item_id}-ps-5-apply-carrier.md").read_text(encoding="utf-8"))
+        pending, _why = O.hand_run_pending(fm)
+        assert bool(pending) is not offered, (
+            f"item {item_id}: dispatch said offered={offered} while the closers' "
+            f"own predicate says hand_run_pending={bool(pending)}")
+
+
+def test_being_held_at_dispatch_writes_nothing_to_the_item_or_the_ledger(isolated):
+    """Clause 4: a hold is an absence from a list, not an event.
+
+    `ready_confirmed` is not only the dispatcher: the triage-depth gate
+    (`app/autonomy.py`) and `board_health` count it on every board poll. A skip
+    that stamped the item — an `owed` entry, a tag, an activity line — would let
+    a health readout mutate the board hundreds of times a day and would make the
+    hold look like a ruling nobody made. So the item must be byte-unchanged
+    apart from what triage itself wrote, still `up_next`, and the ledger must
+    hold nothing new.
+
+    It must also stay VISIBLE: `owed.hand_runs()` is the readout an attended
+    session reads, and holding an item at dispatch while dropping it from that
+    list would turn a loud debt into a silent one — which is the failure #3017
+    was filed over. Held-by-receipt and parked-by-marker stay distinguishable
+    precisely because one appears there and the other does not.
+    """
+    path = _carrier(isolated, 3168)
+    before_text = path.read_text(encoding="utf-8")
+    before_events = len(S.read_events(path=S.LEDGER_PATH))
+
+    assert 3168 not in [i for i, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert B.select_confirmed(S.LEDGER_PATH) is None
+    # The same call a board poll makes, twice more: a health readout counting
+    # this list must not accumulate anything by reading it.
+    B.board_health(S.LEDGER_PATH)
+    B.ready_confirmed(S.LEDGER_PATH)
+
+    fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    assert fm.get("status") == "up_next", (
+        f"being held moved it out of the pool on its own: {fm.get('status')!r}")
+    assert "owed" not in fm, f"the hold minted an owed entry: {fm.get('owed')!r}"
+    assert fm.get("tags") == ["backlog", "spawned-by-pipeline-steward"], (
+        f"the hold retagged it: {fm.get('tags')!r}")
+    assert "## Activity" not in path.read_text(encoding="utf-8"), (
+        "the hold wrote the item an activity line, so a board-health poll would "
+        "leave a trail of them")
+    assert path.read_text(encoding="utf-8") == before_text, "the file changed at all"
+    assert len(S.read_events(path=S.LEDGER_PATH)) == before_events, (
+        "the dispatch pass appended ledger events for a held item")
+
+    listed = [r["item_id"] for r in O.hand_runs()]
+    assert 3168 in listed, (
+        f"the held carrier vanished from the hand_runs readout: {listed} — a "
+        "debt nobody is offered a round for and nobody can see is how #3017's "
+        "silent closure came back")

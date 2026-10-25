@@ -6862,9 +6862,11 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
 
     `select_confirmed` orders this; the triage depth gate and `board_health`
     count it. One definition, because a gate that counted raw `up_next` would
-    count grouped members, human-only items, items with no acceptance and
-    spent attempts — none of which a round will ever start.
+    count grouped members, human-only items, items with no acceptance, spent
+    attempts and unexecuted hand-run carriers — none of which a round will ever
+    start.
     """
+    from scripts.automod import owed as _O
     confirmed = confirmed_verdicts(ledger)
     if outcomes is None:
         outcomes = implement_outcomes(ledger)
@@ -6888,6 +6890,29 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
         if not acceptance_text(ev.get("acceptance")):
             continue
         if is_human_only(ev.get("acceptance")):
+            continue
+        # #3289: a carrier whose `hand_run:` receipt still fails is held HERE,
+        # because no diff can satisfy its contract — an implement turn that runs
+        # the command is not an attended session by definition, which is the
+        # standing executor rule, and three rounds were spent discovering it
+        # (#3163 twice, #3167 once, each ending "No diff can satisfy…"). This is
+        # the only place that can cut the cycle: the recurrence route is owed's
+        # `reopen`, whose hand-block hold exempts `work` and `reopen` by design,
+        # so a re-offered carrier comes straight back to `up_next`.
+        #
+        # One predicate, three readers: `owed.hand_run_pending` is what both
+        # closers refuse over (#3017 ruled an absent receipt pending, never a
+        # clean zero), so dispatch cannot offer what they would not close. It
+        # keys on the receipt and never on the item's path — an item that only
+        # NAMES runtime data is #3027's readable-heads case and is still offered
+        # — and it runs last of the four skips so the subprocess is paid only by
+        # a real carrier, not by every item on the board.
+        try:
+            _fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        _held_by, _receipt_why = _O.hand_run_pending(_fm)
+        if _held_by:
             continue
         ready.append((item, ev))
     return ready
