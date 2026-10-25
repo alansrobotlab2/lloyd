@@ -686,9 +686,17 @@ def index_no_room_error(path, filename: str | None, prospective: str) -> str | N
     caller could round down would be a way to pick which refusal this is.
 
     A file still holding a line's worth of room gets None and keeps
-    `index_file_refusal`'s text unchanged: at 20,192 B on disk — the live index today —
-    288 B are free and a 105 B line is admissible, so the add-a-line route is still the
-    right advice there and rewriting it would only cost a writer the sentence it needs.
+    `index_file_refusal`'s text unchanged: with 288 B free — `lloyd/MEMORY.md` at
+    20,192 B on 2026-10-16, the last day this branch described the live index — a 105 B
+    line is admissible, so the add-a-line route is still the right advice there and
+    rewriting it would only cost a writer the sentence it needs. Both figures are dated
+    now, because an undated "today" is what rotted: the 2026-10-25 nightly wrote that
+    file to 20,465 B and left 15 B free, so this branch stopped being the live answer
+    while the sentence above it still claimed to be, and that is what made the
+    live-vault node of `tests/test_memory_index_cap.py` red (#3298). The boundary is
+    `tight_limit - TOPIC_LINE_MIN_BYTES` = 20,456 B on disk, and the index crosses it
+    every time the nightly writes a fat line or dream #47 trims a thin one — which is
+    why no number here is a fact about today, and why the test reads the file.
     """
     if index_tight_limit_error(filename, prospective) is None:
         return None

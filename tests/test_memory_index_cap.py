@@ -766,6 +766,19 @@ def test_the_live_index_refuses_growth_and_the_live_user_md_does_not():
     next author for the previous writer's change. It re-measures the numbers rather
     than quoting them, so it stays true as the files move — and it skips, rather
     than passes, on the leg that has stopped meaning anything.
+
+    The route half of the message re-measures too, since #3298. It used to demand the
+    generic `<slug>` route unconditionally, which is true only while the index has room
+    for a line; the same file asserts at :1188 that those spellings must be ABSENT from
+    a refusal at room 20, so one of the two had to be wrong and it was this one. The
+    contradiction was latent until 2026-10-25, when the nightly wrote the live index to
+    20,465 B — 15 B of room, under the 24-byte floor — and it has been red ever since,
+    which is why this leg is not simply pinned to today's state: a dream #47 trim under
+    20,456 B turns the old leg green again and the two assertions would contradict each
+    other unseen until the next fat nightly. The leg now asks the live file how much room
+    it has and grades whichever refusal that room selects, through the function a fixture
+    test drives in both states — so the branch is covered by the gate-visible suite and
+    this node reports which side the vault is on.
     """
     mem = Path.home() / "obsidian" / "lloyd"
     if not (mem / "MEMORY.md").is_file():
@@ -780,11 +793,15 @@ def test_the_live_index_refuses_growth_and_the_live_user_md_does_not():
         probe += unit
     size = len(probe.encode())
     assert size > limit and not ceiling.overlong_index_lines(probe), "probe setup"
+    # The room the guard is about to read, read the way the guard reads it: bytes on
+    # disk, not the length of the text `read_text` handed back, which loses any CRLF
+    # the file has and would quietly move this across the 24-byte floor.
+    room = limit - len((mem / "MEMORY.md").read_bytes())
     msg = ceiling.memory_write_error(mem / "MEMORY.md", probe)
     assert msg is not None, f"a {size:,} B MEMORY.md was allowed"
     assert f"{limit:,}" in msg and str(limit) in msg.replace(",", ""), msg
     assert f"{size:,}" in msg, msg
-    assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, msg
+    _assert_index_route_matches_room(msg, room, "live lloyd/MEMORY.md")
     # The file as it stands, written back unchanged, is inside both bounds or the
     # byte rule is the only thing that can refuse it — never the line rule.
     same = ceiling.memory_write_error(mem / "MEMORY.md", text)
@@ -1092,6 +1109,40 @@ def _grow_by(text: str, extra: int) -> str:
     return text + "#" * (extra - 1) + "\n"
 
 
+def _assert_index_route_matches_room(msg: str, room: int, where: str) -> None:
+    """What route text a refusal must carry, decided by the index's room. One place.
+
+    This file held two assertions that contradict each other until #3298: the live node
+    demanded `lloyd/memory/<slug>.md` and `topics/<slug>` of a live `lloyd/MEMORY.md`
+    at 20,465 B against its 20,480 B tight limit — 15 B of room, nine under the 24-byte
+    `TOPIC_LINE_MIN_BYTES` — while `test_a_no_room_index_refusal_orders_no_index_line`
+    (:1188) demanded those same two strings be ABSENT from a refusal at room 20 (#2838,
+    `bb99f4e0`). The message is right in both cases and the older assertion was wrong
+    about which refusal the live state selects: below the floor `index_no_room_error`
+    answers, and stopping the writer being told to "give the index ONE typed line …
+    ending `→ topics/<slug>`" is the entire reason that branch exists — an index line
+    costs 24 B and the guard has just measured fewer than that. The placeholders are
+    advice again only in `index_tight_limit_error`, the roomy branch that can honour
+    them. Room picks the text; `where` says which room this call read, because the same
+    assert off the live vault and off a fixture is a different claim about the world.
+    """
+    if room >= ceiling.TOPIC_LINE_MIN_BYTES:
+        assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, (
+            f"{where}: with {room} B free — at least the "
+            f"{ceiling.TOPIC_LINE_MIN_BYTES} B the shortest legal index line costs — the "
+            "refusal must carry the generic add-a-line route, since that is the route "
+            f"an agent can actually follow there: {msg}")
+    else:
+        assert "consolidation owed" in msg, (
+            f"{where}: with {room} B free the refusal must send the writer to "
+            f"dream-consolidation (#47), the only action that reopens room: {msg}")
+        for placeholder in ("lloyd/memory/<slug>.md", "topics/<slug>"):
+            assert placeholder not in msg, (
+                f"{where}: {placeholder!r} appears in a refusal whose index has {room} B "
+                "free — that is the instruction #2838 removed, ordering an edit the same "
+                f"guard then refuses: {msg}")
+
+
 def _chain_before_2838(path, prospective: str):
     """`memory_write_error` exactly as it read before #2838, for verdict parity.
 
@@ -1246,6 +1297,60 @@ def test_an_index_with_a_lines_worth_of_room_keeps_the_add_a_line_route(memories
     assert not [c for c in entry_consts if len(c) > 40], (
         "a refusal message appeared in the entry point instead of in the callee it delegates "
         f"to: {[c for c in entry_consts if len(c) > 40]}")
+
+
+def test_the_route_a_refusal_carries_is_decided_by_the_room_the_index_has(memories_root):
+    """#3298 clause 2: both sides of the route leg, graded with no vault read.
+
+    `_assert_index_route_matches_room` is what the live node now reads, and the gate
+    deselects `live_vault` — so a helper reached only from that node would have each of
+    its branches checked once a night, by whichever branch the nightly job happens to
+    leave the index in. This drives both from fixtures instead: room 20, the no-room
+    state the live index has been in since the 2026-10-25 nightly wrote it to 20,465 B of
+    its 20,480 B limit, and room `TOPIC_LINE_MIN_BYTES` exactly, the floor where a
+    24-byte line lands the file ON the limit and adding a line is still honest advice.
+
+    Two things keep the driver honest rather than decorative. The room each message is
+    graded against is re-read from the file the fixture wrote, not taken from the loop
+    argument, so a fixture that failed to land the intended size cannot pass on the
+    branch its argument names. And the final block compares the two refusals against
+    each other: the placeholders must be absent from the no-room one and present in the
+    floor one, which is the only assertion here that fails if the guard ever learns to
+    answer both rooms with a single text — a case in which the helper would otherwise
+    grade one message twice and call it two branches.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    topic = root / "memory" / "a-topic.md"
+    topic.parent.mkdir(exist_ok=True)
+    topic.write_text("# A topic\n\n" + "detail. " * 2000, encoding="utf-8")   # ~16 KB of 32,768
+    two_lines = ("- [project] an entry with something worth recording here → topics/a-topic\n"
+                 "- [project] and a second entry the same write must also carry → topics/x\n")
+
+    msgs = {}
+    for room, label in ((20, "below the floor"),
+                        (ceiling.TOPIC_LINE_MIN_BYTES, "at the floor")):
+        index = _index_linking("topics/a-topic", room=room, limit=limit)
+        (root / "MEMORY.md").write_text(index, encoding="utf-8")
+        prospective = index + two_lines
+        assert len(prospective.encode("utf-8")) > limit, "the write must be a growing one"
+
+        msg = ceiling.memory_write_error(root / "MEMORY.md", prospective)
+        assert msg is not None, f"{label}: the write must stay refused"
+        assert f"over the {limit:,}-byte tight limit" in msg, msg
+
+        room_read = limit - len((root / "MEMORY.md").read_bytes())
+        assert room_read == room, (
+            f"{label}: the guard saw {room_read} B of room, not the {room} the fixture "
+            "asked for, so it did not produce the refusal this case is about")
+        _assert_index_route_matches_room(msg, room_read, f"fixture {label}")
+        msgs[room] = msg
+
+    for placeholder in ("lloyd/memory/<slug>.md", "topics/<slug>"):
+        assert placeholder not in msgs[20] and placeholder in msgs[ceiling.TOPIC_LINE_MIN_BYTES], (
+            f"{placeholder!r} is not the pair's discriminator any more — both branches "
+            f"below and at the floor read alike, so the helper above is grading one "
+            f"message twice: {msgs[20]!r}")
 
 
 def test_the_no_room_branch_moves_no_verdict(memories_root):
