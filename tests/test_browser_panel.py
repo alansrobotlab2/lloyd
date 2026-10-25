@@ -625,10 +625,16 @@ class _LandingPage:
 
     Named apart from the module's other `_FakePage`, which is a fixed-content
     stub for the frame test and has no settable url.
+
+    `frames` is what `_page_frames` reads, declared empty because the frame
+    tests fill it with their own documents. `goto` stays exactly the recording
+    no-op the landing tests were written against — a page that lands somewhere
+    else is its own class below, not a branch in this one.
     """
     def __init__(self, url):
         self.url = url
         self.goto_calls = []
+        self.frames = []
     async def goto(self, url, **kw):
         self.goto_calls.append(url)
         self.url = url
@@ -781,6 +787,333 @@ async def test_no_state_is_posted_when_the_host_check_cannot_answer(monkeypatch)
 
     assert sent == [], f"a frame reached the state route for an unchecked host: {sent}"
     assert page.shots == 0
+
+
+# ── #3294: a landing or frame check that cannot answer must not read as allowed ──
+#
+# `_host_block_reason_async` answers None for "this host is fine", so the two
+# swallows this section retires made a guard *bug* indistinguishable from a
+# clean host. Both siblings had already decided otherwise: `_frame_sections`
+# prints "[not read: …]" for an unchecked frame and `_capture_state` (#3043)
+# drops the whole frame and logs. These nodes pin the same ruling on the two
+# readers that return content — `browser_snapshot` and `browser_evaluate` — and
+# on the wording `browser_navigate` puts on it.
+#
+# Every fault here is the predicate exploding, not the resolver being down:
+# `_prewarm_host` swallows its own failure and `egress._resolve_addrs` returns
+# () on a lookup error, so a DNS outage never reaches either check. A test aimed
+# at "resolver down" would pass without proving anything.
+
+
+class _RedirectingLandingPage(_LandingPage):
+    """A page whose navigation ends on a different document than was asked for.
+
+    What a server-side 3xx looks like from here: `goto` returns, and the url the
+    landing check then reads is the one that actually landed. Its own class
+    because `_LandingPage.goto` is the recording no-op a dozen landed tests are
+    written against; a branch in that method would quietly redefine what `goto`
+    means for all of them.
+    """
+
+    def __init__(self, asked_for, landed_on):
+        super().__init__(asked_for)
+        self.landed_on = landed_on
+
+    async def goto(self, url, **kw):
+        self.goto_calls.append(url)
+        self.url = self.landed_on
+        return type("R", (), {"status": 200})()
+
+
+class _HostedFrame:
+    """A frame with a host of its own and content worth refusing.
+
+    Counts the scripts it was asked to run, because the only way to see the
+    fail-open is that the frame was evaluated anyway: `{ok: true}` and a
+    refusal both arrive as JSON from here.
+    """
+
+    def __init__(self, url, content="SECRET-FRAME-CONTENT"):
+        self.url = url
+        self.content = content
+        self.evaluated = []
+
+    async def evaluate(self, script):
+        self.evaluated.append(script)
+        return self.content
+
+
+class _DetachedUrlPage:
+    """A page that cannot answer for its own URL.
+
+    The other fault class #3043's comment names: `page.url` itself raising when
+    the frame tree detaches under a tool call. The guard is healthy here, which
+    is what makes this the case a URL-naming message cannot satisfy — and why
+    the refuse-anyway rule cannot be conditioned on the predicate being the
+    raiser.
+    """
+
+    def __init__(self, url="http://192.168.0.9/cam"):
+        self.goto_calls = []
+        self._url = url
+
+    @property
+    def url(self):
+        raise OSError("frame tree detached")
+
+    async def goto(self, url, **kw):
+        self.goto_calls.append(url)
+        return type("R", (), {"status": 200})()
+
+    async def title(self):
+        return "cam"
+
+
+_REAL_HOST_CHECK = browser_module._host_block_reason_async
+"""The guard as the module shipped it, bound before any test patches it away.
+
+Bound at import because a helper that captured it at call time would, in a test
+that already patched the guard once, capture the fake — and then every url would
+raise, so the second fault in that test would come from the check that ran first
+instead of the one the test is about.
+"""
+
+
+def _host_check_that_raises_for(bad_url_prefix):
+    """The guard answers for most hosts and explodes for one.
+
+    Needed by the frame lane and by `navigate`: a predicate that exploded for the
+    page too would be refused by the landing check before the frame or the
+    document was ever addressed, and the check under test would go unexecuted.
+    Every other url goes to `_REAL_HOST_CHECK` — the sync `_host_block_reason` is
+    not a stand-in for the async one, it answers loopback differently, so
+    delegating to it would block a url the real guard lets through and the test
+    would fail on the wrong door.
+    """
+    async def check(url):
+        if url.startswith(bad_url_prefix):
+            raise OSError("resolver exploded")
+        return await _REAL_HOST_CHECK(url)
+    return check
+
+
+async def test_a_guard_fault_refuses_instead_of_reading_as_allowed(monkeypatch):
+    """A faulting landing check must cost the read, not license it.
+
+    `_enforce_landing` returning None means "checked, and clean", so the swallow
+    at its top handed `browser_snapshot` a private page it had just failed to
+    check. The fault is pinned here as a value, not as a log line, because the
+    callers decide on the return alone.
+    """
+    page = _LandingPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises)
+    recorded = []
+    monkeypatch.setattr(browser_module, "_record_block",
+                        lambda url, reason: recorded.append((url, reason)))
+
+    reason = await browser_module._enforce_landing(page)
+
+    assert isinstance(reason, str) and reason, \
+        "a guard that could not answer was read as a clean host"
+    assert browser_module._is_guard_fault(reason), reason
+    # Distinguishable from a real refusal, which is the whole point of a second
+    # message: "this host is private" and "nobody knows" are different advice.
+    assert "Blocked —" not in reason, reason
+    assert "OSError" in reason and "resolver exploded" in reason, reason
+    assert "http://192.168.0.9/cam" in reason, reason
+
+    # Neither of the two things a *block* does. Blanking on a fault is a second
+    # guess about where the page is, and `_record_block` would let a later
+    # `browser_navigate` report a redirect to a private host that was never
+    # observed — `_block_since` reads that record verbatim.
+    assert page.goto_calls == [], "a fault navigated the page it could not check"
+    assert page.url == "http://192.168.0.9/cam"
+    assert recorded == [], f"a fault recorded a block: {recorded}"
+
+
+async def test_a_guard_fault_costs_snapshot_and_evaluate_an_error(monkeypatch):
+    """The consequence, at the two tools that put content in context."""
+    page = _LandingPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    snap = json.loads(await browser_module._browser_snapshot())
+    assert browser_module._is_guard_fault(snap.get("error", "")), snap
+    assert "snapshot" not in snap and "refs" not in snap, \
+        "the snapshot was built from a page nobody checked"
+
+    page2 = _LandingPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page2))
+    ev = json.loads(await browser_module._browser_evaluate("document.body.innerText"))
+    assert browser_module._is_guard_fault(ev.get("error", "")), ev
+    assert "result" not in ev and "ok" not in ev, \
+        "evaluate ran a script on a page nobody checked"
+
+
+async def test_navigate_names_a_guard_fault_without_claiming_a_redirect(monkeypatch):
+    """`redirected from` is a claim about an event a fault never observed.
+
+    `browser_navigate` appends that suffix to anything `_enforce_landing`
+    refuses, and for a real block the suffix is earned — the page really did end
+    up somewhere else. On a fault nothing was learned about where the page is, so
+    the suffix would send the agent looking for a redirect that was never
+    fetched, away from the actual problem: the guard stopped answering.
+
+    Both raisers are run, because they produce different messages and the suffix
+    rule must hold for each: the predicate exploding for a page that can name its
+    url (the class triage named — a raise inside `egress._is_private_host`), and
+    a page that cannot answer for its own url at all, which is the frame-tree
+    teardown case and the one that leaves no URL to print.
+    """
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises_for("http://10.1.2.3"))
+
+    # Asked for a host the guard answers for, and the document that lands is the
+    # one whose check explodes: the only way to reach the landing fault from
+    # `navigate` with a url still worth printing.
+    named = _RedirectingLandingPage("http://127.0.0.1:9123/quiet",
+                                    "http://10.1.2.3/secrets")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(named))
+    out = json.loads(await browser_module._browser_navigate(
+        "http://127.0.0.1:9123/quiet"))
+    err = out.get("error", "")
+    assert browser_module._is_guard_fault(err), out
+    assert "OSError" in err and "resolver exploded" in err, err
+    # The URL the agent needs: the page it was left on, not the one it asked for.
+    assert "http://10.1.2.3/secrets" in err, err
+    assert "redirected from" not in err, \
+        f"a fault was reported as a redirect: {err}"
+
+    detached = _DetachedUrlPage()
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(detached))
+    out2 = json.loads(await browser_module._browser_navigate(
+        "http://127.0.0.1:9123/quiet"))
+    err2 = out2.get("error", "")
+    assert browser_module._is_guard_fault(err2), out2
+    assert "frame tree detached" in err2, err2
+    assert "redirected from" not in err2, \
+        f"a fault was reported as a redirect: {err2}"
+
+
+async def test_a_real_private_host_landing_is_unchanged_by_the_fault_rule():
+    """The block this file already pinned keeps its exact words and its blank.
+
+    Clause-level insurance against the fault string being *added* to the block
+    path rather than replacing a swallow: same reason string, same
+    `about:blank`, and still not a fault.
+    """
+    page = _LandingPage("http://10.1.2.3/secrets")
+    reason = await browser_module._enforce_landing(page)
+    assert reason == 'Blocked — private/internal host "10.1.2.3"', reason
+    assert not browser_module._is_guard_fault(reason)
+    assert page.goto_calls == ["about:blank"]
+    assert page.url == "about:blank"
+
+
+async def test_navigate_keeps_the_redirect_suffix_for_a_real_private_landing(
+        monkeypatch):
+    """The other half of the suffix rule: a real block still gets it."""
+    # Whatever the caller asked for, the document that landed is on the LAN.
+    page = _RedirectingLandingPage("http://127.0.0.1:9123/quiet",
+                                   "http://10.1.2.3/secrets")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_navigate(
+        "http://127.0.0.1:9123/quiet"))
+    err = out.get("error", "")
+    assert 'Blocked — private/internal host "10.1.2.3"' in err, err
+    assert "(redirected from http://127.0.0.1:9123/quiet)" in err, err
+
+
+async def test_a_frame_with_a_faulting_host_check_is_not_evaluated(monkeypatch):
+    """The page passed the landing guard; the frame has not necessarily.
+
+    Same rule one level down: `blocked = None` on an exception was the value a
+    clean host produced, so a guard bug evaluated the script inside a frame on a
+    link-local address — the metadata-service host, `169.254.169.254`'s family —
+    and returned its content as `{ok: true}`.
+    """
+    frame = _HostedFrame("http://169.254.9.9/admin")
+    page = _LandingPage("http://127.0.0.1:9123/outer")
+    page.frames = [_HostedFrame("http://127.0.0.1:9123/outer", "MAIN"), frame]
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises_for("http://169.254.9.9"))
+
+    out = json.loads(await browser_module._browser_evaluate(
+        "document.body.innerText", frame_index=1))
+
+    assert browser_module._is_guard_fault(out.get("error", "")), out
+    assert "result" not in out and "SECRET-FRAME-CONTENT" not in json.dumps(out), out
+    assert frame.evaluated == [], "the frame ran a script nobody was allowed to run"
+
+
+async def test_a_frame_with_no_host_of_its_own_is_still_evaluated(monkeypatch):
+    """The control that keeps the fix from becoming a frame-blocker.
+
+    `about:blank` and `''` are the urls a child frame the page itself created
+    carries — a sandboxed iframe, the blank tab mid-navigation. The predicate
+    returns None for them; it does not raise. If those had to be refused too,
+    `browser_evaluate(frame_index=…)` would stop working on the frames agents
+    use it for, and the review of a fault would have to read a refusal.
+    """
+    blank = _HostedFrame("about:blank", "blank-ran")
+    empty = _HostedFrame("", "empty-ran")
+    page = _LandingPage("http://127.0.0.1:9123/outer")
+    page.frames = [_HostedFrame("http://127.0.0.1:9123/outer", "MAIN"), blank, empty]
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises_for("http://169.254.9.9"))
+
+    out_blank = json.loads(await browser_module._browser_evaluate("1+1", frame_index=1))
+    out_empty = json.loads(await browser_module._browser_evaluate("1+1", frame_index=2))
+
+    assert out_blank.get("result") == "blank-ran", out_blank
+    assert out_empty.get("result") == "empty-ran", out_empty
+    assert blank.evaluated == ["1+1"] and empty.evaluated == ["1+1"]
+
+
+async def test_each_guard_fault_logs_one_warning_naming_the_exception_type(
+        monkeypatch, caplog):
+    """Both faults are visible, in the shape the file already uses.
+
+    Without the record, a page that stopped being readable reads as a dead site.
+    Two things are pinned rather than the formatted string: exactly one warning
+    per fault (a fault logged twice, or from both the check and its caller, is
+    noise that hides the next one), and `_capture_state`'s argument shape — the
+    URL first, and the *type* qualified message second, so a fault built with no
+    message still names something.
+    """
+    page = _LandingPage("http://192.168.0.9/cam")
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    with caplog.at_level("WARNING", logger="lloyd-browser"):
+        await browser_module._browser_snapshot()
+    landing = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(landing) == 1, f"expected one landing-fault warning: {landing}"
+    assert landing[0].getMessage().startswith(
+        "browser: landing guard failed closed on "), landing[0].getMessage()
+    assert landing[0].args[0] == "http://192.168.0.9/cam", landing[0].args
+    assert landing[0].args[1] == "OSError: resolver exploded", landing[0].args
+
+    caplog.clear()
+    frame = _HostedFrame("http://169.254.9.9/admin")
+    page2 = _LandingPage("http://127.0.0.1:9123/outer")
+    page2.frames = [_HostedFrame("http://127.0.0.1:9123/outer", "MAIN"), frame]
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page2))
+    monkeypatch.setattr(browser_module, "_host_block_reason_async",
+                        _host_check_that_raises_for("http://169.254.9.9"))
+    with caplog.at_level("WARNING", logger="lloyd-browser"):
+        await browser_module._browser_evaluate("1+1", frame_index=1)
+    framed = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(framed) == 1, f"expected one frame-fault warning: {framed}"
+    assert framed[0].getMessage().startswith(
+        "browser: frame guard failed closed on "), framed[0].getMessage()
+    assert framed[0].args[0] == "http://169.254.9.9/admin", framed[0].args
+    assert framed[0].args[1] == "OSError: resolver exploded", framed[0].args
 
 
 def test_a_blank_page_is_not_a_private_host():

@@ -442,6 +442,24 @@ while for a screenshot this check is the entry point — the same call
 `_frame_sections` makes for a frame of this same push, which also refuses to
 read a host it could not check. `browser.block_private_hosts: false` or
 `LLOYD_BROWSER_BLOCK_PRIVATE=0` turns it off, the env winning.
+
+The two checks that hand content to the model **refuse the same way** (#3294).
+`None` from the predicate means "checked, and clean", so the exception these two
+used to swallow made a guard bug — or a page object that could not answer for its
+own URL — read as permission, and `browser_snapshot` served the private page it
+had just failed to check. A fault now returns a message beginning `Guard fault —`
+naming the check, the URL, and the exception's type and message, and each fault
+logs exactly one warning in the shape above with `landing` or `frame` where that
+one says `state`. Two things follow from a fault being a *different answer*
+rather than the same one. A fault neither blanks the page nor records a block:
+the check never learned where the page is, and `_block_since` reports a recorded
+block as a redirect that happened, so navigating on a fault would be a second
+guess and recording one would be a claim nobody observed. And `browser_navigate`
+drops its redirect suffix for a fault while a genuine private-host landing keeps
+its reason string, its blank and that suffix — the suffix is a claim about an
+event only a real block observed. An empty or `about:blank` frame url is not a
+fault: the predicate answers None for those, so a child frame the page created is
+still read.
 `tests/test_browser_panel.py` asserts the entry points *invoke* it, which is
 the property that was missing, and since #3043 two more nodes pin what the
 frame path does when the check cannot answer — no screenshot taken, no POST

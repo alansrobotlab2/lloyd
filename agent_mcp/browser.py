@@ -294,6 +294,35 @@ async def _guard_route(route) -> None:
         pass
 
 
+# The word both fail-closed checks put at the front of their refusal. A caller
+# can test it with `_is_guard_fault` instead of pattern-matching prose, which is
+# what lets `browser_navigate` keep its "(redirected from …)" suffix for a real
+# block and drop it for a fault.
+_GUARD_FAULT = "Guard fault —"
+
+
+def _guard_fault(which: str, url: str, exc: BaseException) -> str:
+    """The refusal of a host check that raised instead of answering.
+
+    `which` names the check (`landing`, `frame`), so the agent can tell whether
+    the page or one document inside it is the thing nobody vouched for. Both the
+    exception's type *and* its message are spelled out because `str(exc)` is
+    routinely empty — the detached frame tree raises `OSError()`, whose message
+    alone renders as `(OSError: )` and leaves an agent nothing to act on. The
+    message is deliberately not a `Blocked —` sentence: those two words mean
+    "this host is private, and the guard is working", and merging the two would
+    make a broken guard indistinguishable from a doing-its-job one.
+    """
+    return (f"{_GUARD_FAULT} the {which} host check could not answer for "
+            f"{url[:200]} ({type(exc).__name__}: {str(exc)[:200]}) — "
+            f"refusing to read the page")
+
+
+def _is_guard_fault(reason: str) -> bool:
+    """Is this answer from `_enforce_landing` a fault rather than a block?"""
+    return reason.startswith(_GUARD_FAULT)
+
+
 async def _enforce_landing(page) -> str | None:
     """Where the page actually ended up, whatever route it took there.
 
@@ -307,11 +336,26 @@ async def _enforce_landing(page) -> str | None:
     Blanks the page on a hit. Leaving it parked on the LAN device would mean
     the very next `browser_snapshot` reads it, and the state mirror would push
     a screenshot of it to Mission Control.
+
+    **Refuses when it cannot answer.** `None` means the check ran and said the
+    host is fine, so a swallowed exception used to be read as exactly that — and
+    `browser_snapshot` and `browser_evaluate` then served the page they had just
+    failed to check. A fault now returns a `_GUARD_FAULT` string, so the three
+    callers — which refuse on any non-None answer — return an error instead of
+    content. It neither blanks nor records: the check never learned where the
+    page is, so navigating it somewhere on the strength of that guess is a second
+    guess, and recording it would report a redirect to a private host that was
+    never observed. `_guard_route` stays the only deliberate fail-open in this
+    file, because it sits *behind* these checks; this one is the entry point.
     """
+    url = "<unknown>"
     try:
-        reason = await _host_block_reason_async(page.url)
-    except Exception:
-        return None
+        url = page.url
+        reason = await _host_block_reason_async(url)
+    except Exception as exc:
+        logger.warning("browser: landing guard failed closed on %s: %s",
+                       url[:120], f"{type(exc).__name__}: {exc}")
+        return _guard_fault("landing", url, exc)
     if not reason:
         return None
     _record_block(page.url, reason)
@@ -714,6 +758,13 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     try:
         landed = await _enforce_landing(page)
         if landed:
+            # The suffix is a claim about what happened, so it goes only with the
+            # answer that earned it. A real block means the page ended up on a
+            # private host, which does mean it was redirected; a fault means the
+            # check could not tell us anything, and "(redirected from …)" would
+            # send the agent hunting a redirect that was never observed.
+            if _is_guard_fault(landed):
+                return json.dumps({"error": landed})
             return json.dumps({"error": f"{landed} (redirected from {url[:100]})"})
         # `resp` is None when Playwright hands back no response handle — a
         # same-document navigation among them — so the status there is
@@ -812,10 +863,10 @@ async def _frame_sections(page, ref_map: dict, first_ref_number: int = 0) -> str
         # A frame is a document of its own and can name a host the page-level
         # guard refused. Same rule at the same place: content from a private
         # host stops here rather than entering the model's context.
-        # Fail closed, the opposite of the page-level read's habit:
-        # `_enforce_landing` can fall back to the URL it was handed when a redirect
-        # resolution misbehaves, and it has one. A frame has no such fallback — the
-        # frame *is* the document — so a host check that could not finish is a
+        # Fail closed, the habit the page-level read has kept since #3294:
+        # `_enforce_landing` and the per-frame check in `_browser_evaluate` refuse
+        # on the same fault. A frame has nothing else to ask — the frame *is* the
+        # document — so a host check that could not finish is a
         # reason not to read, not a reason to hope.
         try:
             blocked = await _host_block_reason_async(url)
@@ -1184,10 +1235,21 @@ async def _browser_evaluate(script: str, frame_index: int | None = None) -> str:
             frame = _frame_at(page, frame_index)
             # The frame is a document with a host of its own: the page passed the
             # landing guard, the frame has not necessarily.
+            # Same rule as the landing check: an exception here used to leave
+            # `blocked = None`, which is the value a *clean* host produces, so a
+            # guard bug handed `target.evaluate` a frame nobody had checked —
+            # and `_frame_sections`, one function over, was already refusing an
+            # unchecked frame. An `about:blank` or empty url is not this case:
+            # the predicate answers None for those, so a child frame the browser
+            # created keeps working.
+            url = "<unknown>"
             try:
-                blocked = await _host_block_reason_async(frame.url or "")
-            except Exception:
-                blocked = None
+                url = frame.url or ""
+                blocked = await _host_block_reason_async(url)
+            except Exception as exc:
+                logger.warning("browser: frame guard failed closed on %s: %s",
+                               url[:120], f"{type(exc).__name__}: {exc}")
+                return json.dumps({"error": _guard_fault("frame", url, exc)})
             if blocked:
                 return json.dumps({"error": blocked})
             target = frame
