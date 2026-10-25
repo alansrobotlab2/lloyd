@@ -17,8 +17,13 @@ a 30-day replay; this box's `workers.db` has never held 30 days (earliest
 30-day label over an 18-day store would report a coverage the data does not have,
 which is the same class of error `app/routers/workers.py:174` already documents
 for the dashboard's per-source stats. So the header says what was held and what
-was asked, in that order, and exits 3 when held falls short of requested — a loud
-note, not a failure: a short window is a normal state of a young store.
+was asked, in that order, and the shortfall is loud in the table rather than in the
+exit code: a short window is a normal state of a young store, so this command exits 0
+on it, and a non-zero code here means the replay could not measure at all (1 = no
+attributable run, 2 = no store; see the comment above that `return`). #3280's clause 2
+asked a sibling command to fail loudly on a short window, copying a promise this
+sentence used to make and this code never kept. A false exit code is not cosmetic: the
+next reader writes a gate around the number a docstring promised.
 
 Tokens, not dollars: `cost_usd` is 0.0 on every usage row, so a dollar P90 here
 would be a column of zeros dressed up as a cost. See `app/cost_outlier.py`.

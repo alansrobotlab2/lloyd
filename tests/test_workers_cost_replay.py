@@ -674,9 +674,12 @@ def test_the_compaction_rule_needs_a_record_that_actually_freed_something():
 
     8,393 of the live usage rows carry a record and 1,145 of those freed anything
     (measured 2026-10-15), so arming this rule on a record merely being present
-    would light it on 86% of runs — ahead of `prefix_cache`, whose <50%-cached
-    threshold is the one that actually discriminates, so the record would name the
-    wrong fix on most of the runs it wrote.
+    would light it on 86% of runs — and `compaction` sits ABOVE `prefix_cache` in the
+    precedence order, so it would name the wrong fix before any cache sentence could be
+    reached. (This sentence used to add that `prefix_cache`'s `<50%-cached` threshold
+    "is the one that actually discriminates". It did not: #3280 measured the shipped
+    rule labelling 6,207 of 6,207 window sessions, because per-session cache_pct tops
+    out at 48.8 on this box while the constant was 50.0.)
 
     The quiet rows are not empty records: each says a pass RAN (`ran: true`, 21
     things microcompacted) and freed 0, which is the case that reads as evidence
@@ -762,3 +765,409 @@ def test_a_freeing_blob_beside_the_int_seeds_still_loses_to_the_turn_cap():
                     _usage_row(_relief_only_blob(43_102))])
     assert v["checks"]["turn_cap"] and v["checks"]["compaction"], v["checks"]
     assert v["candidate"]["rule"] == "turn_cap", v["candidate"]
+
+
+# ---------------------------------------------------------------------------
+# #3280 — the two-week report, and the one rule its own false-positive measure
+# indicts.
+#
+# The fixture below is deliberately the live system's shape, because every number
+# in these tests is a number the item quotes and the review can re-check:
+#   * 5 `queue` rows with `source='cost-investigate'`, one of them quarantined
+#     (queue id 8980 on the live box) with THREE failed run rows -> 7 `runs` rows
+#     for 5 fires. A report that counted run rows would print 7 fires, which is
+#     the error clause 2 exists to prevent;
+#   * the 7 durations are the live ones (3.236275 + 0.246005 + 0.063151 + 1.559609
+#     + 0.271115 + 5.103229 + 1.865907 = 12.345291 s), so the gpu-minutes the row
+#     prints is the same 0.21 the item measured on the live stores;
+#   * four window sessions with per-session cache_pct 20.0 / 30.0 / 40.0 / 45.0 —
+#     all below the retired constant of 50.0, which is the whole defect in
+#     miniature: at that constant every session in the fixture is `prefix_cache`,
+#     and at the window's own P25 (30.0) one of four is.
+# ---------------------------------------------------------------------------
+
+REPORT = ROOT / "scripts" / "maintenance" / "cost_outlier_report.py"
+
+#: The live quarantined fire, verbatim from queue id 8980's payload and its error.
+QUARANTINED_RUN = "run_autotriage_20261013_032311_743cee"
+QUARANTINE_ERROR = ("ValueError: invalid literal for int() with base 10: "
+                    '\'{"mechanisms": [], "turn_start": {"tokens_removed": 41683}}\'')
+
+#: (cache_read, compaction blob) per window session. cache_pct comes out at
+#: 20.0, 30.0, 40.0, 45.0 against a prompt of 10,000 — cache_read/(prompt+cache_read).
+#: `sess-bb` is the one session a real rule indicts: its `compaction` value is the
+#: live JSON record (not an integer, which `_freed_tokens` reads as 0 by design), so
+#: the shipped `analyse()` lights `compaction` for it and for nothing else.
+WINDOW_SESSIONS = [("sess-aa", 2_500, None),
+                   ("sess-bb", 4_286, _turn_start_blob(4_000)),
+                   ("sess-cc", 6_667, None), ("sess-dd", 8_182, None)]
+
+#: (subject run id, subject source, tokens, p90, cache_pct_p25, summary, duration)
+#: for the four arms that wrote a record. None in the cut-off column means the
+#: payload predates #3280 — which is what every live payload does.
+COMPLETED_FIRES = [
+    ("run_autotriage_20261016_062730_a71873", "autotriage", 197_903, 124_030, None,
+     "prefix_cache", 1.559609),
+    ("run_scheduled-task_20261017_013130_628936", "scheduled-task", 286_992, 182_239,
+     None, "compaction", 0.271115),
+    ("run_owed-check_20261019_111002_65b2ba", "owed-check", 208_326, 124_797, None,
+     "prefix_cache", 5.103229),
+    ("run_bench-mine_20261020_041922_424165", "bench-mine", 188_899, 75_155, None,
+     "prefix_cache", 1.865907),
+]
+
+#: The quarantined fire's three failed attempts, with the live durations.
+QUARANTINE_ATTEMPTS = [3.236275, 0.246005, 0.063151]
+
+
+def _run(queue, *, source, status, completed, duration, summary, sessions,
+         queue_id=None, artifact=""):
+    """One run row through `WorkQueue.record_run`, the only writer of that table."""
+    queue.record_run(
+        run_id=new_run_id(source), queue_id=queue_id, source=source, status=status,
+        started_at=_iso(completed - timedelta(seconds=60)), completed_at=_iso(completed),
+        duration_seconds=duration, summary=summary, artifact_path=artifact,
+        meta_json=json.dumps({"session_ids": sessions}))
+
+
+def _make_report_stores(tmp_path, monkeypatch):
+    """A store pair holding exactly 5 arms / 4 records / 1 quarantined / 7 run rows.
+
+    Built through the shipped writers (`enqueue`, `mark_*`, `quarantine`,
+    `record_run`, `record_usage`) rather than by hand-rolled SQL, for the reason this
+    file states at its top: a test that invented its own schema could pass against a
+    table the shipped code never wrote.
+
+    The queue's own `attempts` column is NOT what the report counts, and that is
+    clause 2's point: the quarantined arm is driven to `poisoned` by ONE failure with
+    `max_attempts=1` and then quarantined, while its three attempt rows are recorded
+    explicitly. The printed attempt count comes from the run rows, so the fixture's
+    attempts column (1) is nowhere in the assertion.
+    """
+    wdb, udb = _make_stores(tmp_path, monkeypatch)
+    q = WorkQueue(wdb)
+    now = datetime.now(timezone.utc)
+
+    # Four window sessions, one successful subject run each, and their usage rows.
+    for i, (sid, cache_read, freed) in enumerate(WINDOW_SESSIONS):
+        at = now - timedelta(days=1 + i)
+        item = q.enqueue("autotriage", "triage")
+        q.claim_next(worker_id="w1")
+        q.mark_running(item)
+        _run(q, source="autotriage", status="success", completed=at, duration=60.0,
+             summary="ok", sessions=[sid])
+        q.mark_completed(item)
+        usage_store.record_usage(session_id=sid, model="primary",
+                                 input_tokens=10_000, output_tokens=2_000,
+                                 cache_read=cache_read, num_turns=8, compaction=freed)
+
+    # The quarantined arm: poisoned by its first failure, then quarantined, with the
+    # three attempt rows the live fire left behind (none carrying an artifact).
+    payload = {"run_id": QUARANTINED_RUN, "subject_source": "autotriage",
+               "tokens": 196_404, "p90_tokens": 124_797, "samples": 1661,
+               "window_days": 30, "window_days_held": 13.8,
+               "completed_at": _iso(now - timedelta(days=12)),
+               "session_ids": [WINDOW_SESSIONS[0][0]]}
+    item = q.enqueue(CO.SOURCE, "investigate", payload=payload)
+    q.claim_next(worker_id="w1")
+    q.mark_running(item)
+    q.mark_failed(item, QUARANTINE_ERROR, max_attempts=1)
+    assert q.get(item).state == "poisoned", q.get(item).state
+    assert q.quarantine(item), "the fixture never reached the quarantined state"
+    for j, dur in enumerate(QUARANTINE_ATTEMPTS):
+        _run(q, source=CO.SOURCE, status="error",
+             completed=now - timedelta(days=12, seconds=j), duration=dur,
+             summary=QUARANTINE_ERROR, sessions=[], queue_id=item)
+
+    # The four arms that wrote their record.
+    for k, (rid, src, tokens, p90, cut, cand, dur) in enumerate(COMPLETED_FIRES):
+        at = now - timedelta(days=len(COMPLETED_FIRES) - k)
+        body = {"run_id": rid, "subject_source": src, "tokens": tokens,
+                "p90_tokens": p90, "samples": 1_661, "window_days": 30,
+                "window_days_held": 14.0, "completed_at": _iso(at),
+                "session_ids": [WINDOW_SESSIONS[k % len(WINDOW_SESSIONS)][0]]}
+        if cut is not None:
+            body["cache_pct_p25"] = cut
+        item = q.enqueue(CO.SOURCE, "investigate", payload=body)
+        q.claim_next(worker_id="w1")
+        q.mark_running(item)
+        _run(q, source=CO.SOURCE, status="success", completed=at, duration=dur,
+             summary=f"cost outlier for {src}: {tokens:,} tokens vs p90 {p90:,}; "
+                     f"candidate {cand}",
+             sessions=[], queue_id=item,
+             artifact=str(tmp_path / "cost-outliers" / f"{rid}.md"))
+        q.mark_completed(item)
+    return tmp_path, wdb, udb
+
+
+@pytest.fixture
+def report_stores(tmp_path, monkeypatch):
+    """The 5-arm fixture, and the report measured over it."""
+    return _make_report_stores(tmp_path, monkeypatch)
+
+
+def test_the_fire_count_counts_arms_and_names_the_lost_record(tmp_path, monkeypatch):
+    """Clauses 1 and 2: the row's fire count is arms, not run rows, and the
+    quarantined fire is named by its subject run id rather than re-fired.
+
+    Five queue rows against seven run rows is the whole clause: the two extra rows
+    are one fire's retries, so a run-row count reports 7 discoveries where the store
+    holds 5. And the row must name `run_autotriage_20261013_032311_743cee` as a
+    record lost to #2738 — a report that quietly drops the arm that failed would
+    print 4/4/0 and read like a loop with no losses.
+    """
+    tmp, wdb, udb = _make_report_stores(tmp_path, monkeypatch)
+    rep = CO.report(wdb, udb, window_days=14.0)
+    fired = rep["fires"]
+    assert (fired["arms"], fired["records"], fired["quarantined"],
+            fired["attempts"]) == (5, 4, 1, 7), fired
+
+    from scripts.maintenance import cost_outlier_report as R
+    lines, detail, _day = R.build_row(rep)
+    row = lines[0]
+    assert "5 arms / 4 records / 1 quarantined" in row, row
+    assert "7 run rows" in row and "attempts" in row, row
+    body = "\n".join([row] + detail)
+    assert QUARANTINED_RUN in body, "the quarantined fire is not named"
+    assert "196,404" in body and "124,797" in body, body
+    assert "#2738" in body, "the record must be named as lost to #2738"
+    assert "does not re-fire" in body or "rather than re-firing" in body, body
+    # Nothing in the report path re-armed the loop: the queue still holds 5 rows and
+    # none of them is back in a claimable state.
+    q = WorkQueue(wdb)
+    mine = [i for i in q.list_items(limit=50) if i.source == CO.SOURCE]
+    assert len(mine) == 5, [i.state for i in mine]
+    assert all(i.state in ("completed", "quarantined") for i in mine), mine
+
+
+def test_the_row_prints_the_loops_own_cost_as_zero_tokens_and_gpu_minutes(
+        report_stores):
+    """Clause 3: 0 tokens and 0 model turns, and gpu-minutes off the seconds rule.
+
+    The zero is the load-bearing half, and the fixture makes it non-vacuous: the
+    four subject sessions hold 12,000 tokens and 8 turns each, so a cost line that
+    read the payload's `session_ids` (which name the SUBJECT run) would print
+    48,000 tokens and 32 turns here. It prints 0 and 0 because every
+    `cost-investigate` run row carries `session_ids: []`.
+
+    12.345291 s is the live sum of the seven durations and 0.21 is what the item
+    measured, on the seconds rule `run_rollup_by_source()` in
+    `workers/queue.py` divides by to get gpu-hours; this prints minutes, which is the
+    unit a 12-second loop can be read in.
+    """
+    _tmp, wdb, udb = report_stores
+    rep = CO.report(wdb, udb, window_days=14.0)
+    assert rep["cost"]["run_seconds"] == 12.345291, rep["cost"]
+    assert rep["cost"]["gpu_minutes"] == 0.21, rep["cost"]
+    assert rep["cost"]["tokens"] == 0, rep["cost"]
+    assert rep["cost"]["model_turns"] == 0, rep["cost"]
+    assert rep["cost"]["attributed_sessions"] == 0, rep["cost"]
+    # The subject sessions DO hold spend, which is what makes the zero a measurement.
+    assert CO.tokens_for_sessions(udb, [s for s, _c, _f in WINDOW_SESSIONS]) == 48_000
+
+    from scripts.maintenance import cost_outlier_report as R
+    row = R.build_row(rep)[0][0]
+    assert "0 tokens" in row and "0 model turns" in row, row
+    assert "0.21 gpu-min" in row and "12.345 s" in row, row
+
+
+def test_the_false_positive_share_is_computed_from_the_shipped_rule(
+        report_stores):
+    """Clause 4: the share is derived from `analyse()` over the window's sessions.
+
+    The four sessions sit at cache_pct 20/30/40/45 — every one below the retired
+    constant 50.0 and only one below the window's own P25 (30.0). So the same three
+    `prefix_cache` fires are tautologies under the constant (100.0% of sessions
+    labelled) and would not be under a window cut-off (25.0%): the report's share is
+    75.0% (3 of 4 scored), and the compaction fire — 25.0%, one session of four — is
+    scored as informative, which is the difference the clause is for.
+
+    The quarantined arm is UNSCORED, not a false positive: it named no candidate, so
+    there is no claim to grade, and counting it as a false positive would let a
+    crash inflate the very measure that indicts a rule.
+    """
+    _tmp, wdb, udb = report_stores
+    rep = CO.report(wdb, udb, window_days=14.0)
+    rates = rep["base_rates"]
+    assert rates["sessions_with_rows"] == 4, rates
+    at = rates["prefix_cache_at"]
+    assert at[50.0]["share"] == 100.0, at
+    assert at[30.0]["labelled"] == 1 and at[30.0]["share"] == 25.0, at
+    assert rates["rules"]["compaction"]["share"] == 25.0, rates["rules"]
+
+    s = rep["scored"]
+    assert (s["scored"], s["false_positives"], s["unscored"], s["share"]) == \
+        (4, 3, 1, 75.0), s
+    assert s["bar"] == CO.FALSE_POSITIVE_BASE_RATE == 50.0, s
+
+    from scripts.maintenance import cost_outlier_report as R
+    _lines, detail, _day = R.build_row(rep)
+    body = "\n".join(detail)
+    assert "100%" in body and "25%" in body, body
+    assert "P25 (30%" in body, "the row must name the window cut-off beside its share"
+    row = R.build_row(rep)[0][0]
+    assert "75.0%" in row and "3 of 4" in row, row
+
+
+def test_prefix_cache_arms_below_a_supplied_cutoff_and_never_at_a_constant():
+    """Clause 5, the rule itself: the constant is gone and silence is the default.
+
+    A session at 41.9% cached is the fleet's standing state on this box (live
+    median 41.6). With no cut-off the rule must not fire, so the candidate is whatever
+    else is true of the run — here `spread`, the honest no-rule answer — and the
+    figure beside it says `none`. Supplied a window P25 of 45.0 the same session is in
+    the worst quartile of its peers, and the candidate sentence says so with the
+    number in it.
+
+    The 0%-cached row is the sharpest case: an empty cache is the most extreme
+    cache_pct in the store, and even it must stay unlabelled with no window to be
+    unusual in. `cache_pct_of` is pinned here too, because the cut-off and the figure
+    have to be the same arithmetic.
+    """
+    standing = [_usage_row(cache_read=7_200, inp=10_000)]
+    assert CO.cache_pct_of(10_000, 7_200) == 41.9, CO.cache_pct_of(10_000, 7_200)
+
+    v = CO.analyse(standing)
+    assert v["figures"]["cache_pct"] == 41.9, v["figures"]
+    assert v["figures"]["cache_p25"] == "none", v["figures"]
+    assert v["checks"]["prefix_cache"] is False, v["checks"]
+    assert v["candidate"]["rule"] != "prefix_cache", v["candidate"]
+
+    v2 = CO.analyse(standing, cache_pct_p25=45.0)
+    assert v2["checks"]["prefix_cache"] is True, v2["checks"]
+    assert v2["candidate"]["rule"] == "prefix_cache", v2["candidate"]
+    assert "P25 of 45" in v2["candidate"]["text"], v2["candidate"]
+
+    empty = [_usage_row(cache_read=0, inp=10_000)]
+    assert CO.analyse(empty)["checks"]["prefix_cache"] is False, \
+        "an unmeasured window must not label even a 0%-cached run"
+    assert CO.analyse(empty, cache_pct_p25=25.0)["checks"]["prefix_cache"] is True
+
+
+def test_a_fire_record_and_a_replay_both_carry_the_cutoff_they_used(
+        tmp_path, monkeypatch):
+    """Clause 5 across the two process boundaries it crosses.
+
+    The cut-off is computed by the arming side (`replay()` reads the window's
+    `cache_read`/`cache_create`), travels in the job payload, and is what the record's
+    candidate is judged by — because a record read days later cannot re-derive the
+    window that armed it. So this test arms for real, hands the payload to
+    `investigate`, and reads the number back out of the written file.
+
+    The same file written from a payload that predates #3280 (no key at all) must say
+    `none` and must not name `prefix_cache`: silence, not a fallback to 50.0.
+    """
+    tmp, wdb, udb = _make_report_stores(tmp_path, monkeypatch)
+    rep = CO.replay(wdb, udb, window_days=14.0)
+    assert rep["cache_pct_sessions"] == 4, rep
+    assert rep["cache_pct_p25"] == 30.0, rep
+
+    payload = {"run_id": "run_test_20261025_000000_aaaaaa", "subject_source":
+               "autotriage", "tokens": 197_903, "p90_tokens": 124_030, "samples": 1661,
+               "margin": 1.59, "window_days": 30, "window_days_held": 14.0,
+               "cache_pct_p25": rep["cache_pct_p25"],
+               "completed_at": _iso(datetime.now(timezone.utc)),
+               "session_ids": ["sess-aa"]}
+    out = tmp_path / "recs"
+    monkeypatch.setattr(CO, "record_path",
+                        lambda run_id, **kw: out / f"{run_id}.md")
+    res = CO.investigate(payload, usage_db=udb)
+    txt = Path(res["artifact_path"]).read_text()
+    # sess-aa sits at 20.0%, below the window's 30.0 -> the rule may fire, and the
+    # record has to state the number it was armed below.
+    assert "**`prefix_cache`**" in txt, txt
+    assert "window P25 = 30%" in txt, txt
+    assert "no constant" in txt, txt
+
+    legacy = {k: v for k, v in payload.items() if k != "cache_pct_p25"}
+    res2 = CO.investigate(legacy, usage_db=udb)
+    txt2 = Path(res2["artifact_path"]).read_text()
+    assert "window P25 = none" in txt2, txt2
+    assert "**`prefix_cache`**" not in txt2, \
+        "a payload with no cut-off must not be judged by a constant"
+
+
+def test_the_command_prints_one_dated_row_and_writes_it_beside_the_records(
+        report_stores, monkeypatch):
+    """Clauses 1 and 6, across the subprocess boundary a human actually crosses.
+
+    Run the way `cost_replay.py` is run — same `--workers-db/--usage-db/--days` flags,
+    plus `--json` — against a scratch store pair, and check three things a printed
+    table cannot fake: the window line names held-of-asked, the dated file lands in
+    the directory the per-fire records live in (overridable for exactly this), and
+    the file holds the same row that was printed.
+    """
+    tmp, wdb, udb = report_stores
+    out = tmp / "pub"
+    r = subprocess.run(
+        [sys.executable, str(REPORT), "--workers-db", str(wdb), "--usage-db", str(udb),
+         "--days", "14", "--out-dir", str(out)],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert "5 arms / 4 records / 1 quarantined" in r.stdout, r.stdout
+    assert "75.0%" in r.stdout, r.stdout
+    files = sorted(p.name for p in out.iterdir())
+    assert len(files) == 1 and files[0].startswith("report-") \
+        and files[0].endswith(".md"), files
+    body = (out / files[0]).read_text()
+    assert "5 arms / 4 records / 1 quarantined" in body, body
+    assert QUARANTINED_RUN in body, body
+
+    # The default directory is where the fired records already go, so a reader who
+    # finds one finds the other. Patched, because a test must not write into the live
+    # pipeline tree.
+    from app import paths
+    monkeypatch.setattr(paths, "PIPELINE_DIR", tmp / "pipe", raising=False)
+    assert CO.report_path("2026-10-25") == tmp / "pipe" / "cost-outliers" \
+        / "report-2026-10-25.md"
+    assert CO.record_path("run_x") == tmp / "pipe" / "cost-outliers" / "run_x.md"
+
+    j = subprocess.run(
+        [sys.executable, str(REPORT), "--workers-db", str(wdb), "--usage-db", str(udb),
+         "--days", "14", "--json", "--no-write"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert j.returncode == 0, j.stderr
+    doc = json.loads(j.stdout)
+    assert doc["fires"]["arms"] == 5 and doc["cost"]["gpu_minutes"] == 0.21, doc
+    assert "5 arms / 4 records / 1 quarantined" in doc["row"], doc["row"]
+
+
+def test_a_store_shorter_than_the_window_notes_it_and_still_exits_zero(
+        report_stores):
+    """Clause 1's exit code, measured rather than copied from a docstring.
+
+    #3280's own text says the report should exit 3 on a short window "as cost_replay
+    does". That premise is false on this tree: `cost_replay.py:120` returns 0 and its
+    comment at :112-116 explains why — a shortfall is a fact about the store, and a
+    non-zero code there means the replay could not measure at all. So this pins the
+    behaviour the item needed (the row names held-of-asked) with the exit code this
+    family of commands actually has (0), measured here at 60 days on a ~4-day store.
+    """
+    tmp, wdb, udb = report_stores
+    r = subprocess.run(
+        [sys.executable, str(REPORT), "--workers-db", str(wdb), "--usage-db", str(udb),
+         "--days", "60", "--out-dir", str(tmp / "pub"), "--no-write"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
+    assert "of 60d asked" in r.stdout, r.stdout
+    # The note itself goes on stderr so `--json` stdout stays parseable — asserted
+    # here because this is the only test that runs the shortfall path.
+    assert "shorter than the window asked for" in r.stderr, r.stderr
+    # And the store really is short: a note printed over a window that WAS held would
+    # be the same bug wearing the other uniform.
+    held = CO.report(wdb, udb, window_days=60.0)["window"]["window_days_held"]
+    assert held < 60.0, held
+
+
+def test_cost_replays_short_window_prose_no_longer_promises_an_exit_3():
+    """The one premise in the item that was false, now closed in the same file family.
+
+    `cost_replay.py`'s docstring said "exits 3 when held falls short of requested"
+    while `:120` returns 0 — and the item copied that promise into its own clause 2.
+    The behaviour was right and the sentence was wrong, which is the worst direction
+    for a mismatch: the next reader trusts the sentence and writes the exit code.
+    """
+    doc = REPLAY.read_text().split('"""')[1]
+    low = doc.lower()
+    assert "exits 0" in low, doc
+    assert "exit 3" not in low and "exits 3" not in low, doc
