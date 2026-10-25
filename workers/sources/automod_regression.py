@@ -287,30 +287,48 @@ FLOOR_BY_RESOLUTION = "resolution"
 # whose `pin.daemon.source` names `agent-qmd-daemon.conf`, created at or after
 # the first check under c6e79b45 (2026-09-22T04:08:33Z).
 # Everything from the next line to the command below is ONE DATED PUBLICATION,
-# stamped 2026-10-20T02:29Z (the read before it was 2026-10-03T23:28Z, #2145):
-# every count, median and maximum is what that command answered at that instant
-# over `promotions.jsonl` AND every `promotions-archive-*.jsonl.gz` rotated
-# beside it — the ledger sweep cut the live file on 2026-10-05, so the live file
-# alone is 506 of the 1,035 era rows and reads about half the population. It is
+# stamped 2026-10-25T12:11Z (the publication before it was 2026-10-20T02:29Z,
+# #3037, and before that 2026-10-03T23:28Z, #2145): every count, median and
+# maximum is what that command answered at that instant over `promotions.jsonl`
+# AND every `promotions-archive-*.jsonl.gz` rotated beside it — the live file is
+# 506 rows and only 471 of them are from this era, so a live-file-only read sees
+# 471 of 1,204 and reads a third of the population. It is
 # a publication, not a property of the ledger: the next current-era row moves
 # these figures, and it moves nothing else — the bound below is fixed and does
 # not move with them.
 #
-# Re-checked 2026-10-20T02:29Z: 1,035 rows, 2,070 arm readings, spanning
-# 2026-09-22T04:08:33Z to 2026-10-20T02:22:57Z. Graded arm (current, replayed):
-# median 221.0, p95 283.4, max 401.3 ms — 401.315 as the ledger stores it — at
-# 2026-10-17T07:54:49Z, commit bf52e97c. Fresh baseline arm: median 611.9, p95
-# 681.5, max 905.3 ms — 905.256 as the ledger stores it — at
-# 2026-10-19T15:30:09Z, commit 4a68589b; it is in the population because a change that moves djev's input
+# Re-checked 2026-10-25T12:11Z by `scripts/maintenance/published_maxima_probe.py`,
+# which runs the command below verbatim: 1,204 rows, 2,408 arm readings, spanning
+# 2026-09-22T04:08:33Z to 2026-10-25T11:34:04Z (471 of the rows in the live ledger,
+# 733 across the two archives). Graded arm (current, replayed):
+# median 227.7, p95 295.5, max 477.9 ms — 477.877 as the ledger stores it — at
+# 2026-10-21T22:13:46Z, commit d2847a349. Fresh baseline arm: median 620.1, p95
+# 696.7, max 1,160.2 ms — 1,160.230 as the ledger stores it — at
+# 2026-10-20T21:37:13Z, commit 64914c67a; it is in the population because a change that moves djev's input
 # is judged on the fresh floor, and a healthy fresh reading must not report.
-# 0 of the 1,035 rows reads over 1,600 ms on either arm. The cross-encoder path
+# P95 is nearest-rank (`sorted[v][ceil(0.95*n)-1]`), the method the probe prints:
+# the retired 2026-10-20 p95s below were not produced by that method and do not
+# reproduce under it, which is why the probe names its own.
+# 0 of the 1,204 rows reads over 1,600 ms on either arm.
+#
+# RETIRED, dated, not deleted: the 2026-10-20T02:29Z re-check — 1,035 rows, 2,070
+# arm readings, spanning 2026-09-22T04:08:33Z to 2026-10-20T02:22:57Z; graded arm
+# median 221.0, p95 283.4, max 401.3 ms (401.315 stored) at 2026-10-17T07:54:49Z,
+# commit bf52e97c; fresh arm median 611.9, p95 681.5, max 905.3 ms (905.256 stored)
+# at 2026-10-19T15:30:09Z, commit 4a68589b; 471 era rows live and 564 archived; 0 of
+# the 1,035 rows over 1,600 ms — sat 21.97 % under the fresh arm's record and 16.02 %
+# under the graded arm's by the read above, and NOTHING here could see it: the
+# ceiling test asks only whether 1,600.0 clears the published figure, and
+# `tests/conftest.py` sends `LLOYD_AUTOMOD_STATE` to a scratch dir, so no test in the
+# suite reads this ledger at all. #3304's premise was that gap; the probe named above
+# is the fix, and it is deliberately not a test. The cross-encoder path
 # this replaced read a median 4,257-4,305 ms, so a recall that falls back onto
 # it (djev not answering, or a re-widening) reads over budget, which is the
 # report this ceiling is for. Re-check the population with this (run from the
 # repo root; it prints n, fresh median, graded median, fresh max, graded max,
 # and the count of rows over 1,600). It reads the live ledger AND the rotated
 # archives, because the retention sweep cuts `promotions.jsonl` monthly and the
-# era spans two of those cuts — a live-file-only read answers 506 here today and
+# era spans two of those cuts — a live-file-only read answers 471 here today and
 # looks complete (the same house rule is `architecture/workers-jobs.md`: "Ingest
 # reads the rotated archive *and* the live ledger"):
 #
@@ -329,9 +347,12 @@ FLOOR_BY_RESOLUTION = "resolution"
 #     round(max(a['after'] for a in A),1), sum(1 for a in A if max(a['before'],a['after'])>1600))"
 #
 # 1,600 ms is a FIXED bound RE-CHECKED against that ledger, NOT recomputed from
-# the max. The rule above run over the same 1,035 rows at that stamp reads 2 x
-# 905.256 = 1,810.5 -> 1,900 ms, and that looser number was declined: 0 of the
-# 1,035 rows even reaches 1,600, the ~4,250 ms cross-encoder step this ceiling
+# the max. The rule above run over the 1,204 rows of the 2026-10-25T12:11Z read
+# gives 2 x 1,160.230 = 2,320.5 -> 2,400 ms, and it is DECLINED on the grounds it
+# was declined on 2026-10-03, where over that publication's 1,035 rows the same
+# rule read 2 x 905.256 = 1,810.5 -> 1,900 ms and was refused the same way. The
+# figure moved with the publication; the declination did not, and only a ruling
+# moves it. 0 of the 1,204 rows even reaches 1,600, the ~4,250 ms cross-encoder step this ceiling
 # exists to catch
 # reports under either, and a constant re-derived from the running max can only
 # grow — every new record silently widens the tolerance the check is there to
@@ -360,7 +381,7 @@ FLOOR_BY_RESOLUTION = "resolution"
 # of the three is slow on BOTH arms at once — before-arm 8,053.5 / 6,798.7 /
 # 11,973.5 ms against that era's ~4,300 ms before-median — while its ranking
 # quality is identical to those eras' medians (ndcg10 0.592 / 0.582, doc_hit_rate
-# 1.00 on both arms), and none of it recurs in the 1,035 current-era rows. What
+# 1.00 on both arms), and none of it recurs in the 1,204 current-era rows. What
 # is missing is its CAUSE, and that gap is now measured rather than assumed
 # closed: the raw logs did NOT rotate away — `journalctl` reaches back to
 # 2026-08-24T14:04:45Z, so 2026-09-19 and 2026-09-20 are still in it — and the
@@ -394,7 +415,7 @@ FLOOR_BY_RESOLUTION = "resolution"
 # widening does not account for, a finding on #1129), and every nightly since.
 LATENCY_BUDGET_MS = {
     "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219, pre-wipe)
-    "paired_check": 1600.0,     # published max 905.3 (ledger 2026-10-19T15:30:09Z, fresh arm, re-checked 2026-10-20T02:29Z); the bound is fixed, not recomputed
+    "paired_check": 1600.0,     # published max 1,160.2 (ledger 2026-10-20T21:37:13Z, fresh arm, re-checked 2026-10-25T12:11Z; retired publication 905.3, re-checked 2026-10-20T02:29Z); the bound is fixed, not recomputed
 }
 # The two contexts this module knows, named so a caller passes one rather than a
 # free-text string that silently falls through to a default.

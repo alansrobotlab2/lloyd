@@ -606,13 +606,22 @@ def test_row_7_carries_the_era_d_ceiling_provenance_and_the_tail_ruling():
     nothing failed. The publication date is therefore a needle too, and so is the
     row's reach — a re-check that reads only the live `promotions.jsonl` answers
     about half this era and looks no different from one that read all of it.
+
+    #3304 re-ran that read on 2026-10-25T12:11Z and republished the row: 1,204 rows,
+    graded max 477.9 ms, fresh max 1,160.2 ms, still 0 over the bound. The retired
+    2026-10-20T02:29Z set did not vanish — it is dated in the row's own retirement
+    sentence, and the assertions below are split the same way: the live figures are
+    needles on the row, the retired ones are needles INSIDE that sentence, so the
+    record of the drift survives without the row ever stating a stale figure as
+    current. Phrase-anchored throughout, never a bare number: this document carries
+    an unrelated −0.482 around line 1827, which is what #3037 found the hard way.
     """
     from workers.sources import automod_regression as R
     flat = _flat(DOC)
-    assert "1,035 rows" in flat, "row 7 no longer states the era-D population"
-    assert "905.3 ms" in flat, "row 7 no longer states the fresh arm's era-D maximum"
-    assert "401.3 ms" in flat, "row 7 no longer states the graded arm's era-D maximum"
-    assert "published 2026-10-20T02:29Z" in flat, (
+    assert "1,204 rows" in flat, "row 7 no longer states the era-D population"
+    assert "1,160.2 ms" in flat, "row 7 no longer states the fresh arm's era-D maximum"
+    assert "477.9 ms" in flat, "row 7 no longer states the graded arm's era-D maximum"
+    assert "published 2026-10-25T12:11Z" in flat, (
         "row 7's figures have lost the date they were read on, which is the only "
         "thing that tells a reader whether they are still the current maxima")
     assert "promotions-archive-" in flat, (
@@ -621,9 +630,32 @@ def test_row_7_carries_the_era_d_ceiling_provenance_and_the_tail_ruling():
     assert "not recomputed" in flat.lower(), (
         "row 7 does not say the bound is re-checked rather than recomputed, so a "
         "reader of the doc alone would still recompute it from the max")
-    assert "1,900 ms" in flat, (
-        "row 7 does not name the number recomputation would give (2 × 905.3), which "
-        "is the number the fixed bound was declined against")
+    assert "2,400 ms" in flat, (
+        "row 7 does not name the number recomputation would give on the published "
+        "read (2 × 1,160.2 = 2,320.5 → 2,400 ms), which is the number the fixed "
+        "bound is declined against — the figure moves with each publication, the "
+        "declining never does")
+    # The retirement sentence is where the superseded set lives, and it is the ONLY
+    # place in this document allowed to state them. Asserted as a slice, not as a
+    # whole-doc needle: a retired figure loose in the doc is a figure a skimming
+    # reader takes for current, and the whole-doc absence checks below would not
+    # catch that, because they name the generations before this one.
+    row7 = next(ln for ln in DOC.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("| 7 | "))
+    assert "Retired, dated, not deleted:" in row7, (
+        "row 7's retirement sentence is gone, so the superseded publication has "
+        "been deleted rather than dated — the opposite of what a dated record is for")
+    retired = " ".join(row7[row7.index("Retired, dated, not deleted:"):].split())
+    for phrase in ("2026-10-20T02:29Z", "1,035 rows", "905.3 ms", "401.3 ms",
+                   "1,900 ms", "2 × 905.3", "21.97 %", "16.02 %"):
+        assert phrase in retired, (
+            f"the retired publication's {phrase!r} is no longer in the retirement "
+            "sentence: without it the row states a stale figure with no date, and "
+            "the drift #3037 found becomes invisible again")
+    for live in ("1,204 rows", "1,160.2 ms", "2,400 ms"):
+        assert live not in retired, (
+            f"{live!r} is a CURRENT figure; naming it inside the retirement sentence "
+            "puts a live maximum in the same breath as a superseded one")
     assert "host-level" in flat and "not a retrieval degradation" in flat, (
         "row 7 has not recorded the 2026-09-20 tail ruling")
     assert "unattributed" in flat.lower(), (

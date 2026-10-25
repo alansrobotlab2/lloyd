@@ -9,9 +9,12 @@ than a check against a number recorded at the last promotion.
 
 from __future__ import annotations
 
+import ast
 import contextlib
+import io
 import json
 import time
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -101,28 +104,48 @@ def test_report_only_metrics_never_fire():
 # has since deleted, so they are cited from the ledger and architecture/automod.md
 # §8.1a, not from disk. `paired_check` is this module's own two-arm run against
 # the frozen snapshot, and its figures are the current era's, published
-# 2026-10-20T02:29Z by the re-check command in `automod_regression.py`:
+# 2026-10-25T12:11Z by `scripts/maintenance/published_maxima_probe.py`, which
+# runs the re-check command in `automod_regression.py` verbatim:
 # `regression_check` rows since c6e79b45's first check, 2026-09-22T04:08:33Z,
 # pin naming `agent-qmd-daemon.conf`, read from `promotions.jsonl` AND every
-# `promotions-archive-*.jsonl.gz` rotated beside it — n=1,035 rows, 2,070 arm
-# readings, none of them over the bound. That era is the population the ceiling
-# was set from on 2026-09-24 (#1247) and is re-checked against since (#2145).
-# The bound is fixed; these constants are its evidence, not its formula.
+# `promotions-archive-*.jsonl.gz` rotated beside it — n=1,204 rows, 2,408 arm
+# readings, none of them over the bound. 471 of those rows are in the live file
+# and 733 in the two archives, so the live ledger alone is under 40 % of the
+# population and reading only it is the mistake #3037 was about. That era is the
+# population the ceiling was set from on 2026-09-24 (#1247) and is re-checked
+# against since (#2145). The bound is fixed; these constants are its evidence,
+# not its formula.
+#
+# RETIRED, dated, not deleted: the 2026-10-20T02:29Z publication — 1,035 rows,
+# 2,070 arm readings, maxima 905.3 ms fresh (ledger 2026-10-19T15:30:09Z, commit
+# 4a68589b) and 401.3 ms graded (2026-10-17T07:54:49Z, commit bf52e97c) — was
+# superseded by the read above five days and 169 rows later. It sat 21.97 % under
+# the fresh arm's ledger maximum and 16.02 % under the graded arm's, and nothing
+# in this suite could see it: `test_no_recorded_run_reads_over_budget` only asks
+# whether 1,600.0 clears the published figure. The recorder is what closes that
+# gap; `test_the_superseded_2026_10_20_publication_is_kept_as_a_dated_retirement`
+# is what keeps the retirement readable here.
 POST_WIDENING_MS = {
     # The step #504 bought: 708 ms nightly before it, 4,230-4,379 ms after, and
     # nobody graded it because nothing read the field.
     R.CONTEXT_NIGHTLY: 4378.8,        # nightly-20260917-20260917-060324.json
     # The graded (current, replayed) arm's highest reading in the published set.
-    R.CONTEXT_PAIRED_CHECK: 401.3,    # ledger 2026-10-17T07:54:49Z, commit bf52e97c
+    R.CONTEXT_PAIRED_CHECK: 477.9,    # ledger 2026-10-21T22:13:46Z, commit d2847a349
 }
-# The highest reading each context has on record, published as ONE DATED SET:
-# these four figures are what the module's re-check command printed for their
-# populations on 2026-10-20T02:29Z, each named by its own ledger stamp below.
-# The next current-era record moves these figures and nothing else — it never
+# The highest reading each context has published, and the two contexts are NOT
+# one date: the nightly pair is still the `eval/baselines/*.json` read of
+# 2026-09-18 (artifacts the wipe deleted, so their re-derivation is a human's and
+# is explicitly out of #3304's scope), and the paired pair is the era-D ledger
+# maxima `scripts/maintenance/published_maxima_probe.py` printed on
+# 2026-10-25T12:11Z. Each figure is named by its own stamp below.
+# The next current-era record moves the paired figures and nothing else — it never
 # moves the bound. They are deliberately NOT called the population's worst-ever,
 # because nothing in this suite re-reads the ledger: a constant that claimed to
 # BE the maximum would silently stop being one, which is the rot #3037 fixes and
-# the reason #2145 kept them as evidence rather than as a derived value.
+# the reason #2145 kept them as evidence rather than as a derived value. What
+# #3304 adds is the thing that can see the figure go stale: the recorder, off the
+# suite, whose alarm is the only route from "the ledger moved" to "these
+# constants need a ruling".
 #
 # The nightly one is a 2026-09-04 outlier that predates #504, read off artifacts
 # the wipe has since deleted. The paired one is the fresh BASELINE arm — in the
@@ -130,12 +153,14 @@ POST_WIDENING_MS = {
 # floor. It is NOT half the ceiling: the ceiling was set at twice the fresh-arm
 # worst on 2026-09-24 and has been FIXED since, re-checked against this
 # population rather than recomputed from it (the module comment above
-# LATENCY_BUDGET_MS says why — 2 x 905.256 would round to 1,900 ms, and the
-# looser bound was declined on 2026-10-03 and stands again with 0 of 1,035 rows
-# reading over 1,600).
+# LATENCY_BUDGET_MS says why — 2 x 1,160.230 = 2,320.5 ms would round up to
+# 2,400 ms, and that looser bound was declined on 2026-10-03 and stands again on
+# the 2026-10-25 read with 0 of 1,204 rows reaching 1,600. The arithmetic changed;
+# the decision did not, and only a ruling changes it. (The retired 2026-10-20
+# publication ran the same arithmetic on 2 x 905.256 and reached 1,900 ms.)
 PUBLISHED_MAXIMA_MS = {
     R.CONTEXT_NIGHTLY: 4408.0,        # nightly-20260904-20260904-060219.json
-    R.CONTEXT_PAIRED_CHECK: 905.3,    # ledger 2026-10-19T15:30:09Z, commit 4a68589b
+    R.CONTEXT_PAIRED_CHECK: 1160.2,   # ledger 2026-10-20T21:37:13Z, commit 64914c67a
 }
 # Excluded from the paired population on purpose: readings before a54ccda
 # (2026-09-19T01:22Z) measured a pin that restated qmd's settings, not
@@ -193,34 +218,78 @@ def test_no_recorded_run_reads_over_budget():
         assert not R.over_budget({"latency_ms_avg": post}, context)["over"]
 
 
-def test_the_paired_constants_are_the_2026_10_20_publication_with_their_stamps():
-    """#3037 clause 1: the paired figures equal the newest ledger maxima, and each
-    names the row it came from.
+def test_the_paired_constants_are_the_2026_10_25_publication_with_their_stamps():
+    """#3037 clause 1, re-stamped by #3304: the paired figures equal the era-D
+    ledger maxima as published on 2026-10-25T12:11Z, and each names its row.
 
     `tests/` reads these constants, never the ledger, so a figure with no stamp is
-    a figure nobody can re-check. The fresh arm's 905.3 ms is the ledger row at
-    2026-10-19T15:30:09Z on commit 4a68589b, the graded arm's 401.3 ms is the row
-    at 2026-10-17T07:54:49Z on bf52e97c — both read on 2026-10-20T02:29Z by the
-    module's archive-inclusive re-check command over n=1,035 era rows. The floors
-    are asserted too, because a refreshed figure that came in BELOW the row it
-    names would be a transcription error and still keep the suite green: 905.3 and
-    401.3 are what that query answered, and the bound they sit under stays 1,600.0.
+    a figure nobody can re-check. The fresh arm's 1,160.2 ms is the ledger row at
+    2026-10-20T21:37:13Z on commit 64914c67a; the graded arm's 477.9 ms is the row
+    at 2026-10-21T22:13:46Z on d2847a349. Both came off the module's own
+    archive-inclusive re-check filter — run verbatim by
+    `scripts/maintenance/published_maxima_probe.py` at 12:11Z — over n=1,204 era
+    rows (2,408 arm readings), of which 471 sit in the live ledger and 733 in the
+    two rotated archives. The floors are asserted too, because a refreshed figure
+    that came in BELOW the row it names would be a transcription error and still
+    keep the suite green: 1,160.2 and 477.9 are what that query answered, and the
+    bound they sit under stays 1,600.0.
+
+    What this node cannot do is notice the NEXT record — it reads this file, and
+    `tests/conftest.py` sends `LLOYD_AUTOMOD_STATE` to a scratch dir, so a
+    ledger-reading assertion here is vacuously green inside a gate round. That
+    knowing is what #3304's recorder is for; the floors below are a transcription
+    check, not a freshness check, and are described as such so nobody reads green
+    here as evidence the publication is current.
     """
     src = Path(__file__).read_text(encoding="utf-8")
     graded = src[src.index("POST_WIDENING_MS = {"):src.index("# The highest reading")]
     fresh = src[src.index("PUBLISHED_MAXIMA_MS = {"):]
     for block, figure, stamp, sha in (
-            (fresh, "905.3", "2026-10-19T15:30:09Z", "4a68589b"),
-            (graded, "401.3", "2026-10-17T07:54:49Z", "bf52e97c")):
+            (fresh, "1160.2", "2026-10-20T21:37:13Z", "64914c67a"),
+            (graded, "477.9", "2026-10-21T22:13:46Z", "d2847a349")):
         line = next((ln for ln in block.splitlines() if f": {figure}," in ln), "")
         assert line, f"the paired {figure} ms figure is no longer a constant"
         assert stamp in line and sha in line, (
             f"the {figure} ms constant lost its ledger stamp ({stamp}, commit {sha}); "
             "an unstamped maximum is the hand-copied number #1247 exists to kill")
-    assert PUBLISHED_MAXIMA_MS[R.CONTEXT_PAIRED_CHECK] >= 905.3
-    assert POST_WIDENING_MS[R.CONTEXT_PAIRED_CHECK] >= 401.3
+    assert PUBLISHED_MAXIMA_MS[R.CONTEXT_PAIRED_CHECK] >= 1160.2
+    assert POST_WIDENING_MS[R.CONTEXT_PAIRED_CHECK] >= 477.9
     assert R.LATENCY_BUDGET_MS[R.CONTEXT_PAIRED_CHECK] == 1600.0, (
         "the bound is fixed: refreshing a maximum never lifts it")
+
+
+def test_the_superseded_2026_10_20_publication_is_kept_as_a_dated_retirement():
+    """#3304 clause 4: the retired figures stay readable, anchored to a phrase.
+
+    The 2026-10-20T02:29Z publication is not deleted from this file: it is the
+    evidence that a set can sit 21.97 % and 16.02 % under the ledger with the
+    whole suite green, and #1247's rule against an un-owned number applies to a
+    retirement as much as to a publication. Each needle is a PHRASE, never a bare
+    figure — `architecture/automod.md:1827` carries an unrelated −0.482, and this
+    file carries a retired `2 x 905.256` — and each is shown to bite the retired
+    sentence it belongs to by sitting inside `retirement`, the block that opens
+    `# RETIRED, dated, not deleted:`.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    head = src[:src.index("POST_WIDENING_MS = {")]
+    retirement = head[head.index("# RETIRED, dated, not deleted:"):]
+    block = " ".join(ln[1:].strip() if ln.lstrip().startswith("#") else ln
+                     for ln in retirement.splitlines())
+    for phrase in ("1,035 rows", "2,070 arm readings", "905.3 ms", "401.3 ms",
+                   "2026-10-20T02:29Z", "21.97 %", "16.02 %"):
+        assert phrase in block, (
+            f"{phrase!r} is the retired publication's own wording: dropping it drops "
+            "the record that this set went stale unnoticed")
+    # And the retired figures must no longer be what the constants SAY. The
+    # constants themselves are the two lines, not the prose around them.
+    for figure in ("905.3", "401.3"):
+        constant_lines = [ln for ln in src.splitlines()
+                          if ln.lstrip().startswith("R.CONTEXT_PAIRED_CHECK:")]
+        assert all(figure not in ln for ln in constant_lines), (
+            f"{figure} is back as a constant value; the retired figure belongs in the "
+            "retirement note above, where it is dated")
+    assert PUBLISHED_MAXIMA_MS[R.CONTEXT_PAIRED_CHECK] == 1160.2
+    assert POST_WIDENING_MS[R.CONTEXT_PAIRED_CHECK] == 477.9
 
 
 def test_the_paired_constants_are_a_dated_publication_not_the_worst_ever():
@@ -334,6 +403,32 @@ def test_the_paired_provenance_publishes_the_era_d_recomputation():
         "the comment does not say how many of the population read over the bound, "
         "which is the evidence the fixed bound stands on")
 
+    # #3304: that needle set above is satisfied by the RETIRED paragraph alone, so
+    # on its own it cannot tell a refreshed block from one that was never refreshed
+    # — which is how the 2026-10-20 figures came to sit here 21.97 % under the
+    # ledger's fresh-arm record with the suite green. The LIVE read is therefore
+    # needle-set complete in its own right, sliced between this publication's own
+    # opening and the retirement paragraph that closes it, so a figure that drifts
+    # in the live block fails here rather than quietly matching the retired text.
+    live = prose[prose.index("Re-checked 2026-10-25T12:11Z"):
+                 prose.index("RETIRED, dated, not deleted")]
+    for needle in ("1,204 rows", "2,408 arm readings",
+                   "2026-09-22T04:08:33Z to 2026-10-25T11:34:04Z",
+                   "median 227.7", "max 477.9 ms", "477.877",
+                   "2026-10-21T22:13:46Z", "commit d2847a349",
+                   "median 620.1", "max 1,160.2 ms", "1,160.230",
+                   "2026-10-20T21:37:13Z", "commit 64914c67a",
+                   "P95 is nearest-rank", "published_maxima_probe",
+                   "0 of the 1,204 rows reads over 1,600 ms"):
+        assert needle in live, (
+            f"the live provenance block no longer states {needle!r} beside the "
+            "2026-10-25T12:11Z stamp — this is the block the published constants "
+            "are read out of by eye, so a figure drifting here is the #3037 rot "
+            "with a fresh date on it")
+    assert "2026-10-25T12:11Z" in prose, (
+        "the provenance block lost the stamp of the publication it publishes, so a "
+        "reader cannot tell current maxima from the read before them")
+
     # The re-check command the comment publishes must survive as a command: it is
     # the only thing a later reader has, and a `# ` prefix folded into the string
     # or a broken line join silently returns nothing while looking complete. The
@@ -388,10 +483,24 @@ def test_the_paired_provenance_publishes_the_era_d_recomputation():
         "the comment has grown back a max-derived `… -> 1,600 ms` chain; the bound "
         "is fixed and says so")
     paired_only = prose[:prose.index("nightly —")]
-    assert "2 x " not in paired_only.replace("2 x 905.256", ""), (
-        "a second max-derivation has appeared in the paired_check provenance; the "
-        "one that SET the bound is quoted and declined, and nothing else is priced "
-        "from a max here")
+    # #3304 clause 6 restates the DECLINED recomputation on the current read (2 x
+    # 1,160.230 = 2,320.5 -> 2,400 ms, refused on 2026-10-03's own grounds) while the
+    # retired price stays quoted, so a reader sees the same rule run against the
+    # superseded publication. Both are declined arithmetic: neither sets nor moves the
+    # bound. Each is stripped only as a WHOLE quoted price — stripping the bare prefix
+    # `2 x 905.256` the way this rail used to would let a third derivation through by
+    # hiding behind a partial match, and the point of the assert is to catch a third.
+    declined = ("2 x 1,160.230 = 2,320.5 -> 2,400 ms", "2 x 905.256 = 1,810.5")
+    for price in declined:
+        assert price in paired_only, (
+            f"the comment no longer quotes the declined recomputation {price!r}, so "
+            "the bound looks arbitrary rather than a decision that was taken and "
+            "re-declined on a newer read")
+        paired_only = paired_only.replace(price, "")
+    assert "2 x " not in paired_only, (
+        "a third max-derivation has appeared in the paired_check provenance; the two "
+        "quoted declined prices are the record, and nothing else is priced from a max "
+        "here")
 
 
 def test_the_paired_ceiling_is_a_fixed_bound_not_a_max_derived_number():
@@ -440,7 +549,7 @@ def test_the_2026_09_20_tail_is_ruled_not_left_to_a_human():
     evidence, all five of it: both arms slow together (before-arm 8,053.5 / 6,798.7
     / 11,973.5 ms against that era's ~4,300 ms before-median), ranking quality
     identical to those eras' medians (ndcg10 0.592 / 0.582, doc_hit_rate 1.00 on
-    both arms), no recurrence in the 1,035 current-era rows, the journal still
+    both arms), no recurrence in the 1,204 current-era rows, the journal still
     covering that day, and the one host-level candidate it offers measured against
     and not fitting. "a human's call" was still standing when the tail had already
     been called, so the module read as open on a question the board closed.
@@ -461,7 +570,7 @@ def test_the_2026_09_20_tail_is_ruled_not_left_to_a_human():
         "the tail hedge is back: the ruling is 2026-10-03, #1247 owed entry 2")
     prose, _ = _budget_prose()
     for needle in ("16,256", "11,868", "11,561", "HOST-LEVEL", "cross-encoder era",
-                   "NOT a retrieval degradation", "BOTH arms", "1,035 current-era"):
+                   "NOT a retrieval degradation", "BOTH arms", "1,204 current-era"):
         assert needle in prose, f"the tail ruling no longer states {needle!r}"
     # The negative control as readings, not as a mood: the journal's reach, the
     # record class, the three tail readings, the day's control distribution, and
@@ -2435,3 +2544,163 @@ def test_a_run_reporting_39_unverified_pairs_gates_nothing():
                                          "entity_hit_rate": 0.45}),
                                  clean, ZERO_NOISE)
     assert regressed
+
+
+def test_the_recorder_stays_off_the_promotion_path_and_the_bound_is_untouched():
+    """#3304 clause 5: the recorder observes the ledger, it does not gate anything,
+    and refreshing a maximum never moved the ceiling.
+
+    Three separate properties, one node each is overkill for a diff this size:
+
+    * **The bound did not move.** `LATENCY_BUDGET_MS` is asserted by VALUE and by
+      the bytes of the line that no clause asked to change: `nightly` 4,800.0 with
+      its pre-wipe citation intact, and the `paired_check` entry still `1600.0`.
+      The paired line's COMMENT did change — clause 3 requires the new publication
+      stamp beside the budget, and clause 5 requires the bound unchanged, so the
+      number and the comment are pinned apart rather than conflated into one
+      "byte-identical" claim that could not be true of both.
+    * **The recorder is not wired into this suite.** These two files may name the
+      probe in prose (they must, or the provenance would be a mystery), but neither
+      imports it, exec's it, nor reads its exit code — importing it here would make
+      a ledger-reading job part of the suite that `tests/conftest.py:93` points at a
+      scratch dir, which is precisely the vacuous-green test the ruling refused.
+    * **Nothing in the promotion path reads it.** No file under `scripts/automod/`
+      or `workers/` mentions it at all, so no gate rung, landing decision or
+      rollback path can be gated on a measurement the gate cannot re-run.
+
+    `test_no_recorded_run_reads_over_budget` above is unchanged by this diff and
+    still passes in a throwaway detached worktree off the base commit
+    (`git worktree add --detach ~/lloyd-work/check-$ HEAD`, then
+    `.venvs/lloyd/bin/python -m pytest tests/test_automod_regression.py
+    tests/test_automod_doc_claims.py -q` → 214 passed), which is the check that
+    proves the refresh did not quietly retune the one ceiling assertion the suite
+    has.
+    """
+    here = Path(__file__)
+    repo = here.parent.parent
+    # The recorder's name is spelled in pieces, twice over in places, so that this
+    # node does not match itself: its own source has to mention the probe to forbid
+    # mentioning it, and a check that trips over its own literals is a check that can
+    # never live in the file it guards.
+    probe = "published_maxima_" + "probe"
+
+    def _folds(node):
+        """Every string an expression can denote, with literal `+` folded.
+
+        Needed because the execution this rail exists to refuse does not have to
+        spell the script's name in one piece: `subprocess.run(["python",
+        "scripts/maintenance/published_maxima_" + "probe.py"])` is a concatenation of
+        two literals, and a scan that reads each `ast.Constant` on its own sees two
+        harmless fragments and calls it green. Folding is syntactic only (literals,
+        adjacent f-string parts, `+` of the above, and list/tuple/set/dict element
+        lists) — it is not trying to evaluate Python, only to close the split-literal
+        gap a grep would leave open.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.JoinedStr):
+            out = set()
+            for part in node.values:
+                out |= _folds(part)
+            return out
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return {l + r for l in _folds(node.left) for r in _folds(node.right)}
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            out = set()
+            for elt in node.elts:
+                out |= _folds(elt)
+            return out
+        if isinstance(node, ast.Dict):
+            out = set()
+            for val in node.values:
+                out |= _folds(val)
+            return out
+        return set()
+
+    def _mentions(path, calls_only):
+        """Places in `path` where the recorder is named by CODE, not by prose.
+
+        Two strictness levels, because the two halves of the clause need different
+        things. For the promotion path (`calls_only=False`) any string constant or
+        dotted name anywhere in the module is refused, comments excluded — a module
+        under `scripts/automod/` has no legitimate reason to hold the recorder's name
+        in data, so a wide net costs nothing and catches `argv = [PROBE]` built
+        outside the call. For the two suite files (`calls_only=True`) a *needle list*
+        of figure names is legitimate data and must not be refused, so what is refused
+        is a folded mention appearing inside a call — an import, an exec, a
+        `subprocess.run`, a `spec_from_file_location` — plus any import of it. A
+        comment or a docstring may name it anywhere: clause 3 REQUIRES
+        `automod_regression.py` to carry this very name in its provenance comment, and
+        a first draft of this rail grepped raw text and failed on that requirement.
+        """
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        prose_lines = {ln.start[0] for ln in tokenize.generate_tokens(
+            io.StringIO(text).readline) if ln.type == tokenize.COMMENT}
+        prose_lines |= {n for node in ast.walk(tree)
+                        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                             ast.AsyncFunctionDef))
+                        for n in (range(node.body[0].lineno, node.body[0].end_lineno + 1)
+                                  if isinstance(node.body[0], ast.Expr)
+                                  and ast.get_docstring(node) is not None else range(0))}
+        bad = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.ImportFrom) and probe in (node.module or "")) or (
+                    isinstance(node, ast.Import)
+                    and any(probe in (a.name or "") for a in node.names)):
+                bad.append(f"{path.name}:{node.lineno} imports the recorder")
+                continue
+            if getattr(node, "lineno", None) in prose_lines:
+                continue
+            if calls_only and not isinstance(node, ast.Call):
+                continue
+            # A `Call` is folded from its ARGUMENTS, not from itself: `_folds` of the
+            # call node would be the empty set, and a first draft written that way
+            # left `subprocess.run(["python", "…/published_maxima_" + "probe.py"])`
+            # green — the exact hole the gate's review named.
+            cands = set()
+            if isinstance(node, ast.Call):
+                for arg in node.args:
+                    cands |= _folds(arg)
+                for kw in node.keywords:
+                    cands |= _folds(kw.value)
+            else:
+                cands = _folds(node)
+            hit = next((v for v in cands if probe in v), None)
+            if hit is not None:
+                bad.append(f"{path.name}:{node.lineno} names the recorder in code "
+                           f"({hit[:60]!r})")
+        return bad
+
+    # The two suite files that could pull the recorder into a gate run. Doing it
+    # there would be vacuously green, because `tests/conftest.py:93` points
+    # `LLOYD_AUTOMOD_STATE` at a scratch dir: the probe would read an empty ledger,
+    # print n=0, and check nothing — the failure mode that made the recorder a
+    # scheduled job rather than a test.
+    suite_bad = (_mentions(here, calls_only=True)
+                 + _mentions(here.parent / "test_automod_doc_claims.py", calls_only=True))
+    assert not suite_bad, (
+        f"the suite executes or imports the recorder: {suite_bad} — it must be named "
+        "only in prose, or the drift alarm goes green on an empty ledger")
+
+    # And nothing on the promotion path: no gate rung, landing decision or rollback
+    # may depend on a measurement the gate itself cannot re-run.
+    path_bad = [m for rel in ("scripts/automod", "workers")
+                for p in (repo / rel).rglob("*.py") for m in _mentions(p, calls_only=False)]
+    assert not path_bad, (
+        f"the promotion path runs the recorder: {path_bad} — it is an observation, "
+        "never a gate")
+
+    assert R.LATENCY_BUDGET_MS == {"nightly": 4800.0, "paired_check": 1600.0}
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    block = src[src.index("LATENCY_BUDGET_MS = {"):src.index("\n}\n") + 3]
+    assert '"nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219, pre-wipe)' in block, (
+        "the nightly budget line changed, including its comment: that figure is a "
+        "human's re-derivation and no part of #3304 touches it")
+    paired_line = next(ln for ln in block.splitlines() if '"paired_check"' in ln)
+    assert paired_line.split("#")[0].strip().endswith("1600.0,"), (
+        f"the paired_check bound moved: {paired_line!r}")
+    assert "2026-10-25T12:11Z" in paired_line and "1,160.2" in paired_line, (
+        "the budget line lost the publication stamp clause 3 requires beside it")
+    assert "905.3" in paired_line, (
+        "the budget line dropped the retired publication it is a refresh OF")
