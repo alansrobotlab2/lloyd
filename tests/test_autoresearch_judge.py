@@ -2158,3 +2158,66 @@ def test_the_live_bench_coverage_node_still_grades_the_live_vault():
     assert len(asserts) == 1, f"expected the node's one assertion, got {len(asserts)}"
     assert ast.unparse(asserts[0].test) == "tasks and (not missing)", (
         f"the node's assertion is now {ast.unparse(asserts[0].test)!r}")
+
+
+#: The ten live bench ids #3311 put through the judge comparison on 2026-10-25 —
+#: the ids `eval/autoresearch_judge_compare.py` could label but had never
+#: minted, listed in `coverage.missing` as `untraced` until then. Named here so
+#: clause 5's expectation is about these ten and not about whatever the table
+#: happens to say.
+TASKS_3311_MEASURED = (
+    'bench_018_skill_invocation_rare_interp',
+    'bench_019_skill_invocation_retired_schedule',
+    'bench_020_skill_inventory_coverage_gap',
+    'bench_021_skill_invocation_self_kill',
+    'bench_022_skill_invocation_never_ran_chain',
+    'bench_023_skill_invocation_shadowed_import_chain',
+    'bench_024_recall_user_fact_incidental',
+    'bench_025_skill_invocation_never_ran_resume_chain',
+    'bench_027_recall_user_fact_topic_read',
+    'bench_028_contradiction_two_kinds',
+
+)
+
+
+def test_a_task_measured_under_0_9_assertion_agreement_carries_graded_and_the_note_names_it():
+    """#3311 clause 5: `graded` is the escape hatch for a task whose rubric resists
+    binarisation, and it has to be a reading of the measured agreement rather than
+    of a guess — a task left unlabelled below the 0.9 line keeps the binary judge
+    anyway (`assertions_for` still returns its rows), so the only record that it
+    was measured bad is the flag and the note.
+
+    All ten ids came in at binary per-assertion agreement **1.000**, the highest in
+    the corpus, so the expected set below is empty and no task in
+    `eval/autoresearch_assertions.yaml` carries `graded`: the flag's first use is
+    still unwritten, and no id outside the ten was touched. The node reads the
+    published json rather than trusting that sentence, so a re-measurement that
+    drops one of these ten below 0.9 turns this red naming the id, instead of
+    leaving a task on a judge it has been measured to disagree with itself on.
+    """
+    import json
+
+    published = json.loads((judge.LLOYD_HOME
+                           / "eval/measurements/autoresearch-judge-compare-2026-09-24.json")
+                           .read_text(encoding="utf-8"))
+    per_task = published["per_task"]
+    assert all(tid in per_task for tid in TASKS_3311_MEASURED), (
+        "a #3311 id has no agreement measurement, so clause 5 cannot be graded from the json")
+    below = sorted(tid for tid in TASKS_3311_MEASURED
+                   if per_task[tid]["binary"]["agree"] is not None
+                   and per_task[tid]["binary"]["agree"] < 0.9)
+
+    table = judge.load_assertions()
+    graded = sorted(tid for tid, entry in table.items()
+                    if isinstance(entry, dict) and entry.get("graded"))
+    assert graded == below, (
+        f"`graded: true` is on {graded} but the measured binary agreement under 0.9 "
+        f"is {below}: the flag must be set from the measurement, on exactly its ids")
+
+    note = (judge.LLOYD_HOME / "eval/measurements/autoresearch-judge-compare-2026-09-24.md"
+            ).read_text(encoding="utf-8")
+    for tid in below:
+        assert f"`{tid}`" in note, f"{tid} is graded and the note must name it"
+    if not below:
+        assert "No new id needs `graded: true`, so none was set" in note, (
+            "nothing is graded, so the note has to say so rather than stay silent")
