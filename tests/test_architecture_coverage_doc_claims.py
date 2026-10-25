@@ -239,13 +239,21 @@ _EXT = r"(?:py|md|ts|tsx|json|jsonl|yaml|yml|js|mjs|css|html|db|sql|txt|sh|servi
 #: `keep/raise/revert` and `met/not_met`, and a directory-shaped match against
 #: those would report invented missing files — a check that fails on nothing
 #: real is a check a later reader disables. Inside a span, a citation is
-#: `[$LLOYD_DATA/ | ~/] a/b/c.ext | a/b/c/ [:line]`. A bare `stats.py` is not a
+#: `[$LLOYD_DATA/ | $HOME/ | ~/] a/b/c.ext | a/b/c/ [:line]`, or the same shape on
+#: a `$VAR` root — which is a citation too, and since #3297 is checked: the
+#: grammar used to name the two known roots and nothing else, so a span starting
+#: `$DATA_ROOT/…` matched no prefix, was dropped as not-a-citation, and six live
+#: invented roots kept the corpus green. A prefix this file cannot answer for is
+#: resolved against a directory named after the variable, which exists in no root,
+#: so the sweep reports it instead of skipping it; a `$VAR` the same doc assigns
+#: (`FH=$(mktemp -d)`) is skipped, being a snippet's temp directory and not a
+#: claim about this machine. A bare `stats.py` is not a
 #: citation: it names a file without claiming where it lives. Neither is a glob
 #: (`web/src/**`) or a URL — both are rules and routes, not paths on disk.
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 
 _CITATION = re.compile(
-    r"\A(?P<pre>\$LLOYD_DATA/|~/)?"
+    r"\A(?P<pre>\$LLOYD_DATA/|\$HOME/|(?P<var>\$[A-Z][A-Z0-9_]*/)|~/)?"
     r"(?P<path>(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+\.(?:" + _EXT + r")"   # a file
     r"|(?:[A-Za-z0-9_.\-]+/)+)"                                             # or a directory
     r"(?::(?P<line>\d+))?\Z")
@@ -270,6 +278,17 @@ def _resolve(prefix: str | None, rel: str) -> Path:
         return (ENV_DATA_ROOT or DATA_ROOT or ACCOUNT_HOME / "lloyd-data") / rel
     if prefix == "~/":
         return ACCOUNT_HOME / rel
+    if prefix == "$HOME/":
+        # The same directory `~/` names, spelled the way a shell snippet spells
+        # it: three live citations do that, and two of them are real files.
+        return ACCOUNT_HOME / rel
+    if prefix:
+        # A `$VAR` root the extractor was never taught: the literal name goes into
+        # the checkout, so the path exists in no root, `citation_roots` cannot
+        # re-root it onto one that does, and every caller sees an unresolved
+        # citation. That is the loud answer an invented prefix always should have
+        # had; the bare spelling reached it by accident of parsing.
+        return ROOT / prefix / rel
     return ROOT / rel
 
 
@@ -337,16 +356,48 @@ def cited_citations(text: str) -> list[tuple[str, Path, int | None]]:
     not on the path the extractor built from it: an entry has to be checkable
     against the doc, and `lloyd/SOUL.md` is the citation a reader can find,
     whereas `/home/…/lloyd/SOUL.md` is an artefact of which root won.
+
+    A span whose prefix is a `$VAR` this doc never assigns is kept, and `_resolve`
+    sends it to a directory that exists in no root, which is what makes the sweep
+    below report it. Before #3297 it was dropped here instead: the prefix
+    alternation named only `$LLOYD_DATA/` and `~/` and anchored the span at its
+    start, so
+    `$DATA_ROOT/safety/denials.jsonl` parsed as nothing and the six live spans
+    spelled that way were invisible — while the same mistake written bare,
+    `DATA_ROOT/safety/denials.jsonl`, parsed checkout-relative and went red. The
+    silent half is what this closes; the loud half already worked, which is exactly
+    why the gap survived. A `$VAR` the doc assigns itself (`FH=$(mktemp -d)`,
+    architecture/djev.md:1432) is not a citation about the box at all, so those
+    spans stay skipped.
     """
+    local_vars = _doc_local_vars(text)
     out = []
     for span in _CODE_SPAN.findall(text):
         m = _CITATION.match(span.strip())
         if not m or "/" not in m.group("path"):
             continue
+        if m.group("var") and m.group("var")[1:-1] in local_vars:
+            continue
         out.append((span.strip(),
                     _resolve(m.group("pre"), m.group("path")),
                     int(m.group("line")) if m.group("line") else None))
     return out
+
+
+#: An uppercase name a doc gives a value to with its own shell snippet.
+_DOC_LOCAL_VAR = re.compile(r"\b([A-Z][A-Z0-9_]*)=\$?\(")
+
+
+def _doc_local_vars(text: str) -> set[str]:
+    """Uppercase names the doc itself assigns, dollars stripped.
+
+    `FH=$(mktemp -d)` at architecture/djev.md:1432 makes the two `$FH/…` spans
+    below it real references to a directory that snippet creates. `_CITATION`
+    cannot tell that from a span alone, so the allowance is scoped to the one
+    document that assigns the name: a root invented in one doc and cited in
+    another is still invented.
+    """
+    return set(_DOC_LOCAL_VAR.findall(text))
 
 
 def cited_paths(text: str) -> list[tuple[Path, int | None]]:
@@ -396,6 +447,24 @@ def unresolved_citations(cited) -> list:
     absent = [Path(p) for p, _ in cited if resolve_citation(p) is None]
     ignored = git_ignored(absent)
     return [p for p in absent if p not in ignored]
+
+
+def unexplained_citations(text: str, exempt: dict) -> list[tuple[str, Path]]:
+    """The citations in `text` that exist under no root and carry no reason.
+
+    Factored out of `test_every_path_an_architecture_doc_cites_resolves_in_the
+    _working_tree`, which now asks this, so a fixture can be put to the identical
+    question the corpus is graded by — extractor, git-ignore allowance and
+    exemption lookup all included. A control that reimplemented the rule could
+    report on a rule the corpus is never checked against.
+    """
+    cited = cited_citations(text)
+    absent = [pth for _s, pth, _l in cited if _resolved_or_none(pth) is None]
+    ignorable = {str(p) for p in git_ignored(absent)}
+    return [(span, pth) for span, pth, _l in cited
+            if _resolved_or_none(pth) is None
+            and str(pth) not in ignorable
+            and span not in exempt]
 
 
 #: Every top-level architecture doc, read the way the cadence reads it:
@@ -565,6 +634,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'never in a worktree'),
  },
  'data-home.md': {
+  '$LLOYD_DATA/quarantine/tree-strays/':
+   ('generated: the directory the watch moves a tree stray into, under'
+    ' the runtime root, created on the first quarantine. Dated'
+    ' 2026-10-25: measured absent at the data root that day, where'
+    ' `quarantine` names no directory at all'),
   '.venvs/':
    ('generated: interpreter venvs the install scripts build, never'
     'committed, so no worktree has them'),
@@ -931,11 +1005,14 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: honest reporting and taught the next reader to distrust it. At zero, one new rot
 #: exemption fails the suite by itself.
 #: It has stayed there, and the residue #2795 left open was ruled on 2026-10-18 at
-#: `917f669b`, not left as a question. Re-measured 2026-10-24, after #3255 added one
-#: `historical:` entry for the retirement `voice.md` records in its own sentence
-#: (`~/.lloyd/`, the home dot-directory the wake-miss corpus left in #1444): 108
+#: `917f669b`, not left as a question. Re-measured 2026-10-25, after #3297 added one
+#: `generated:` entry for the quarantine directory `data-home.md` has always cited
+#: (the span was spelled on an invented root, so the sweep could not see it until the
+#: re-spelling made it a citation), on top of the #3255 entry that records the
+#: retirement `voice.md` states in its own sentence (`~/.lloyd/`, the home
+#: dot-directory the wake-miss corpus left in #1444): 109
 #: exemptions across 29 docs —
-#: other-tree 43, generated 33, historical 32 — and NONE of them is `stale:`; and `git log
+#: other-tree 43, generated 34, historical 32 — and NONE of them is `stale:`; and `git log
 #: -L` on the line below names `24228136` and nobody since, so the bound has not moved in
 #: the 93 commits landed since it was cut. No run count is quoted here because the ledger
 #: cannot produce one: a `promotions.jsonl` gate row has no field marking a full-suite run.
@@ -971,7 +1048,8 @@ def test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
     it, and a line anchor is checked against the file the citation actually
     resolved to, not against the checkout's guess at it.
     """
-    cited = cited_citations(_text(slug))
+    text = _text(slug)
+    cited = cited_citations(text)
     assert cited, f"{slug} cites no path at all — the doc has stopped being checkable"
     exempt = PATH_CITATION_EXEMPTIONS.get(slug, {})
     resolved = []
@@ -989,11 +1067,10 @@ def test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
         f"{slug} cites {len(cited)} paths and not one of them exists under any root "
         "the box has — a doc whose every citation is exempt has stopped being "
         "checkable, which is the failure the exemption list exists to be unable to hide")
-    absent = [pth for _s, pth, _l in cited if _resolved_or_none(pth) is None]
-    ignored = git_ignored(absent)              # one batched call for the whole doc
-    missing = sorted({span for span, path, _line in cited
-                      if _resolved_or_none(path) is None
-                      and path not in ignored and span not in exempt})
+    # One batched git-ignore call for the whole doc, inside the helper the
+    # fixture-level node is put to as well: the corpus and the synthetic line are
+    # graded by literally the same call.
+    missing = sorted({span for span, _path in unexplained_citations(text, exempt)})
     assert not missing, (
         f"{slug} cites paths that exist under none of the "
         f"{len(CITATION_ROOTS)} roots, are not git-ignored, and carry no exemption "
@@ -1087,6 +1164,137 @@ def test_the_absent_pseudo_query_cache_is_cited_by_what_defines_it():
     assert caught == [_NEVER_WRITTEN_CONTROL], (
         f"the reader caught {caught} in a citation of the pre-fix shape, so the "
         "assertion above would pass on a doc that cites nothing")
+
+
+def test_an_invented_dollar_root_is_reported_where_the_named_root_is_not():
+    """The silent half of #3297, in one pair of lines.
+
+    Two fixtures, one span apart: a root the extractor was never taught
+    (`$DATA_ROOT/`) must be reported by the same call the corpus sweep makes, and
+    the root it was taught (`$LLOYD_DATA/`) must not be. Both halves are needed.
+    Asked only of the bad line, a guard could pass by parsing nothing at all —
+    `$DATA_ROOT/safety/x.jsonl` matched no citation rule before this and so was
+    never reported, which is how six live citations went unseen while the file
+    stayed green. The good line being *extracted* is what makes that impossible
+    here: `_CITATION` and `cited_citations` produce it, and the report the node
+    reads out of the failure is that function's own output, not a copy.
+    """
+    bad = "The journal lands in `$DATA_ROOT/safety/x.jsonl` on every denial."
+    good = "The journal lands in `$LLOYD_DATA/safety/denials.jsonl` on every denial."
+
+    bad_cited = cited_citations(bad)
+    good_cited = cited_citations(good)
+    assert [s for s, _p, _l in bad_cited] == ["$DATA_ROOT/safety/x.jsonl"], \
+        f"the invented root was not extracted at all: {bad_cited}"
+    assert [s for s, _p, _l in good_cited] == ["$LLOYD_DATA/safety/denials.jsonl"], \
+        f"the named root was not extracted either: {good_cited}"
+
+    caught = unexplained_citations(bad, {})
+    assert [s for s, _p in caught] == ["$DATA_ROOT/safety/x.jsonl"], (
+        f"an invented root prefix passed the sweep unseen: {caught}")
+    # The good half asks whether a file on this box exists, so say which half
+    # failed when the box, not the guard, is the problem: without this a deleted
+    # data-root file would redden the assertion below, whose message blames the
+    # guard for keying on `$`.
+    assert _resolved_or_none(good_cited[0][1]) is not None, (
+        f"precondition, not a verdict: `{good_cited[0][0]}` names a file the data "
+        "root no longer holds, so this pair cannot say anything about the guard")
+    assert unexplained_citations(good, {}) == [], (
+        "the real root the extractor resolves was reported as invented — the guard "
+        "is keying on `$` and not on whether the root is one it can answer for")
+
+    # And the reported path is the one nobody can answer for: the variable name
+    # survives into it, so no root on the box can hold it. That is what turns the
+    # bare spelling loud and now, the same, the `$` spelling.
+    assert "$DATA_ROOT" in str(caught[0][1]), str(caught[0][1])
+
+
+def test_a_dollar_name_is_only_an_invented_root_when_no_doc_assigns_it():
+    """The allowance that keeps clause 5 quiet, and its edge.
+
+    `$FH/.local/state/lloyd-djev/shadow.jsonl` (architecture/djev.md:1434 and
+    :1736) is a directory the snippet three lines above creates — `FH=$(mktemp
+    -d)` at :1432 — so it is not a claim about a root on this machine at all, and
+    the two live spans must go on being skipped. A name nothing assigns is a
+    different matter: it is the same invention under a different spelling, and
+    reported. `$HOME/` is in neither camp: it is a root the extractor answers for
+    (the account home, same as `~/`), which is why `automod.md:3115`,
+    `djev.md:1421` and `skills.md:425` are untouched.
+    """
+    assigned = ("FH=$(mktemp -d); HOME=$FH\n"
+                "touch `$FH/.local/state/lloyd-djev/shadow.jsonl`\n")
+    assert _doc_local_vars(assigned) == {"FH"}
+    assert cited_citations(assigned) == [], "a snippet's own temp directory was cited"
+    assert unexplained_citations(assigned, {}) == []
+
+    unassigned = "touch `$FH/.local/state/lloyd-djev/shadow.jsonl`\n"
+    assert _doc_local_vars(unassigned) == set()
+    assert [s for s, _p in unexplained_citations(unassigned, {})] == \
+        ["$FH/.local/state/lloyd-djev/shadow.jsonl"], \
+        "a dollar root no doc assigns is still invisible to the sweep"
+
+    home = "`$HOME/.local/state/lloyd-djev/shadow.jsonl` and `$HOME/obsidian`\n"
+    assert [s for s, _p in unexplained_citations(home, {})] == [], \
+        "the account home was reported as an invented root"
+
+    # Corpus leg, measured from the docs rather than from this node's own fakes, so
+    # clause 5's five spans are pinned where they are written. Each is a different
+    # reason to be left alone, and the node says which: `djev.md:1421`'s span IS a
+    # citation, on the account home, and the file is real; `automod.md:3115`'s
+    # `$HOME/obsidian` and `skills.md:425`'s `$HOME/…` are not citations at all —
+    # one path segment, and a literal ellipsis — so the grammar never claims them;
+    # `workers.md:988`'s `AUTONOMY_RUNS_DIR/**/run_*.md` is a glob, which the
+    # grammar has always refused. None of the five is newly reported, and none of
+    # them needed an exemption entry to stay green.
+    untouched = ("automod.md", "djev.md", "skills.md", "workers.md")
+    for slug in untouched:
+        assert unexplained_citations(_text(slug),
+                                     PATH_CITATION_EXEMPTIONS.get(slug, {})) == [], (
+            f"{slug} gained an unexplained citation from the widened grammar")
+    djev = {s: str(p) for s, p, _l in cited_citations(_text("djev.md"))}
+    assert "$HOME/.local/state/lloyd-djev/shadow.jsonl" in djev
+    # Where the span points, not whether the file is there: this store is 300 MB
+    # of live djev traffic, and a node that asked for its existence would redden
+    # on a cleared cache while blaming the guard for keying on `$`.
+    assert djev["$HOME/.local/state/lloyd-djev/shadow.jsonl"] == \
+        str(ACCOUNT_HOME / ".local/state/lloyd-djev/shadow.jsonl"), \
+        "the $HOME span stopped resolving to the account home"
+    fh_spans = [s for s in djev if s.startswith("$FH/")]
+    assert fh_spans == [], f"djev.md assigns FH itself, so nothing cites it: {fh_spans}"
+    for slug, prose_span in (("automod.md", "$HOME/obsidian"),
+                             ("skills.md", "$HOME/…"),
+                             ("workers.md", "AUTONOMY_RUNS_DIR/**/run_*.md")):
+        assert prose_span not in {s for s, _p, _l in cited_citations(_text(slug))}, (
+            f"{slug}'s `{prose_span}` is now claimed as a citation — one of the "
+            "grammar's refusals (single segment, non-ASCII, glob) came off")
+
+
+def test_the_quarantine_citation_carries_a_dated_generated_reason():
+    """Clause 4's shape: one exemption per quarantine citation, no new kind.
+
+    The directory is created the first time a stray is actually moved, so it is
+    legitimately absent today — which is exactly what `generated:` is for, the
+    kind the list already carries. The date is in the reason because the claim is
+    a measurement of this box on a day, and a reader in six months cannot tell an
+    exemption that has gone stale from one that never needed removing otherwise.
+    """
+    reasons = {span: reason for span, reason in
+               PATH_CITATION_EXEMPTIONS["data-home.md"].items()
+               if "quarantine/tree-strays" in span}
+    assert reasons, "the quarantine citation lost its exemption and the doc is red"
+    for span, reason in reasons.items():
+        assert span.startswith("$LLOYD_DATA/"), \
+            f"exemption keyed on an invented root: {span}"
+        assert reason.startswith("generated:"), span
+        assert re.search(r"20\d\d-\d\d-\d\d", reason), \
+            f"{span}'s reason states no date it can go stale against: {reason}"
+    # The corpus keeps exactly one such entry: the other quarantine mention,
+    # `$LLOYD_DATA/quarantine/tree-strays/<name>`, is not a citation at all (a
+    # span with `<` matches no path grammar), so it needs no reason and gets none.
+    quarantine = [s for s in PATH_DOC_SLUGS
+                  for span in PATH_CITATION_EXEMPTIONS.get(s, {})
+                  if "quarantine" in span]
+    assert len(quarantine) == 1, quarantine
 
 
 def test_the_path_extractor_is_what_the_check_depends_on():

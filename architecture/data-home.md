@@ -136,7 +136,7 @@ fall back to a literal absolute path naming this account, which is right on this
 and nobody's root on any other. They resolve the live root from any tree. For a reader
 that is wrong but harmless, and for a while the sweep was the only one with `unlink`
 behind it — that is no longer true of the guardian, whose `quarantine_inert` creates
-`$DATA_ROOT/quarantine/tree-strays/<name>` under its own hand-resolved root and
+`$LLOYD_DATA/quarantine/tree-strays/<name>` under its own hand-resolved root and
 unlinks the code-tree copy (#3208). Import the accessor `policy.quarantine_dir`
 already loads by path when one of them next changes.
 
@@ -316,7 +316,7 @@ Four layers, in the order a turn meets them:
    is bracketed by a read of the live checkout's *ignored* paths
    (`live_strays.ignored`, ~7 ms, `--no-optional-locks`). One that appeared is appended
    to the result — what it is, where it belongs, remove it if you made it — and
-   journaled to `$DATA_ROOT/safety/tree-strays.jsonl` with the session and command. No
+   journaled to `$LLOYD_DATA/safety/tree-strays.jsonl` with the session and command. No
    command shape is matched, so a redirect, `sqlite3` and a Python one-liner are one
    case. Ignored only: an untracked `??` file may be about to be committed. Caches
    (`live_strays.CACHE_PARTS`) are left out. It is a note, not a refusal, and
@@ -341,7 +341,7 @@ Four layers, in the order a turn meets them:
    checkout is a standing artefact that would otherwise be re-reported on every call, while
    an empty database is only ever new on the one call that made it. Moving either one stays
    the sweep's report-only, human decision. One `present` row per tree and path, decided by
-   `$DATA_ROOT/safety/tree-stray-acks.json` and never by the after-set alone, so the
+   `$LLOYD_DATA/safety/tree-stray-acks.json` and never by the after-set alone, so the
    checkout's standing ignored paths are not journalled as incidents; it carries no note,
    because the call did not make it. Not covered: `run_in_background` commands,
    attribution between two sessions writing in the same second (the note says "appeared
@@ -374,7 +374,7 @@ Four layers, in the order a turn meets them:
    `bracket-only`.
 3. **The guardian moves provably inert residue instead of alerting on it**
    (`datawatch.quarantine_inert`, called from `_runtime_data_incident`). A stray is
-   moved to `$DATA_ROOT/quarantine/tree-strays/` and announced as news only when every
+   moved to `$LLOYD_DATA/quarantine/tree-strays/` and announced as news only when every
    one of these is measured: a top-level `RUNTIME_NAMES` entry, a regular file with
    one link and zero bytes, untouched for `INERT_MIN_AGE_SECONDS` (600), no SQLite
    sidecar beside it, and the same name present in the data root. A move, never a

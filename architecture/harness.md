@@ -1902,7 +1902,7 @@ a negative result is a clean `rejected`):
 ## The denial journal (2026-09-30)
 
 **What it is.** `app/harness/denial_journal.py` writes one JSON line per refusal to
-`$DATA_ROOT/safety/denials.jsonl` (`app.paths.DENIAL_JOURNAL_PATH`, env override
+`$LLOYD_DATA/safety/denials.jsonl` (`app.paths.DENIAL_JOURNAL_PATH`, env override
 `LLOYD_DENIAL_JOURNAL` for tests and canary boots). A row carries `at` (UTC, offset-bearing),
 `guard`, `where` (`hook` | `dispatch`), `session`, `session_class`
 (`chat` | `background` | `bench` | `subagent` | `none`, read off the id alone), `tool`,
@@ -1957,7 +1957,7 @@ as zero. The scorecard resolves the path through `app.data_root`, the stdlib-onl
 the guardian uses, so it still imports nothing from the application.
 
 **The install-provenance journal is its sibling, and is read beside it (#1956).**
-`$DATA_ROOT/supply-chain/provenance.jsonl` (`app/harness/supply_chain.py`) records what
+`$LLOYD_DATA/supply-chain/provenance.jsonl` (`app/harness/supply_chain.py`) records what
 this journal cannot: an *override*, an install allowed *unvetted*, and what was cleared or
 already declared. Three things were wrong with it on its first day of data (2026-10-01:
 36 rows, 19 decisions, 212 KB). One decision was written twice, because the guard runs in
