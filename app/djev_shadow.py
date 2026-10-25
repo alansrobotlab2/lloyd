@@ -87,10 +87,15 @@ PENDING_DROPS = STATE_DIR / "dropped_at_shutdown.json"
 
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
-    #: Deliberately small. The seams fire 140-300 times a day between them and
-    #: a decision takes ~40 ms plus prefill, so a healthy backlog is single
-    #: digits. A queue deep enough to hold an hour of traffic would hide the
-    #: overflow this is meant to report.
+    #: Deliberately small, and sized off the same probe as `config.yaml`'s
+    #: `djev.shadow.queue_max`: 2026-10-25, read over `djev_status`'s
+    #: `shadow.seam_log`. The four shadow seams in this module's `SEAMS`
+    #: wrote 9,241 rows/day over the seven full UTC days
+    #: 2026-10-18..2026-10-24 — 385 rows/hour — and `action_review` alone is
+    #: 99.5% of the store. At ~40 ms a decision a healthy backlog is still
+    #: single digits, but 385 rows/hour is deeper than 256, so this is a
+    #: reporting bound and not an absorbing one: shallow enough that a real
+    #: backlog reports overflow is the whole point of the number.
     "queue_max": 256,
     #: Above `djev.DEFAULT_TIMEOUT_S`, because a shadow call has no caller
     #: waiting on it and its states are the large ones (a 12-candidate rerank

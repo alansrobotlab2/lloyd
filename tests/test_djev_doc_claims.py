@@ -1,6 +1,6 @@
 """What the djev prose is allowed to say about the seams it describes.
 
-Two items live here, both because a description was read as a fact. The first
+Three items live here, each because a description was read as a fact. The first
 is `architecture/djev.md`'s record of the #1324 shadow-log leak: the behaviour
 that closes the leak is pinned in `tests/test_djev_shadow_isolation.py`, and
 this file pins the *other* half — what the doc may now say, and the numbers
@@ -13,6 +13,13 @@ the kill switch. Those assertions sit at the bottom of this file because they
 are the same shape as the ones above: they read words out of files rather than
 running code, so they need no daemon, no engine and no fixture, and every
 needle is a string a later reader can `grep` to re-measure.
+
+The third is #3326: the two comments that size the shadow queue — `config.yaml`'s
+`shadow.queue_max` and `djev_shadow.DEFAULTS` — each justified the bound with a
+rate counted over three seams, while `djev_shadow.SEAMS` has held four since
+2026-09-25 and the fourth writes 99.5% of the log. Those nodes sit with the #1372
+ones for the same reason and refuse the same two shapes: a seam count that is not
+`len(SEAMS)`, and a calibration that asserts a relation the log refutes.
 
 It matters because the doc is where the item came from. §11 carried "Test runs
 write to production's shadow log" as an open gap and named #1324, so any
@@ -316,6 +323,319 @@ def test_the_needle_check_refuses_the_sentence_it_exists_to_refuse():
         f"it raised, but not on the phrase — the needles have moved and the "
         f"parametrised node is now guarding something else: {raised.value}")
     _assert_no_live_seam_claims(CONFIG_SRC.read_text(), where="config.yaml")
+
+
+#: Both places that size the shadow queue with a frequency sentence: the live
+#: config and the recorder's own `DEFAULTS`. #3326 found the same stale claim on
+#: each — `config.yaml`'s "a few hundred times a day" and `djev_shadow.py`'s
+#: "140-300 times a day" — so one parametrised trio guards both, and a third such
+#: comment inherits the three rather than escaping them.
+QUEUE_MAX_COMMENTS = [CONFIG_SRC, SHADOW_SRC]
+
+#: The probe #3326 landed on and the three readings it took from
+#: `djev_status`'s `shadow.seam_log`: the aggregate over the seven full UTC days
+#: 2026-10-18..2026-10-24 (9,241 rows, ~385 an hour), and `action_review`'s share
+#: of the store (303,434 of 304,832 rows). Pinned as literals on purpose: these
+#: sentences are readings, and a re-read that updates either comment has to move
+#: the date and the figures here with it, which is the one thing that keeps a
+#: dated rate from quietly becoming a present fact.
+SEAM_PROBE_DATE = "2026-10-25"
+SEAM_ROWS_PER_DAY = "9,241"
+SEAM_ROWS_PER_HOUR = "385"
+SEAM_DOMINANT_SHARE = "99.5%"
+
+#: The rates the two comments shipped with. Named because both are refused over
+#: the comment's whole text, and a third spelling of "we did not measure" would
+#: otherwise slip through the pair.
+STALE_QUEUE_MAX_RATES = ("few hundred", "140-300")
+
+#: The calibration sentence #3326 refutes, by its own words: it asserted the
+#: bound outlasts an hour of traffic, and a measured hour (~385 rows) has been
+#: larger than `queue_max` since the fourth seam's first row, 2026-09-25T18:45Z.
+OLD_HOUR_CLAIM = "deep enough to hold an hour"
+
+_DAY_FIGURE = re.compile(r"\b([\d,]+) rows/day\b")
+_HOUR_FIGURE = re.compile(r"\b([\d,]+) rows/hour\b")
+_PROBE_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+
+
+def _queue_max_comment(path: Path) -> str:
+    """The comment block sitting directly above a `queue_max` declaration.
+
+    Located from the value and walked backwards over comment lines, so re-wrapping
+    the prose or inserting a key above it moves the window along rather than
+    leaving the check reading a neighbour's comment. Both surfaces put their
+    justification in exactly this position; the recorder's `#:` and the config's
+    `#` strip to the same prose, which is wrapped in places and so is flattened
+    before any figure is read out of it.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = [i for i, ln in enumerate(lines)
+          if ln.strip().startswith(("queue_max:", '"queue_max"'))]
+    assert at, f"`queue_max` is gone from {path.name}, so this check has no subject"
+    end = at[0]
+    start = end
+    while start > 0 and lines[start - 1].strip().startswith("#"):
+        start -= 1
+    prose = " ".join(ln.strip().lstrip("#").lstrip(":").strip()
+                     for ln in lines[start:end])
+    prose = " ".join(prose.split())
+    assert prose, (
+        f"nothing above `queue_max` in {path.name} justifies the bound any more. "
+        "The comment that did was the subject of #3326")
+    return prose
+
+
+def _assert_a_dated_probe(flat: str, *, where: str) -> None:
+    """Clause 1: a rate a reader can re-measure, not a rate to trust.
+
+    Three things, no more: the unmeasured claim is gone, the reading carries the
+    day it was taken, and it names `shadow.seam_log` as the place to re-take it.
+    The date and the per-day figure are both pinned, because a sentence that keeps
+    a date while swapping the number under it is how a dated reading becomes a
+    present fact again — which is the failure this whole item is about.
+    """
+    for stale in STALE_QUEUE_MAX_RATES:
+        assert stale not in flat, (
+            f"{where} sizes `queue_max` by {stale!r} again. That figure was #3326: "
+            "read `shadow.seam_log`, then write the measurement with its date.")
+    dated = _PROBE_DATE.search(flat)
+    assert dated, (f"{where}'s `queue_max` comment states a rate with no probe date, "
+                   "so no reader can tell how stale the rate is")
+    assert dated.group(0) == SEAM_PROBE_DATE, (
+        f"{where}'s comment is dated {dated.group(0)} but still quotes the "
+        f"{SEAM_PROBE_DATE} readings. Either re-measure or name which probe ran")
+    assert "seam_log" in flat, (
+        f"{where}'s comment quotes a rate without naming `shadow.seam_log` to "
+        "re-measure it against, so the sentence cannot be checked")
+    day = _DAY_FIGURE.search(flat)
+    assert day, (
+        f"{where}'s `queue_max` comment states no `N rows/day` figure, so there is "
+        "no rate here to re-measure against `seam_log` — #3326's complaint was a "
+        "frequency nobody could re-check, not a frequency nobody liked")
+    assert day.group(1) == SEAM_ROWS_PER_DAY, (
+        f"{where}'s comment quotes {day.group(1)} rows/day while the "
+        f"{SEAM_PROBE_DATE} probe read {SEAM_ROWS_PER_DAY} over "
+        "`shadow.seam_log`. The item's own ~28-40/day is refused here: it counted "
+        "three of the four seams")
+
+
+def _assert_the_seam_count_and_its_owner(flat: str, *, where: str) -> None:
+    """Clause 2: the comment counts the seams the recorder declares.
+
+    Read with the same `_SEAM_COUNT` that pins §6.1 of `architecture/djev.md` and
+    compared against `len(djev_shadow.SEAMS)` — never against a literal four — so
+    a fifth seam makes these comments wrong rather than making this check agree
+    with them quietly. An absent count is a failure here even though the doc's own
+    node lets a page name the set uncounted: for a queue bound, the count IS the
+    argument, and a count of three sat unexamined in this comment for a month.
+    """
+    from app import djev_shadow
+
+    seams = tuple(djev_shadow.SEAMS)
+    found = _SEAM_COUNT.findall(flat)
+    assert found, (
+        f"{where}'s `queue_max` comment puts no count beside `shadow seams`, so it "
+        f"cannot be checked against `SEAMS` = {seams}")
+    counted = [int(digits) if digits else _NUMBER_WORDS[word.lower()]
+               for digits, word in found]
+    stale = [c for c in counted if c != len(seams)]
+    assert not stale, (
+        f"{where}'s comment counts {stale} shadow seams while `SEAMS` holds "
+        f"{len(seams)}: {seams}. The comment that sizes the queue has to count the "
+        "seams that fill it")
+    assert "action_review" in flat, (
+        f"{where}'s comment names no dominant seam. `action_review` writes "
+        f"{SEAM_DOMINANT_SHARE} of the store, and a rate quoted without it is the "
+        "error #3326 was filed on")
+    assert SEAM_DOMINANT_SHARE in flat, (
+        f"{where}'s comment names `action_review` without its {SEAM_DOMINANT_SHARE} "
+        "share, which is the figure that makes it the dominant seam rather than a "
+        "fourth name on a list")
+
+
+def _assert_the_bound_is_a_reporting_bound(flat: str, bound: int,
+                                          *, where: str) -> None:
+    """Clause 3: no sentence may claim the bound outlasts an hour of traffic.
+
+    Arithmetic against the live `queue_max`, not a phrase match, because the
+    failure to catch is the one #3326 nearly shipped: an hour figure small enough
+    to leave the old story standing. The day figure has to be a day OF the hour
+    figure, so a three-seam rate and a four-seam rate cannot share a sentence, and
+    what the bound is actually for — reporting overflow rather than absorbing it —
+    has to survive as a reading on the probe's date.
+    """
+    assert OLD_HOUR_CLAIM not in flat, (
+        f"{where}'s comment reasserts that `queue_max` outlasts an hour of traffic. "
+        f"A measured hour ({SEAM_ROWS_PER_HOUR} rows, {SEAM_PROBE_DATE}) is larger "
+        f"than {bound}, which is the whole finding")
+    hour = _HOUR_FIGURE.search(flat)
+    assert hour, (
+        f"{where}'s comment no longer states an `N rows/hour` figure, so the bound's "
+        "calibration is back to an unstated rule of thumb")
+    assert hour.group(1) == SEAM_ROWS_PER_HOUR, (
+        f"{where}'s comment quotes {hour.group(1)} rows/hour while the "
+        f"{SEAM_PROBE_DATE} probe read {SEAM_ROWS_PER_HOUR}")
+    hourly = int(hour.group(1).replace(",", ""))
+    day = _DAY_FIGURE.search(flat)
+    assert day, f"{where}'s comment states an hour with no day beside it"
+    daily = int(day.group(1).replace(",", ""))
+    assert daily >= 24 * hourly, (
+        f"{where}'s comment puts {daily} rows/day beside {hourly} rows/hour, and "
+        f"{daily} is not a day of that hour ({24 * hourly}): the two figures are "
+        "from different readings, which is how a three-seam rate and a four-seam "
+        "rate end up in one sentence")
+    assert hourly > bound, (
+        f"{where}'s comment quotes {hourly} rows/hour against a `queue_max` of "
+        f"{bound} and so still leaves the bound looking deeper than an hour. If the "
+        "log really does run under it again, rewrite this calibration rather than "
+        "quietly shrink the figure")
+    assert "overflow" in flat, (
+        f"{where}'s comment dropped what the bound is for: shallow enough that a "
+        "real backlog reports overflow instead of absorbing it")
+
+
+@pytest.mark.parametrize("path", QUEUE_MAX_COMMENTS,
+                         ids=["config.yaml", "djev_shadow"])
+def test_the_queue_max_comment_states_a_dated_probe_not_a_frequency(path):
+    """Clause 1, on both surfaces (and so clause 5 for the recorder's `DEFAULTS`
+    comment, whose "140-300 times a day" is the same defect spelled twice).
+
+    The comment exists to justify a number, and until #3326 it justified it with a
+    frequency nobody had measured: "a few hundred times a day" was 5-7x high for
+    the three seams it named and ~230x low for the four that actually run. What
+    replaces an unmeasured claim has to be a measurement plus the way back to it,
+    which is the date and the source."""
+    _assert_a_dated_probe(_queue_max_comment(path), where=path.name)
+
+
+@pytest.mark.parametrize("path", QUEUE_MAX_COMMENTS,
+                         ids=["config.yaml", "djev_shadow"])
+def test_the_queue_max_comment_counts_the_seams_the_recorder_declares(path):
+    """Clause 2. Both comments counted three seams; `SEAMS` gained its fourth on
+    2026-09-25 and has carried it for a month, during which the fourth wrote
+    303,434 rows to the store's 304,832.
+
+    The count is derived from `djev_shadow.SEAMS` through the regex §6.1's node
+    already uses, so this node cannot be kept green by a comment that learned to
+    say "four" today and means three after the next seam lands."""
+    _assert_the_seam_count_and_its_owner(_queue_max_comment(path),
+                                         where=path.name)
+
+
+@pytest.mark.parametrize("path", QUEUE_MAX_COMMENTS,
+                         ids=["config.yaml", "djev_shadow"])
+def test_the_queue_max_comment_no_longer_claims_the_bound_outlasts_an_hour(path):
+    """Clause 3, on both surfaces. The calibration's own words were the item's
+    stronger half: "a queue deep enough to hold an hour of traffic would hide the
+    overflow this bound exists to report" asserts that 256 exceeds an hour, and a
+    measured hour is ~385 rows.
+
+    The bound is read live — `DEFAULTS` for the recorder, the parsed document for
+    the config — so this is also the check that refuses a re-tune done under cover
+    of a comment: move `queue_max` and the relation this asserts moves with it."""
+    from app import djev_shadow
+
+    if path is SHADOW_SRC:
+        bound = int(djev_shadow.DEFAULTS["queue_max"])
+    else:
+        import yaml
+        bound = int(yaml.safe_load(path.read_text(encoding="utf-8"))
+                    ["djev"]["shadow"]["queue_max"])
+    _assert_the_bound_is_a_reporting_bound(_queue_max_comment(path), bound,
+                                          where=path.name)
+
+
+def test_the_probe_sits_in_comments_and_no_value_moved():
+    """Clause 4: the entire edit is prose the YAML scanner never sees.
+
+    Three witnesses, because what is being asserted is a landing route. Every line
+    carrying one of the probe's figures is a whole-line comment. The bound the
+    loader sees is still the recorder's default, so nothing was re-tuned on the way
+    past the comment. And `comment_only_change` — the real one, the same call
+    `COMMENT_ONLY_GLOBS`'s promotion route makes — has to call this file
+    comment-only against its own comment-stripped body, which is where prose that
+    had leaked into a quoted scalar or a block string would change the token
+    stream and fail. Without that third witness the claim "this needed no human"
+    rests on this round's diff alone and proves nothing about the shipped file.
+    """
+    import yaml
+
+    from app import djev_shadow
+    from scripts.automod.spec import COMMENT_ONLY_GLOBS, comment_only_change
+
+    text = CONFIG_SRC.read_text(encoding="utf-8")
+    assert CONFIG_SRC.name in COMMENT_ONLY_GLOBS, (
+        "`config.yaml` left `COMMENT_ONLY_GLOBS`, so a comment here is a human "
+        "edit again and this item's route is gone")
+    for ln in text.splitlines():
+        if any(needle in ln for needle in (SEAM_PROBE_DATE, "seam_log",
+                                           SEAM_ROWS_PER_DAY, SEAM_ROWS_PER_HOUR,
+                                           SEAM_DOMINANT_SHARE)):
+            assert ln.strip().startswith("#"), (
+                f"a probe figure reached outside a whole-line comment: {ln!r}")
+    bound = int(yaml.safe_load(text)["djev"]["shadow"]["queue_max"])
+    assert bound == int(djev_shadow.DEFAULTS["queue_max"]), (
+        f"`config.yaml` now sets `queue_max` to {bound} while the recorder defaults "
+        "to a different number. #3326 excludes re-tuning the bound")
+    assert f"queue_max: {bound}" in text, (
+        "`queue_max` no longer reads as a bare integer, so the value moved")
+    stripped = "\n".join(ln for ln in text.splitlines()
+                         if not ln.strip().startswith("#"))
+    ok, why = comment_only_change(stripped, text)
+    assert ok, (f"`config.yaml` does not survive its own comment-only test: {why}")
+
+
+def test_the_queue_max_prose_check_refuses_the_rates_it_exists_to_refuse():
+    """The red side of all three guards, and the only thing telling their greens
+    apart from silence. Two seeds, both real text rather than straw.
+
+    The first is the shipped comment as #3326 found it, quoted verbatim from
+    `config.yaml` at base 414868f5: the guard must refuse it on the stale rate by
+    name. The second is #3326's OWN clause 1 — the "~28-40/day" its triage
+    refuted, which carries a date, carries `seam_log` and carries a per-day
+    figure, and is still wrong by ~230x because it counts three of four seams.
+    Only the count and the hour relation catch that one, which is exactly why
+    those two checks are not folded into the first. The paired green half is the
+    shipped comment itself, so a guard that had gone deaf would fail here too.
+    """
+    shipped = ("Small on purpose. The three seams fire a few hundred times a day "
+               "between them and a decision is ~40 ms plus prefill, so a healthy "
+               "backlog is single digits; a queue deep enough to hold an hour of "
+               "traffic would hide the overflow this bound exists to report.")
+    with pytest.raises(AssertionError) as stale_rate:
+        _assert_a_dated_probe(shipped, where="config.yaml")
+    assert "few hundred" in str(stale_rate.value), (
+        f"it raised, but not on the stale rate — the needles have moved: "
+        f"{stale_rate.value}")
+    with pytest.raises(AssertionError) as hour_claim:
+        _assert_the_bound_is_a_reporting_bound(shipped, 256, where="config.yaml")
+    assert OLD_HOUR_CLAIM in str(hour_claim.value), (
+        f"it raised, but not on the calibration it exists to refuse: "
+        f"{hour_claim.value}")
+
+    item_own_clause = ("Sized 2026-10-25 from `shadow.seam_log`: the three shadow "
+                       "seams write 40 rows/day, so a queue deep enough to hold an "
+                       "hour of traffic would hide the overflow this bound reports.")
+    with pytest.raises(AssertionError) as wrong_rate:
+        _assert_a_dated_probe(item_own_clause, where="config.yaml")
+    assert SEAM_ROWS_PER_DAY in str(wrong_rate.value), (
+        f"the item's own ~28-40/day got past the figure check: {wrong_rate.value}")
+    with pytest.raises(AssertionError) as wrong_count:
+        _assert_the_seam_count_and_its_owner(item_own_clause, where="config.yaml")
+    assert "SEAMS" in str(wrong_count.value), (
+        f"the three-of-four seam count got past the count check: {wrong_count.value}")
+    with pytest.raises(AssertionError) as wrong_hour:
+        _assert_the_bound_is_a_reporting_bound(item_own_clause, 256,
+                                               where="config.yaml")
+    assert OLD_HOUR_CLAIM in str(wrong_hour.value), (
+        f"the hour-of-traffic calibration got past the relation check: "
+        f"{wrong_hour.value}")
+
+    for path in QUEUE_MAX_COMMENTS:
+        _assert_a_dated_probe(_queue_max_comment(path), where=path.name)
+        _assert_the_seam_count_and_its_owner(_queue_max_comment(path),
+                                             where=path.name)
 
 
 def test_the_seam_section_states_the_row_stream_it_left_behind():

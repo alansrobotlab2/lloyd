@@ -91,10 +91,20 @@ djev:
   # record.
   shadow:
     enabled: true
-    # Small on purpose. The three seams fire a few hundred times a day
-    # between them and a decision is ~40 ms plus prefill, so a healthy
-    # backlog is single digits; a queue deep enough to hold an hour of
-    # traffic would hide the overflow this bound exists to report.
+    # Small on purpose, and sized off a measurement, not a guess. Probed
+    # 2026-10-25 over `djev_status`'s `shadow.seam_log`: the four shadow
+    # seams in `djev_shadow.SEAMS` wrote 9,241 rows/day over the seven full
+    # UTC days 2026-10-18..2026-10-24 — 385 rows/hour — and `action_review`
+    # alone is 99.5% of the store (303,434 of 304,832 rows, live since
+    # 2026-09-25T18:45Z). The three older seams are rounding beside it: over
+    # the store's 34.6 days `dedupe` wrote 974 rows, `entity` 415 and
+    # `rerank` 9, dark since 2026-09-21T08:57Z. A decision is ~40 ms plus
+    # prefill, so a healthy backlog is still single digits — but 385
+    # rows/hour is deeper than 256, so this bound stopped meaning "an hour of
+    # traffic" the day the fourth seam arrived. Its job is what it always
+    # was: stay shallow enough that a real backlog reports overflow rather
+    # than absorbing it. Re-read `shadow.seam_log` before quoting a figure
+    # here as present.
     queue_max: 256
     # Above the client default, because nothing waits on a shadow call and
     # its states are the large ones (a 12-candidate rerank pool, an item

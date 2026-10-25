@@ -712,17 +712,30 @@ def test_the_config_block_carries_the_precondition_as_comment_only():
     lives in the block — and the five keys stay exactly where they are, because the
     values are not this clause's to change."""
     lines = (ROOT / "config.yaml").read_text(encoding="utf-8").split("\n")
-    assert lines[244].strip() == "ab:", lines[244]
-    assert lines[245].strip() == "enabled: true"
-    assert lines[246].strip() == "name: iv-chat-1"
-    assert lines[247].strip() == "start: '2026-09-25'"
-    assert lines[248].strip() == "end: '2026-10-09'"
-    assert lines[249].strip() == "fraction_on: 0.5"
+    # Located by its key, never by a row number. #3326's clause 4 REQUIRES a comment
+    # edit to `djev.shadow.queue_max` above this block, and a comment edit moves
+    # every row index below it while moving no value: at base 414868f5 the block
+    # began at lines[244], and it begins at lines[254] now because that comment grew
+    # by ten lines. A row index is not a value and was never this clause's to hold;
+    # the five keys, their order and their contents are, and every one of them is
+    # still asserted below, twice over — against `ab_config()` and against the
+    # comment-stripped re-parse at the end of this node.
+    at = [i for i, ln in enumerate(lines) if ln.rstrip() == "  ab:"]
+    assert len(at) == 1, (
+        f"`config.yaml` should hold exactly one two-space-indented `ab:` key and "
+        f"holds {len(at)}, so the block can no longer be located by its key")
+    start = at[0]
+    assert lines[start].strip() == "ab:", lines[start]
+    assert lines[start + 1].strip() == "enabled: true"
+    assert lines[start + 2].strip() == "name: iv-chat-1"
+    assert lines[start + 3].strip() == "start: '2026-09-25'"
+    assert lines[start + 4].strip() == "end: '2026-10-09'"
+    assert lines[start + 5].strip() == "fraction_on: 0.5"
     assert ab.ab_config() == {"enabled": True, "name": "iv-chat-1",
                                  "start": "2026-09-25", "end": "2026-10-09",
                                  "fraction_on": 0.5}
 
-    block = "\n".join(lines[244:268])
+    block = "\n".join(lines[start:start + 24])
     for phrase in ("0/0", "2026-10-18", "2f6bd2de", "#2149", "create_session",
                    "app/sessions_io.py:398", "app/sessions_io.py:1363"):
         assert phrase in block, f"the ab block no longer says {phrase!r}:\n{block}"
