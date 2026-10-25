@@ -25,8 +25,8 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships fourteen nodes: thirteen that read a vault tree through git — the live
-vault's for twelve of them, and one throwaway vault this file builds for the #3272 pair —
+It ships fifteen nodes: fourteen that read a vault tree through git — the live
+vault's for thirteen of them, and one throwaway vault this file builds for the #3272 pair —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
@@ -38,8 +38,9 @@ vault's for twelve of them, and one throwaway vault this file builds for the #32
 `test_the_2523_red_tree_extract_reproduces_the_two_roundless_items`,
 `test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio`,
 `test_every_dated_promotions_extract_is_committed_and_parses`,
-`test_the_promotions_directory_check_passes_on_an_extract_that_is_not_committed_yet` and
-`test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles` — plus
+`test_the_promotions_directory_check_passes_on_an_extract_that_is_not_committed_yet`,
+`test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles` and
+`test_the_3039_promotions_extract_reproduces_the_refused_and_landed_vault_land_pair` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
 
@@ -631,8 +632,8 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 14, (
-        "thirteen nodes that read a vault tree through git plus this rail. The count is "
+    assert len(shipped) == 15, (
+        "fourteen nodes that read a vault tree through git plus this rail. The count is "
         "spelled out so that adding a node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
 
@@ -1251,3 +1252,168 @@ def test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles():
         "That is runtime data outside the commit: a cleaner can remove it, and a node "
         "that reads it — or asserts it exists — is a guard reading its own missing "
         "input")
+
+
+def test_the_3039_promotions_extract_reproduces_the_refused_and_landed_vault_land_pair():
+    """#3039 owed 3: the refused-then-landed `vault_land` pair behind its premise, from the extract.
+
+    #3039's figures were quoted from the live promotions ledger, a store measured at
+    **20,980 lines / 28,884,449 bytes** at the cut instant — 27.5x the
+    `WITNESS_MAX_BYTES` = 1,048,576 ceiling on what an owed entry may order whole, and a
+    file its own archiver rewrites. #3293 commits the subset those figures need: **11
+    rows / 25,364 bytes**, 2.4% of that ceiling, cut with `grep -a` so the committed
+    bytes are the store's own lines and not a re-serialisation. Until this node nothing
+    here re-derived a single one of them, which is the exact state this module was
+    written to end (#2079 clause 6, #2385's red-tree count).
+
+    Everything below is a JSON parse of the committed file — no grep counting, no
+    fixture built here. What is pinned:
+
+    - the two `wc` figures, measured the way `wc` measures them: newline CHARACTERS
+      against the parsed row count (an agreement is what proves no row was truncated
+      mid-object), and `st_size` against the bytes read. 11 and 25,364.
+    - all 11 rows carry `item_id` **equal to 3035**, the item the rows were written
+      for, and the census is 3 `vault_review` + 2 `backlog_triage` + 2
+      `backlog_implement` + 2 `vault_land` + 1 `status_moved` + 1 `backlog_retriage`
+      over the span `2026-10-19T21:20:22Z .. 2026-10-19T22:47:31Z`. The `grep` pattern
+      is a substring, so the census and the equality together are what say the cut
+      matched 3035 and not something wearing its digits.
+    - the premise itself: exactly two `vault_land` rows. The one at
+      `2026-10-19T21:56:56Z` is `ok: false` with `reverted` a **list of 8** whose first
+      entry is `backlog/3035-triage-stranded-merged-finding-blocks-after-the-he.md`;
+      the one at `2026-10-19T22:21:47Z` is `ok: true` and carries **no `reverted` key
+      at all**, having landed as vault commit `ffbb71394918dbdbae54b08a5fff429f7e994b51`.
+      Both name the same 8 paths, so the discriminator is that key's presence.
+    - the key sets, as sets rather than as prose. The item's own wording is that the two
+      rows "differ exactly on presence of `reverted`", and read as a set difference that
+      is false — the refused row also holds `errors`, `output_tokens` and
+      `reasoning_tokens`, the landed row also holds `commit`, `guards`, `message`,
+      `review_findings`, `session_id` and `validated`. Both symmetric differences are
+      asserted, so the sentence cannot drift into the stronger claim that would make the
+      premise wrong while still reading true.
+    - the `.md` sibling quotes the figures this node computes, in the pair form the
+      `2026-10-19.2992-…` note established: the store's size at the cut, the ceiling as
+      the source spells it, the `grep -a` pattern, the `grep -Fx` verbatim-line proof
+      and the fact that these rows sit in no archive.
+
+    Which file is #3039's? Discovered by the id group of `_PROMOTION_EXTRACT_NAME` — the
+    same pattern the directory's property node reads — because the middle term of this
+    artifact's name is the state directory this module may not name at all: #2523's node
+    scans every byte of this file for that token, and the `2026-10-19.2444`/`2759` peers
+    discover their own files by a property for the same reason. The scan is re-run here
+    over this node's own span, and the runtime-data root's own name is added to its
+    marks: reading the committed file is the whole claim, and a node that also opened
+    the store could go green on a day the committed bytes had stopped matching it.
+    """
+    from scripts.automod import backlog as B
+
+    data = paths.VAULT_ROOT / _PROMOTION_SUBDIR
+    mine = [p for p in sorted(data.glob("*.????-*promotions.jsonl"))
+            if (m := _PROMOTION_EXTRACT_NAME.match(p.name)) and m.group(1) == "3039"]
+    assert len(mine) == 1, (
+        f"{[p.name for p in mine]} dated promotions extracts carry item 3039, not one: "
+        "the owed figure has either lost its witness or gained a second candidate for "
+        "the same 11 rows")
+    witness = mine[0]
+    assert witness.resolve().is_relative_to(paths.VAULT_ROOT.resolve()), (
+        f"{witness} is not inside the vault, so its figures are not committed bytes")
+
+    # Clause 1's word is COMMITTED, and `is_file()` would green-light a scratch file
+    # dropped beside its peers — the same subprocess #2523's node goes to for the same
+    # reason: history is the only thing here that outlives the fold of the store.
+    rel = str(witness.relative_to(paths.VAULT_ROOT))
+    tracked = _git(paths.VAULT_ROOT, "ls-files", "--error-unmatch", rel)
+    assert tracked.returncode == 0, (
+        f"{witness.name} is on disk but not tracked: `git ls-files --error-unmatch` "
+        f"said {tracked.stderr.strip() or 'nothing'}, and #3039's owed entry asked for "
+        "bytes with history, not for a file this round happened to write")
+
+    raw = witness.read_bytes()
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines() if l.strip()]
+    assert raw.count(b"\n") == len(rows) == 11, (
+        f"the extract holds {raw.count(chr(10))} newline characters and parses to "
+        f"{len(rows)} rows; `wc -l` printed 11 when the cut was taken, and either "
+        "figure moving means the committed bytes are no longer those 11 ledger rows")
+    assert len(raw) == witness.stat().st_size == 25364, (
+        f"`wc -c` on the extract is {witness.stat().st_size}, not the 25,364 bytes the "
+        "store's own lines total — a re-cut through a JSON re-serialiser changes this "
+        "number and is the reason the cut is a `grep`")
+    assert len(raw) < B.WITNESS_MAX_BYTES, (
+        f"the extract is {len(raw):,} bytes against the {B.WITNESS_MAX_BYTES:,}-byte "
+        "ceiling an owed entry may ask a witness to fit under")
+
+    assert {r["item_id"] for r in rows} == {3035}, (
+        "every row must carry item_id 3035: the cut is a substring match, so this is "
+        "the assertion that says it matched the id and not a longer one containing it")
+    census = sorted({e: sum(1 for r in rows if r["event"] == e)
+                     for e in {r["event"] for r in rows}}.items())
+    assert census == [("backlog_implement", 2), ("backlog_retriage", 1),
+                      ("backlog_triage", 2), ("status_moved", 1), ("vault_land", 2),
+                      ("vault_review", 3)], (
+        f"the 11 rows are made of {census}, not the census they were cut with — the "
+        "extract's population changed, so a figure counted over it means something else")
+    stamps = [str(r["created_at"]) for r in rows]
+    assert (min(stamps), max(stamps)) == ("2026-10-19T21:20:22Z", "2026-10-19T22:47:31Z"), (
+        f"the extract spans {min(stamps)}..{max(stamps)}; #3035's refused land and its "
+        "retry sit inside this window, and a window that moved is a different cut")
+
+    # The premise: one land refused, the next landed, and `reverted` is what tells them
+    # apart. Keyed by `created_at` rather than by file order, because the claim is about
+    # which timestamp carries which shape.
+    by_ts = {r["created_at"]: r for r in rows if r["event"] == "vault_land"}
+    assert sorted(by_ts) == ["2026-10-19T21:56:56Z", "2026-10-19T22:21:47Z"], (
+        f"the extract's vault_land rows are at {sorted(by_ts)}, not the two timestamps "
+        "#3039's premise is written from")
+    refused, landed = by_ts["2026-10-19T21:56:56Z"], by_ts["2026-10-19T22:21:47Z"]
+    assert refused["ok"] is False and landed["ok"] is True, (
+        "the refused land must be the ok=false row and the retry the ok=true one")
+    assert isinstance(refused["reverted"], list) and len(refused["reverted"]) == 8, (
+        f"the refused land reverted {refused['reverted']!r:.160}, not the 8 paths "
+        "#3039's figure counts — this is the number its premise is made of")
+    assert refused["reverted"][0] == (
+        "backlog/3035-triage-stranded-merged-finding-blocks-after-the-he.md"), (
+        f"the reverted list now opens with {refused['reverted'][0]!r}, not the file "
+        "#3039 names as evidence that the revert reached its own item")
+    assert "reverted" not in landed, (
+        "the landed row now carries a `reverted` key, so presence of the key no longer "
+        "separates the refused attempt from the landed one and the discriminator this "
+        "whole artifact exists to record has stopped existing")
+    assert landed["commit"] == "ffbb71394918dbdbae54b08a5fff429f7e994b51", (
+        f"the retry landed as {landed['commit']!r}, not the vault commit these rows "
+        "were quoted for")
+    assert len(refused["paths"]) == len(landed["paths"]) == 8 and \
+        set(refused["paths"]) == set(landed["paths"]), (
+        "the retry is the same land on the same 8 paths; if the path sets differ, the "
+        "pair is two different attempts and `reverted` is not their discriminator")
+
+    # The item's phrase is "differ exactly on presence of `reverted`". True of that key,
+    # false as a set difference, and the note says so — so the note's own claim is what
+    # is pinned here, both directions.
+    assert set(refused) - set(landed) == {
+        "errors", "output_tokens", "reasoning_tokens", "reverted"}, (
+        f"the refused row's extra keys are now {sorted(set(refused) - set(landed))}, so "
+        "the note's key-set paragraph — and the reading that the rows differ ONLY in "
+        "`reverted` — needs re-checking")
+    assert set(landed) - set(refused) == {
+        "commit", "guards", "message", "review_findings", "session_id",
+        "validated"}, (
+        f"the landed row's extra keys are now {sorted(set(landed) - set(refused))}, so "
+        "the note's key-set paragraph is describing a pair it no longer holds")
+
+    md = witness.with_suffix(".md").read_text(encoding="utf-8")
+    for quoted in ("11 lines / 25,364 bytes", "20,980 lines / 28,884,449 bytes",
+                   "1_048,576", '"item_id": 3035', "grep -Fx", "jq",
+                   "2026-10-01T00:02:28Z .. 2026-10-11T04:59:36Z", "extracted_from:"):
+        assert quoted in md, (
+            f"the note no longer quotes {quoted!r}, which is the figure or the method "
+            "this extract's cut depends on — the note is the only place the store's "
+            "size at cut time and the archive spans are recorded")
+
+    own = _own_source_of(
+        "test_the_3039_promotions_extract_reproduces_the_refused_and_landed_vault_land_pair")
+    for mark in (".local" "/state", "lloyd" "-automod"):
+        assert mark not in own, (
+            f"this node now names the runtime-data store ({mark!r}) inside its own "
+            "bytes: these figures are committed bytes or they are nothing, and a node "
+            "that could open the store would stay green while the committed rows "
+            "drifted away from it")
