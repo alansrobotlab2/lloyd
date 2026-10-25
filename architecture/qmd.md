@@ -272,8 +272,15 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   verification passed in the same invocation; it holds `regression.lock`, stops
   the watcher and the daemon, renames the live database with its `-wal`/`-shm` to
   `index.sqlite.bak-<stamp>`, moves the side copy in, starts both and runs one
-  retrieval. `--dry-run` prints the commands and runs none. No scheduled run
-  passes either flag, and no clock window applies either: nothing in
+  retrieval. Since #3314 the two halves cost what each one costs:
+  `--rebuild-side-copy NAME` re-embeds the copy, stops no service and moves no exit
+  code, so it is the half a schedule could run to have one ready, while `--swap` on a
+  command line where that copy is already there verifies it in that invocation and moves
+  it in, in seconds, running no rebuild. `--swap` with no copy present still builds
+  first, and the old form — `--swap` on a line that also builds — pays the re-embed again
+  for a copy that exists, which is the duplicated cost the split removes. `--dry-run`
+  prints the commands it would actually run, and runs none. No scheduled run passes
+  `--swap`, and no clock window applies either: nothing in
   `scripts/maintenance/qmd_index_maintenance.py` branches on the hour, so the
   route is refused by a failed verification or a busy embed lock, never by the
   time of day. It has been run for real since the route landed, twice. The

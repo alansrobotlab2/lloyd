@@ -1105,7 +1105,21 @@ def test_an_ordinary_backfill_still_runs_exactly_one_embed(monkeypatch, tmp_path
 # (plain tables, readable without the extension), never the live index.
 
 def _vec0_index(path: Path, *, chunks: int, chunk_slots: int, live: int,
-                vec_bytes: int = 16, orphaned: int = 0) -> Path:
+                vec_bytes: int = 16, orphaned: int = 0,
+                vec_orphans: int = 0) -> Path:
+    """Build a vec0-shaped index. `live` vectors have their document, `orphaned`
+    `content_vectors` rows do not.
+
+    `vec_orphans` is a third, separate thing, and the distinction is the whole point of
+    having it: a live index also keeps the orphaned vectors' ROWS in the vec0 shadow
+    tables, so its `vec0.live_rows` counts vectors its `content_vectors`-vs-`content`
+    join does not. Both real side-copy reports show that relation exactly — 2026-10-05
+    read `vec0.live_rows` 43941 against 42654 non-orphan vectors, the 1287 gap being its
+    orphans, and 2026-10-04 read 43685 against 41536 across 2149 — so a fixture that wants
+    production's shape sets `vec_orphans == orphaned`. Without this knob the two counts are
+    equal by construction, which is exactly the coincidence that would let a test pass
+    against a comparator the live index can never satisfy.
+    """
     import sqlite3
     con = sqlite3.connect(path)
     con.executescript("""
@@ -1130,6 +1144,13 @@ def _vec0_index(path: Path, *, chunks: int, chunk_slots: int, live: int,
         con.execute("insert into content_vectors values (?, 0)", (f"h{i}",))
     for i in range(orphaned):
         con.execute("insert into content_vectors values (?, 0)", (f"gone{i}",))
+    for i in range(vec_orphans):
+        # The vec0 shadow tables still hold the orphan's row: counted by
+        # `vec0_capacity`, absent from the non-orphan join. Production's shape.
+        con.execute("insert into vectors_vec_rowids values (?,?,?,?)",
+                    (live + orphaned + i + 1, f"gone{i}",
+                     (live + orphaned + i) // chunk_slots + 1,
+                     (live + orphaned + i) % chunk_slots))
     con.commit()
     con.close()
     return path
@@ -4399,6 +4420,352 @@ def test_the_rail_leaves_the_dry_run_plan_and_the_parser_rail_alone(monkeypatch,
     assert fq.calls == [], fq.calls
     assert _stat_listing(d) == before
     assert not (tmp_path / "reflection").exists()
+
+
+# ---------------------------------------------------------------------------
+# #3314: the swap is a hand step of seconds, not a second 36-minute build.
+#
+# Before this section `--swap` could only mean "build, then swap", because
+# `swap_side_copy` accepted nothing but a verification `rebuild_side_copy` had returned
+# in the same process and `run_side_copy_route` always called it. The measured cost is
+# in the two committed reports: `elapsed_s` 2149.8 for the 2026-10-04 rehearsal that
+# never swapped, 2197.0 for the 2026-10-05 one that did — so a person who wanted a
+# swap paid the re-embed twice, once to have a copy and again on the command line that
+# moved it in.
+#
+# What the split preserves is the rule, not the call order: the swap still needs a
+# verification produced IN ITS OWN INVOCATION, and what produces it now is
+# `verify_side_copy` — the same row floor, the same `status` pending read, the same real
+# `vsearch` — plus one check a copy measured days after its build needs and a fresh one
+# never did. Every node below therefore starts from `_built_side_copy`, a copy the
+# rebuild route has already left on disk, and drives the swap through `main()` on a
+# kernel pty or a kernel pipe. The subprocess seam `_sh` is still the only thing faked,
+# so "no supervisorctl invocation of any kind" and "no `update`/`embed` was run" are
+# readings of the recorded trace, not of a flag.
+# ---------------------------------------------------------------------------
+
+
+def _built_side_copy(monkeypatch, tmp_path, **fake):
+    """A live index and a side copy this route has already built, verified and left
+    on disk — the state a scheduled build hands to the hand swap.
+
+    Returns `(fake, index dir)`. Snapshot `len(fake.calls)` afterwards to separate the
+    build's commands from the swap's.
+    """
+    fq, d = _side_env(monkeypatch, tmp_path, **fake)
+    rep = m.rebuild_side_copy(SIDE)
+    assert rep["verification"]["passed"] is True, rep["verification"]["failed"]
+    # Read off the files, not off `side_copy_exists`, so the helper still stands up a
+    # world against the pre-#3314 script: these nodes must fail there on behaviour (the
+    # swap ran the rebuild), not on a missing attribute.
+    assert m.side_marker_path(SIDE).exists() and m.side_index_path(SIDE).exists(), \
+        "the build left no copy for the swap to find"
+    return fq, d
+
+
+def _ingest_into_live(d: Path, *, live: int, orphaned: int, vec_orphans: int = 0) -> None:
+    """Replace the live index with one that has `live` non-orphan vectors, as new
+    ingests and new deletions would leave it. Only the live index moves: a side copy
+    built before this moment has no knowledge of it.
+
+    The sidecars go and are not faked back. A `-wal` belonging to an index that is not in
+    WAL mode is not a shape production has — the live index's WAL is its own — and it is
+    not inert: opening such a pair read-only creates a `-shm`. Probed directly (a
+    delete-mode database plus a stray `-wal`, opened `mode=ro`, grew an `index.sqlite-shm`;
+    the same database with no stray WAL grew nothing). Keeping the fake here would put a
+    phantom sidecar in front of the assertion that matters in the staleness node below:
+    that a refused swap left the index directory exactly as it found it.
+    """
+    for suffix in ("", "-wal", "-shm"):
+        (d / f"index.sqlite{suffix}").unlink(missing_ok=True)
+    _vec0_index(d / "index.sqlite", chunks=4, chunk_slots=64, live=live,
+                orphaned=orphaned, vec_orphans=vec_orphans)
+
+
+def _dir_shape(d: Path) -> dict:
+    """Every entry in the index directory with its size: nothing created, removed,
+    renamed or resized.
+
+    `_stat_listing` also carries mtime, and this world cannot hold that still for a run
+    that reads the live index: `_side_env` leaves a stray `index.sqlite-wal` next to an
+    index that is not in WAL mode, and SQLite touches the resulting `index.sqlite-shm` on
+    any open of the pair (same 32768 bytes, mtime moved — probed, and it is why the
+    pre-existing route nodes compare only `index.sqlite`). A swap refused at verification
+    has to open the index to know to refuse, so mtime is not the claim here; size is, and
+    size is what an act would change. The run that is refused at the terminal rail never
+    opens anything, so the node for that one keeps the strict `_stat_listing` comparison.
+    """
+    return {p.name: p.stat().st_size for p in d.iterdir()}
+
+
+def _report_of(tmp_path) -> dict:
+    return json.loads(next((tmp_path / "reflection").glob("qmd-side-copy-*.json")).read_text())
+
+
+def test_swapping_an_existing_side_copy_verifies_it_and_never_rebuilds(monkeypatch, tmp_path,
+                                                                     capsys):
+    """Clause 1: `--rebuild-side-copy NAME --swap` from a terminal, the copy already there,
+    swaps without running the rebuild — exit 0, and the printed output names the swap.
+
+    The rebuild step is patched to raise, so a route that still called it dies naming
+    itself rather than failing an assertion about a report. What is proved is therefore
+    twofold: the swap happened, and it happened through the verify half — the recorded
+    trace below contains no `update` and no `embed` at all, only the `status` and
+    `vsearch` that measure the copy and the post-swap retrieval probe.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    build_calls = len(fq.calls)
+    old_live = (d / "index.sqlite").read_bytes()
+
+    def no_rebuild(*a, **k):
+        raise AssertionError("the hand swap ran the rebuild")
+
+    monkeypatch.setattr(m, "rebuild_side_copy", no_rebuild)
+
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    assert rc == 0, capsys.readouterr()
+
+    names = sorted(p.name for p in d.iterdir())
+    baks = [n for n in names if re.fullmatch(r"index\.sqlite\.bak-\d{8}-\d{6}", n)]
+    assert len(baks) == 1 and (d / baks[0]).read_bytes() == old_live, names
+    assert f"{SIDE}.sqlite" not in names and f"{SIDE}.sqlite.rebuild.json" not in names
+    # No build command ran in the swap's own window. The verbs of the side commands are
+    # `status` then `vsearch`; the last entry is the post-swap probe on the live index.
+    tail = fq.calls[build_calls:]
+    assert not [c for c in tail if "update" in c or "embed" in c], tail
+    assert [c[4] for c in tail if c[2:4] == ["--index", SIDE]] == ["status", "vsearch"], tail
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)]
+    assert (_FakeLock.held, _FakeLock.released) == (1, 1)
+    out = capsys.readouterr().out
+    assert "swap: swapped=True retrieval_ok=True" in out, out
+    assert "no rebuild run" in out, out
+    report = _report_of(tmp_path)
+    assert report["route"] == "verify-side-copy"
+    assert report["swap"]["swapped"] is True and report["swap"]["retrieval_ok"] is True
+    v = report["verification"]
+    assert v["passed"] is True and v["verified_without_build"] is True
+    assert v["floor_vectors_live"] == 32 and v["side_live_rows"] == 40
+
+
+def _shrink_the_side_copy(fq, d: Path) -> None:
+    """Rebuild `<SIDE>.sqlite` on disk with 31 rows, one under the 32 its own build
+    recorded — a copy whose embed finished short, as an interrupted build leaves it."""
+    for suffix in ("", "-wal", "-shm"):
+        p = d / f"{SIDE}.sqlite{suffix}"
+        if p.exists():
+            p.unlink()
+    _vec0_index(d / f"{SIDE}.sqlite", chunks=1, chunk_slots=64, live=31)
+
+
+@pytest.mark.parametrize("break_it, why", [
+    (_shrink_the_side_copy, "is under the 32 vectors its own build was held to"),
+    (lambda fq, d: setattr(fq, "hits", 0), "returned no hits"),
+])
+def test_a_hand_swap_refuses_a_copy_that_fails_verification_in_that_invocation(
+        monkeypatch, tmp_path, capsys, break_it, why):
+    """Clause 2: a copy that is present but measures wrong is refused — exit 2 naming the
+    failure, not one `supervisorctl` invocation, no report, and no file in the index
+    directory created, removed, renamed or resized.
+
+    The directory witness here is `_dir_shape` (names and sizes), not the stricter
+    `_stat_listing`: this run has to open the live index to learn it must refuse, and
+    `_side_env`'s stray WAL means any open touches a sidecar's mtime. The node below for
+    the terminal rail keeps `_stat_listing`, because that refusal opens nothing at all.
+
+    The copy is built healthy and broken afterwards, so the only thing wrong with it is
+    what this invocation's own measurements found: the row floor short of the number its
+    build recorded, or the vector leg answering zero hits. Exit 2 rather than the 1 a
+    failed build-then-swap returns is the point: that run built something and has a
+    report to say so, while this one touched nothing and writes nothing — the same
+    contract #2458 set for the terminal refusal. #1992's guard is what this keeps whole:
+    an unverified copy must never reach the rename, whatever it looks like on disk.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    break_it(fq, d)
+    build_calls = len(fq.calls)
+    before = _dir_shape(d)
+
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "cannot be swapped" in err and why in err, err
+    assert fq.services() == [] and not [c for c in fq.calls if "supervisorctl" in c], fq.calls
+    assert not [c for c in fq.calls[build_calls:] if "update" in c or "embed" in c]
+    assert _FakeLock.held == 0, "a refused swap took the lock guarding a restart"
+    assert _dir_shape(d) == before, "a refused swap changed the index directory"
+    assert m.side_copy_exists(SIDE), "a refused swap moved the copy it refused"
+    assert not (tmp_path / "reflection").exists(), "a refused swap wrote a report"
+
+
+def test_a_side_copy_staler_than_the_live_index_is_refused_naming_the_staleness(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3: a copy older than the newest ingests cannot be swapped in.
+
+    The copy was built against 32 live vectors; the live index has since taken on 8
+    more. Swapping it in would delete those 8 documents' vectors from the serving path
+    while reporting a success, which is the failure mode the row floor was never for —
+    the floor says the copy is as full as its own build claimed, and says nothing about
+    what arrived afterwards.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    _ingest_into_live(d, live=40, orphaned=6)
+    before = _stat_listing(d)
+
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "stale" in err and "32" in err and "40" in err, err
+    assert "8 vectors ingested since that build are not in it" in err, err
+    assert fq.services() == [] and _FakeLock.held == 0
+    assert _stat_listing(d) == before
+    assert m.side_copy_exists(SIDE)
+    assert not (tmp_path / "reflection").exists()
+
+
+def test_the_staleness_bar_is_the_non_orphan_count_so_a_correct_copy_is_swappable(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3's other edge: a copy at or above the live count is not refused on that
+    ground — and the count that means is the non-orphan one, not `vec0.live_rows`.
+
+    Clause 3 names `vec0.live_rows`, read literally here it refuses every correct copy
+    forever, and that is measurable rather than a reading: a fresh side copy holds no
+    orphans, so its floor is the live index's non-orphan vectors, which is always BELOW
+    that same index's `vec0.live_rows` by the orphan count. The two real reports show the
+    gap exactly — 2026-10-05 verified a copy at floor 42654 against a live
+    `vec0.live_rows` of 43941, the difference being its 1287 orphans, and 2026-10-04 at
+    41536 against 43685 across 2149 — so both swaps would have been refused as "stale" by
+    the literal bar and neither was. The bar is therefore the quantity the copy was
+    actually built against, `vectors_live`, which `rebuild_side_copy` already uses for
+    its floor.
+
+    This node models production's shape rather than the fixture's default: the live index
+    gains orphans and so a `vec0.live_rows` (43) above the floor, while its non-orphan
+    count stays at 32. The swap proceeds, and the report carries both numbers side by
+    side so the next reader can see which one was read.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    _ingest_into_live(d, live=32, orphaned=11, vec_orphans=11)
+    live = m.inspect_index()
+    assert live["vec0"]["live_rows"] == 43 and live["vectors_live"] == 32, live
+
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    assert rc == 0, capsys.readouterr()
+
+    assert "stale" not in capsys.readouterr().err
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)]
+    v = _report_of(tmp_path)["verification"]
+    assert v["passed"] is True and v["stale"] is False
+    assert v["floor_vectors_live"] == 32 and v["live_vectors_live"] == 32
+    assert v["live_vec0_live_rows"] == 43, "the report stopped saying which count it read"
+
+
+def test_a_hand_swap_over_a_pipe_is_refused_even_with_a_verified_copy_present(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4: #2458's stdin rail still catches what it exists to catch on the new path.
+
+    The whole point of the new path is that a fully verified copy is sitting there ready
+    to be taken, which is exactly the temptation a scheduled caller faces now that a swap
+    costs seconds instead of 36 minutes — so the rail has to hold against a copy that
+    would pass, not just against a run with nothing built. It does, and it holds ahead of
+    even the verification: no database is opened, so the refusal reads the OS's verdict on
+    stdin before it reads anything else. Exit 2, the reason names the interactive
+    terminal, no service touched, no report, the directory byte- and mtime-identical.
+    """
+    import sqlite3
+
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    build_calls = len(fq.calls)
+    before = _stat_listing(d)
+    real_connect, opened = sqlite3.connect, []
+
+    def recording_connect(database, *a, **k):
+        opened.append(str(database))
+        return real_connect(database, *a, **k)
+
+    monkeypatch.setattr(m.sqlite3, "connect", recording_connect)
+    with _stdin_on(tty=False):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    monkeypatch.setattr(m.sqlite3, "connect", real_connect)
+
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "refused" in err and "--swap" in err and "interactive terminal" in err, err
+    assert fq.calls[build_calls:] == [], fq.calls[build_calls:]
+    assert fq.services() == []
+    assert opened == [], f"a refused swap opened a database: {opened}"
+    assert _FakeLock.held == 0
+    assert _stat_listing(d) == before
+    assert not (tmp_path / "reflection").exists()
+
+
+def test_the_dry_run_plan_says_which_half_this_invocation_will_run(monkeypatch, tmp_path,
+                                                                  capsys):
+    """The plan a person reads before an irreversible command tracks the split too.
+
+    `--dry-run --swap` with the copy on disk must not print `update` and `embed`: it will
+    run neither, and a plan that promises a 36-minute build above a run that takes seconds
+    is the same falsehood clause 5 exists to remove from the prose. Without the copy the
+    build commands are back, because that invocation really will build.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    build_calls = len(fq.calls)
+    before = _stat_listing(d)
+
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--dry-run", "--swap")
+    out = capsys.readouterr().out
+    assert rc == 0 and out.rstrip().endswith("dry-run: nothing was run"), out
+    assert "verify the copy already at" in out, out
+    assert f"--index {SIDE} update" not in out, out
+    assert f"--index {SIDE} embed" not in out, out
+    assert "supervisorctl" in out, "the plan stopped showing the service stops"
+    assert fq.calls[build_calls:] == [] and _stat_listing(d) == before
+
+    (d / f"{SIDE}.sqlite").unlink()
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--dry-run", "--swap")
+    out2 = capsys.readouterr().out
+    assert rc == 0 and f"--index {SIDE} update" in out2, out2
+    assert "verify the copy already at" not in out2, out2
+
+
+def test_the_capacity_prose_names_the_swap_as_the_only_hand_step():
+    """Clause 5: the three strings a fired verdict and a refusal print now split the
+    route the way the code does, and the nodes that read them still find their phrases.
+
+    Before #3314 all three told a person to run `--rebuild-side-copy <name>` and then the
+    same command with `--swap` — which, because `--swap` implied a build, was an
+    instruction to pay the ~36-minute re-embed twice. Each string now names the SWAP
+    alone as the hand step and says the build half may run unattended. Read as text,
+    because what is being checked is the sentence a person acts on: `test_a_fired_verdict
+    _reports_what_is_owed_and_on_what_numbers` pins `"side copy"`, `"BY HAND"`, `"swap"`
+    and `"Never in place"` inside `CAPACITY_WHAT_TO_DO`, and
+    `test_the_by_hand_only_rule_names_the_rail_the_swap_now_has` pins the docstring's
+    by-hand rule and the rail inside `SWAP_NEEDS_TERMINAL`; both pass against this
+    wording, which is why the phrases below are additive and nothing above was deleted.
+    """
+    ruled = m.VEC0_REBUILD_RULED_OUT
+    assert "BUILD" in ruled and "SWAP" in ruled, ruled
+    assert "unattended" in ruled, "the ruling still makes the whole route a hand act"
+
+    owed = m.CAPACITY_WHAT_TO_DO
+    assert "BUILD" in owed and "SWAP" in owed, owed
+    assert "36" in owed and "seconds" in owed, "the two halves still cost the same in prose"
+    assert "interactive terminal" in owed and "Never in place" in owed, owed
+
+    rail = m.SWAP_NEEDS_TERMINAL
+    assert "--swap" in rail and "interactive terminal" in rail, rail
+    assert "rebuild-side-copy" in rail and "unattended" in rail, rail
+
+    doc = " ".join((m.__doc__ or "").split())
+    assert "The BUILD" in doc and "The SWAP" in doc, doc
+    assert "By hand only, never scheduled" in doc and "interactive terminal" in doc, doc
 
 
 def test_the_by_hand_only_rule_names_the_rail_the_swap_now_has():

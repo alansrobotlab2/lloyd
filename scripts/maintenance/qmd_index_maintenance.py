@@ -169,8 +169,18 @@ Usage:
 
 By hand only, never scheduled (#1992, see "the side-copy rebuild" below):
   ... --rebuild-side-copy NAME --dry-run   # print the commands, run none
-  ... --rebuild-side-copy NAME             # build, embed and verify a side index
-  ... --rebuild-side-copy NAME --swap      # the same, then swap it in if it verified
+  ... --rebuild-side-copy NAME             # BUILD: re-embed a side index and verify it
+  ... --rebuild-side-copy NAME --swap      # SWAP: verify NAME and move it in
+
+The two lines are two jobs, and #3314 split what they cost. The BUILD re-embeds the
+corpus into `~/.cache/qmd/NAME.sqlite` — about 36 minutes, no service stopped, no effect
+on this script's exit code — and it rebuilds a copy that already exists, which is what
+makes it something a schedule could run to have one ready. The SWAP is the hand step:
+with `NAME.sqlite` already on disk it only re-verifies that copy (its recorded row floor,
+pending 0, a real vsearch, and that the live index has not outgrown it) and moves it in,
+in seconds; with no copy on disk it builds first, because there is nothing to swap. The
+old form — `--swap` on a line that also builds — still works, it just pays the 36 minutes
+again for a copy that is already there.
 
 That rule is enforced for the third line, not just printed: `--swap` is the one flag
 here that stops the serving path, so it is refused unless stdin is an interactive
@@ -342,8 +352,10 @@ VEC0_REBUILD_RULED_OUT = (
     "ruled out as an unattended action: the one measured rebuild (2026-09-21 "
     "model switch) was a side copy re-embedded in full and swapped in, 1.25 GB "
     "-> 481 MB, 56% occupancy after; an in-place drop would leave the serving "
-    "daemon with no vector leg for the whole re-embed. A fired need_capacity "
-    "means rebuild a side copy and swap it, by hand.")
+    "daemon with no vector leg for the whole re-embed. A fired need_capacity means a "
+    "side copy has to be built and then swapped in: the BUILD is this script's own "
+    "`--rebuild-side-copy NAME`, needs no terminal and may run unattended, and the "
+    "SWAP is the half a person does from a terminal (#3314).")
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -1530,10 +1542,14 @@ CAPACITY_WHAT_TO_DO = (
     "rebuild a side copy re-embedded in full and swap it in while the daemon "
     "serves the old one, BY HAND (the 2026-09-21 procedure: 1.25 GB -> 481 MB at "
     "56% occupancy). Never in place: an in-place vec0 drop leaves the serving "
-    "daemon with no vector leg for the whole re-embed. The route a person runs is "
-    "this script's `--rebuild-side-copy <name>`, then the same command with "
-    "`--swap`; no scheduled run passes either flag, and since #2458 the script refuses "
-    "`--swap` outright unless stdin is an interactive terminal.")
+    "daemon with no vector leg for the whole re-embed. Two steps, and only the second "
+    "one is a person's: BUILD with this script's `--rebuild-side-copy <name>` — a full "
+    "re-embed of about 36 minutes that stops no service and moves no exit code, so it "
+    "may run unattended — then SWAP from a terminal with the same command plus "
+    "`--swap`, which on a copy that build left behind re-verifies it and moves it in in "
+    "seconds. Ask for `--swap` with no copy present and it builds first, paying the 36 "
+    "minutes again. Since #2458 the script refuses `--swap` outright unless stdin is an "
+    "interactive terminal; no scheduled run passes it.")
 
 
 def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
@@ -2569,18 +2585,42 @@ def _qmd_side(name: str, *args: str) -> list[str]:
     return ["/usr/bin/node", str(QMD_CLI), "--index", name, *args]
 
 
+def side_copy_exists(name: str) -> bool:
+    """True when this route built the named side copy and its database is on disk.
+
+    The swap half keys off this and nothing else: a copy that is there is verified and
+    swapped, one that is not is built first. The marker is what makes it this route's
+    copy — the eval side indexes share `~/.cache/qmd/` and are never built on or swapped
+    in — and the floor the build recorded in it is what the swap verifies against.
+    """
+    return side_marker_path(name).exists() and side_index_path(name).exists()
+
+
 def side_copy_plan(name: str, swap: bool) -> list[str]:
-    """The commands the route runs, in order, as a person would type them."""
+    """The commands the route runs, in order, as a person would type them.
+
+    The plan tracks the split (#3314). A swap whose copy is already on disk is the
+    seconds-scale hand step, so the build commands are not in it: the plan is a promise
+    about what the invocation will do, and printing `update` and `embed` above a run that
+    will run neither is the same falsehood the prose used to tell.
+    """
     cli = f"node {QMD_CLI} --index {name}"
-    plan = [
-        f"cp {LIVE_CONFIG} {side_config_path(name)}",
-        f"{cli} update",
-        f"{cli} embed    # retried while the watcher holds the embed lock",
-        f"{cli} status   # pending must read 0",
-        f"{cli} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
-        f"verify: side live_rows >= live index's non-orphan vectors, pending 0, "
-        f"vsearch hits > 0",
-    ]
+    if swap and side_copy_exists(name):
+        plan = [
+            f"verify the copy already at {side_index_path(name)}: live_rows >= the floor "
+            f"{side_marker_path(name).name} recorded, pending 0, vsearch hits > 0, and "
+            "the live index not outgrown since that build",
+        ]
+    else:
+        plan = [
+            f"cp {LIVE_CONFIG} {side_config_path(name)}",
+            f"{cli} update",
+            f"{cli} embed    # retried while the watcher holds the embed lock",
+            f"{cli} status   # pending must read 0",
+            f"{cli} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
+            f"verify: side live_rows >= live index's non-orphan vectors, pending 0, "
+            f"vsearch hits > 0",
+        ]
     if swap:
         ctl = f"supervisorctl -c {SUPERVISOR_CONF}"
         plan += [
@@ -2716,6 +2756,104 @@ def rebuild_side_copy(name: str) -> dict:
     return report
 
 
+#: What a hand swap measures, and why the bar it reads is the copy's own recorded
+#: floor rather than a fresh count off the live index.
+#:
+#: A fresh build's floor is the live index's non-orphan vectors AT THAT MOMENT
+#: (`rebuild_side_copy`'s `floor_vectors_live`), and the copy that passes is therefore
+#: always *below* the live index's `vec0.live_rows` by exactly that index's orphan count:
+#: the two real reports show it, floor 42654 against `vec0.live_rows` 43941 on 2026-10-05
+#: and 41536 against 43685 on 10-04, the gaps being the 1287 and 2149 orphaned vectors the
+#: live table still holds and a fresh copy never has. So `vec0.live_rows` cannot be the
+#: staleness bar — read that way, every correct copy is stale and the hand swap it exists
+#: to protect could never be performed. Both checks below therefore use the same quantity
+#: `rebuild_side_copy` uses: non-orphan vectors, counted off `content_vectors` joined to
+#: `content`. It is the ruler the copy was built against, and unlike `vec0.live_rows` it
+#: does not count rows the live index has already lost.
+def verify_side_copy(name: str) -> dict:
+    """Measure the side copy that is already there. Seconds, and it builds nothing.
+
+    This is the half #3314 split off the ~36-minute rebuild so that `swap_side_copy`'s
+    rule — verification must have passed in *this* invocation, "there is no flag, file or
+    earlier run that stands in for it" — stays literally true for a copy built by an
+    earlier one. Nothing durable is trusted for it: the returned dict is the same shape
+    `rebuild_side_copy` returns, `"verified_without_build": true` aside, and
+    `swap_side_copy` cannot tell the two apart.
+
+    Three measurements are the same three a build ends with: the copy's own `vec0`
+    live rows against the floor its build recorded in the marker, `qmd status` pending at
+    0, and one real `vsearch` against it. The fourth is new because a copy measured days
+    after it was built needs something a fresh one never did: that the live index has not
+    outgrown it since. That check is a count, not a set difference, so vectors deleted and
+    added in balance do not move it — the floor says the copy is as full as its own build
+    claimed, and this says nothing newer has arrived.
+
+    Raises `SideCopyRefused` only for a name that is not this route's copy at all. A copy
+    that is there and measures wrong is reported, not raised: `failed` says how.
+    """
+    _check_side_name(name)
+    side, marker = side_index_path(name), side_marker_path(name)
+    if not marker.exists() or not side.exists():
+        raise SideCopyRefused(
+            f"{side} is not a side copy this route built (no {marker.name}); run "
+            f"`--rebuild-side-copy {name}` to build one")
+    try:
+        built = json.loads(marker.read_text())
+        floor = int(built["floor_vectors_live"])
+    except (ValueError, KeyError, TypeError) as e:
+        raise SideCopyRefused(
+            f"{marker.name} does not record the floor the build was held to ({e!r}), so "
+            f"there is nothing to verify {name} against") from e
+    live = inspect_index()
+    if live.get("error") or "vectors_live" not in live:
+        raise SideCopyRefused(f"the live index could not be read: {live.get('error')}")
+
+    report: dict = {"route": "verify-side-copy", "name": name, "side_index": str(side),
+                    "actions": [], "live_before": live}
+    after = inspect_index(side)
+    report["side_after"] = after
+    side_rows = (after.get("vec0") or {}).get("live_rows") if not after.get("error") else None
+    src, sout = _sh(_qmd_side(name, "status"), 180, env=QMD_ENV)
+    pending = _status_pending(sout) if src == 0 else -1
+    hits = _vsearch_hits(_qmd_side(name, "vsearch", "--format", "json", "-n", "5",
+                                   SIDE_PROBE_QUERY))
+
+    live_now = int(live["vectors_live"])
+    failed = []
+    if side_rows is None:
+        failed.append(f"the side copy's own vec0 rows could not be read "
+                      f"({after.get('error') or 'no vec0 table'})")
+    elif side_rows < floor:
+        failed.append(f"side live_rows {side_rows} is under the {floor} vectors its own "
+                      f"build was held to (recorded in {marker.name})")
+    if pending != 0:
+        failed.append(f"the side copy has embeddings pending ({pending})")
+    if hits <= 0:
+        failed.append("the vsearch against the side index returned no hits")
+    if floor < live_now:
+        failed.append(f"{name} is stale: it was built against {floor} live vectors and "
+                      f"the live index now holds {live_now} non-orphan ones, so the "
+                      f"{live_now - floor} vectors ingested since that build are not in it")
+    report["verification"] = {
+        "passed": not failed,
+        "name": name,
+        "verified_without_build": True,
+        "side_live_rows": side_rows,
+        # The floor the build recorded, not a fresh count: see the note above.
+        "floor_vectors_live": floor,
+        "live_vec0_live_rows": (live.get("vec0") or {}).get("live_rows"),
+        "live_vectors_live": live_now,
+        "stale": floor < live_now,
+        "pending_embeddings": pending,
+        "vsearch_hits": hits,
+        "failed": failed,
+    }
+    report["side_bytes"] = after.get("index_bytes")
+    report["side_occupancy"] = (after.get("vec0") or {}).get("occupancy")
+    report["live_occupancy"] = (live.get("vec0") or {}).get("occupancy")
+    return report
+
+
 def _regression_lock():
     """`regression.lock`, held across the daemon restart: a promotion's regression
     check times the same daemon, and a restart under it reads as a regression."""
@@ -2792,11 +2930,17 @@ def swap_side_copy(name: str, verification: dict | None) -> dict:
 
 
 #: Why the swap asks for a terminal, in the words the refusing run prints (#2458).
+#: Narrowed by #3314 to the swap alone: since the build split off it, this refusal is not
+#: a refusal to build, and the message has to send the reader to the flag that needs no
+#: terminal rather than implying the whole route does.
 SWAP_NEEDS_TERMINAL = (
-    "--swap stops agent-qmd-watcher and the serving qmd daemon, so it is accepted only "
-    "from an interactive terminal and stdin here is not one (#1992: by hand, never "
-    "scheduled). Drop --swap to build and verify the side copy without touching the "
-    "serving path, or re-run the same command from a terminal.")
+    "--swap is the hand step: it stops agent-qmd-watcher and the serving qmd daemon, so "
+    "it is accepted only from an interactive terminal and stdin here is not one (#1992: "
+    "by hand, never scheduled). It is the only half that needs one. The BUILD — "
+    "`--rebuild-side-copy <name>` with no --swap — re-embeds and verifies a copy without "
+    "touching the serving path and may run unattended; the swap then takes that copy in "
+    "seconds, or builds one first if none is there. Drop --swap to build and verify the "
+    "side copy, or re-run the same command from a terminal.")
 
 
 def _stdin_is_interactive() -> bool:
@@ -2821,7 +2965,17 @@ def _stdin_is_interactive() -> bool:
 
 def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) -> int:
     """`--rebuild-side-copy <name>` [`--swap`] [`--dry-run`]. Exit 0 only when the
-    side copy verified and, if a swap was asked for, retrieval answers afterwards."""
+    side copy verified and, if a swap was asked for, retrieval answers afterwards.
+
+    Two halves since #3314. `--swap` with the copy already on disk is the hand step
+    alone: `verify_side_copy` measures it in this invocation and it swaps, in seconds,
+    without a rebuild. `--swap` with no copy present falls back to build-then-swap
+    (~36 minutes), because there is nothing to swap; a failure of that route is a report
+    and exit 1, since the run did build something. `--swap` refused for having no
+    terminal, or refused because the copy that is there failed verification or is stale,
+    is exit 2 with the reason on stderr and no report at all — nothing was touched.
+    Without `--swap` the route always builds, a copy that exists included: that is the
+    unattended half, and it stops no service."""
     try:
         _check_side_name(name)
     except SideCopyRefused as e:
@@ -2837,17 +2991,34 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
         return 0
     # Behind that early return on purpose: the plan is a thing a scheduled run may
     # legitimately print, and only the act of swapping needs a person holding a
-    # terminal. Everything below is the acting path — `rebuild_side_copy` opens the
-    # databases and `swap_side_copy` is the sole caller of `supervisorctl stop` — so
-    # refusing here means a refused swap neither touches a service nor writes a report.
+    # terminal. Everything below is the acting path — `rebuild_side_copy` and
+    # `verify_side_copy` open the databases and `swap_side_copy` is the sole caller of
+    # `supervisorctl stop` — so refusing here means a refused swap neither touches a
+    # service nor writes a report, whether or not a verified copy is sitting there.
     if swap and not _stdin_is_interactive():
         print(f"refused: {SWAP_NEEDS_TERMINAL}", file=sys.stderr)
         return 2
     started = datetime.now()
+    # The swap half no longer implies the build half (#3314). With the copy already on
+    # disk the run verifies that copy and swaps it — seconds, which is the whole point —
+    # and with none present it builds first, because there is nothing to swap. Without
+    # `--swap` it always builds: that is the half that may run unattended, and a
+    # scheduled build is meant to refresh a copy that is already there.
+    hand_swap = bool(swap) and side_copy_exists(name)
     try:
-        report = rebuild_side_copy(name)
+        report = verify_side_copy(name) if hand_swap else rebuild_side_copy(name)
     except SideCopyRefused as e:
         print(f"refused: {e}", file=sys.stderr)
+        return 2
+    if hand_swap and not report["verification"]["passed"]:
+        # A copy that is there and measures wrong is a refusal, not a swap with a note
+        # in the report: nothing was built and nothing moved, so nothing is written
+        # either. The run reports the way the terminal rail above does — exit 2 and the
+        # reason on stderr — and `swap_side_copy` is never reached, so not one
+        # `supervisorctl` command runs and the index directory reads untouched. A failed
+        # build-then-swap still exits 1 with its report: that run did build something.
+        print(f"refused: {name} cannot be swapped: "
+              + "; ".join(report["verification"]["failed"]), file=sys.stderr)
         return 2
     rc = 0 if report["verification"]["passed"] else 1
     if swap:
@@ -2866,6 +3037,9 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
         print(json.dumps(report, indent=2))
     else:
         v = report["verification"]
+        if hand_swap:
+            print(f"swapping the side copy {name} that is already there: verified in this "
+                  f"invocation, no rebuild run")
         print(f"side copy {name}: verification {'passed' if v['passed'] else 'NOT passed'} "
               f"(live_rows {v['side_live_rows']} vs floor {v['floor_vectors_live']}, "
               f"pending {v['pending_embeddings']}, vsearch hits {v['vsearch_hits']}); "
@@ -3244,10 +3418,12 @@ def _emit(r: dict, as_json: bool) -> None:
         # `BY HAND` of the fired run's instruction, because those two lines are counted
         # by name and this is a different state.
         print(f"  capacity APPROACHING  {100*v['occupancy']:.1f} % occupancy, "
-              f"{v['dead_mib']:,.0f} MiB dead — a hand side-copy rebuild is due "
+              f"{v['dead_mib']:,.0f} MiB dead — a side-copy rebuild is due by hand "
               f"before the red trigger at "
-              f"{100*CAPACITY_OCCUPANCY_TRIGGER:.0f}% occupancy fires; the route is "
-              f"`--rebuild-side-copy <name>` then `--swap`, by hand")
+              f"{100*CAPACITY_OCCUPANCY_TRIGGER:.0f}% occupancy fires, and only its swap "
+              f"needs the terminal: build with `--rebuild-side-copy <name>` (about 36 "
+              f"minutes, stops no service), then swap that copy in with `--swap` from a "
+              f"terminal")
     owed = r.get("capacity_owed_to_a_person")
     if owed:
         # Its own line, and the run's exit status (#1897). The `capacity verdict
