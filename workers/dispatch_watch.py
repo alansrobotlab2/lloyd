@@ -538,9 +538,12 @@ def judgement_aggregate(queue: Any, window_days: int = JUDGEMENT_WINDOW_DAYS,
     health route already reads the store, and `GET /api/workers/health` puts its
     result on the board-steward row.
 
-    Read-only, and it decides nothing. It does not touch `apply`; whether `judged
-    >= 100` and `rate >= 0.90` are the right numbers is a ruling #1688 owes, not
-    something a function can settle. It reports, and traffic or a person flips.
+    Read-only, and it decides nothing. It does not touch `apply`. The numbers it adds
+    up against — summed `judged` >= 50 and `rate >= 0.90` over this window — are
+    settled, ruled by owed-check on 2026-10-25 (#3089 asked, #3329 landed the
+    ruling), and re-ruling the floor as cadence moves stays that job's to do from a
+    fresh recompute; a function that only reads has no part in either. It reports,
+    and traffic or a person flips.
 
     What a row must look like to count: only a row whose `meta_json.agreement`
     carries an INTEGER `judged` contributes, and it contributes to BOTH sides.

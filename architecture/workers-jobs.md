@@ -452,10 +452,17 @@ carries `judged` — the decisions both sides made — on the run meta and the
 tick's summary reads `agreement not measured, 0 judged (…)` and one that judged
 something reads `agreement 50% of 2 judged (…)`. The flip is judged on a sum of
 `judged` over the ticks, never on `rate` alone: since #3089 (2026-10-20) the
-comment above the flip states both numbers — summed `judged` ≥ 100 and agree
-`rate` ≥ 0.90 over the rolling 7-day window — and `GET /api/workers/health`
-publishes them as `judgement` on this source's row, so the gate and the figure
-that clears it are read from one place.
+comment above the flip states both numbers, and owed-check settled them on
+2026-10-25 (#3329) — summed `judged` ≥ 50 and agree `rate` ≥ 0.90 over the
+rolling 7-day window — and `GET /api/workers/health` publishes them as
+`judgement` on this source's row, so the gate and the figure that clears it are
+read from one place. The floor came down because #3089's 100 sat ~20% above the
+measured weekly plateau under it, not because 100 was unreachable — the oldest
+of the four weeks the ruling read (163/82/78/82, ending 2026-10-25) cleared it.
+And `rate` is a pre-flip measure only: `disagree` is scored on the moves a tick
+proposes, so after `apply: true` an applied wrong status is never re-proposed and
+the standing divergence shows up in `missed` and the `judged` denominator
+instead, where nothing new ever reads as a disagreement.
 
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
@@ -1308,7 +1315,8 @@ that put every disk-heavy scan on a thread, and stays.
   declarations are 9 not 5 (True on 5, False also on `failure-ledger` and
   `frontend-probe-canary`); the gate is thirteen rungs not eleven; the fleet is
   45 task files not 36; the picklist is 48 units not 42; the board-steward flip
-  gate is stated since #3089 (judged ≥ 100, rate ≥ 0.90); the canary runs
+  gate is stated since #3089, whose floor owed-check re-ruled to 50 on
+  2026-10-25 (#3329; the rate bar held); the canary runs
   `--seeds 16` (#2130) and has measured state; `autocode`'s last-ten avg is
   ~1200 s not ~2000; the bench corpus is 28 files. Re-pointed the drifted
   `file:line` citations in §2/§3 (`pool.py`, `app/routers/workers.py`,

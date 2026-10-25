@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1418,15 +1419,36 @@ def test_the_window_is_a_string_comparison_on_completed_at(tmp_path):
 
 
 def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
-    """Clause 5 (second half): the gate lives in the file that would flip it.
+    """Clause 5 (second half), re-pinned by #3329: the gate lives in the file that
+    would flip it, and it states the numbers that were RULED.
 
     `config.yaml`'s board-steward comment has always said the flip waits for a
     summed `judged` count to clear "a minimum" with a rate that "holds over it" —
-    which is a gate with no numbers in it, so no reader can tell cleared from
-    unmet without a query. The two thresholds and the date they were measured are
-    now in the comment beside the flag, and the node pins all three plus the fact
-    that `apply` is still false: stating a threshold next to a flipped flag would
-    be a flip dressed as documentation.
+    a gate with no numbers in it, so no reader can tell cleared from unmet without
+    a query. #3089 put numbers in; owed-check ruled them on 2026-10-25, KEEPING
+    `rate` >= 0.90 and the 7-day window and REPLACING the summed-judged floor 100
+    with 50. The node therefore pins four things a re-worded comment can fail one
+    at a time:
+
+     - the ruled floor, and the ABSENCE of the superseded one — a reader obeys the
+       number written beside the flag, so a retired 100 left in the prose is still
+       a live instruction to the next round;
+     - the half of the gate that did not move (`>= 0.90`, the 7-day window, the date
+       the figures were read) plus WHICH half today's reading leaves unmet: judged
+       86 clears a 50 floor, so the old "NEITHER threshold is met" went false the
+       moment the floor dropped;
+     - that the numbers are settled, on the ruling's own reason — the floor sits
+       ~20% above a measured ~80/week plateau (weekly judged 163/82/78/82 for the
+       four weeks ending 2026-10-25) — and NOT on "100 was unreachable", which the
+       ruling's own 163-judged week refutes;
+     - that `judgement.rate` is a pre-flip-only measure, with its mechanism named:
+       once `apply: true` has written a wrong status the item sits at the steward's
+       value and is never re-proposed, so the standing divergence lands in `missed`
+       and in the `judged` denominator only and never arrives as a fresh
+       `disagree`.
+
+    And `apply` is still read as YAML and asserted false: stating a threshold beside
+    a flipped flag would be a flip dressed as documentation.
     """
     text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -1448,19 +1470,93 @@ def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
     block = "\n".join(lines[start:end])
     assert "apply: false" in block, (
         "the slice did not capture the flag the comment gates: " + block[-200:])
+    # Comment lines wrap at ~76 columns, so every phrase below is pinned against
+    # the comment's PROSE — comment markers stripped, whitespace collapsed. The
+    # markers have to go, not just the newlines: leaving them in re-joins the text
+    # as "the agree-rate is the # half that does not", so a pinned phrase that
+    # happens to wrap would fail for where the author broke the line. The wording
+    # is the contract; the line breaks are not.
+    prose = " ".join(ln.lstrip().lstrip("#").rstrip() for ln in block.splitlines())
+    flat = " ".join(prose.split())
 
-    assert "judged` >= 100" in block, (
-        "the judged-count threshold is not stated as a number in the "
-        "board-steward block: " + block[:200])
+    # The ruled floor is the stated floor, and the superseded one is gone.
+    assert "judged` >= 50" in block, (
+        "the judged-count threshold in the board-steward block is not the ruled "
+        "number — owed-check set the floor to 50 on 2026-10-25: " + block[:200])
+    assert "judged` >= 100" not in block, (
+        "the block still states the floor #3089 proposed and the 2026-10-25 ruling "
+        "replaced. Beside a flag that flips on what this comment says, a retired "
+        "number left in prose is an instruction, not history")
+    # The half of the gate the ruling did NOT move. The window is pinned as the
+    # phrase attached to the two numbers, not as "7-day" or "7 days" somewhere in
+    # the block: the block also says the rate "read 0.7317 over the trailing 7
+    # days", and that incidental phrase satisfied the loose check while the
+    # thresholds' own window silently became 30.
     assert ">= 0.90" in block, "the agree-rate threshold is not stated as a number"
-    assert "7-day" in block or "7 days" in block, (
-        "the thresholds are meaningless without the window they are measured over")
-    assert re.search(r"2026-\d\d-\d\d", block), (
-        "the figures need the date they were measured, or the next reader cannot "
+    assert "both over the rolling 7-day window" in flat, (
+        "the thresholds are meaningless without the window they are measured over, "
+        "and it has to be the window attached to THEM")
+    # And the prose window is the code window: `judgement_aggregate` measures what
+    # this comment promises, so a drift between the two is the seam failing, not a
+    # wording preference.
+    from workers import dispatch_watch as DW
+    assert DW.JUDGEMENT_WINDOW_DAYS == 7, (
+        "`JUDGEMENT_WINDOW_DAYS` is no longer 7, so the window this comment states "
+        "and the one `judgement_aggregate` measures have come apart")
+    # The reading needs a timestamp, not merely some date in the block: the
+    # comment also carries the ruling's date and the plateau weeks' end dates, and
+    # any one of them satisfied a bare `2026-\d\d-\d\d`. Only the measurement is
+    # dated to the minute.
+    assert re.search(r"2026-\d\d-\d\dT\d\d:\d\dZ", block), (
+        "the figures need the moment they were measured, or the next reader cannot "
         "tell a stale reading from a current one")
     assert "not cleared" in block.lower(), (
         "the comment must say what today's figures read, so an unmet gate is not "
         "mistaken for an absent one")
+    # …and which of the two halves that leaves unmet. Lowering the floor made the
+    # #3089 wording false rather than merely stale: judged clears, rate does not.
+    assert "neither" not in flat.lower(), (
+        "the comment still says NEITHER threshold is met. A 50 floor made that "
+        "false — the live reading clears it — and a comment naming the wrong unmet "
+        "half is how the wrong bar gets lowered next time")
+    assert "the agree-rate is the half that does not" in flat, (
+        "naming the gate NOT cleared is not enough; the block has to say which half "
+        "of it today's figures leave unmet")
+    # Settled, with the ruling's reason and not a refuted one. An assert on "owed"
+    # proves nothing here because "owed-check" contains it, so the settled wording
+    # itself is what has to be present.
+    assert "settled by the owed-check ruling of 2026-10-25" in flat, (
+        "the two numbers have to read as ruled, not as proposals still on trial")
+    assert "still owed" not in flat.lower(), (
+        "the block still calls the numbers a ruling owed to owed-check, which #3089 "
+        "settled on 2026-10-25")
+    assert "80/week plateau" in flat, (
+        "the reason 50 is the floor is the measured plateau under the old one; a "
+        "number with no reason beside it gets re-litigated by the next reader")
+    assert "163/82/78/82" in flat, (
+        "the four weekly judged counts behind that plateau are the evidence for the "
+        "floor, so they belong with the number they justify")
+    assert "unreachable" not in flat.lower(), (
+        "the block repeats a claim the ruling's own first week (judged 163, over "
+        "the old floor) refutes — the reason is a plateau under the floor, not an "
+        "unreachable floor")
+    assert "rate bar was deliberately not lowered" in flat.lower(), (
+        "keeping 0.90 while moving the floor was a decision, and the comment has to "
+        "say it was one")
+    assert "0.7317" in flat and "0.80" in flat, (
+        "the rate readings the bar was deliberately NOT fitted to are the whole "
+        "point of that sentence")
+    # The rate is only evidence while the steward is still dry-running, and the
+    # file that would end the dry-run has to carry the reason.
+    assert "pre-flip-only" in flat.lower(), (
+        "the block has to say that judgement.rate stops meaning agreement at the flip")
+    assert "never as a fresh `disagree`" in flat, (
+        "the pre-flip-only claim without its mechanism reads as an opinion: an "
+        "applied wrong status is never re-proposed, so no fresh `disagree` is ever "
+        "scored on it")
+    assert "`missed` and in the `judged` denominator only" in flat, (
+        "and where the divergence does go instead — `missed`, plus the denominator, "
+        "which is what pulls the rate down while nothing new disagrees")
     # The flag itself is read as YAML, not as prose: the comment says
     # "Flip to `apply: true` only after …" and a substring test would trip on its
     # own instruction. The value is the only thing that answers "is it flipped?".
@@ -1468,9 +1564,91 @@ def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
     cfg = yaml.safe_load(text)
     assert cfg["workers"]["sources"]["board-steward"]["apply"] is False, (
         "this item exposes the gate; it does not open it")
-    assert "owed" in block.lower(), (
-        "whether 100 and 0.90 are the right numbers is a ruling owed to owed-check, "
-        "and the comment has to say the numbers are proposals rather than settled")
+
+
+#: The three ways the tree actually writes the retired floor. #3089's own absence
+#: grep was `>= 100`, which saw one of them: `config.yaml` and the architecture doc
+#: put the backtick AFTER `judged` (one of them with a Unicode `≥`), and
+#: `workers/dispatch_watch.py`'s docstring puts it BEFORE and wraps the number onto
+#: the next comment line. Collapsing whitespace and making the backtick optional
+#: covers all three; the trailing guard stops an unrelated `judged 1000`-shaped
+#: count from reading as the floor.
+RETIRED_FLOOR = re.compile(r"judged[`'\"\u201d\u2019]{0,2}\s*(?:>=|≥)\s*100(?![\d.])")
+#: The sentence claiming the two numbers are still on trial, anchored on the flip's
+#: own figures. The anchor is load-bearing: "is a ruling owed" is ordinary English
+#: in this tree (#3109's guardian raise, #2584's loopback allowance, #2644's
+#: restored verdicts), and those are decisions this item does not own.
+RULING_STILL_OWED = re.compile(
+    r"(?:judged|judgement|0\.90)[^.]{0,140}?\b(?:is|remains|stays)\s+a\s+ruling\b"
+    r"[^.]{0,90}?(?:owed|owes)")
+#: Suffixes that carry prose, so the scan reaches `.md` docs, `.yaml` config and
+#: `.json` fixtures without trying to decode an image.
+TEXT_SUFFIXES = {".py", ".md", ".rst", ".yaml", ".yml", ".txt", ".json",
+                 ".ts", ".tsx", ".toml", ".cfg", ".ini", ".sh"}
+
+
+def test_no_shipped_file_still_states_the_old_flip_floor_or_an_owed_ruling():
+    """#3329 clause 5: after this round the only 100 left is the one inside the
+    assertion that it is gone.
+
+    The item's check was ``git grep ">= 100"``, and that pattern is what let three
+    sites outlive #3089: the `judgement_aggregate` docstring keeps the backtick on
+    the other side of `judged`, `architecture/workers-jobs.md` writes the
+    comparison as `≥` in two places, and one of those is a dated drift record no
+    bare grep can tell from a live claim. So this node collapses each file's
+    whitespace before matching, covers the ASCII and Unicode spellings, and
+    enumerates with `git ls-files` rather than a list of files it happens to
+    remember — an allowlist cannot close a property that has to hold over every
+    file, which is the class rule this loop wrote on 2026-09-20 after exactly this
+    failure. `tests/` is the one excluded tree, because the node above has to
+    spell the retired literal in order to assert its absence, and that is the
+    single place a 100 belongs.
+    """
+    # The instrument proves itself first: a pattern that matches nothing would
+    # green this node against any corpus, and that is the failure this class of
+    # guard has to defend against before it checks anybody else.
+    assert RETIRED_FLOOR.search("summed `judged` >= 100 AND agree `rate`")
+    assert RETIRED_FLOOR.search("whether `judged\n    >= 100` and `rate >= 0.90`")
+    assert RETIRED_FLOOR.search("both numbers — summed `judged` ≥ 100 and agree")
+    assert RETIRED_FLOOR.search("gate is stated since #3089 (judged ≥ 100, rate ≥ 0.90)")
+    assert not RETIRED_FLOOR.search("summed `judged` >= 50 AND agree `rate` >= 0.90")
+    assert not RETIRED_FLOOR.search("`judged` totals 1000 rows")
+    assert RULING_STILL_OWED.search("Whether 100 and 0.90 are the right two numbers "
+                                    "is a ruling still owed to owed-check on #3089")
+    assert RULING_STILL_OWED.search("whether `judged >= 100` and `rate >= 0.90` are "
+                                    "the right numbers is a ruling #1688 owes")
+    assert not RULING_STILL_OWED.search("Whether that stays report-only is a ruling "
+                                        "no round makes (owed on #3109).")
+
+    repo = Path(__file__).resolve().parents[1]
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"],
+                            capture_output=True, check=True).stdout.split(b"\0")
+    scanned, offenders = 0, []
+    for raw in listed:
+        if not raw:
+            continue
+        rel = Path(raw.decode())
+        if rel.parts[0] == "tests" or rel.suffix not in TEXT_SUFFIXES:
+            continue
+        try:
+            body = (repo / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        scanned += 1
+        flat = " ".join(body.split())
+        for rx, label in ((RETIRED_FLOOR, "states the retired 100 floor"),
+                          (RULING_STILL_OWED, "calls the two numbers a ruling still owed")):
+            hit = rx.search(flat)
+            if hit:
+                offenders.append(f"{rel}: {label}: …"
+                                 f"{flat[max(0, hit.start() - 60):hit.end() + 50]}…")
+    # A scan that read nothing is a green instrument that checked nothing, so the
+    # corpus size is asserted alongside the emptiness of the offender list.
+    assert scanned > 1000, (
+        f"the scan read {scanned} tracked text files, which is not this corpus "
+        "(~2,200 outside tests/) — the enumeration, not the match, is broken")
+    assert not offenders, ("shipped prose still states the superseded gate:\n"
+                           + "\n".join(offenders))
 
 
 def test_the_judgement_reader_lives_in_the_watcher_and_names_the_writers_keys():

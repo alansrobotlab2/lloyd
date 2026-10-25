@@ -1824,19 +1824,34 @@ workers:
     # a tick that judged nothing has no rate (#1688) — and with the
     # `autocode.status_pipeline` / `close_on_settle` handover decided as a
     # precondition of the flip, not as its consequence.
-    # THE TWO NUMBERS, stated (#3089): summed `judged` >= 100 AND agree `rate`
+    # THE TWO NUMBERS, settled by the owed-check ruling of 2026-10-25 (#3089
+    # asked, #3329 lands the ruling): summed `judged` >= 50 AND agree `rate`
     # >= 0.90, both over the rolling 7-day window — the same window
     # `judgement_aggregate` measures and the health route publishes as
     # `judgement` on this source's row of `GET /api/workers/health`, so the gate
     # and the figure that clears it are read from one place and `?days=` cannot
-    # narrow either. Measured over the 7 days ending 2026-10-21T02:11Z the
-    # window read summed judged 80, agree 51, disagree 29, rate 0.637 across 265
-    # board-steward run rows (210 of them carrying `judged`), so NEITHER
-    # threshold is met and the gate reads NOT cleared — an unmet gate is a
-    # reason to keep dry-running, not a number to adjust. Whether 100 and 0.90
-    # are the right two numbers is a ruling still owed to owed-check on #3089,
-    # not a diff; a round that reported this gate cleared would be reporting a
-    # phantom rate. With `apply: true`
+    # narrow either. The floor came down from #3089's 100 because 100 sat ~20%
+    # above the plateau under it — weekly judged 163/82/78/82 for the four weeks
+    # ending 2026-10-25, a ~80/week plateau no round can manufacture — and not
+    # because 100 was ever shown impossible: the oldest of those four weeks
+    # cleared it. The rate bar was deliberately not lowered: it read 0.7317 over
+    # the trailing 7 days and 0.80 post-#3089-landing, and fitting a bar to its
+    # own measurement is exactly what this comment forbids.
+    # TODAY'S READING off the field the flip actually reads
+    # (`GET /api/workers/health`, 2026-10-25T22:46Z): summed judged 86, agree
+    # 64, disagree 22, rate 0.7442 over 242 board-steward run rows (224 carrying
+    # `judged`, truncated false). The floor clears at 86;
+    # the agree-rate is the half that does not, and the gate reads NOT cleared —
+    # an unmet gate is a reason to keep dry-running, not a number to adjust.
+    # `judgement.rate` is a PRE-FLIP-ONLY measure, never a post-flip KPI:
+    # `agreement()` scores `disagree` only over the moves it proposes on the tick
+    # that asks, so once `apply: true` has written a wrong status the item sits
+    # at the steward's value and is never re-proposed.
+    # The divergence lands in `missed` and in the `judged` denominator only,
+    # never as a fresh `disagree`. The rate drifts down from that alone, with no
+    # 0.90 is a number that exists only while `apply: false` — and a round that
+    # reported this gate cleared after the flip would be reporting a phantom
+    # rate. With `apply: true`
     # it writes through the one status writer and `select_confirmed` takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
