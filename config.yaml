@@ -1846,10 +1846,18 @@ workers:
       max_events: 300
       max_items: 80
       priority: 68
-      # Off, like every other unattended turn since cut 1 of
-      # senses-not-supervision (2026-09-12). It landed the same day with no
-      # key and inherited the old True fallback, so it was the one source
-      # still watched on the primary every 900 s (#1015).
+      # Off: what this key encodes is a per-source decision, not a fleet-wide
+      # rule. `source_inner_voice` (workers/sources/_common.py) is its only
+      # reader, and an unkeyed session source reads as off under it — the #1015
+      # fallback, moved that way because board-steward itself landed on cut-1
+      # day (2026-09-12) naming no answer, inherited the then-default True, and
+      # was watched on the primary every 900 s until the fallback moved. On or
+      # off is decided here, on the block whose value it sets; the key means
+      # nothing on a `run_prompt_on_primary` source, because the observer
+      # attaches only in the chat endpoint (`app/routers/messages.py`), so only
+      # a source that runs a real session has one to set. `autotriage` and
+      # `autocode` have been on again since 2026-09-25 (see
+      # `autotriage.inner_voice`).
       inner_voice: false
     # Settles what items still owe after the loop is done with them — the
     # post-landing checks, protected paths, spent attempts and parking triage
@@ -2285,12 +2293,16 @@ workers:
       max_inflight: 1
       max_duration_seconds: 3600
       max_turns: 90
-      # On: it edits a production doc and files from its own judgement.
-      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
-      # cut 1). Measured effect on rounds was negative: #874 abandoned at
-      # iteration 38 with 44 min left on an invented premise, 16 false
-      # repetition fires in one day, an inject into #875 with no room to
-      # answer. Stall rescue, budget and context pressure are deterministic
+      # Off: it edits a production doc and files from its own judgement, so its
+      # turn would be worth reading, but this source stayed off after cut 1 of
+      # senses-not-supervision (2026-09-12) turned the observer off on the keyed
+      # session sources. That was a per-source decision, not an end to the rule:
+      # `autotriage` and `autocode` have been on again since 2026-09-25 (see
+      # `autotriage.inner_voice` for what was fixed in Inner Voice rather than
+      # switched off). What kept this one off is the measured effect on rounds:
+      # #874 abandoned at iteration 38 with 44 min left on an invented premise,
+      # 16 false repetition fires in one day, an inject into #875 with no room
+      # to answer. Stall rescue, budget and context pressure are deterministic
       # anchors now; the gate is the real check. Stays on for chat, where a
       # human reads it and its value was measured there.
       inner_voice: false
@@ -2360,15 +2372,18 @@ workers:
       enabled: true
       interval_seconds: 300
       max_inflight: 1
-      # On: it evaluates untrusted transcripts against Lloyd's own profile
-      # and files backlog items from the answer. See `autotriage.inner_voice`.
-      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
-      # cut 1). Measured effect on rounds was negative: #874 abandoned at
-      # iteration 38 with 44 min left on an invented premise, 16 false
-      # repetition fires in one day, an inject into #875 with no room to
-      # answer. Stall rescue, budget and context pressure are deterministic
-      # anchors now; the gate is the real check. Stays on for chat, where a
-      # human reads it and its value was measured there.
+      # Off: it evaluates untrusted transcripts against Lloyd's own profile and
+      # files backlog items from the answer, so its turn would be worth reading,
+      # but this source stayed off after cut 1 of senses-not-supervision
+      # (2026-09-12) turned the observer off on the keyed session sources — a
+      # per-source decision, not an end to the rule: `autotriage` and `autocode`
+      # have been on again since 2026-09-25. See `autotriage.inner_voice` for
+      # what was fixed in Inner Voice rather than switched off, and for what
+      # kept this one off: #874 abandoned at iteration 38 with 44 min left on an
+      # invented premise, 16 false repetition fires in one day, an inject into
+      # #875 with no room to answer. Stall rescue, budget and context pressure
+      # are deterministic anchors now; the gate is the real check. Stays on for
+      # chat, where a human reads it and its value was measured there.
       inner_voice: false
       # 45, not the source default of 60: scheduled-task maps autonomy
       # priorities critical/high/medium/low/background to 10/20/30/50/70

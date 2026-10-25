@@ -3084,3 +3084,244 @@ def test_the_ban_on_measured_evidence_figures_actually_bites():
             f"the §3 prose ban accepted {example!r}, which is the measured "
             f"figure this node exists to refuse; every pattern missed it "
             f"({[p for p, _ in _EVIDENCE_BANS]})")
+
+
+# ---------------------------------------------------------- config.yaml's own
+# # Inner-Voice comments (#3285). Three sentences in `config.yaml` read as a
+# fleet-wide Inner-Voice off while the same file says the opposite two blocks
+# away: the comment above `workers.sources.board-steward.inner_voice: false` was
+# "Off, like every other unattended turn since cut 1 of senses-not-supervision
+# (2026-09-12)", and `arch-review` and `youtube-digest` each carried a copy of
+# one paragraph calling themselves "OFF for unattended turns since 2026-09-12".
+# The values were always right — `autotriage.inner_voice` and
+# `autocode.inner_voice` are both true, re-armed 2026-09-25 — and
+# `architecture/workers-jobs.md` §1 was corrected on 2026-09-25, so the config
+# comment was the last carrier. `config.yaml` was never inside the existing
+# sweep's reach: `test_no_live_file_asserts_the_inner_voice_refusal` walks
+# `_scope()`, which is `architecture/*.md` + `workers/sources/*.py` and does not
+# open `config.yaml` at all. These nodes read `config.yaml`'s own source blocks.
+
+#: The board-steward sentence #3285 was filed from, verbatim. The file wraps it
+#: over four comment lines; the readers below normalise a block, so both sides
+#: of every comparison here are whitespace-normalised.
+RETIRED_FLEET_WIDE_COMMENT = (
+    "Off, like every other unattended turn since cut 1 of senses-not-supervision "
+    "(2026-09-12). It landed the same day with no key and inherited the old True "
+    "fallback, so it was the one source still watched on the primary every 900 s "
+    "(#1015).")
+
+#: The paragraph `arch-review` and `youtube-digest` each copied from the other,
+#: verbatim, in the form that states an off as a property of unattended turns
+#: rather than of the source whose key it sits beside.
+RETIRED_CUT_ONE_PARAGRAPH = (
+    "OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision, "
+    "cut 1). Measured effect on rounds was negative: #874 abandoned at iteration "
+    "38 with 44 min left on an invented premise, 16 false repetition fires in one "
+    "day, an inject into #875 with no room to answer. Stall rescue, budget and "
+    "context pressure are deterministic anchors now; the gate is the real check. "
+    "Stays on for chat, where a human reads it and its value was measured there.")
+
+#: The stale verdict line both of those blocks opened with while their key read
+#: `false` — the armed/disarmed pair inside one comment block.
+RETIRED_VERDICT_LINE = ("On: it evaluates untrusted transcripts against Lloyd's "
+                        "own profile and files backlog items from the answer.")
+
+#: A comment that states the observer's state as a property of unattended turns
+#: in general rather than of the source whose value it licenses. Each pattern is
+#: shown to bite in the first node below — on the two verbatim retired sentences
+#: and, for the third, on the same claim in the shape a later editor would write
+#: it — because a ban whose pattern matches nothing is a ban on nothing (#1689).
+_IV_FLEET_WIDE_BANS = (
+    (r"(?:like|as\s+with|as\s+in)\s+(?:every|all)\s+(?:other\s+)?(?:unattended|background|scheduled)",
+     "one source's off compared to every other unattended turn"),
+    (r"\b(?:off|on)\s+for\s+unattended\s+turns\b",
+     "an off stated as a property of unattended turns"),
+    (r"\b(?:off|on|disabled|switched off)\s+for\s+(?:every|all|the\s+whole|entire)"
+     r"\s+(?:unattended|background|scheduled)\s+turns?",
+     "an off stated as applying to all unattended turns"),
+)
+
+#: A comment block's own verdict line, in the house style (`# Off: …`,
+#: `# On: …`). Colon-terminated on purpose: `# OFF from 2026-09-12 …` is a dated
+#: history clause, not this source's verdict.
+_IV_VERDICT = re.compile(r"^(On|Off)\s*:", re.I)
+
+_SRC_HEAD = re.compile(r"^    ([a-z][a-z0-9-]*):(?:\s*#.*)?$")
+
+
+def _config_lines() -> list[str]:
+    return (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+
+
+def _keyed_inner_voice_sources() -> dict[str, bool]:
+    """Every `workers.sources` block that carries an `inner_voice` key, parsed.
+
+    Parsed rather than grepped, so the values are the shipped ones and a comment
+    can never be checked against a line the loader would not read.
+    """
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    src = cfg["workers"]["sources"]
+    return {k: bool(v["inner_voice"]) for k, v in src.items()
+            if isinstance(v, dict) and "inner_voice" in v}
+
+
+def _inner_voice_comment(name: str, required: bool = True) -> tuple[str, list[str]]:
+    """The `#` lines directly above `workers.sources.<name>.inner_voice`.
+
+    Block-anchored per source for the reason `_comment_block_above` gives:
+    `inner_voice:` sits on seven source blocks here, so a whole-file grep cannot
+    say which block a sentence is licensing. Returns the normalised block and its
+    raw lines (the verdict check needs the line starts back).
+    """
+    lines = _config_lines()
+    si = next((i for i, ln in enumerate(lines) if ln == "  sources:"), None)
+    assert si is not None, "config.yaml has no `  sources:` line; this reader is blind"
+    heads = {i: _SRC_HEAD.match(ln) for i, ln in enumerate(lines)
+             if i > si and _SRC_HEAD.match(ln)}
+    start = next((i for i, m in sorted(heads.items()) if m.group(1) == name), None)
+    assert start is not None, f"{name!r} has no block under `workers.sources`"
+    end = next((i for i in sorted(heads) if i > start), len(lines))
+    hits = [i for i in range(start + 1, end)
+            if lines[i].startswith("      ")
+            and lines[i].strip().startswith("inner_voice:")]
+    assert len(hits) == 1, (
+        f"{name} carries {len(hits)} `inner_voice` keys in its block; the reader "
+        "cannot pick which comment belongs to the value")
+    i = hits[0]
+    raw: list[str] = []
+    while i > 0 and lines[i - 1].lstrip().startswith("#"):
+        raw.append(lines[i - 1].lstrip().lstrip("#").strip())
+        i -= 1
+    assert raw or not required, (
+        f"no comment above {name}.inner_voice — the block was deleted, not corrected")
+    return " ".join(" ".join(reversed(raw)).split()), list(reversed(raw))
+
+
+def _config_comment_paragraphs() -> list[str]:
+    """Every contiguous `#` comment block in `config.yaml`, whitespace-normalised.
+
+    Paragraphs rather than lines because the retired sentence wrapped over four
+    of them: a line-level scan would miss any claim that a later wrap split.
+    """
+    paras, cur = [], []
+    for ln in _config_lines():
+        if ln.lstrip().startswith("#"):
+            cur.append(ln.lstrip().lstrip("#").strip())
+        elif cur:
+            paras.append(" ".join(" ".join(cur).split()))
+            cur = []
+    if cur:
+        paras.append(" ".join(" ".join(cur).split()))
+    return paras
+
+
+def test_no_config_comment_claims_inner_voice_off_for_every_unattended_turn():
+    """Clause 1 (#3285): the file may not state the observer's off state as a
+    rule about unattended turns in general.
+
+    The scan is the whole file's comment corpus, because the three carriers sat
+    in three different source blocks and only one of them was the item's title
+    sentence. Its sight is checked before its verdict is trusted: the corpus has
+    to be big enough to be a scan, and every ban has to bite on the retired text
+    it was written from — an empty result with a dead pattern reads exactly like
+    a fixed file (#1689's rule, which this file already enforces twice above).
+    """
+    paras = _config_comment_paragraphs()
+    assert len(paras) > 200, (
+        f"the corpus is only {len(paras)} comment blocks; config.yaml has "
+        "hundreds — the reader is not scanning the file")
+    retired = (" ".join(RETIRED_FLEET_WIDE_COMMENT.split()),
+               " ".join(RETIRED_CUT_ONE_PARAGRAPH.split()),
+               "Inner Voice is off for every unattended turn since the re-arm")
+    for pattern, what in _IV_FLEET_WIDE_BANS:
+        assert any(re.search(pattern, r, re.I) for r in retired), (
+            f"the ban on {what} matches none of the retired sentences it was "
+            f"written from ({pattern!r}) — a pattern that matches nothing is a "
+            "ban on nothing, so the empty result below would prove nothing")
+    assert "like every other unattended turn" not in (ROOT / "config.yaml").read_text(
+        encoding="utf-8"), "the exact sentence #3285 was filed from is still in the file"
+    violations = [(p[:150], what) for p in paras for pattern, what in _IV_FLEET_WIDE_BANS
+                  if re.search(pattern, p, re.I)]
+    assert not violations, (
+        f"{len(violations)} comment(s) still state Inner Voice's off state as a "
+        f"property of unattended turns rather than of their own source: "
+        f"{violations} — say what this source's value is, and where the "
+        "on/off decision for it is made (#3285)")
+
+
+def test_board_steward_inner_voice_comment_states_the_rule_its_value_encodes():
+    """Clause 2 (#3285): the comment above `board-steward.inner_voice: false`
+    has to state the rule that value encodes, and name its owner.
+
+    The rule is not paraphrased here — it lives in `source_inner_voice`
+    (`workers/sources/_common.py`), whose docstring carries the #1015 story this
+    comment repeats. The comment points at that reader, at the fallback an
+    unkeyed session source inherits, at where on/off is decided, and at the
+    boundary that makes the key meaningless on a `run_prompt_on_primary` source.
+    The tokens are checked literally because a comment that merely sounds like
+    the rule is what this item is: the retired sentence was fluent, dated, and
+    false two blocks away in the same file.
+    """
+    value = _keyed_inner_voice_sources()["board-steward"]
+    assert value is False, (
+        "board-steward is no longer off, so this node is pinning a comment to a "
+        "value it never described — move the node with the value")
+    block, _ = _inner_voice_comment("board-steward")
+    assert " ".join(RETIRED_FLEET_WIDE_COMMENT.split()) not in block, (
+        "the fleet-wide sentence is back; it is false two blocks away in this "
+        "same file, which is what #3285 was filed from")
+    for required in ("Off:", "per-source", "source_inner_voice", "unkeyed",
+                     "#1015", "run_prompt_on_primary", "app/routers/messages.py",
+                     "2026-09-25"):
+        assert required in block, (
+            f"the comment no longer names {required!r}: {block[:200]!r} — the "
+            "half that says where the decision is made is the half a reader "
+            "cannot re-derive from the value alone")
+
+
+def test_every_cut_one_inner_voice_comment_carries_the_rearm_date():
+    """Clause 3 (#3285): a comment that justifies its `false` with the 2026-09-12
+    cut has to carry the 2026-09-25 re-arm beside it.
+
+    That is the difference between a dated history and a rumour of a rule: cut 1
+    did switch the keyed session sources off, and `autotriage` and `autocode`
+    have been on again since 2026-09-25, so the date alone is the sentence that
+    reads as fleet-wide. The same node holds each block's own verdict line to its
+    value, because `arch-review` and `youtube-digest` both opened with `# On:`
+    above `inner_voice: false` — the pair this item is about, one layer down.
+    Both halves are shown to bite: on the verbatim retired paragraph, and on the
+    verbatim retired `# On:` line.
+    """
+    keyed = _keyed_inner_voice_sources()
+    assert len(keyed) >= 5, f"only {len(keyed)} sources key inner_voice; not a sweep"
+    assert ("2026-09-12" in RETIRED_CUT_ONE_PARAGRAPH
+            and "2026-09-25" not in RETIRED_CUT_ONE_PARAGRAPH), (
+        "the retired cut-1 paragraph no longer trips this node's own rule, so an "
+        "empty result below would be the pattern dying, not the claim dying")
+    legacy_verdict = _IV_VERDICT.match(RETIRED_VERDICT_LINE)
+    assert legacy_verdict and (legacy_verdict.group(1).lower() == "on"), (
+        "the retired `# On:` line no longer parses as a verdict, so the "
+        "verdict/value check below cannot be shown to bite")
+    cut_one, verdicts, stale = [], [], []
+    for name, value in sorted(keyed.items()):
+        block, raw = _inner_voice_comment(name, required=False)
+        if "2026-09-12" in block:
+            cut_one.append(name)
+            assert "2026-09-25" in block, (
+                f"{name}'s comment still gives the 2026-09-12 cut as the reason "
+                f"for inner_voice: {str(value).lower()} with no re-arm beside it "
+                f"— {block[:160]!r}: cut 1 was not the end of the rule, and a "
+                "reader of one block cannot see the sources that came back")
+        seen = [m.group(1) for m in map(_IV_VERDICT.match, raw) if m]
+        if seen:
+            verdicts.append(name)
+            if (seen[0].lower() == "on") is not value:
+                stale.append((name, seen[0], value))
+    assert len(cut_one) >= 3, (
+        f"only {cut_one} cite 2026-09-12; the rule is reading an empty corpus")
+    assert len(verdicts) >= 3, (
+        f"only {verdicts} carry a verdict line; the check is reading an empty corpus")
+    assert not stale, (
+        f"{stale}: a block's own verdict line disagrees with the value beneath it "
+        "— #3285 is exactly this pair, and `# On:` above `inner_voice: false` is "
+        "how the fleet-wide reading was written in the first place")
