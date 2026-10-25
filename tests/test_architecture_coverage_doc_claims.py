@@ -1682,7 +1682,30 @@ def test_the_subliminal_page_enumerates_the_badge_tuple_the_code_carries():
 #: has anchors whether the extractor graded any of them. Deliberately not
 #: `_CITATION`: an assertion that reads the same regex as the extraction it
 #: audits proves nothing about that extraction.
+#:
+#: and the same question asked of the continuation form — `:NNNN` as its own code
+#: span, which `bare_anchor_citations` attaches to the path the sentence named just
+#: before it and the span rule therefore grades (22 graded citations are spelled that
+#: way today, almost all of them review-log re-points: "… is `:1043`"). The two are
+#: probes of two different spellings and each one only ever answers for its own graded
+#: count: #3292's first attempt summed them into one `probe >= graded`, and since the
+#: continuation form carries a far larger surplus (108 spellings against 22 graded,
+#: versus 196 against 189), the sum could report a shortfall in either family as a
+#: pass. A probe that can pay for the other family's deficit is not an independent
+#: check of it.
+#:
+#: Both counts dropped when #3292 retired the spellings this corpus used to pad
+#: them with: 35 distinct `path.ext:N-M` ranges in 18 docs, and 43 distinct numbers
+#: on a bare basename in 16. Neither survives — the node that refuses them is
+#: `test_the_corpus_writes_no_line_citation_a_rail_cannot_read`. What does survive is
+#: a third unreadable spelling the probe above cannot see either: a CONTINUATION
+#: range, `` `:68-71` ``, which this pattern misses (a closing backtick must follow
+#: the digits) and `bare_anchor_citations` misses for the same reason — its group is
+#: `(?P<line>\\d+)`. Eight sit in the corpus, each on a line that names no source
+#: file, and they are named doc by doc and measured form by form in that node's
+#: docstring rather than being quietly counted as clean by this one.
 _ANCHORISH_PY = re.compile(r"[\w./$~#-]+\.py:\d+")
+_ANCHORISH_CONTINUATION = re.compile(r"`:\d+`")
 
 #: How many `.py:NNN` anchors the corpus-wide sweep has to grade to be a sweep.
 #: Measured at shipping, over the corpus this diff re-pointed: 140 anchors into
@@ -2029,10 +2052,49 @@ def test_the_anchor_span_sweep_grades_the_corpus_not_a_named_few():
     # extractor's known silence, recorded on the item, not this node's subject.
     # What the comparison does catch is the extractor inventing an anchor no doc
     # spelled, which would make the sweep grade a sentence nobody wrote.
-    probe = sum(len(_ANCHORISH_PY.findall(_text(slug))) for slug in PATH_DOC_SLUGS)
-    assert probe >= len(graded), (
-        f"the independent probe counts {probe} `.py:NNN` spellings in the corpus "
-        f"while the extractor graded {len(graded)} of them")
+    #
+    # TWO legs, never one sum. The sweep grades two spellings, and one
+    # `probe >= graded` over both lets a surplus in one family pay for a deficit in
+    # the other: this round's first attempt added the continuation count to the same
+    # sum, and measured at the head the review graded (`f5bf5e7a`) `_ANCHORISH_PY`
+    # alone saw 196 spellings against 189 graded path anchors while the continuation
+    # term supplied 106 against 20 — so the combined 302 >= 209 passed on the term the
+    # same diff had just added, which is the masking the review caught. Each family is
+    # now covered only by a probe of that family, so neither borrows the other's
+    # surplus. (Both counts have moved since that head: converting two continuation
+    # ranges below made them 196/189 and 108/22, and the sum 304 >= 211.)
+    #
+    # The two families are the extractor's own shapes, not a split I chose:
+    # `cited_citations` returns the span stripped of its backticks and
+    # `bare_anchor_citations` returns the `:NNN` code span WITH them, so a leading
+    # backtick is the discriminator the two functions ship with — and the
+    # classification itself is asserted below, so mislabelling a span cannot
+    # quietly move a graded anchor from the short leg to the long one.
+    docs = [_text(slug) for slug in PATH_DOC_SLUGS]
+    spelled = [g for g in graded if not g[0].startswith("`")]
+    continued = [g for g in graded if g[0].startswith("`")]
+    mislabeled = [g[0] for g in continued if not re.fullmatch(r"`:\d+`", g[0])]
+    assert not mislabeled, (
+        f"{mislabeled} was classified as a continuation without being a bare "
+        "`:NNN` code span, so the two legs below grade families the extractor does "
+        "not actually return")
+    py_probe = sum(len(_ANCHORISH_PY.findall(t)) for t in docs)
+    cont_probe = sum(len(_ANCHORISH_CONTINUATION.findall(t)) for t in docs)
+    assert py_probe >= len(spelled), (
+        f"the independent probe counts {py_probe} `.py:NNN` spellings in the corpus "
+        f"while the extractor graded {len(spelled)} path-anchored citations of them")
+    # This leg is not the mislabel assertion above in another form, and the
+    # difference is what it is for. `bare_anchor_citations` walks the `:NNN` spans a
+    # doc spells and appends AT MOST ONE entry per span, breaking on the first path
+    # the sentence named — so the day that `break` moves outside the inner loop, or a
+    # refactor appends per candidate, the graded list outgrows the spelled list while
+    # every entry is still a well-formed `` `:N` ``. The format check cannot see that;
+    # a count against a probe of the same spelling can, and 22 graded continuations
+    # against 108 spelled spans is the slack it is measuring.
+    assert cont_probe >= len(continued), (
+        f"the independent probe counts {cont_probe} `:NNNN` code spans in the "
+        f"corpus while the extractor graded {len(continued)} of them — the sweep is "
+        "grading an anchor more times than any doc spelled it")
     # The skip `definition_spans` is allowed, bounded. The per-doc identity makes
     # an unparsable citation visible; this makes it a failure, because an anchor
     # into a file that no longer parses is an anchor into nothing — the same loss
@@ -6603,7 +6665,7 @@ def _body_ruling_gaps(para: str) -> list[str]:
                        "paragraph already gives"),
         ("land-time", "it does not name the land-time probe as the enforcement point "
                       "for a shell-authored body"),
-        ("scripts/automod/vault_guards.py:710-711",
+        ("scripts/automod/vault_guards.py:710",
          "it does not cite the line that hands the probe its vault"),
         ("LLOYD_VAULT_ROOT", "it does not name the knob that line sets"),
         ("tests/test_research_doc_claims.py::_task_files",
@@ -6620,8 +6682,8 @@ def test_the_accepted_open_bash_lane_records_the_body_rule_ruling():
     claim: the paragraph that accepts the Bash lane names #2589's body rule
            (`64b501c3`) as open on this lane for the same bind-mount reason, names
            the land-time probe as what enforces it for a shell-authored body —
-           `scripts/automod/vault_guards.py:710-711` handing the probe its vault by
-           both routes, grading
+           the env it builds handing the probe its vault by both routes, one of them
+           `scripts/automod/vault_guards.py:710`, grading
            the corpus of `tests/test_research_doc_claims.py::_task_files` — and
            states its reopen trigger as an observable a reader can go and measure.
     verdict: #2589 put the rail on both writer lanes and ruled the Bash lane "not
@@ -6666,7 +6728,7 @@ def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
         "above came from an emptied paragraph and not from a missing ruling")
 
     for needle in ("64b501c3",
-                   "scripts/automod/vault_guards.py:710-711",
+                   "scripts/automod/vault_guards.py:710",
                    "LLOYD_VAULT_ROOT",
                    "tests/test_research_doc_claims.py::_task_files",
                    'guard="autonomy_body_rail"'):
@@ -7994,3 +8056,209 @@ def test_the_tools_page_names_the_method_that_clamps_a_declared_call_budget():
         "The call bound is `CALL_TIMEOUT_SECONDS` 660 s, and while "
         "`harness.mcp_pool.per_tool_timeouts` is true, "
         "`MCPPool._call_timeout` uses the lesser of it and 660 s.")
+
+
+# --------------------------------------------------------------------------- #
+# corpus-wide — a `path.ext:N-M` range is read by no rail, so no doc may write
+# one; and neither is a line number on a bare basename (#3292, 2026-10-25)
+# --------------------------------------------------------------------------- #
+
+#: The range spelling, including the basename half. Deliberately NOT `_CITATION`
+#: with a `-END` bolted on: `_CITATION` requires a directory in the path
+#: (`cited_citations` then drops anything without a `/`), and 9 of the corpus's 38
+#: ranges are spelled as a bare basename (`mcp_pool.py:606-620`,
+#: `_common.py:592-600`), so a rule built on `_CITATION` would be blind to exactly
+#: the spans no other rule can ever own. `_EXT` is the same alternation the path
+#: rails read, which is what makes `.ts` and `.yaml` ranges fail here too: the
+#: span rule is `ast.parse`-only, so no extension outside `.py` has a gradeable
+#: line either way.
+_RANGE_CITATION = re.compile(
+    r"\A(?P<pre>\$LLOYD_DATA/|~/)?"
+    r"(?P<path>[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*\.(?:" + _EXT + r"))"
+    r":(?P<start>\d+)-(?P<end>\d+)\Z")
+
+#: A line number — single or range — on a path with no directory in it. Invisible
+#: to `cited_citations` by construction, so graded by neither rail: not the path
+#: existence check, not the span rule, not the file's line count.
+#:
+#: Deliberately NOT bounded by `_EXT`, which makes this the one half of the rule
+#: wider than the path rails it stands beside. A basename number is unread for the
+#: same reason whatever the extension is — there is no directory to resolve it
+#: against — so keying this to the list of code extensions would leave a
+#: `name.jinja:91`-shaped span outside the rule while the node's own sentence claimed
+#: the spelling was retired corpus-wide. A numberless basename stays allowed, because
+#: that form simply does not assert a line (`config.yaml` appears 92 times that way,
+#: and `chat_template.jinja` once since #3292 re-pointed its number out). A port
+#: survives because the extension group is alphabetic, and `0.0.0.0:8080` and
+#: `127.0.0.1:8501` have digits where `jinja` sits.
+_BASENAME_LINE_CITATION = re.compile(
+    r"\A(?P<path>[A-Za-z0-9_.\-]+\.[A-Za-z]{1,8})"
+    r":(?P<lines>\d+(?:-\d+)?)\Z")
+
+
+def _line_citation_gaps(text: str) -> list[str]:
+    """Every PATH-shaped line citation in this text that no rail reads, as written.
+
+    Shared by the two claim nodes and both of their controls, in the shape
+    `_body_ruling_gaps` established: a control seeds text and asks THIS function
+    what it finds, so a green live run can never be an extractor that quietly found
+    nothing to complain about.
+
+    Two spellings land here, and both are the same defect — a number a reader
+    cannot check and a grader cannot see:
+
+      * a RANGE (`foo/bar.py:3-4`). `_CITATION` ends at
+        `(?::(?P<line>\\d+))?\\Z`, so the trailing `-4` makes the whole span fail to
+        match and `cited_citations` returns nothing for it: 38 occurrences of 35
+        distinct ranges across 18 of the 36 docs were graded by neither rail at
+        `22829b49`, including two in
+        `workers-jobs.md` that #3283's hand review found stale while the span rule
+        reported `mis_anchored=0` for the doc.
+      * a BASENAME line (`bar.py:3`, `chat_template.jinja:91`). `cited_citations`
+        skips any path with no `/` in it, so a number whose file was never localized
+        is invisible however correct it is — and invisible for a reason that has
+        nothing to do with the extension, which is why this half of the rule does not
+        consult `_EXT`.
+    """
+    out: list[str] = []
+    for span in _CODE_SPAN.findall(text):
+        s = span.strip()
+        if s in out:
+            continue
+        if _RANGE_CITATION.match(s) or _BASENAME_LINE_CITATION.match(s):
+            out.append(s)
+    return out
+
+
+def _live_corpus_line_citations() -> dict[str, list[str]]:
+    """What the rails cannot read, per doc, over the whole glob."""
+    return {slug: _line_citation_gaps(_text(slug)) for slug in PATH_DOC_SLUGS}
+
+
+@pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
+def test_the_corpus_writes_no_line_citation_a_rail_cannot_read(slug):
+    """No architecture doc cites a `path.ext:N-M` range, and none cites a line
+    number on a bare basename — the two spellings no rail reads (#3292, clauses 3
+    and 4).
+
+    Parameterized over `PATH_DOC_SLUGS` with `ARCH_DOC_SURFACE` as the vacuity
+    guard, the same pair the resolution node and the span rule read — so a doc
+    landing tomorrow is graded the moment it lands.
+
+    The two halves are bounded differently on purpose, and the difference is the
+    two extractors' own. The RANGE half is keyed on `_EXT`, because a range is a
+    path-shaped citation and `_EXT` is the set of extensions the path rails resolve
+    at all — `tools.md`'s `qmd/src/store.ts:1463-1470` and `skills.md`'s
+    `config.yaml:842-843` are why that set is not `.py`. The BASENAME half ignores
+    `_EXT` and takes any alphabetic extension: a number on a bare file name has no
+    directory to resolve whatever it is called, so bounding it by the code-extension
+    list would leave a `name.jinja:91`-shaped span readable-by-nothing while this
+    node's sentence said the spelling was retired. (`harness.md` wrote exactly that
+    span and lost its number in this round; ports survive, since
+    `0.0.0.0:8080`/`127.0.0.1:8501` have digits where the extension has to be.)
+
+    Both spellings are refused rather than graded because neither can be graded:
+    a range's end line is checked by nothing (not even "is it < the file's line
+    count", which is all #2583's resolution node asked), and a basename's number
+    is checked against no file at all. The replacement is the form #2971 settled
+    on for `workers/queue.py:<n>`: a slash-bearing path whose line the span rule
+    grades, or the same path with no number at all — 92 backticked
+    `` `config.yaml` `` pointers in this corpus already take that second form.
+
+    One unreadable spelling is deliberately NOT refused here: a continuation RANGE,
+    `` `:68-71` `` — a range with no path at all, which `bare_anchor_citations`
+    ignores because its pattern is `` `:(?P<line>\\d+)` `` with no hyphen arm. Ten sat
+    in the corpus at this round's base; two are gone (`djev.md`'s `:83-86` and
+    `skills.md`'s `:269-271`), because each sits on a line that already names the file,
+    so dropping the end line yields an anchor the span rule grades green — they are now
+    2 of the 22 graded continuations. The remaining eight (`djev.md` 2,
+    `infrastructure.md` 2, and one each in `memory.md`, `skills.md`, `vllm.md`,
+    `workers-jobs.md`) sit on lines naming no file, so their number can only be graded
+    by spelling a path on the line, and that was measured with `anchor_span_report`
+    before deciding rather than assumed: two such spellings are objected
+    (`` `app/djev_shadow.py:68` `` and
+    `` `workers/sources/automod_regression.py:690` `` both land inside a docstring),
+    two are silently ungraded (`` `app/memory.py:46` ``, `` `workers/jobs.py:2549` ``),
+    and the rest are claims about how a file looked at a named sha whose lines have
+    since moved out from under the number — `vllm.md`'s own Review log says of its
+    `:61-66` that it is "left as it stand[s]" inside a reading pinned by sha256.
+    Re-pointing those eight means re-deriving eight review-log claims against the trees
+    they describe, which is #3139's doc-accuracy shape; it is recorded on #3292 rather
+    than guessed at here, and refusing them from this node would only turn the suite red
+    over text that is not this item's acceptance.
+    """
+    assert len(PATH_DOC_SLUGS) == ARCH_DOC_SURFACE, (
+        f"the path surface holds {len(PATH_DOC_SLUGS)} docs and "
+        f"ARCH_DOC_SURFACE says {ARCH_DOC_SURFACE}, so this sweep is reading a "
+        "corpus that is not the one the other rails grade")
+    gaps = _line_citation_gaps(_text(slug))
+    assert not gaps, (
+        f"{slug} cites {gaps} — a line RANGE that `_CITATION` cannot match, or a "
+        "line number on a path with no directory in it, which `cited_citations` "
+        "drops. Neither is graded by the resolution node or the span rule: the "
+        "number reads as checked and never was. Write "
+        "(`app/harness/mcp_pool.py:606`) — a slash the extractor returns and the "
+        "span rule grades — or the #2971 pointer, the path with no number.")
+
+
+def test_the_unreadable_line_citation_check_sees_every_kind_it_names():
+    """Extractor-proof for the node above, and the reason it is a refusal and not
+    a grade: a planted range of each source kind has to be reported BY NAME.
+
+    Seeded text only, and the live corpus asserted clean first — the
+    `_body_ruling_gaps` shape, for the reason every other extractor proof in this
+    file exists: a fixture that "passes" because the pattern matched nothing is
+    indistinguishable from a corpus that really is clean. Re-measured at this
+    round's base with these two patterns, the live assertion failed in 23 of the 36
+    docs: 35 distinct RANGES in 18 of them (#3292's "38" counts a span once per doc),
+    and 43 distinct BASENAME numbers in 16 — 8 of which are the ranges the item's
+    nine occurrences are, and 35 of which are single-line numbers the item never
+    counted because it measured ranges only. That is also why the rule covers
+    `chat_template.jinja:91`, whose extension no path rail resolves.
+    """
+    seeded = ("a python range (`foo/bar.py:3-4`), a typescript one "
+              "(`foo/bar.ts:3-4`), a config one (`foo/config.yaml:3-4`), a bare "
+              "basename number (`baz.py:9`), a basename number on an extension no "
+              "path rail resolves (`chat_template.jinja:91`), and — as controls — a "
+              "graded anchor (`app/foo/bar.py:3`) and a pointer (`app/foo/bar.py`), a "
+              "numberless basename (`config.yaml`) and a port (`0.0.0.0:8080`).")
+    found = _line_citation_gaps(seeded)
+    for want in ("foo/bar.py:3-4", "foo/bar.ts:3-4", "foo/config.yaml:3-4",
+                 "baz.py:9", "chat_template.jinja:91"):
+        assert want in found, (
+            f"the check did not report the planted {want}; the green live run is "
+            f"an extractor that found nothing. It found only {found}")
+    assert "app/foo/bar.py:3" not in found, (
+        "a single slash-bearing anchor is the form this rule exists to allow — the "
+        "span rule grades it — so reporting it would turn the refusal into a ban on "
+        "citations, and the corpus would be rewritten to earn nothing")
+    assert "app/foo/bar.py" not in found, (
+        "the #2971 pointer form is reported too, so the rule cannot be satisfied "
+        "only by deleting every citation in the doc")
+    assert "config.yaml" not in found, (
+        "a basename with no number is the form the corpus already writes 92 times "
+        "and asserts no line, so refusing it would ask for a slash no extractor "
+        "needs in order to say nothing")
+    assert "0.0.0.0:8080" not in found, (
+        "the basename pattern is extension-shaped, and a host:port has digits where "
+        "an extension has to be — `infrastructure.md` and `voice.md` cite live "
+        "listen addresses, and a rule that reports them is a rule that will be "
+        "loosened by whoever meets it first")
+
+    swept = _live_corpus_line_citations()
+    dirty = {slug: gaps for slug, gaps in swept.items() if gaps}
+    assert not dirty, (
+        f"the live corpus already fails the claim node in {sorted(dirty)}, so the "
+        "seeded cases above would prove nothing about the live run")
+    # Both sides of this are values the code produced — what the sweep enumerated
+    # and what the glob finds on disk — pinned against #3292's literal. The
+    # assertion it replaces, `len(PATH_DOC_SLUGS) == ARCH_DOC_SURFACE == 36`,
+    # compared the surface with the constant declared beside it, so it could only
+    # ever report the two agreeing; a sweep that read a shorter corpus than the
+    # claim node would still have passed it. `ARCH_DOC_SURFACE` stays where clause
+    # 1 wants it — the claim node's own vacuity guard — and does no work here.
+    on_disk = len(list(ARCH.glob("*.md")))
+    assert len(swept) == on_disk == 36, (
+        f"the control swept {len(swept)} docs while the glob finds {on_disk} and "
+        "#3292 measured 36, so a green seeded run says nothing about the corpus "
+        "the claim node grades")

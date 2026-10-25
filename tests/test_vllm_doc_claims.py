@@ -4100,7 +4100,33 @@ _BAR_HEADING = "- **The acceptance bar"
 #   python -c "import hashlib,pathlib; r=pathlib.Path('architecture/vllm.md').read_text(); \
 #   print(hashlib.sha256(r[r.index('- **The counted reading: 2026-09-25'):\
 #   r.index('- **The 2026-09-29 re-open')].encode()).hexdigest())"
-_SEPTEMBER_READING_SHA = "b7653a7c657d355b206f2c7a0cdbadcab62133b025cf8ee274691ba68dbdccc7"
+#
+# Re-pinned by #3292 on 2026-10-25, and only for its citation spellings: two anchors inside
+# this block were written as ranges (`…py:225-229`, `…py:61-66`), the spelling no architecture
+# rail can read, and the item retires it corpus-wide.
+#
+# What the command below proves, stated exactly: the block's NON-backtick bytes are identical
+# between the round's base and this tree. That rules out a changed figure, sentence or number
+# anywhere in the block; it says NOTHING about the stripped spans themselves — a number
+# re-typed inside backticks would pass it unchanged. That narrower claim is the one this
+# re-pin needs, since the sha held below exists to move only when the reading is re-derived,
+# and the two edits inside it were citation spellings. The two spans that changed are printed
+# as the command's other half, so the substitution that was granted is on the record rather
+# than inferred from the absence of a diff. The base is named by sha, not `HEAD~1`: this
+# branch has carried more than one commit since, and `HEAD~1` would quietly compare the
+# re-pin against itself.
+#   python - <<'EOF'
+#   import subprocess, difflib, re, pathlib
+#   b = subprocess.run(["git","show","69dab4c6:architecture/vllm.md"],capture_output=True,text=True).stdout
+#   c = pathlib.Path("architecture/vllm.md").read_text()
+#   blk = lambda t: t[t.index("- **The counted reading: 2026-09-25"):t.index("- **The 2026-09-29 re-open")]
+#   strip = lambda t: [re.sub(r"`[^`]*`", "``", l) for l in blk(t).splitlines()]
+#   print(list(difflib.unified_diff(strip(b), strip(c), lineterm="", n=0)))       # -> no +/- lines
+#   pat = re.compile(r"[A-Za-z0-9_./-]+\.py:\d+(?:-\d+)?")
+#   print(sorted(set(pat.findall(blk(b))) - set(pat.findall(blk(c)))))  # removed, both ranges
+#   print(sorted(set(pat.findall(blk(c))) - set(pat.findall(blk(b)))))  # added, both re-spelled
+#   EOF
+_SEPTEMBER_READING_SHA = "d557c53aa1e4a0ce3d9370ba40c11bed0773ade7bd6c944008d02ff63f42c7ba"
 
 
 @pytest.fixture(scope="module")

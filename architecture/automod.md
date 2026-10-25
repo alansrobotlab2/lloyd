@@ -4187,7 +4187,7 @@ step, a dirty working tree, or commits its upstream never received
 steps, because the build writes `dist/` — the directory the daemon serves — so
 a dirty fork is refused without ever being compiled into it, and it names the
 `node` and `bun` it resolved before any step output, because the fork's suite
-spawns `bun` by bare name (`test-all.mjs:37`) and a missing bun is an
+spawns `bun` by bare name (test-all.mjs) and a missing bun is an
 environment verdict, not a red fork. Teaching the gate to build and test the
 fork as a second tree — fork sha in the promotion record, a revert target for
 the guardian — is #854's route (a), a human decision, and not implemented.

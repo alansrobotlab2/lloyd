@@ -395,7 +395,7 @@ def test_section_3_names_the_wiring_gap_and_its_citations_resolve():
     s = _flat(_section_3(DOC.read_text()))
 
     assert "_save_session_meta" in s and "create_session" in s and "ab.assignment" in s
-    assert "app/sessions_io.py:1360-1368" in s and "app/sessions_io.py:398" in s
+    assert "app/sessions_io.py:1360" in s and "app/sessions_io.py:398" in s
 
     cited_branch = _cited_span("app/sessions_io.py", 1360, 1368)
     assert "ab import assignment" in cited_branch and "_iv_ab(session_id)" in cited_branch

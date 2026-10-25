@@ -271,7 +271,7 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    the bound for every tool: a budget declared in `annotations.TIMEOUT_SECONDS`
    rides to the pool as `Tool._meta["lloyd/timeoutSeconds"]` and, while
    `harness.mcp_pool.per_tool_timeouts` is true, `MCPPool.timeout_for` uses
-   the lesser of it and 660 s (`mcp_pool.py:606-620`). Today five tools declare
+   the lesser of it and 660 s (`app/harness/mcp_pool.py:606`). Today five tools declare
    one — `Bash` 630 s, `http_fetch`/`http_search` 120 s, `http_request` 180 s,
    `automod_gate_wait` 600 s — so a hung web fetch dies at its own budget
    instead of at the fleet ceiling. It re-sends after a transport
@@ -454,9 +454,9 @@ only when a change both names it there and reads it somewhere.
 Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
 `tests/test_mcp_pool_retry_policy.py` and the `fact_resolve_apply` cases in
 `tests/test_memory_improvement.py`. One name in the class is still open by
-decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`annotations.py:83`)
+decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`agent_mcp/annotations.py:83`)
 and its handler `mkdir`s the screenshot directory and writes a PNG on every call
-(`browser.py:1015-1032`). It is a derived artifact, like the code graph's cache
+(`agent_mcp/browser.py:1015`). It is a derived artifact, like the code graph's cache
 `annotations.py` explicitly justifies a few lines above — but that comment covers
 only `graph_*`, and `_retry_safe` re-sends it, so a dropped transport leaves two
 PNGs. Low severity: no vault state, no authority, and the duplicate is
@@ -484,7 +484,7 @@ self-evidently a file with a fresh timestamp.
 | `backlog` | 4 | the kanban backlog. `backlog_write_task` runs write-time dedupe ([[backlog]]) |
 | `browser` | 13 | Playwright Chromium, with the SSRF guard on resolved addresses |
 | `desktop` | 2 | look at Alan's Hyprland desktop and act on it. `desktop_act` needs the lease only Alan grants from Mission Control's Desktop tab; refused outright for a background, worker, bench or eval turn. `architecture/desktop.md` is the authority |
-| `recall_observation` | 1 | one tool, and its own module: read back a tool result that context pressure replaced with an observation stub. Advertised only to a turn whose relief actually writes those stubs (`app/harness/tool_result_spill.py:331-333`, #1481) |
+| `recall_observation` | 1 | one tool, and its own module: read back a tool result that context pressure replaced with an observation stub. Advertised only to a turn whose relief actually writes those stubs (`app/harness/tool_result_spill.py`, #1481) |
 | `code_graph` | 6 | structural navigation over graphify's AST extraction (§9) |
 | `discord_bot` | 4 | Discord. All four are disabled in config today |
 | `djev` | 3 | typed decisions on GPU 2's DiffusionGemma, ~40 ms each. Ranking only: the scores are not calibrated ([[djev]]) |
@@ -1071,14 +1071,14 @@ a tool running in the aggregator has no other way to know them.
 
 **Why depth 1, and where it is enforced** (#1515). The cap is enforced twice.
 Every child's `RunOptions.disallowed_tools` gets `Task` appended
-(`agent_mcp/builtin_task.py:366-368`), which the harness honours at advertise
+(`agent_mcp/builtin_task.py:366`), which the harness honours at advertise
 time (`app/harness/tool_schema.py:186`, `build_tool_list`) and again at
 dispatch (`app/harness/loop.py`, `_pre_dispatch`: "disabled by
 configuration") — this is the layer that holds on the real path, because a
 child's tool calls re-enter `main.call_tool` over loopback `/mcp` from a fresh
 ASGI task where no contextvar survives. The `_task_depth` contextvar check
 against `MAX_TASK_DEPTH = 1` (`agent_mcp/builtin_task.py:37`, checked at
-`agent_mcp/builtin_task.py:282-285`) is the backstop for a same-context call. `tests/test_task_depth_cap.py` pins both,
+`agent_mcp/builtin_task.py:282`) is the backstop for a same-context call. `tests/test_task_depth_cap.py` pins both,
 so a silent widening fails. The cap exists **because** of what each extra
 level would stack on one box: every level is a live `run_query` on the same
 primary whose parent sits blocked on the tool call, so its 100-200k prefix has
@@ -1355,7 +1355,7 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   against its own 7-row section (#3126). Corrected the counts, added the missing
   module rows and tool rows, and fixed two `required` cells (`browser_snapshot`
   has no `required`; `browser_evaluate` requires only `script`) and two drifted
-  citations (`annotations.py:83`, `browser.py:1015-1032`). The §5 marks columns
+  citations (`agent_mcp/annotations.py`, `agent_mcp/browser.py`). The §5 marks columns
   were checked row by row against `annotations.py` and 143 of 143 agreed — the
   drift is all in the counts, not the classification. Added the per-call timeout
   mechanism the page was missing (`annotations.TIMEOUT_SECONDS` →

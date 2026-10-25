@@ -268,11 +268,11 @@ disarm all of them. One level up, two supported routes still stop the seat itsel
 and each stops the reporting of the problem along with the work:
 
 - **`workers.enabled: false` at boot.** `start_worker_pool()`
-  (`app/routers/workers.py:962-967`) returns before `WorkerPool` is constructed, so
+  (`app/routers/workers.py:962`) returns before `WorkerPool` is constructed, so
   `_scheduler_loop` (`workers/pool.py:1566`) never runs at all.
 - **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:559`
   awaits `pool.stop()`, which clears `_running` and cancels `_scheduler_task`
-  (`workers/pool.py:839-845`).
+  (`workers/pool.py:839`).
 
 What either one silences is everything that rides that loop, not just dispatch: the
 parse announcement and both stall alarms above, `workers/service_probe.py`'s port
@@ -1297,7 +1297,7 @@ that put every disk-heavy scan on a thread, and stays.
   Inner Voice **off** (config says so; the prose said on, against the doc's own
   roster), the fleet is 36 task files not 32, `bench-mine`'s turn budget is a
   config key since #896 (only `session-distill`'s remains a literal), and the
-  `judge.py:177` citation is dead — the zero-score is `judge_trace`. Findings
+  `eval/durable_write_judge/judge.py` citation is dead — the zero-score is `judge_trace`. Findings
   outside this doc filed as #1458 (stale automod-regression config comment),
   #1459 (dead judge.py citation in `bench_mine.py`), #1460 (session-distill
   budget has no config key).

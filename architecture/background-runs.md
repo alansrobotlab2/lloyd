@@ -398,7 +398,7 @@ head in `sessions/`: no four-part id on live data carries a human platform at
 all, and **no writer records a member's departure** — the sweep gzips and never
 deletes, nothing rewrites the `platform` of an *existing* session
 (`_save_session_meta` stamps it only in its create branch,
-`app/sessions_io.py:1330-1348`). Two in-tree routes remove a transcript, and
+`app/sessions_io.py:1330`). Two in-tree routes remove a transcript, and
 what separates them is everything around the unlink: `DELETE
 /api/sessions/{session_id}` (`app/routers/sessions.py:1141`) cancels the current
 turn, drains the queued turns in **both** tiers, discards the session's ambient
@@ -428,12 +428,12 @@ machine age exactly like the background runs they always were.
 
 What the exemption promises is longer than this page used to say, and the reason
 is the field the sweep reads. `_archive_age_for`
-(`scripts/groundskeeper/retention-sweep.py:607-619`) takes the archive age from
+(`scripts/groundskeeper/retention-sweep.py`) takes the archive age from
 `platform`: `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS` (30) for
 `NON_USER_PLATFORMS = ("autonomy", "worker")`, `SESSION_ARCHIVE_AGE_DAYS` (90)
 for everything else — including an unreadable head, which keeps the longer
 window. This class is *defined* by a platform word outside that tuple:
-`names_a_machine_platform` (`app/sessions_io.py:244-262`) returns exactly that
+`names_a_machine_platform` (`app/sessions_io.py:244`) returns exactly that
 membership test, and its own docstring says the class is identified by failing
 it. The sweep's predicate and the endpoint's exemption are complements over one
 field, so the 30-day background age cannot reach a file the exemption exists for.
@@ -921,7 +921,7 @@ round that ran it and for nothing else.
   `source: bench` class has no life).
 - 2026-10-13 — **Correction to the entry above (#2651).** Its `#2647`
   parenthetical is wrong, and so was every sentence on this page that repeated it:
-  `_archive_age_for` (`scripts/groundskeeper/retention-sweep.py:607-619`) picks the
+  `_archive_age_for` (`scripts/groundskeeper/retention-sweep.py`) picks the
   archive age from the `platform` field, and this class exists precisely because
   its platform is outside `NON_USER_PLATFORMS`, so a member is archived at the
   90-day conversation age, not at 30 — the exemption was never expiring a month

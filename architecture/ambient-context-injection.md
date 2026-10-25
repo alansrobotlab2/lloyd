@@ -53,7 +53,7 @@ Producers call one MCP tool — `session_inject_context` — with a priority. Th
 That sentence has one exception, and it is the branch *before* the priority one:
 if no session resolves, `priority` no longer selects an endpoint. Since #1516 an
 unaddressable producer falls through to the file-backed **next-session channel**
-whatever it asked for (`agent_mcp/ambient.py:185-216` → `POST
+whatever it asked for (`agent_mcp/ambient.py` → `POST
 /api/next-session-note`), so a 03:00 pass with no session to name still leaves its
 signal for the morning. Two consequences the table below does not show: an
 unresolvable `notable` or `urgent` is delivered as a passive note, with no agent
@@ -165,7 +165,7 @@ instant — no measurement, no stamp, rather than a 1969 date offered as evidenc
   ` [... truncated]`, applied to every ambient line — and the next-session
   channel caps its own fields at 720 / 2000 before a note is ever stored
   (`NEXT_SESSION_SUMMARY_MAX` / `NEXT_SESSION_CONTENT_MAX`,
-  `app/next_session_notes.py:69-76`).
+  `app/next_session_notes.py`).
 - **A summary carrying a date that contradicts itself is refused, not rendered.**
   `app/date_fidelity.refusal_detail` runs before the target check on all three
   doors — `/inject`, `/inject-prefetch` and `/api/next-session-note` — and
@@ -281,7 +281,7 @@ User turns always win, and `/cancel` never drops one: `drain_pending`'s
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
-(`app/routers/sessions.py:1141-1195`). That route wipes the session outright, so a
+(`app/routers/sessions.py:1141`). That route wipes the session outright, so a
 queued **user** turn it left behind would still run and still write nothing:
 `_append_messages` goes through `mutate_session`, which no-ops once the session
 JSON is gone — a full model turn spent on a transcript nobody will read again.
@@ -525,7 +525,7 @@ mode has no reason to block it.
   the listing predicate that is deliberately *not* the delivery predicate.
   Corrected: two drifted line pointers `drain_pending` is
   `app/sessions_io.py:1109`, not `1030-1074`; the `DELETE` route is
-  `app/routers/sessions.py:1141-1195`, not `811-840`), the "zero SDK cost"
+  `app/routers/sessions.py`, not `811-840`), the "zero SDK cost"
   attribution — that phrase is the `/inject-prefetch` docstring, not the tool
   description, which says "at no cost" — the override path, which is
   `$LLOYD_DATA/data/tool_overrides.yaml` rather than a file in the checkout, and

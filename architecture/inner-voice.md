@@ -217,7 +217,7 @@ edit lands at once, so a prompt change that assumes new code ships with it.
   no A/B has produced a population to compare.
   **Why the arms are empty is a wiring fact, not thin traffic.** `ab.assignment`
   is called from exactly one place in `app/`: the create branch of
-  `sessions_io._save_session_meta` (`app/sessions_io.py:1360-1368`, gated on
+  `sessions_io._save_session_meta` (`app/sessions_io.py:1360`, gated on
   `platform == "mission-control"`), and `git grep -n "from app.inner_voice.ab import assignment" -- app/`
   returns that one line and nothing else. But every chat is minted by
   `create_session` (`app/sessions_io.py:398`), the one writer for every create,

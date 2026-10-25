@@ -247,7 +247,7 @@ fact tree and `kg.sqlite` via `LLOYD_FACTS_ROOT`/`LLOYD_KG_DB`; the live store
 was never opened (the record's `isolated`, `facts_root` and `kg_db` say which
 copies a score came from). There *was* a knob trap here, and it is closed at the
 source rather than by remembering: `run_eval()`'s signature defaults
-(`eval/run_eval.py:777-786`) are now the same `RECALL_*` constants its argparse
+(`eval/run_eval.py`) are now the same `RECALL_*` constants its argparse
 defaults use (`:2312`, `:2329`), imported at `:46-48` — #498 (`0a7c239e`,
 2026-09-14) deleted the restated literals, one of which, `rerank_alpha=0.5`
 against production's 0.3, is what made this section's first version measure a
@@ -409,7 +409,7 @@ a day before its code half).
   §4 knob-trap paragraph (closed at the source by #498; the live divergence is
   `expand_graph=True` against a production that defaults it False), the
   corrections channel (three surfaces since #2789, `lloyd/MEMORY.md` the live
-  dated one), and four pointers/counts (`facts.py:159`, `vault.py:2637`, the
+  dated one), and four pointers/counts (`agent_mcp/facts.py`, `agent_mcp/vault.py`, the
   drift corpus's directory count, and the suite's test count — the last two are
   named without their figures hereafter, because a stale figure in a list of stale
   figures is still a stale figure). Filed #3004 (the nightly never scores

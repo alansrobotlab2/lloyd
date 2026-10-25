@@ -366,7 +366,7 @@ Kill switch: `workers.sources.arch-review.enabled`.
   2026-09-15. Corpus counts: 36 top-level docs, 23 `tests/test_*_doc_claims.py`
   files, and §1's "a first pass in about a week" is replaced by the division it
   was an estimate of, since the picklist is 47 units and not 33.
-  `_common.py:592-600` is `:1043`. Filed #2603 (the prompt/rail denominator
+  `workers/sources/_common.py` is `:1043`. Filed #2603 (the prompt/rail denominator
   mismatch, with the `group:workers-jobs:Dispatch` rejection it has already
   cost), #2604 (rail 4's "the model never runs git" is a prompt rule, not a
   rail — `Bash` is kept and `git commit` is tier 1), #2605 (the module's own

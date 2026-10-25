@@ -285,9 +285,9 @@ The subtraction is gated on the probe having reached a conclusion. Failures
 outside the round's own files that the base probe does **not** reproduce leave the
 rung unable to attribute them, and it fails closed — *"every failure outside the
 round's own files was unexplained, and the base probe could not say whose they
-are"* (`gate.py:3574`) — filing nothing. Only a conclusive pass with an inherited
+are"* (`scripts/automod/gate.py:3574`) — filing nothing. Only a conclusive pass with an inherited
 red files the debt: `_file_red_tree` runs on `pre_existing and conclusive`
-(`gate.py:3545`), and the verdict names the nodes under `pre_existing_failures`
+(`scripts/automod/gate.py:3545`), and the verdict names the nodes under `pre_existing_failures`
 with the tracker's id in `red_tree_item`. There is no `external_blocker` /
 `external_failures` pair in the gate — that was the pre-#2876 shape, and a round
 whose report contains neither key did not hit an inherited red.
@@ -301,7 +301,7 @@ red tree is the signal to go fix base, not a reason to relax about the failure.
 ## Parallel isolation is a requirement, not a nicety
 
 The rung runs `-n 8` — the count is `automod.gate.test_workers`
-(`config.yaml:1461`), and `_test_workers` falls back to serial when that key is
+(`config.yaml`), and `_test_workers` falls back to serial when that key is
 missing or unusable or the venv has no `xdist`, and always for a `--only` subset.
 Tests from different files share a worker process, so
 **anything process-global leaks**: logging levels and propagation, `TMPDIR`, cwd,
@@ -471,4 +471,4 @@ suite exercises · [[data-home]] for where the live data moved on 2026-09-22.
   `tests/frontend_deps.py` and its gitignore line, the vitest sentence, the
   vacuity probes, tmpwatch's fractions, and both incident records. Filed: the two
   1000-test floors are under 5% of what they were set for (#3250), and
-  `gate.py:128` names closed #2214 as the live ruling on the figure (#3251).
+  `scripts/automod/gate.py` names closed #2214 as the live ruling on the figure (#3251).

@@ -90,7 +90,7 @@ absence grep, `text_delta` in `app/harness/action_review.py`, with its control i
 | `app/harness/action_review.py` | is this call what the task asked for | the worker's prompt and the calls it has made | `build_turn_options`, `kind == "stream"`, worker platforms only |
 | `agent_mcp/_injection_probe.py` | is this result instruction-shaped | the text of five tools' results, background sessions | `agent_mcp/main.call_tool` |
 | `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:299`, `:351`) — it **refuses**, `ErrorCode.INJECTION` |
-| `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:119`, `:413`, `:523`, `agent_mcp/browser.py:694` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, which **is set `false`** at `config.yaml:712`: #2123 seeded that block on 2026-10-04 and the comment above it closes "Arming `enforce` is a separate decision", so the branch is unarmed by reviewed decision, not by an unset default a reader could flip (#1965, which also made the value parsed rather than `bool()`-coerced, so a quoted `"off"` cannot arm it). The posture is published by `egress.network_report()`'s `policy.enforce`, live at `GET /api/dashboard` → `network.policy` and rendered `enforcing` / `recording only` |
+| `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:119`, `:413`, `:523`, `agent_mcp/browser.py:694` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, which **is set `false`** at `config.yaml`: #2123 seeded that block on 2026-10-04 and the comment above it closes "Arming `enforce` is a separate decision", so the branch is unarmed by reviewed decision, not by an unset default a reader could flip (#1965, which also made the value parsed rather than `bool()`-coerced, so a quoted `"off"` cannot arm it). The posture is published by `egress.network_report()`'s `policy.enforce`, live at `GET /api/dashboard` → `network.policy` and rendered `enforcing` / `recording only` |
 
 ```
 git grep -n "_check_injection" -- agent_mcp/session.py
@@ -233,7 +233,7 @@ one thing on this box, `_injection_probe`, and that thing's own exclusions are
 §4. The second command above is the exception that makes the qualifier
 necessary: `outcome_of` does read a result, and stops at a prefix test for
 `Tool call denied:` and a fragment test for `disabled by configuration`
-(`app/harness/action_review.py:189-197`) to work out what the *other* gates did.
+(`app/harness/action_review.py:189`) to work out what the *other* gates did.
 It never asks what the page said. Say "reads a result" without that qualifier
 and this section contradicts itself four lines after proving the reader exists.
 This is deliberate in
@@ -467,7 +467,7 @@ is a stronger statement than the one it replaces, not a weaker one — and read-
 is precisely the probe's class, so what a script pulls back *is* scanned.
 
 The whole section is latent today: `harness.rpc.enabled: false` in `config.yaml`
-(the `rpc:` block, `config.yaml:765`), and the module says the feature ships off.
+(the `rpc:` block, `config.yaml`), and the module says the feature ships off.
 Named anyway, because the exclusion belongs to the mechanism, and the mechanism
 is one config key from live.
 
@@ -493,7 +493,7 @@ measurement in that module's docstring (#1944: 174.1 would-be interruptions per
 day, 1 of 963 positives above tier 1, `injected` the argmax in 0 of 57,325 rows).
 `injection_probe` still *ships* `warn`, and `warn` is the only behaviour on the
 box that puts a word back into the conversation. `config.yaml` does not have it
-"off" — it sets `harness.injection_probe.mode: shadow` (`config.yaml:758`), which
+"off" — it sets `harness.injection_probe.mode: shadow` (`config.yaml`), which
 records hits and stays out of the result — and the module says the decision to
 turn `warn` on belongs to a measured hit sample, not to itself. So every
 exclusion above is an exclusion from a *recorder*. A prompt injection that

@@ -145,8 +145,8 @@ def test_the_rationale_carries_a_because_and_the_task_id_alternative():
     # The doc cites the file the same way, and `_body()` finds the function by AST,
     # so this key holds the enforcement rather than its address.
     ("app/harness/loop.py", "_pre_dispatch", "for d in effective_disallowed"),
-    ("agent_mcp/builtin_task.py:366-368", "_task", 'disallowed.append("Task")'),
-    ("agent_mcp/builtin_task.py:282-285", "_task", "MAX_TASK_DEPTH"),
+    ("agent_mcp/builtin_task.py:366", "_task", 'disallowed.append("Task")'),
+    ("agent_mcp/builtin_task.py:282", "_task", "MAX_TASK_DEPTH"),
 ])
 def test_each_cited_site_still_holds_what_the_doc_says(cite, func, needle):
     assert f"`{cite}`" in _section(), f"the doc no longer cites {cite}"

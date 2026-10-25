@@ -40,9 +40,9 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   decodes at `_qmd_post` (and again in the Mission Control memory search), so
   `people/Ali Behrouz.md` is citable. 18 indexed notes carry a space, `+`, `#`
   or `&`. Two callers open their own sockets and are not doors: the MC memory
-  search reads `results` straight (`app/routers/memory.py:112-117`, it does apply
+  search reads `results` straight (`app/routers/memory.py`, it does apply
   `qmd_file`) and write-time backlog dedupe reads them raw
-  (`agent_mcp/backlog_similar.py:176-190`), so neither's rerank fallback reaches
+  (`agent_mcp/backlog_similar.py:176`), so neither's rerank fallback reaches
   `qmd_health`. See `architecture/qmd.md`.
 - **Tests never reach the live djev.** `tests/conftest.py` pins the recall to
   `"qmd"`; `tests/test_recall_djev_ranker.py` opts in with djev stubbed.

@@ -411,7 +411,7 @@ generated file for 27 days: #2728's operator leg narrowed subliminal to
 glob, and the pair measured `collections_match: false` / `missing_collections: []` /
 `embed_match: true` on 2026-10-22 with mtimes 2026-10-15 against 2026-09-25. That is
 precisely what the copy exists to prevent, because `store_collections` is what qmd
-scopes and resolves paths against, `syncConfigToDb` (`qmd/src/store.ts:1463-1470`)
+scopes and resolves paths against, `syncConfigToDb` (qmd/src/store.ts)
 rebuilds it from this file on every `serve --index evalpin` whose parsed config hash
 differs, and the `eval/` arms build their own configs from this same text
 (`eval/embed_side_index.py:66`, `eval/contextual_full_corpus.py:58`). Two things name

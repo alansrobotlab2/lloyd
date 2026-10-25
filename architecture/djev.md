@@ -1396,7 +1396,7 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 ### Closed 2026-09-21 — test runs wrote to production's shadow log (#1324)
 
 **What it was.** `STATE_DIR`, `SHADOW_LOG` and `PENDING_DROPS` are
-`Path.home()` literals bound at import (`app/djev_shadow.py:83-86`, re-pointed
+`Path.home()` literals bound at import (`app/djev_shadow.py:83`, re-pointed
 2026-10-21 from the `:68-71` this was written against) and `_write()` opens
 `SHADOW_LOG` on the recorder's daemon thread at *write* time (`:313`), so a
 per-test patch could not hold: `tests/test_djev_shadow.py`
@@ -1706,7 +1706,7 @@ djev on Lloyd's traffic; the recall eval decides.
   none of either shape, so `replay.py --floors` is no longer fixture-dominated.
   §11 attributed the `samples` default to the client, which has none. §13 called
   #1477 open; it is closed `rejected`. Re-pointed two anchors that had moved
-  (`app/djev_shadow.py:68-71`→`:83-86`, `:295`→`:313`, and `backlog.py:458-460`→
+  (`app/djev_shadow.py`→`:83`, `:295`→`:313`, and `agent_mcp/backlog.py`→
   `:613-616`, whose flag is `judged` now), refreshed the seam volumes from the
   live log, added the rerank seam's two 2026-10-11 production rows and the
   name-prior probe's two monthly reproductions. Filed #3112 (`djev_decide`'s

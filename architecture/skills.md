@@ -147,7 +147,7 @@ hardcoded set were deleted, because a fallback that silently re-derived the
 roots and re-spelled the set was a second definition nothing could see taking
 over, and `app/prefetch.py` has imported the module unconditionally all along —
 the wrapper protected a path that does not exist. `prompt_builder` holding no
-second list is now asserted: `tests/test_prompt_builder_overlay.py:207-210`
+second list is now asserted: `tests/test_prompt_builder_overlay.py:207`
 checks `not hasattr(pb, "_QUARANTINE_STATUSES")` and that the alias *is* the
 walker's function. The check therefore pays the walker's real front-matter
 parse (`_parse_frontmatter`, `agent_mcp/skills.py:96`) for every skill on every
@@ -159,7 +159,7 @@ nested `metadata: openclaw: status: archived` a retirement and missed a
 
 `app/prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`app/prefetch.py:52-55`):
+(`app/prefetch.py:52`):
 
 | | value |
 |---|---|
@@ -228,11 +228,11 @@ intercept expressed as a deny comes back `is_error=True` and is booked into
 number this feature exists to improve, so a deny would make the fleet look
 sicker exactly where it is being taught something.
 `HookRegistry.fire_pre_tool_use` recognises
-`skillDeliver` alongside `deny` (`app/harness/hooks.py:269`) and `loop.py:3004`
+`skillDeliver` alongside `deny` (`app/harness/hooks.py:269`) and `app/harness/loop.py:3004`
 renders it, in the same shape as the synthetic `ToolSearch` result above it.
 
 **A deny beats a deliver regardless of registration order.** The walk holds a
-deliver as provisional and keeps going (`hooks.py:195`, `:269-271`), so a catastrophic
+deliver as provisional and keeps going (`app/harness/hooks.py:195`, `:269`), so a catastrophic
 `Bash` is blocked rather than answered with a protocol card by a deliverer that
 happened to register first. `install_skill_dispatch_hook` is still called after
 `install_default_safety_hook` (`app/routers/turn_options.py::arm_skill_dispatch`) — not because
@@ -325,7 +325,7 @@ where its tools are spliced into `TOOLS`; the module itself is imported at the h
   tags and body, using the same `_score_skill` prefetch uses.
 - **`skills_read(name)`** — the full raw `SKILL.md` for a directory name.
 
-Both are in the ToolSearch baseline (`config.yaml:842-843`), so they are
+Both are in the ToolSearch baseline (`config.yaml`), so they are
 advertised on every request rather than needing discovery.
 
 There is no install tool, no catalog, no remote source, and no `skills_get` or
@@ -549,7 +549,7 @@ loaders are actually run against the change:
 2. The system prompt must still build (`build_system_prompt()` returning ≥ 500
    chars), and **each touched skill must still load** — through
    `agent_mcp.skills.skill_load_defect` (def `agent_mcp/skills.py:262`, called
-   at `vault_round.py:189`), not `_load_skill`.
+   at `scripts/automod/vault_round.py:189`), not `_load_skill`.
 
 Scoped to the diff on purpose: a pre-existing broken file elsewhere in the
 vault must not block every round — the same delta principle as pyflakes and tsc

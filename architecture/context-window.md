@@ -44,7 +44,7 @@ summarises persistently and then again from scratch.
    model can re-read (`app/harness/tool_result_spill.py`).
 2. **The persisted summary** (`app/compaction_state.py`) — that step, chosen
    under `compaction.persist_summary` or for a session someone hand-compacted
-   (`compaction_state.py:241`). One record per session in `data["compaction"]`,
+   (`app/compaction_state.py:241`). One record per session in `data["compaction"]`,
    folded forward rather than regenerated; the fold calls the same summariser
    layer 3 does (`compaction_state.fold` → `compaction_llm.summarize_incremental`,
    `app/compaction_state.py:562`). History is rebuilt as
@@ -93,7 +93,7 @@ three private definitions of a protected path ([[authority-surfaces]]).
 ## The trigger, and what a fold costs
 
 Every key below lives under `config.yaml`'s `compaction:` — the microcompact ones
-nested one level deeper at `compaction.microcompact:` (`config.yaml:424`) — which
+nested one level deeper at `compaction.microcompact:` (`config.yaml`) — which
 owns the thresholds, while `app/compaction.py` holds only `setdefault` fallbacks.
 So a number read in code may not be the number in force: `app/compaction.py:360`
 defaults the micro pass to a `trigger_fraction` of 0.8 while `config.yaml` ships
@@ -401,10 +401,10 @@ size-controlled ratio, are owed on #2027; nothing here changes a threshold.
 `app/prompt_layout.py` decides what rides on the turn's user message instead
 (P1). Three layouts exist — `prompt_builder.SESSION_STATE_LAYOUTS` — and what
 ships is `system_tail` (`harness.prompt_layout.session_state`,
-`config.yaml:555`, since 2026-09-25): the `<session_state>` block is rendered
+`config.yaml`, since 2026-09-25): the `<session_state>` block is rendered
 last, after every static paragraph, so a goal/plan/todo edit moves the tail of
 the system prompt and nothing under it. The `<memory_delta>` note goes to the
-user tail when `harness.prompt_layout.freeze_memory` is on (`config.yaml:556`
+user tail when `harness.prompt_layout.freeze_memory` is on (`config.yaml`
 ships it off) and the memory files moved since the session's snapshot
 (`app/memory_snapshot.py`). Both exist to keep the system prompt as static as it
 can be, because it is the front of the prefix and anything that moves inside it

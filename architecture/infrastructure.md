@@ -46,11 +46,11 @@ four until 2026-10-09 added `agent-tts-omni.conf`, and the sentence still said
 directory it was read out of, which is why
 `tests/test_infrastructure_gpu_inventory.py` reads the confs rather than this
 line. The four engine launchers export it themselves —
-`start-qwen38-flash-next.sh:609` (with `CUDA_VISIBLE_DEVICES=1` on the next
+`agent-services/bin/start-qwen38-flash-next.sh` (with `CUDA_VISIBLE_DEVICES=1` on the next
 line), `start-secondary.sh` (taking the conf's
 `GPU="2"`; before either exec it reads the card through
 `agent-services/bin/gpu-mem.sh` — see the preflight in `architecture/djev.md`),
-`start-qwen3-tts.sh:24` and `start-qwen3-tts-omni.sh:51`. **Neither LLM program
+`agent-services/bin/start-qwen3-tts.sh` and `agent-services/bin/start-qwen3-tts-omni.sh`. **Neither LLM program
 names it in `environment=` at all**, so a `supervisorctl` dump of the primary's
 environment shows no pin and the pin is nonetheless there. `agent-tts` is the
 one pinned twice, in both places, to the same device; `agent-tts-omni` is the
@@ -173,13 +173,13 @@ Two venvs **on this box** can serve the primary's model family, which is why
 `vllm-flash-next-main-1012` (what the program names) and the undated
 `vllm-flash-next-main`, the 09-17 build kept as the revert target with the same
 fp8 QSA path. The launcher's *own* fallback default
-(`start-qwen38-flash-next.sh:199`) is `.venvs/vllm-qwen38-flash-next`, and a
+(`agent-services/bin/start-qwen38-flash-next.sh`) is `.venvs/vllm-qwen38-flash-next`, and a
 dropped `VLLM_VENV` still does not reach BF16 — it exits 1 one check earlier, at
 the venv-exists guard `:239-243`, because that venv is no longer installed; had
 it been, the fp8 QSA guard at `:578-581` would still have refused it, since the
 conf exports `KV_CACHE_DTYPE=fp8` and that build's QSA kernel has no fp8 path.
 `vllm-qwen3.8` is the same story one slot over: it is the default in
-`start-qwen3.8-27b-nvfp4.sh:84` (the 27B revert target) and is likewise absent.
+`agent-services/bin/start-qwen3.8-27b-nvfp4.sh` (the 27B revert target) and is likewise absent.
 Both revert targets are therefore a rebuild, not a variable — `SETUP.md` Part 4
 (venvs) and Part 9 (LLM models) carry the builds and the weights.
 
@@ -664,7 +664,7 @@ untrusted peer which API paths exist.
 accepted connection spawns a language-server subprocess rooted at a
 caller-supplied `workspace`. The `http` decorator wraps its handler in
 starlette's `BaseHTTPMiddleware`, whose `__call__` returns before dispatching
-any scope that is not `http` (`starlette/middleware/base.py:101-104`), so an
+any scope that is not `http` (starlette/middleware/base.py), so an
 HTTP-only gate leaves that upgrade path entirely unenforced — measured on #683's
 first commit, with the HTTP gate in place a LAN peer's LSP socket was accepted
 and reached the spawn while the same peer's `GET /api/sessions` was refused. The

@@ -2196,9 +2196,9 @@ the one rung with no in-band handle; its reasoning is persisted as
   shipped state (both deployed 2026-09-25; the closing summary still listed
   `render_overflow: render_all` and `skills.index.descriptions` as off, against
   the doc's own P4/P5 sections), the P4 opening's MEMORY.md size and ceiling,
-  the P10 transcript-retention horizon and its `retention-sweep.py:252-264`
+  the P10 transcript-retention horizon and its `scripts/groundskeeper/retention-sweep.py`
   citation (chat sessions are `SESSION_ARCHIVE_AGE_DAYS` 90 d; those lines are
-  a docstring now), the `chat_template.jinja:91` citation (the only template in
+  a docstring now), the `chat_template.jinja` citation (the only template in
   the tree is the served Qwen3.8 one), and the two engine-build attributions —
   the primary answers 0.31.1rc1 where the doc says 0.28/0.28.1, so P6(b)'s
   `tool_choice: "none"` verification is now dated to the build it was made on

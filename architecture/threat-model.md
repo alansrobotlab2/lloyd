@@ -95,7 +95,7 @@ prompt cannot be access control — is for.
 | B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py::check_scope`, `scripts/automod/gate.py:3532` |
 | B12 | scheduler → a worker turn | a queue row, and the turn it becomes | the queue's own due-gates | `workers/queue.py`, `claim_next()` |
 | B13 | a run's output → a durable store | loaded memory, facts, the entity store, eval baselines, `-latest` pointers | the job that owns the file, with no cross-job reader | `app/memory_flush.py`, `app/kg_store.py` |
-| B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `server.py:241`, `server.py:181` |
+| B14 | a network peer → the backend API | an HTTP request that can start a turn | the peer's address, and a fingerprint if one arrives | `./server.py:181`, `./server.py:241` |
 | B15 | a nested RPC call → tool dispatch | a tool call issued from inside a `Bash` child | the allowlist stamped when the parent call began | `app/harness/rpc_policy.py:76` |
 | B16 | an act → Alan's desktop session | a click, a keystroke, a window focus | a lease only a human grants, revoked by mouse motion | `app/desktop_lease.py:123` |
 | B17 | a new dependency → this machine | a package name, a resolver, an installer | an install-command matcher | `app/harness/supply_chain.py:421` |
@@ -148,8 +148,8 @@ appears in this table: those threats are in the next one.
 | T-29 | B10 | E | An unattended turn mints itself the authority it was banned from using | `app/tool_bans.py:35` |
 | T-30 | B10 | E | A grant outlives its scope, its quota or its expiry | `app/harness/policy.py:185` |
 | T-31 | B12 | E | A child turn inherits a wider surface than the turn that spawned it | `agent_mcp/builtin_task.py` |
-| T-32 | B14 | S | A peer outside loopback starts a turn over the API | `server.py:241` |
-| T-33 | B14 | S | A presented fingerprint is read as identity where none was required | `server.py:181` |
+| T-32 | B14 | S | A peer outside loopback starts a turn over the API | `./server.py:181` |
+| T-33 | B14 | S | A presented fingerprint is read as identity where none was required | `./server.py:241` |
 | T-34 | B15 | E | A nested call performs a write, skipping every pre-dispatch hook | `app/harness/rpc_policy.py:76` |
 | T-35 | B16 | E | The desktop is acted on with no live lease, or after the lease was revoked | `app/desktop_lease.py:123` |
 | T-36 | B18 | agency | A trial told to be destructive is handed the real tool surface | `agent_mcp/_tool_sandbox.py` |
