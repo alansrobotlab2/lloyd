@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-09-25
+date: 2026-10-25
 ---
 
 # The worker pool and the unified work queue
@@ -41,11 +41,22 @@ Two loops, both inside the **backend** process (`server.py`):
 
 - **The scheduler** wakes every 60 s, and for each enabled source whose
   `interval_seconds` has elapsed calls `enqueue_if_due`. It is the only thing
-  that creates work. The same tick carries two deterministic chores that must
-  not wait for a free slot: the poison sweep (`workers/maintenance.py`) and
-  the service probe (`workers/service_probe.py`, #1359), which announces a
-  supervised infra program whose declared port stays closed past its grace
-  while supervisord still reports it up — the crash loop that reads RUNNING.
+  that creates work. The same tick carries **five** deterministic seats that
+  must not wait for a free slot, every one of them awaited before
+  `_scheduler_pass` and outside the `try` around it, so a source raising in the
+  pass cannot silence them: the poison sweep (`workers/maintenance.py`), the
+  mitigation-drill seat (`maintenance.maybe_run_mitigation_drill`, #2333, on its
+  own hourly interval — §7), the service probe (`workers/service_probe.py`,
+  #1359), which announces a supervised infra program whose declared port stays
+  closed past its grace while supervisord still reports it up — the crash loop
+  that reads RUNNING — the dispatch watch (`workers/dispatch_watch.py`, #1681),
+  and the fleet watchdog (`workers/fleet_watchdog.py`, #1682), whose stall and
+  unparseable-file alarms were moved here precisely because they had lived
+  inside `scheduled_task.enqueue_if_due`, which the pass skips outright for a
+  source config says is disabled: an alarm that its own silencing cannot report.
+  The sentence this one replaces said "two" for a month; `WorkerPool`'s own
+  `_scheduler_loop` is the list, and #3286 asks for a test that keeps the two
+  from parting again.
 - **The workers** — `workers.slots` of them — claim one item at a time and
   await its source's `execute`.
 
@@ -67,16 +78,21 @@ the backend ask `configured_db_path()` instead of inventing a path.
 Three tables are this file's own. `queue` is the work, `runs` is the history,
 `watermarks` is whatever a source needs to remember between ticks.
 
-Three more share the database, and each is here because *this* file owns it:
+Four more share the database, and each is here because *this* file owns it:
 `authority_grants` and `grant_dispatch` (#534) are declared in `queue.py`'s
 `GRANT_DDL` and read by `app/harness/policy.py` rather than redeclared there —
 two definitions of a table whose NOT-NULL `expires_at` is the whole safety
-property is how one of them stops being true — and `tool_effects` (#544) is
-created by `agent_mcp/_tool_effects.py` against `configured_db_path()`. One
-more shares the file without being *owned* here: `egress_events` (#628),
-created by `agent_mcp/egress.py`, the egress guard's record of every
-destination it saw. So `.tables` shows seven, and only the first three
-belong to the pool.
+property is how one of them stops being true; `pause_journal` (#2615) is in the
+same `_SCHEMA`, one row per take and per lift of the durable pool hold with its
+`holder_kind`, its `actor` and the `hold_id` of the take it lifts, which is the
+history §7's overwritten-in-place `watermarks` pair cannot carry; and
+`tool_effects` (#544) is created by `agent_mcp/_tool_effects.py` against
+`configured_db_path()`. One more shares the file without being *owned* here:
+`egress_events` (#628), created by `agent_mcp/egress.py`, the egress guard's
+record of every destination it saw. So `.tables` shows eight, and only the first
+three are the work the pool runs: `pause_journal` is the pool's own state
+rather than a unit of work — and the sweep that bounds it is the groundskeeper's
+(`PAUSE_JOURNAL_MAX_AGE_DAYS`), not the pool's.
 
 An item walks one path:
 
@@ -412,10 +428,19 @@ Two rules carry it:
 Whatever failed to verify is carried into the next run of that same task, as a
 `gaps:<task_id>` watermark — a gap that lives only in the prose of the last run
 is a gap nobody reads — and an empty list is written on a clean run so a
-resolved gap stops being re-litigated. Still a pilot: the first bundles
-landed on 2026-09-23 — 3 rows in `runs` carry one (nightly
-`scheduled-task` reflection runs) as of 2026-09-25 — so every rate the
-health view derives from a bundle rests on a sample of three.
+resolved gap stops being re-litigated. Still a pilot, no longer a small one:
+its scope is `app/autonomy.py`'s `EVIDENCE_PILOT_TASK_IDS`, seven task ids
+(24, 38, 39, 40, 42, 53, 56) since #2675 widened it on 2026-10-13, all of them
+nightly `scheduled-task` runs — 202 rows in `runs` carry a bundle as measured
+2026-10-25. Read the denominator rather than this sentence: the per-task and
+`fleet`-block counters `runs_with_bundle` / `runs_without_bundle` and
+`claims_checked` / `claims_verified` / `claims_refuted` / `claims_insufficient`
+are published by `GET /api/autonomy/health` (that is the "health view" above —
+the worker route publishes none of them, #3288), and the 7-day fleet measured
+2026-10-25 read 78 bundles over 253 runs, 919 claims checked, 877 verified, 16
+refuted, 26 insufficient. The sentence this one replaces ("3 rows carry one …
+a sample of three") stood for six weeks after it stopped being true, which is
+the reason a count belongs on a route and not in prose.
 
 ### Event-loop discipline
 
@@ -597,15 +622,20 @@ tri-state to say so**: `null` means the source does not set the key, which for
 a direct-path source is not "off, and you could turn it on" — nothing there can
 be observed at all, because the observer is wired in `app/routers/messages.py`
 and nowhere else. Reporting a flat `false` there would invite a knob that reads
-as broken the one time somebody uses it. The promise is being broken today,
-just not where an earlier draft of this file said: `config.yaml` no longer
-sets `inner_voice` on `backlog-cluster` — #1015 removed the key and a
-comment marks the omission deliberate — but the UI-written override file
-re-adds `inner_voice: false` for it (among six sources), so the panel still
-renders the one source that *cannot* be observed as the one that has been
-switched off. Harmless (nothing reads the key on that path) and wrong in
-exactly the direction the tri-state was built to prevent; the honest value
-is no key, and the stray one is filed (#1464).
+as broken the one time somebody uses it. The promise *was* being broken, and
+#1464 closed it (`fbbca754`): `config.yaml` had long since stopped setting
+`inner_voice` on `backlog-cluster` — #1015 removed the key and a comment marks
+the omission deliberate — but the UI-written override file re-added
+`inner_voice: false` for it, which rendered the one source that *cannot* be
+observed as one that had been switched off. The merge now refuses to
+*introduce* the key on a source whose tracked block has none
+(`app/config.py::_merge_tool_overrides`, pinned by
+`test_an_override_may_not_introduce_inner_voice_on_an_unobservable_source`),
+logs why, and `save_tool_overrides()` rebuilding from the merged `CONFIG` drops
+the stale key from the file on the next write. Measured 2026-10-25:
+`data/tool_overrides.yaml` names five sources and `backlog-cluster` is not one
+of them, and `/api/workers/health` renders `inner_voice: null` for all nine
+sources with no turn to observe.
 
 **`deep-research` owns its own retries, and that is not a preference.** The
 pool records an in-band `{"status": "failed"}` and then calls `mark_completed`
@@ -906,9 +936,15 @@ deletion of `~/lloyd` reset both tables (§8) and the retention sweep prunes
 this file enumerated there (`domain-research`, `backlog-selfmod`,
 `selfmod-regression`, `autoimplement`, `backlog-implement` — see MEMORY.md's
 naming history) no longer appear in any window it can ask for. The
-unconfigured row an operator finds today is `queue-maintenance`: the poison
-sweep's own ledger identity (`workers/maintenance.py`'s `SOURCE`) — a
-mechanism that records runs without being a scheduled source.
+unconfigured row an operator is likely to find at all is `queue-maintenance`:
+the poison sweep's own ledger identity (`workers/maintenance.py`'s `SOURCE`) — a
+mechanism that records runs without being a scheduled source. §2 is the reason
+it is often absent: the sweep records a `runs` row **only when it acted**, so
+the row appears in a window that reaches its last acting sweep and not otherwise
+(measured 2026-10-25: newest `queue-maintenance` run 2026-10-17, so the default
+7-day window shows no unconfigured row whatsoever, and the two idle sources —
+`automod-regression`, `failure-ledger` — appear as `health: null`, which the
+view renders "no runs in the window" rather than 0% failing).
 `configured: false` now has two readings: a swept-away retirement, or a
 mechanism wearing a source's name.
 
@@ -1035,3 +1071,22 @@ is the known self-grading failure mode, and this is where it is stopped.
   (now `queue-maintenance`, not the swept-away retirements); §8 counts —
   both tables reset by the 2026-09-22 deletion, `runs` pruned at 30 days,
   `queue` still growing. Filed #1463–#1466.
+- 2026-10-25: **stale** — the mechanisms again held (claim SQL and its four
+  predicates, the `UNIQUE` dedup-release branch, `backoff`/`attempts` on the
+  claimed branch, `recover_claimed` ignoring its `older_than_seconds`, the
+  `status: running → completed` result contract, hold-before-claim order,
+  `MACHINE_LEASE_STALE_SECONDS = 300`, the 60 s tick and 900 s sweep,
+  `STALE_AFTER_S = 30.0`, `LONG_LIVED = True` on `autocode`/`arch-review`
+  alone, and every value §6 quotes against `config.yaml`); five passages had
+  moved. Corrected: §1's tick "carries two deterministic chores" where
+  `_scheduler_loop` runs five seats — the pin is #3286, since the two watches
+  exist precisely to be unsilenceable and the list is what rotted; §2's shared
+  table count missed `pause_journal` (#2615), now eight; §3's "3 rows carry a
+  bundle … a sample of three" is 202 rows across a seven-task pilot (#2675
+  widened it 2026-10-13), with the denominator cited to
+  `/api/autonomy/health`'s counters (78 bundles over 253 runs, 919 claims, a
+  genuinely 7-day window) rather than to prose; §5's #1464 paragraph still
+  described an override file re-adding `inner_voice` on `backlog-cluster`,
+  which `fbbca754` closed — the merge refuses to introduce the key and the
+  stray key is gone; §7's "the unconfigured row an operator finds today",
+  which a 7-day window shows no longer at all. Filed #3286–#3288.
