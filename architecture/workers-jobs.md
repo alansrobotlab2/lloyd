@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-09-25
+date: 2026-10-25
 ---
 
 # The worker jobs
@@ -42,7 +42,7 @@ Sixteen sources are registered.
 All sixteen have a block under `workers.sources`, and none is registered-but-off:
 `failure-ledger` was the last to get one, on 2026-10-06 (#2309). Until that block
 existed `WorkerPool._scheduler_pass` read an empty dict for the source
-(`workers/pool.py:1176`) and stepped past it at `:1177` without calling its
+(`workers/pool.py:1613`) and stepped past it at `:1614` without calling its
 `enqueue_if_due`, which is why its **on** column was the only **no** in the table and
 why its cadence was a module constant rather than a configured interval (see §6's
 last entry). Priority is `DEFAULT_PRIORITY` unless config overrides it —
@@ -61,9 +61,9 @@ the parser as the count sentence being gone.
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
 |---|---|---|---|---|---|---|---|---|
 | `scheduled-task` | dispatch | 10–70 | 60 s | 2 | `run_query` direct, recorded | no | per task | yes |
-| `autocode` | self-mod | 40 | 900 s | 2 | session | **yes** | off | yes |
+| `autocode` | self-mod | 40 | 900 s | 2 | session | **yes** | **on** | yes |
 | `youtube-digest` | intake | **45** | 300 s | 1 | session | no | off | yes |
-| `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | off | yes |
+| `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | **on** | yes |
 | `autoresearch` | self-mod | 60 | 14400 s | 1 | own script | no | — | **yes** |
 | `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | off | yes |
 | `backlog-cluster` | self-mod | 65 | 3600 s poll | 1 | none (numpy) | no | — | yes |
@@ -72,22 +72,25 @@ the parser as the count sentence being gone.
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
-| `cost-investigate` | mining | **92** | armed at a run's completion, not a timer | 1 | direct, no model turn | no | off | no |
+| `cost-investigate` | mining | **92** | armed at a run's completion, not a timer | 1 | direct, no model turn | no | — | yes |
 | `failure-ledger` | mining | 75 | every 1 h poll; **one sweep a day** (`min_interval_seconds`) | 1 | direct (primary) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
-one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Five
-sources declare the attribute — `True` on the three long turns, `False`
-explicitly on `backlog-cluster` and `board-steward`.
+one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Nine
+sources declare the attribute — `True` on the five long-session turns
+(`autocode`, `autotriage`, `arch-review`, `deep-research`, `owed-check`),
+`False` explicitly on `backlog-cluster`, `board-steward`, `failure-ledger`
+and `frontend-probe-canary`.
 
 **IV** is `workers.sources.<name>.inner_voice`, and `—` is not "off": it is
 meaningful only on a source that runs through `run_prompt_in_session`, because
 the observer is wired in `app/routers/messages.py` and nowhere else.
-`/api/workers/health` reports it tri-state for exactly that reason. Every
-session source sets it `false` explicitly, and a session source with no key
+`/api/workers/health` reports it tri-state for exactly that reason. Session
+sources set the key explicitly — `true` on `autocode` and `autotriage` since
+2026-09-25, `false` on the rest — and a session source with no key
 reads as off too: `source_inner_voice` falls back to False since #1015, when
 `board-steward` shipped unkeyed and was observed by nobody's decision.
 `tests/test_background_inner_voice.py` discovers the session sources from
@@ -155,10 +158,10 @@ source reporting nothing at all while the window already held two runs of it.
   store failing to hold a row, and two functions decide that between them:
   `enqueue_if_due()` declines the offer silently unless `_runner_needed()` is true
   — `pending_promotions()` non-empty **and** no `runner_alive()`
-  (`workers/sources/automod_regression.py:1348`) — because offering unconditionally
+  (`workers/sources/automod_regression.py:455`) — because offering unconditionally
   would write ninety-six "nothing to measure" rows a day over the handful worth
   reading; and `start_runner()`, the job body, re-checks and returns
-  `_skipped("no promotion is waiting to be measured")` (`:1175`, skip `:1183`). So
+  `_skipped("no promotion is waiting to be measured")` (def `:1248`, skip `:1256`). So
   **a zero means no promotion was pending in the window** — or one was and a runner
   was already on it, which is the same `_runner_needed()` answer — and it is a
   declined offer, so unlike a `queued → skipped` transition elsewhere in this table
@@ -194,7 +197,7 @@ source reporting nothing at all while the window already held two runs of it.
 ## 3. Dispatch — one door onto the autonomy fleet
 
 One source, and it is not really a job. It is the seam the entire autonomy
-fleet comes through: 36 task files in the vault, each with its own schedule,
+fleet comes through: 45 task files in the vault, each with its own schedule,
 priority, skill and dependencies, all reaching the pool as
 `scheduled-task:<id>`. Everything the pool knows about the nightly KG chain or
 the morning triage, it knows through this one module — which is why it is both
@@ -265,16 +268,16 @@ disarm all of them. One level up, two supported routes still stop the seat itsel
 and each stops the reporting of the problem along with the work:
 
 - **`workers.enabled: false` at boot.** `start_worker_pool()`
-  (`app/routers/workers.py:765-770`) returns before `WorkerPool` is constructed, so
+  (`app/routers/workers.py:962-967`) returns before `WorkerPool` is constructed, so
   `_scheduler_loop` (`workers/pool.py:1566`) never runs at all.
-- **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:409`
+- **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:559`
   awaits `pool.stop()`, which clears `_running` and cancels `_scheduler_task`
-  (`workers/pool.py:526-531`).
+  (`workers/pool.py:839-845`).
 
 What either one silences is everything that rides that loop, not just dispatch: the
 parse announcement and both stall alarms above, `workers/service_probe.py`'s port
 watch, and — because the sources that *create* work are polled from `_scheduler_pass`
-on the same loop (`workers/pool.py:1023`, body `:1028`) — the entire autonomy/nightly chain,
+on the same loop (`workers/pool.py:1596`, body `:1612`) — the entire autonomy/nightly chain,
 including the job that would have written the alert. `/api/workers/status` and
 `/health` both publish the state honestly (`{"initialized": false}` on the boot
 route, with no `pool` key at all, because `get_queue()` raises to tell "switched off"
@@ -294,7 +297,7 @@ and that dict does not. It deliberately does **not** report a pause
 nothing while the backend is unreachable, leaving one outage to the existing liveness
 alert. Pinned by `tests/test_guardian_pool_watch.py` (#1747).
 
-Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 36
+Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 45
 jobs it dispatches — the reflection chain, trace2skill, the graph chain, vault
 hygiene, inbound signal.
 
@@ -325,7 +328,7 @@ one `architecture/*.md` doc per run, and nothing else.
 
 What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
-reaches a verdict and implements nothing; `autocode` lands only through eleven
+reaches a verdict and implements nothing; `autocode` lands only through thirteen
 rungs and a second reader; `automod-regression` measures and never reverts; and
 `arch-review` may correct the doc it read and must *file* every other finding,
 including the one-line skill fix it could obviously make itself.
@@ -347,8 +350,8 @@ Long version: [[automod]], [[backlog]].
 picklist: every top-level `architecture/*.md` is a unit, plus one per
 functional *group* of [[autonomy-jobs]] and this doc (hand-kept in
 `workers.sources.arch-review.groups`). A unit rests 30 days after a review, so
-the first pass takes about ten days at `daily_max: 4` (31 docs + 11 groups =
-42 units as of 2026-09-27) and steady state is a review a month per unit.
+the first pass takes about twelve days at `daily_max: 4` (36 docs + 12 groups =
+48 units as of 2026-10-25) and steady state is a review a month per unit.
 
 **Executes** as one session (Inner Voice off) that checks every backticked path,
 count, tool name and config key against the tree — `Read`, `Grep`,
@@ -447,9 +450,12 @@ Since #1688 the record no longer claims what it did not measure. `agreement()`
 carries `judged` — the decisions both sides made — on the run meta and the
 `board_steward` ledger row, and its `rate` is `None` when `judged` is 0; such a
 tick's summary reads `agreement not measured, 0 judged (…)` and one that judged
-something reads `agreement 50% of 2 judged (…)`. The flip is to be judged on a
-sum of `judged` over the ticks, not on `rate` (config.yaml's comment above the
-flip still names `rate`); the minimum is still to be chosen from real traffic.
+something reads `agreement 50% of 2 judged (…)`. The flip is judged on a sum of
+`judged` over the ticks, never on `rate` alone: since #3089 (2026-10-20) the
+comment above the flip states both numbers — summed `judged` ≥ 100 and agree
+`rate` ≥ 0.90 over the rolling 7-day window — and `GET /api/workers/health`
+publishes them as `judgement` on this source's row, so the gate and the figure
+that clears it are read from one place.
 
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
@@ -551,7 +557,7 @@ no promotion under observation, no rollback pending, no round open — and
 `select_confirmed`, and enqueues at most one round under `autocode:round`.
 
 **Executes** one turn in a real session following the `automod-change-own-code`
-skill: open a worktree round, do the work, run the eleven-rung gate, land it or
+skill: open a worktree round, do the work, run the thirteen-rung gate, land it or
 abort. Landing runs detached, exactly as when a human drives it.
 
 - **Two gates stand in front of it.** Triage must have reached `confirmed`
@@ -582,8 +588,8 @@ abort. Landing runs detached, exactly as when a human drives it.
   whether a round may start, so the interval's only job is to ask them
   often enough. At an hour it did not — one round settled at 19:16 and the next
   poll was 19:50, with four confirmed items waiting.
-- By far the longest-running job in the pool: ~2000 s over its last ten runs,
-  and over the 7 d to 2026-09-27, 246 of 300 runs ok (20 failed, 34 skipped)
+- The longest-running job in the pool: ~1200 s over its last ten ok runs
+  (measured 2026-10-25), and over the 7 d to 2026-09-27, 246 of 300 runs ok (20 failed, 34 skipped)
   for 116 GPU-hours — three fifths of the pool's 195 measured hours.
 
 ### `automod-regression` — did the landing make anything worse?
@@ -629,7 +635,7 @@ what a safety net that has not had to fire looks like.
 **Wakes** on the 3600 s poll and runs at most once per `min_interval_seconds`
 (86400), held by its own `last_enqueued` watermark so a restart or a finished
 run cannot let a second one in. `execute` spawns
-`python -m scripts.automod.frontend_probe_canary --seeds 12` as a subprocess off
+`python -m scripts.automod.frontend_probe_canary --seeds 16` as a subprocess off
 the event loop, with no `env=`: the child inherits the pool's environment, which
 sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
 `~/.local/state/lloyd-automod/frontend_probe_canary/latest.json` — the file
@@ -638,16 +644,19 @@ sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
 
 - **The source is only the schedule.** Seeds, the 90% bar and the artifact are
   the script's; it is not a gate, and the check it measures stays observe-only.
-- **`--seeds 12` is the whole must-detect table.** The script's default floor of
-  10 would let a seed drop out of `n` on top of the one miss the bar allows.
+- **`--seeds 16` is the whole must-detect table** (`SEEDS` in the source, raised
+  12 → 16 on #2130 when four layout seeds joined it; a test pins the constant to
+  the table). The script's default floor of 10 would let a seed drop out of `n`
+  on top of the one miss the bar allows.
 - **The exit code is the verdict.** 0 is a success carrying `detected`,
   `seeds_measured`, `rate`, `rate_counting_blind_as_misses` and `run_at` (in the
   result and in the run's `meta`). 1 is a returned failure carrying the same
   measured numbers. 2, a crash, a timeout, or an exit 0 with no artifact from
   this run is a returned failure that says "not measured" and carries no rate —
   `latest.json` may still hold an older run.
-- No measured state yet: the first run happens after the backend restart that
-  loads the source.
+- **Measured state exists** (2026-10-25): 24 success runs, and `latest.json` reads
+  `seeds_measured: 16`, `detected: 16`, `rate: 1.0` with one blind seed
+  (`rate_counting_blind_as_misses` 0.94) — clear of the script's 90% bar.
 
 ### `autoresearch` — the gate-less week, and why it runs again now
 
@@ -1037,8 +1046,8 @@ wrote it**. Each gate is scar tissue:
 
 **Current state (7 days to 2026-09-28):** 1 of 29 runs failed, and it was not a
 cap death — an empty turn that stopped under the ceiling (`stop_reason=stop`,
-14 of 15). 28 notes staged; 1.3 GPU-hours. The 154-of-369 figure in §2 is the
-window to 2026-09-11 and no longer reproduces.
+14 of 15). 28 notes staged; 1.3 GPU-hours. The 154-of-369 figure §2 carried before #1713
+re-measured it is the window to 2026-09-11 and no longer reproduces.
 
 ### `bench-mine` — new bench tasks from failure signal
 
@@ -1099,7 +1108,7 @@ other session sources' — #896) and stages a candidate task under
   capability edge. A task the learner always passes and one it always fails both
   move the bench mean by noise rather than signal; of the 11 tasks with baseline
   rows in the ledger, none sits at mean 0.00 on 2026-09-28, and the live corpus is
-  20 files, not the eleven this line used to count (filed). **And as measured it
+  28 files as of 2026-10-25, not the twenty this line used to count (filed). **And as measured it
   scores the wrong document**: `_load_candidate` hands `load_bench_tasks` the
   staging *directory*, so the thing given 10 real trials is `write_staging_note`'s
   envelope — no `prompt`, no `objective_checks`, the layer the judge then awards
@@ -1127,7 +1136,7 @@ those one `ConnectError` burst on 2026-09-24 and 2 genuine cap deaths — plus 1
 skipped, 11 of them "no parseable bench-task frontmatter", again on
 `bench_007_skill_invocation`. 6.42 GPU-hours. The failure that matters is not in
 the failed column: it is 118 successes writing 113 copies of one candidate. §2's
-49-of-60 is the window to 2026-09-11.
+former 49-of-60 was the window to 2026-09-11.
 
 ### `failure-ledger` — the same fault counted, and one run a day sent after it (#2079)
 
@@ -1289,3 +1298,18 @@ that put every disk-heavy scan on a thread, and stays.
   outside this doc filed as #1458 (stale automod-regression config comment),
   #1459 (dead judge.py citation in `bench_mine.py`), #1460 (session-distill
   budget has no config key).
+- 2026-10-25 — **stale**: §1 disagreed with itself and with `config.yaml` —
+  the roster said `autocode`/`autotriage` IV **off** while §4 and config say
+  `inner_voice: true` (re-armed 2026-09-25), and `cost-investigate` said on
+  **no** though its block shipped `enabled: true` in #2510. `LONG_LIVED`
+  declarations are 9 not 5 (True on 5, False also on `failure-ledger` and
+  `frontend-probe-canary`); the gate is thirteen rungs not eleven; the fleet is
+  45 task files not 36; the picklist is 48 units not 42; the board-steward flip
+  gate is stated since #3089 (judged ≥ 100, rate ≥ 0.90); the canary runs
+  `--seeds 16` (#2130) and has measured state; `autocode`'s last-ten avg is
+  ~1200 s not ~2000; the bench corpus is 28 files. Re-pointed the drifted
+  `file:line` citations in §2/§3 (`pool.py`, `app/routers/workers.py`,
+  `automod_regression.py`) and fixed §6's two dangling cross-references to
+  §2's pre-#1713 figures. Findings filed: #3283 (no rail reads doc
+  `file:line` citations), #3284 (canary module docstring still says
+  `--seeds 12`), #3285 (config comment claims every unattended turn is IV off).
