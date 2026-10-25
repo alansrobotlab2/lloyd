@@ -68,7 +68,21 @@ COMPONENT_ORDER = ("SOUL.md", "memories", "skills_index")
 COMPONENT_TEXTS = {"SOUL.md": SOUL_TEXT, "memories": MEMORY_TEXT,
                    "skills_index": SKILLS_TEXT}
 
-INSIDE_DAY = "2026-10-11"      # inside a 14-day window ending 2026-10-13
+#: The `today` every window-sensitive fixture is anchored on. The probe's
+#: `outside_window` flag and every `report` count are measured against
+#: `retention_window()`, whose newest day IS `today` — so a corpus written in fixed
+#: days has to be read against a fixed `today` too. Left to the wall clock the
+#: fixture reads as a passing test only until the clock walks past it: with
+#: `retention_days() = 14`, the window opened on `2026-10-12` when the real date
+#: became 2026-10-25, `INSIDE_DAY` fell out of it, every session in `_corpus` and
+#: every single-step fixture below became "outside the window", and the three nodes
+#: that drive the CLI (#3279) went red on a tree whose code had not moved. A person
+#: retargeting this corpus moves this one constant and its two days together;
+#: `test_no_cli_call_in_this_file_reads_the_window_off_the_wall_clock` is what keeps
+#: a later call site from quietly reading the real date instead.
+ANCHOR_TODAY = "2026-10-13"
+
+INSIDE_DAY = "2026-10-11"      # inside a 14-day window ending ANCHOR_TODAY
 OUTSIDE_DAY = "2026-08-01"     # same store, older than the window
 
 
@@ -236,7 +250,8 @@ def test_probe_cli_prints_the_digests_and_the_request_id(tmp_path, monkeypatch,
     _pin_rebuild(monkeypatch)
 
     code = srf.main(["probe", "--session", session["session_id"], "--step", "1",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     out = capsys.readouterr().out
 
     assert code == 0
@@ -270,7 +285,8 @@ def test_the_probe_cli_explains_a_mismatch_instead_of_printing_it(tmp_path,
                                "skills_index": COMPONENT_TEXTS["skills_index"] + "\n"})
 
     code = srf.main(["probe", "--session", session["session_id"], "--step", "1",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     out = capsys.readouterr().out
 
     assert code == 0
@@ -447,7 +463,8 @@ def test_a_mismatch_names_the_vault_the_rebuild_actually_read(tmp_path, monkeypa
     assert root_path in srf.format_probe(record)
 
     code = srf.main(["report", "--source", "youtube-digest",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     out = capsys.readouterr().out
     assert code == 0
     assert f"vault_read={root_path}" in out, (
@@ -848,12 +865,18 @@ def test_a_probe_and_report_run_under_an_import_and_action_guard_complete(tmp_pa
         script=str(ROOT / "eval" / "step_replay_fidelity.py")), encoding="utf-8")
     _pin_rebuild(monkeypatch)
 
+    # The anchor is argv here rather than a monkeypatch: the run happens in a child
+    # process that no fixture of this one can patch, and an unanchored `report`
+    # inside it rebuilds nothing once the real date passes the fixture's day
+    # (#3279) — which would have left this node asserting a `verdict=` line the
+    # guarded run no longer prints.
     runs = []
     for argv in (["probe", "--session", session["session_id"], "--step", "1"],
                  ["report", "--source", "youtube-digest"]):
         runs.append(subprocess.run(
             [sys.executable, str(driver), *argv,
-             "--sessions-dir", str(root), "--store", str(store)],
+             "--sessions-dir", str(root), "--store", str(store),
+             "--today", ANCHOR_TODAY],
             cwd=str(ROOT), capture_output=True, text=True, timeout=300,
             env={**os.environ, "PYTHONPATH": str(ROOT),
                  "LLOYD_MANIFEST_STORE": str(store)}))
@@ -956,10 +979,12 @@ def test_a_full_probe_run_mutates_no_store(tmp_path, monkeypatch):
     before = _store_fingerprint(dirs)
 
     code = srf.main(["probe", "--session", list(sessions)[0], "--step", "1",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     assert code == 0
     srf.main(["report", "--source", "youtube-digest", "--max-sessions", "5",
-              "--sessions-dir", str(root), "--store", str(store)])
+              "--sessions-dir", str(root), "--store", str(store),
+              "--today", ANCHOR_TODAY])
 
     assert _store_fingerprint(dirs) == before
 
@@ -1015,7 +1040,7 @@ def test_report_counts_matched_inside_and_skipped_outside(tmp_path, monkeypatch)
     _pin_rebuild(monkeypatch)
 
     report = srf.report_source("youtube-digest", root=root, store=store,
-                               today="2026-10-13")
+                               today=ANCHOR_TODAY)
 
     assert report["steps_matched"] == 1
     assert report["steps_mismatched"] == 1
@@ -1047,7 +1072,8 @@ def test_the_report_prints_every_number_the_clause_names(tmp_path, monkeypatch,
     _pin_rebuild(monkeypatch)
 
     code = srf.main(["report", "--source", "youtube-digest",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     out = capsys.readouterr().out
 
     assert code == 0
@@ -1096,7 +1122,7 @@ def test_report_keeps_a_missing_day_file_out_of_the_outside_window_count(
     _pin_rebuild(monkeypatch)
 
     report = srf.report_source("youtube-digest", root=root, store=store,
-                              today="2026-10-13")
+                              today=ANCHOR_TODAY)
 
     assert report["steps_skipped_outside_window"] == 1, \
         "one session dated 2026-08-01 is the only thing outside the window"
@@ -1122,7 +1148,7 @@ def test_report_reads_each_day_file_once(tmp_path, monkeypatch):
         return real(session_ids, path)
 
     monkeypatch.setattr(srf, "_lines_by_session", spy)
-    srf.report_source("youtube-digest", root=root, store=store, today="2026-10-13")
+    srf.report_source("youtube-digest", root=root, store=store, today=ANCHOR_TODAY)
 
     assert opened == [f"{INSIDE_DAY}.ndjson"]
 
@@ -1144,9 +1170,9 @@ def test_report_accepts_the_task_stem_and_the_id_token(tmp_path, monkeypatch):
     root, store = _corpus(tmp_path)
     _pin_rebuild(monkeypatch)
     by_token = srf.report_source("youtubediges", root=root, store=store,
-                                 today="2026-10-13")
+                                 today=ANCHOR_TODAY)
     by_stem = srf.report_source("youtube-digest", root=root, store=store,
-                                today="2026-10-13")
+                                today=ANCHOR_TODAY)
     assert by_stem["steps_probed"] == by_token["steps_probed"] == 2
 
 
@@ -1159,7 +1185,8 @@ def test_a_source_that_matches_nothing_says_which_tokens_exist(tmp_path, capsys)
     """
     root, store = _corpus(tmp_path)
     code = srf.main(["report", "--source", "nightly-vault-maintenance",
-                     "--sessions-dir", str(root), "--store", str(store)])
+                     "--sessions-dir", str(root), "--store", str(store),
+                     "--today", ANCHOR_TODAY])
     out = capsys.readouterr().out
     assert code == 0
     assert "no session matched" in out and "youtubediges" in out
@@ -1173,7 +1200,7 @@ def test_report_names_the_moved_component_per_step(tmp_path, monkeypatch):
     _pin_rebuild(monkeypatch, drifted)
 
     report = srf.report_source("youtube-digest", root=root, store=store,
-                               today="2026-10-13")
+                               today=ANCHOR_TODAY)
 
     assert report["steps_matched"] == 0
     assert report["moved_components"].get("skills_index") == 2
@@ -1256,9 +1283,10 @@ def test_retention_window_matches_the_sweeps_arithmetic():
     """
     from datetime import date, timedelta
     days = component_manifest.retention_days()
-    cutoff, newest = srf.retention_window(today="2026-10-13")
-    assert newest == "2026-10-13"
-    assert cutoff == (date(2026, 10, 13) - timedelta(days=days - 1)).isoformat()
+    cutoff, newest = srf.retention_window(today=ANCHOR_TODAY)
+    assert newest == ANCHOR_TODAY
+    assert cutoff == (date.fromisoformat(ANCHOR_TODAY)
+                      - timedelta(days=days - 1)).isoformat()
 
 
 def test_manifest_store_follows_the_writers_precedence(tmp_path, monkeypatch):
@@ -1434,7 +1462,7 @@ def test_the_witness_step_mismatches_on_committed_bytes(tmp_path, monkeypatch):
     _pin_rebuild(monkeypatch)
 
     record = srf.probe_step(WITNESS_SESSION, "1", root=root, store=store,
-                            today="2026-10-13")
+                            today=ANCHOR_TODAY)
 
     assert record["verdict"] == "mismatched"
     assert record["request_id"] == WITNESS_REQUEST_ID, \
@@ -1502,7 +1530,7 @@ def test_the_witness_step_with_no_day_file_reports_no_oracle(tmp_path, monkeypat
     _pin_rebuild(monkeypatch)
 
     record = srf.probe_step(WITNESS_SESSION, "1", root=root, store=empty,
-                            today="2026-10-13")
+                            today=ANCHOR_TODAY)
 
     assert record["verdict"] == "no_manifest_line"
     assert record["request_id"] == ""
@@ -1511,7 +1539,7 @@ def test_the_witness_step_with_no_day_file_reports_no_oracle(tmp_path, monkeypat
         "simply gone — not pruned"
     srf.main(["probe", "--session", WITNESS_SESSION, "--step", "1",
               "--sessions-dir", str(root), "--store", str(empty),
-              "--today", "2026-10-13"])
+              "--today", ANCHOR_TODAY])
 
 
 def test_the_witness_line_still_describes_the_step_it_is_named_for(tmp_path):
@@ -1556,3 +1584,123 @@ def test_a_live_witness_reading_adds_a_measurement_and_never_a_skip():
         "the committed witness line no longer matches the store it came from"
 
 
+
+# ── hermeticity: the anchor, and the only ways this file may reach green ───
+
+#: This file, for the AST walks below — they read the test source, not the store.
+THIS_FILE = Path(__file__).resolve()
+
+#: Every way a node in this file runs the probe's command line: in-process through
+#: `main`, or in a child process that executes the script or the audit-hook driver.
+CLI_FUNCS = ("srf.main", "subprocess.run")
+
+#: What makes a `subprocess.run` one of those. The file also shells out to `git` for
+#: the witness's ignore-and-tracked checks, and that child runs no probe code, so the
+#: rule keys on the script being executed rather than on the act of forking.
+PROBE_CHILD_MARKERS = ("step_replay_fidelity", "driver")
+
+#: Decorators that buy green by not running. `parametrize` is not one of them: it
+#: expands a node, it never hides one.
+SILENCING_MARKS = ("skip", "skipif", "xfail", "live_vault")
+
+#: The three nodes #3279 lists as failing at base `bb589de0`, named literally so that
+#: deleting one to get an exit code 0 fails here instead of on the next red tree.
+CLAUSE_1_NODES = (
+    "test_a_mismatch_names_the_vault_the_rebuild_actually_read",
+    "test_a_probe_and_report_run_under_an_import_and_action_guard_complete",
+    "test_the_report_prints_every_number_the_clause_names",
+)
+
+
+def _this_files_tree() -> "ast.AST":
+    return ast.parse(THIS_FILE.read_text(encoding="utf-8"),
+                     filename=str(THIS_FILE))
+
+
+def test_no_cli_call_in_this_file_reads_the_window_off_the_wall_clock():
+    """Every command-line run in this file states which `today` it is measured on.
+
+    `--today` is optional to the CLI and load-bearing to these fixtures: the report's
+    counts and the probe's `outside_window` flag are both measured against
+    `retention_window()`, whose newest day IS `today`. A call that omits the flag does
+    not fail loudly — it reads the real date, and passes until the calendar catches up
+    with a corpus written in fixed days. That is how #3279's three nodes went red at
+    `bb589de0` with no code moved: on 2026-10-25 the 14-day window opened at
+    `2026-10-12`, one day after `INSIDE_DAY`, so every fixture session fell outside it
+    and the guarded child run's `verdict=` line was never printed.
+
+    Parsed rather than grepped, and matched against the constant rather than against
+    any date string, so the rule is "the call names the anchor this corpus is built
+    against": retargeting `ANCHOR_TODAY` moves all nine call sites with it, and a
+    tenth that leaves the flag out fails here today instead of on a later calendar.
+    """
+    source = THIS_FILE.read_text(encoding="utf-8")
+    unanchored = []
+    for node in ast.walk(_this_files_tree()):
+        if not isinstance(node, ast.Call):
+            continue
+        name = ast.unparse(node.func)
+        if name not in CLI_FUNCS:
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        if name == "subprocess.run" and not any(
+                mark in segment for mark in PROBE_CHILD_MARKERS):
+            continue
+        if "ANCHOR_TODAY" not in segment:
+            unanchored.append(f"{THIS_FILE.name}:{node.lineno}")
+    assert unanchored == [], (
+        "these CLI call(s) read the retention window off the wall clock, so their "
+        f"fixtures are only in-window by luck: {unanchored} — pass "
+        "`--today ANCHOR_TODAY` (#3279)")
+
+
+def test_the_fixture_days_are_on_the_side_of_the_anchor_their_names_claim():
+    """`INSIDE_DAY` and `OUTSIDE_DAY` are true of the anchor under live retention.
+
+    A corpus written in fixed days means its own window only through two inequalities,
+    and `retention_days()` is a config value rather than a constant in this file. Lower
+    it below the 3 days between `ANCHOR_TODAY` and `INSIDE_DAY` and every report node
+    here starts asserting a corpus sitting entirely outside its window — which prints as
+    a small corpus, not as a moved config. This is where that shows up, naming numbers.
+    """
+    days = component_manifest.retention_days()
+    cutoff, newest = srf.retention_window(today=ANCHOR_TODAY)
+    assert newest == ANCHOR_TODAY
+    assert cutoff <= INSIDE_DAY <= newest, (
+        f"INSIDE_DAY={INSIDE_DAY} is not inside {cutoff}..{newest}, the window "
+        f"retention_days()={days} derives from ANCHOR_TODAY — move the fixture days "
+        "and the anchor together")
+    assert OUTSIDE_DAY < cutoff, (
+        f"OUTSIDE_DAY={OUTSIDE_DAY} is no longer outside {cutoff}..{newest}, so the "
+        "'skipped as outside the window' counts have nothing left to count")
+
+
+def test_no_test_in_this_file_is_silenced_and_the_three_red_nodes_exist():
+    """Clause 2's shape: green here has to come from the named nodes running.
+
+    #3279 asks that the three nodes pass, not that the file exit 0. A
+    `@pytest.mark.skip`, an `xfail`, a `live_vault` mark (the gate's selection
+    deselects that one) or deleting the node would each hand back a green file over an
+    unfixed tree, so this reads the file's own syntax for all four: no test definition
+    carries a silencing decorator, nothing calls `pytest.skip`/`pytest.xfail`, and the
+    three nodes are still defined here.
+    """
+    silenced: "list[str]" = []
+    defined: "set[str]" = set()
+    for node in ast.walk(_this_files_tree()):
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            defined.add(node.name)
+            for dec in node.decorator_list:
+                dotted = ast.unparse(dec)
+                tail = dotted.split(".")[-1].split("(")[0].split("[")[0]
+                if tail in SILENCING_MARKS:
+                    silenced.append(f"{node.name}:{node.lineno} -> {dotted}")
+        elif isinstance(node, ast.Call) and ast.unparse(node.func) in (
+                "pytest.skip", "pytest.xfail", "pytest.skipif"):
+            silenced.append(f"line {node.lineno} -> {ast.unparse(node.func)}")
+    assert silenced == [], (
+        f"green bought by not running, which leaves #3279's failure in the tree: "
+        f"{silenced}")
+    missing = [n for n in CLAUSE_1_NODES if n not in defined]
+    assert missing == [], (
+        f"#3279's clause 1 nodes are gone from this file rather than fixed: {missing}")
