@@ -1403,6 +1403,181 @@ def test_a_legacy_deferred_commit_someone_else_resolved_is_dropped(tree):
     assert "pending_commit" not in state["doc:memory"]
 
 
+# ── 6g. a refused doc edit is kept, and the unit comes back (#3338) ──────────
+#
+# A bound refusing a doc edit is the rail working. Discarding the correction it
+# had already derived, and advancing the review stamp as though the doc had been
+# fixed, was the hole: the Ingest group's edit of 2026-09-25 was refused for one
+# hunk, nothing of it survived the deleted worktree, and the unit next ran
+# 2026-10-25 — exactly the 30-day gate. The four tests below are #3338's four
+# clauses, in order.
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+async def test_a_refused_doc_edit_is_kept_and_named_by_the_row_and_meta(tree, monkeypatch):
+    """Clause 1: content on disk under `arch-review-rejected/<unit>-<date>.md`,
+    reason and path verbatim in the run meta and the unit's row, and a later
+    committing pass clears the reason from the row."""
+    doc = tree["arch"] / "workers-jobs.md"
+    out = await _run_group(tree, monkeypatch,
+                           _edit(doc, "Mining body one.", "Mining body ONE."))
+    reason = out["meta"]["doc_update_rejected"]
+    assert "falls outside section" in reason
+    kept = out["meta"]["doc_update_kept"]
+    assert kept == str(tree["state"] / "arch-review-rejected"
+                       / f"group-workers-jobs-Dispatch-{_today()}.md"), kept
+    assert "Mining body ONE." in Path(kept).read_text(), "the correction itself survives"
+
+    row = A.load_state()["group:workers-jobs:Dispatch"]
+    assert row["doc_rejected"]["reason"] == reason, "the row carries the bound verbatim"
+    assert row["doc_rejected"]["kept"] == kept
+    assert _arch_events(tree)[0]["doc_update_kept"] == kept, "and so does the ledger event"
+    assert out["summary"].count("doc edit rejected") == 1
+    assert kept in out["summary"], "and the runs table names the file too"
+
+    # A pass of the same unit that commits ends the matter: a kept file is
+    # evidence of a lost correction, not a permanent annotation on the row.
+    out2 = await _run_group(tree, monkeypatch,
+                            _edit(doc, "Dispatch body line one.", "Dispatch body line ONE."))
+    assert out2["meta"]["commit"], "and this one commits"
+    row2 = A.load_state()["group:workers-jobs:Dispatch"]
+    assert "doc_rejected" not in row2 and "due_again_at" not in row2
+    assert row2["reject_streak"] == 0
+
+
+async def test_a_refused_pass_leaves_the_unit_due_again_in_four_days(tree, monkeypatch):
+    """Clause 2, the refused half: `is_pending` says yes at refusal + 4 days
+    under the live `interval_days: 30`, and no an hour later — the rest is
+    shortened, not removed."""
+    doc = tree["arch"] / "workers-jobs.md"
+    await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body ONE."))
+    row = A.load_state()["group:workers-jobs:Dispatch"]
+    refusal = A._parse_ts(row["last_reviewed_at"])
+    assert row["due_again_at"], "the row carries the re-offer, not a rolled-back stamp"
+    assert A._parse_ts(row["due_again_at"]) == refusal + 4 * 86400
+    assert A.is_pending(row, now=refusal + 4 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is True
+    assert A.is_pending(row, now=refusal + 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is False
+    assert A.is_pending(row, now=refusal + 3 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is False, "and it is 4 days, not 3"
+
+
+async def test_a_committing_pass_leaves_the_unit_resting_the_full_interval(tree, monkeypatch):
+    """Clause 2, the committed half: the same question answered of a pass whose
+    edit landed is the ordinary cadence — False at +4 days, True at +30."""
+    doc = _doc(tree)
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(doc, "Body line 1.", "Body line one.")))
+    await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    row = A.load_state()["doc:memory"]
+    stamp = A._parse_ts(row["last_reviewed_at"])
+    assert "due_again_at" not in row
+    assert A.is_pending(row, now=stamp + 4 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is False
+    assert A.is_pending(row, now=stamp + 30 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is True
+
+
+async def test_the_shortened_rest_is_capped_at_two_refusals_running(tree, monkeypatch):
+    """Clause 3: 49 units against `daily_max: 4`, so a unit that can never be
+    corrected inside the bound may not spend two of four daily slots on it. The
+    counter lives in the row, and on the third refusal the full interval is
+    back in force."""
+    doc = tree["arch"] / "workers-jobs.md"
+    unit = "group:workers-jobs:Dispatch"
+    for want in (1, 2):
+        await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body ONE."))
+        row = A.load_state()[unit]
+        assert row["reject_streak"] == want
+        refusal = A._parse_ts(row["last_reviewed_at"])
+        assert A.is_pending(row, now=refusal + 4 * 86400, interval_days=30,
+                            retry_spacing=21600, max_attempts=3) is True
+
+    await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body ONE."))
+    row = A.load_state()[unit]
+    assert row["reject_streak"] == 3
+    assert "due_again_at" not in row, "the third refusal buys no shortened rest"
+    refusal = A._parse_ts(row["last_reviewed_at"])
+    assert A.is_pending(row, now=refusal + 4 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is False
+    assert A.is_pending(row, now=refusal + 30 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is True, "the interval governs again"
+    # The cap is also what takes away the queue priority: with no `due_again_at`
+    # the row no longer leads `pending_units` either.
+    units = [{"unit": unit, "kind": "group", "doc": "workers-jobs", "name": "Dispatch"},
+             {"unit": "doc:memory", "kind": "doc", "doc": "memory", "name": ""}]
+    state = dict(A.load_state())
+    state.setdefault("doc:memory", {})
+    got = A.pending_units(units, state, now=refusal + 30 * 86400, interval_days=30,
+                          retry_spacing=21600, max_attempts=3)
+    assert [u["unit"] for u in got] == ["doc:memory", unit], \
+        "never-reviewed leads once the refusal priority has expired"
+
+
+async def test_a_committing_pass_ends_the_refusal_streak(tree, monkeypatch):
+    """Clause 3's reset: a unit that loses an edit, gets one committed, and then
+    loses another is on its FIRST shortened rest again, not its third — otherwise
+    a unit one bound away from correct is quietly retired."""
+    doc = tree["arch"] / "workers-jobs.md"
+    unit = "group:workers-jobs:Dispatch"
+    await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body ONE."))
+    assert A.load_state()[unit]["reject_streak"] == 1
+    await _run_group(tree, monkeypatch,
+                     _edit(doc, "Dispatch body line one.", "Dispatch body line ONE."))
+    assert A.load_state()[unit]["reject_streak"] == 0, "the committing pass reset the counter"
+    await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body TWO."))
+    row = A.load_state()[unit]
+    assert row["reject_streak"] == 1
+    refusal = A._parse_ts(row["last_reviewed_at"])
+    assert A.is_pending(row, now=refusal + 4 * 86400, interval_days=30,
+                        retry_spacing=21600, max_attempts=3) is True
+
+
+async def test_a_refused_edit_reaches_neither_live_nor_the_committer(tree, monkeypatch):
+    """Clause 4: the bound stays unrelaxed, and the kept content must never be
+    routed through `pending_commit` — that row is committed by the next tick, so
+    doing so would land the very edit this rail exists to refuse."""
+    doc = tree["arch"] / "workers-jobs.md"
+    before = doc.read_text()
+    head = _git(tree["repo"], "rev-parse", "HEAD")
+    out = await _run_group(tree, monkeypatch, _edit(doc, "Mining body one.", "Mining body ONE."))
+
+    assert doc.read_text() == before, "the bound is unrelaxed: the edit is reverted whole"
+    assert _git(tree["repo"], "status", "--porcelain") == "", "and live is left clean"
+    assert out["meta"]["commit"] == "" and out["meta"]["commit_deferred"] == ""
+
+    state = A.load_state()
+    row = state["group:workers-jobs:Dispatch"]
+    assert "pending_commit" not in row
+    assert not (tree["state"] / A.PENDING_DIRNAME / "group-workers-jobs-Dispatch.md").exists(), \
+        "the kept content is not in the pending dir, where the next tick would commit it"
+    assert A.commit_pending(state, tree["repo"]) == [], "the committer has nothing to pay"
+    A.save_state(state)
+    assert _git(tree["repo"], "rev-parse", "HEAD") == head
+    assert doc.read_text() == before, "and still byte-identical after a tick ran"
+
+
+def test_a_refused_unit_is_offered_first_not_last():
+    """A re-queued unit that sorts last by stamp age is re-offered in name and
+    starved in fact: `batch: 2` takes the head of this list, and a unit whose
+    last pass is four days old is the YOUNGEST row on the board — behind every
+    never-reviewed row (which keys `0.0`) and behind everything older than a
+    month, which is the state of the board during a pass over all 49 units."""
+    units = [{"unit": f"doc:{s}", "kind": "doc", "doc": s, "name": ""}
+             for s in ("a", "b", "c")]
+    state = {"doc:a": {"last_reviewed_at": _iso(31)},               # overdue by a day
+             "doc:b": {"last_reviewed_at": _iso(0.1),               # refused 4 days ago
+                       "due_again_at": _iso(0.1), "reject_streak": 1}}
+    # `doc:c` has no row at all: never reviewed, and the head of the old order.
+    got = A.pending_units(units, state, now=time.time(), interval_days=30,
+                          retry_spacing=21600, max_attempts=3)
+    assert [u["unit"] for u in got] == ["doc:b", "doc:c", "doc:a"]
+
+
 # ── 7. the tick ──────────────────────────────────────────────────────────────
 
 

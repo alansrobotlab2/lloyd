@@ -68,9 +68,16 @@ Three properties decide whether this is safe, and they are the whole module:
   else. A skill with a phantom tool name, an unbounded autonomy step, a dead
   consumer: those become `arch-review` drafts, tagged `spawned-by-review`, and
   their ids are verified on disk before the ledger records them.
-* **The picklist is the scheduler.** Never-reviewed first, then oldest
-  `last_reviewed_at`, docs before groups on a tie. A unit rests
-  `review_interval_days` after a review; three failed attempts park it. There
+* **The picklist is the scheduler.** A unit whose last doc edit a bound refused
+  leads, then never-reviewed, then oldest `last_reviewed_at`, docs before groups
+  on a tie. A unit rests `review_interval_days` after a review; three failed
+  attempts park it. The one exception is a doc edit a bound refused: the rail
+  discards the edit, and must not also discard the correction — the content is
+  kept under `arch-review-rejected/`, the row names the kept file and the bound
+  verbatim, and the unit is due again in four days, for at most two refusals
+  running before the ordinary cadence reasserts itself (#3338: the refused
+  Ingest edit of 2026-09-25 was thrown away outright, and the unit next ran 30
+  days later). There
   is no churn trigger and no backoff — the picklist is read from disk at call
   time, and at `daily_max` 4 a board this size is a first pass in about a
   week, then a month's rest per unit. No count is written down anywhere: the
@@ -239,6 +246,22 @@ PENDING_DIRNAME = "arch-review-pending"
 #: Reviewed doc content whose live doc moved under the review — kept, so a
 #: human can read what the review wanted, and never written over live.
 CONFLICT_DIRNAME = "arch-review-conflicts"
+#: The doc content a bound refused (#3338). `check_doc_bound` throwing the whole
+#: edit away is the correct rail; throwing away the *correction* with it was not,
+#: and the two were indistinguishable — the Ingest group's edit of 2026-09-25 was
+#: refused for one hunk, nothing of it survived the deleted worktree, and the
+#: unit next ran exactly 30 days later. Kept here, and never written live.
+REJECTED_DIRNAME = "arch-review-rejected"
+#: How long a unit whose doc edit a bound refused rests before it is offered
+#: again. Four days rather than `review_interval_days`: the correction exists and
+#: was lost, which is not the state a full rest is for.
+REJECT_REST_SECONDS = 4 * 86400
+#: How many refusals in a row get that shortened rest. 49 units sit against
+#: `daily_max: 4` and `batch: 2`, so an uncapped shortened rest would hand one
+#: permanently-uncorrectable unit two of four daily slots until its interval
+#: elapsed anyway, and still never land the doc. After this many, the ordinary
+#: cadence is back in force.
+MAX_REJECT_REQUEUES = 2
 _GIT_TIMEOUT = 60
 
 #: Worktrees an `execute` in THIS process is using. Both the tick that sweeps
@@ -416,6 +439,13 @@ def is_pending(row: dict | None, *, now: float, interval_days: float,
     `retry_spacing`. It is a spacing rule rather than a permanent stop: a unit
     whose doc is unreadable today is reviewable next week, and a unit nobody
     ever fixes still costs one run every six hours rather than one per tick.
+
+    A row carrying `due_again_at` is a unit whose last doc edit a bound refused:
+    the review derived a correction and the rail discarded it, so the unit is due
+    at that instant rather than a full `interval_days` after its stamp (#3338).
+    Parking still wins — three failures are not made reviewable by a lost edit —
+    and the field is only ever written for `MAX_REJECT_REQUEUES` refusals
+    running, so the shortened rest is bounded by the row itself.
     """
     row = row or {}
     attempts = int(row.get("attempts") or 0)
@@ -426,23 +456,52 @@ def is_pending(row: dict | None, *, now: float, interval_days: float,
     last_reviewed = _parse_ts(row.get("last_reviewed_at"))
     if not last_reviewed:
         return True
+    due_again = _parse_ts(row.get("due_again_at"))
+    if due_again and now >= due_again:
+        return True
     return (now - last_reviewed) >= float(interval_days) * 86400
+
+
+def _due_key(row: dict | None) -> tuple[int, float]:
+    """Ordering key for the due list: a refused unit first, then oldest stamp.
+
+    Level 0 is a unit whose last doc edit a bound refused and whose shortened
+    rest is therefore what makes it due — its correction is sitting in
+    `arch-review-rejected/` waiting to be re-attempted, which makes it the one
+    review on the board that already has its answer. Without that level the
+    re-queue is decorative: keyed by a four-day-old stamp it sorts behind every
+    never-reviewed row (those key `0.0`) and behind every row older than a month,
+    so during a pass over the whole board it would be re-offered in name and
+    starved in fact. At the third refusal the row loses `due_again_at` and with
+    it the priority, so the cap bounds the queue slot as well as the rest.
+
+    Level 1 is the rule as it always was — `last_reviewed_at` ascending, with a
+    never-reviewed row at the front of the reviewed ones.
+    """
+    row = row or {}
+    return (0 if _parse_ts(row.get("due_again_at")) else 1,
+            _parse_ts(row.get("last_reviewed_at")))
 
 
 def pending_units(units: list[dict], state: dict, *, now: float, interval_days: float,
                   retry_spacing: float, max_attempts: int) -> list[dict]:
-    """Due units, never-reviewed first, then oldest `last_reviewed_at`.
+    """Due units: one whose last doc edit a bound refused first, then
+    never-reviewed, then oldest `last_reviewed_at`.
 
     Docs before groups on a tie, which is `all_units`' own order — so the first
     pass over a fresh state file walks the docs alphabetically and then the
     groups in config order, and every later pass is driven purely by age.
+
+    The ordering is `_due_key`; with no row carrying `due_again_at` — every row
+    in a state file written before #3338 — it reduces to the raw-stamp order this
+    function has always had, which `test_never_reviewed_comes_first_then_oldest`
+    still pins.
     """
     due = [u for u in units
            if is_pending(state.get(u["unit"]), now=now, interval_days=interval_days,
                          retry_spacing=retry_spacing, max_attempts=max_attempts)]
     order = {u["unit"]: i for i, u in enumerate(units)}
-    return sorted(due, key=lambda u: (_parse_ts((state.get(u["unit"]) or {}).get("last_reviewed_at")),
-                                      order[u["unit"]]))
+    return sorted(due, key=lambda u: (_due_key(state.get(u["unit"])), order[u["unit"]]))
 
 
 def reviews_today(ledger: Path | None = None, *, now: float | None = None) -> int:
@@ -1613,6 +1672,34 @@ def keep_conflict(unit: str, content: bytes) -> str:
     return str(path)
 
 
+def keep_rejected(unit: str, root: Path, rel: str) -> str:
+    """Save the doc content a bound refused, and return where it went (or "").
+
+    The worktree this is read from is deleted in `execute`'s `finally`, so this
+    is the only moment the derived correction exists outside a dying checkout
+    (#3338). Named `<unit>-<UTC date>.md`: one file per unit per day, which is
+    stable enough for the run's meta, the row and the file on disk to be checked
+    against each other, and cannot collide — a unit is only ever offered when it
+    is due, and the shortest rest this path can produce is four days.
+
+    A refusal never depends on this write succeeding: `""` means nothing was
+    kept, and the summary says so rather than naming a file that is not there.
+    """
+    try:
+        content = (root / rel).read_bytes()
+    except OSError:
+        return ""
+    try:
+        d = _state_subdir(REJECTED_DIRNAME)
+        d.mkdir(parents=True, exist_ok=True)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        path = d / f"{_safe_name(unit)}-{day}.md"
+        path.write_bytes(content)
+    except OSError:
+        return ""
+    return str(path)
+
+
 def _commit_message(unit: str, doc_status: str) -> str:
     return f"arch-review: {unit} — {doc_status}"
 
@@ -1759,19 +1846,59 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 # ── Execution ────────────────────────────────────────────────────────────────
 
 
-def _touch_state(unit: str, **fields) -> dict:
+def _touch_state(unit: str, *, drop: Iterable[str] = (), **fields) -> dict:
     """Read-modify-write one unit's row.
 
     `max_inflight: 1` and one tick at a time, both on the backend's single
     event loop, so there is no writer to race — the file is small and rewritten
     whole rather than locked.
+
+    `drop` names keys to REMOVE. A stale row key is not inert here: `is_pending`
+    reads `due_again_at`, so a refusal record that outlives the pass that
+    explains it would keep re-offering a unit whose doc has since been fixed.
+    Setting such a key to `None` would leave the key standing, so it is deleted.
     """
     state = load_state()
     row = dict(state.get(unit) or {})
     row.update(fields)
+    for key in drop:
+        row.pop(key, None)
     state[unit] = row
     save_state(state)
     return row
+
+
+def _rest_fields(row: dict | None, *, reject: str, kept: str,
+                 now_iso: str) -> tuple[dict, tuple[str, ...]]:
+    """What a finished pass writes to the picklist, and what it clears.
+
+    Returns `(fields, drop)`. A bound-refused doc edit is the one outcome that
+    has to shorten the unit's rest: the review derived a correction, the rail
+    threw it away, and the doc is still wrong — which is #3338, whose Ingest unit
+    was refused on 2026-09-25 and next ran 2026-10-25, having re-derived the same
+    six filings in between. The row therefore carries the reason and the kept
+    file verbatim, and `due_again_at` shortens the rest for
+    `MAX_REJECT_REQUEUES` refusals running; on the third the field is removed
+    from the row and the full interval governs, so a unit whose section cannot be
+    corrected inside the bound stops spending queue slots on it.
+
+    Any pass that did not lose its edit ends the streak and clears the record —
+    including a pass whose commit was deferred, whose content is already stored
+    for `main`, and a pass that found the doc unchanged, which owes nothing.
+    """
+    streak = int((row or {}).get("reject_streak") or 0)
+    if reject:
+        streak += 1
+        fields: dict = {"doc_rejected": {"reason": reject, "kept": kept, "at": now_iso},
+                        "reject_streak": streak}
+        if streak <= MAX_REJECT_REQUEUES:
+            fields["due_again_at"] = _iso_at(_parse_ts(now_iso) + REJECT_REST_SECONDS)
+            return fields, ()
+        # Past the cap the field has to be REMOVED, not merely left unwritten:
+        # the previous refusal put it there, and a row that keeps it is a unit
+        # that keeps the shortened rest the cap exists to take away.
+        return fields, ("due_again_at",)
+    return ({"reject_streak": 0} if streak else {}), ("doc_rejected", "due_again_at")
 
 
 def _count_attempt(unit: str, error: str) -> int:
@@ -1783,6 +1910,17 @@ def _count_attempt(unit: str, error: str) -> int:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _iso_at(epoch: float) -> str:
+    """Epoch seconds → the ISO stamp the picklist uses, same shape as `_now_iso`.
+
+    `due_again_at` is written as a duration from the refusal, so it must be the
+    same representation `_parse_ts` reads back; a naive stamp here would be read
+    as local time by the next pass and the rest would come out wrong by the UTC
+    offset.
+    """
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
 
 
 def _prepare(unit: dict, root: Path) -> dict:
@@ -1958,9 +2096,17 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         max_delta_lines=max_delta, max_shrink_pct=max_shrink,
         allow_shrink=status in ("superseded", "aspirational"),
         section=section if kind == "group" else None)
+    kept_rejected = ""
     if changed and reject:
         changed = False
-        logger.warning("arch-review %s: doc edit rejected — %s", unit_key, reject)
+        # The bound stands — nothing of this edit reaches live — but the
+        # correction has to outlive the worktree, or a review that found the
+        # right answer is charged the full interval as though it had found
+        # nothing (#3338).
+        kept_rejected = await asyncio.to_thread(keep_rejected, unit_key, wt, rel)
+        logger.warning("arch-review %s: doc edit rejected — %s%s", unit_key, reject,
+                       f" (kept at {kept_rejected})" if kept_rejected else
+                       " (and the content could not be kept)")
 
     # 8. Infra-shaped: the harness never got a completion. Not the unit's
     #    fault, so it costs no attempt and the unit stays due.
@@ -2041,10 +2187,15 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         logger.warning("arch-review %s: live HEAD moved during the turn and this "
                        "source did not commit it: %s -> %s", unit_key,
                        head_moved["from"][:12], head_moved["to"][:12])
+    # The picklist consequence. `row` is the row as it stood BEFORE this turn,
+    # which is what makes the streak consecutive: it counts refusals running,
+    # and this pass contributes at most one to it.
+    rest, rest_drop = _rest_fields(row, reject=reject, kept=kept_rejected, now_iso=now_iso)
     event = {"event": "arch_review", "unit": unit_key, "kind": kind, "doc": slug,
              "name": name, "verdict": status or None,
              "grouping": (parsed or {}).get("grouping"),
              "doc_updated": bool(changed), "doc_update_rejected": reject or "",
+             "doc_update_kept": kept_rejected,
              "commit": commit_sha, "commit_deferred": commit_note,
              "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
              "live_head_moved": head_moved,
@@ -2071,11 +2222,11 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
                          "attempts": n, "stray_writes": strays, "filed": filed}}
 
     await asyncio.to_thread(
-        _touch_state, unit_key,
+        _touch_state, unit_key, drop=rest_drop,
         last_reviewed_at=now_iso, reviewed_commit=(commit_sha or prep["head"]),
         verdict=status or None, grouping=(parsed or {}).get("grouping"),
         filed=filed, attempts=0, last_attempt_at=now_iso, last_error="",
-        section_missing=False, commit_conflict=commit_conflict or None)
+        section_missing=False, commit_conflict=commit_conflict or None, **rest)
 
     bits = [f"{unit_key}: {status or 'no verdict'}"]
     if (parsed or {}).get("grouping"):
@@ -2083,7 +2234,14 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
     if commit_sha:
         bits.append(f"doc committed {commit_sha[:12]}")
     elif reject:
-        bits.append(f"doc edit rejected ({reject})")
+        # The row and the file are the durable record; the runs table is what a
+        # person queries, and "rejected" on its own is what let six units vanish
+        # for a month behind a summary that read like a clean review (#3338).
+        kept_bit = f"kept at {kept_rejected}" if kept_rejected else "content NOT kept"
+        due = rest.get("due_again_at") or ""
+        due_bit = (f"due again {due}" if due else
+                   f"rest not shortened ({rest.get('reject_streak')} refusals running)")
+        bits.append(f"doc edit rejected ({reject}; {kept_bit}; {due_bit})")
     elif commit_conflict:
         bits.append(f"doc not committed: {commit_conflict}")
     elif commit_note:
@@ -2109,6 +2267,8 @@ async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, paylo
         "meta": {**base, "session_id": session_id, "verdict": status,
                  "grouping": (parsed or {}).get("grouping"),
                  "doc_updated": bool(changed), "doc_update_rejected": reject or "",
+                 "doc_update_kept": kept_rejected, "due_again_at": rest.get("due_again_at") or "",
+                 "reject_streak": int(rest.get("reject_streak") or 0),
                  "live_head_moved": head_moved,
                  "commit": commit_sha, "commit_deferred": commit_note,
                  "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
