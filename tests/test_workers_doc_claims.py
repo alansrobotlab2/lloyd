@@ -1688,39 +1688,102 @@ def test_workers_md_records_the_bench_mine_input_as_a_dated_measurement():
         assert stated in block, f"the measurement lost {stated!r}"
 
 
+#: What a count has to be ABOUT before this block demands a date beside it
+#: (#3287 widened the noun list). `queue rows`/`runs` are what #2077 wrote this
+#: for; `failures` and `failed runs` are what #3287 added, because the sentence
+#: it filed — "104 eligible failures in the last 7 days" — named a failure count
+#: and no noun here recognised it, so the node ran green over the one unstamped
+#: figure in a bullet whose own last line demands a stamp on every figure.
+#: `rows` ALONE is deliberately absent. The trace_status-guard sentence's
+#: "all 77 `error` baseline rows" is undated on purpose — its date is #625's, not
+#: a reading of a live store — and this file forbids editing that sentence, so
+#: adding bare `rows` would make the guard demand an edit it is not allowed to
+#: ask for. That is a scope limit, not an oversight, and the node below asserts
+#: the exclusion is still in force.
+_BENCH_COUNTED = re.compile(
+    r"\b\d[\d,]*(?:\s+[\w`'-]+){0,2}\s+(queue rows?|runs?|failures|failed runs)\b")
+
+#: A count is dated only by a WINDOW or READ STAMP on its own sentence: `as of`,
+#: `since`, `to`, `read`, `at`, `through` immediately before an ISO date. A date
+#: string somewhere in the sentence is not a measurement date — #1713's
+#: `test_section2_carries_no_undated_count` draws the same line.
+_BENCH_DATED = re.compile(r"(?:as of|since|to|read|at|through)\s*`?\d{4}-\d{2}-\d{2}")
+
+#: Sentence boundaries after the block's whitespace is collapsed. Splitting on
+#: `.` only is what makes this per-sentence rather than per-block, and the block
+#: is full of `…jsonl` — paths whose period is followed by a backtick, not by a
+#: space, so they do not end a sentence.
+_BENCH_SENTENCE = re.compile(r"(?<=[.!])\s+")
+
+
+def _bench_mine_count_sentences(block: str) -> tuple[list[str], list[str]]:
+    """(count-bearing sentences, of those the undated ones) for a bench-mine block.
+
+    Takes the text rather than reading the page so a caller can hand it a mutated
+    block: a guard that can only be exercised on the live tree has never been
+    shown to be able to fail, and #3287's whole claim is that this guard stopped
+    the next occurrence of a retired sentence. So the retired sentence is fed
+    back in below and this function has to report it.
+    """
+    checked: list[str] = []
+    undated: list[str] = []
+    for s in _BENCH_SENTENCE.split(" ".join(block.split())):
+        if not _BENCH_COUNTED.search(s):
+            continue
+        checked.append(s)
+        if not _BENCH_DATED.search(s):
+            undated.append(s)
+    return checked, undated
+
+
 def test_the_dated_bench_mine_counts_sit_beside_a_date():
-    """Clause 3: no queue-row or run count in the block is undated.
+    """No run, failure or queue-row count in the block goes without a stamp.
 
-    Per sentence, not per block: the block is ~50 lines and one dated sentence must
-    not license every count in it. `DATED` requires a WINDOW or a READ STAMP attached
-    to the count's own sentence (`as of`, `since`, `to`, `read`, `at` before an ISO
-    date), which is the same distinction #1713's `test_section2_carries_no_undated_count`
-    draws — a date string anywhere is not a measurement date.
+    Per sentence, not per block: the block is ~50 lines and one dated sentence
+    must not license every count in it.
 
-    Scope, stated honestly: this guards counts of QUEUE ROWS and RUNS, which is what
-    clause 3 names. It does not scan every integer in the bullet, because clause 4
-    forbids altering the trace_status-guard sentence, whose "all 77 `error` baseline
-    rows" is undated and stays exactly as written — dating it would be the edit the
-    same clause prohibits. The new measurement sentence is what clause 3's "adds no
-    undated live count" is about, and it is checked here and pinned to its bytes
-    below.
+    Two things changed here for #3287, and both are asserted rather than assumed.
+    The noun list now recognises a FAILURE count, and the pattern tolerates up to
+    two words between the number and the noun — "104 eligible failures" is the
+    shape that walked past the old one-word-adjacent form, which is why an
+    unstamped figure sat in this bullet since 2026-09-09 while a node named
+    "counts sit beside a date" passed over it. The capability of that widening is
+    asserted below against the retired sentence itself, so narrowing the pattern
+    again trips this node instead of quietly reopening the hole.
+
+    Scope, stated honestly, is unchanged in one respect: `rows` is still not a
+    counted noun, because the trace_status-guard sentence's "all 77 `error`
+    baseline rows" is undated on purpose and this file forbids editing that
+    sentence. That is asserted too, so the exclusion is a checked fact and not a
+    regex accident waiting for someone to simplify the alternation.
     """
     block = _bench_mine_block()
-    COUNTED = re.compile(r"\b\d[\d,]*\s+(queue rows|queue row|runs|run)\b")
-    DATED = re.compile(r"(?:as of|since|to|read|at|through)\s*`?\d{4}-\d{2}-\d{2}")
-    sentences = re.split(r"(?<=[.!])\s+", " ".join(block.split()))
-    checked = 0
-    for s in sentences:
-        if not COUNTED.search(s):
-            continue
-        checked += 1
-        assert DATED.search(s), f"undated count in §8's bench-mine block: {s[:160]!r}"
-    assert checked >= 2, (
-        f"only {checked} count-bearing sentence(s) were checked: the doc's queue "
-        "and run counts moved somewhere this node no longer reads")
+    retired = ("gated by nothing the ledger does — 104 eligible failures "
+               "in the last 7 days.")
+    assert _BENCH_COUNTED.search(retired), (
+        "`_BENCH_COUNTED` no longer recognises a count with a word between the "
+        f"number and the noun ({retired!r} is the sentence #3287 was filed over), "
+        "so the widening is gone and an unstamped failure count can pass this "
+        "node again")
+
+    checked, undated = _bench_mine_count_sentences(block)
+    assert not undated, (
+        "undated count in §8's bench-mine block: "
+        + " | ".join(s[:160] for s in undated))
+    assert len(checked) >= 2, (
+        f"only {len(checked)} count-bearing sentence(s) were checked: the doc's "
+        "queue, run and failure counts moved somewhere this node no longer reads")
     assert "as of 2026-09-19" in " ".join(block.split()), (
         "the pre-fix zero is no longer stated with the date it was read, which is "
         "the only reason it can coexist with the 2026-10-02 measurement")
+
+    seventy_seven = "all 77 `error` baseline rows"
+    assert seventy_seven in " ".join(block.split()), (
+        "the trace_status-guard sentence lost its undated `rows` figure, which is "
+        "the one number in this bullet this file is not allowed to touch")
+    assert not any(seventy_seven in s for s in checked), (
+        "`rows` alone became a counted noun, so this node now demands a date "
+        "beside a figure whose clause forbids dating it")
 
 
 def test_the_quoted_bench_mine_figures_are_re_derivable_from_the_committed_bytes():
@@ -3325,3 +3388,168 @@ def test_every_cut_one_inner_voice_comment_carries_the_rearm_date():
         f"{stale}: a block's own verdict line disagrees with the value beneath it "
         "— #3285 is exactly this pair, and `# On:` above `inner_voice: false` is "
         "how the fleet-wide reading was written in the first place")
+
+
+# ── #3287: §8's failure count is a dated record, never a standing number ─────
+
+#: The retired live-reading framings, quoted byte-exact from the three files that
+#: carried them (#522's era, read 2026-09-09, `a4e52633`). Kept as constants here
+#: so the ban and the non-vacuity splice quote the SAME strings rather than two
+#: paraphrases of them.
+_BENCH_LIVE_CLAIMS = (
+    "104 eligible failures in the last 7 days",
+    "104 failed runs in the last 7 days",
+    "104 failed runs in 7 days",
+    "4,044 run files on disk",
+    "4,044 unused failure transcripts",
+)
+
+
+def _bench_mine_sentences() -> list[str]:
+    """§8's bench-mine bullet as sentences, whitespace normalised."""
+    return _BENCH_SENTENCE.split(" ".join(_bench_mine_block().split()))
+
+
+def test_the_selector_is_described_and_its_era_count_is_historical():
+    """Clause 1: no present-tense standing failure count, and no thinner prose.
+
+    The sentence "It now scans `AUTONOMY_RUNS_DIR/**/run_*.md` for
+    `status: failed` on every tick" is the only place on this page that states
+    what the source's second input reads, so it has to survive whatever happens
+    to the number beside it — deleting the clause is only allowed if it leaves
+    the selector standing. The clause being banned is a count attached to that
+    tick-scoped present-tense sentence, because that pairing is what made a
+    2026-09-09 reading read like a property of the code: the era it measured is
+    deleted by the 30-day retention sweep
+    (`scripts/groundskeeper/retention-sweep.py`) and cannot be re-stamped, so the
+    only honest forms are past tense with its own date, or silence.
+
+    The count itself is allowed to remain only as a dated record. That half is
+    not re-checked here — `_bench_mine_count_sentences` in the node above already
+    refuses any undated run/failure count in this block — so this node asks only
+    the tense question: is there a count sitting inside the sentence that says
+    the source does this on every tick?
+    """
+    sentences = _bench_mine_sentences()
+    joined = " ".join(sentences)
+
+    assert "`AUTONOMY_RUNS_DIR/**/run_*.md`" in joined, (
+        "§8's bench-mine bullet no longer names the path the failed-run input "
+        "walks, so the clause was deleted along with the sentence it lived in")
+    assert "`status: failed`" in joined and "on every tick" in joined, (
+        "the selector sentence went with it: the reader is left with a number "
+        "and no statement of what was counted")
+
+    standing = [s for s in sentences if "on every tick" in s
+                and _BENCH_COUNTED.search(s)]
+    assert not standing, (
+        "a count is still attached to the tick-scoped present-tense sentence, so "
+        f"it reads as a standing property of the code again: {standing[0][:200]!r}")
+    for claim in _BENCH_LIVE_CLAIMS:
+        assert claim not in joined, (
+            f"{claim!r} is back verbatim in §8's bench-mine block — the era it "
+            "measured is pruned and cannot be re-read, so it can only be quoted "
+            "as a dated record in its own past-tense sentence")
+
+
+def test_the_ban_on_a_standing_failure_count_actually_bites():
+    """The two §8 checks above must refuse the exact text #3287 was filed over.
+
+    A regex that cannot fire is a green light, and both checks here are pure
+    text predicates, so they can be exercised on a block that does not exist any
+    more: the retired sentence is spliced back into the real bullet IN MEMORY —
+    nothing is written — and both the tick-pairing test and the widened
+    undated-count guard have to report it. Without this, widening
+    `_BENCH_COUNTED`'s noun list or narrowing the tick-pairing predicate would
+    silently un-make the rail this item exists to install.
+    """
+    block = " ".join(_bench_mine_block().split())
+    retired = ("It now scans `AUTONOMY_RUNS_DIR/**/run_*.md` for `status: failed` "
+               "on every tick, gated by nothing the ledger does — 104 eligible "
+               "failures in the last 7 days.")
+    spliced = block.replace(
+        "It now scans `AUTONOMY_RUNS_DIR/**/run_*.md` for `status: failed` on "
+        "every tick,", retired, 1)
+    assert spliced != block, (
+        "the selector sentence this splice targets is no longer the sentence it "
+        "was when #3287 was filed, so the splice no longer proves anything and "
+        "has to be re-pointed at the current wording")
+
+    spliced_sentences = _BENCH_SENTENCE.split(" ".join(spliced.split()))
+    standing = [s for s in spliced_sentences
+                if "on every tick" in s and _BENCH_COUNTED.search(s)]
+    assert standing, (
+        "the spliced retired sentence passed the tick-pairing check, so that "
+        "check cannot catch the regression it names")
+
+    _checked, undated = _bench_mine_count_sentences(spliced)
+    assert any("104 eligible failures" in s for s in undated), (
+        "the widened undated-count guard let the retired sentence through, so "
+        "the widening this round installed is not real")
+
+
+def test_the_retired_counts_are_dated_records_in_the_source_and_the_jobs_page():
+    """Clause 4: the two other copies of the same figure stop claiming liveness.
+
+    `workers/sources/bench_mine.py` opened its own module docstring with "104
+    failed runs in the last 7 days against 4,044 run files on disk" and
+    `enqueue_if_due` repeated "4,044 unused failure transcripts";
+    `architecture/workers-jobs.md` carried "104 failed runs in 7 days against
+    4,044 run files on disk" inside the #522 paragraph. All three were read
+    2026-09-09 and none said so, and the 4,044 was 4x the live count on disk
+    today — a module docstring is the most-freely-quoted prose in the tree, so
+    an unstamped figure there propagates faster than one on a docs page.
+
+    Docstrings are read with `ast`, not by importing: this file's own rule is
+    that a doc claim must not pull a module's import side effects into the
+    suite, and `bench_mine` opens a queue and a config on import.
+
+    What must SURVIVE is the lesson, not the numbers — that `enqueue_if_due`
+    returned early and the input stayed unreachable, and that the queue held
+    zero rows for its whole life — so those phrases are pinned as well. A pass
+    that deleted the paragraphs to make the ban green would fail here, which is
+    the difference between removing a claim and removing a record.
+    """
+    import ast  # precedent at :775 and :955 of this file, not a module import
+
+    src = (ROOT / "workers" / "sources" / "bench_mine.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    mod_doc = ast.get_docstring(tree) or ""
+    enqueue_doc = next(
+        (ast.get_docstring(node) or "" for node in tree.body
+         if isinstance(node, ast.AsyncFunctionDef) and node.name == "enqueue_if_due"),
+        None)
+    assert enqueue_doc, (
+        "`enqueue_if_due` lost its docstring or changed kind, so this node has "
+        "nothing to grade and the 4,044 copy inside it is ungraded again")
+
+    jobs = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    anchor = "#522 found it enabled"
+    assert anchor in jobs, (
+        "the #522 paragraph anchor moved on the jobs page, so the slice below is "
+        "no longer the passage that carried the figure")
+    jobs_para = jobs[jobs.index(anchor):jobs.index(anchor) + 900]
+
+    for where, text in (("bench_mine.py module docstring", mod_doc),
+                        ("bench_mine.py `enqueue_if_due` docstring", enqueue_doc),
+                        ("architecture/workers-jobs.md's #522 paragraph", jobs_para)):
+        for claim in _BENCH_LIVE_CLAIMS:
+            assert claim not in text, f"{where} still asserts {claim!r} as a count"
+        for sent in _BENCH_SENTENCE.split(" ".join(text.split())):
+            if re.search(r"\b(?:104|4,044)\b", sent) and re.search(r"run|failure", sent):
+                assert _BENCH_DATED.search(sent), (
+                    f"{where} quotes one of the #522-era figures with no date on "
+                    f"its own sentence: {sent[:170]!r} — the class rule this item "
+                    "is an instance of is that a number without the moment it was "
+                    "read becomes a standing claim")
+
+    assert "never once enqueued" in mod_doc and "never opened the directory" in mod_doc, (
+        "the module docstring's account of WHY the input never fired was removed "
+        "with the figure; the mechanism is the part worth keeping")
+    assert "returned early" in enqueue_doc, (
+        "`enqueue_if_due` no longer says its first cut returned early, which is "
+        "the bug its call order is arranged around")
+    assert "never once enqueued" in jobs_para and \
+        "the directory was never opened" in jobs_para, (
+        "the jobs page's #522 paragraph was emptied rather than de-dated: the "
+        "finding it records is worth keeping, only the number beside it was not")

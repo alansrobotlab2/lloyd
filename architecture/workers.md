@@ -986,7 +986,18 @@ is the known self-grading failure mode, and this is where it is stopped.
   mtime, so the failed-run input its own docstring named since the first commit
   was unreachable and the queue held zero rows for its entire life. It now
   scans `AUTONOMY_RUNS_DIR/**/run_*.md` for `status: failed` on every tick,
-  gated by nothing the ledger does — 104 eligible failures in the last 7 days.
+  gated by nothing the ledger does. What that walk can offer is bounded by the
+  selector and nothing else: `FAILURE_WINDOW_DAYS` (7), `SKIP_FAILURE_KINDS`
+  (`infra`) and `MAX_ENQUEUE_PER_TICK` (3) are its only limits, all in
+  `workers/sources/bench_mine.py`, so the number it holds moves with the
+  retention sweep rather than with the code. The one reading of it this page
+  carries is therefore a dated record and not a standing count: as of 2026-09-09
+  the walk held 104 eligible failures against 4,044 run files in the directory
+  (`a4e52633`, the #522 commit that landed the input). That era is gone and
+  cannot be re-read — `scripts/groundskeeper/retention-sweep.py` deletes
+  `autonomy-runs/<id>/run_*.md` past 30 days — which is why the present-tense
+  sentence it shipped in is recorded as history rather than re-stamped with a
+  date nobody can check.
   Each candidate is calibrated (10 trials, composite kept only strictly inside
   0.05–0.95, and a calibration that scored fewer than 3 is a measurement of the
   engine rather than of the task) and tagged with one escalation direction. The

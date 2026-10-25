@@ -14,10 +14,16 @@ registered, and never once enqueued while both inputs were wide open:
   failure rather than a weak task.
 - **Failed autonomy runs**: ``AUTONOMY_RUNS_DIR/**/run_*.md`` with ``status:
   failed``. The docstring advertised this input from the day it was written
-  and never opened the directory: 104 failed runs in the last 7 days against
-  4,044 run files on disk. Terminal-Universe (arXiv:2609.04148) is the idea
-  this copies — a recorded trajectory, *including the failed ones*,
-  reconstructed into a task with a deterministic pass/fail check.
+  and never opened the directory. What the walk held when #522 landed it is a
+  dated record and not a current count: as of 2026-09-09 (``a4e52633``) it held
+  104 eligible failures against 4,044 run files, and the retention sweep that
+  prunes ``autonomy-runs/**`` past 30 days has made that reading unreproducible.
+  The rule that removed the saturated-task count below applies to it — a corpus
+  that moves every night cannot be described by one number in permanent prose,
+  so re-derive this from the selector rather than from here. Terminal-Universe
+  (arXiv:2609.04148) is the idea this copies — a recorded trajectory,
+  *including the failed ones*, reconstructed into a task with a deterministic
+  pass/fail check.
 
 Produces candidate bench-task markdown under
 ``~/lloyd-data/_pipeline/vault-derived/pending-research/bench-mine/{yyyy-mm-dd}/``
@@ -349,9 +355,12 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
     The first cut of this function returned early when the ledger's mtime had
     not moved, so everything added after that line was unreachable whenever
-    autoresearch was off — which is how a source with 4,044 unused failure
-    transcripts under `AUTONOMY_RUNS_DIR` stayed at zero items for its whole
-    life.
+    autoresearch was off — which is how a source whose `AUTONOMY_RUNS_DIR` walk
+    was full of failure transcripts stayed at zero items for its whole life.
+    The count that finding carried lives in the module docstring as a record of
+    the day it was read, not here: this function does not open that directory,
+    and the retention sweep prunes those files past 30 days, so any figure
+    written into this docstring could only ever go stale.
     """
     # One number, both inputs. `limit` used to be passed to the failed-runs
     # input alone while the ledger input ran at `_recent_ledger_losers`'s own

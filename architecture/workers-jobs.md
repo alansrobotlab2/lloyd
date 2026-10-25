@@ -1070,8 +1070,11 @@ other session sources' — #896) and stages a candidate task under
 
 - **#522 found it enabled, registered, and never once enqueued** while both
   inputs were wide open — the failed-runs input was advertised in the docstring
-  from the day it was written and the directory was never opened. 104 failed
-  runs in 7 days against 4,044 run files on disk.
+  from the day it was written and the directory was never opened. What that
+  directory held when the input landed is stated once, with its date, in
+  `architecture/workers.md` §8; it is not repeated here, because the sweep that
+  prunes `autonomy-runs/**` past 30 days has made that reading unreproducible
+  and a copy of it on a second page could only go staler, not truer.
 - **The ledger input can go quiet for days** — only an autoresearch round
   appends to it — and had a defect of its own: the writer mints `BASELINE_<int>`
   while the filter matched lowercase `baseline`, a case-sensitive comparison
