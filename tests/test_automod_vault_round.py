@@ -8785,3 +8785,139 @@ def test_a_store_primary_still_lands_through_this_door(vault):
     assert out["ok"] is True, out
     assert primary in _head_paths(vault), _head_paths(vault)
     assert "sidecar_refusals" not in out, out
+
+
+# ── run-record citations (#3299) ───────────────────────────────────────────
+# Both ids here are planted. `run_99_20991231_235959` names a record dated 2099-12-31:
+# the retention sweep cannot have removed it and no writer has ever produced it, so a
+# fixture corpus that lacks it is the ONLY corpus in which it is `gone` for the right
+# reason — using a real swept id would make the test pass by accident if the corpus
+# resolution broke and returned nothing. `run_7_20260925_010203` is planted as the
+# resolving half, in the same fixture, so no test here reads the live corpus at all.
+
+def _stage_text(vault, rel, text):
+    """`_stage`, for a body spelled as text — that helper writes bytes, and every body
+    here is an f-string of front matter plus prose."""
+    return _stage(vault, rel, text.encode("utf-8"))
+
+
+def _rc_commit(vault, msg):
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", msg)
+
+
+RC_DEAD = "run_99_20991231_235959"
+RC_LIVE = "run_7_20260925_010203"
+
+
+@pytest.fixture
+def rc_runs(tmp_path, monkeypatch):
+    """`$LLOYD_DATA/autonomy-runs` holding one record, and NOT the dead id.
+
+    `LLOYD_DATA` is the seam the rung reads: `skill_run_citation.autonomy_runs_dir()`
+    resolves `${LLOYD_DATA:-~/lloyd-data}/autonomy-runs`, the same rule
+    `retention-sweep.py:493-502` uses to find the files it unlinks. Pointing it here is
+    what lets the land door be tested against a corpus whose contents this file decides.
+    """
+    root = tmp_path / "ldata"
+    p = root / "autonomy-runs" / RC_LIVE.split("_")[1] / f"{RC_LIVE}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# run\n", encoding="utf-8")
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+    return root
+
+
+def test_a_skill_diff_that_adds_a_dead_run_citation_does_not_land(vault, rc_runs):
+    """Clauses 3 and 4's refusal half, at the door itself — the planted-citation check.
+
+    This is #3299's verification spelled as a node: plant an id naming no record, land →
+    refused; the same diff without it → lands. It runs `V.land`, not just the rung,
+    because the boundary that matters is the one the nightly writers cross —
+    `automod_vault_land` → `validate` → this rung — and a rung wired into nothing passes
+    its own unit test forever.
+    """
+    path = _stage_text(vault, "skills/rc/SKILL.md",
+                       "---\nname: rc\n---\n# rc\n\nA rule, no citation yet.\n")
+    _rc_commit(vault, "add the rc skill")
+    skill = vault / path
+
+    skill.write_text("---\nname: rc\n---\n# rc\n\n"
+                     f"A rule the run found (`{RC_DEAD}`).\n", encoding="utf-8")
+    errs = V.run_citation_errors([path])
+    assert any("run record" in e and RC_DEAD in e for e in errs), errs
+    errors, _buckets = V.validate([path])
+    assert any("run record" in e and RC_DEAD in e for e in errors), \
+        f"the door does not carry the rung: {errors}"
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land([path], "cite a run record that is gone")
+    assert RC_DEAD in str(ei.value), str(ei.value)
+    assert f"`{RC_DEAD}`" not in git(vault, "show", f"HEAD:{path}").stdout, \
+        "the refused text reached the vault anyway"
+
+    skill.write_text("---\nname: rc\n---\n# rc\n\n"
+                     f"A rule the run found (`{RC_LIVE}`).\n", encoding="utf-8")
+    out = V.land([path], "cite the record that is still there")
+    assert out["ok"] is True, out
+    assert RC_LIVE in git(vault, "show", f"HEAD:{path}").stdout
+
+
+def test_a_skill_already_carrying_dead_run_ids_lands_when_it_adds_none(vault, rc_runs):
+    """Clause 3's added-only half, which is what keeps the rail from becoming a ban.
+
+    Ten vault files carry dead ids today and `nightly-reflection-*` plus
+    `morning-brief-and-triage` rewrite exactly those nightly. A rule keyed on a touched
+    file CARRYING a dead id would block essentially every landing that touches them —
+    `scripts/util/skill_path_findings.py:28-31`'s own argument that a permanent alarm is
+    a disabled alarm. So the pre-existing population is reported and never refused, and
+    this node pins the two edges of that: removing a dead id lands, adding one more to a
+    file that already has one is refused for the one it added.
+    """
+    path = _stage_text(vault, "skills/rc/SKILL.md",
+                       "---\nname: rc\n---\n# rc\n\n"
+                       f"An old citation (`{RC_DEAD}`) the sweep took.\n")
+    _rc_commit(vault, "add a skill that already carries a dead id")
+    skill = vault / path
+
+    skill.write_text("---\nname: rc\n---\n# rc\n\n"
+                     f"The dead citation is gone now; this run found it (`{RC_LIVE}`).\n",
+                     encoding="utf-8")
+    assert V.run_citation_errors([path]) == [], \
+        "a diff that REMOVES a dead id was refused — the rule is a ban, not a gate"
+    out = V.land([path], "repair the dangling citation")
+    assert out["ok"] is True, out
+
+    skill.write_text(skill.read_text(encoding="utf-8")
+                     + f"\nAnd a second finding (`{RC_DEAD}`).\n", encoding="utf-8")
+    errs = V.run_citation_errors([path])
+    assert len(errs) == 1 and RC_DEAD in errs[0], errs
+    with pytest.raises(V.VaultRoundError):
+        V.land([path], "add a second dead citation")
+
+
+def test_the_run_citation_rung_asks_nothing_of_a_body_that_cites_no_run(vault, rc_runs):
+    """Clause 4: no run id in the body, and any non-skill path, both produce nothing.
+
+    The second half is the one that can rot silently: the rung is wired into a door that
+    every vault land crosses, so if it ever graded a `knowledge/` note or an `autonomy/`
+    task against the run corpus, a round documenting a fleet change would be refused for
+    a citation shape it never wrote. Asserted against `validate`, not only the rung,
+    because that wiring is the thing being protected.
+    """
+    assert V.run_citation_errors(["skills/rc/SKILL.md"]) == [], (
+        "the rung fired on a batch whose file does not exist")
+
+    note = _stage_text(vault, "knowledge/run-notes.md",
+                       f"---\ntype: note\n---\n# notes\n\nMentions {RC_DEAD} in prose.\n")
+    _rc_commit(vault, "add a note")
+    (vault / note).write_text(f"---\ntype: note\n---\n# notes\n\n"
+                              f"Now cites `{RC_DEAD}` for real.\n", encoding="utf-8")
+    assert V.run_citation_errors([note]) == [], (
+        "a non-skill path was graded against the run-record corpus")
+    errors, _buckets = V.validate([note])
+    assert not any("run record" in e for e in errors), errors
+
+    skill = _stage_text(vault, "skills/rc2/SKILL.md",
+                        "---\nname: rc2\n---\n# rc2\n\nA rule with no run id anywhere.\n")
+    assert V.run_citation_errors([skill]) == []
+    errors, _buckets = V.validate([skill])
+    assert not any("run record" in e for e in errors), errors

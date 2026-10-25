@@ -641,7 +641,8 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     if not errors:
         errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
                       + skill_timezone_errors(paths)
-                      + uptake_citability_errors(paths))
+                      + uptake_citability_errors(paths)
+                      + run_citation_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
     if not errors and SKILL_ACTIVATION_ENFORCE:
@@ -2094,6 +2095,129 @@ def revert(sha: str, reason: str = "manual") -> dict:
     new = _git("rev-parse", "HEAD").stdout.strip()
     S.append_event({"event": "vault_revert", "reverted": sha, "commit": new, "reason": reason[:300]})
     return {"ok": True, "reverted": sha, "commit": new}
+
+
+# ── run-record citations (scripts/skill_run_citation.py) ───────────────────
+def _skill_run_citation():
+    """Load `scripts/skill_run_citation.py`, or None when it cannot be loaded.
+
+    By path, not `import`: `scripts/` is not a package and the module lives at
+    its top level beside `skill_lint.py`, and `scripts.automod.spec` has already
+    preloaded a module named `spec` into `sys.modules` in this process (#2398), so
+    a package-style import of anything under `scripts/` is the one route that is
+    known to mis-bind here.
+    """
+    import importlib.util
+    path = LLOYD_HOME / "scripts" / "skill_run_citation.py"
+    try:
+        s = importlib.util.spec_from_file_location("skill_run_citation", str(path))
+        mod = importlib.util.module_from_spec(s)
+        s.loader.exec_module(mod)
+        return mod
+    except Exception:                                     # noqa: BLE001 — see the caller
+        return None
+
+
+def _vault_text_at_head(path: str) -> str:
+    """The committed bytes of a vault path, or "" when HEAD has no such file.
+
+    "" is also the answer for a path staged as new (`git add` without a commit),
+    which is what makes an untracked skill entirely added-only to this rung: every
+    citation in it is new.
+    """
+    r = _git("show", f"HEAD:{path}")
+    return r.stdout if r.returncode == 0 else ""
+
+
+def run_citation_errors(paths: list[str]) -> list[str]:
+    """A skill diff that ADDS a citation to a run record already swept (#3299).
+
+    Fourth instance of the shape `reflection_archive_errors` and
+    `skill_timezone_errors` argue for: skill prose is state no round under test
+    controls, and the invariant that must *stop* a bad edit belongs on the landing
+    path, with `scripts/skill_run_citation.py`'s `report()` as the reporting copy.
+    What this refuses is narrower than "a skill mentions a dead run id", and the
+    narrowness is load-bearing in both directions:
+
+      * **Added-only, because a permanent alarm is a disabled alarm.** Ten vault
+        files carry dead ids today and the `nightly-reflection-*` and
+        `morning-brief-and-triage` writers rewrite exactly those files nightly, so a
+        rule keyed on a touched file CARRYING a dead id would block essentially every
+        landing that touches them — `scripts/util/skill_path_findings.py:28-31`'s
+        trap, which is why the pre-existing population is reported by `report()` and
+        never refused here. So: a skill that removes every dead id it carries lands
+        (its added set is empty), and one that adds a second dead id to a file that
+        already has fifteen is refused for the one it added.
+      * **Refused, not just reported, because the corpus is open-set and the writer
+        cannot see the decay.** The citation resolves at the instant it is written and
+        is unlinked ~30 days later by task #79, which is `frequency: daily` with
+        `last_attempt: 2026-10-25T05:02:46`. A rung invoked on a *deletion* would be
+        the other design, and there is none — nothing in the fleet runs on an
+        `unlink` — so the land door is the only point where a human is looking at the
+        citation and the corpus at the same time.
+
+    The run-record corpus is read from the LIVE data root, not from this checkout: it
+    is a deletion the land is being asked to bless, not a file in the diff —
+    `scripts/consolidation_source_gate.py:33-35`'s argument about the same corpus. The
+    directory comes from `skill_run_citation.autonomy_runs_dir()`, which is
+    `${LLOYD_DATA:-~/lloyd-data}/autonomy-runs` — the same rule the sweeper that
+    unlinks these files uses (`retention-sweep.py:493-502`), so honouring the variable
+    is also how a test plants a fixture corpus and moves this rung off the live one.
+    Nothing in the land path overrides it.
+
+    Scope this does NOT have, so the gate is not read as wider than it is: it reads
+    `skills/**/SKILL.md` bodies only, so the same decay in tracked code
+    (`scripts/consolidation_source_gate.py:24`, one of the swept ids) passes untouched;
+    and an id whose record is simply not written yet still resolves as `gone`, since
+    "cited" is the only fact available at the land door.
+
+    There is deliberately NO `ack` route for it, which is a departure from
+    `VG.witness_count_errors` and the reason needs stating: an ack excuses a refusal
+    whose evidence is a count that moved, whereas this error is about bytes THIS batch
+    is adding, and a token that answers to no record does not start answering because
+    the writer acknowledged it. The escape hatch a writer actually has is in the error
+    text: bind the claim to a command or a sha instead of an id.
+    """
+    skills = sorted({str(p) for p in paths
+                     if str(p or "").startswith("skills/")
+                     and str(p or "").endswith("/SKILL.md")})
+    if not skills:
+        return []
+    src = _skill_run_citation()
+    if src is None:
+        # Deliberately not VaultRoundError: the gate's canary turn lands a real
+        # skills/**/SKILL.md, and a rung that cannot load must not brick every
+        # land on the box. Absent rail, present reporter — the one line names
+        # itself, and `report()` is the measurement.
+        return ["run_citation unavailable, cannot check run-record citations "
+                "(scripts/skill_run_citation.py failed to load; land proceeds)"]
+    errs: list[str] = []
+    for path in skills:
+        new = VAULT / path
+        if not new.is_file():
+            continue
+        try:
+            added = src.added_citations(new.read_text(encoding="utf-8", errors="replace"),
+                                        _vault_text_at_head(path))
+            gone = src.gone_citations(added)
+        except Exception as exc:                          # noqa: BLE001 — fail closed
+            # A crash on a batch that touches a skill is a refusal, like
+            # VG.skill_body_errors and the archive scan: a rung that reads nothing
+            # must not report that everything cited a record that still exists.
+            errs.append(f"{path}: run-citation check failed closed: "
+                        f"{type(exc).__name__}: {exc}")
+            continue
+        horizon = src.horizon_days()
+        for tok in sorted(gone):
+            errs.append(
+                f"{path}: cites run record `{tok}`, which no longer exists under "
+                f"$LLOYD_DATA/autonomy-runs/ and is not a prefix of any record name there — "
+                f"a citation this diff ADDS, and the retention sweep removes records at "
+                f"{horizon if horizon is not None else 'the documented'} days "
+                f"(`RUN_RECORD_MAX_AGE_DAYS`), so this sentence's evidence is already gone. "
+                f"Bind the claim to something that survives: the command or query that "
+                f"re-derives it, or a code sha.")
+    return errs
 
 
 def main(argv=None) -> int:
