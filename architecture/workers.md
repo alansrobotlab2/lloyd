@@ -44,19 +44,22 @@ Two loops, both inside the **backend** process (`server.py`):
   that creates work. The same tick carries **five** deterministic seats that
   must not wait for a free slot, every one of them awaited before
   `_scheduler_pass` and outside the `try` around it, so a source raising in the
-  pass cannot silence them: the poison sweep (`workers/maintenance.py`), the
-  mitigation-drill seat (`maintenance.maybe_run_mitigation_drill`, #2333, on its
-  own hourly interval — §7), the service probe (`workers/service_probe.py`,
-  #1359), which announces a supervised infra program whose declared port stays
-  closed past its grace while supervisord still reports it up — the crash loop
-  that reads RUNNING — the dispatch watch (`workers/dispatch_watch.py`, #1681),
-  and the fleet watchdog (`workers/fleet_watchdog.py`, #1682), whose stall and
-  unparseable-file alarms were moved here precisely because they had lived
-  inside `scheduled_task.enqueue_if_due`, which the pass skips outright for a
-  source config says is disabled: an alarm that its own silencing cannot report.
-  The sentence this one replaces said "two" for a month; `WorkerPool`'s own
-  `_scheduler_loop` is the list, and #3286 asks for a test that keeps the two
-  from parting again.
+  pass cannot silence them: the poison sweep (`_maybe_sweep_poisoned`,
+  `workers/maintenance.py`), the mitigation-drill seat (`_maybe_mitigation_drill`,
+  `maintenance.maybe_run_mitigation_drill`, #2333, on its own hourly interval —
+  §7), the service probe (`_probe_services`, `workers/service_probe.py`, #1359),
+  which announces a supervised infra program whose declared port stays closed
+  past its grace while supervisord still reports it up — the crash loop that
+  reads RUNNING — the dispatch watch (`_watch_dispatch`,
+  `workers/dispatch_watch.py`, #1681), and the fleet watchdog (`_watch_fleet`,
+  `workers/fleet_watchdog.py`, #1682), whose stall and unparseable-file alarms
+  were moved here precisely because they had lived inside
+  `scheduled_task.enqueue_if_due`, which the pass skips outright for a source
+  config says is disabled: an alarm that its own silencing cannot report.
+  The sentence this one replaces said "two" for a month. `WorkerPool`'s own
+  `_scheduler_loop` is the list, and `tests/test_workers_doc_claims.py` now pins
+  the two together in both directions: a seat awaited there and not named here,
+  or named here and no longer awaited, fails the suite.
 - **The workers** — `workers.slots` of them — claim one item at a time and
   await its source's `execute`.
 
@@ -89,8 +92,10 @@ history §7's overwritten-in-place `watermarks` pair cannot carry; and
 `tool_effects` (#544) is created by `agent_mcp/_tool_effects.py` against
 `configured_db_path()`. One more shares the file without being *owned* here:
 `egress_events` (#628), created by `agent_mcp/egress.py`, the egress guard's
-record of every destination it saw. So `.tables` shows eight, and only the first
-three are the work the pool runs: `pause_journal` is the pool's own state
+record of every destination it saw. So `.tables` shows eight (`queue`, `runs`,
+`watermarks`, `authority_grants`, `grant_dispatch`, `pause_journal`,
+`tool_effects`, `egress_events`), and only the first three are the work the pool
+runs: `pause_journal` is the pool's own state
 rather than a unit of work — and the sweep that bounds it is the groundskeeper's
 (`PAUSE_JOURNAL_MAX_AGE_DAYS`), not the pool's.
 

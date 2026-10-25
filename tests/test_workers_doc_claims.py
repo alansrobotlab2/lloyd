@@ -10,6 +10,7 @@ does not read.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import re
 import subprocess
@@ -2441,3 +2442,517 @@ def test_workers_jobs_md_names_the_queue_call_each_arm_takes():
     assert "and the queue's backoff" in flat, (
         "§5 no longer says what a raised exception reaches besides the call — the "
         "backoff is the reason the split matters to a reader who runs a job on a timer.")
+
+
+# --------------------------------------------------------------------------- #
+# §1's scheduler-seat list and §2's shared-table count: the two enumerations
+# #3286 found hand-maintained and unpinned.
+#
+# Both had rotted by 2026-10-25, and the pass that fixed the PROSE left nothing
+# to keep it fixed. §1 stated the 60 s tick "carries two deterministic chores"
+# while `WorkerPool._scheduler_loop` awaited five seats ahead of
+# `_scheduler_pass` — among them the dispatch watch (#1681) and the fleet
+# watchdog (#1682), which exist precisely because their alarms had been disarmed
+# from inside a source's own `enqueue_if_due`, so a page naming two of the five
+# under-reports the thing watching the pool. §2 stated `.tables` shows seven
+# while `pause_journal` (#2615) had already made it eight. A corrected paragraph
+# with no pin is a paragraph that rots again, so each enumeration is now held to
+# the tree it describes, in the shape of `tests/test_kv_gate_docs.py`: read the
+# live thing, parse the prose with a BOUNDED capture, compare in BOTH directions.
+#
+# Two hazards decided the shape.
+#   * `workers/queue.py` carries prose: `apply_grant_ddl`'s docstring quotes the
+#     literal `CREATE TABLE IF NOT EXISTS` while explaining why that statement is
+#     not a migration, so a pattern stopping at the identifier reads `IF` as a
+#     table name and the count comes out one too high out of a comment.
+#     `_ddl_tables` therefore requires the name to be followed by `(` — a
+#     statement, not a sentence — and
+#     `test_a_prose_create_table_is_not_counted_as_a_table` feeds it that real
+#     sentence instead of asserting the guard works. The sentence is located
+#     from its own text and the symbols around it, never from a line number: a
+#     numeric citation to that file is banned corpus-wide (#2971, widened #3233)
+#     precisely because the numbers rot, and this file is inside the ban.
+#   * The page's count words are not evidence of anything. §1 still carries the
+#     retired "two" inside the sentence explaining the fix, §7 and §8 hold
+#     unrelated counts ("seven task ids", "all nine"), and §8's dated review rows
+#     record "the seventh shared table" and "now eight" AS HISTORY. A node that
+#     grepped the file for a number would be vacuous or permanently red, so §1
+#     and §2 are compared as LISTS, each sliced inside its own `## ` heading, and
+#     §8 is never opened.
+
+
+#: The module attributes that own the shared database's DDL. Each is read as the
+#: live module sees it rather than re-typed here: a fourth `_SCHEMA` appearing in
+#: a new module is the event this pin is for, and a hand-maintained list of
+#: modules in the test would be a third copy of the very enumeration #3286 is
+#: about. `workers.queue._SCHEMA` already concatenates `GRANT_DDL`, which is why
+#: `authority_grants` and `grant_dispatch` come out of that one attribute.
+DDL_SCHEMAS = ("workers.queue", "agent_mcp._tool_effects", "agent_mcp.egress")
+
+#: A `CREATE TABLE` statement. The trailing `(` is the whole guard: it is what
+#: separates a definition from `apply_grant_ddl`'s docstring, whose sentence
+#: "`CREATE TABLE IF NOT EXISTS` alone is not a migration" would otherwise
+#: contribute the table `IF`.
+# The name class is case-wide on BOTH sides — `_TABLE_DDL` here and `_DOC_TABLE`
+# below — because a class restricted to lowercase hides a table declared as
+# `CREATE TABLE Audit_Log(...)` from the derived set AND from the page's parsed
+# list, so count and list would still agree with each other while both were
+# wrong. `_shared_tables` then refuses an uppercase name outright rather than
+# folding it in: SQLite resolves table names case-insensitively, the eight
+# declared today are all lowercase, and a mixed-case one is a naming decision a
+# human has to make before the page can be written to match.
+_TABLE_DDL = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+#: A table name inside §2's parenthesised enumeration.
+_DOC_TABLE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
+
+#: §2's count claim and the list it counts, as ONE bounded capture. Bounded at
+#: the closing paren because §2 backticks plenty of things that are not tables —
+#: `GRANT_DDL`, `_SCHEMA`, `expires_at`, `holder_kind`, `actor`, `hold_id`,
+#: `.tables` — and any of them would otherwise satisfy or trip a check written
+#: over the section's whole text. Anchored on the `.tables` sentence, the only
+#: place in the file where a count of the shared tables is a PRESENT-TENSE claim.
+_TABLE_SITE = re.compile(
+    r"So `\.tables`\s+shows\s+(?P<count>[a-z]+)\s+\((?P<tables>[^)]*)\)")
+
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+                "twelve": 12}
+
+
+def _ddl_tables(sql: str) -> set[str]:
+    """Every table a SQL string actually creates, statements only."""
+    return set(_TABLE_DDL.findall(sql))
+
+
+def _shared_tables() -> set[str]:
+    """The union of the three modules' own `_SCHEMA` strings."""
+    out: set[str] = set()
+    for mod_name in DDL_SCHEMAS:
+        mod = importlib.import_module(mod_name)
+        sql = getattr(mod, "_SCHEMA", None)
+        assert sql, (f"{mod_name} no longer declares a module-level `_SCHEMA`, so "
+                     "this pin's source of the shared tables has moved — find it "
+                     "and name it in DDL_SCHEMAS rather than dropping this entry")
+        found = _ddl_tables(sql)
+        assert found, f"{mod_name}._SCHEMA creates no table: the extractor read nothing"
+        mixed = sorted(n for n in found if n != n.lower())
+        assert not mixed, (
+            f"{mod_name}._SCHEMA declares {mixed} with a mixed-case name. Every "
+            "table named in `architecture/workers.md` §2 is lowercase, SQLite "
+            "resolves these names case-insensitively, and the page's enumeration is "
+            "what a human reads off — settle the spelling in the schema before "
+            "widening this assertion rather than letting the count silently miss a "
+            "table")
+        out |= found
+    return out
+
+
+def _workers_md() -> str:
+    return (ARCH / "workers.md").read_text(encoding="utf-8")
+
+
+def _md_section(heading: str, doc: str) -> str:
+    """One `## ` section of `workers.md`, heading line excluded, out of `doc`.
+
+    Takes the text rather than reading the file so a mutated page can be handed
+    in: an enumeration pin that can only be exercised on the live tree has never
+    been shown to be able to fail. Same reason `_table_after` and `_section`
+    slice rather than grep.
+    """
+    assert heading in doc, f"{heading} is gone from `architecture/workers.md`"
+    start = doc.index(heading) + len(heading)
+    rest = doc[start:]
+    end = rest.find("\n## ")
+    return rest if end < 0 else rest[:end]
+
+
+#: `_scheduler_loop`'s seat list, read out of the source instead of re-listed
+#: here. A `SEATS = {...}` literal in this file would be a second hand-maintained
+#: copy of the list, which is the rot #3286 exists to stop: as written, a seat
+#: added to the pool has to be named on the page and nowhere else.
+_LOOP_OPEN = "async def _scheduler_loop"
+_PASS_CALL = "await self._scheduler_pass()"
+_AWAIT_SEAT = re.compile(r"await self\.(_[a-z][a-z0-9_]*)\(\)")
+
+
+def _seats_awaited(src: str) -> list[str]:
+    """Every `await self._<seat>()` the scheduler loop runs ahead of its pass."""
+    assert src.count(_LOOP_OPEN) == 1, (
+        f"`{_LOOP_OPEN!r}` occurs {src.count(_LOOP_OPEN)} times in the source handed "
+        "to the extractor, so the seat region has no single opening. Re-point it at "
+        "something the file says once — a line number would be worse.")
+    body = src[src.index(_LOOP_OPEN):]
+    assert body.count(_PASS_CALL) == 1, (
+        f"`{_PASS_CALL!r}` occurs {body.count(_PASS_CALL)} times after the loop opens, "
+        "so the extractor cannot tell where 'ahead of the pass' ends.")
+    seats = _AWAIT_SEAT.findall(body[:body.index(_PASS_CALL)])
+    assert seats, (
+        "no `await self._…()` call ahead of `_scheduler_pass`: the extractor read an "
+        "empty region, which would make every comparison below pass by comparing "
+        "nothing.")
+    assert len(seats) == len(set(seats)), f"a seat is awaited twice: {seats}"
+    return seats
+
+
+#: §1's seat enumeration, bounded between the colon that opens it and the period
+#: that closes it. `_scheduler_pass` is named in the sentence BEFORE that colon,
+#: so the one seat-shaped identifier on the page that is not a seat sits outside
+#: the capture and can neither satisfy it nor trip it.
+_SEAT_SITE = re.compile(
+    r"cannot silence them:\s*(?P<seats>.*?)an alarm that its own silencing "
+    r"cannot report\.", re.S)
+_SEAT_NAME = re.compile(r"`(_[a-z][a-z0-9_]*)`")
+
+
+def _seats_named(sec1: str) -> set[str]:
+    match = _SEAT_SITE.search(sec1)
+    assert match, (
+        "§1 of `architecture/workers.md` no longer states the seat enumeration "
+        "between 'cannot silence them:' and 'an alarm that its own silencing cannot "
+        "report.' Re-point `_SEAT_SITE` at the new sentence: a capture that reads "
+        "nothing would let the seat pin pass on an empty set.")
+    named = set(_SEAT_NAME.findall(match.group("seats")))
+    assert named, (
+        "§1's seat enumeration names no backticked `_name`, so the pin has nothing "
+        "to compare — the page describes the seats in prose the pool cannot be "
+        "compared to. Name each seat by the method `_scheduler_loop` awaits.")
+    return named
+
+
+def test_the_scheduler_runs_more_than_one_seat_before_its_pass():
+    """Non-vacuity for the seat pin, the way #1341 held its own first check.
+
+    Two is the floor, not the count: five seats run today and the nodes below
+    compare LISTS rather than that number, because a sixth seat with the page
+    updated is a passing change and a pinned five would make the pin itself the
+    thing that has to be edited whenever the pool grows — which is how the list
+    on the page got left behind in the first place.
+    """
+    seats = _seats_awaited(POOL_SRC.read_text(encoding="utf-8"))
+    assert len(seats) >= 2, (
+        "the pool runs one seat, so 'every seat is named on the page' is one name "
+        "and the enumeration checks below are meaningless")
+
+
+def test_workers_md_sec1_names_every_awaited_seat_and_nothing_else():
+    """Clause 1: the page's seat list IS the pool's, in both directions."""
+    seats = _seats_awaited(POOL_SRC.read_text(encoding="utf-8"))
+    named = _seats_named(_md_section("## 1. Shape", _workers_md()))
+    missing = sorted(set(seats) - named)
+    assert not missing, (
+        f"`_scheduler_loop` awaits {missing} before `_scheduler_pass` and §1 does "
+        "not name them. These seats are the readers kept outside the pass's `try` "
+        "because a source cannot be trusted to report on itself — the page that "
+        "under-reports them under-reports what is watching the pool.")
+    extra = sorted(named - set(seats))
+    assert not extra, (
+        f"§1 names {extra} as a seat the 60 s tick carries, and `_scheduler_loop` "
+        "awaits none of them before `_scheduler_pass`. The page promises a "
+        "deterministic reader that the loop no longer runs.")
+
+
+def test_the_seat_pin_bites_in_both_directions():
+    """Clause 2: the seat node can fail, and fails on either side moving alone.
+
+    Three mutations, each one edit to one side, because the live tree is a single
+    observation: an unmutated green is also what a node that cannot fail looks
+    like. Every case is the comparison the live node above runs, on the same
+    helpers, so nothing here is a second and weaker copy of that check.
+    """
+    src = POOL_SRC.read_text(encoding="utf-8")
+    doc = _workers_md()
+    seats, named = _seats_awaited(src), _seats_named(_md_section("## 1. Shape", doc))
+    assert set(seats) == named, "the live tree is inconsistent; fix that first"
+
+    # (a) a seat added to the pool and not to the page: clause 1's failure.
+    added_src = src.replace(
+        "            await self._watch_fleet()",
+        "            await self._watch_fleet()\n"
+        "            await self._watch_brand_new_thing()", 1)
+    assert added_src != src, "the source mutation found no seat to follow"
+    after = set(_seats_awaited(added_src))
+    assert "_watch_brand_new_thing" in after, "the extractor missed the new seat"
+    assert after - named == {"_watch_brand_new_thing"}, (
+        "a seat added to the pool is not reported as missing from §1, so the "
+        "forward direction of the pin is not a check")
+
+    # (b) a seat dropped from the page and left running: clause 2's failure, the
+    # same node's other assert firing. `re.sub` rather than a literal replace
+    # because the enumeration is hard-wrapped, so a name and the backticked
+    # module after it do not necessarily sit on one line.
+    dropped_doc = re.sub(r"`_watch_fleet`,\s*", "", doc, count=1)
+    assert dropped_doc != doc, "the page mutation found no seat name to drop"
+    dropped = _seats_named(_md_section("## 1. Shape", dropped_doc))
+    assert dropped == named - {"_watch_fleet"}, (
+        "dropping `_watch_fleet` from §1 left the parsed list alone, so the capture "
+        "is reading somewhere other than the enumeration")
+    assert set(seats) - dropped == {"_watch_fleet"}, (
+        "a seat the pool still runs can vanish from the page without the pin "
+        "reporting it")
+
+    # (c) a seat named on the page that the pool never awaited: the reverse
+    # direction, which no amount of consistency in the source can produce.
+    phantom_doc = re.sub(r"(the poison sweep \()",
+                         r"\1`_watch_phantom_seat`, ", doc, count=1)
+    assert phantom_doc != doc, "the page mutation found no enumeration to widen"
+    phantom = _seats_named(_md_section("## 1. Shape", phantom_doc))
+    assert "_watch_phantom_seat" in phantom and phantom - set(seats) == {
+        "_watch_phantom_seat"}, (
+        "a name on the page that no source awaits is not reported, so the reverse "
+        "direction of the pin is not a check")
+
+
+def test_the_shared_table_set_reaches_every_declaring_schema():
+    """Non-vacuity for §2's pin: the union is the union, not the first file.
+
+    §2's own account splits the eight across three modules, and the drift that
+    made the count wrong was a LATER addition (`pause_journal`, #2615) in the
+    same `_SCHEMA` as the queue's three tables. So the set is checked to contain
+    the grant pair — proof `GRANT_DDL` was reached through the concatenation
+    rather than read past — and the journal, which is the table the count missed.
+    """
+    tables = _shared_tables()
+    for must_have in ("queue", "runs", "watermarks", "authority_grants",
+                      "grant_dispatch", "pause_journal", "tool_effects",
+                      "egress_events"):
+        assert must_have in tables, (
+            f"`{must_have}` is not in the set built from {DDL_SCHEMAS}, so §2's "
+            "comparison below is being run against a partial read of the DDL")
+
+
+def test_workers_md_sec2_counts_and_names_exactly_the_declared_tables():
+    """Clause 3: §2's stated count and its enumerated list are the declared set.
+
+    Count and list are both graded, and the list in both directions: a ninth
+    table in `_SCHEMA` has to fail this, and so has a name on the page that no
+    source creates. The count is read as a word because that is how the sentence
+    states it, and compared to the length of the derived set rather than to a
+    literal this file carries.
+    """
+    tables = _shared_tables()
+    match = _TABLE_SITE.search(_md_section("## 2. The queue", _workers_md()))
+    assert match, (
+        "§2 of `architecture/workers.md` no longer states the shared-table count "
+        "as `So `.tables` shows <word> (<list>)`. Re-point `_TABLE_SITE`: the "
+        "alternative is a pin that silently compares nothing.")
+    word = match.group("count")
+    assert word in _COUNT_WORDS, f"§2's count {word!r} is not a word this node reads"
+    assert _COUNT_WORDS[word] == len(tables), (
+        f"§2 says `.tables` shows {word} ({_COUNT_WORDS[word]}) but the schemas "
+        f"declare {len(tables)}: {sorted(tables)}. §2's 2026-09-25 review row says "
+        "the count missed a table once already, which is the drift this node exists "
+        "for.")
+    listed = set(_DOC_TABLE.findall(match.group("tables")))
+    assert len(listed) == len(match.group("tables").split(",")), (
+        "§2's table list has a name this node cannot parse, so a table added to a "
+        "schema could hide in it")
+    missing = sorted(tables - listed)
+    assert not missing, (
+        f"§2's enumeration omits {missing}, which the declared schemas create. The "
+        "count and the list are the same claim stated twice; a reader who learns "
+        "the tables from the list stops reading the number.")
+    invented = sorted(listed - tables)
+    assert not invented, (
+        f"§2 enumerates {invented}, which no schema in {DDL_SCHEMAS} creates")
+    assert len(listed) == _COUNT_WORDS[word], (
+        "§2's list and its own count word disagree with each other")
+
+
+def test_a_prose_create_table_is_not_counted_as_a_table():
+    """The `(` in `_TABLE_DDL` is load-bearing, demonstrated on the real prose.
+
+    `apply_grant_ddl`'s docstring in `workers/queue.py` quotes the literal
+    `CREATE TABLE IF NOT EXISTS` while explaining why that statement is not a
+    migration. A pattern that stopped at the identifier would return the table
+    `IF` from a comment and hand §2 a count one too high, so the guard is
+    exercised on that sentence rather than asserted — and the sentence is found
+    from its own text between two symbols, not from a line number, because the
+    numeric spelling of a citation into that file is banned across every tracked
+    path (#2971, widened #3233) after `691df24b` moved `depth_by_source` from
+    1226 to 1253 and left every citation naming its old line pointing somewhere
+    else.
+    """
+    src = (ROOT / "workers" / "queue.py").read_text(encoding="utf-8")
+    # Whitespace-normalised: the sentence is hard-wrapped in the docstring, and a
+    # node quoting it with the wrong newline is a node that fails on a re-wrap.
+    flat = " ".join(src.split())
+    anchor = "`CREATE TABLE IF NOT EXISTS` alone is not a migration"
+    assert anchor in flat, (
+        "the prose literal this node exists to guard has moved out of "
+        "`apply_grant_ddl`'s docstring; re-find such a sentence, or drop this node "
+        "only if no DDL file quotes the statement in prose any more")
+    clause = flat[flat.index("def apply_grant_ddl"):flat.index("conn.executescript")]
+    assert anchor in clause, "the slice is not the docstring that carries the prose"
+    assert _ddl_tables(clause) == set(), (
+        f"`_ddl_tables` read {sorted(_ddl_tables(clause))} out of a docstring "
+        "sentence, so the count it feeds §2's comparison is inflated by prose")
+    queue_sql = importlib.import_module("workers.queue")._SCHEMA
+    assert _ddl_tables(queue_sql + "\n" + clause) == _ddl_tables(queue_sql), (
+        "appending prose to the schema changed the derived table set: the guard is "
+        "not the trailing `(`")
+    assert _ddl_tables(src) == _ddl_tables(queue_sql), (
+        "regexing the whole of `workers/queue.py` no longer yields just the declared "
+        "tables, so the trailing-`(` guard has stopped doing its job and the count "
+        "§2 is graded against is one reading away from prose")
+
+
+def test_the_table_pin_bites_in_both_directions():
+    """Clause 3's other half: either side moving alone fails §2's node."""
+    tables = _shared_tables()
+    match = _TABLE_SITE.search(_md_section("## 2. The queue", _workers_md()))
+    assert match, "the live §2 claim is unreadable; the node above says what to fix"
+    listed = set(_DOC_TABLE.findall(match.group("tables")))
+    assert listed == tables, "the live tree is inconsistent; fix that first"
+
+    # (a) a ninth table declared by a schema, page untouched: clause 3's failure.
+    ninth = "\nCREATE TABLE IF NOT EXISTS brand_new_ledger (\n  id INTEGER\n);\n"
+    grown = _ddl_tables(importlib.import_module("workers.queue")._SCHEMA + ninth)
+    assert grown - listed == {"brand_new_ledger"}, (
+        "a table added to `_SCHEMA` is not reported as missing from §2, so a new "
+        "shared table can ship with the count a month behind")
+    assert _COUNT_WORDS[match.group("count")] != len(grown), (
+        "the count comparison cannot see a ninth table")
+
+    # (b) a name on the page no schema creates: the reverse direction.
+    phantom = match.group("tables").replace(
+        "`queue`", "`queue`, `phantom_ledger`", 1) + "\n"
+    phantom_doc = _workers_md().replace(match.group("tables"), phantom, 1)
+    re_search = _TABLE_SITE.search(_md_section("## 2. The queue", phantom_doc))
+    assert re_search is not None, "the page mutation broke the capture, not the check"
+    phantom_listed = set(_DOC_TABLE.findall(re_search.group("tables")))
+    assert phantom_listed - tables == {"phantom_ledger"}, (
+        "a table named on the page that no schema creates is not reported, so the "
+        "reverse direction of the pin is not a check")
+    assert len(phantom_listed) != _COUNT_WORDS[re_search.group("count")], (
+        "the count word still matches a widened list, so §2 can enumerate nine and "
+        "say eight")
+
+
+#: §1's own count of the seats it then enumerates — the page states it bold, and
+#: the bold is what makes the capture safe. `\s+` rather than a space because the
+#: page is hard-wrapped. The retired count the fix replaced is the string `said
+#: "two" for a month`, two sentences later and unbolded, which this capture
+#: cannot reach — which is the whole reason a count word is worth reading at this
+#: address when a count word read anywhere else in the file is worthless.
+_SEC1_COUNT = re.compile(r"carries\s+\*\*(?P<count>[a-z]+)\*\*\s+deterministic seats")
+
+
+def test_the_two_pins_pass_on_the_tree_as_it_stands_and_stray_counts_cannot_move_them():
+    """Clause 4: the live tree satisfies both pins, and the file's other numbers
+    are inert with respect to them.
+
+    Three claims, three checks.
+
+    (i) The tree as it stands. `WorkerPool._scheduler_loop` awaits five seats, §1
+    enumerates those five AND states the count word `five` for them in the same
+    sentence; §2 states `eight` and names the eight the three schemas declare.
+    Both counts are compared to the parsed lists rather than to a literal typed
+    here, so this node does not have to be edited the next time the pool grows —
+    §1's count word does, which is the entire point.
+
+    (ii) The unrelated numbers are inert. §1 still carries `said "two" for a
+    month` in the sentence explaining the fix; §2's own body carries `seven
+    youtube`; `seven task ids` and `all nine` sit further into the page; and the
+    Review log records `the seventh shared table` and `now eight`. Each is
+    mutated below to a word that belongs to the OTHER pin, and both parsed sets
+    come back identical — which is what "anchored to §1's and §2's own
+    sentences" has to mean before the phrase is worth claiming. A node that
+    grepped the file for a number would be vacuous or permanently red here, which
+    is why the item ruled that shape out.
+
+    (iii) The Review log rows still say what their dates recorded. They are
+    measurements, not promises, and the way a count-word pin destroys history is
+    by getting a later editor to retype an old row to match the new reality.
+    """
+    src = POOL_SRC.read_text(encoding="utf-8")
+    doc = _workers_md()
+    sec1, sec2 = _md_section("## 1. Shape", doc), _md_section("## 2. The queue", doc)
+    tables = _shared_tables()
+
+    seats = _seats_awaited(src)
+    named = _seats_named(sec1)
+    assert set(seats) == named, "clause 1's node already names the disagreement"
+    sec1_count = _SEC1_COUNT.search(sec1)
+    assert sec1_count, (
+        "§1 no longer states its own count in the form `carries **<word>** "
+        "deterministic seats`; re-point `_SEC1_COUNT` rather than dropping this "
+        "comparison — a list on the page with no number beside it is how `two` "
+        "survived a month")
+    assert _COUNT_WORDS[sec1_count.group("count")] == len(seats), (
+        f"§1 says the tick carries {sec1_count.group('count')!r} seats and then "
+        f"enumerates {len(seats)}: the count word and the list are two claims and "
+        "only one of them was updated")
+    assert sec1_count.group("count") != "two", (
+        "§1's seat count reads `two` — the retired value, which stayed on the page "
+        "for a month while the loop already awaited five")
+
+    sec2_match = _TABLE_SITE.search(sec2)
+    assert sec2_match, "clause 3's node already names an unreadable §2 claim"
+    listed = set(_DOC_TABLE.findall(sec2_match.group("tables")))
+    assert listed == tables, "clause 3's node already names the disagreement"
+    assert _COUNT_WORDS[sec2_match.group("count")] == len(tables)
+    assert len(seats) >= 2 and len(tables) >= 2, "the non-vacuity nodes say what to fix"
+
+    # (ii) Each stray pushed to a number the other pin owns.
+    strays = {}
+    for needle, replacement in (
+            ('said "two" for a month', 'said "eight" for a month'),
+            ("seven youtube", "eight youtube"),
+            ("seven task ids", "eight task ids"),
+            ("all nine", "all eight"),
+            ("the seventh shared table", "the eighth shared table"),
+            ("now eight", "now five")):
+        assert needle in doc, (
+            f"{needle!r} has left the page, so either a dated record was edited (it "
+            "must not be) or this node's idea of the file's stray numbers is stale")
+        strays[needle] = doc.replace(needle, replacement, 1)
+        assert strays[needle] != doc, f"could not mutate {needle!r}"
+    for needle, mutated in strays.items():
+        assert _seats_named(_md_section("## 1. Shape", mutated)) == named, (
+            f"changing {needle!r} moved §1's parsed seat list, so the seat pin is "
+            "reading a count word rather than the enumeration")
+        mutated_match = _TABLE_SITE.search(_md_section("## 2. The queue", mutated))
+        assert mutated_match is not None, (
+            f"changing {needle!r} made §2's count claim unreadable, so the capture is "
+            "not bounded to the sentence that makes the claim")
+        assert (set(_DOC_TABLE.findall(mutated_match.group("tables"))),
+                mutated_match.group("count")) == (listed, sec2_match.group("count")), (
+            f"changing {needle!r} moved §2's list or its own count word, so the table "
+            "pin can be satisfied or tripped from prose the schemas do not declare")
+
+    # (iii) The dated rows, still saying what their dates measured.
+    assert "the seventh shared table" in doc and "now eight" in doc, (
+        "a dated Review log row was retyped to satisfy a count check. §2 is the "
+        "present-tense claim and the only one a pin may edit; the log records what "
+        "the measurement was on its date")
+
+
+def test_workers_md_no_longer_states_that_the_pin_is_owed():
+    """Clause 5: §1 stops promising a test that this file now contains.
+
+    Bounded to §1 on purpose. §8's 2026-10-25 review row records "the pin is
+    #3286" as the thing that review FILED, and a dated history row is a record,
+    not a promise — editing it to satisfy a ban would destroy the measurement it
+    carries. §1 is the present-tense page, and that is where a forward reference
+    reads as work still owed.
+    """
+    doc = _workers_md()
+    sec1 = _md_section("## 1. Shape", doc)
+    for owed in ("asks for a test", "needs a test", "no test yet", "a test that keeps"):
+        assert owed not in sec1, (
+            f"§1 still says the seat list {owed!r}. The pin is in "
+            "tests/test_workers_doc_claims.py; §1 should name it, not promise it.")
+    assert "test_workers_doc_claims" in sec1, (
+        "§1 no longer points a reader at the pin that holds the seat list, so the "
+        "sentence that replaced the forward reference has stopped saying where the "
+        "enforcement lives")
+    assert "#3286" not in sec1, (
+        "#3286 is cited in §1 in the present tense; it is closed by this round, and "
+        "a live forward reference is what let the list rot once")
+    # The ban is §1's, not the file's: the Review log's 2026-10-25 row records
+    # "the pin is #3286" as the thing that review FILED, and that row is evidence.
+    assert "#3286" in doc, (
+        "`#3286` has vanished from the page entirely, so the ban above was widened "
+        "into a deletion and a dated review row was edited to satisfy a test")
