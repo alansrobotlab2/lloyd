@@ -361,8 +361,8 @@ a platform this code has never heard of stays eligible, because silently losing 
 brief is worse than delivering one to an unexpected session. Two details that are
 easy to get backwards: `/inject` answers **409, not a 200 "skipped"**, so no
 producer records a lost brief as delivered; and since `af5f9082` (2026-09-20)
-`/inject-prefetch` answers **the same 409** for a `NON_USER_PLATFORMS` session
-(`app/routers/sessions.py:1408-1418`), so the ambient path is gated at
+`/inject-prefetch` answers **the same 409** when `is_user_session` says no
+(`app/routers/sessions.py:1415`), so the ambient path is gated at
 *resolution* **and** at the endpoint. The endpoint half is what catches a producer
 that passes an explicit worker id instead of leaving the server to resolve it —
 before that commit such a producer got a 200 and an entry queued in a session that
