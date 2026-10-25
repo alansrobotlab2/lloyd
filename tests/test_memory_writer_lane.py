@@ -1941,8 +1941,13 @@ def test_the_writers_still_write_when_the_destination_is_under_file_or_defaulted
     Refusing mis-named destination keys is the contract; requiring `file` would
     break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
     omit it, while preventing nothing this refusal does not already prevent. The
-    question reopens only on an observed mis-route of a call that omits `file` —
-    never for an alias key, which the refusal catches on read and write alike.
+    question reopens only on an observed mis-route the shipped property guard
+    fails to refuse — a call that stated a destination in a routable argument
+    outside `file` and was answered the default anyway — never for an alias key,
+    which the refusal catches on read and write alike, and never for a call that
+    merely omits `file`: naming a destination nowhere was DEFAULTED, not
+    mis-routed (re-ruled 2026-10-25; the three reads it cited are labelled in
+    the lane note above the ruling constants).
     Likewise an unrecognised argument that does not read as a destination must stay
     tolerated, because `summary` rides on every tool call the harness dispatches.
     """
@@ -2203,8 +2208,13 @@ def test_memory_read_still_reads_when_the_destination_is_under_file_or_defaulted
     Refusing mis-named destination keys is the contract; requiring `file` would
     break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
     omit it, while preventing nothing this refusal does not already prevent. The
-    question reopens only on an observed mis-route of a call that omits `file` —
-    never for an alias key, which the refusal catches on read and write alike.
+    question reopens only on an observed mis-route the shipped property guard
+    fails to refuse — a call that stated a destination in a routable argument
+    outside `file` and was answered the default anyway — never for an alias key,
+    which the refusal catches on read and write alike, and never for a call that
+    merely omits `file`: naming a destination nowhere was DEFAULTED, not
+    mis-routed (re-ruled 2026-10-25; the three reads it cited are labelled in
+    the lane note above the ruling constants).
     `USER.md` and `topics/<slug>` read as they did, and a call carrying only
     non-destination extras still reads, because the harness adds `summary` to every
     tool call and a guard on every unrecognised key would break the transport
@@ -2270,6 +2280,27 @@ async def test_the_memory_read_wire_payload_carries_the_path_it_read(off_tree):
 # not to the repo. It is assembled from the pieces below at runtime so this
 # module's own source never holds it: a scan that reads this file would
 # otherwise be failed by the very test that forbids the phrase.
+#
+# The question came back a fourth time on 2026-10-25, so THAT re-ruling is
+# recorded here too, in the lane, because this is the block a reader of the
+# guard is already in: `file` stays optional on all four memory tools, #1729 and
+# #1796 are NOT reversed, and the reopen condition is narrower than the sentence
+# #3093 shipped with. A call that names a destination nowhere was DEFAULTED, not
+# mis-routed — a refusal has no key to name — so the question reopens only on a
+# mis-route the shipped property guard FAILS TO REFUSE. The three reads the
+# fourth asking cited are every one of the first kind: each sent only `summary`,
+# which `_NON_ROUTE_KEYS` never scans, so `_misnamed_destination` returned None
+# for all three and the loaded index was answered exactly as designed. Each is
+# labelled below, and this note is the durable home — the vault copy cannot hold
+# a ruling this long: measured 2026-10-25, the same record's sibling `what` field
+# stops mid-word at "that needs the schem" (597 chars, no truncation marker),
+# because `_recorded` flattens that field through `_text`'s DEFAULT 600-char
+# bound (`scripts/automod/owed.py:119-120`, `_text` at :78) and a verdict writes
+# the flattened text back. #1955 raised the bound on `evidence` and `ruling` to
+# SETTLED_TEXT_LIMIT = 1200 with a marker; `what` never went through it.
+#   20261011_193358_sessiondisti_21ba  2026-10-11T19:39:44  {"summary": "Reading loaded USER.md"}  — defaulted, not refused
+#   20261011_194423_sessiondisti_5bf5  2026-10-11T19:48:16  {"summary": "Reading USER.md for existing user facts"}  — defaulted, not refused
+#   20261018_125858_sessiondisti_ebcf  2026-10-18T13:01:01  {"summary": "Checking loaded user profile for duplicate preference lines"}  — defaulted, not refused
 # ---------------------------------------------------------------------------
 
 _LANE_FILES = ("agent_mcp/session.py", "tests/test_memory_writer_lane.py")
@@ -2292,7 +2323,7 @@ _SETTLED_RULING_PHRASES = (
     "stays optional",           # `file` is not, and stays not, a required parameter
     "all four memory tools",    # the default stands on read and on all three writers
     "contract",                 # the mis-named-destination refusal is the contract
-    "omits `file`",             # reopen condition: a defaulting call that mis-routes
+    "omits `file`",             # reopen condition: only a STATED destination reopens it
     "alias",                    # never an alias key, which the refusal already catches
     "#1729",                    # sourced to the item that ruled it
 )
@@ -2437,6 +2468,160 @@ def test_the_served_memory_tool_schemas_still_leave_file_optional():
         assert "file" not in schema["required"], (
             f"{name} started requiring `file`, which #1729 ruled against")
         assert not _OWED_RULING_RE.search(served[name].description), name
+
+
+# ---------------------------------------------------------------------------
+# #3324: the 2026-10-25 re-ruling, and the wording that made a fourth asking
+# possible.
+#
+# #1729 (2026-09-29), #1796 (2026-09-30), #1892 and #3093 all asked this guard
+# the same question, and the answer travelled in a sentence that a DEFAULTED
+# call — one naming a destination nowhere — appeared to satisfy on its face,
+# because it named only the omission, never a stated destination. Three such
+# reads were measured and cited on 2026-10-25, and the ruling that closed the
+# fourth asking named the discriminator: only a mis-route the shipped property
+# guard FAILS TO refuse reopens it. These three nodes keep that ruling in the
+# tree — the narrowed guard docstring, the lane record with its three labelled
+# reads, and the disappearance of the gloss that invited the misreading. Prose
+# pins on purpose: the artefact under test IS the sentence the next reader
+# finds, and a rail that checked only behaviour would leave that sentence free
+# to drift back into a fifth asking.
+#
+# Both forbidden wordings are RECONSTRUCTED, never spelled, on the same footing
+# as `_FORBIDDEN_RE` and `_LANE_CONTROLS` above: these nodes have to name the
+# readings they forbid, and a scan of this file would otherwise be failed by the
+# very node that forbids them. `_RERULING_READS` is what the scan excludes.
+# ---------------------------------------------------------------------------
+
+_REOPEN_AS_DEFAULTING = "a defaulting call that " + "mis-routes"
+_BARE_REOPEN_READING = "mis-route of a call that omi" + "ts `file`"
+_RULING_SENTENCE = "`file` stays optional on all four memory tools"
+_DEFAULTED_LABEL = "defaulted, not refused"
+#: The tuple entry whose comment is the site of clause 4, and the gloss that
+#: replacement left there. Both are read off the entry line, never rewritten
+#: into it: a control that inserted the forbidden wording and then searched for
+#: it would be a check that cannot fail.
+_GLOSSED_ENTRY = '"omits `file`",'
+_NARROWED_GLOSS = "only a STATED destination reopens it"
+_RERULING_SESSIONS = (
+    "20261011_193358_sessiondisti_21ba",
+    "20261011_194423_sessiondisti_5bf5",
+    "20261018_125858_sessiondisti_ebcf",
+)
+#: The three nodes below, whose own text names the readings they forbid.
+_RERULING_READS = (
+    "test_the_guard_narrows_the_reopen_to_a_misroute_the_guard_failed_to_refuse",
+    "test_the_lane_note_records_the_reruling_with_all_three_reads_labelled_defaulted",
+    "test_neither_lane_file_still_glosses_the_reopen_as_a_defaulting_call",
+)
+
+
+def _reruling_span_source(name: str) -> str:
+    """One of the three nodes below, as VERBATIM SOURCE — what a scan of this
+    file has to exclude to be a scan of everything except the naming of the
+    forbidden readings. `_func_source` hands back the AST node, which is the
+    right shape for reading a body and the wrong shape for cutting a slice.
+    """
+    src = _lane_source("tests/test_memory_writer_lane.py")
+    node = _func_source("tests/test_memory_writer_lane.py", name)
+    lines = src.splitlines(keepends=True)
+    span = "".join(lines[node.lineno - 1:node.end_lineno])
+    # Catches the one way a lineno-based slice goes wrong: off by one, it starts
+    # inside the def and leaves its first lines in the file for the scan to hit.
+    assert span.startswith(f"def {name}("), \
+        f"{name}: slice starts {span.splitlines()[0]!r}, not at its own def"
+    return span
+
+
+def test_the_guard_narrows_the_reopen_to_a_misroute_the_guard_failed_to_refuse():
+    """#3324 clauses 1 and 2: the reopen needs a refusal the guard did NOT make.
+
+    The clause is TWO sentences in one docstring, and the second is the one
+    #3093's own clause 1 left out: naming a destination nowhere is DEFAULTING,
+    not mis-routing. Asserted on `_docstring_of`'s flattening, because the
+    sentence is what a reader parses, and the old bare reading is asserted
+    ABSENT so the narrowing cannot be quietly re-widened by deleting a
+    subordinate clause.
+    """
+    doc = _docstring_of("agent_mcp/session.py", "_misnamed_destination")
+    assert "the shipped property guard fails to refuse" in doc, \
+        "the reopen is back to any observed mis-route, which a defaulted call answers"
+    assert "stated a destination in a routable argument outside `file`" in doc, \
+        "the reopen names no discriminator, so any mis-routed-looking read reopens it"
+    assert "DEFAULTED, not mis-routed" in doc, \
+        "the half the 2026-10-25 ruling exists to say went missing again"
+    assert _BARE_REOPEN_READING not in doc, \
+        "the #3093 sentence is back verbatim: a defaulted read satisfies it on its face"
+
+
+def test_the_lane_note_records_the_reruling_with_all_three_reads_labelled_defaulted():
+    """#3324 clause 3: the ruling lives in the lane, not only in a ledger field.
+
+    The vault copy is not a durable home: measured 2026-10-25, the same
+    `owed_settled` record's sibling `what` field stops mid-word after 597 chars
+    with no truncation marker, because `_recorded` flattens it through `_text`'s
+    DEFAULT 600-char bound (scripts/automod/owed.py:119-120, `_text` at :78) and a
+    verdict writes that flattened text back — `SETTLED_TEXT_LIMIT` never sees the
+    field. So the record goes in the module-level note ABOVE `_LANE_FILES`, and
+    the scan is cut at that anchor so a node cannot be satisfied by literals
+    sitting in its own assertions. Per line, not per file: three session ids with
+    no label beside them are a list of reads, not a ruling about them.
+    """
+    src = _lane_source("tests/test_memory_writer_lane.py")
+    above = src[:src.index("_LANE_FILES = (")]
+    # Marker-free, per line: a comment block flattens to prose only once each
+    # line's leading `#` is off, or a sentence that wraps reads as broken here
+    # while reading fine on screen. The cut at the `_LANE_FILES` anchor is what
+    # stops this node's own assertions from standing in for the note.
+    note = _flat("\n".join(l.lstrip().removeprefix("#").strip()
+                           for l in above.splitlines() if l.lstrip().startswith("#")))
+    assert _flat(_RULING_SENTENCE) in note, \
+        "the region scanned no longer holds the ruling — the note moved below the anchor"
+    assert _flat("#1729 and #1796 are NOT reversed") in note, \
+        "the record does not say what the fourth asking did not reverse"
+    note_lines = [l.strip() for l in above.splitlines() if l.lstrip().startswith("#")]
+    for sid in _RERULING_SESSIONS:
+        named = [l for l in note_lines if sid in l]
+        assert len(named) == 1, \
+            f"{sid} appears on {len(named)} note lines, expected the one record line"
+        assert _DEFAULTED_LABEL in named[0], \
+            f"{sid} is recorded with no verdict beside it: {named[0]!r}"
+
+
+def test_neither_lane_file_still_glosses_the_reopen_as_a_defaulting_call():
+    """#3324 clause 4: the comment beside the phrase tuple no longer invites it.
+
+    The tuple's `omits `file`` entry carried a gloss reading the reopen as a
+    call that merely defaults — the reading the 2026-10-25 ruling rejects, and
+    the reason fixing only the guard's docstring would have left the loop's
+    trigger standing. An absence is not evidence by itself, so the node holds
+    two things that each fail alone: it excludes only the three nodes that must
+    name the readings (`_RERULING_READS` — delete any one and its text re-enters
+    the scan), and it pins the replacement site POSITIVELY, so a reverted gloss
+    trips the absence scan and a deleted one trips the site pin. Rewriting the
+    file's own text with the forbidden wording would have been a control that
+    cannot fail — the literal inserted by such a replace is inside the string it
+    then searches — which is why the site is read, not rewritten.
+    """
+    for rel in _LANE_FILES:
+        src = _lane_source(rel)
+        if rel.endswith("test_memory_writer_lane.py"):
+            for name in _RERULING_READS:
+                src = src.replace(_reruling_span_source(name), "")
+        assert _REOPEN_AS_DEFAULTING not in src, f"{rel} still glosses defaulting as mis-routing"
+        assert _flat(_BARE_REOPEN_READING) not in _flat(src), \
+            f"{rel} still states the bare reopen reading the ruling narrowed"
+        assert re.search("default", src, re.IGNORECASE), \
+            f"{rel} came back with not even the word 'default' in it: the scan read nothing"
+    # The positive half: the entry the gloss stood beside is still there, and the
+    # narrowed wording is what is beside it now. Read, never rewritten — and
+    # counted, so deleting the entry cannot pass the absence scan by vanishing.
+    site = [l for l in _lane_source("tests/test_memory_writer_lane.py").splitlines()
+            if _GLOSSED_ENTRY in l and "reopen condition:" in l]
+    assert len(site) == 1, \
+        f"{len(site)} lines gloss the tuple's entry, expected the one the ruling narrowed"
+    assert _NARROWED_GLOSS in site[0], \
+        f"the gloss beside the entry is no longer the narrowed one: {site[0]!r}"
 
 
 # ── #2407: the advertised schema names `file_path` as the wrong key ───────────
@@ -2764,8 +2949,13 @@ def test_a_call_that_names_no_destination_anywhere_still_defaults(off_tree):
     Refusing mis-named destination keys is the contract; requiring `file` would
     break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
     omit it, while preventing nothing this refusal does not already prevent. The
-    question reopens only on an observed mis-route of a call that omits `file` —
-    never for an alias key, which the refusal catches on read and write alike.
+    question reopens only on an observed mis-route the shipped property guard
+    fails to refuse — a call that stated a destination in a routable argument
+    outside `file` and was answered the default anyway — never for an alias key,
+    which the refusal catches on read and write alike, and never for a call that
+    merely omits `file`: naming a destination nowhere was DEFAULTED, not
+    mis-routed (re-ruled 2026-10-25; the three reads it cited are labelled in
+    the lane note above the ruling constants).
     What is new here is WHICH keys are never scanned: `entry`, `old_text` and
     `new_text` hold prose that legitimately names a file — the 2026-09-28 clean-up
     calls pass `memory_remove({"entry": "Removing misrouted row 1 from MEMORY.md"})`

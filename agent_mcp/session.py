@@ -201,13 +201,25 @@ def _misnamed_destination(params: dict) -> Optional[str]:
        off that pattern has not named anything, route-marked or not.
 
     `file` stays optional, with its `MEMORY.md` default, on all four memory
-    tools: #1729 ruled that settled on 2026-09-29 and #1796 re-affirmed it on
-    2026-09-30. Refusing a destination that arrives under any other key, or in
-    any other place, is the contract; requiring `file` would break the 10 of 15
-    `memory_remove` calls and the one `memory_replace` call that omit it, while
-    preventing nothing this refusal does not already prevent. The question
-    reopens only on an observed mis-route of a call that omits `file` — never
-    for an alias key, which the refusal catches on read and write alike. A call
+    tools: #1729 ruled that settled on 2026-09-29, #1796 re-affirmed it on
+    2026-09-30, and the same question asked a fourth time was ruled settled
+    again on 2026-10-25 with its discriminator named — the sentence this one
+    replaces read as though three DEFAULTED reads could reopen it. Refusing a
+    destination that arrives under any other key, or in any other place, is the
+    contract; requiring `file` would break the 10 of 15 `memory_remove` calls
+    and the one `memory_replace` call that omit it, while preventing nothing
+    this refusal does not already prevent. The question reopens only on an
+    observed mis-route the shipped property guard fails to refuse — a call that
+    stated a destination in a routable argument outside `file` and was answered
+    the loaded index anyway — never for an alias key, which the refusal catches
+    on read and write alike, and never for a call that merely omits `file`: a
+    call that names a destination nowhere was DEFAULTED, not mis-routed, so a
+    refusal has nothing to name. That is the shape of the three `memory_read`
+    calls the 2026-10-25 pass cited: each sent only `summary`, which is in
+    `_NON_ROUTE_KEYS` and never scanned, so all three defaulted as designed and
+    not one of them weighs against the ruling. The dated record, each read
+    labelled, is the lane note above the ruling constants in
+    tests/test_memory_writer_lane.py. A call
     that puts a route anywhere other than `file` has stated which file it meant
     to name, and quietly answering with the loaded index instead is the defect: a
     write appends 2,290 B there (#1729) and a read hands back its bytes as if
