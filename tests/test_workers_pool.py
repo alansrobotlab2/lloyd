@@ -2075,7 +2075,7 @@ async def test_the_watch_is_silent_on_a_re_armed_or_disabled_source(q, monkeypat
 
 
 def _one_stalled_source(q, *, age_s: float = 200.0, interval: int = 60,
-                        repoll=None, announce=None):
+                        repoll=None):
     """A watch over one source whose clean stamp is `age_s` old, and nothing else.
 
     200 s on a 60 s source is `scheduled-task`'s real shape: past its 180 s threshold.
@@ -2089,7 +2089,7 @@ def _one_stalled_source(q, *, age_s: float = 200.0, interval: int = 60,
     watch = dispatch_watch.DispatchWatch(
         queue=q,
         sources=lambda: {"s": {"enabled": True, "interval_seconds": interval}},
-        announce=(lambda *a: said.append(a)) if announce is None else announce,
+        announce=lambda *a: said.append(a),
         repoll=set() if repoll is None else repoll)
     return watch, said
 
@@ -2242,6 +2242,11 @@ async def test_one_announced_stall_leaves_one_log_line(q, monkeypatch, caplog):
     assert logged[0][1].startswith("dispatch_watch: dispatch stalled: s — "), logged[0]
     assert [lvl for lvl, _ in logged] == [logging.WARNING], (
         f"the surviving line is not the module's own WARNING: {logged}")
+
+
+# ---------------------------------------------------------------------------
+# #1606 — the summary is cut on a word, and says so
+# ---------------------------------------------------------------------------
 #
 # `runs.summary` is 500 characters wide and every reader of a run — the
 # dashboard cell, the fleet-watchdog alert, the `grep` over a day of rows — reads
