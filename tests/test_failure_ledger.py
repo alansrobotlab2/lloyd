@@ -11,7 +11,9 @@ could get wrong without a red test:
    own onset;
 3. ingestion reads the rotated archive AND the live ledger, because the live file
    alone understates the guardian's own family as 2 occurrences instead of 18;
-4. both detectors emit rows, with growth measured over active days only;
+4. both detectors emit rows, with growth judged on two arms — a 2x-active-median
+   bar where the trailing window holds a rate, and `GROWTH_MIN_COUNT` alone where it
+   holds none (#3281);
 5. one investigation run per day, with a record-id-bounded prompt.
 
 Everything runs against a `tmp_path` database and fixture files written into
@@ -396,7 +398,7 @@ def test_a_warn_alert_is_not_counted_as_a_failure(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Clause 4 — detectors emit rows; growth is over ACTIVE days only
+# Clause 4 — detectors emit rows; growth on the median arm and the silent arm
 # ---------------------------------------------------------------------------
 
 
@@ -406,14 +408,35 @@ def kinds(conn: sqlite3.Connection, day: str = TODAY) -> list[tuple[str, str]]:
         "ORDER BY kind, signature", (day,)).fetchall()]
 
 
-def test_a_day_old_family_trips_new_onset_and_not_growth(tmp_path):
+def test_an_onsetting_burst_trips_both_detectors_and_stamps_one_finding_each(tmp_path):
+    """#3281 clause 1: the same burst IS a new onset and growth from silence.
+
+    Three events today with nothing in the 7 days before them: new-onset fires on
+    `first_seen`, and growth now fires on the silent-baseline arm instead of being
+    discarded for having no rate to compare against. This node asserted the opposite
+    (`detect_growth(...) == []`) until #3281, which is the shape the live ledger
+    actually produces — the store's 3 median-None burst-days against 1 day that
+    cleared the 2x bar.
+
+    Two findings is not two runs: `dispatch_findings` spends one investigation a day,
+    which is what keeps a detector that gained an arm from doubling the queue.
+    """
     conn = ledger(tmp_path)
     sig = seed(conn, "kg rebuild died: vault lock held",
                [NOW - timedelta(hours=9), NOW - timedelta(hours=6),
                 NOW - timedelta(hours=3)])
     ids = fl.detect_new_onset(conn, now=NOW)
     assert ids and kinds(conn) == [(sig, "new_onset")]
-    assert fl.detect_growth(conn, day=TODAY) == []
+    growth = fl.detect_growth(conn, day=TODAY)
+    assert len(growth) == 1, \
+        f"3 events with an empty trailing window is one growth finding, got {growth}"
+    assert kinds(conn) == [(sig, "growth"), (sig, "new_onset")], \
+        "one finding per detector and no more"
+    row = conn.execute(
+        "SELECT detected_on, occurrences FROM failure_findings WHERE kind = 'growth'",
+    ).fetchone()
+    assert tuple(row) == (TODAY, 3), \
+        "the growth row carries the day it detected and the count on the reviewed day"
 
 
 def test_growth_trips_at_twice_the_active_day_median_and_new_onset_does_not(tmp_path):
@@ -436,18 +459,80 @@ def test_growth_trips_at_twice_the_active_day_median_and_new_onset_does_not(tmp_
     assert fl.detect_new_onset(conn, now=NOW) == []
 
 
-def test_an_all_zero_trailing_window_never_trips_growth(tmp_path):
-    """Five events today and nothing in the 7 days before it: there is no rate to
-    compare against, so growth cannot fire. `median_active` returns None rather
-    than 0.0 precisely so a caller cannot turn that absence into a threshold of
-    zero, which would trip every family on its first bad day.
+def test_an_all_zero_trailing_window_fires_the_silent_baseline_arm(tmp_path):
+    """#3281 clause 1: five events and NOTHING in the 7 days before IS growth.
+
+    This node pinned the opposite until #3281, and the discarded shape is the live
+    one: family `04f90c87b03a` logged 8 events on 2026-10-21 with an empty trailing
+    window, and the pass wrote `failure-ledger 2026-10-22: 0 finding(s), 8 event(s)
+    new, investigation queue_id=None`.
+
+    `median_active` still returns None. The arm is a separate test of that absence,
+    never a median coerced to zero — `median or 0` would read "no history" as a
+    history of zero and trip every family on every day it reaches 3.
     """
     conn = ledger(tmp_path)
     sig = seed(conn, "djev shadow worker died: cuda oom",
                [NOW - timedelta(hours=h) for h in (11, 10, 9, 8, 7)])
-    assert fl.median_active(fl.trailing_counts(conn, sig, TODAY)) is None
+    assert fl.median_active(fl.trailing_counts(conn, sig, TODAY)) is None, \
+        "None has to stay None: the caller discriminates on it, it does not default it"
+    ids = fl.detect_growth(conn, day=TODAY)
+    assert len(ids) == 1, f"5 events from silence is one growth finding, got {ids}"
+    assert kinds(conn) == [(sig, "growth")]
+    row = conn.execute("SELECT occurrences FROM failure_findings").fetchone()
+    assert row[0] == 5
+
+
+def test_two_events_on_a_silent_day_trip_no_growth_finding(tmp_path):
+    """#3281 clause 2: on the silent arm `GROWTH_MIN_COUNT` is the ONLY bar.
+
+    The day's investigation is one run, so a two-event family must not be able to
+    spend it. Nothing here compares the count to a median — there is no median — and
+    the thing that refuses this family is the `count < GROWTH_MIN_COUNT` gate, which
+    the new arm did not widen.
+    """
+    conn = ledger(tmp_path)
+    sig = seed(conn, "vision node published no frames",
+               [NOW - timedelta(hours=10), NOW - timedelta(hours=9)])
+    assert fl.GROWTH_MIN_COUNT == 3
+    assert fl.median_active(fl.trailing_counts(conn, sig, TODAY)) is None, \
+        "this is the silent arm, so the count gate is the whole bar"
     assert fl.detect_growth(conn, day=TODAY) == []
     assert kinds(conn) == []
+
+
+def test_a_family_that_has_a_baseline_is_still_judged_only_by_the_two_x_median(tmp_path):
+    """#3281 clause 3: the live family's own numbers still do not fire.
+
+    Rebuilt from the store's real shape for signature `04f90c87b03a`: 23 events on
+    2026-09-25, 4 on 09-26, 11 on 09-30, 8 on 10-02. Reviewing 09-30 puts 23 and 4 in
+    the window, an active median of 13.5 and a 2x bar of 27.0, so 11 does not clear
+    it; reviewing 10-02 puts 23, 4 and 11 in the window, a median of 11.0 and a bar of
+    22.0, so 8 does not either. The new arm widened nothing for a family that HAS a
+    rate — and the pair here is the measured one (11 vs 13.5, 8 vs 11.0), not the
+    #3281 text's mis-stated "09-30 (n=11, median 11)".
+
+    The same store's 09-25, with 23 events and an empty window, is the arm this round
+    added: it fires.
+    """
+    conn = ledger(tmp_path)
+    stamps = ([datetime(2026, 9, 25, 1, 35, k, tzinfo=timezone.utc) for k in range(23)]
+              + [datetime(2026, 9, 26, 3, k, tzinfo=timezone.utc) for k in range(4)]
+              + [datetime(2026, 9, 30, 4, k, tzinfo=timezone.utc) for k in range(11)]
+              + [datetime(2026, 10, 2, 5, k, tzinfo=timezone.utc) for k in range(8)])
+    sig = seed(conn, "runtime data is being written into the code tree", stamps)
+
+    assert fl.median_active(fl.trailing_counts(conn, sig, "2026-09-30")) == 13.5
+    assert fl.detect_growth(conn, day="2026-09-30") == [], \
+        "11 events against a median of 13.5 is not growth"
+    assert fl.median_active(fl.trailing_counts(conn, sig, "2026-10-02")) == 11.0
+    assert fl.detect_growth(conn, day="2026-10-02") == [], \
+        "8 events against a median of 11.0 is not growth"
+    assert conn.execute("SELECT COUNT(*) FROM failure_findings").fetchone()[0] == 0
+
+    assert len(fl.detect_growth(conn, day="2026-09-25")) == 1, \
+        "23 events with nothing in the window before them is the burst the old code threw away"
+    assert kinds(conn, "2026-09-25") == [(sig, "growth")]
 
 
 def test_zero_days_are_not_in_the_growth_median(tmp_path):

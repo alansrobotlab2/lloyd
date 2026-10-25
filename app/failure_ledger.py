@@ -458,12 +458,26 @@ def get_issue(conn: sqlite3.Connection, sig: str) -> sqlite3.Row | None:
 NEW_ONSET_MAX_AGE_H = 24.0
 NEW_ONSET_MIN_OCCURRENCES = 3
 
-#: Growth is today's count against 2x the trailing-7-day median, over the days
-#: that actually had an event. Including zero-days in that median is the bug:
-#: an intermittent family's median over `[0,0,0,2,0,3,0]` is 0.0, which either
-#: trips on nothing or, guarded by `median > 0`, can never trip at all. Only the
-#: active days carry a rate, so `median_active` is the honest denominator and an
-#: all-zero trailing window means "no rate to compare against" — never a trip.
+#: Growth has two arms, and which one applies is decided by whether the trailing
+#: 7-day window holds a rate at all.
+#:
+#: * A window that recorded events: 2x `median_active` — the median over the days
+#:   that actually had an event. Including zero-days in that median is the bug: an
+#:   intermittent family's median over `[0,0,0,2,0,3,0]` is 0.0, which either trips
+#:   on nothing or, guarded by `median > 0`, can never trip at all. Only the active
+#:   days carry a rate, so `median_active` is the honest denominator.
+#: * A window that recorded NO event, where `median_active` is None: `GROWTH_MIN_COUNT`
+#:   on its own, no comparison. This is the burst-from-silence arm (#3281). A family
+#:   that goes from nothing to `GROWTH_MIN_COUNT` events in one day has no rate to
+#:   compare against, and discarding it meant the detector said nothing on exactly the
+#:   days the fault was newest. Measured over the ledger copy on 2026-10-25: of the 9
+#:   signature-days that reached `GROWTH_MIN_COUNT` across 25 event days, 3 were this
+#:   shape (`04f90c87b03a` 09-25 n=23 and 10-21 n=8, `a1afbe2e3b04` 09-06 n=6), and
+#:   the one day that cleared the 2x bar (`9cd285a288f7` 09-29 n=3 vs median 1.0) is a
+#:   day no D-1 pass can ever review.
+#:
+#: The arms are separate tests, never `median or 0`: that coercion reads "no rate at
+#: all" as a rate of zero, which would trip every family on every day it reaches 3.
 GROWTH_MEDIAN_MULTIPLE = 2.0
 GROWTH_MIN_COUNT = 3
 GROWTH_WINDOW_DAYS = 7
@@ -515,6 +529,9 @@ def median_active(counts: dict[str, int]) -> float | None:
     Returns None rather than 0.0 on purpose: 0.0 is a real median reading ("it
     was quiet on the days it was open") while None means the window holds no rate
     at all, and the caller must not turn that absence into a threshold of zero.
+    None is not a reason to drop the signature either: `detect_growth` treats it as
+    its own arm, where `GROWTH_MIN_COUNT` events on the reviewed day are the whole
+    bar (#3281).
     """
     values = sorted(v for v in counts.values() if v > 0)
     if not values:
@@ -573,6 +590,17 @@ def detect_growth(conn: sqlite3.Connection, *, day: str,
     CHECK 2). A store holding >=3 same-signature events dated only the day before
     the pass therefore yields a finding AND a queue row; the pass calls this with
     `day=growth_review_day(day), detected_on=day`.
+
+    Two arms decide the finding, and the difference between them is the whole of
+    #3281. Where the trailing-7-day window recorded events, the bar is
+    `GROWTH_MEDIAN_MULTIPLE` x `median_active` and nothing else changed. Where it
+    recorded NONE — `median_active` is None — the bar is `GROWTH_MIN_COUNT`, already
+    satisfied by the gate below, and the burst is reported rather than thrown away:
+    that is the only burst shape the live ledger produces, and the pass that discarded
+    it logged "0 finding(s), 8 event(s) new, investigation queue_id=None" over a family
+    with 8 events the previous evening. An onsetting burst also trips
+    `detect_new_onset`, and the one-run-a-day cap in `dispatch_findings` is what keeps
+    two findings from costing two investigations.
     """
     stamp = detected_on or day
     ids: list[int] = []
@@ -585,8 +613,12 @@ def detect_growth(conn: sqlite3.Connection, *, day: str,
             continue
         median = median_active(trailing_counts(conn, sig, day))
         if median is None:
-            continue
-        if count >= GROWTH_MEDIAN_MULTIPLE * median:
+            # Silent-baseline arm: no rate behind the burst at all, so the count gate
+            # above IS the bar (#3281). Deliberately not `median or 0`, which would
+            # report a family with no history as a family whose history is zero.
+            ids.append(_emit_finding(conn, sig=sig, kind="growth", day=stamp,
+                                     occurrences=count))
+        elif count >= GROWTH_MEDIAN_MULTIPLE * median:
             ids.append(_emit_finding(conn, sig=sig, kind="growth", day=stamp,
                                      occurrences=count))
     conn.commit()

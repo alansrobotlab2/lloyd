@@ -400,17 +400,27 @@ def test_a_finding_that_arrives_after_the_days_run_was_sent_stays_queued(
 
     The real sequence: the morning pass dispatches, and later the same day a second
     family crosses the new-onset bar. `enqueue_if_due` must then send NOTHING — the
-    cap is one dispatch per day, not one per finding — and the new finding must
+    cap is one dispatch per day, not one per finding — and the new findings must
     still be sitting there with `dispatched = 0`, which is the number that says how
     much the ledger deliberately left uninvestigated.
+
+    Since #3281 every onsetting family files TWO findings — a new onset AND growth
+    from silence — so the counts below are findings, not families. That is the point
+    of the node sharpened rather than blurred: the cap spends one run a day however
+    many rows the detectors wrote.
     """
     conn = fl.connect(tmp_path / "failure_issues.sqlite")
     monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", tmp_path / "failure_issues.sqlite")
-    assert seed_fresh_failures(conn, families=1)
+    alpha = seed_fresh_failures(conn, families=1)
+    assert len(alpha) == 2, \
+        f"one onsetting family is one finding per detector (#3281), got {alpha}"
     queue = make_queue(tmp_path)
     assert fl.dispatch_findings(conn, DAY, queue=queue,
                                 diagnosis="Establish what changed near the onset.")
-    assert undispatched(conn, DAY) == [], "the morning pass took the first family"
+    assert len(dispatched(conn, DAY)) == 1, "the day is spent on one run"
+    assert len(undispatched(conn, DAY)) == 1, \
+        "the same family's other finding is held back, not dropped — two findings, " \
+        "one investigation"
 
     seed_fresh_failures(conn, families=1, occurrences=5, offset=1)
     sent = {sig for _, sig, _ in dispatched(conn, DAY)}
@@ -426,7 +436,9 @@ def test_a_finding_that_arrives_after_the_days_run_was_sent_stays_queued(
         queue, {"enabled": True, **fixture_cfg(tmp_path)})), \
         "watermark cleared, so this is the CAP refusing, not the interval"
     assert len(queue.list_items(source=fl.SOURCE)) == 1, "still exactly one row today"
-    assert len(undispatched(conn, DAY)) == 1, "and it is still on the ledger"
+    assert len(undispatched(conn, DAY)) == 3, \
+        "alpha's undispatched sibling plus beta's pair: three findings held, one run " \
+        "spent, every one of them still on the ledger"
     conn.close()
 
 
@@ -437,9 +449,20 @@ def test_derived_diagnosis_is_empty_once_the_days_findings_are_dispatched(tmp_pa
     `failure_dispatches` row: the cap row's real columns are
     `(day, queue_id, finding_ids)`, and a test that invented a `reason` column
     would be describing a schema the store does not have.
+
+    The store is `seed_yesterdays_burst` rather than `seed_fresh_failures` because
+    #3281 made a fresh family file two findings and the cap sends one run a day: with
+    two rows there is always an undispatched finding left, so this node would be
+    asserting a residue instead of the emptiness it is named for. The spike in an OLD
+    family files exactly one growth finding, and dispatching it is what empties the
+    day.
     """
     conn = fl.connect(tmp_path / "failure_issues.sqlite")
-    assert seed_fresh_failures(conn)
+    seed_yesterdays_burst(conn)
+    assert fl.detect_growth(conn, day=YESTERDAY, detected_on=DAY)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM failure_findings WHERE detected_on = ?",
+        (DAY,)).fetchone()[0] == 1, "one finding, so dispatching it really is 'all done'"
     assert failure_ledger.derive_diagnosis(conn, DAY).strip()
     fl.dispatch_findings(conn, DAY, queue=make_queue(tmp_path),
                          diagnosis="Establish what changed near the onset.")
@@ -478,6 +501,81 @@ def seed_yesterdays_burst(conn) -> str:
                                 ts=fl.iso_utc(stamp), run_id=stamp.isoformat())
     fl.sweep(conn)
     return sig
+
+
+def seed_yesterdays_burst_from_silence(conn) -> str:
+    """One family that did not exist before yesterday: 4 events, no trailing rate.
+
+    `seed_yesterdays_burst` is a spike inside a family the ledger already knows, so
+    its window carries a median. This is the other shape, and the one the live store
+    actually produces: measured over the ledger copy on 2026-10-25, 3 of the 9
+    signature-days that reached `GROWTH_MIN_COUNT` (3) had an EMPTY trailing-7-day
+    window, and the single day that cleared the 2x bar is one a D-1 pass can never
+    review. The pass that saw 8 events of this shape logged `0 finding(s) …
+    queue_id=None`.
+
+    Every event is dated 2026-10-02 between 00:30Z and 01:20Z — inside the reviewed
+    day, and more than 24 h before the 02:10Z pass on 10-03 — so `first_seen` falls
+    outside the new-onset window and growth is the only detector that can fire. That
+    is deliberate: a node whose finding could have come from either detector does not
+    say which one worked.
+    """
+    stamps = [datetime(2026, 10, 2, h, m, tzinfo=timezone.utc)
+              for h, m in ((0, 30), (0, 45), (1, 5), (1, 20))]
+    sig = ""
+    for stamp in stamps:
+        sig = fl.record_failure(conn, logger_name="lloyd-worker",
+                                message="voice pipeline lost the microphone: device busy",
+                                ts=fl.iso_utc(stamp), run_id=stamp.isoformat())
+    fl.sweep(conn)
+    return sig
+
+
+def test_a_burst_from_silence_reaches_the_queue_as_one_growth_finding(
+        tmp_path, monkeypatch):
+    """#3281 clause 4: the silent-baseline arm crosses the pool boundary too.
+
+    Frozen 02:10 UTC on day D, over a store whose only >=3-event same-signature burst
+    is dated D-1 with no event in the 7 days before it: exactly one `growth` finding
+    stamped D, exactly one `failure-ledger` queue row carrying that signature, and
+    exactly one `failure_dispatches` row for D. On the base the same store produced
+    none of the three — the finding was discarded at `median is None`, so there was
+    nothing for the cap to spend and the queue row nobody writes looks exactly like a
+    quiet day.
+    """
+    assert (YESTERDAY, DAY) == ("2026-10-02", "2026-10-03"), \
+        "the burst's day must be the day before the pass's, or this proves nothing"
+    monkeypatch.setattr(fl, "now_utc", lambda: EARLY_PASS)
+    db = tmp_path / "failure_issues.sqlite"
+    conn = fl.connect(db)
+    sig = seed_yesterdays_burst_from_silence(conn)
+    assert fl.median_active(fl.trailing_counts(conn, sig, YESTERDAY)) is None, \
+        "an empty trailing window is what makes this the silent arm and not the other node"
+    assert fl.detect_new_onset(conn, now=EARLY_PASS, day=DAY) == [], \
+        "the family is >24 h old at pass time, so growth is the only detector in play"
+    conn.close()
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", db)
+    queue = make_queue(tmp_path)
+
+    asyncio.run(failure_ledger.enqueue_if_due(
+        queue, {"enabled": True, **fixture_cfg(tmp_path)}))
+
+    store = fl.connect(db)
+    rows = store.execute(
+        "SELECT signature, kind, detected_on, occurrences FROM failure_findings "
+        "WHERE kind = 'growth'").fetchall()
+    assert len(rows) == 1, f"one silent burst is one growth finding, got {tuple(rows)!r}"
+    assert tuple(rows[0]) == (sig, "growth", DAY, 4), \
+        "the burst is growth, stamped the day the pass ran, with all four events counted"
+
+    qrows = queue.list_items(source=fl.SOURCE)
+    assert len(qrows) == 1, f"one burst is the day's one investigation, got {len(qrows)}"
+    assert qrows[0].payload["signatures"] == [sig] and qrows[0].payload["day"] == DAY
+    assert store.execute(
+        "SELECT COUNT(*) FROM failure_dispatches WHERE day = ?", (DAY,)).fetchone()[0] == 1
+    assert undispatched(store, DAY) == [], \
+        "dispatched=0 here would be the silent detected_on mismatch, not a fix"
+    store.close()
 
 
 def early_morning_pass(tmp_path, monkeypatch):

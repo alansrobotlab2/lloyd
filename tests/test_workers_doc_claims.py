@@ -2125,6 +2125,68 @@ def test_section6_names_the_day_growth_reviews_and_what_the_watermark_means():
         "§6's `runs_total` line citation no longer lands on the dict key it names")
 
 
+def test_section6_states_both_growth_arms_and_the_module_stopped_denying_them():
+    """#3281 clause 5: the bar §6 never stated, and the comment that denied the new one.
+
+    §6's growth bullet explained WHICH day is counted and never said what the count is
+    compared against, so a reader could not see that a family with no history was being
+    thrown away. The module comment and `median_active`'s docstring DID say so, and
+    called it the design ("never a trip") — prose that reads as a reason for behaviour
+    the code has since dropped is the failure this file exists for.
+
+    No assert here stops at a phrase. The two numbers the new bullet states are read
+    back off the constants they name, the arm is checked in the code that has to
+    implement it (a `median is None` branch that EMITS, and no `median or 0`, which is
+    the coercion the bullet forbids), and the retired sentence is checked absent from
+    the module rather than merely unfavourable.
+    """
+    from app import failure_ledger as app_fl
+
+    sub = _section(SEC6)
+    sub = sub[sub.index("### `failure-ledger`"):]
+    assert "two arms" in sub, (
+        "§6 stopped saying growth has two arms, which is the fact that decides whether "
+        "a burst from silence is a finding or a discard")
+
+    bullet = sub[sub.index("**What the counted day is compared against"):]
+    mult = re.search(r"`GROWTH_MEDIAN_MULTIPLE`[^\d\n]{0,8}(\d+(?:\.\d+)?)", bullet)
+    assert mult and float(mult.group(1)) == app_fl.GROWTH_MEDIAN_MULTIPLE, (
+        f"§6's growth bullet states no multiple the code uses (code: "
+        f"{app_fl.GROWTH_MEDIAN_MULTIPLE})")
+    minimum = re.search(r"`GROWTH_MIN_COUNT`[^\d\n]{0,8}(\d+)", bullet)
+    assert minimum and int(minimum.group(1)) == app_fl.GROWTH_MIN_COUNT, (
+        f"§6's silent-baseline arm states no floor the code uses (code: "
+        f"{app_fl.GROWTH_MIN_COUNT})")
+    assert "`GROWTH_WINDOW_DAYS`" in bullet, (
+        "§6 lost the width of the window the median is taken over")
+    for frag in ("median_active", "burst-from-silence", "median coerced to zero"):
+        assert frag in bullet, f"§6's growth arm no longer names {frag!r}"
+
+    ledger = (ROOT / "app" / "failure_ledger.py").read_text(encoding="utf-8")
+    assert "never a trip" not in ledger, (
+        "the comment that called the discard the design is back: an empty trailing "
+        "window is an arm, not a reason to stay silent")
+    growth_src = ledger[ledger.index("def detect_growth("):]
+    growth_src = growth_src[:growth_src.index("\n\ndef ")]
+    assert "if median is None:" in growth_src, (
+        "the silent-baseline arm is no longer a branch of its own, so the doc's second "
+        "arm has nothing behind it")
+    none_arm = growth_src[growth_src.index("if median is None:"):]
+    assert 'kind="growth"' in none_arm[:none_arm.index("elif")], (
+        "the None branch stopped emitting a growth finding")
+    # The coercion is named in the module and in §6 precisely in order to forbid it, so
+    # what gets checked is WHERE it is named: a `median or 0` on a non-comment line is
+    # the threshold every family trips on, not a warning about one.
+    for ln in ledger.splitlines():
+        if "median or 0" in ln:
+            assert ln.strip().startswith("#"), (
+                "the coercion the doc forbids became executable code: "
+                f"{ln.strip()!r}")
+    assert "median or 0" in bullet, (
+        "§6 stopped naming the coercion it forbids, so the next reader has no reason "
+        "to keep the two arms separate")
+
+
 def test_workers_md_does_not_restate_the_retired_unscheduled_claim():
     """The second carrier of the same retired claim, in the second workers doc.
 

@@ -1144,7 +1144,8 @@ touching it are both about not lying to the reader.
   day, so a second dispatch the same day writes nothing, and the findings the cap
   held back stay in `failure_findings` with `dispatched = 0` — which is the figure
   that says how much was deliberately left uninvestigated.
-- **Growth counts the day BEFORE the pass and is stamped with the pass's own day.**
+- **Growth counts the day BEFORE the pass, is stamped with the pass's own day, and
+  has two arms.**
   One sweep a day means the day a pass's clock names holds only the ~2 h before it
   woke — the three logged passes ran at 01:51:42, 02:03:27 and 02:38:29 UTC — so
   counting `ts[:10] == day_of(now)` looked at a slice too thin to contain the burst
@@ -1162,6 +1163,24 @@ touching it are both about not lying to the reader.
   forever while the pass logs a sensible-looking `0 finding(s)`-shaped summary:
   `tests/test_failure_ledger_dispatch.py` pins the pair from a frozen 02:10 clock
   through `enqueue_if_due` to the queue row.
+- **What the counted day is compared against — two arms, and only one of them is a
+  comparison.** Where the trailing `GROWTH_WINDOW_DAYS` = 7 window recorded events, the
+  bar is `GROWTH_MEDIAN_MULTIPLE` = 2.0 times `median_active`, the median over ONLY the
+  days that had an event (put the zero-days in and an intermittent family's median is
+  0.0, which either trips on nothing or, guarded, never). Where that window recorded NO
+  event at all, `median_active` is None and `GROWTH_MIN_COUNT` = 3 on the reviewed day
+  is the whole bar — the burst-from-silence arm #3281 added, and the only burst shape
+  this store has ever produced: measured over the ledger copy on 2026-10-25, 3 of the 9
+  signature-days that reached 3 across 25 event days had an empty window
+  (`04f90c87b03a` 09-25 n=23 and 10-21 n=8, `a1afbe2e3b04` 09-06 n=6), and the single
+  day that cleared the 2x median (`9cd285a288f7` 09-29 n=3 against 1.0) is one no D-1
+  pass can ever review. The pass that got 8 events of the silent shape wrote `0
+  finding(s), 8 event(s) new, investigation queue_id=None`. An empty window is its own
+  arm and NEVER a median coerced to zero — `median or 0` rates every family as
+  quiet-then-growing — and a family that does have a rate is judged by the bar alone:
+  09-30's 11 events against a median of 13.5 and 10-02's 8 against 11.0 both stay
+  quiet. `tests/test_failure_ledger.py` pins both arms; `tests/
+  test_failure_ledger_dispatch.py` carries the silent one through `enqueue_if_due`.
 - **`last_enqueued` is the last sweep, not the last enqueued row.** The source stamps
   it unconditionally after `sweep_and_dispatch` returns, whether or not a dispatch
   happened, so it is the interval gate's clock and answers only "has this source been
@@ -1188,9 +1207,9 @@ real ledger and the real guard logs before it, and this is what it had done
 (measured 2026-10-03): `reconcile()` over the real store reported 313 events across 30
 families, the top two holding 80 and 41 of them. Counting is what the sweep does
 alone; acting needs the pool. **The denominator is `runs`, not that event count** —
-`app/failure_ledger.py:638` `reconcile()` reports `runs_total` (`:669`) as
+`app/failure_ledger.py:670` `reconcile()` reports `runs_total` (`:701`) as
 `SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
-`source='failure-ledger'` against `workers.db` (`:660-664`, its own docstring at `:648`
+`source='failure-ledger'` against `workers.db` (`:690-696`, its own docstring at `:679`)
 already names it "the denominator for 'how much did the ledger actually do?'"), and
 `runs` rows are written only by `_insert_run()` (`_RUN_INSERT_SQL`) when a worker finishes
 one. So `runs_total` is the one
