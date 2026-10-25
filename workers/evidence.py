@@ -32,7 +32,12 @@ than a few lines in `pool.py`:
    three times over in MEMORY.md (the self-rebaselining `graph-baseline.json`,
    `_is_dependency_met`'s `if not dep_task: return True`, the dream lock whose
    absent file read as 56 years). So a bundle with nothing in it reports a gap
-   and a rate of `None` — never a clean zero.
+   and a rate of `None` — never a clean zero. Two shapes of it are the *check*
+   failing rather than the claim being wrong, and say so on their face: a
+   `count_eq` over the whole run-record corpus, which cannot hold still while the
+   graded run writes into it (#2817, `_whole_run_record_corpus`), and a body past
+   `MAX_CHECK_BYTES`, which the check was never going to read (#3295,
+   `_oversized_body`).
 
 Schema (one claim):
 
@@ -83,8 +88,17 @@ MAX_GAP_CHARS = 400
 
 # Cost bounds. A check reads at most this many bytes, and a bundle at most this
 # many claims — a run that emits 200 claims is asserting nothing in particular.
+# The bound stays; what #3295 changed is what happens on the far side of it —
+# see `_oversized_body`.
 MAX_CHECK_BYTES = 8_000_000
 MAX_BUNDLE_CLAIMS = 20
+
+# The repair an over-cap detail leads with, one per body-measuring kind. The
+# order is not stylistic: `verify_bundle` truncates a gap line to MAX_GAP_CHARS
+# with the claim in front of it, so the actionable half has to be what survives.
+_OVERSIZED_REPAIR_VALUE = "bind a smaller artefact carrying the same numbers"
+_OVERSIZED_REPAIR_COUNT = "bind a smaller artefact carrying the same count"
+_OVERSIZED_REPAIR_TEXT = "bind a smaller artefact holding the text claimed about"
 
 
 def default_root() -> Path:
@@ -175,6 +189,63 @@ def _resolve(path_value: Any, root: Path) -> tuple[Path | None, str | None]:
 def _read_text(target: Path) -> str:
     raw = target.read_bytes()[:MAX_CHECK_BYTES]
     return raw.decode("utf-8", errors="replace")
+
+
+def _oversized_body(target: Path, check_name: str,
+                    repair: str) -> tuple[str, Any, str] | None:
+    """The verdict for a body-measuring check pointed at a file it cannot read.
+
+    Returns `("insufficient", None, detail)` when `target` holds more than
+    MAX_CHECK_BYTES and so cannot be graded from what `_read_text` hands back,
+    and `None` when the check may go ahead and read it.
+
+    Every body measure grades against whatever it was handed, and past the cap
+    what it was handed is a prefix. Over `_pipeline/relations-index.json` —
+    180,645,844 bytes, 22.6x the cap, and the artifact autonomy task #24 rebuilds
+    on every run — that prefix produced four grades, none of them true, all
+    measured live on that file (#3295):
+
+    * `json_key total_relationships` died inside `json.loads` on the truncated
+      prefix and came back `insufficient` with the detail `is not valid JSON`,
+      naming a broken artifact when the file parses whole in 0.7 s with
+      548,124 relationships in it. The gap text handed the next run the model's
+      own number as the thing that failed.
+    * `regex pattern=last_updated expect=absent` came back *verified*, `observed=0`,
+      for a key sitting in the file's tail — an absence the next run was told to
+      PRESERVE.
+    * `count_eq measure=matches` and `measure=lines` with a tail pattern came back
+      `refuted observed=0`: a true claim refuted by a `[:8_000_000]`.
+
+    Truncation is a failure of the instrument, so it gets the treatment
+    `_whole_run_record_corpus` gives a corpus that cannot hold still: the status
+    stays `insufficient` — a *new status word* would have to move through
+    `CLAIM_STATUSES`, `GAP_STATUSES`, the duplicated `_ROLLUP_STATUSES` in
+    `app/autonomy.py` and the rate math, and the label was the defect, not the
+    status — and the repair leads the detail, for the same truncation reason
+    named there.
+
+    The gate is "reads a body", not "is big". `file_exists`, `count_eq
+    measure=bytes` (which reads `stat().st_size`) and `measure=files` never call
+    this, so a run keeps the ability to bind a large artifact's byte count — the
+    only workaround that ever worked here.
+
+    Streaming to the requested key was rejected rather than built: `ijson` is not
+    installed, and seeking a top-level key out of a 180 MB body would mean a new
+    dependency or a hand-rolled parser inside the grader.
+    """
+    try:
+        size = target.stat().st_size
+    except OSError:
+        # Let the read itself raise: `verify_claim` has always graded an OSError
+        # `insufficient` as `read failed: …`, and this helper adds nothing to say
+        # about a file that cannot be stat'd.
+        return None
+    if size <= MAX_CHECK_BYTES:
+        return None
+    return ("insufficient", None,
+            f"{repair} — {target} is {size:,} bytes, over the "
+            f"{MAX_CHECK_BYTES:,}-byte body-read cap, so the {check_name} check "
+            f"could not read the file it was pointed at")
 
 
 def _directory_target(target: Path, check_name: str) -> tuple[str, Any, str]:
@@ -280,8 +351,13 @@ def _check_count_eq(check: dict, root: Path) -> tuple[str, Any, str]:
         if not target.is_file():
             return ("refuted", 0, f"{target} does not exist")
         if measure == "bytes":
+            # No body read: `st_size` is the whole truth about a 180 MB file.
             observed = target.stat().st_size
         else:
+            capped = _oversized_body(target, f"count_eq measure={measure}",
+                                     _OVERSIZED_REPAIR_COUNT)
+            if capped is not None:
+                return capped
             text = _read_text(target)
             if measure == "lines":
                 pattern = check.get("pattern")
@@ -332,10 +408,16 @@ def _check_json_key(check: dict, root: Path) -> tuple[str, Any, str]:
         return _directory_target(target, "json_key")
     if not target.is_file():
         return "refuted", None, f"{target} does not exist"
+    capped = _oversized_body(target, "json_key", _OVERSIZED_REPAIR_VALUE)
+    if capped is not None:
+        return capped
     try:
         data = json.loads(_read_text(target))
     except (ValueError, TypeError) as e:
-        # Unparseable is not a false claim, it is an unreadable one.
+        # Unparseable is not a false claim, it is an unreadable one. Since #3295
+        # this arm can only be reached by a body under the cap, so it is the only
+        # place left that may call a file's JSON invalid: an over-cap prefix is
+        # evidence about nothing but the prefix.
         return "insufficient", None, f"{target} is not valid JSON: {e}"
     present, value = _dig(data, key)
     if not present:
@@ -365,6 +447,9 @@ def _check_regex(check: dict, root: Path) -> tuple[str, Any, str]:
         if want == "absent":
             return "verified", 0, f"{target} does not exist, so nothing matches"
         return "refuted", 0, f"{target} does not exist"
+    capped = _oversized_body(target, "regex", _OVERSIZED_REPAIR_TEXT)
+    if capped is not None:
+        return capped
     hits = len(re.findall(pattern, _read_text(target), re.MULTILINE))
     ok = hits > 0 if want == "match" else hits == 0
     if ok:

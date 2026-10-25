@@ -1962,3 +1962,214 @@ def test_count_eq_measure_files_over_a_path_that_is_a_file_stays_refuted(tmp_pat
         "expected": 3}}, root=tmp_path)
     assert v["status"] == "refuted" and v["observed"] == 0
     assert "is not a directory" in v["detail"]
+
+
+# ── A body past the read cap is the check's own failure (#3295) ───────────────
+#
+# `MAX_CHECK_BYTES` bounds what `_read_text` hands a check, and until #3295 every
+# body-measuring kind graded whatever came back — a prefix — as if it were the
+# file. Four such grades were measured live on 2026-10-25 over
+# `_pipeline/relations-index.json` (180,645,844 bytes, 22.6x the cap, the artifact
+# autonomy task #24 rebuilds on every run) and not one of them was true:
+#
+#   json_key total_relationships       → insufficient `… is not valid JSON`, of a
+#                                        file that parses whole in 0.7 s holding
+#                                        548,124 relationships and 4,235 documents
+#   regex pattern=last_updated absent  → VERIFIED observed=0, for a key sitting in
+#                                        the file's tail
+#   count_eq measure=matches  exp=1    → refuted observed=0
+#   count_eq measure=lines    exp=1    → refuted observed=0
+#
+# The first names a broken artifact when the artifact is fine and reads to the run
+# as a lie it told; the second is worse, because a verified claim is what the next
+# run is told to PRESERVE; the last two refute true claims. The cap is a sane cost
+# bound and stays at 8,000,000 — the label was the defect, so `_oversized_body`
+# now returns `insufficient` with the size, the cap and a repair, and no body
+# measure grades from a prefix at all.
+#
+# Every node below pins this with `MAX_CHECK_BYTES` monkeypatched to 64 rather
+# than with a 180 MB fixture: the property under test is "the bytes this check
+# needs are past the cap", and that property is identical at 64 bytes.
+
+_SMALL_CAP = 64
+
+
+def _seed_beyond_cap(tmp_path, monkeypatch, body: str, name: str):
+    """Write `body`, then drop the read cap to 64 bytes so every body-measuring
+    check is looking at a prefix of it. Returns the file."""
+    monkeypatch.setattr(evidence, "MAX_CHECK_BYTES", _SMALL_CAP)
+    f = tmp_path / name
+    f.write_text(body)
+    assert f.stat().st_size > _SMALL_CAP, "the fixture must be over the cap it pins"
+    return f
+
+
+def test_json_key_over_a_body_past_the_cap_names_the_cap_not_broken_json(
+        tmp_path, monkeypatch):
+    """#3295 clause 1. The gap line is the whole instruction the next run of task
+    #24 gets about its rebuild's two counts, and until now it read
+    `relations-index.json is not valid JSON` about a file that parses clean — an
+    accusation about the run's honesty for a limit of the instrument."""
+    assert evidence.MAX_CHECK_BYTES == 8_000_000, "#3295 moved the label, not the bound"
+
+    body = json.dumps({"relationships": {f"rel:{i}": i for i in range(40)},
+                       "total_relationships": 548124})
+    f = _seed_beyond_cap(tmp_path, monkeypatch, body, name="index.json")
+    size = f.stat().st_size
+    assert body.index("total_relationships") > _SMALL_CAP, \
+        "the requested key has to live past the cap, as it does in the real index"
+    claim = {"claim": "the rebuild stored 548124 relationships",
+             "check": {"kind": "json_key", "path": "index.json",
+                       "key": "total_relationships", "expected": 548124}}
+
+    v = verify_claim(claim, root=tmp_path)
+    assert v["status"] == "insufficient"
+    assert v["observed"] is None, "a file the check could not read is not a None value"
+    assert "not valid JSON" not in v["detail"], v["detail"]
+    assert f"{size:,}" in v["detail"], f"the detail must name the size: {v['detail']}"
+    assert "64-byte" in v["detail"], f"and the cap: {v['detail']}"
+    assert "could not read" in v["detail"], v["detail"]
+    assert v["detail"].startswith("bind a smaller artefact carrying the same numbers"), (
+        "the repair leads, as `_whole_run_record_corpus` does: a gap line is cut to "
+        f"{evidence.MAX_GAP_CHARS} chars with the claim in front of it")
+
+    b = verify_bundle([claim], root=tmp_path)
+    assert b["verified"] == [], "an unreadable claim is never a fact to preserve"
+    assert b["counts"] == {"total": 1, "verified": 0, "refuted": 0, "insufficient": 1}
+    line = b["gap"][0]
+    assert line == ("[insufficient] the rebuild stored 548124 relationships — "
+                    + v["detail"]), line
+    assert len(line) <= evidence.MAX_GAP_CHARS, (
+        f"the repair, the size and the cap all have to survive the truncation: {line}")
+
+    # The seam this item is about. That line is stored under `evidence_gaps:<id>`
+    # and replayed by `gaps_prompt` into the NEXT run of task #24, which is where
+    # "the index rebuild stored 547,931 relationships — … is not valid JSON" read
+    # as a suspicion about the run. Here it has to arrive naming the size and the
+    # cap; the carry plumbing itself is pinned by
+    # `test_the_gap_list_reaches_the_next_run_of_the_same_task`.
+    prompt = gaps_prompt(b["gap"])
+    assert "bind a smaller artefact carrying the same numbers" in prompt, prompt
+    assert f"{size:,}" in prompt, prompt
+    assert "64-byte" in prompt, prompt
+    assert "is not valid JSON" not in prompt, prompt
+
+    # Control: the same claim over the same bytes verifies as soon as the cap can
+    # reach the key, so the gate is the cap and not the file's JSON.
+    monkeypatch.setattr(evidence, "MAX_CHECK_BYTES", 8_000_000)
+    back = verify_claim(claim, root=tmp_path)
+    assert back["status"] == "verified" and back["observed"] == 548124
+
+
+def test_regex_over_a_body_past_the_cap_cannot_grade_an_absence_as_verified(
+        tmp_path, monkeypatch):
+    """#3295 clause 2, the false pass. `pattern=last_updated expect=absent` over
+    the 180 MB index returned `verified observed=0` for a key the file holds in
+    its tail, and `verify_bundle` puts a verified claim in the set the next run of
+    the task is told to preserve."""
+    body = json.dumps({"relationships": {f"rel:{i}": i for i in range(40)},
+                       "last_updated": "2026-10-25T00:09:52"})
+    f = _seed_beyond_cap(tmp_path, monkeypatch, body, name="index.json")
+    size = f.stat().st_size
+    assert body.index("last_updated") > _SMALL_CAP, \
+        "the pattern must live past the cap, as `last_updated` does in the real index"
+
+    for want in ("absent", "match"):
+        v = verify_claim({"claim": f"last_updated count ({want})", "check": {
+            "kind": "regex", "path": "index.json", "pattern": "last_updated",
+            "expect": want}}, root=tmp_path)
+        assert v["status"] == "insufficient", (want, v["status"])
+        assert v["observed"] is None, want
+        assert f"{size:,}" in v["detail"], (want, v["detail"])
+        assert "64-byte" in v["detail"], (want, v["detail"])
+
+    # Control: under a cap that reaches the tail, both arms grade as they always
+    # did — the key is there, so `absent` is genuinely refuted.
+    monkeypatch.setattr(evidence, "MAX_CHECK_BYTES", 8_000_000)
+    hit = verify_claim({"claim": "the index stamped last_updated", "check": {
+        "kind": "regex", "path": "index.json", "pattern": "last_updated",
+        "expect": "match"}}, root=tmp_path)
+    assert hit["status"] == "verified" and hit["observed"] == 1
+    miss = verify_claim({"claim": "the index has no last_updated", "check": {
+        "kind": "regex", "path": "index.json", "pattern": "last_updated",
+        "expect": "absent"}}, root=tmp_path)
+    assert miss["status"] == "refuted" and miss["observed"] == 1
+
+
+def test_count_eq_lines_and_matches_over_a_body_past_the_cap_are_not_refuted(
+        tmp_path, monkeypatch):
+    """#3295 clause 2, the false refutation. Both measures counted the prefix: on
+    2026-10-25 `measure=matches pattern=total_relationships expected=1` over the
+    180 MB index came back `refuted observed=0` for a key the file holds. Here the
+    pattern occurs twice — once inside the cap, once past it — so the truncated
+    count is 1 against a claimed 2, and the grade a run gets today is a refutation
+    of a true claim."""
+    body = '{"first":"needle",\n"pad":"' + "p" * 200 + '",\n"last":"needle"}'
+    assert body.count("needle") == 2
+    f = _seed_beyond_cap(tmp_path, monkeypatch, body, name="index.json")
+    size = f.stat().st_size
+    assert body.rindex("needle") > _SMALL_CAP, \
+        "the second hit has to live past the cap for the count to be truncated"
+
+    arms = (("lines", {"measure": "lines", "pattern": "needle", "expected": 2}),
+            ("matches", {"measure": "matches", "pattern": "needle", "expected": 2}))
+    for measure, extra in arms:
+        v = verify_claim({"claim": "the index names needle twice", "check": dict(
+            kind="count_eq", path="index.json", **extra)}, root=tmp_path)
+        assert v["status"] == "insufficient", (measure, v["status"])
+        assert v["observed"] is None, f"{measure}: a prefix is not a count of one"
+        assert measure in v["detail"], v["detail"]
+        assert f"{size:,}" in v["detail"], (measure, v["detail"])
+        assert "64-byte" in v["detail"], (measure, v["detail"])
+
+    monkeypatch.setattr(evidence, "MAX_CHECK_BYTES", 8_000_000)
+    for measure, extra in arms:
+        v = verify_claim({"claim": "the index names needle twice", "check": dict(
+            kind="count_eq", path="index.json", **extra)}, root=tmp_path)
+        assert v["status"] == "verified", (measure, v["detail"])
+        assert v["observed"] == 2, measure
+
+
+def test_body_free_checks_still_grade_a_target_past_the_read_cap(tmp_path,
+                                                                monkeypatch):
+    """#3295 clause 3. The gate is "reads a body", not "is big". `measure=bytes`
+    reads `stat().st_size` and reported all 180,645,844 bytes of the relations
+    index correctly on 2026-10-25 — it is the binding task #24 used to bound the
+    two counts this item is about, and a fix keyed on size would have taken the
+    only proof that worked away from the run."""
+    monkeypatch.setattr(evidence, "MAX_CHECK_BYTES", _SMALL_CAP)
+    store = tmp_path / "store"
+    store.mkdir()
+    f = store / "index.json"
+    f.write_text(json.dumps({"total_relationships": 548124}) + "x" * 200)
+    size = f.stat().st_size
+    assert size > _SMALL_CAP
+
+    present = verify_claim({"claim": "the index exists", "check": {
+        "kind": "file_exists", "path": "store/index.json"}}, root=tmp_path)
+    assert present["status"] == "verified" and present["observed"] is True
+    gone = verify_claim({"claim": "the index was replaced", "check": {
+        "kind": "file_exists", "path": "store/index.json",
+        "expected": False}}, root=tmp_path)
+    assert gone["status"] == "refuted" and gone["observed"] is True
+    assert "body-read cap" not in gone["detail"], gone["detail"]
+
+    exact = verify_claim({"claim": f"the index is {size} bytes", "check": {
+        "kind": "count_eq", "path": "store/index.json", "measure": "bytes",
+        "expected": size}}, root=tmp_path)
+    assert exact["status"] == "verified" and exact["observed"] == size
+    assert exact["detail"] == "", "a byte count needs no apology: the check ran"
+    wrong = verify_claim({"claim": f"the index is {size + 1} bytes", "check": {
+        "kind": "count_eq", "path": "store/index.json", "measure": "bytes",
+        "expected": size + 1}}, root=tmp_path)
+    assert wrong["status"] == "refuted" and wrong["observed"] == size
+    assert "body-read cap" not in wrong["detail"], wrong["detail"]
+
+    files = verify_claim({"claim": "one index file", "check": {
+        "kind": "count_eq", "path": "store", "measure": "files",
+        "glob": "*.json", "expected": 1}}, root=tmp_path)
+    assert files["status"] == "verified" and files["observed"] == 1
+    two = verify_claim({"claim": "two index files", "check": {
+        "kind": "count_eq", "path": "store", "measure": "files",
+        "glob": "*.json", "expected": 2}}, root=tmp_path)
+    assert two["status"] == "refuted" and two["observed"] == 1
