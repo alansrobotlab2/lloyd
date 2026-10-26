@@ -822,8 +822,10 @@ has still not been run as of 2026-09-11.
   cannot hold, so the re-stated bar asks for what a person feels (a, d) and a
   budget for the rest (b). Clearing it needs a day with real chat in it, and
   the day counted below is still the reading this page marks the four criteria
-  against: 2026-09-25. 2026-10-09 is recorded below as a later day on which all
-  four hold as well.
+  against, and 2026-10-09 is recorded below as a later day on which all four
+  hold as well — with 2026-10-23 the newest such day as counted through
+  2026-10-24 — yet naming a later clearing day re-points neither that counted
+  reading nor the four marks made against it, which stay 2026-09-25.
 - **The counted reading: 2026-09-25 00:00 → 2026-09-26 00:00 UTC** (one full
   UTC day at the shape the bar names — slots 6, 2 rounds, the
   844,969-token FP8 pool — and the first day counted at it, since the 09-23
@@ -1243,7 +1245,10 @@ has still not been run as of 2026-09-11.
   **DROPPED, not owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
 - **2026-10-09 is the newest day, as counted through 2026-10-19, on which all
-  four acceptance-bar criteria hold.** Derived by
+  four acceptance-bar criteria hold.** That bound is no longer the page's
+  headline: 2026-10-23 clears all four as counted through 2026-10-24, one bullet
+  below, and what follows re-derives this day's own figures unchanged rather than
+  restating them from memory. Derived by
   `scripts.vllm_prefix_miss_window.derive` over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-10-09.json`, byte-identical to the
   standing daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the
@@ -1266,6 +1271,47 @@ has still not been run as of 2026-09-11.
   the fleet as it runs now is the bar's shape, not its engine. 2026-10-03 clears
   the same four on the daily job's copy, which is not in the tree, so this page
   states no figure for it and headlines it nowhere.
+
+- **2026-10-23 is the newest day, as counted through 2026-10-24, on which all
+  four acceptance-bar criteria hold.** Derived by
+  `scripts.vllm_prefix_miss_window.derive` over the extract committed as
+  `tests/fixtures/vllm_prefix_miss_2026-10-23.json`, byte-identical to the
+  standing daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the
+  day's 3 chat turns carries a prefix miss, so (a) holds — over a chat
+  population of 3, thinner than 2026-10-09's 9, and still not the zero of zero
+  the bar refuses to test; 79 misses and 8,482,836 re-prefilled tokens against
+  §6.1's per-day 97 and 10.3M, which is 81.4% of the misses and 82.4% of the
+  tokens, so (b) holds with 17.6% of the token budget left and the page calls
+  that margin a budget it is inside rather than a trend; KV p50 0.160, so (c)
+  holds with room; and 3 of 2,391 two-request windows run under 15 tok/s, which
+  `derive` splits 2 with a cold engine still loading the model in flight and 1
+  sitting on a cold prefill — all 3 excluded as cold admissions, **0 counted
+  against**, so (d) holds on the ruled exclusion rather than on an unexamined
+  count. The day is 496 turns, 496 measured, 35 turns
+  carrying the 79 misses. Its pool is the one figure here this day cannot
+  produce: `derive` reports **no measured pool** for the window at all, because
+  `#2665` bounds a `GPU KV cache size:` line to its own window and this day was
+  served without a restart inside it, so the **844,969** the free-pool arithmetic
+  divides by comes from the pinned provenance beside `NO_BOOT_POOL` in
+  `tests/test_vllm_doc_claims.py`, whose committed witness puts the boot that
+  served this day at `INFO 10-19 17:59:37 … GPU KV cache size: 844,969 tokens`.
+  That boot postdates the **2026-10-12 16:21** engine, so unlike 2026-10-09 this
+  is not a pre-`a98247ab4db6` reading; which build served it is not a figure the
+  extract can produce, so this page names none. What this day does not do is
+  replace anything. 2026-09-25 stays the counted reading the four criteria are
+  marked against, and the filing-condition evidence set is unmoved — `derive`
+  gives 0 chat turns with a miss, so no event on 2026-10-23 meets the
+  accepted-loss filing condition and the paragraphs above still count four days.
+  Of the days between the two counted ones, the standing daily job's copies for
+  2026-10-20, 2026-10-21, 2026-10-22 and 2026-10-24 clear none of the four;
+  those copies are not in the tree, so this page states no figure for them and
+  the bound is a counting one, owed-check's to move with the next extract. Clearing
+  the bar is a measurement, not a ruling, and this day settles nothing by itself:
+  owed-check still owes the flip its ≥7 days of real ticks clearing both numbers and
+  the `autocode.status_pipeline` / `close_on_settle` handover decision carried from
+  #3089, and a better day moves none of the four marks made against 2026-09-25 —
+  which stays the counted reading, as §6.1's budget keeps its home above and is
+  quoted against it and no other.
 
 - **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
   vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in

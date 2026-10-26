@@ -4160,6 +4160,24 @@ def _bar_bullet() -> str:
     return _bullet_at(_BAR_HEADING)
 
 
+# #3341: the day the committed family most recently cleared. `TENTH_EXTRACT` is its
+# bytes — "tenth" is its position in the family, "newest" its place in the page's
+# argument — and the two phrases mean the same day until a later one clears.
+_NEWEST_HEADING = "- **2026-10-23 is the newest day"
+
+
+def _newest_bullet() -> str:
+    """§10's newest-clearing-day bullet, or a failure naming what went missing.
+
+    `_bullet_at` raises ValueError out of `raw.index`, which reads as an error rather
+    than as the one claim this file makes about that bullet: that the page carries it.
+    """
+    assert _NEWEST_HEADING in DOC.read_text(encoding="utf-8"), (
+        f"§10 carries no bullet starting {str(_NEWEST_HEADING)!r}, so there is no "
+        "newest-clearing-day claim on the page to check")
+    return _bullet_at(_NEWEST_HEADING)
+
+
 def _september_counted_reading() -> str:
     """The 2026-09-25 reading and its (a)/(b)/(c)/(d) bullets, byte for byte, not flattened."""
     raw = DOC.read_text(encoding="utf-8")
@@ -4317,11 +4335,19 @@ def test_the_bar_bullet_keeps_the_counted_reading_and_names_a_later_clearing_day
         "against; acknowledging a later day is not a re-point of the counted reading")
     assert "2026-10-09" in bar and "later day on which all four hold" in bar, (
         "the bar bullet still reads as though no day after the counted one had met the bar")
-    for span, where in ((bar, "the bar bullet"), (ninth_p, "the 2026-10-09 bullet")):
-        hits = re.findall(r"\b(first|second|third|fourth|fifth|sixth)\s+day\b", span)
+    # #3341: the bar's close is also where the newest clearing day gets named, so a
+    # reader who never reaches the bullet still knows which day the page headlines.
+    assert "2026-10-23" in bar, (
+        "the bar bullet's close no longer names 2026-10-23, the newest counted "
+        "clearing day, so the bar and the headline disagree about which day is newest")
+    for span, where in ((bar, "the bar bullet"), (ninth_p, "the 2026-10-09 bullet"),
+                        (_newest_bullet(), "the 2026-10-23 bullet")):
+        hits = re.findall(r"\b(first|second|third|fourth|fifth|sixth)\s+(counted\s+)?day\b",
+                          span)
         assert not hits, (
             f"{where} states a day-count ordinal ({hits}); among the committed extracts "
-            "2026-09-25 and 2026-10-09 both clear all four and the daily job's copies show "
+            "2026-09-25, 2026-10-09 and 2026-10-23 all clear all four (the three "
+            "`_committed_clearing_days` returns) and the daily job's copies show "
             "2026-10-03 doing the same, so no ordinal is derivable — the page says newest")
     assert "2026-09-25" in ninth_p and _NINTH_HEADING in raw_doc
 
@@ -5109,3 +5135,372 @@ def _sha_of_page_record(page: str) -> str:
     assert m, "the header records no sha256 for the extract, so the bytes it describes are " \
               "identifiable only by their line count"
     return m.group(1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §10's newest bar-clearing day: 2026-10-23 (#3341)
+# ─────────────────────────────────────────────────────────────────────────────
+# owed-check's owed entry on #3101 asked, as counted on 2026-10-21, "whether a
+# newer day should displace 2026-10-09 as the headline: … none after 10-09 clears
+# criterion (b)". The tenth extract (#3271, 07216627) answers it: 2026-10-23 clears
+# (a), (b), (c) and (d). This block does the two jobs #1918's rule prescribes for a
+# moved headline — move it to the date with its window-end bound, and re-bind the
+# day it displaces so that day's own superlative does not sit on the page turned
+# false — while everything already graded stays put: the counted reading, the
+# filing-condition set, 2026-09-25's four marks, and the sha-pinned bullets.
+#
+# Every figure is re-derived from the committed extract at the gate `config.yaml`
+# carries. The page's prose is the thing under test, never the source of a number.
+_NEWEST_PERDAY_MISSES = 97               # §6.1's per-day baseline, pinned above
+_NEWEST_PERDAY_TOK = 10_300_000
+_NEWEST_PERDAY_TOK_M = "10.3M"          # how §6.1 writes that budget
+_NEWEST_CLEARING_DAY = "2026-10-23"
+# The bound both "newest" claims on the page are counted through: the newest day the
+# daily job has produced an extract for. A day with no extract (2026-10-24 has none
+# committed) is neither counted nor listed, exactly as 2026-09-24 was not listed.
+# One definition, because two would let the comments diverge the first time either is
+# edited while the second assignment silently wins.
+_COUNTED_THROUGH = "2026-10-24"
+_NEWEST_HEADING_RE = re.compile(r"newest day,? as counted through (\d{4}-\d\d-\d\d)")
+
+
+def _clears_all_four(path: Path, gate: float) -> bool:
+    """Whether the committed extract in `path` clears (a), (b), (c) and (d) at `gate`
+    — the same four marks §10 grades 2026-09-25 with.
+
+    `gate` is the caller's, read from `config.yaml` by the node that asks, never a
+    literal here: a second copy of 0.60 would drift from the config the page cites,
+    and the caller's `assert gate == 0.60` would then catch the move one step before
+    the sweep silently changed its answer. The (b) thresholds come from the module
+    constants for the same reason — the sweep and the pinned per-day budget are then
+    one number, not two spellings.
+
+    The four criteria are written out rather than read from a table because §10 states
+    them in prose and `derive` publishes their inputs.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    d = W.derive(raw, gate=gate)
+    return (d["chat_turns"] > 0 and d["chat_turns_with_misses"] == 0        # (a)
+            and d["misses"] <= _NEWEST_PERDAY_MISSES                          # (b)
+            and d["reprefill_tokens"] <= _NEWEST_PERDAY_TOK                   # (b)
+            and d["kv_p50"] < gate                                           # (c)
+            and d["two_request_under_stall_not_cold"] == 0)                  # (d)
+
+
+def _committed_clearing_days(gate: float) -> list[str]:
+    """Every committed extract's day that clears all four at `gate`, oldest first."""
+    return sorted(p_.stem.rsplit("_", 1)[-1] for p_ in _tracked_extracts()
+                  if _clears_all_four(p_, gate))
+
+
+def _s10_bullets() -> list[tuple[str, str]]:
+    """§10's top-level bullets in page order, as `(day-named-in-the-heading, text)`.
+
+    Read off the RAW page, never the `s10` fixture: `_section(10)` joins its slice with
+    `" ".join(...)`, so the collapsed text has no line starts and a bullet-boundary scan
+    of it finds nothing — a check built on it passes by enumerating zero bullets, which
+    is the failure mode this helper exists to avoid. Text comes back collapsed and
+    `**`-stripped exactly as `_bullet_at` returns it, so a paragraph here compares equal
+    to the bullet another node checks.
+
+    `day` is "" for a bullet whose heading opens with no date, which is how a caller
+    tells a day count from §10's non-day bullets.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    # Asserted, not chained, as `_section` does: a bare `.group(0)` here raises
+    # AttributeError the moment §10's heading is renumbered or re-worded, and every
+    # caller of this helper dies by an error inside the helper instead of reporting
+    # what went missing — which also means the positive control a caller sets up
+    # (a day count it expects to find) never gets to run.
+    found = re.search(r"^## 10\. .*?(?=^## )", raw, re.M | re.S)
+    assert found, ("§10's heading does not match `^## 10\\. …`, so no bullet of it can be "
+                   "enumerated and every bullet-count node here would be reading nothing")
+    sec = found.group(0)
+    out = []
+    for m in re.finditer(r"^- (.+)$", sec, re.M):
+        rest = sec[m.end():]
+        nxt = re.search(r"^- |^## ", rest, re.M)
+        end = m.end() + (nxt.start() if nxt else len(rest))
+        body = " ".join(sec[m.start():end].split()).replace("**", "")
+        day_m = re.match(r"\*{0,2}(\d{4}-\d\d-\d\d)", m.group(1))
+        out.append((day_m.group(1) if day_m else "", body))
+    return out
+
+
+def _date_bullets() -> list[tuple[str, str]]:
+    """§10's date-headed bullets, page order — every day the section counts."""
+    return [(day, body) for day, body in _s10_bullets() if day]
+
+
+def _headline_paragraphs() -> list[tuple[str, str]]:
+    """§10 bullets that headline a day as CLEARING THE BAR, in page order.
+
+    Date-headed and bar-worded only: the filing-condition bullets ("The 2026-09-27
+    count: …") headline a different claim and are graded by their own nodes, so letting
+    one answer a newest-day question is the confusion this filter prevents.
+    """
+    return [(day, body) for day, body in _date_bullets()
+            if "acceptance-bar criteria hold" in body
+            or "clears all four criteria" in body]
+
+
+def test_the_newest_clearing_day_is_headlined_with_all_four_criterion_figures(
+        tenth_raw, tenth, cfg):
+    """§10 gains exactly one new top-level bullet, and every number in it is the
+    derivation's, not the prose's (#3341, clause 1).
+
+    The four criteria are named in the same breath as the figures that satisfy them,
+    because the claim being made is not "a day happened" but "this day closes the
+    bar": (a) no chat turn carries a miss, (b) both daily budgets, (c) KV p50 under
+    the gate, (d) nothing counted against the bar among the two-request windows.
+
+    It also pins the two things a re-derivation could silently lose. The chat
+    sentence must state its OWN denominator ("of 3 chat turns"): the same node shape
+    that reads "0 of 3" off 2026-10-09's "0 of 13" reads a true sentence off the
+    wrong day. And the trigger-(ii) sentence must carry its subject, because a bare
+    "3 windows" is answerable by the 10-15 bullet's "3 windows" as easily as by this
+    day's 3 of 2,391.
+    """
+    assert tenth["pool_tokens"] is None  # the pool is NOT the derivation's; next node
+    assert tenth_raw["window"][0] == "2026-10-23", (
+        f"the tenth extract is the window {tenth_raw['window']!r}, so these figures "
+        "are being pinned against the wrong day")
+    # The gate is config.yaml's, not a literal this file could keep current by accident.
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    assert tenth["chat_turns"] == 3 and tenth["chat_turns_with_misses"] == 0, (
+        f"(a) is now {tenth['chat_turns_with_misses']} of {tenth['chat_turns']} chat "
+        "turns with a miss, and the bullet states 0 of 3")
+    assert tenth["misses"] == 79 and tenth["reprefill_tokens"] == 8_482_836, (
+        f"(b) is now {tenth['misses']:,} misses / {tenth['reprefill_tokens']:,} tokens")
+    assert tenth["misses"] <= _NEWEST_PERDAY_MISSES and \
+        tenth["reprefill_tokens"] <= _NEWEST_PERDAY_TOK, (
+        "2026-10-23 no longer clears (b), so it is not a clearing day and the "
+        "headline belongs somewhere else")
+    assert tenth["kv_p50"] < gate and round(tenth["kv_p50"], 3) == 0.16, (
+        f"(c) is now kv_p50 {tenth['kv_p50']:.3f} against the {gate} gate")
+    assert tenth["two_request_windows"] == 2391, (
+        f"there are now {tenth['two_request_windows']:,} two-request windows")
+    assert tenth["two_request_under_stall"] == 3 and \
+        tenth["two_request_under_stall_cold_in_flight"] == 2 and \
+        tenth["two_request_under_stall_cold_prefill"] == 1 and \
+        tenth["two_request_under_stall_not_cold"] == 0, (
+        "(d) is no longer 3 under-stall windows of which 2 are cold in "
+        "flight and 1 a cold prefill, leaving 0 counted against")
+    assert tenth["turns"] == 496 and tenth["measured"] == 496 and \
+        tenth["turns_with_misses"] == 35, (
+        f"the day is now {tenth['measured']} measured of {tenth['turns']} turns with "
+        f"{tenth['turns_with_misses']} carrying the misses")
+
+    para = _newest_bullet()
+    # (1) Exactly ONE new top-level bullet, and it is the page's last day count.
+    date_bullets = _date_bullets()
+    assert date_bullets, (
+        "§10 enumerates no date-headed bullets at all, so this scan is vacuous and a "
+        "count of 1 from it would prove nothing — the positive control is enumeration")
+    assert sum(1 for d, b in date_bullets
+               if b.startswith("- 2026-10-23 is the newest day")) == 1, (
+        "§10 does not carry exactly one date-headed bullet headlining 2026-10-23, so "
+        "the page either repeats the newest-day claim or states it nowhere")
+    assert _headline_paragraphs()[-1] == (_NEWEST_CLEARING_DAY, para), (
+        "the newest-clearing-day bullet is not §10's last day count, so a reader meets "
+        "a stale headline after the current one")
+
+    # (2) The claim itself: newest, counted through a bound, all four criteria.
+    assert "newest day" in para, "the bullet no longer claims to be the newest"
+    m = re.search(r"newest day,? as counted through (\d{4}-\d\d-\d\d)", para)
+    assert m, (
+        "the newest-day claim carries no window-end bound, so it is a bare superlative "
+        "again — #1918's rule is the date the counter had reached, in the sentence")
+    assert m.group(1) == _COUNTED_THROUGH, (
+        f"the bullet is counted through {m.group(1)}, but the newest extract the daily "
+        f"job has produced is {_COUNTED_THROUGH}")
+    assert "clears all four criteria" in para or "four acceptance-bar criteria hold" in para, (
+        "the bullet never says which bar the day clears")
+
+    # (3) Every figure, with the comparison that makes (b) a claim rather than a count.
+    assert "0 of the day's 3 chat turns" in para, (
+        "the chat sentence lost its own denominator; a bare '0' is what 2026-10-09's "
+        "'0 of 13' also satisfies, so the wrong day could answer this claim")
+    assert "79 misses" in para and "8,482,836" in para, "the (b) figures are not stated"
+    # One decimal, because that is the precision the page renders, and the leftover
+    # half of the budget is what (b) is actually a claim about.
+    _miss_pct = 100 * tenth['misses'] / _NEWEST_PERDAY_MISSES
+    _tok_pct = 100 * tenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK
+    assert f"{_miss_pct:.1f}% of the misses" in para and f"{_tok_pct:.1f}% of the tokens" in para, (
+        f"the (b) figures lost their comparison to §6.1's budget (the day is "
+        f"{_miss_pct:.1f}% of its misses and {_tok_pct:.1f}% of its tokens): §6.1 says "
+        "over-budget is not rare, so a bare count is the claim this page avoids making")
+    assert f"{100 - _tok_pct:.1f}% of the token budget left" in para, (
+        f"the page no longer states the margin ({100 - _tok_pct:.1f}% of the token "
+        "budget), which is the difference between clearing a budget and trending down "
+        "to it — the distinction #1919's ruling turns on")
+    assert "§6.1" in para and "10.3M" in para, (
+        "the percentages are stated against no named budget, so a reader cannot check "
+        "them without leaving the bullet")
+    assert "0.160" in para, "(c)'s figure is not stated to three decimals as derived"
+    assert "2,391" in para, "(d)'s denominator is not stated"
+    assert "2 with a cold engine still loading the model in flight" in para \
+        and "1 sitting on a cold prefill" in para, (
+        "the (d) sentence lost the cold causes, which are the whole reason 3 windows "
+        "under the stall bar are not 3 windows counted against it")
+    assert "0 counted against" in para, (
+        "(d) is the criterion about what counts AGAINST the bar, and the bullet must "
+        "state that number, not merely the raw 3")
+    assert "496 turns" in para and "35 turns" in para, (
+        "the day's shape (measured of total, and how many turns carry the misses) is "
+        "what tells a reader 79 misses is 79 spread over 35 turns and not 79 in one")
+    assert _NEWEST_PERDAY_TOK_M in para, (
+        f"the comparison lost §6.1's {_NEWEST_PERDAY_TOK_M} budget, so the "
+        "percentage has no denominator")
+    # (4) The two sentences that stop this day being read as a ruling.
+    assert "not a ruling" in para and "settles nothing" in para and "four marks" in para, (
+        "the bullet does not say that a day clearing the bar settles nothing: that is "
+        "the sentence every prior clearing-day bullet carries, and it is the one that "
+        "keeps a new day from being read as the flip it is not")
+    # Pinned to this page's wording rather than the 2026-10-15 bullet's ("the filing
+    # condition remains the four days named above"), because the sentence here is the
+    # stronger one: it states WHY the set is unmoved, not just that it is.
+    assert "the filing-condition evidence set is unmoved" in para \
+        and "the paragraphs above still count four days" in para, (
+        "the bullet no longer states that the filing-condition set is unmoved, which "
+        "is the graded quantity a new clearing day is most often mistaken for — and "
+        "this bullet's whole case for that is `derive`'s 0 chat turns with a miss")
+
+
+def test_the_newest_clearing_day_pool_is_pinned_and_derive_reports_none(
+        tenth_raw, tenth, cfg):
+    """The 844,969 figure comes from `NO_BOOT_POOL`, and that is a different kind of
+    fact from every other number in the bullet (#3341, clause 2).
+
+    `derive` returns `pool_tokens = None` for this day: the extract is the daily
+    job's own output and carries no boot line, so the engine's capacity is simply
+    absent from its bytes. The pool the bullet states is therefore taken from a
+    `vllm serve` banner — and the page has been wrong about that exact number before,
+    which is why #3101 pinned the banner lines into this file's sibling fixture.
+    Asserting `pool_tokens is None` is the point: it is what records that the bullet's
+    pool figure CANNOT be re-derived from the extract, so if the pinned boot line ever
+    stops matching the page has no live source for its own capacity claim.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    assert tenth["pool_tokens"] is None, (
+        f"`derive` now reports pool_tokens {tenth['pool_tokens']!r} for 2026-10-23; "
+        "this node's reason for pinning the pool separately dies with it — if the "
+        "extract carries the pool, cite the extract instead of NO_BOOT_POOL")
+    assert NO_BOOT_POOL.get("2026-10-23") == 844_969, (
+        f"`NO_BOOT_POOL` now says {NO_BOOT_POOL.get('2026-10-23')!r} tokens for "
+        "2026-10-23, so the provenance the bullet cites no longer supports 844,969")
+    para = _newest_bullet()
+    # The bullet's OWN clause, not the quoted banner. `"844,969 tokens" in para` is
+    # answered by the boot line on its own, so it would stay green on a bullet that
+    # pasted a banner and never stated the day's pool; this demands the clause that
+    # puts the number into the free-pool arithmetic and says where it came from.
+    assert "so the 844,969 the free-pool arithmetic divides by comes from the pinned " \
+           "provenance beside `NO_BOOT_POOL`" in para, (
+        "the bullet no longer states 844,969 as the pool it divides by and names "
+        "NO_BOOT_POOL as its source. Every other number in the paragraph is derived "
+        "from the extract and this one is not — the distinction a re-boot has to be "
+        "able to check, and the reason this node exists")
+    # And the sentence saying WHY the figure needs a second source at all. The
+    # `pool_tokens is None` assert above is the same fact from the derivation side;
+    # without this one the provenance reads as decoration and a reader has no way to
+    # learn that this figure, unlike its eleven neighbours, cannot be re-derived.
+    assert "`derive` reports no measured pool for the window at all" in para, (
+        "the bullet states a pool figure without saying derive reports none for the "
+        "window, so nothing on the page marks 844,969 as the one number a reader "
+        "cannot check against the extract")
+    assert "GPU KV cache size: 844,969 tokens" in para, (
+        "the bullet names the provenance but not the boot line it pins, so the reader "
+        "cannot check the number against the banner it came from")
+
+
+def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
+        ninth_raw, ninth, cfg):
+    """2026-10-09 was the newest clearing day as counted through 2026-10-19, and is
+    not one now; #1918's rule makes an expired bound as wrong as an unbounded
+    superlative, so the displaced day has to be re-bound, not deleted (#3341, clause 3).
+
+    Two checks, because the two failure modes are different. (i) The bullet's own
+    bound must be the bound that is TRUE today — the newest day the job has produced —
+    so the page cannot carry two live "newest" claims. (ii) No paragraph §10 headlines
+    may name a day that a real extract disproves: the sweep over the daily job's
+    extracts is what makes "2026-10-23 is the newest" a derived statement rather than
+    this file's opinion, and it is the check that catches the next displacement.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    ninth_p = _ninth_bullet()
+
+    # The re-bound, kept in the same sentence the bound was born in.
+    assert "2026-10-19" in ninth_p, (
+        "the 2026-10-09 bullet lost the window-end date that scopes its own "
+        "superlative — a bound is the difference between an expired claim and a false "
+        "one (#1918)")
+    assert "2026-10-23" in ninth_p, (
+        "the 2026-10-09 bullet still reads as the page's newest-day claim without "
+        "pointing at the day that displaced it; as counted through 2026-10-19 was true "
+        "once and is false on the page today")
+    pointer = [s for s in ninth_p.split(".") if _NEWEST_CLEARING_DAY in s]
+    assert pointer, "the 2026-10-09 bullet never names the day that displaced it"
+    assert f"counted through {_COUNTED_THROUGH}" in pointer[0], (
+        "the sentence naming the newer day states no bound for it, so the displaced "
+        "bullet reads as a second unbounded superlative pointing at a second newest day")
+    assert "re-derive" in ninth_p, (
+        "the bullet no longer says its own figures are re-derived rather than carried "
+        "forward — the rule #1918 was written to enforce and the one a moved headline "
+        "makes easiest to break")
+    assert "the day predates the 2026-10-12 16:21 boot" in ninth_p, (
+        "the pre-2026-10-12 boot caveat was reworded while the bullet was re-bound; "
+        "that caveat is #3096's ruling about which engine the day ran on, not prose "
+        "this round owns")
+
+    # (i) Only one paragraph on the page may still claim to be the newest, and it
+    # must be the newest day's own bullet.
+    claimers = [(day, para_) for day, para_ in _headline_paragraphs()
+                if "newest day" in para_]
+    assert sorted(day for day, _ in claimers) == ["2026-10-09", _NEWEST_CLEARING_DAY], (
+        f"the §10 paragraphs claiming to be the newest day are "
+        f"{sorted(day for day, _ in claimers)}; a displaced headline keeps its own "
+        "bound and names the newer day, it does not keep competing with it")
+    bounds = {}
+    for day, para_ in claimers:
+        m = _NEWEST_HEADING_RE.search(para_)
+        assert m, (
+            f"the {day} paragraph claims 'newest day' with no window-end bound, so it "
+            "is the bare superlative #1918 exists to stop")
+        bounds[day] = m.group(1)
+    assert bounds[_NEWEST_CLEARING_DAY] == _COUNTED_THROUGH, (
+        f"the newest day's headline is counted through {bounds[_NEWEST_CLEARING_DAY]}, "
+        f"not {_COUNTED_THROUGH}")
+    assert bounds["2026-10-09"] == "2026-10-19", (
+        f"the displaced headline's own bound moved to {bounds['2026-10-09']}; it is the "
+        "date the counter had reached when THAT day was the newest, and re-binding it "
+        "to today would erase the history of when the page moved")
+
+    # (ii) Which day is newest is the sweep's answer, not this file's: every clearing
+    # day among the committed extracts is derived here, and the page has to name the
+    # last of them. A new extract that clears the bar therefore fails this node and
+    # names the day the headline must move to — the #1918 tripwire, so the page cannot
+    # quietly fall behind its own data. Nothing outside the repo is read: the daily
+    # job's own copies rotate, and a node grading them would go red on a rotation
+    # rather than on a false claim. (The sweep over those copies is what triage
+    # measured to bound the claim at 2026-10-24; it is recorded on the item, not here.)
+    clearing = _committed_clearing_days(gate)
+    assert _NEWEST_CLEARING_DAY in clearing, (
+        f"the committed extract for {_NEWEST_CLEARING_DAY} no longer clears all four "
+        f"criteria at the {gate} gate, so the headline this block pins is false")
+    assert max(clearing) == _NEWEST_CLEARING_DAY, (
+        f"the committed family now clears the bar latest on {max(clearing)}, not "
+        f"{_NEWEST_CLEARING_DAY}: the page's newest-day headline has to move to that "
+        "day and this one re-bound to the window-end it was counted through")
+    disproved = [p.stem.rsplit("_", 1)[-1] for p in _tracked_extracts()
+                 if not _clears_all_four(p, gate)]
+    assert disproved, (
+        "every committed extract clears all four criteria, so this sweep cannot tell "
+        "one day from another and its negative half proves nothing — the `newest` "
+        "verdict is worth nothing until something in the family fails a criterion")
+    page = DOC.read_text(encoding="utf-8")
+    assert _NEWEST_CLEARING_DAY in page, (
+        f"the page names no {_NEWEST_CLEARING_DAY} at all, so the clearing day the "
+        "sweep finds is recorded nowhere on it")
