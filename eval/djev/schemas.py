@@ -153,11 +153,21 @@ RERANK = Schema(
     # UNSET, deliberately, and this is the one place the plan's own rule was
     # tested rather than restated. Listwise `label_mass` at n=12-16 has been
     # measured at 0.446, 0.807, 0.965 and 1.000 across four runs on different
-    # corpora — a fourfold spread inside the window the design calls safe. No
-    # floor read off any one of them would mean anything for the others, so
-    # the SHADOW rows, which are the seam's own requests on the seam's own
-    # corpus, set this one. `eval/djev/replay.py --floors` prints the
-    # distribution as it accumulates.
+    # corpora — a fourfold spread inside the window the design calls safe, so
+    # no floor read off any one of them means anything for the others.
+    # The only corpus that could settle it is the seam's own shadow rows, and
+    # that corpus is frozen, not growing. The sole writer of a `rerank` row is
+    # `agent_mcp/vault.py::_djev_shadow_rerank`, below the ranking arm that the
+    # kill switch reaches only with `RECALL_RERANKER` pulled back to `qmd`:
+    # while djev is the recall's ranker the seam is structurally dark, so
+    # `eval/djev/replay.py --floors` re-prints what the two rollback windows
+    # left, not a distribution in the making. Probe 2026-10-26 — 84
+    # `label_mass` answers over 9 requests (7 on 2026-09-21, 2 on 2026-10-11,
+    # the two single-question rows carrying none), min 0.7546, p05 0.8548.
+    # Whether that residue is a usable basis is calibration's ruling, not a
+    # code change: only if djev stops being the recall's ranker does the seam
+    # record again, and `--floors` reporting `n` past 84 says it has.
+    # `architecture/djev.md` §7.3 and §11 carry the same ruling.
     label_mass_floor=None,
     gate_blocked_reason="not a gate: ranking has no cutoff to calibrate",
     notes="Ranking only. MRR 0.766 / recall@1 0.64 over 16 candidates against "

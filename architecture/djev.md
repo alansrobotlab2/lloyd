@@ -976,10 +976,20 @@ entity floor fires on 0% of its own corpus.
 **`rerank` stays unset, and that is the design's own rule holding.** Listwise
 `label_mass` at n=12–16 has measured 0.446, 0.807, 0.965 and 1.000 across four
 runs on different corpora: a fourfold spread inside the window the design calls
-safe. No floor taken from one of them means anything for the others. The shadow
-rows are the seam's own requests on the seam's own corpus, so they set this
-one. `eval/djev/replay.py --floors` prints the distribution as it accumulates.
-Read §11 before trusting it.
+safe, so no floor taken from one of them means anything for the others. The only
+corpus that could settle it is the seam's own shadow rows, and that corpus is
+frozen, not growing. The sole writer of a `rerank` row is
+`vault._djev_shadow_rerank`, sitting below the ranking arm the kill switch
+reaches only with `RECALL_RERANKER` pulled back to `qmd` (§6.1), so while djev
+is the recall's ranker the seam is structurally dark and
+`eval/djev/replay.py --floors` re-prints what the two rollback windows left —
+probe 2026-10-26: 84 `label_mass` answers over 9 requests (7 on 2026-09-21, 2 on
+2026-10-11, the two single-question rows carrying none), min 0.7546, p05 0.8548,
+p50 0.9619. Frozen, not empty: whether those 84 are a usable basis is
+calibration's ruling, and the four-corpus spread above is what says no round can
+make it today. Only if djev stops being the recall's ranker does the seam record
+again, and `--floors` reporting `n` past 84 is what would say it had. Read §11
+before trusting it.
 
 ### 7.4 djev reads option names, not only their order (#1452, 2026-09-24)
 
@@ -1495,9 +1505,18 @@ describes is real instead of structurally false, and the emitted rows carry it
 (§5.1).
 
 **What it does NOT fix.** `rerank.label_mass_floor` is still `None` — that is
-calibration's call, not a code change (§7.3), and `eval/djev/replay.py --floors`
-has to set it from the seam's own rows. So today's annotation is still 0.5; what
-changed is that the payload says so, naming the key
+calibration's call, not a code change (§7.3). This record pointed at
+`eval/djev/replay.py --floors` as the thing that would fill it in, and #3378
+retired that pointer: the sole writer of a `rerank` shadow row is
+`vault._djev_shadow_rerank`, which the kill switch reaches only with
+`RECALL_RERANKER` pulled back to `qmd`, so while djev is the recall's ranker the
+seam is structurally dark (§6.1) and `--floors` re-prints a frozen corpus rather
+than an accumulating one — probe 2026-10-26: 84 `label_mass` answers over 9
+requests, from the 2026-09-21 and 2026-10-11 rollback windows. The reopen
+condition is a real ranker rollback: only if djev stops being the recall's ranker
+does the seam record again, and `--floors` reporting `n` past 84 says it has. So
+today's annotation is still 0.5; what changed is that the payload says so,
+naming the key
 `low_label_mass_cutoff_source: "uncalibrated_fallback"` next to
 `label_mass_floor: null` (§5.1). The annotation is still advisory: no ranking is
 ever refused on it (§8.1).

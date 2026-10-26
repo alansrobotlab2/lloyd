@@ -198,8 +198,14 @@ def test_a_calibrated_schema_names_what_it_was_calibrated_on():
 def test_the_rerank_schema_has_no_floor_and_says_why():
     """The one place the design's own rule was tested rather than restated:
     listwise `label_mass` at n=12-16 has measured 0.446, 0.807, 0.965 and
-    1.000 across four runs on different corpora. No floor read off one of
-    them means anything for the others, so the shadow rows set it."""
+    1.000 across four runs on different corpora, so no floor read off one of
+    them means anything for the others. What could replace that reasoning was
+    never a growing corpus: the sole writer of a `rerank` shadow row is the
+    kill switch arm to `qmd`, so the seam is dark while djev is the recall's
+    ranker and `replay.py --floors` re-prints 84 answers over 9 requests left by
+    two rollback windows (#3378, `architecture/djev.md` §7.3). Both values below
+    are behaviour, which is why this node is the rail on any round that reaches
+    for a figure it cannot defend."""
     assert schemas.RERANK.label_mass_floor is None
     assert schemas.RERANK.threshold is None
 

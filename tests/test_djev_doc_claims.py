@@ -1333,10 +1333,294 @@ def test_the_open_gaps_no_longer_list_the_rank_cutoff_and_the_record_owns_it():
                    'floor_for("tool:rank")',          # and the one rejected…
                    "BY_SEAM",                         # …because this has no such key
                    "still `None`",                    # what is NOT fixed
-                   "replay.py --floors",              # who does set it
+                   "replay.py --floors",              # the instrument, whose corpus
+                                                      # is frozen since #3378
                    "0.446",                           # the spread that forbids one
                    "advisory",                        # and it still refuses nothing
                    "app/djev.py:307",                 # the 0.5 deliberately left alone
                    "git grep"):                       # how to re-check it
         assert needle in record, (
             f"the #3115 closed record no longer carries {needle!r}")
+
+
+# ---------------------------------------------------------------------------
+# #3378 — what the rerank floor may promise about the corpus that would set it
+#
+# Four surfaces told a reader that the `rerank` shadow rows would arrive and
+# settle `label_mass_floor`: the comment on the field itself in
+# `eval/djev/schemas.py`, the same sentence as §7.3 wraps, §11's #3115 closed
+# record, and the docstring of the test whose job is to hold the reason. None of
+# them could happen. `vault._djev_shadow_rerank` is the only writer of a
+# `rerank` row and it sits below the ranking arm the dispatch returns from
+# first (§6.1), so `djev_shadow.seam_log_stats()` answered `dark: true` for
+# `rerank` at 2026-10-26T12:12Z while `dedupe`, `entity` and `action_review`
+# each answered `dark: false` — the flag discriminates rather than sticks.
+#
+# What the log does hold is frozen, not empty: `eval/djev/replay.py --floors`
+# printed 84 `label_mass` answers over 9 `rerank` requests (min 0.7546, p05
+# 0.8548), 12 values on each of the seven 12-question rows and none on the two
+# single-question ones, all from the 2026-09-21 and 2026-10-11 rollback windows.
+# That is why the needles below are worded as they are: the retired claim misled
+# in both directions, pointing a reader at a distribution that cannot grow and
+# then reading, to whoever noticed it had not grown, as though there were
+# nothing to measure. Whether the frozen 84 are a usable floor basis is
+# calibration's ruling and stays owed; the reopen condition is a real ranker
+# rollback, observable only on live traffic.
+# ---------------------------------------------------------------------------
+
+#: The schema the comment sits on, the doc that same sentence wraps across, and
+#: the test file that exists to hold the reason. A fifth such comment inherits
+#: the four needles rather than escaping them.
+SCHEMAS_SRC = ROOT / "eval" / "djev" / "schemas.py"
+SCHEMAS_TESTS = ROOT / "tests" / "test_djev_schemas.py"
+FLOOR_COMMENTS = [SCHEMAS_SRC, DOC, SCHEMAS_TESTS]
+
+#: The retired claims. Matched against whitespace-flattened text on purpose:
+#: §7.3 breaks the sentence as "so they set this / one.", and a raw substring
+#: check sails straight through the line break and reports a green guard over
+#: the exact prose it was filed to refuse.
+RETIRED_FLOOR_NEEDLES = [
+    "set this one",                        # schemas.py's comment, and §7.3's
+    "as it accumulates",                   # both again — the growing-corpus claim
+    "set it from the seam's own rows",     # §11's #3115 closed record
+    "shadow rows set it",                  # test_djev_schemas.py's docstring
+]
+
+#: The reason the corpus is frozen, which has to be stated and not merely
+#: implied. Same trio as `test_the_shadow_docstring_names_when_the_rerank_seam_can_fire`:
+#: the switch, the value that reaches the writer, and the state that follows.
+FLOOR_REASON = ("kill switch", "qmd", "dark")
+
+#: The frozen corpus as `seam_log_stats()` and `replay.py --floors` read it at
+#: 2026-10-26T12:12Z, and the window the rows came from. Typed as literals for
+#: the same reason §6.1's probe is: a reading quoted into prose has to be
+#: dateable, or it becomes a present-state claim a new row can falsify — and a
+#: new row can only arrive through a rollback, which is what `n` passing 84
+#: would report.
+FLOOR_PROBE = "probe 2026-10-26"
+FLOOR_ANSWERS = "84"
+FLOOR_REQUESTS = "9"
+FLOOR_WINDOWS = ("2026-09-21", "2026-10-11")
+
+#: The reopen condition, in the words §7.3 and §11 both carry.
+FLOOR_REOPEN = "stops being the recall's ranker"
+
+#: §9.3 step 5's instruction to a NEW seam. True of a live seam, and the thing
+#: a round weakening the rerank prose could delete by accident.
+LIVE_SEAM_STEP5 = "Let the shadow rows accumulate, then set the floor from them"
+
+
+def _flat(text: str) -> str:
+    """Lowercased, with `#` and whitespace collapsed, so a phrase survives both
+    the doc's wrapping and a comment block's per-line `#`.
+
+    The `#` matters as much as the newline: the sentence in `schemas.py` wraps as
+    "the kill / # switch reaches", and a check that only joins lines would read
+    that as the phrase being absent from the file — the same false green the
+    newline alone would give, one character earlier.
+    """
+    return " ".join(text.lower().replace("#", " ").split())
+
+
+def _assert_no_accumulating_corpus_promise(text: str, *, where: str) -> None:
+    """Refuse prose that sends a reader to a corpus that cannot grow.
+
+    A helper rather than a node body for the reason #1372's is one: the
+    parametrised node runs it over every guarded file, and
+    `test_the_floor_needle_check_refuses_the_sentence_it_exists_to_refuse` feeds
+    it the sentences it exists to refuse. A guard whose only green path is "the
+    corpus happens not to match" cannot be told apart from one that cannot
+    match, and the file that most needs this one — `schemas.py` — is a file no
+    item's triage thought to re-read after the seam went dark.
+    """
+    flat = _flat(text)
+    for needle in RETIRED_FLOOR_NEEDLES:
+        assert needle not in flat, (
+            f"{where} still says {needle!r} about the rerank floor. The only "
+            "writer of a `rerank` shadow row is the kill-switch arm to `qmd`, so "
+            "while djev is the recall's ranker the seam is structurally dark and "
+            "the corpus is frozen: state that, and the rollback that would "
+            "reopen it.")
+
+
+def _rerank_floor_comment() -> str:
+    """The comment block sitting on `label_mass_floor=None` inside `RERANK`.
+
+    Scoped to the `RERANK` assignment because `action_review`'s floor is `None`
+    too, for a different reason (#1944: permanently shadow, a ruling, not an
+    absent corpus), and reading the wrong one would make this guard's asserts
+    pass on prose about a different seam.
+    """
+    text = SCHEMAS_SRC.read_text()
+    start = text.index("RERANK = Schema(")
+    following = re.search(r"\n[A-Z][A-Z_]+ = Schema\(", text[start + 1:])
+    assert following, "no schema follows RERANK, so its block cannot be bounded"
+    lines = text[start:start + 1 + following.start()].splitlines()
+    hits = [i for i, line in enumerate(lines)
+            if line.strip() == "label_mass_floor=None,"]
+    assert len(hits) == 1, (
+        f"`label_mass_floor=None` is not a single line inside RERANK "
+        f"(lines {[i + 1 for i in hits]}), so this guard cannot tell which "
+        "field's comment it is reading")
+    end = hits[0]
+    begin = end
+    while begin - 1 >= 0 and lines[begin - 1].lstrip().startswith("#"):
+        begin -= 1
+    assert begin < end, (
+        "the rerank floor has lost its comment entirely: `label_mass_floor=None` "
+        "now sits under nothing, and the reason it stays None is unreadable")
+    return "\n".join(lines[begin:end])
+
+
+def _rank_record(text: str) -> str:
+    """Everything after §11's #3115 closed heading."""
+    assert RANK_CLOSED_HEADING in text, (
+        "§11 has lost the #3115 closed record that this item's ruling has to be "
+        "written into")
+    return text.split(RANK_CLOSED_HEADING, 1)[1]
+
+
+@pytest.mark.parametrize("path", FLOOR_COMMENTS,
+                         ids=["schemas.py", "djev.md", "test_djev_schemas.py"])
+def test_no_floor_comment_promises_a_corpus_that_cannot_grow(path):
+    """Clauses 1 and 4, the absence half.
+
+    "The SHADOW rows … set this one / `replay.py --floors` prints the
+    distribution as it accumulates" was the sentence in three files, and §11's
+    "has to set it from the seam's own rows" was the fourth. Each one sends the
+    next reader to wait on rows that arrive only on the rollback path, which is
+    the waiting that kept #3115's owed entry open after its own record closed.
+    """
+    _assert_no_accumulating_corpus_promise(path.read_text(), where=path.name)
+
+
+def test_the_rerank_floor_comment_names_the_kill_switch_and_the_frozen_corpus():
+    """Clauses 2 and 3, by presence: the reason and the real state of the
+    corpus, not just the deletion of the old ones.
+
+    The trio is the same one the shadow module's docstring is held to
+    ("kill switch", "qmd", "dark"), so a rewording that keeps the sentence
+    pretty but loses the mechanism fails here rather than in the next triage.
+    The figures are asserted because the correction that was filed on the item
+    is a measurement: the corpus is frozen at 84 answers over 9 requests, and
+    prose saying it is empty is as wrong as prose saying it grows.
+    """
+    comment = _flat(_rerank_floor_comment())
+    for needle in FLOOR_REASON:
+        assert needle in comment, (
+            f"the floor comment no longer names {needle!r}: it has to say that "
+            "the seam is dark because the only writer is the kill switch arm to "
+            "`qmd`, and not merely that the floor is unset")
+    assert "_djev_shadow_rerank" in comment, (
+        "the comment lost the name of the only writer, which is the half a "
+        "reader follows to check the claim — the arm is findable, a prose "
+        "description of 'the shadow path' is not")
+    assert "frozen" in comment, (
+        "the comment no longer says what the corpus is: not growing, not empty, "
+        "frozen at what the two rollback windows left")
+    for figure in (FLOOR_PROBE, FLOOR_ANSWERS, FLOOR_REQUESTS) + FLOOR_WINDOWS:
+        assert figure in comment, (
+            f"the floor comment lost {figure!r}. The 84/9 figures are a dated "
+            "probe of a frozen corpus; dropping either the date or the figures "
+            "leaves a reader who cannot re-measure it")
+    from eval.djev import schemas
+    assert schemas.RERANK.label_mass_floor is None, (
+        "the comment explains why the floor is None, and it is not None — so "
+        "either the seam reopened through a real rollback and the probe moved, "
+        "or a round typed a number here that #3378 left to calibration")
+
+
+def test_section_7_3_and_the_3115_record_carry_the_ruling_and_the_reopen_condition():
+    """Clause 4, the presence half: the doc's two surfaces carry the same
+    ruling as the code comment, plus the condition under which the seam records
+    again.
+
+    Both places are held to the same needles because they are read by different
+    audiences — §7.3 by whoever is deciding a floor, §11 by whoever is reading
+    the closed item that promised one — and one of them carrying the truth while
+    the other still reads as a to-do is the shape this page's own records keep
+    re-filing.
+    """
+    text = _doc_text()
+    places = [("§7.3", text[text.index("### 7.3"):text.index("### 7.4")]),
+              ("the §11 #3115 closed record", _rank_record(text))]
+    for where, body in places:
+        body = _flat(body)
+        for needle in FLOOR_REASON:
+            assert needle in body, (
+                f"{where} no longer states the mechanism ({needle!r}): the floor "
+                "is None because the only writer of a `rerank` row is the "
+                "kill-switch arm to `qmd` and the seam is dark while djev ranks")
+        assert "frozen" in body, f"{where} lost the word the corpus is: frozen"
+        assert FLOOR_PROBE in body, (
+            f"{where} lost {FLOOR_PROBE!r}, so the 84/9 figures are an undated "
+            "present-state claim again")
+        for figure in (FLOOR_ANSWERS, FLOOR_REQUESTS) + FLOOR_WINDOWS:
+            assert figure in body, f"{where} lost {figure!r}"
+        assert FLOOR_REOPEN in body, (
+            f"{where} no longer states the reopen condition — the seam records "
+            "again only if djev stops being the recall's ranker, which is the "
+            "half that turns 'unset' from a dead end into a waiting state")
+
+
+def test_the_floor_needle_check_refuses_the_sentence_it_exists_to_refuse():
+    """The guard's red side, which is the only thing separating it from a no-op.
+
+    Three feedings, one per retired spelling, and the middle one is the point of
+    `_flat`: the doc's own sentence has the needle split across a line break, so
+    a guard written as a plain substring check over the raw text is green over
+    the prose it was filed to refuse. The paired green half is the real text of
+    all three files — without it this node would only prove the helper is noisy.
+    """
+    schema_sentence = (
+        "No floor read off any one of them would mean anything for the others, "
+        "so the SHADOW rows, which are the seam's own requests on the seam's own "
+        "corpus, set this one. `eval/djev/replay.py --floors` prints the "
+        "distribution as it accumulates.")
+    with pytest.raises(AssertionError) as raised:
+        _assert_no_accumulating_corpus_promise(schema_sentence, where="schemas.py")
+    assert "set this one" in str(raised.value), (
+        f"it raised, but not on the phrase — the needles have moved and the "
+        f"parametrised node is guarding something else: {raised.value}")
+
+    doc_sentence = (
+        "The shadow rows are the seam's own requests on the seam's own corpus, "
+        "so they set this\none. `eval/djev/replay.py --floors` prints the "
+        "distribution as it accumulates.")
+    with pytest.raises(AssertionError) as wrapped:
+        _assert_no_accumulating_corpus_promise(doc_sentence,
+                                               where="architecture/djev.md")
+    assert "set this one" in str(wrapped.value), (
+        "the check did not survive the doc's line break: it saw 'set this' and "
+        f"'one.' on either side of a newline and passed the sentence through — "
+        f"this is the sentence §7.3 shipped. Raised: {wrapped.value}")
+
+    with pytest.raises(AssertionError) as record:
+        _assert_no_accumulating_corpus_promise(
+            "`eval/djev/replay.py --floors` has to set it from the seam's own "
+            "rows.", where="§11")
+    assert "set it from the seam's own rows" in str(record.value), (
+        f"the §11 spelling got past the needles: {record.value}")
+
+    for path in FLOOR_COMMENTS:
+        _assert_no_accumulating_corpus_promise(path.read_text(),
+                                               where=path.name)
+
+
+def test_the_onboarding_step_still_sends_a_new_seam_to_its_own_rows():
+    """Clause 5: the rail against over-correcting.
+
+    §9.3 step 5 tells whoever adds a seam to let its shadow rows accumulate and
+    set the floor from them. That is true of a live seam, and `tests/conftest.py`
+    cites the step by number as its own reason for existing, so the sentence has
+    to survive this round. What #3378 retires is the claim about `rerank`, whose
+    rows cannot accumulate — not the instruction the next seam needs, and a
+    guard that only noticed step 5 going missing would have let a round delete
+    the page's only calibration route to look consistent.
+    """
+    step = " ".join(_step(_procedure(_doc_text()), 5).split())
+    assert LIVE_SEAM_STEP5 in step, (
+        "§9.3 step 5 no longer tells a new seam to accumulate its shadow rows "
+        "and set the floor from them. That is the route for a live seam; "
+        "weakening the rerank prose is not a reason to delete it, and conftest "
+        f"quotes this step for exactly that. Read: {step!r}")
