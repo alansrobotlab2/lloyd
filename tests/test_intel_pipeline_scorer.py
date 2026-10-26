@@ -3311,6 +3311,23 @@ def _eligibility_comment_block() -> str:
     return block
 
 
+def _prose(site: str) -> str:
+    """A comment run or docstring reflowed into one line of prose.
+
+    Both sites wrap at column ~85, so a phrase a ruling states can straddle a line break
+    with the comment marker in the middle of it — "the text the grader is\n# shown". A
+    raw-substring check would then grade where the wrapper broke a sentence, and a passing
+    node would be a coincidence of reflow rather than of the ruling being present. Comment
+    markers go first, then every run of whitespace collapses to one space.
+
+    The forbidden-phrase checks run against the raw text AS WELL, because collapsing is
+    also the direction that can invent an adjacency ("owed" at one line's end and
+    "on #2314" at the next) and a deferral must not be able to hide by being unwrapped.
+    """
+    return " ".join(
+        " ".join(line.lstrip().removeprefix("#") for line in site.splitlines()).split())
+
+
 def _allocation_header_item(number: int) -> str:
     """One numbered component of the `SOURCE_ALLOCATION_RANK` header block."""
     lines = SCORING_TEXT.splitlines()
@@ -3325,35 +3342,121 @@ def _allocation_header_item(number: int) -> str:
 
 
 def test_no_prose_calls_the_allocation_number_the_number_that_decided_eligibility():
-    """Clause 1: the equality claim is gone, and the owed list lost the rank.
+    """Clause 1: the equality claim is gone, and the block no longer lists the rank as owed.
 
     Two halves, both read from `scoring.py`'s own bytes. First, the phrase itself:
     `grep -n 'same number that' scoring.py` returned exactly one hit (the header item
     above `SOURCE_ALLOCATION_RANK`), so the whole file must be free of it. Second, the
-    forward pointer above the eligibility read, which used to list "the allocation
-    ranking above" among the readers still owed a ruling on #2314 and to call them "those
-    three" while naming four: it now leaves exactly the prompt, the fallback's own score
-    and project matching owed, and records the rank's ruling with its own item id.
+    forward pointer above the eligibility read, which used to name "those three" as owed
+    a ruling on #2314 while listing four readers, "the allocation ranking above" among
+    them — the rank's own ruling was settled separately by #3144 owed 3, and #3384
+    settled the other three, so the sentence this node used to split the block on is now
+    gone. It splits on the rank's own sentence instead, which is the seam that has to
+    stay: three readers on one side of it, the rank's ruling on the other. Anchoring on
+    the owed sentence is precisely what made the old prose impossible to delete, and an
+    anchor that moves with the ruling is the point of locating the block from the read.
     """
     assert "same number" not in SCORING_TEXT, (
         "a comment in scoring.py again calls one read 'the same number' as the other; "
         "eligibility and the allocation rank read two different texts")
 
-    block = _eligibility_comment_block()
-    owed, found, ruled = block.partition("the ruling on those three is owed on #2314")
+    readers, found, rank = _prose(_eligibility_comment_block()).partition(
+        "allocation ranking above")
     assert found, (
-        "the eligibility block no longer says which readers stay owed on #2314, so the "
-        f"list below cannot be checked against it:\n{block}")
+        "the eligibility block no longer separates the readers that stay on the stripped "
+        f"copy from the allocation rank, so neither list can be checked:\n"
+        f"{_prose(_eligibility_comment_block())}")
 
-    for reader in ("`_score_prompt`", "fallback's own score", "project matching"):
-        assert reader in owed, f"{reader} is no longer named as an owed reader"
-    assert "allocation" not in owed.lower(), (
-        "the allocation ranking is listed among the readers still owed a ruling on "
-        "#2314, which #3144 settled")
-    assert "no longer on that list" in ruled, ruled
-    for marker in ("#3144", "owed 3", "allocation", 'f"{item.title} {item.summary}"'):
-        assert marker in ruled, (
+    for reader in ("`_score_prompt`", "fallback's own score", "`_keyword_fallback`",
+                   "project matching", "`match_projects`"):
+        assert reader in readers, f"{reader} is no longer named as staying stripped"
+    assert "allocation" not in readers.lower(), (
+        "the allocation ranking is back among the readers whose copy is still unsettled, "
+        "which #3144 owed 3 settled")
+    assert "no longer on that list" in rank, rank
+    for marker in ("#3144", "owed 3", 'f"{item.title} {item.summary}"'):
+        assert marker in rank, (
             f"the eligibility block does not record the rank's ruling ({marker} missing)")
+
+
+def test_the_eligibility_block_owes_its_three_readers_to_no_open_item():
+    """Clause 2: the pointer above the read is a ruling, and sends nobody anywhere.
+
+    Both parents are closed — #2314 and #3144 are each `status: done` in the vault — and
+    the block above `kw_score` still sent a reader to #2314 for a ruling on the prompt,
+    the fallback's own score and project matching that had been made four days after that
+    item closed. A pointer into a closed item is not a TODO: following it returns nothing,
+    and the reader concludes the code has no answer when the answer exists. So the block
+    is pinned on the ruling itself, cited by owed entry, and on there being no remaining
+    deferral in it.
+    """
+    block = _eligibility_comment_block()
+    prose = _prose(block)
+    assert "owed on #2314" not in block, (
+        "the block defers to #2314 again, which is closed and has nothing left to say")
+    assert "open scope question" not in block, block
+    assert "nothing left owed" in prose, (
+        "the block does not say outright that nothing remains owed for these readers")
+    assert "#3144 owed 1" in prose, "the block does not cite the ruling that closed it"
+    for phrase in ("by ruling", "not by omission"):
+        assert phrase in prose.lower(), (
+            f"the block does not call the three readers' copy a ruling ({phrase} missing)")
+
+
+def test_stage1_filter_records_the_ruling_on_its_three_sibling_readers():
+    """Clause 1: `stage1_filter`'s own docstring answers, instead of asking.
+
+    The docstring has named this function's three sibling readers of `item.summary` since
+    #2241 and called widening them "an open scope question on that item". #3144 owed 1
+    answered it on 2026-10-26: the three stay on the stripped copy, because all three emit
+    published output and widening them would push the link-block and channel boilerplate
+    the strip exists to remove back into `knowledge/`, on a gain measured at zero
+    `grade_source: call_cap` rows across the four days of day files after #2314 landed and
+    70 of 70 graded rows model-graded. An answered question left written as open is how
+    the next round re-opens it. Read off the function, not by line number, so relocating
+    the prose cannot make this node silently vacuous.
+    """
+    doc = scoring_mod.stage1_filter.__doc__ or ""
+    prose = _prose(doc)
+    assert doc.strip(), "stage1_filter has no docstring"
+    assert "open scope question" not in doc, (
+        "the docstring points at a question #3144 owed 1 answered on 2026-10-26")
+    for reader in ("_score_prompt", "_keyword_fallback", "match_projects"):
+        assert reader in prose, (
+            f"{reader} is no longer named as reading the stripped published copy")
+    assert "#3144 owed 1" in prose, "the docstring does not cite the ruling that closed it"
+    for reason in ("the text the grader is shown",
+                   "the stand-in relevance a writer may publish",
+                   "project attribution"):
+        assert reason in prose, f"the published-copy reason is missing ({reason})"
+
+
+def test_neither_prose_site_leaves_the_three_readers_open_or_owed_elsewhere():
+    """Clause 4 of #3384: both homes for this ruling say the same decided thing.
+
+    The ruling has two reading places — `stage1_filter`'s docstring, where a reader first
+    meets the strip, and the block above the eligibility read, where they meet the one line
+    that was widened away from it. Previous passes rewrote one of them and left the other,
+    which is how the pair ended up carrying two different claims about the same three
+    readers: one called the question open, the other owed on a closed item. Both sites are
+    graded here from `scoring.py`'s own bytes on the same three conditions — neither
+    forbidden pointer, all three readers named, the ruling cited by owed entry — so prose
+    that merely says the matter is settled elsewhere cannot pass: naming the readers is
+    what makes the sentence checkable, and deferring is the defect itself. The forbidden
+    pointers are looked for both as written and reflowed, so neither can survive by
+    straddling a wrap.
+    """
+    sites = (("stage1_filter's docstring", scoring_mod.stage1_filter.__doc__ or ""),
+             ("the eligibility comment block", _eligibility_comment_block()))
+    for name, site in sites:
+        prose = _prose(site)
+        assert site.strip(), f"{name} has no text to record the ruling"
+        for gone in ("owed on #2314", "open scope question"):
+            assert gone not in site, f"{name} still says {gone!r}"
+            assert gone not in prose, f"{name} says {gone!r} across a line break"
+        for reader in ("_score_prompt", "_keyword_fallback", "match_projects"):
+            assert reader in prose, f"{name} does not name {reader} as staying stripped"
+        assert "#3144 owed 1" in prose, f"{name} does not cite #3144 owed 1"
 
 
 def test_both_allocation_prose_sites_name_the_two_texts_and_call_the_split_a_ruling():

@@ -383,9 +383,16 @@ def stage1_filter(
     strips a description that is nothing but a link block so `knowledge/` never holds
     a link farm, and doing that before the gate meant such a video was matched on its
     title alone, with the profile keyword in the channel's own label never in front of
-    the matcher. Stage 2's three other readers of `item.summary` (`_score_prompt`,
-    `_keyword_fallback`, `match_projects`) still read the stripped value — widening
-    them is an open scope question on that item, not a change to make here.
+    the matcher. Stage 2's three other readers of `item.summary` — `_score_prompt`,
+    `_keyword_fallback`'s own score and `match_projects` — stay on the stripped value by
+    ruling, not by omission: #3144 owed 1 (2026-10-26) rules that they do, and #2314 has
+    nothing left owed for them. All three emit published output — the text the grader is
+    shown, the stand-in relevance a writer may publish, project attribution — so widening
+    them would push back into `knowledge/` the link-block and channel boilerplate this
+    strip exists to keep out, while the gain is unmeasured: 0 `grade_source: call_cap`
+    rows across the four days of day files written after #2314 landed, and 70 of 70
+    graded rows model-graded. The one Stage 2 number that did move is eligibility
+    (#2314); the allocation rank is ruled to keep reading this copy too (#3144 owed 3).
 
     Since #2463 the match runs on `gate_match_text(item)` rather than on `stage1_text()`
     itself: the same text with its URL substrings taken out, because `\b` cannot tell an
@@ -624,9 +631,16 @@ def stage2_score(
         # What moves is only WHO IS ASKED. `keyword_score` stays `max(topic weight)`, so a
         # topic weighted at or below the threshold still buys no call whichever copy its
         # keyword sat in — the off switch #2092 documents stays a property of the profile.
-        # What stays on the stripped `summary`: the prompt (`_score_prompt`), the
-        # fallback's own score and project matching, plus everything the writer publishes;
-        # the ruling on those three is owed on #2314, not taken here. The allocation
+        # What stays on the stripped `summary`, by ruling and not by omission: the prompt
+        # (`_score_prompt`), the fallback's own score (`_keyword_fallback`) and project
+        # matching (`match_projects`), plus everything the writer publishes. #3144 owed 1
+        # (2026-10-26) rules those three in on this copy, and #2314 has nothing left owed
+        # for them: each of the three emits published output — the text the grader is
+        # shown, the stand-in relevance a writer may publish, project attribution — so
+        # widening them would push the link-block and channel boilerplate the strip
+        # exists to remove straight back into `knowledge/`, while the gain is
+        # unmeasured (0 `grade_source: call_cap` rows across the four days of day files
+        # written after #2314 landed, 70 of 70 graded rows model-graded). The allocation
         # ranking above is no longer on that list: #3144 settles #2314 owed 3 by ruling
         # that the rank keeps reading f"{item.title} {item.summary}" deliberately, so
         # this line and that key are two different numbers wherever the two copies
