@@ -114,6 +114,68 @@ def test_rank_defaults_to_twelve_and_ceilings_at_sixteen():
     assert djev.RANK_DEFAULT_N == 12 and djev.RANK_MAX_N == 16
 
 
+def _capturing_rank(monkeypatch):
+    """Stub `djev.rank` and keep the arguments the handler actually passed it."""
+    seen: list[dict] = []
+
+    def _rank(query, candidates, **k):
+        seen.append({"query": query, "candidates": list(candidates), **k})
+        return _client_rows([(0, 0.9, 0.99), (1, 0.1, 0.85)])
+
+    monkeypatch.setattr(djev, "rank", _rank)
+    return seen
+
+
+def test_the_rank_tool_pins_one_read_like_the_recall_ranker(monkeypatch):
+    """#3377: what the engine is told to read, on the tool side.
+
+    `djev_rank` used to forward no `samples`, so every call ran the engine's
+    `auto` policy — one read, or four when a first read's entropy is over 0.1.
+    Measured 2026-10-26 over the 21 real `djev_rank` calls on this box, that was
+    4 reads on 21/21 at a 323.9 ms median against 1 read at 133.9 ms, with the
+    top pick identical on 20/21 — the same penalty §8.1 measured on the recall
+    ranker, which pins `RECALL_DJEV_SAMPLES = 1` for exactly that reason.
+
+    The assertion is the kwarg, the same shape as
+    `tests/test_recall_djev_ranker.py`'s `call["samples"] == 1`. It has to be:
+    the read count is a request field the engine reads, and no value this
+    handler returns can show it. What the response carries is scores.
+    """
+    seen = _capturing_rank(monkeypatch)
+    out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
+    assert len(seen) == 1, "one ranking, one engine call"
+    assert seen[0]["samples"] == 1, \
+        f"`djev_rank` must ask for exactly one read, not auto: {seen[0]}"
+    assert seen[0]["seam"] == "tool:rank"
+    assert "error" not in out
+
+
+def test_pinning_the_read_count_leaves_every_other_rank_argument_alone(monkeypatch):
+    """The other half of the same clause: this is a read-budget change and
+    nothing else. `levels` (a caller's own ordered set, whose order changes the
+    answer), the registry `floor`, the caller's `timeout`, and the over-ceiling
+    refusal all have to behave as they did — the refusal especially, because a
+    handler that pinned reads before checking the pool would start spending
+    engine calls it was supposed to refuse."""
+    seen = _capturing_rank(monkeypatch)
+    _measured_rerank(monkeypatch, 0.8)
+    _call("djev_rank", {"query": "q", "candidates": ["a", "b"],
+                        "levels": ["nope", "maybe", "yes"],
+                        "timeout_seconds": 7.5})
+    assert len(seen) == 1
+    assert seen[0]["levels"] == ["nope", "maybe", "yes"]
+    assert seen[0]["floor"] == pytest.approx(0.8), \
+        "the floor is a client-side annotation; pinning reads must not drop it"
+    assert seen[0]["timeout"] == 7.5
+    assert seen[0]["samples"] == 1
+
+    seen.clear()
+    out = _call("djev_rank", {"query": "q",
+                             "candidates": [f"c{i}" for i in range(20)]})
+    assert seen == [], "the over-ceiling refusal must not reach the engine"
+    assert out["max_candidates"] == djev.RANK_MAX_N and out["got"] == 20
+
+
 def test_rank_reports_no_answer_rather_than_an_empty_ranking(monkeypatch):
     monkeypatch.setattr(djev, "rank", lambda *a, **k: None)
     out = _call("djev_rank", {"query": "q", "candidates": ["a", "b"]})
@@ -299,8 +361,14 @@ def test_a_rank_call_posts_the_same_bytes_whether_or_not_the_floor_is_measured(m
     of JSON.
 
     Two-sided on purpose. Every other test here stubs the client and so never
-    sees a request at all; a leaked `floor` or `samples` key, or a body that
-    grew by one field, would pass all of them.
+    sees a request at all; a leaked `floor` key, or a body that grew by one
+    field, would pass all of them.
+
+    `samples` used to be on the leak list here, and #3377 is the ruling that
+    makes it wrong: the tool now asks for one read on purpose, so the key is
+    meant to be in the body — pinned to 1, and identical on both calls so the
+    property above still holds. What stays a leak is a body whose read count
+    depends on the floor, or that says anything other than one read.
     """
     posted: list = []
     _serve_rank(monkeypatch, [0.9, 0.6, 0.1], [0.9, 0.7, 0.6])
@@ -325,8 +393,12 @@ def test_a_rank_call_posts_the_same_bytes_whether_or_not_the_floor_is_measured(m
         "the engine was asked something different depending on the resolved "
         "floor, which is a client-side annotation and never a request field")
     for body in posted:
-        for key in ("floor", "label_mass_floor", "samples", "max_samples"):
+        for key in ("floor", "label_mass_floor", "max_samples"):
             assert key not in body, f"{key} leaked into the engine request"
+        assert body.get("samples") == 1, (
+            "the engine must be told one read — `app/djev.py::_body` writes the "
+            "key only when it is not None, so its absence here is the auto "
+            f"policy coming back; body said {body.get('samples')!r}")
 
 
 def test_a_measured_floor_reaches_a_ranked_row_through_the_real_client(monkeypatch):

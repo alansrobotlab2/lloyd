@@ -1624,3 +1624,106 @@ def test_the_onboarding_step_still_sends_a_new_seam_to_its_own_rows():
         "and set the floor from them. That is the route for a live seam; "
         "weakening the rerank prose is not a reason to delete it, and conftest "
         f"quotes this step for exactly that. Read: {step!r}")
+
+
+#: Where the one `samples` measurement of the TOOL rank path is written down.
+#: Three places state it — the handler's own comment, §8.1 and §11 — so one node
+#: pins each and a third pins that they still say the same thing.
+MEASUREMENT_NEEDLES = ("4 reads on 21/21", "323.9", "133.9", "20/21")
+
+
+def _open_gaps(text: str) -> str:
+    """§11's open-gap bullets, with the Closed subsection cut off, so an
+    assertion about what is OPEN cannot be satisfied by the closed record."""
+    return _section(text, "## 11. Known gaps").split(CLOSED_HEADING, 1)[0]
+
+
+def _section_8_1(text: str) -> str:
+    """§8.1 alone: the slice stops at §8.2, because `_section` runs to the next
+    `## ` and would hand back §8.2 with it."""
+    return text.split("### 8.1", 1)[1].split("### 8.2", 1)[0]
+
+
+def test_the_open_gaps_record_both_samples_rulings_and_neither_stale_claim():
+    """#3377: §11's samples bullet stops carrying two sentences that are no
+    longer true and starts carrying what was actually measured.
+
+    The two stale sentences: "No seam has measured whether one read is enough
+    for its schema" — two have been since 2026-10-26 — and the claim that the
+    `djev_decide` input schema "tells the model `samples` defaults to 1", which
+    has been false since `7f3622ae` rewrote that description to name the engine's
+    auto policy. An open-gap list is a to-do list, so a retracted claim still
+    standing in one is a re-filed item waiting to happen.
+
+    Two-sided on purpose: the bullet is about a gap that is STILL open (neither
+    `ask` nor `ask_sync` defaults), so the assertions also require the word
+    `samples` and both rulings to be there. Deleting the bullet would satisfy
+    every absence below and fail these.
+    """
+    text = DOC.read_text()
+    open_part = _open_gaps(text)
+    assert "No seam has measured" not in open_part, (
+        "§11 still says nobody measured whether one read is enough, which is "
+        "the sentence that kept this item open after two seams had been measured")
+    assert "defaults to 1" not in open_part, (
+        "§11 still claims the djev_decide schema tells the model `samples` "
+        "defaults to 1 — false since 7f3622ae rewrote that description")
+    assert "Filed as #3112" not in text, (
+        "the open gaps still close the #3112 half with a pointer instead of the "
+        "measurement that replaced it")
+    mentions = [ln for ln in text.splitlines() if "#3112" in ln]
+    assert len(mentions) == 1, (
+        f"#3112 belongs on this page only as the changelog line that filed it; "
+        f"found {len(mentions)} mentions")
+    assert "Filed #3112" in mentions[0], (
+        "the surviving #3112 mention is not the changelog line, so the item's "
+        "history has been rewritten rather than the open gap updated")
+
+    assert "samples" in open_part, (
+        "§11 has no samples bullet at all: the entry points still default to "
+        "nothing, which is the gap that remains open")
+    for needle in ("4 reads on 21/21", "323.9", "133.9", "20/21",   # rank numbers
+                   "pins one read",                                  # ruling 1
+                   "left on `auto`", "0/15", "~170 ms",              # ruling 2
+                   "chars=1200", "#3376"):
+        assert needle in open_part, (
+            f"§11's samples bullet no longer carries {needle!r}, so the two "
+            f"rulings cannot be told apart by a reader who never opens a diff")
+
+
+def test_section_8_1_records_the_tool_rank_measurement_beside_the_recall_one():
+    """Clause 5: §8.1's only `samples` datum used to be the recall ranker's
+    "200 ms slower and worse". The tool path is a different canvas —
+    `rank(chars=1200)`, up to 16 candidates — and it has now been measured in
+    its own right, so the page must carry that number too and keep the old one:
+    the recall figure is evidence for the recall shape, not a transferable
+    constant, which is exactly why the tool path needed its own run."""
+    text = _section_8_1(DOC.read_text())
+    for needle in ("+190 ms", "4 reads on 21/21", "20/21", "9/21",
+                   "323.9", "133.9", "chars=1200"):
+        assert needle in text, (
+            f"§8.1 no longer records the tool rank path's own measurement "
+            f"({needle!r})")
+    assert "200 ms slower" in text, (
+        "§8.1 lost the recall figure while adding the tool one. The two are "
+        "different canvases and the page has to keep both")
+
+
+def test_the_three_places_that_state_the_rank_measurement_still_agree():
+    """The measurement is written down three times — the handler comment in
+    `agent_mcp/djev.py`, §8.1's new bullet, §11's ruling — because each is where
+    a different reader looks: the author editing the call, the reviewer of the
+    read budget, the arch review sweeping the open gaps. Copy it in three places
+    and it drifts in three places, so every number has to appear in all three.
+    """
+    sources = {
+        "agent_mcp/djev.py": (ROOT / "agent_mcp" / "djev.py").read_text(),
+        "§8.1": _section_8_1(DOC.read_text()),
+        "§11": _open_gaps(DOC.read_text()),
+    }
+    for name, body in sources.items():
+        for needle in MEASUREMENT_NEEDLES:
+            assert needle in body, (
+                f"{name} no longer states {needle!r}: the tool rank path's "
+                "measurement is quoted from three places and they must not "
+                "disagree about it")

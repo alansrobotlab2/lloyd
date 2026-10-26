@@ -145,15 +145,12 @@ async def _rank(args: dict) -> str:
     levels = [str(x) for x in levels] if isinstance(levels, list) and len(levels) >= 2 \
         else list(djev.RANK_LEVELS)
 
-    # No `samples` is passed here, and this round deliberately leaves that
-    # inconsistency standing rather than fixing it (#3112). The rank TOOL
-    # therefore runs the engine's auto policy — 1 read, or 4 when a first read
-    # is uncertain — while the recall RANKER pins samples=1, because on that
-    # path `architecture/djev.md` §8.1 measured `samples: "auto"` as 200 ms
-    # slower AND worse-ordered than one read (the recall side is pinned by
-    # tests/test_recall_djev_ranker.py asserting `call["samples"] == 1`). Two
-    # rank paths, two read budgets, one of them measured: choosing for the tool
-    # side needs its own run, not a number copied across the seam.
+    # One read, pinned, because this path was measured and not copied across
+    # the seam: over the 21 real `djev_rank` calls on 2026-10-26 `auto` cost
+    # 4 reads on 21/21 at a 323.9 ms median against 1 read at 133.9 ms, top
+    # pick identical on 20/21. §8.1 found the same penalty on the recall
+    # shape and pinned one read there, so both rank paths hold one budget
+    # (#3377). tests/test_djev_tools.py pins the kwarg and the posted body.
     # The registry's floor for a ranking, or None. Handed to the client as well
     # as used for the annotation below, because `app/djev.py`'s per-row
     # `low_trust` is `floor is not None and label_mass < floor` (`:355`) — with
@@ -164,7 +161,7 @@ async def _rank(args: dict) -> str:
     floor = _rank_floor()
     rows = await asyncio.to_thread(
         djev.rank, query, [c[:CANDIDATE_CHARS] for c in candidates],
-        seam="tool:rank", levels=levels, floor=floor,
+        seam="tool:rank", levels=levels, floor=floor, samples=1,
         timeout=float(args.get("timeout_seconds") or djev.DEFAULT_TIMEOUT_S))
     if rows is None:
         return _err("djev did not answer (engine unreachable, disabled, or the "

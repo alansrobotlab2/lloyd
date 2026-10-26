@@ -1106,6 +1106,16 @@ has to match it (Alan: equal accuracy plus throughput is a win).
   and worse than one read. A repeat of one read gave the same recall outcome on
   87/87 queries, which is not the same thing as a deterministic read: the
   scores behind it do not repeat (§8.2).
+- **The TOOL rank path pays the same penalty on its own canvas** (#3377,
+  measured 2026-10-26), so the line above is no longer this page's only
+  `samples` datum. `djev_rank` ranks up to 16 candidates through
+  `rank(chars=1200)` — fewer, longer rows than the recall's 32 x 160 — and over
+  the 21 real tool calls on this box `auto` was **4 reads on 21/21** at a 323.9
+  ms median against 1 read at 133.9 ms: **+190 ms median** for reads that left
+  the top pick identical on **20/21** (the full order moved on 9/21, τ
+  0.717-0.905). `djev_rank` now pins `samples=1` on the same evidence, and
+  `agent_mcp/djev.py`'s handler comment carries the numbers. The decide seam is
+  the one that stays on `auto` (§11).
 - **Deployed shape:** global fusion's 20-row head + floors 2/2/2 for autonomy,
   architecture and skills, cross-encoder off, `rank(chars=160, samples=1,
   max_n=32, timeout=4)`, seam `recall_rank` (`RECALL_DJEV_HEAD`, `_FLOOR`,
@@ -1378,14 +1388,20 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 ## 11. Known gaps (2026-09-20, re-checked 2026-10-21)
 
 - **Neither client entry point has a `samples` default**, one read or four. The
-  ~40 ms headline is `samples=1`. No seam has measured whether one read is
-  enough for its schema. `ask` and `ask_sync` both take `samples=None`
+  ~40 ms headline is `samples=1`. `ask` and `ask_sync` both take `samples=None`
   (`app/djev.py:510`, `:585`) and `_body` writes the key only when it is not
   `None`, so a caller that does not name one gets the **server's** `"auto"`
   policy (§3.3), not one read — which is what this page used to call "the
-  client's default", a different claim about a different object. The `djev_decide` input schema tells the model `samples`
-  defaults to 1, which is wrong for the same reason: omitted, it is `"auto"`.
-  Filed as #3112.
+  client's default", a different claim about a different object. Both seams that
+  could answer the question have now been measured, and the rulings are
+  deliberately **opposite**. **`djev_rank` pins one read**: measured 2026-10-26
+  on its own `rank(chars=1200)` shape, `auto` ran 4 reads on 21/21 real calls at
+  a 323.9 ms median against 1 read at 133.9 ms, the top pick identical on 20/21
+  (§8.1). **`djev_decide` is left on `auto`**: on that schema `auto` cost ~170 ms
+  more and changed **0/15 labels** (#3376), so the extra reads buy an identical
+  answer and the tool keeps forwarding whatever `samples` its caller names and
+  none when it names none. Its input schema says that outright and claims no
+  default of 1, because omitting the field sends no `samples` at all.
 - **Engine contention** between shadow reads and tool calls (§5.3). It is
   harmless while every consumer is advisory.
 - **Scores repeat only while `BATCH_INVARIANT=1` is on** (§8.2). Production
