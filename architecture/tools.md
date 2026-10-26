@@ -837,8 +837,11 @@ competes only after a discovery round trip, which is why `http_search` and
 values through `app.mcp_discovery._get_harness_kwargs()`.
 
 The override shadows this block wholesale, so config.yaml and the override must
-carry the same values. `tests/test_tool_overrides.py::test_config_yaml_agrees_with_the_live_override`
-catches an unpaired edit.
+carry the same values.
+`tests/test_tool_overrides.py::test_config_yaml_agrees_with_the_live_override`
+pins the comparison that decides it, and
+`python -m scripts.maintenance.sync_tool_overrides --check` runs that same
+comparison against a real box's two files.
 
 ---
 
@@ -858,8 +861,15 @@ page writes `data/tool_overrides.yaml`, which is merged over it
 stay that way. While it was tracked, one click dirtied the live tree, and the
 automod gate and promoter both refuse a dirty tree. So a fresh clone boots on
 config.yaml alone, and config.yaml has to describe what is actually served. The
-merge warns when the override re-enables a tool config.yaml disables, and when
-a `tool_search` key differs from the tracked value. Agreement stays silent.
+merge warns in both directions, and on every key it honours: when the override
+re-enables a tool config.yaml disables, when it disables a tool the tracked file
+does not list (the direction this box sits in — the fifteen above are exactly
+this warning's subject), when the two disagree on a server's `enabled` or on
+`workers.enabled`, and when a `tool_search` key differs from the tracked value.
+Agreement stays silent. The same comparison, run outside the suite, is
+`python -m scripts.maintenance.sync_tool_overrides --check` — the only way to ask
+the question about a particular box, because the suite repoints `LLOYD_DATA` at a
+scratch data root and no test can read the override a box actually serves.
 
 The merge is deliberately narrow. It honours per-server `enabled` and
 `disabled_tools`, the `harness.tool_search` block, `workers.enabled` and

@@ -103,7 +103,20 @@ def _merge_tool_overrides(config: dict) -> dict:
             continue  # overrides can't introduce servers, only adjust them
         cfg = config["mcp_servers"][server]
         if "enabled" in o:
-            cfg["enabled"] = bool(o["enabled"])
+            # Same shape as the `workers.enabled` warning below: the override
+            # wins, and a disagreement is logged only where config.yaml takes a
+            # position. A key the tracked file never mentions is not a
+            # disagreement — it is an override adding a default, which is legal.
+            want_enabled = bool(o["enabled"])
+            if "enabled" in cfg and bool(cfg["enabled"]) != want_enabled:
+                logger.warning(
+                    "tool_overrides.yaml sets mcp_servers.%r.enabled: %r where "
+                    "config.yaml says %r. The override wins. Reconcile the two "
+                    "files, or the tracked config keeps describing a server that "
+                    "is not being served.",
+                    server, want_enabled, bool(cfg["enabled"]),
+                )
+            cfg["enabled"] = want_enabled
         if "disabled_tools" in o:
             # Override wins, deliberately: the Tools page is the live
             # authority and must be able to re-enable a tool. But a silent
@@ -121,6 +134,24 @@ def _merge_tool_overrides(config: dict) -> dict:
                     "files, or the tracked config keeps describing a state that is "
                     "not being served.",
                     ", ".join(resurrected), server,
+                )
+            # The opposite direction, which is the one this box has been living
+            # in: the override disables a batch of mail mutators config.yaml
+            # never lists, so the tracked file implies a wider served surface
+            # than the machine actually offers, and a rebuild boots tools the
+            # operator switched off (#3128, `architecture/tools.md` §8). Only
+            # `was - now` was ever computed, so the boot log said nothing about
+            # it and the disagreement was invisible unless someone diffed the two
+            # files by hand.
+            extra_disables = sorted(now - was)
+            if extra_disables:
+                logger.warning(
+                    "tool_overrides.yaml disables %s for server %r, which "
+                    "config.yaml does not list as disabled for that server. The "
+                    "override wins. Add them to config.yaml's disabled_tools, or "
+                    "the tracked config keeps describing a state that is not being "
+                    "served, and a fresh clone boots tools this box switched off.",
+                    ", ".join(extra_disables), server,
                 )
             cfg["disabled_tools"] = list(o["disabled_tools"] or [])
     ts = (overrides.get("harness") or {}).get("tool_search")
