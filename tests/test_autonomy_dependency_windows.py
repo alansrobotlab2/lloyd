@@ -553,11 +553,72 @@ def test_a_cycle_whose_hand_off_is_older_than_half_a_day_still_runs(
 LIVE_BOARD_DIR = autonomy.AUTONOMY_DIR
 
 
-def _live_bypass_bound(tid):
-    """`stale_bypass_hours` as the live board declares it, for task `tid`."""
+def _live_field(tid, key):
+    """One front-matter field as the live board declares it, for task `tid`."""
     path = next(iter(LIVE_BOARD_DIR.glob(f"{tid}-*.md")), None)
     assert path is not None, f"no task file for #{tid} under {LIVE_BOARD_DIR}"
-    return (autonomy._parse_task_file(path) or {}).get("stale_bypass_hours")
+    return (autonomy._parse_task_file(path) or {}).get(key)
+
+
+def _live_bypass_bound(tid):
+    """`stale_bypass_hours` as the live board declares it, for task `tid`."""
+    return _live_field(tid, "stale_bypass_hours")
+
+
+def _window_ages(aut, tid, upstream_done):
+    """The two ages of `upstream_done` that decide whether a declared
+    `stale_bypass_hours` is usable at all, for the first window task `tid` opens
+    after it: its age AT THE OPENING and its age AT THE CLOSE.
+
+    A bound at or below the first never holds the window: the bypass is past on the
+    first tick the dependent may run, which is #3365's daily inversion. A bound at
+    or above the second never opens it: by the close the bypass still has not
+    expired, and the leg waits a further day — #1526's outage. A bound serves a
+    night only strictly between them, so the pair, not any number, is the contract;
+    both ends come from the live board's own `preferred_hours` through the engine's
+    own window derivation (the `aut` fixture's pinned PDT zone is what makes them
+    UTC instants), so when either window moves these tests say so with the two ages
+    instead of with a ceiling somebody once computed."""
+    hours = autonomy._window_hours(
+        {"preferred_hours": _live_field(tid, "preferred_hours")})
+    assert hours, f"#{tid} declares no window on the live board"
+    openings = [occ for occ in autonomy._window_occurrences(hours, upstream_done)
+                if occ[0] > upstream_done]
+    assert openings, f"no window of #{tid} opens after {upstream_done}"
+    opening, closing = openings[0]
+    return ((opening - upstream_done).total_seconds() / 3600,
+            (closing - upstream_done).total_seconds() / 3600)
+
+
+# Where #56's output actually exists on a healthy night. `completed_at` in
+# `~/lloyd-data/autonomy-runs/56/` is between 08:01:14Z and 08:02:05Z on every day
+# from 10-21 to 10-26 — inside the first minutes of its own 08:00Z-09:59Z window —
+# so the window's opening, 08:00Z, is the instant its dependents see. Against it
+# their 06:00Z opening carries a 22 h-old upstream and its 12:00Z close a 28 h-old
+# one, which is the band `test_the_starved_leg_declares_its_fail_forward_and_56_does_not`
+# grades the live bound on.
+UPSTREAM_AT_ITS_OPENING = Z(25, 8, 0)
+
+# The other end of #56's own declared window: `preferred_hours` [1, 2] local is
+# 08:00Z-09:59Z, so 09:59Z is the latest an on-schedule #56 can finish. What that
+# costs the dependents is what
+# `test_a_completion_at_the_end_of_56_s_own_window_forfeits_their_next_window`
+# measures — nothing about that #56 is late, and its dependents get almost nothing.
+UPSTREAM_AT_ITS_CLOSE = Z(25, 9, 59)
+
+# The two node ids this item was filed for, named here so
+# `test_no_node_this_item_names_is_skipped_xfailed_or_remarked` can hold clause 2
+# rather than leave it to a diff reading.
+ITEM_NAMED_NODES = (
+    "test_a_completion_starved_past_the_close_releases_that_same_window",
+    "test_the_starved_leg_declares_its_fail_forward_and_56_does_not",
+)
+
+# The bound #1526 shipped on 2026-09-26, and the one the starved night below was
+# served by. #3365 raised the live board's value to 26 h on 2026-10-26 (vault
+# commit 8ad529fc), so that night is replayed here at this constant: run it at
+# today's bound and it pins neither night.
+BOUND_AT_1526 = 12.0
 
 
 # The night the pool starved #56: queue row 515 `enqueued_at 2026-09-25T08:00:33Z`
@@ -579,25 +640,98 @@ def _starved_board(bound):
     ]
 
 
-def test_the_starved_leg_declares_its_fail_forward_and_56_does_not():
-    """#1526 clause 1. #56 has no `depends_on`, so a bound on it is read by
-    nothing; #51 and #57 are the tasks the pool has been holding since
-    2026-09-22, and each must declare one short enough to fire on this edge.
+def test_the_starved_leg_declares_its_fail_forward_and_56_does_not(aut):
+    """#1526 clause 1, restated as the invariant its ceiling was a proxy for.
 
-    The ceiling is not the clause's 30 h but the arithmetic of the night that
-    broke: a completion that lands 7 h 14 m past the dependents' close is
-    16 h 45 m old at that close, so a bound above it cannot open that window at
-    all — 24 h (the reflection chain's value, where the upstream's slip is a
-    night) holds the chain for a whole further day. 12 h is shipped; over 17 h
-    fails this clause and re-creates the outage.
+    #56 has no `depends_on`, so a bound on it is read by nothing; #51 and #57 are
+    the tasks the pool has been holding since 2026-09-22, and each must declare
+    one the LIVE SCHEDULE can actually use — which is a band, not a number, and
+    the band is derived here from the two windows the board declares.
+
+    The ceiling this test used to carry (`0 < bound <= 17`) was arithmetic on one
+    night: #56 finishing 7 h 14 m past the dependents' close on 2026-09-25 left
+    that output 16 h 45 m old at the close, so a bound above it forfeited the
+    window. #56's schedule has since moved inside its own window — 08:00:09Z to
+    08:02:06Z on every day from 10-21 to 10-26 — so at the dependents' 06:00Z
+    opening its output is already 21.97 h old, and the 12 h this clause used to
+    bless releases them on the first tick of every window beside an upstream two
+    hours from writing that cycle's file. That is the nine-day stale read #3365
+    measured in `workers.db` and raised the bound to 26 h for, and this clause is
+    what it turned red: a ceiling copied out of one night's arithmetic outlived
+    the night. The two bands are disjoint (10.75-16.75 h then, 22-28 h now), so no
+    `stale_bypass_hours` serves both, exactly as this file's own header says of
+    a dependent whose window opens before its upstream's. What a clause can
+    therefore hold is the shape, and the shape is tested: the bound strictly
+    between the upstream's age at the window's opening and at its close.
+
+    Both nights stay pinned, each at the bound it is served by:
+    `test_a_completion_starved_past_the_close_releases_that_same_window` replays
+    2026-09-25 at #1526's 12 h,
+    `test_the_live_bound_costs_the_starved_night_one_window_and_releases_the_next`
+    says what 26 h gives up on that same night, and
+    `test_the_pre_3365_bound_released_the_window_beside_an_upstream_still_owed`
+    is the falsifier for bringing 12 h back.
     """
     assert _live_bypass_bound(56) is None, "#56 has no depends_on: a bound is noise"
     for tid in (51, 57):
         raw = _live_bypass_bound(tid)
         assert raw is not None, f"#{tid} declares no stale_bypass_hours"
-        assert 0 < float(raw) <= 17, (
-            f"#{tid} declares {raw} h: a starved completion is only 16.75 h old at "
-            "the window's close, so that bound never opens this window")
+        bound = float(raw)
+        at_open, at_close = _window_ages(aut, tid, UPSTREAM_AT_ITS_OPENING)
+        assert at_open < at_close, f"fixture: #{tid}'s window closes before it opens"
+        assert at_open < bound < at_close, (
+            f"#{tid} declares {bound:g} h, but an upstream finished at #56's 08:00Z "
+            f"opening is {at_open:.2f} h old when #{tid}'s window opens and "
+            f"{at_close:.2f} h old when it closes, so {bound:g} h "
+            + ("releases it on the first tick of every window — the stale read "
+               "#3365 raised the bound for (see "
+               "test_the_pre_3365_bound_released_the_window_beside_an_upstream_still_owed)"
+               if bound <= at_open else
+               "never opens that window at all — the outage #1526 was filed for "
+               "(see test_a_completion_starved_past_the_close_releases_that_same_"
+               "window)"))
+
+        # The band is only a contract if it excludes things. Both bounds this file's
+        # history has actually used fall outside it — 12 h is the value #3365 raised
+        # because of, and 30 h is the ceiling #1526's clause allowed — so the check
+        # below is not a window widened until the failing value fits.
+        for dead in (BOUND_AT_1526, 30.0):
+            assert not (at_open < dead < at_close), (
+                f"#{tid}'s band ({at_open:.2f}, {at_close:.2f}) admits {dead:g} h, "
+                "which is the bound that caused one incident (12 h, #3365) or the "
+                "ceiling that would have caused the other (30 h, #1526's clause): "
+                "the band no longer discriminates")
+
+        # The cost of a bound this high, stated as a number rather than left to
+        # prose: an upstream that finishes at the END of its own window — still
+        # inside `preferred_hours`, so nothing about it is late — is only
+        # `late_open` h old when the dependents' NEXT window opens, less than the
+        # bound. That window is therefore entered held, and `usable` is how much of
+        # its final hour the bound leaves to run in. Raising the bound, or widening
+        # #56's window, spends this margin first and fails here.
+        late_open, late_close = _window_ages(aut, tid, UPSTREAM_AT_ITS_CLOSE)
+        usable = late_close - bound
+        assert late_open < bound, (
+            f"#{tid} declares {bound:g} h and an upstream finishing at #56's close "
+            f"is {late_open:.2f} h old at the next opening: the bound is already "
+            "past there, so this node's premise — that a late-but-in-window "
+            "upstream forfeits that window — no longer holds")
+        assert 0 <= usable <= 1.0, (
+            f"#{tid} declares {bound:g} h against an upstream finishing at #56's "
+            f"own close: {usable:.2f} h of the dependents' next window is usable "
+            "after the bound expires — the margin #3365 bought with 26 h")
+
+    # And the band and the replays must describe one fleet. Every behavioural node
+    # here runs a synthetic board with hardcoded hours (`LATE` for #51/#57, [1, 2]
+    # for #56); the bound above is graded against the LIVE board's `preferred_hours`.
+    # Assert the equality here, where a window move first makes a verdict wrong,
+    # rather than leaving the two to drift apart silently.
+    for tid, replayed in ((51, LATE), (57, LATE), (56, [1, 2])):
+        declared = _live_field(tid, "preferred_hours") or []
+        assert sorted(declared) == sorted(replayed), (
+            f"#{tid} declares preferred_hours {declared} on the live board but the "
+            f"replayed nights use {replayed}: the band is computed from one window "
+            "and the releases asserted against another")
 
 
 def test_the_starved_chain_releases_at_its_window_opening(aut, monkeypatch):
@@ -694,8 +828,18 @@ def test_a_completion_starved_past_the_close_releases_that_same_window(
     shipped 12 h that is 03:00 and 04:30 local, 3-4.5 h before the close: the
     leg runs the very night it was starved. Strip the bound and all three
     instants hold, which is the outage this item is about.
+
+    Replayed at #1526's own 12 h (`BOUND_AT_1526`), not at the bound the board
+    declares today: #3365 raised that to 26 h on 2026-10-26, and 26 h is past at
+    neither end of this night, so running it here would assert a release that no
+    longer happens. What the live bound does on this exact night — forfeits this
+    window, releases the next one — is pinned in words by
+    `test_the_live_bound_costs_the_starved_night_one_window_and_releases_the_next`,
+    and the night the live bound IS about by
+    `test_the_live_bound_holds_todays_opening_and_forwards_once_56_ran`. A replay
+    at a bound chosen for a different night pins neither.
     """
-    bound = float(_live_bypass_bound(51))
+    bound = BOUND_AT_1526
     board = _starved_board(bound)
     b = by_id(board)
     held_at = ("23:00 local", "03:00 local", "04:30 local")
@@ -724,6 +868,263 @@ def test_a_completion_starved_past_the_close_releases_that_same_window(
             assert reason(aut, bs[tid], stripped, now) == "waiting on #56", (
                 f"#{tid} released at {label} with no bound declared — this test "
                 "would pass whatever the board says")
+
+
+def test_the_live_bound_costs_the_starved_night_one_window_and_releases_the_next(
+        aut, monkeypatch):
+    """What #3365's 26 h gives up on #1526's night, said out loud instead of left
+    in a change note.
+
+    The night that broke is replayed unchanged — #56 completed 19:14:12Z on 09-25,
+    7 h 14 m after the dependents' 12:00Z close — so that output is 10.8 h old when
+    their next window opens and 16.3 h old when it closes, and a bound of 26 h is
+    past at neither end. All three of #1526's instants therefore HOLD, each refusal
+    naming the bound that holds them; the bypass expires at 21:14:12Z on 09-26,
+    9 h 14 m after that window shut; and the window after it (06:00Z 09-27, the
+    output 34.8 h old) opens with both legs released.
+
+    So the cost of the live bound on this night is exactly ONE window, and the
+    fail-forward path still ends the wait on its own clock rather than leaving the
+    leg stuck as it was from 2026-09-22. What it no longer does is release the
+    starved night itself — the trade #3365 made against the steady-state night
+    pinned in `test_the_live_bound_holds_todays_opening_and_forwards_once_56_ran`,
+    where 12 h was forwarding on 22 h-old input every single day.
+    """
+    bound = float(_live_bypass_bound(51))
+    last_in_window = (Z(26, 11, 30) - LATE_AT).total_seconds() / 3600
+    assert bound > last_in_window, (
+        "fixture: this test is about a bound that forfeits the starved window, and "
+        f"the live board declares {bound:g} h against {last_in_window:.2f} h at the "
+        "last probe inside it — #1526's replay now owns the other case")
+    board = _starved_board(bound)
+    b = by_id(board)
+    for label, probe in zip(("23:00 local", "03:00 local", "04:30 local"),
+                            (Z(26, 6, 0), Z(26, 10, 0), Z(26, 11, 30))):
+        age_h = (probe - LATE_AT).total_seconds() / 3600
+        assert age_h < bound, (label, age_h)
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            assert reason(aut, b[tid], board, now) == (
+                f"waiting on #56 (inside its {bound:g} h stale_bypass window: "
+                f"#56 ran {age_h:.1f} h ago)"), (label, tid)
+            assert due(aut, b[tid], board, now) is False, (label, tid)
+    expires = LATE_AT + dt.timedelta(hours=bound)
+    assert Z(26, 12, 0) < expires < Z(27, 6, 0), (
+        "the bound must expire after this window's close and before the next "
+        f"one's opening, and it expires at {expires.isoformat()}")
+    now = at(aut, monkeypatch, Z(27, 6, 0))
+    assert (now - LATE_AT).total_seconds() / 3600 > bound
+    for tid in (51, 57):
+        assert reason(aut, b[tid], board, now) is None, tid
+        assert due(aut, b[tid], board, now) is True, (
+            f"#{tid} stayed held into the next window: one forfeited window is "
+            "#3365's cost, two is a wedge")
+
+
+def test_the_live_bound_holds_todays_opening_and_forwards_once_56_ran(
+        aut, monkeypatch):
+    """#3365's whole case in one node — the behaviour it bought with 26 h, which
+    was landed through the vault route with nothing in the suite holding it.
+
+    #56 finished at 08:02Z on 09-26, so at the dependents' 06:00Z opening on 09-27
+    that output is 21.97 h old and at 07:59Z still only 23.95 h old: inside the live
+    bound at both, so both legs wait, and each refusal names the bound that is
+    holding them rather than printing the bare `waiting on #56` that #1739 could not
+    tell apart from a dead chain. #56 then completes at 08:02Z on 09-27 and at
+    08:03Z both legs are due — the dependent dispatched AFTER its upstream's file,
+    on that file, which is the ordering #3365 raised the bound to get and 12 h could
+    not give (see `test_the_pre_3365_bound_released_the_window_beside_an_upstream_still_owed`).
+    Skip #56 on 09-27 and the bound alone decides, as #1526 requires: 10:00Z (25.97 h
+    old) still holds, 11:00Z (26.97 h) releases both, so a missed upstream costs
+    hours inside the same window and not another day.
+    """
+    bound = float(_live_bypass_bound(51))
+    board = _starved_board(bound)
+    b = by_id(board)
+    up_done = Z(26, 8, 2)
+    board[0]["last_run"] = up_done.isoformat()
+    for probe in (Z(27, 6, 0), Z(27, 7, 59)):
+        age_h = (probe - up_done).total_seconds() / 3600
+        assert age_h < bound, (
+            "fixture: the probe must sit INSIDE the live bound, or the hold this "
+            f"test pins is not the bound's doing ({age_h:.2f} h vs {bound:g} h)")
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            assert reason(aut, b[tid], board, now) == (
+                f"waiting on #56 (inside its {bound:g} h stale_bypass window: "
+                f"#56 ran {age_h:.1f} h ago)"), (probe, tid)
+            assert due(aut, b[tid], board, now) is False, (probe, tid)
+    complete(b[56], Z(27, 8, 2))
+    now = at(aut, monkeypatch, Z(27, 8, 3))
+    for tid in (51, 57):
+        assert reason(aut, b[tid], board, now) is None, (
+            f"#{tid} still held a minute after #56 wrote this cycle's file: the "
+            "hold was supposed to end when the upstream ran, which is the whole "
+            "point of the bound")
+        assert due(aut, b[tid], board, now) is True, tid
+    board[0]["last_run"] = up_done.isoformat()      # #56 skipped 09-27 entirely
+    for probe, releases in ((Z(27, 10, 0), False), (Z(27, 11, 0), True)):
+        age_h = (probe - up_done).total_seconds() / 3600
+        assert (age_h > bound) is releases, (probe, f"{age_h:.2f} h", bound)
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            assert (reason(aut, b[tid], board, now) is None) is releases, (
+                probe, tid, f"{age_h:.2f} h old against a {bound:g} h bound")
+            assert due(aut, b[tid], board, now) is releases, (probe, tid)
+
+
+def test_the_pre_3365_bound_released_the_window_beside_an_upstream_still_owed(
+        aut, monkeypatch):
+    """The falsifier for restoring #1526's 12 h, and the lower edge of the band
+    `test_the_starved_leg_declares_its_fail_forward_and_56_does_not` grades on.
+
+    At the bound the board carried until 2026-10-26 the bypass was past before the
+    window could open: #56 finished 08:02Z on 09-26 and is not due again until
+    08:00Z on 09-27, so at the 06:00Z opening its output is 21.97 h old, past a 12 h
+    bound, and both legs dispatch beside an upstream that still owes this cycle's
+    run. That is not a hypothetical replay — `autonomy-runs/51` and `/57` start at
+    06:00-06:01Z and `autonomy-runs/56` completes at 08:00-08:02Z the same UTC day on
+    every day from 10-23 to 10-26, nine consecutive stale reads, which is the
+    measurement #3365 raised the bound for. 12 h comes back only when #56's window
+    moves into the dependents' band, and this node is what says so when it does.
+    """
+    board = _starved_board(BOUND_AT_1526)
+    up_done = Z(26, 8, 2)
+    board[0]["last_run"] = up_done.isoformat()
+    b = by_id(board)
+    now = at(aut, monkeypatch, Z(27, 6, 0))
+    assert (now - up_done).total_seconds() / 3600 > BOUND_AT_1526, (
+        "fixture: 12 h must be past at the opening, or the inversion has no edge")
+    assert due(aut, b[56], board, now) is False, (
+        "fixture: #56 must still owe this cycle's run at the opening, or nothing "
+        "is being inverted — it is #56's 08:00Z window that has not opened yet")
+    for tid in (51, 57):
+        assert reason(aut, b[tid], board, now) is None, tid
+        assert due(aut, b[tid], board, now) is True, (
+            f"#{tid} was held at the opening at 12 h: what 12 h actually did was "
+            "release onto yesterday's file, and that release is the defect "
+            "#3365 closed")
+
+
+def test_a_completion_at_the_end_of_56_s_own_window_forfeits_their_next_window(
+        aut, monkeypatch):
+    """What the 26 h #3365 accepted actually costs, in minutes, not in prose.
+
+    Nothing about this #56 is late: it finishes at 09:59Z, the last minute of the
+    08:00Z-09:59Z window IT declares. The dependents' next window (06:00Z-11:59Z)
+    opens with that output 20.02 h old — inside a 26 h bound — and closes with it
+    26.02 h old, so the bound expires 1 minute before the close. The window is
+    entered held, and 1 minute is all of it that is usable. Move the completion one
+    minute later, to 10:00Z, and the close is exactly 26.00 h: nothing of that
+    window is usable at all, and the leg runs the one after.
+
+    The bound is charged for this, not the schedule: at the 12 h #3365 replaced, the
+    same night leaves 14.02 h usable. The lower value gives up nothing HERE — it
+    gives up #3365's window, the one pinned by
+    `test_the_pre_3365_bound_released_the_window_beside_an_upstream_still_owed`.
+    That asymmetry is why the bound has a band and why this node exists: the margin
+    is spent silently by whoever moves `preferred_hours` on either task, and it is
+    measured here rather than asserted in a task file's note.
+    """
+    bound = float(_live_bypass_bound(51))
+    late_open, late_close = _window_ages(aut, 51, UPSTREAM_AT_ITS_CLOSE)
+    usable_min = (late_close - bound) * 60
+    assert 0 <= usable_min <= 2.0, (
+        f"an upstream finishing at #56's own close is {late_open:.2f} h old at the "
+        f"dependents' next opening and {late_close:.2f} h old at its close, so a "
+        f"{bound:g} h bound leaves {usable_min:.1f} min of that window: this node's "
+        "arithmetic no longer describes the live board — re-measure the margin")
+
+    # The same night at the value #3365 replaced, for the size of the trade.
+    assert (late_close - BOUND_AT_1526) * 60 > 14 * 60, (
+        "fixture: the 12 h bound should leave this window nearly whole")
+
+    # The forfeit is behaviour, not arithmetic: #56 done at its own close at
+    # 09:59Z on 09-26, and the dependents are still inside the bound at 11:30Z on
+    # 09-27 — 25.5 h — so 09-27's window closes with both legs unrun.
+    board = _starved_board(bound)
+    b = by_id(board)
+    b[56]["last_run"] = UPSTREAM_AT_ITS_CLOSE.replace(day=26).isoformat()
+    now = at(aut, monkeypatch, Z(27, 11, 30))
+    assert float((now - UPSTREAM_AT_ITS_CLOSE.replace(day=26))
+                 .total_seconds()) / 3600 == pytest.approx(25 + 31 / 60, abs=1e-9), (
+        "fixture: the probe must sit 25 h 31 m after 09:59Z, which the engine "
+        "renders as the 25.5 h its refusal message quotes")
+    for tid in (51, 57):
+        assert reason(aut, b[tid], board, now) == (
+            f"waiting on #56 (inside its {bound:g} h stale_bypass window: "
+            "#56 ran 25.5 h ago)"), tid
+
+    # A completion one minute later is the whole difference, and it is not an
+    # off-window question: 11:30Z is 2 h 30 m before #56's close, so the pool is
+    # still holding the leg on the same 25.5 h-old output rather than letting it
+    # run — which is the forfeit, told by the engine instead of the subtraction.
+    later = _starved_board(bound)
+    b2 = by_id(later)
+    b2[56]["last_run"] = Z(26, 10, 0).isoformat()
+    assert reason(aut, b2[51], later, now) == (
+        f"waiting on #56 (inside its {bound:g} h stale_bypass window: "
+        "#56 ran 25.5 h ago)")
+
+
+def test_no_node_this_item_names_is_skipped_xfailed_or_remarked(aut):
+    """Clause 2 of #3368 as a check, not as a diff reading.
+
+    The clause is that the named tests PASS rather than being routed around: nothing
+    skipped, xfailed, deleted, or re-marked `live_vault` / `fault_injection` to get
+    the file green. That is testable from inside the file: both node ids are still
+    here, neither carries a mark that would drop or mute it, and no module-level
+    `pytestmark` does either — the same selector the gate runs
+    (`-m "not live_vault and not fault_injection"`) is what would hide them. Add
+    `@pytest.mark.skip` to either node and this one fails, which is the crispness
+    proof; the suite cannot go green by muting the two nodes without going red here
+    first.
+
+    `aut` is not used by the assertions and is not decoration: it is the fixture that
+    pins the machine-local zone, and importing it proves this module still runs under
+    the same engine the other nodes drive.
+    """
+    import inspect
+
+    mod = __import__(__name__)
+    forbidden = {"skip", "skipif", "xfail", "live_vault", "fault_injection"}
+    module_marks = {m.name for m in getattr(mod, "pytestmark", [])}
+    assert not (module_marks & forbidden), (
+        f"this module carries module-level {sorted(module_marks & forbidden)}: "
+        "every node in it is being routed around, not fixed")
+    for name in ITEM_NAMED_NODES:
+        fn = getattr(mod, name, None)
+        assert callable(fn), (
+            f"{name} is gone from this file — deleting a node satisfies a run and "
+            "fails the clause #3368 was filed for")
+        marks = {m.name for m in getattr(fn, "pytestmark", [])}
+        assert not (marks & forbidden), (
+            f"{name} carries {sorted(marks & forbidden)} — the clause requires it to "
+            "PASS, not to be excused")
+        src = inspect.getsource(fn)
+        assert "pytest.skip" not in src and "pytest.xfail" not in src, (
+            f"{name} skips or xfails itself in its own body")
+
+    # The other way to satisfy a run without satisfying a clause is to exclude the
+    # node from the selection: an `addopts` deselect, a `-k` that drops it, or a
+    # `testpaths` that stops collecting this file. Read the project's own pytest
+    # config, because the gate runs that and nothing else.
+    root = Path(inspect.getfile(mod)).parent.parent
+    configured = []
+    for name in ("pytest.ini", "tox.ini", "setup.cfg"):
+        text = (root / name).read_text(encoding="utf-8", errors="replace") \
+            if (root / name).exists() else ""
+        configured.append(text)
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        configured.append(pyproject.read_text(encoding="utf-8", errors="replace"))
+    blob = "\n".join(configured)
+    for needle in ("testpaths", "deselect", "ignore", "--deselect"):
+        for line in blob.splitlines():
+            if needle in line and "test_autonomy_dependency_windows" in line:
+                raise AssertionError(
+                    f"pytest config {needle}: {line.strip()} — the file is being "
+                    "excluded from the selection, which the clause forbids")
 
 
 # ── #1739: a chain that COMPLETED reads as a chain that is HELD ───────────────
