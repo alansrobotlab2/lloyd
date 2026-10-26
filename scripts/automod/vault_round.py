@@ -1871,7 +1871,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # existed — `tests/test_automod_vault_round.py::
     # test_the_code_agreement_call_carries_no_surface_and_no_item` pins that keyword set as
     # exactly {"paths"}, and it should keep failing for anything that leaks into the probe.
-    guards = VG.agreement(paths=list(norm),
+    guards = VG.agreement(paths=list(norm), message=message.strip(),
                           **({"ack": [str(a) for a in ack]} if ack else {}))
     if guards.get("refuse"):
         undone = revert_paths(list(norm))

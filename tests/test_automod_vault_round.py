@@ -1255,6 +1255,7 @@ RETENTION_NODES = (
 )
 
 SKILL_AT_FOUR = "---\nname: foo\n---\nstores: 4\n"
+SKILL_AT_FIVE = "---\nname: foo\n---\nstores: 5\n"
 
 
 def repo() -> Path:
@@ -1948,8 +1949,21 @@ def test_a_mixed_surface_items_vault_land_is_checked_too(vault, guard_tree, prob
                          ids=["vault", "mixed", "code", "no-surface-field"])
 def test_the_code_agreement_call_carries_no_surface_and_no_item(vault, monkeypatch,
                                                                 surface):
-    """Clause 4, mechanism half: asked once with `paths` and nothing else, whatever
-    the item's surface is — which is what makes an exemption impossible to write.
+    """Clause 4, mechanism half: asked once with `paths`, its own commit message, and
+    nothing else, whatever the item's surface is — which is what makes an exemption
+    impossible to write.
+
+    `message` is the one addition #3367 allows, and it is data, not a lever: it is the
+    string this very call is about to put on the vault (#1980 commits `message.strip()`),
+    and the proposed mirror commits the proposal under it so a guard that reads the
+    vault's HISTORY can see the change it is judging. It cannot widen the probe or
+    excuse a node — the only guard that consumes it, `_retro_fit` in
+    `tests/test_measured_in_lloyd_pointer.py`, intersects the item numbers it names with
+    the ones a new section cites, so a message that names nothing REFUSES harder, and an
+    item number that does not match the section's is what that guard was written to
+    catch. The set below is therefore exactly `{paths, message}`: `surface`, `item_id`
+    and `guards` are refused by the same assert, and the equality rather than a
+    containment is what stops a third one arriving quietly.
 
     A route that decides per surface is a route that eventually exempts one: the
     #551 history inside review.py:1426-1430 is what a surface-scoped refusal did
@@ -1976,8 +1990,12 @@ def test_the_code_agreement_call_carries_no_surface_and_no_item(vault, monkeypat
     (vault / "skills/foo/SKILL.md").write_text("---\nname: foo\n---\nstores: 4\n\n#2036.\n")
     out = V.land(["skills/foo/SKILL.md"], "#2036 shape", item_id=42)
     assert len(calls) == 1, f"surface {surface!r}: {calls}"
-    assert set(calls[0]) == {"paths"}, f"surface {surface!r} reached the probe call"
+    assert set(calls[0]) == {"paths", "message"}, f"surface {surface!r} reached the probe call"
     assert calls[0]["paths"] == ["skills/foo/SKILL.md"]
+    # The message the probe is handed is byte-for-byte the one this land commits, not a
+    # restatement of it: `_retro_fit` reads item numbers out of it, so a paraphrase that
+    # dropped the `#42` would silently refuse an honest section.
+    assert calls[0]["message"] == "#2036 shape"
     assert out["guards"]["refuse"] is False
 
 
@@ -4309,13 +4327,20 @@ def test_land_asks_the_probe_about_its_paths_and_the_ack_and_nothing_that_moves_
     assert "live_root" not in inspect.signature(V.land).parameters, (
         "land() must not accept a tree for the probe to judge")
 
-    # And a land WITHOUT an ack makes byte-identically the call it made before this
-    # parameter existed, so the door is narrower than "always pass something".
+    # And a land WITHOUT an ack adds nothing beyond the one keyword #3367 introduced, so
+    # the door is narrower than "always pass something". `message` is that keyword: the
+    # land's own commit message, committed verbatim 100+ lines later, which is what lets the
+    # proposed mirror carry the proposal as the commit it is about to become. It is the only
+    # growth ever allowed in this set, it cannot excuse a node, and an empty one REFUSES
+    # harder — a probe handed no message names no item, so a section citing one is refused.
     seen.clear()
     (vault / "backlog" / "9-item.md").write_text("---\nstatus: done\n---\n# 9\n")
     V.land(["backlog/9-item.md"], "a land with no ack", item_id=10)
-    assert set(seen) == {"paths"}, (
+    assert set(seen) == {"paths", "message"}, (
         f"an unacknowledged land changed the probe call: {sorted(seen)}")
+    assert seen["message"] == "a land with no ack", (
+        "the probe is handed the message this land commits, verbatim: a paraphrase that "
+        "dropped an item number would silently refuse an honest section")
 
 
 def test_the_cli_land_forwards_its_ack_flag_and_invents_none_without_it(monkeypatch):
@@ -5007,6 +5032,204 @@ def test_the_pre_land_mirror_is_copied_before_the_first_run_and_the_gap_is_ledge
     assert rep["state"] == "checked", rep
     assert isinstance(rep["mirror_gap_s"], float) and rep["mirror_gap_s"] >= 0.0, rep
     assert V._guards_row(rep)["mirror_gap_s"] == rep["mirror_gap_s"]
+
+
+def _mirror_head(mirror: Path) -> tuple[list[str], str]:
+    """(paths in HEAD's commit, HEAD's subject) of one vault mirror.
+
+    Read with `git`, because every question below is a history question — the whole of
+    #3367 is that a mirror of working-tree bytes has no history in which the proposal
+    exists.
+    """
+    def run(*args):
+        r = subprocess.run(("git", "-C", str(mirror), *args), capture_output=True,
+                           text=True)
+        assert r.returncode == 0, f"git {' '.join(args)}: {r.stderr.strip()[:200]}"
+        return r.stdout.strip()
+
+    return (run("show", "--name-only", "--format=", "HEAD").splitlines(),
+            run("log", "-1", "--format=%s", "HEAD"))
+
+
+def _mirror_view(mirror: Path, declared: list[str]) -> dict:
+    """Each declared path on one mirror: (bytes on disk, bytes in its HEAD).
+
+    `None` for HEAD means the mirror's history has no such path at all — which is what
+    HEAD looks like for a note this land is creating, and what the pre-land mirror has
+    to keep looking like while the proposed one moves ahead of it.
+    """
+    out = {}
+    for rel in declared:
+        probe = mirror / rel
+        shown = subprocess.run(("git", "-C", str(mirror), "show", f"HEAD:{rel}"),
+                               capture_output=True, text=True)
+        out[rel] = {"tree": (probe.read_text(encoding="utf-8") if probe.is_file()
+                             else None),
+                    "head": shown.stdout if shown.returncode == 0 else None}
+    return out
+
+
+def _new_note(vault: Path) -> str:
+    """A declared path the live vault has NEVER committed: a first-ever section."""
+    rel = "knowledge/research/2026-04-06-sim-to-real-robotics.md"
+    (vault / "knowledge" / "research").mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text(
+        "# Sim-to-real robotics\n\nAn open question, unanswered.\n\n"
+        "## Measured in Lloyd (2026-10-26)\n\n"
+        "- Warp cost fell 4.1x. Closes #3367, the item this note filed.\n",
+        encoding="utf-8")
+    return rel
+
+
+def test_the_proposed_mirror_carries_the_proposal_as_a_commit_before_any_run(
+        tmp_path, vault, monkeypatch):
+    """#3367 clause 1: the proposed mirror holds the proposal as a real commit of exactly
+    the declared paths under the land's own message, made before the first selection run.
+
+    The route used to hand the probe a `cp -a` mirror and judge a proposal that lived
+    only in its working tree. A guard that decides from the vault's HISTORY could not see
+    it: `tests/test_measured_in_lloyd_pointer.py`'s `_heading_write` is
+    `git log -1 -S"## Measured in Lloyd"`, and for a first-ever section the ONLY commit
+    that can ever answer it is the one this land has not made yet. #3366 died that way at
+    2026-10-26T07:59:25Z — the probe's only green path was an operation the route refuses
+    to perform before judging (#1752/#1753's class).
+
+    The commit is the object the land is about to put on `~/obsidian`, so the guard reads
+    the provenance the section will actually carry. It goes in between the two mirrors
+    coming down and the first child starting: a child that ran while the proposal was
+    still loose bytes is the same unanswered question, and a commit made later widens the
+    window #2283 closed.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)                      # the vault's HEAD says four stores
+    _prose(vault, SKILL_AT_FIVE)                    # and this land proposes five
+    rel_note = _new_note(vault)
+    paths = ["skills/foo/SKILL.md", rel_note]
+    message = "#3367 commit the proposal into the mirror the probe reads"
+    live_head = lambda: subprocess.run(
+        ("git", "-C", str(vault), "rev-parse", "HEAD"),
+        capture_output=True, text=True).stdout.strip()
+    head_before = live_head()
+
+    order: list[str] = []
+    seen: dict = {}
+    real_copy, real_commit = VG._copy_vault, VG.commit_proposal
+
+    def spy_copy(dest, live):
+        order.append(f"copy:{dest.parent.name}")
+        return real_copy(dest, live)
+
+    def spy_commit(mirror, declared, msg):
+        order.append("commit")
+        out = real_commit(mirror, declared, msg)
+        files, subject = _mirror_head(mirror)
+        seen.update(declared=list(declared), msg=msg, out=out, files=files,
+                    subject=subject, view=_mirror_view(mirror, list(declared)),
+                    loose=subprocess.run(
+                        ("git", "-C", str(mirror), "status", "--porcelain"),
+                        capture_output=True, text=True).stdout.strip())
+        return out
+
+    # A clean probe: nothing fails, so each side is answered by its first draw. The
+    # stand-in is wrapped rather than replaced so its launches land in `order` too —
+    # "before any run" is only pinned if a run is observable.
+    _draw_runs(monkeypatch, parallel_failed=[], proposed_draws=[[]], base_draws=[[]])
+    real_sel = VG._run_selection
+    monkeypatch.setattr(VG, "_run_selection",
+                        lambda *a, **k: (order.append("run"), real_sel(*a, **k))[1])
+    monkeypatch.setattr(VG, "_copy_vault", spy_copy)
+    monkeypatch.setattr(VG, "commit_proposal", spy_commit)
+    rep = _probe_here(tmp_path, tree, vault, paths=paths, message=message)
+
+    assert "run" in order, "the probe launched no selection run at all"
+    assert order.index("commit") < order.index("run"), (
+        f"a selection run read the mirror before the proposal was committed to it: {order}")
+    assert order[:3] == ["copy:home-proposed", "copy:home-head", "commit"], (
+        f"both mirrors come down first, so the commit cannot widen the A/B gap #2283 "
+        f"closed: {order}")
+
+    assert seen["declared"] == paths, "the commit is of exactly the declared paths"
+    assert seen["out"]["ok"] is True and seen["out"]["sha"], seen["out"]
+    assert seen["subject"] == message, (
+        f"the mirror commit carries the land's own message, which is the only place a "
+        f"guard can check a section's citation against: {seen['subject']!r}")
+    assert sorted(seen["files"]) == sorted(paths), seen["files"]
+    assert seen["loose"] == "", f"the proposal left loose bytes: {seen['loose']!r}"
+    assert seen["view"]["skills/foo/SKILL.md"] == {"tree": SKILL_AT_FIVE,
+                                                   "head": SKILL_AT_FIVE}, seen["view"]
+    assert seen["view"][rel_note]["head"] == seen["view"][rel_note]["tree"] is not None, (
+        f"the new note must reach the mirror's history, not only its bytes: "
+        f"{seen['view'][rel_note]}")
+    assert rep["proposal_commit"]["ok"] is True, rep
+    assert rep["state"] == "checked", rep["reason"]
+    assert live_head() == head_before, (
+        "the probe committed into the LIVE vault. The mirror is the only tree it may "
+        "write: `~/obsidian` is being edited by the guardian, the reflection writer and "
+        "the backlog writers while this runs")
+
+
+def test_the_pre_land_mirror_still_holds_head_bytes_once_the_proposal_is_committed(
+        tmp_path, vault, monkeypatch):
+    """#3367 clause 4: committing the proposal changes ONE mirror, and the A/B still works.
+
+    The pre-land mirror must still show every declared path at HEAD's bytes and hold
+    NOTHING where HEAD has no such path. The new note is the case that matters: a file
+    copied into both mirrors and committed into only one would look "already deleted" on
+    the base side, every guard would answer the same on both sides, and the probe would
+    report agreement about an edit it never compared.
+
+    So the assertion is the A/B itself — a node red against the proposal and green
+    against HEAD still refuses, named, over one parallel run and one draw per side. The
+    commit is what #3367 added; the refusal is what it must not have cost.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    _prose(vault, SKILL_AT_FIVE)                    # the proposal, uncommitted
+    rel_note = _new_note(vault)
+    paths = ["skills/foo/SKILL.md", rel_note]
+
+    bases: list[Path] = []
+    seen: dict = {}
+    real_base, real_commit = VG.baseline_vault, VG.commit_proposal
+
+    def spy_base(dest, live, declared, **kw):
+        bases.append(dest)
+        return real_base(dest, live, declared, **kw)
+
+    def spy_commit(mirror, declared, msg):
+        out = real_commit(mirror, declared, msg)
+        # Read both mirrors AFTER the commit: the question is whether the commit
+        # stopped at the proposed side, so a view taken before it would show two
+        # identical mirrors and prove nothing either way.
+        seen["proposed"] = _mirror_view(mirror, list(declared))
+        seen["base"] = _mirror_view(bases[-1], list(declared))
+        return out
+
+    monkeypatch.setattr(VG, "baseline_vault", spy_base)
+    monkeypatch.setattr(VG, "commit_proposal", spy_commit)
+    # The disagreement #2036 exists to catch, scripted as the rest of this module
+    # scripts it: red on the proposed side's draw, green on the pre-land side's.
+    _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+               proposed_draws=[[COUNT_NODE], [COUNT_NODE]],
+               base_draws=[[], []])
+    rep = _probe_here(tmp_path, tree, vault, paths=paths,
+                      message="#3367 a vault edit that genuinely breaks the guard")
+
+    m = seen["base"]
+    assert m["skills/foo/SKILL.md"] == {"tree": SKILL_AT_FOUR, "head": SKILL_AT_FOUR}, m
+    assert m[rel_note] == {"tree": None, "head": None}, (
+        f"HEAD has no such note, so the pre-land mirror may not carry one either: "
+        f"{m[rel_note]}")
+    p = seen["proposed"]
+    assert p["skills/foo/SKILL.md"] == {"tree": SKILL_AT_FIVE, "head": SKILL_AT_FIVE}, p
+    assert p[rel_note]["head"] == p[rel_note]["tree"] is not None, p[rel_note]
+    assert p["skills/foo/SKILL.md"]["tree"] != m["skills/foo/SKILL.md"]["tree"], (
+        "both mirrors hold the same skill prose, so the A/B compared one vault with "
+        "itself and any agreement it reported would have been vacuous")
+
+    assert rep["state"] == "checked" and rep["refuse"] is True, rep["reason"]
+    assert rep["nodes"] == [COUNT_NODE], rep
+    assert rep["proposed_runs"] == 2 and rep["baseline_runs"] == 2, rep
 
 
 def test_a_draw_that_collected_nothing_is_not_counted_as_a_draw_and_never_refuses(

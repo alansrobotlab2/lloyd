@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -351,3 +352,189 @@ def test_the_pointer_does_not_pose_as_a_note_that_has_a_section():
     assert claiming == [], (
         "the skill mentions the section without pointing at the file that holds the "
         f"rule, which reads as the skill having one: {claiming}")
+
+
+# ── #3367: a FIRST-EVER section, which has no heading commit until the land makes one ──
+#
+# Everything above reads the live vault, where all three carriers already have a heading
+# commit behind them (the newest, `cd565534`, predates this file's own `50bba19b`, which
+# is why the shape below was never exercised). #3366 was refused by a draw over a proposal
+# whose `## Measured in Lloyd` was real, current and unciteable — verbatim at
+# `~/.local/state/lloyd-automod/promotions.jsonl`, row `"created_at": "2026-10-26T07:59:25Z"`,
+# `"event": "vault_land"`, `"ok": false`, `"item_id": 3366`:
+#
+#   tests/test_measured_in_lloyd_pointer.py::test_no_file_in_knowledge_gained_the_section_heading:
+#   fails against the vault as proposed (every one of 2 draws) and passes against the vault
+#   before this land (every one of 2 draws), in the default selection at
+#   /home/alansrobotlab/lloyd@89e1904a
+#
+# The three nodes below re-create exactly that draw: a real git vault, a tracked note with
+# NO heading in its history, the section in its working tree. They write only into a temp
+# vault, never into this one.
+
+CITED_SECTION = (f"{HEADING}\n\n"
+                 "Closes #3366, measured 2026-10-26.\n"
+                 "WER over 202 utterances: 11.5 % (baseline 15.3 %).\n")
+UNCITED_SECTION = (f"{HEADING}\n\n"
+                   "Measured 2026-10-26 over 202 utterances: 11.5 % (baseline 15.3 %).\n")
+LAND_MESSAGE = "#3366 add the Lloyd measurement to the jesse-hall live note"
+
+
+def _first_ever_note(tmp_path, monkeypatch):
+    """A git vault holding one tracked note whose history contains no `## Measured in Lloyd`.
+
+    Stands for the digest note #3366 wanted to section: `git log -- <path>` is non-empty, so
+    the note is not new, and `git log -S"## Measured in Lloyd" -- <path>` is empty, so no
+    commit has ever moved the heading count. `_convention_ts` is pinned to 0 because
+    `0050139c` does not exist in a temp vault, and pinning it to 0 states the case: every
+    commit here postdates the convention, so nothing is exempt as pre-convention residue and
+    a legitimacy verdict can only come from the section's own citation.
+    """
+    root = tmp_path / "vault"
+    (root / "knowledge" / "research").mkdir(parents=True)
+    subprocess.run(("git", "init", "-q", "-b", "main", str(root)), check=True,
+                   capture_output=True)
+    for key, val in (("user.email", "t@e.com"), ("user.name", "t")):
+        subprocess.run(("git", "-C", str(root), "config", key, val), check=True,
+                       capture_output=True)
+    note = root / "knowledge" / "research" / "2026-10-26-note.md"
+    note.write_text("# A note the digest worker wrote\n\nNo section yet.\n")
+    subprocess.run(("git", "-C", str(root), "add", "-A"), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(root), "commit", "-q", "-m", "note without a section"),
+                   check=True, capture_output=True)
+    # `sys.modules[__name__]`, not the dotted name: pytest imports a test file by PATH as
+    # `test_measured_in_lloyd_pointer`, so importing `tests.test_measured_in_lloyd_pointer`
+    # would hand back a second module object and the patch would land on globals this node's
+    # own `_heading_write` never reads — which is what a green-looking fixture with a red
+    # assert on the live vault looks like.
+    mine = sys.modules[__name__]
+    monkeypatch.setattr(mine, "VAULT", root)
+    monkeypatch.setattr(mine, "_convention_ts", lambda: 0)
+    rel = "knowledge/research/2026-10-26-note.md"
+    assert not _vault_git("log", "-1", "-S", HEADING, "--format=%h", "--", rel).strip(), (
+        "fixture: this note must have no heading in its history, or the case below is a "
+        "second-section case and proves nothing about a first one")
+    return root, rel
+
+
+def _commit(root: Path, message: str, paths: list[str]) -> list[str]:
+    """Stage exactly `paths`, commit them under `message`, and return that commit's files."""
+    for p in paths:
+        subprocess.run(("git", "-C", str(root), "add", "--", p), check=True,
+                       capture_output=True)
+    subprocess.run(("git", "-C", str(root), "commit", "-q", "-m", message), check=True,
+                   capture_output=True)
+    listed = subprocess.run(("git", "-C", str(root), "show", "--pretty=format:",
+                             "--name-only", "HEAD"),
+                            capture_output=True, text=True, check=True).stdout
+    return sorted(line for line in listed.splitlines() if line.strip())
+
+
+def test_a_first_ever_section_is_legitimate_once_the_land_commits_its_own_message(tmp_path,
+                                                                                  monkeypatch):
+    """Clause 2: the section that CANNOT be refused for provenance is the one that can be landed.
+
+    #3367's defect is that `_heading_write` demands the vault commit which introduced the
+    heading while the code-agreement probe runs BEFORE the route makes any commit
+    (`agreement()` at `scripts/automod/vault_round.py:1874`, the commit at :1980), so a
+    first-ever section has no such commit to find and the assert at :157 fires — every
+    proposed draw red, every pre-land draw green. The three steps below are that sequence,
+    in order, and each one is the reason the next is worth asserting.
+
+    1. the section in the working tree with no commit behind it — the refused draw, red;
+    2. `VG.commit_proposal`'s mirror commit: the declared paths, the land's own message,
+       nothing else in it — which is what the proposed mirror now carries;
+    3. `_retro_fit` on the result: legitimate, because the message names #3366 and the
+       section cites #3366, so `_retro_fit`'s `written & cited` is non-empty.
+
+    The residue exemption is checked too, because the clause names both nodes and only its
+    second one asks about residue: the commit is today's, so it does NOT date under
+    `0050139c`, and this section earns its place by citing rather than by being old.
+    """
+    root, rel = _first_ever_note(tmp_path, monkeypatch)
+    (root / rel).write_text(CITED_SECTION)
+
+    with pytest.raises(AssertionError, match="no vault commit ever changed"):
+        _heading_write(rel)
+
+    from scripts.automod import vault_guards as VG
+    staged = VG.commit_proposal(root, [rel], LAND_MESSAGE)
+    assert staged["ok"] is True, staged["reason"]
+    assert _commit_files(root) == [rel], (
+        "the mirror commit must carry exactly the paths the land declared, or a proposal "
+        "would be judged on somebody else's bytes")
+
+    sha, ts, message = _heading_write(rel)
+    assert message.strip() == LAND_MESSAGE.strip(), (
+        f"the commit the guard reads is not the land's message: {message!r}")
+    assert ts >= _convention_ts(), (
+        f"a commit made today ({sha}) would be exempted as pre-convention residue, so this "
+        "node would be passing on the wrong rule")
+    assert _retro_fit(rel, CITED_SECTION) is None, (
+        "a first-ever section citing the item the land's message names was still refused, "
+        "so the fix did not reach the case #3366 was refused for")
+
+
+def _commit_files(root: Path) -> list[str]:
+    listed = subprocess.run(("git", "-C", str(root), "show", "--pretty=format:",
+                             "--name-only", "HEAD"),
+                            capture_output=True, text=True, check=True).stdout
+    return sorted(line for line in listed.splitlines() if line.strip())
+
+
+def test_a_first_ever_section_citing_nothing_is_refused_by_its_own_text(tmp_path, monkeypatch):
+    """Clause 3: the new path cannot launder a maintenance sweep, because the refusal it
+    produces is about the SECTION and not about a missing commit.
+
+    The pre-fix failure mode and the refused-forever failure mode both read as "the node is
+    red", so they are distinguished here: this commit EXISTS, `_heading_write` is silent, and
+    `_retro_fit` still refuses — which can only be the citation intersection,
+    `written & cited`, coming out empty. The message names #3366, exactly as an honest land's
+    does; `written = {"3366"}` and `cited = {}` do not intersect, and the text the sweep would
+    have to write to pass is a number it does not have: that is what keeps the sweep refused
+    now that a first-ever section can be landed.
+    """
+    root, rel = _first_ever_note(tmp_path, monkeypatch)
+    (root / rel).write_text(UNCITED_SECTION)
+
+    from scripts.automod import vault_guards as VG
+    assert VG.commit_proposal(root, [rel], LAND_MESSAGE)["ok"] is True
+    sha, ts, message = _heading_write(rel)   # the commit exists: nothing missing to blame
+    assert sha and message.strip() == LAND_MESSAGE.strip(), (
+        f"the guard is not reading the mirror commit: {sha!r} {message!r}")
+
+    refused = _retro_fit(rel, UNCITED_SECTION)
+    assert refused, (
+        "a `## Measured in Lloyd` citing no item was accepted once a commit carried it, so "
+        "the route that let a first-ever section through also let a sweep through")
+    assert "3366" in refused and "nothing" in refused, refused
+
+
+def test_a_first_ever_section_lands_refused_when_the_message_names_no_item(tmp_path,
+                                                                          monkeypatch):
+    """Clause 3's other half: an EMPTY or item-less land message cannot excuse a section
+    either, which is why `message` defaults to "" and why the keyword can be passed without
+    a lever.
+
+    `commit_proposal` labels a nameless commit `unlabelled`, and an unlabelled commit names
+    no item, so `written` is empty for every proposal in a vault whose land passed no message
+    — every section would be refused. That is the safe direction (a probe with no message can
+    cost a landing, never grant one), and it is pinned here so a later change cannot make the
+    fallback permissive by treating an empty message as a wildcard.
+    """
+    root, rel = _first_ever_note(tmp_path, monkeypatch)
+    (root / rel).write_text(CITED_SECTION)     # cites #3366, as an honest section does
+
+    from scripts.automod import vault_guards as VG
+    assert VG.commit_proposal(root, [rel], "nightly: refresh the digest notes")["ok"] is True
+    sha, ts, message = _heading_write(rel)
+    # The commit carries the land's prose verbatim and names no item in it, which is the
+    # state under test. (A land that passed no message at all is labelled `unlabelled` by
+    # `commit_proposal`; either way `written` comes out empty.)
+    assert sha and message.strip() == "nightly: refresh the digest notes", message
+
+    refused = _retro_fit(rel, CITED_SECTION)
+    assert refused, (
+        "a commit message naming no backlog item was treated as naming whatever the section "
+        "cited, which would let any sweep through by passing no message at all")
+    assert "no backlog item" in refused, refused

@@ -376,6 +376,77 @@ def _copy_vault(dest: Path, live_vault: Path) -> str | None:
     return None
 
 
+#: Identity stamped on a probe mirror's proposal commit. The mirror is a scratch tree
+#: that dies with the probe's scratch directory, so this is a label and not an
+#: attribution — and passing it on the command line is what lets the commit happen at
+#: all under a HOME with no git identity configured.
+PROBE_GIT_IDENTITY = ("lloyd-vault-probe", "vault-probe@localhost")
+
+
+def commit_proposal(mirror: Path, paths: list[str], message: str) -> dict:
+    """Put a proposal into a vault mirror as a real commit, or say why it could not.
+
+    The probe's A/B has always compared *bytes*, and for most guards that is the whole
+    question. It is not the whole question for a guard that reads the vault's HISTORY:
+    `tests/test_measured_in_lloyd_pointer.py::_heading_write` asks which commit changed
+    how many times `## Measured in Lloyd` appears in a note, and a mirror laid down by
+    `cp -a` has a HEAD that predates the proposal by construction. The route was asking
+    that child for evidence only the commit it had not yet made could produce, so the
+    first-ever section in any note — the outcome the convention exists to produce —
+    failed on the proposed side, passed on the pre-land side, and the land was refused
+    (#3366, ledgered `2026-10-26T07:59:25Z`). That is the #1752/#1753 class: a probe
+    whose only green path is an operation the route refuses to perform before judging.
+
+    So the proposed mirror carries the proposal as the commit it is about to become,
+    before any selection runs. Only the PROPOSED mirror: `baseline_vault` copies the
+    live vault and puts these paths back, so the pre-land side never sees this commit
+    and an edit that genuinely breaks a guard still reads fails-after/passes-before.
+
+    Exactly `paths` are staged — the same pathspec `land()` hands its own `git add` —
+    so the mirror's other dirt, which is every other writer's, stays out of the commit.
+    `message` is the land's own message, and it is load-bearing rather than cosmetic:
+    `_retro_fit` decides a section's origin by intersecting the item numbers in the
+    commit message with the ones the section cites, so a message naming nothing leaves
+    the intersection empty and the sweep is refused exactly as it was before.
+
+    A failure is returned, never raised, and the caller turns it into a `skipped`:
+    #2036's standing rule is that a probe which cannot judge does not refuse a land.
+    What it must never do is answer `checked` on a mirror it could not build.
+    """
+    out = {"ok": True, "sha": "", "reason": ""}
+    if not paths:
+        out["reason"] = "no paths declared"
+        return out
+    # A copied `.git/index.lock` is some other writer's in-flight index operation on the
+    # live tree, mirrored as a plain file. Git in the mirror would refuse to touch its
+    # own index while it sits there, and in a scratch copy it means nothing.
+    (mirror / ".git" / "index.lock").unlink(missing_ok=True)
+    add = subprocess.run(["git", "-C", str(mirror), "add", "-A", "--", *paths],
+                         capture_output=True, text=True, check=False)
+    if add.returncode != 0:
+        out.update(ok=False, reason=f"git add: {(add.stdout + add.stderr).strip()[:200]}")
+        return out
+    name, email = PROBE_GIT_IDENTITY
+    # `--allow-empty`: a proposal whose bytes equal HEAD stages nothing, and the mirror
+    # still has to carry a commit whose message names the item, or the commit the route
+    # is about to make is not the commit the child was shown. `git log -S` fires on a
+    # change of count, so an empty commit is never the one a provenance probe finds.
+    commit = subprocess.run(
+        ["git", "-C", str(mirror), "-c", f"user.name={name}",
+         "-c", f"user.email={email}", "-c", "commit.gpgsign=false",
+         "commit", "-q", "--no-verify", "--allow-empty",
+         "-m", message.strip() or "vault land (probe mirror)"],
+        capture_output=True, text=True, check=False)
+    if commit.returncode != 0:
+        out.update(ok=False,
+                   reason=f"git commit: {(commit.stdout + commit.stderr).strip()[:200]}")
+        return out
+    sha = subprocess.run(["git", "-C", str(mirror), "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=False)
+    out["sha"] = sha.stdout.strip() if sha.returncode == 0 else ""
+    return out
+
+
 #: The one name in a probe child's home that is NOT carried across from the real
 #: one: `obsidian` IS that run's own vault mirror, laid down at `<home>/obsidian` as
 #: a real directory. `Path.home() / "obsidian"` and `$LLOYD_VAULT_ROOT` are then one
@@ -1133,6 +1204,7 @@ def _failed_union(draws: list[dict]) -> list[str]:
 
 
 def agreement(*, paths: list[str], ack: list[str] | None = None,
+              message: str = "",
               live_root: Path | None = None,
               live_vault: Path | None = None, python: Path | None = None,
               scratch_parent: Path | None = None, timeout: float | None = None,
@@ -1144,6 +1216,19 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     written into the live vault, which is what makes this the only moment the
     question can be asked: after the commit the vault has no "before" to compare
     against, and before the edit there is nothing to judge.
+
+    `message` is the commit message this land is about to put on the vault, and it is
+    what lets the proposed mirror carry the proposal as the COMMIT it is about to become
+    (`commit_proposal`) rather than as loose bytes. A guard that reads the vault's
+    history rather than its working tree cannot see bytes no commit has: the first-ever
+    `## Measured in Lloyd` section in any note failed its own provenance guard for that
+    reason, and the land was refused (#3366 at 2026-10-26T07:59:25Z). Passing the
+    message is also what keeps that guard honest — the provenance rule it implements
+    intersects the item numbers the message names with the ones the new section cites, so
+    an unrelated or empty message cannot turn a maintenance sweep into a closure. It
+    defaults to empty for a caller that has none, which only ever costs the mirror its
+    label, never a pass: an empty message makes the intersection empty and the guard
+    refuses on the section's own evidence.
 
     `ack` is this module's ONE excuse, and it is narrow by construction: a list of
     vault-relative paths whose pinned witness the SAME change is re-deriving. #2047 is the
@@ -1425,6 +1510,22 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         report["mirror_gap_s"] = round(time.time() - mirror_copied, 1)
         if not base_build["ok"]:
             return done(reason=f"cannot build the pre-land vault: {base_build['reason']}")
+        # Both mirrors are down, so the proposal now becomes a commit on the PROPOSED
+        # one before either child starts. A guard that reads `git log` of its vault is
+        # asking a question about history, and a mirror of working-tree bytes has no
+        # history containing the proposal — the route was refusing lands over a heading
+        # whose only possible introducing commit was the one it had not made yet (#3367;
+        # #1752/#1753's class). The pre-land mirror is deliberately left alone: it holds
+        # these paths at HEAD's bytes, so a real regression still reads
+        # fails-after/passes-before rather than matching on both sides.
+        #
+        # A commit that cannot be made is a probe that cannot judge, and #2036 says what
+        # that is worth: a non-answer, never a refusal.
+        staged = commit_proposal(proposed_vault, list(paths), message)
+        report["proposal_commit"] = staged
+        if not staged["ok"]:
+            return done(reason=f"cannot commit the proposal into the mirror: "
+                               f"{staged['reason']}")
         cand = _run_selection(interp, tree, files, proposed_vault, probe_data,
                               mark_expr or mark, run_budget(), workers)
         report["candidate"] = {"ran": cand["ran"], "failed": cand["failed"],
