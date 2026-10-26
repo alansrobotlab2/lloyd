@@ -945,13 +945,20 @@ def test_the_triage_prompt_puts_vault_and_frontend_in_scope():
 
 
 def test_human_only_acceptances_are_never_handed_to_the_implementer(isolated):
+    """The parked row used to read 'human-only: needs config.yaml
+    `agent.max_turns` raised', and #3391 clause 2 makes that one DISPATCHABLE: a
+    dotted key path in a `config.yaml` head is now judged against the fence tables
+    and `harness`/`agent`-level tunables are not in them. The example moved to a
+    key that IS in them (`mcp_servers`), so what this node pins — a confirmed
+    human-only row never reaches the implementer — is unchanged."""
     write_item(isolated, 1, days_old=50)
     write_item(isolated, 2, days_old=40)
-    _confirm(1, acceptance="human-only: needs config.yaml `agent.max_turns` raised")
+    acc = "human-only: needs config.yaml `mcp_servers.lloyd-mcp.disabled_tools` cleared"
+    _confirm(1, acceptance=acc)
     _confirm(2)
     item, _ = B.select_confirmed(S.LEDGER_PATH)
     assert item.id == 2
-    assert B.human_only_ids(S.LEDGER_PATH) == {1: "human-only: needs config.yaml `agent.max_turns` raised"}
+    assert B.human_only_ids(S.LEDGER_PATH) == {1: acc}
 
 
 # #1698: the triage prompt shows the marker inside a markdown code span
@@ -1093,8 +1100,11 @@ def test_a_marker_that_names_a_path_is_still_a_guard(acceptance):
 def test_a_marker_on_a_path_the_gate_would_land_is_not_a_guard(acceptance):
     """Alan, 2026-10-05: the loop goes with its own recommendation unless a step
     is physical. The marker is checked against the rail it cites: protected is
-    not denied (`spec.py`: "Lloyd may edit these"), `config.yaml` is judged by
-    content at rung 0, and a decision is not a path at all."""
+    not denied (`spec.py`: "Lloyd may edit these"), `config.yaml` is judged by the
+    same CONTENT fence rung 0 applies — which since #3391 means a head naming a
+    key under the fence is a guard and one naming a tunable is not, and these rows
+    are the tunable-and-unrelated half of that pair — and a decision is not a path
+    at all. See `CONFIG_FENCE_*` for the fenced half."""
     assert B.is_human_only(acceptance) is False, acceptance
 
 
@@ -1108,6 +1118,166 @@ def test_the_guard_asks_spec_and_does_not_restate_the_globs():
     for path in (".gitignore", "data/tool_overrides.yaml", "web/package.json"):
         assert spec.classify(path) == "denied"
         assert B.is_human_only(f"human-only: {path}") is True
+
+
+# ── #3391: a `config.yaml` head naming a FENCED key is a guard ─────────────────
+#
+# `_names_a_guard` skipped the `config.yaml` token outright (`continue  # rung 0
+# judges the content, not triage`). Correct for the thirteen tunables the
+# 2026-10-05 lane freed, and blind to the fence itself — so it could not see the
+# residual `spec.py` states plainly: `mcp_servers.*.disabled_tools` "is a denied
+# prefix, and so stays exactly as unreachable as before". #3388's acceptance opens
+# by naming exactly that subtree; triage said landable, rung 0 refused both of its
+# rounds in under half a second with
+# `denied paths in diff: ['config.yaml'] … under the denied key `mcp_servers``,
+# and a third session was claimed 101 seconds after a re-triage pass marked the
+# item `blocked: true` in order to stop it. Both sides now read one table:
+# `CONFIG_DENIED_KEYS` and `CONFIG_DENIED_LEAVES`.
+
+#: #3388's acceptance verbatim as recorded on the item — the row that was
+#: dispatched three times. Its only `_PATH_TOKEN` hit is `config.yaml`; the fenced
+#: key `mcp_servers` appears ONLY as prose, which is why the detector reads the
+#: head and not just the path tokens.
+ACC_3388_FENCED_CONFIG = (
+    "human-only: config.yaml (its mcp_servers subtree is a denied key for every "
+    "loop lane \u2014 scripts/automod/spec.py:327, and scripts/config_edit_guard.py commit "
+    "applies the same fence outside the lane). A person at a shell on the live tree runs "
+    "`git -C ~/lloyd merge --ff-only automod/SM_20261026_172432`.")
+
+#: config.yaml heads naming a key the value-change fence refuses, so no diff can
+#: land them: #3388's prose form, a dotted path under a denied prefix, a
+#: `workers.sources.<source>.<control leaf>`, and a denied leaf name.
+CONFIG_FENCE_GUARD_MARKERS = (
+    ACC_3388_FENCED_CONFIG,
+    "human-only: config.yaml `mcp_servers.lloyd-mcp.disabled_tools` needs the entry",
+    "human-only: config.yaml (workers.sources.autocode.model must stop naming the mini)",
+    "human-only: config.yaml (arm `knowledge_graph.write_gate` for the nightly pass)",
+    "human-only: config.yaml (rotate the api_key placeholder)",
+)
+
+#: config.yaml heads naming a tunable OUTSIDE the fence. Four of these six are
+#: taken from `spec.py:43-49`'s own list of the thirteen contracts that stalled and
+#: were freed on 2026-10-05; `knowledge_graph.write_enabled` is landable by
+#: `spec.py`'s own words ("Dotted `write_gate`, NOT `knowledge_graph`:
+#: `knowledge_graph.write_enabled` is a tunable a round may change"). The last row
+#: is the one a bare-word scan of the table would park by accident, because `model`
+#: is itself a denied prefix that reads as English.
+CONFIG_FENCE_LANDABLE_MARKERS = (
+    "human-only: config.yaml (harness.finalizer.max_tokens raised). Done when the "
+    "value is 4096.",
+    "human-only: config.yaml (workers.sources.autoresearch.max_duration_seconds raised)",
+    "human-only: config.yaml (workers.sources.autocode.reasoning_bank flipped to ab)",
+    "human-only: config.yaml (`knowledge_graph.write_enabled` at line 564)",
+    "human-only: needs config.yaml `agent.max_turns` raised",
+    "human-only: config.yaml (the model name in the example is stale)",
+)
+
+
+@pytest.mark.parametrize("acceptance", CONFIG_FENCE_GUARD_MARKERS)
+def test_a_config_head_naming_a_fenced_key_is_a_guard(acceptance):
+    """#3391 clause 1: triage now answers the question rung 0 answers.
+
+    Before, a head naming a fenced key was called landable HERE and refused THERE,
+    and the item that fell through the gap is the first row of this table. A head
+    whose only fenced key is prose (`mcp_servers subtree`) counts, because the
+    fence is content and content is what triage is here to predict."""
+    assert B.is_human_only(acceptance) is True, acceptance
+
+
+@pytest.mark.parametrize("acceptance", CONFIG_FENCE_LANDABLE_MARKERS)
+def test_a_config_head_naming_a_tunable_outside_the_fence_is_not_a_guard(acceptance):
+    """#3391 clauses 2 + 3: the constraint that must not regress.
+
+    The thirteen tunable contracts of `spec.py:43-49` stay dispatchable, so the
+    fix keys off the tables and never restores the pre-2026-10-05 blanket guard on
+    the filename. The dotted rows are the half that a `spec.classify` call could
+    not get right: `_PATH_TOKEN` eats the leading dot, so
+    `harness.finalizer.max_tokens` reached `classify` as `.finalizer.max_tokens`,
+    came back `unlisted`, and parked the item."""
+    assert B.is_human_only(acceptance) is False, acceptance
+
+
+def test_the_tunable_fragment_is_not_judged_as_a_repo_path():
+    """#3391 clause 2's mechanism, pinned so the node above cannot go green by
+    accident: `spec.classify` still answers `unlisted` for the chopped fragment, so
+    the tunable is dispatchable ONLY because a dot-leading token in a
+    `config.yaml` head goes to the fence. Route those tokens back through
+    `classify` and this is the node that goes red — not the parametrised one, which
+    would keep passing on an unrelated change to the tables."""
+    from scripts.automod import spec
+    assert spec.classify(".finalizer.max_tokens") == "unlisted"
+    assert B.is_human_only("human-only: config.yaml "
+                           "(harness.finalizer.max_tokens raised)") is False
+
+
+def test_a_fenced_config_key_head_is_withheld_from_the_pool_end_to_end(isolated):
+    """#3391 clause 1, at the two readers that cost three sessions.
+
+    `ready_confirmed`'s `is_human_only` skip is the one place that keeps an
+    unlandable contract out of autocode, and `human_only_ids` is the ledger readout
+    of the same verdict. The fenced row is the OLDER item, so before the fix the
+    pool offered it and a round spent itself on a `preflight` refusal; the plain
+    sibling next to it must still be offered, because parking one head unparks
+    nothing."""
+    write_item(isolated, 3388, days_old=50)
+    write_item(isolated, 3389, days_old=40)
+    _confirm(3388, acceptance=ACC_3388_FENCED_CONFIG)
+    _confirm(3389)
+    assert B.human_only_ids(S.LEDGER_PATH) == {3388: ACC_3388_FENCED_CONFIG}, (
+        "the fenced-config row was not counted as a guard by the ledger readout")
+    ids = [item.id for item, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 3388 not in ids, f"the fenced-config contract was offered a round: {ids}"
+    assert 3389 in ids, f"an ordinary confirmed item was withheld beside it: {ids}"
+
+
+def test_the_fence_verdict_travels_with_the_table_and_not_with_a_name(monkeypatch):
+    """#3391 clause 4, the shape `test_the_guard_asks_spec_and_does_not_restate_
+    the_globs` pins for the path rails: the guard is the TABLE's verdict.
+
+    `CONFIG_DENIED_KEYS` gains a name and a head naming it flips from dispatchable
+    to a guard with no edit to `backlog.py`. The name carries an underscore
+    because that is the detector's narrowing — an identifier, not a prose word."""
+    from scripts.automod import spec
+    head = "human-only: config.yaml (widget_frobnicator needs a second stage)"
+    assert B.is_human_only(head) is False, "a key outside the table must not park"
+    monkeypatch.setattr(spec, "CONFIG_DENIED_KEYS",
+                        spec.CONFIG_DENIED_KEYS + ("widget_frobnicator",))
+    assert B.is_human_only(head) is True, (
+        "the verdict did not move with CONFIG_DENIED_KEYS, so the classifier is "
+        "restating the fence somewhere instead of reading it")
+
+
+def test_blocked_front_matter_is_not_a_pool_gate(isolated):
+    """#3391's secondary, and the call is that it STAYS that way.
+
+    #3388's item was set `blocked: true` at 18:24:55 specifically to stop the pool,
+    and an implement session claimed it at 18:26:36 — 101 seconds later — because
+    no reader of the pool consults the flag and `Item` carries no such field. It is
+    not added as a gate: nothing auto-clears it, so one triage row written in error
+    would park an item for good, which is the false-park class this module keeps
+    refusing (#1909, #3027). So the node pins both halves — that a blocked item IS
+    still returned, and that the docstring says so and names the levers that do
+    withhold, since a docstring is the only thing the next triage pass reads."""
+    path = write_item(isolated, 3390, days_old=10)
+    _confirm(3390)
+    # The flag a triage pass writes, written AFTER `_confirm` so the assert below
+    # is read from the file dispatch will read, not from a pre-set fixture.
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "---\n", "---\nblocked: true\n", 1), encoding="utf-8")
+    fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    assert fm.get("blocked") is True, (
+        f"the flag never reached the file, so the node proves nothing: {fm!r}")
+
+    ids = [item.id for item, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 3390 in ids, (
+        f"`blocked: true` withheld the item, which is the behaviour the ruling "
+        f"against #3391 says NOT to add: {ids}")
+
+    doc = B.ready_confirmed.__doc__ or ""
+    assert "NOT one of these levers" in doc, (
+        "the docstring no longer states that `blocked` is not a pool gate")
+    for lever in ("blocked", "status", "human-only", "grouping", "spent"):
+        assert lever in doc, f"ready_confirmed's docstring must name {lever!r}"
 
 
 # ── #3027: the loop's own runtime data root is not a guard ─────────────────────
@@ -1275,7 +1445,13 @@ def test_a_no_path_marker_dispatches_the_item_and_owes_no_decision(isolated):
     p = write_item(isolated, 1881, status="draft")
     acc = ("human-only: not required. Done when step-2a-ter-curation.md §1 and §5 both "
            "name the 32,768 B topic ceiling and the topic_size_error refusal")
-    guard = "human-only: config.yaml (`knowledge_graph.write_enabled` at line 564)"
+    # The guard row used to name `knowledge_graph.write_enabled`, which #3391
+    # clause 2 makes a tunable and therefore NOT a guard — `spec.py` says so in
+    # so many words ("Dotted `write_gate`, NOT `knowledge_graph`:
+    # `knowledge_graph.write_enabled` is a tunable a round may change"). It moved
+    # to a key that sits under a denied prefix, so the sibling this node holds out
+    # of the pool is still a real rail rather than a tokenising artifact.
+    guard = "human-only: config.yaml (`mcp_servers.lloyd-mcp.disabled_tools` at line 214)"
 
     assert B.record_verdict(B.item_by_id(1881), "confirmed", "the premise still holds",
                             acceptance=acc) is not None

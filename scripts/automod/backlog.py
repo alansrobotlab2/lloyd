@@ -351,6 +351,26 @@ _PHYSICAL_WORDS = re.compile(
 _PATH_TOKEN = re.compile(r"[~\w.*\-]*[/][\w.*/\-]*|\.[a-z]\w+(?:\.\w+)*|\b[\w\-]+\.[a-z]{1,5}\b",
                          re.IGNORECASE)
 
+#: A dotted config key path written in prose: `harness.finalizer.max_tokens`,
+#: `mcp_servers.lloyd-mcp.disabled_tools`, `knowledge_graph.write_gate`. Read out
+#: of the head rather than out of `_PATH_TOKEN`, because that tokeniser's
+#: `\.[a-z]\w+(?:\.\w+)*` alternative EATS THE LEADING DOT: over the head
+#: `config.yaml (harness.finalizer.max_tokens raised)` it answers
+#: `['config.yaml', '.finalizer.max_tokens']`, and the fragment it hands on is
+#: what made a plain tunable look like a guard (#3391 clause 2). This one keeps
+#: the path whole.
+_CONFIG_KEY_PATH = re.compile(r"[A-Za-z_][\w\-]*(?:\.[A-Za-z_][\w\-]*)+")
+
+#: A config key written as a bare identifier: `mcp_servers`, `api_key`. Only a
+#: name carrying an UNDERSCORE counts, and that is a deliberate narrowing:
+#: `CONFIG_DENIED_KEYS` also holds `models`, `model`, `subagents`, `server`,
+#: `services` and `guardian`, which are ordinary English words, and bare-word
+#: scanning the table would park the landable contracts `0e6d8af5` exists to
+#: dispatch. The accepted cost, recorded because it is real: a head whose ONLY
+#: fence is one of those prose words (`config.yaml (the model name is stale)`)
+#: stays dispatchable and is caught by rung 0, not here.
+_CONFIG_BARE_KEY = re.compile(r"[A-Za-z][\w]*_[\w]*")
+
 #: Vault subtrees a vault round may not write, whatever the contract says: the
 #: app's own state, and `autonomy/` because a task's dispatch fields are the #724
 #: grant rail's (`vault_round.validate`).
@@ -401,6 +421,33 @@ def _head_text(acceptance) -> str:
     return value
 
 
+def _names_a_fenced_config_key(text: str) -> bool:
+    """Would rung 0 refuse a VALUE change to the config key this text names?
+
+    The two tests `spec.config_value_change` applies to every changed path, run
+    over prose instead of a diff: a path under a `CONFIG_DENIED_KEYS` prefix (by
+    `spec._config_denied_prefix`, which also covers the
+    `workers.sources.<source>.<control leaf>` fence), or a `CONFIG_DENIED_LEAVES`
+    leaf name — the latter judged on the last segment, exactly as rung 0 judges it.
+    No key name is written here: the tables ARE the verdict, so a prefix added to
+    `CONFIG_DENIED_KEYS` tomorrow is a guard here the same day, which is the
+    property #3391 clause 4 pins.
+
+    Detection is `_CONFIG_KEY_PATH` plus `_CONFIG_BARE_KEY`, so only a dotted path
+    or an underscore-bearing identifier is ever put to the table — never a prose
+    word, which is what keeps `config.yaml (the model name is stale)` in the pool
+    even though `model` is itself a denied prefix.
+    """
+    from scripts.automod import spec
+
+    def denied(path: str) -> bool:
+        return (spec._config_denied_prefix(path) is not None
+                or path.rsplit(".", 1)[-1] in spec.CONFIG_DENIED_LEAVES)
+
+    return (any(denied(p) for p in _CONFIG_KEY_PATH.findall(text))
+            or any(denied(w) for w in _CONFIG_BARE_KEY.findall(text)))
+
+
 def _names_a_guard(acceptance) -> bool:
     """Would the gate refuse what this marker names, or does it ask for hands?
 
@@ -411,6 +458,23 @@ def _names_a_guard(acceptance) -> bool:
     vault round. Anything else — a denied or unlisted path, a file outside the
     repo and the vault — is a guard. A head naming no path is a guard only when
     it names something physical: a decision is the loop's to make now.
+
+    `config.yaml` is therefore judged BOTH ways, which is #3391. It used to be an
+    unconditional skip, so the classifier had no representation of the 2026-10-05
+    fence and could not see the residual `spec.py` states plainly — that
+    `mcp_servers.*.disabled_tools` "is a denied prefix, and so stays exactly as
+    unreachable as before". A head naming a key under `CONFIG_DENIED_KEYS` or a
+    `CONFIG_DENIED_LEAVES` leaf now returns True through
+    `_names_a_fenced_config_key`, and a head naming a tunable stays dispatchable
+    because the TABLE answers, not the key's spelling: `harness.finalizer.
+    max_tokens` and `workers.sources.autoresearch.max_duration_seconds` are two of
+    the thirteen the 2026-10-05 ruling freed and neither is denied. What the
+    narrowing in `_CONFIG_BARE_KEY` (underscore-bearing identifiers only) keeps
+    landable is the other shape: a bare-word scan of the table would park
+    `config.yaml (the model name is stale)`, because `model`, `models`, `server`
+    and `services` are denied prefixes that read as English. The gap that
+    narrowing leaves — a head whose only fence is one of those prose words — is
+    accepted, and lands on rung 0, which reads the actual diff.
 
     Two shapes are skipped rather than judged, both #3027. The loop's own runtime
     data root (`_RUNTIME_DATA_ROOTS`) is not a guard even though it is absolute:
@@ -435,15 +499,23 @@ def _names_a_guard(acceptance) -> bool:
         return [t for t in found if t]
 
     tokens = paths_in(head)
+    scope = head
     if not tokens:
         # "the dispatch half of this item — `~/obsidian/autonomy/96-….md`": the
         # head describes and the path follows the dash (#2219's row). Read on a
         # little; the no-path words were already answered by the caller.
         text = str(acceptance or "")
         start = text.lower().find(HUMAN_ONLY_PREFIX) + len(HUMAN_ONLY_PREFIX)
-        tokens = paths_in(text[start:start + 400])[:3]
+        scope = text[start:start + 400]
+        tokens = paths_in(scope)[:3]
     if not tokens:
         return physical
+    # A head naming `config.yaml` is judged by the CONTENT fence, so every
+    # dot-leading fragment in it is a key path, not a repo path: `_PATH_TOKEN`
+    # eats the leading dot, so `harness.finalizer.max_tokens` reaches this loop as
+    # `.finalizer.max_tokens`, which `spec.classify` calls unlisted. Judging that
+    # fragment as a path is what parked the tunable class #3391 clause 2 pins.
+    in_config_head = any(tok == "config.yaml" for tok in tokens)
     for tok in tokens:
         low = tok.lower()
         if _under_runtime_data_root(low):
@@ -466,7 +538,28 @@ def _names_a_guard(acceptance) -> bool:
             if tok.endswith("/"):
                 continue               # "…and its store-backups/": prose, not a path
             if tok == "config.yaml":
-                continue               # rung 0 judges the content, not triage
+                # Rung 0 judges this file by CONTENT, so triage judges it by the
+                # SAME table (#3391). The blanket `continue` that stood here was
+                # right for the tunables that motivated 0e6d8af5 and wrong for
+                # everything under the fence it cannot see: #3388's head names
+                # `mcp_servers`, rung 0 refused its diff twice in under half a
+                # second (`denied paths in diff: ['config.yaml'] … under the
+                # denied key `mcp_servers``), and three sessions stood in the gap.
+                if _names_a_fenced_config_key(scope):
+                    return True
+                continue               # outside the fence: landable, as before
+            if in_config_head and tok.startswith(".") and "/" not in tok:
+                # A dot-leading token with no slash inside a `config.yaml` head is
+                # a KEY PATH the tokeniser chopped in half: `_PATH_TOKEN` eats the
+                # leading dot, so `knowledge_graph.write_enabled` arrives here as
+                # `.write_enabled` and `agent.max_turns` as `.max_turns`. Put it to
+                # the fence, not to `spec.classify`, whose `unlisted` verdict on
+                # such a fragment is what parked the tunable class (#3391 clause 2).
+                # A rail that really DENIES the name (`.gitignore`, `.env*`) still
+                # parks, because that refusal is about the file, not the tokeniser.
+                if _names_a_fenced_config_key(tok) or spec.classify(tok) == "denied":
+                    return True
+                continue
             if spec.classify(tok) not in ("allowed", "protected"):
                 return True
     return physical
@@ -7005,6 +7098,24 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     sessions over one contract is what #3370 is about. `ignore_implement_claims`
     is the one reader that wants them back — `implement_held_confirmed`, which
     has to name what it refused rather than report an empty pool.
+
+    An item's `blocked:` front matter is NOT one of these levers, and a triage
+    pass should not reach for it (#3391). Nothing that dispatches a round reads
+    it: this module's `Item` carries no such field, and the key's other readers
+    are the two surfaces that merely REPORT a board — `app/routers/backlog.py`
+    (a `_FALLBACK_FIELDS` row, and the PATCH path that writes it) and the backlog
+    MCP tool (`agent_mcp/backlog.py`, whose `blocked` argument filters a listing).
+    So marking an item blocked on a person and expecting the pool to stop
+    offering it is pulling a handle that is not connected: #3388's item was set
+    `blocked: true` at 18:24:55 and an implement session still claimed it 101
+    seconds later, at 18:26:36. It is deliberately not added here — nothing
+    auto-clears the flag, so gating on it would park an item for good the moment
+    a triage wrote it in error, the same false-park class this module keeps
+    refusing (#1909, #3027). What DOES withhold an item, and what a triage that
+    wants one held must use: `status` (the pool is `up_next` and only there), the
+    human-only marker (`is_human_only`, the clause above), umbrella grouping
+    (`is_grouped`), an empty acceptance, a pending `hand_run:` receipt, and a
+    spent attempt, an in-flight gate or landing, or another slot's claim.
     """
     from scripts.automod import owed as _O
     confirmed = confirmed_verdicts(ledger)
