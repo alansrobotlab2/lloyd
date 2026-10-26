@@ -1172,11 +1172,11 @@ CLAUSE_MAX_CHARS = 600
 
 
 def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
-    """Clauses as a bounded list of non-placeholder strings. `limit` is
-    `MAX_CLAUSES` on a write, else the read bound. Two rows of one clause: one."""
+    """Clauses as a bounded list of non-placeholder strings, `MAX_CLAUSES` on a
+    write; a verdict trailer (`trailer_placeholder_row`) is a placeholder too."""
     out: list[str] = []
     for v in (values or []):
-        s = acceptance_text(v)
+        s = "" if trailer_placeholder_row(str(v)) else acceptance_text(v)
         if s and s not in out:
             out.append(s[:CLAUSE_MAX_CHARS])
         if len(out) >= limit:
@@ -3367,6 +3367,45 @@ def acceptance_text(value) -> str:
     if s.strip(" -<>()[].:'\"").lower() in _ACCEPTANCE_PLACEHOLDERS:
         return ""
     return s
+
+
+#: A verdict trailer written as if it were a clause: `HUMAN_CLAUSES: none`,
+#: `SPAWNED: none`. `record_verdict` takes those two things as SEPARATE parameters
+#: (`human_clauses=`, `spawned=`) and keeps them out of `acceptance_clauses` on purpose,
+#: so a row like this in that list is malformed input, not a requirement — and no diff can
+#: satisfy the string `HUMAN_CLAUSES: none`, so the grader cannot address it: `review.py`
+#: synthesises a `partial` for an unaddressed clause, `partial` blocks, and #3341 has been
+#: refused twice on nothing else while all three of its real clauses graded `met`
+#: (SM_20261026_004219 clause rows 4 and 5, note "not addressed by the grader").
+#:
+#: The value has to BE a placeholder, and that is the whole scope of this filter:
+#: `SPAWNED: #401 #402` is a real record of what a round filed, and `the ruling the
+#: HUMAN_CLAUSES section defers` is a real requirement, so dropping any row that merely
+#: names a label would silently delete a graded requirement — the false-positive risk
+#: `POST_LANDING_RX`'s comment above recites for its own filter. One placeholder set
+#: (`_ACCEPTANCE_PLACEHOLDERS`, beside `acceptance_text`) is shared by both guards, which
+#: is why a bare `- 'none'` already died here and `- 'HUMAN_CLAUSES: none'` did not: the
+#: punctuation strip that catches the first leaves the second intact.
+#:
+#: It lives down here, beside the set it reads, and NOT beside `clean_clauses` (its only
+#: caller): the Step 2.5 section of `~/obsidian/skills/autonomy-data-pipeline/SKILL.md`
+#: cites `backlog.py` line numbers that `tests/test_skill_stranded_ruled_sets.py` derives
+#: from this file, and a line inserted above the `WITNESS_MAX_BYTES` constant moves those
+#: cites and reds that guard — measured, not assumed: 11 lines added above it shifted the
+#: constant 1328 -> 1333 and three of its nodes failed at the gate. Keep a guard of this
+#: kind below that constant, or re-point the skill's cites in the same change.
+_TRAILER_CLAUSE_RX = re.compile(
+    r"^\s*(?:[-*]\s*|\d+[.)]\s*)?(HUMAN_CLAUSES|SPAWNED)\s*[:=]\s*(.+)$",
+    re.IGNORECASE)
+
+
+def trailer_placeholder_row(row: str) -> bool:
+    """True for `<trailer label>: <placeholder>` and for nothing else."""
+    m = _TRAILER_CLAUSE_RX.match(row)
+    if not m:
+        return False
+    value = " ".join(m.group(2).split()).strip(" -<>()[].:'\"").lower()
+    return value in _ACCEPTANCE_PLACEHOLDERS
 
 
 _ID_RE = re.compile(r"#?(\d{1,6})\b")

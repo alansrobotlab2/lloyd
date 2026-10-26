@@ -672,3 +672,112 @@ def test_the_collapse_never_joins_a_list_that_is_not_one_clause_wrapped():
     assert B._self_numbered(["1. one", "2. two", "4. four", "5. five"]) is True
     # And #3002's shape still strips to its content, join not firing on it.
     assert B.clean_clauses(SELF_NUMBERED) == UNNUMBERED
+
+
+# ── #3347: a verdict trailer is not a clause the grader has to satisfy ──────────
+#
+# `record_verdict` takes `human_clauses=` and `spawned=` as parameters SEPARATE from
+# `acceptance_clauses`, and keeps them out of that list on purpose. Autotriage ignored the
+# separation for #3341 and wrote the two trailer lines INTO the clause list, so #3341's
+# contract is five rows of which two no diff can ever satisfy. Two rounds were refused on
+# those two rows alone (SM_20261025_233431 at 7ccdc67bb228, SM_20261026_004219 at
+# 3718bc6d3754), with the gate's clause rows reading 1/2/3 `met` + `how_verified: ran` and
+# 4/5 `partial` + note `not addressed by the grader`: `review.py` synthesises a `partial`
+# for a clause the grader could not address, and `partial` blocks. Neither escape route was
+# open from inside that round — `amend_clause` refuses unless the grader called the clause
+# UNSATISFIABLE, and it never does (it never reaches the clause at all).
+#
+# The asymmetry is the one `acceptance_text` already knows about: a bare `- 'none'` dies in
+# `clean_clauses` today, while `- 'HUMAN_CLAUSES: none'` survives it, because the
+# punctuation strip that catches the first leaves the second intact. Both nodes below
+# measure both sides, because a filter that drops too much is worse than no filter: it
+# deletes a real requirement from grading and reports success.
+
+REAL3 = ["the runner prints the tally", "the table names the column",
+         "a node pins the refusal"]
+
+
+def test_a_trailer_row_with_a_placeholder_value_stops_being_a_clause():
+    """Clause 1: `HUMAN_CLAUSES: none` / `SPAWNED: none` are not requirements.
+
+    #3341's two rows, plus a numbered and an `=`-spelled variant, because the row reaches
+    `clean_clauses` carrying whatever numbering the model chose.
+    """
+    assert B.clean_clauses(["1. real clause", "HUMAN_CLAUSES: none",
+                            "SPAWNED: none"]) == ["real clause"]
+    assert B.clean_clauses(REAL3 + ["4. HUMAN_CLAUSES: none", "5. SPAWNED: none"]) == REAL3
+    assert B.clean_clauses(REAL3 + ["human_clauses: n/a", "Spawned = NA"]) == REAL3
+    assert B.clean_clauses(REAL3 + ["- HUMAN_CLAUSES: none", "* SPAWNED: nil"]) == REAL3
+    assert B.trailer_placeholder_row("HUMAN_CLAUSES: none") is True
+    assert B.trailer_placeholder_row("SPAWNED: none") is True
+
+
+def test_a_clause_that_only_names_a_trailer_label_survives_byte_for_byte():
+    """Clause 2: the false positive this filter must not commit.
+
+    `SPAWNED: #401 #402` is a round's record of what it filed, and `the ruling the
+    HUMAN_CLAUSES section defers` is a real requirement that happens to name a section.
+    Dropping either silently un-grades a demand, which is the failure
+    `POST_LANDING_RX`'s comment recites for the sibling filter: the clause list is the
+    implementer's contract, and a filter that shaves it is worse than one that lets an
+    ungradeable row through.
+    """
+    survivors = ["the ruling the HUMAN_CLAUSES section defers", "SPAWNED: #401 #402"]
+    assert B.clean_clauses(survivors) == survivors
+    assert B.clean_clauses(REAL3 + survivors) == REAL3 + survivors
+
+    # A non-placeholder value under the label stays graded, deliberately: routing
+    # `HUMAN_CLAUSES: re-run the owed check Monday` into the human list is a triage
+    # question, and this is a placeholder guard, not a re-router.
+    kept = ["HUMAN_CLAUSES: re-run the owed check Monday"]
+    assert B.clean_clauses(kept) == kept
+    # A bare label with no value is not the shape either: that is a header row, and
+    # guessing which field it meant is not this filter's call.
+    assert B.clean_clauses(["SPAWNED"]) == ["SPAWNED"]
+
+
+def test_a_contract_read_from_an_item_already_on_disk_drops_the_stored_rows(isolated):
+    """Clause 3: the READ side, which is what heals items filed before this landing.
+
+    #3341's malformed rows are already committed in its front matter, so a writer-only fix
+    would leave every item triaged before today broken forever. The file is therefore
+    written the way a pre-fix autotriage left it — trailer rows sitting in
+    `acceptance_clauses` and in `human_clauses` — and read back the way `item_contract`
+    reads it, with no re-write in between.
+    """
+    p = write_item(isolated, 66130, extra={
+        "acceptance_clauses": REAL3 + ["HUMAN_CLAUSES: none", "SPAWNED: none"],
+        "human_clauses": ["HUMAN_CLAUSES: none", "SPAWNED: none"]})
+    raw = _fm(p)
+    assert "HUMAN_CLAUSES: none" in raw["acceptance_clauses"], (
+        "the fixture stopped looking like #3341's file, so this node is no longer "
+        "measuring a stored malformed contract")
+    assert B.acceptance_clauses_of(None, raw) == REAL3
+    # The trailer's own field: `human_clauses_of` shares `clean_clauses`, so the same rows
+    # are absent there too instead of parking in a field nothing grades.
+    assert B.human_clauses_of(None, raw) == []
+
+
+def test_writer_and_reader_agree_on_what_a_trailer_row_is(isolated):
+    """Clause 4: the boundary is the item FILE, and both ends must call it nothing.
+
+    A writer that dropped the row while a reader kept it would make an item's contract
+    depend on when it was written; the reverse would let a trailer reach the grader from a
+    file an older writer produced. So write through `record_verdict` with the trailers among
+    the clauses, then read the file both ways: as stored bytes, and through the reader. The
+    first assertion is the writer's half and would fail alone if only the read path were
+    fixed.
+    """
+    p = write_item(isolated, 66131)
+    B.record_verdict(B.item_by_id(66131), "confirmed", "re-measured, unchanged",
+                     acceptance="A: real one\nB: real two\nC: real three",
+                     acceptance_clauses=REAL3 + ["HUMAN_CLAUSES: none", "SPAWNED: none"],
+                     human_clauses=["HUMAN_CLAUSES: none"], spawned=[])
+    stored = _fm(p)
+    assert stored["acceptance_clauses"] == REAL3, stored["acceptance_clauses"]
+    assert B.acceptance_clauses_of(None, stored) == REAL3
+    assert B.human_clauses_of(None, stored) == [], (
+        "the trailer survived into the human list, which is the field it should have been "
+        f"written into as a VALUE — `none` is not one: {stored['human_clauses']}")
+    # One answer from either end, bypassing the file entirely:
+    assert B.acceptance_clauses_of({"acceptance_clauses": REAL3 + ["SPAWNED: none"]}) == REAL3
