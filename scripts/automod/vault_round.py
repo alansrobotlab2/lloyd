@@ -871,47 +871,60 @@ def _revert_tracked_path(p: str) -> str:
                                      for field, value in restored) + ")"
 
 
-#: #3039: an untracked path under this prefix survives a refusal instead of being
-#: unlinked. `backlog/` holds board prose and nothing else — `app/backlog_write.py`
-#: writes these files, the kanban reads them, and a backlog edit is not handed to a
-#: loader at all (`test_loaders_run_only_for_paths_that_feed_a_prompt_or_the_scheduler`)
-#: — so #2437's reason to delete a created file has no purchase here: it is an
-#: `autonomy/<n>-*.md` that arms a task, and a `backlog/<id>-*.md` arms nothing.
-#: Deleting one bought no safety and cost the board the item: on 2026-10-19 a single
-#: diverged review of item 3035 took that item's own file and the successor filing
-#: `backlog/3036-*.md` with it, because the clauses of a vault round end with its own
-#: item file, so that file is in every such round's path set.
+#: #3375: the prefixes whose ON-DISK PRESENCE arms behaviour, which are therefore the only
+#: untracked paths a refused land still unlinks. An `autonomy/<n>-*.md` is the task file the
+#: scheduler reads (#2437). A `skills/<slug>/SKILL.md` is a skill: `agent_mcp/skills.py:240-249`
+#: yields a directory as soon as that file exists — its own docstring says "presence is what
+#: the index, the Skills page and the tab count are reporting" — `app/uptake.py:1736` counts
+#: `skills/*/SKILL.md` off disk the same way, and `skill_activation_findings` above is a
+#: land-door rail that `validate()` refuses on. Keeping a skill that rail just refused would
+#: leave it in the index and in every prompt's skill list, which is the refusal undone;
+#: deleting it costs bytes a round can rewrite, because a skill is short, structured, and was
+#: itself the thing under grading.
 #:
-#: The rule is the path class, deliberately not `item_id`: the case that fired deleted
-#: a created item that was NOT the one the round was opened for.
-BACKLOG_PATH_PREFIX = "backlog/"
+#: Everything else is prose the vault holds by the thousand and a prompt reaches only through
+#: retrieval, so #3375 inverts the default: keep, and delete only what arms something.
+ARMING_PATH_PREFIXES = ("autonomy/", "skills/")
 
-#: How a kept path is marked in a `reverted` list (#3039 clause 4). A bare entry is what
-#: a path that was put back at HEAD or unlinked has, so an unannotated kept path would
-#: make the row claim a deletion that did not happen.
-KEPT_UNTRACKED_NOTE = (" kept (untracked backlog file: left on disk, bytes are "
+#: How a kept path is marked in a `reverted` list (#3039 clause 4; wording widened by #3375).
+#: A bare entry is what a path that was put back at HEAD or unlinked has, so an unannotated
+#: kept path would make the row claim a deletion that did not happen. The wording names no
+#: directory because the kept class stopped being one directory: it read "untracked backlog
+#: file" while the rule was all of `backlog/`, and would have booked a kept `knowledge/` note
+#: onto the ledger row as a backlog file.
+KEPT_UNTRACKED_NOTE = (" kept (untracked file the round created: left on disk, bytes are "
                        "the round's — git holds no pre-round copy)")
 
 
 def _kept_when_untracked(p: str) -> bool:
-    """True for an untracked path a refused land must leave on disk (#3039, widened #3272).
+    """True for an untracked path a refused land must leave on disk.
 
-    All of `backlog/`, whatever the extension. #3039 carved the class out for a `.md`, and
-    the extension then carried none of the reason: on 2026-10-24 the refused land of a
-    promotions witness ran this function on
-    `backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl`, answered False because
-    the name does not end `.md`, and `revert_paths` unlinked the bytes it had been
-    grading minutes earlier. The caller had to re-cut them from the live ledger to attempt
-    the land again — and the window those rows were cut from folds, so the second attempt
-    could have had nothing to re-cut. A guard that consumes what it grades is a guard the
-    caller cannot re-run.
+    #3039 carved out `backlog/`, #3272 widened that to every extension of it, and #3375
+    inverts the default so the exception is behaviour-bearing and nothing else: keep
+    everything outside `ARMING_PATH_PREFIXES`.
 
-    The class argument above already covers a `.jsonl` under `backlog/data/`: it feeds no
-    loader, arms no task, and an unwritten witness is the silent absence every other clause
-    of this file is written against. `autonomy/<n>-*.md` stays deleted, for #2437's reason
-    and not this one — that file arms a task, so a refused round must not leave one armed.
+    The reason is an asymmetry, not a directory. An untracked path has no HEAD copy and the
+    vault keeps no second store, so an unlink here is unrecoverable; what the same file's
+    survival costs is retrieval-indexed prose in a corpus that already holds far more of it,
+    written through routes with no round and no grader at all. #3272 is the record of what
+    deleting costs: on 2026-10-24 a refused promotions-witness land ran this function on
+    `backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl`, answered False because the
+    name does not end `.md`, and `revert_paths` unlinked the bytes it had been grading minutes
+    earlier, leaving the caller no re-runnable bytes for an attempt whose grading window
+    folds. A guard that consumes what it grades is a guard the caller cannot re-run.
+
+    #3375 is that bug one directory up, and it had fired. The 2026-10-26 triage scan of all 74
+    refused `vault_land` rows classified 12 bare non-backlog `reverted` entries, 3 of them
+    untracked at the refusal and therefore unlinked; the newest, 2026-10-26T07:59:25Z on item
+    #3366, took a created `knowledge/youtube/AI_Engineer/20261026-…-jesse-hall-liv.md` that
+    exists today only because the nightly knowledge write re-committed it as `d32d8697`
+    fourteen minutes later. That round was refused by a section-heading convention node, which
+    says nothing about the note's content — while the deletion was final.
+
+    `autonomy/` and `skills/` therefore stay deleted, each for the same #2437 reason: a file
+    left there goes on arming the task, or the skill, that the refusal exists to stop.
     """
-    return p.startswith(BACKLOG_PATH_PREFIX)
+    return not p.startswith(ARMING_PATH_PREFIXES)
 
 
 def revert_paths(paths: list[str]) -> list[str]:
@@ -921,17 +934,19 @@ def revert_paths(paths: list[str]) -> list[str]:
     back to HEAD's bytes except a `last_run`, `last_attempt`, `next_run` or `updated`
     the worktree holds strictly newer than HEAD's — those belong to the run that
     completed while the round was landing, and a refusal of the round's edit is no
-    claim on them. An untracked path the round created is still unlinked whole: a
+    claim on them. An untracked path under `ARMING_PATH_PREFIXES` is unlinked whole: a
     created file cannot both keep a completion's stamp and stop arming the task the
     refusal exists to stop, which is owed ruling 3 on #2437 rather than a call to
     make here.
 
-    #3039 carves one class out of that unlink and it is exactly the class #2437 was
-    not about: a `backlog/*.md` arms no task, so removal is pure loss, and the loss
-    falls on the board's own record — the round's item file and any item it filed are
-    in `paths` on every vault round. The achievable property there is "not deleted":
-    an untracked path has no HEAD copy, and `app/backlog_write.py` keeps no second
-    store (the markdown file IS the store), so the bytes that survive are the round's.
+    Every other untracked path is left on disk and marked kept (#3039 → #3272 → #3375),
+    which is the class #2437 was never about: a `backlog/*.md` arms no task, nor does a
+    `knowledge/` note, so removal there is pure loss and the loss falls on whatever the
+    round was building — the round's item file and any item it filed are in `paths` on
+    every vault round, and #3366 lost a whole knowledge note the same way. The achievable
+    property for an untracked path is "not deleted": it has no HEAD copy, and the vault
+    keeps no second store for these files (the markdown IS the store), so the bytes that
+    survive are the round's.
     """
     undone: list[str] = []
     for p in paths:

@@ -8263,13 +8263,18 @@ def test_a_refused_land_keeps_a_created_item_that_is_not_the_round_s_own(vault):
 
 
 def test_a_refused_land_still_deletes_an_untracked_autonomy_task(vault):
-    """Clause 3: the carve-out does not widen — a created task file still goes.
+    """#2437's exception survives #3375's widening: a created task file still goes.
 
     One refusal, two files untracked at HEAD, one of each class: the backlog item stays
     and the autonomy task is gone. #2437's reason stands for the task — a created
     `autonomy/*.md` left in the tree goes on arming the task the refusal exists to stop
     — and nothing under `backlog/` arms anything, so deletion there buys no safety, nor
     since #3272 buys any safety at all: the same refusal unlinked a `.jsonl` witness.
+
+    The rule is now inverted (#3375: keep everything outside `ARMING_PATH_PREFIXES`), so
+    what this node pins is the exception rather than the boundary of a carve-out — the
+    sentence it used to carry, that the keep rule "covers nothing outside" `backlog/`,
+    describes a rule the code no longer has.
     """
     _untrack_at_head(vault, "autonomy/1-task.md")
     _untrack_at_head(vault, "backlog/9-item.md")
@@ -8282,10 +8287,138 @@ def test_a_refused_land_still_deletes_an_untracked_autonomy_task(vault):
 
     assert not task.exists(), (
         "#2437: a created task file left on disk keeps arming the task this refusal "
-        "exists to stop — the keep rule (#3039, widened by #3272 to all of backlog/ "
-        "whatever the extension) covers nothing outside it"
+        "exists to stop — `autonomy/` is one of the two prefixes whose presence arms "
+        "behaviour, so it stays deleted whatever the keep rule covers elsewhere"
     )
     assert item.exists(), row["reverted"]
+
+
+#: Prose the round CREATED outside `backlog/`. The 2026-10-26T07:59:25Z refusal on item
+#: #3366 unlinked exactly this shape — a created `knowledge/` note — and the file exists
+#: today only because the nightly knowledge write re-committed it as `d32d8697` fourteen
+#: minutes later. Byte-exact bytes matter here: the claim is "the round's copy survives",
+#: not "a file with that name exists".
+CREATED_NOTE_TEXT = "---\ntype: note\n---\n# a note the round created\n"
+
+#: Classes a refused land now keeps, one refusal each. `knowledge/` is the case #3366
+#: lost; the deep one is the shape that case had; `memory/` and `plans/` are two more
+#: classes a round actually writes, so the rule cannot quietly become `backlog/` plus
+#: `knowledge/` again the way #3039's `.md` quietly became none-of-`backlog/` in #3272.
+KEPT_CLASSES = ["knowledge/x.md",
+                "knowledge/youtube/AI_Engineer/20261026-note.md",
+                "memory/a-note.md",
+                "plans/2026-10-26-a-round.md",
+                "backlog/10-successor.md"]
+
+
+def _created_note(vault, rel: str) -> Path:
+    """Write `rel` as a created, untracked note and return it."""
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CREATED_NOTE_TEXT, encoding="utf-8")
+    return path
+
+
+def test_a_refused_land_keeps_an_untracked_knowledge_note(vault):
+    """#3375 clause 1: prose outside `backlog/` survives the refusal, byte-for-byte.
+
+    `knowledge/x.md` is created by the round and untracked at HEAD; the refusal comes from
+    a different path in the batch, so nothing about the note is under grading. After the
+    refusal the note is on disk, byte-identical to what the round wrote, still untracked,
+    and its `reverted` entry carries the kept marker.
+
+    This is the node that goes red if `revert_paths`'s `unlink()` is restored for a path
+    `_kept_when_untracked` does not exempt: the deletion is unrecoverable precisely because
+    an untracked path has no HEAD copy, so "left it on disk with the round's bytes" is the
+    whole of what a refusal can promise, and 2026-10-26 is the ledger's evidence that the
+    old default did not deliver it.
+    """
+    note = _created_note(vault, "knowledge/x.md")
+    before = note.read_bytes()
+    row = _refused_batch(["knowledge/x.md", _broken_created_task(vault)])
+
+    assert note.is_file(), (
+        "the refusal destroyed a knowledge note it was not grading, which is what it did "
+        f"to #3366's note on 2026-10-26T07:59:25Z: {row['reverted']}")
+    assert note.read_bytes() == before, (
+        "the note survived but not as written: an untracked path has no HEAD copy to "
+        "restore, so the only bytes a refusal can leave are the round's")
+    assert "?? knowledge/x.md" in git(
+        vault, "status", "--short", "--untracked-files=all").stdout, (
+        "a kept note is untracked again, not silently committed by the refusal")
+    kept = [e for e in row["reverted"] if e.startswith("knowledge/x.md")]
+    assert kept == ["knowledge/x.md" + V.KEPT_UNTRACKED_NOTE], (
+        f"the row does not say it kept the note: {row['reverted']}")
+
+
+def test_a_refused_land_still_deletes_every_path_whose_presence_arms_something(vault):
+    """#3375 clause 2: the exception is behaviour-bearing, and only that.
+
+    One refusal, four untracked created files: a task, a `SKILL.md` in a brand-new skill
+    directory, a knowledge note, and the file that caused the refusal. The task and the
+    skill are gone and recorded as bare paths; the note is kept.
+
+    The skill half is why the exception could not stay `autonomy/`-only as this item first
+    framed it: `agent_mcp/skills.py:240-249` yields a directory to the index as soon as its
+    `SKILL.md` exists on disk, `app/uptake.py:1736` counts the same way, and
+    `skill_activation_findings` is a land-door rail `validate()` refuses on — so a kept
+    refused skill would sit in the index and in every prompt's skill list, and the refusal
+    would have undone itself. The 2026-10-18T15:00:20Z ledger row is this same pair
+    (`skills/find-all-arms-run/SKILL.md` with `autonomy/102-find-all-arms-run.md`), which is
+    also why the deletion is not hypothetical for skills.
+    """
+    _untrack_at_head(vault, "autonomy/1-task.md")
+    task = vault / "autonomy" / "1-task.md"
+    task.write_text(CREATED_TASK_TEXT, encoding="utf-8")
+    skill = _created_note(vault, "skills/bar/SKILL.md")
+    note = _created_note(vault, "knowledge/x.md")
+    row = _refused_batch(["autonomy/1-task.md", "skills/bar/SKILL.md",
+                          "knowledge/x.md", _broken_created_task(vault)])
+
+    assert not task.exists(), (
+        f"#2437: a created task file left on disk arms the task: {row['reverted']}")
+    assert not skill.exists(), (
+        "a SKILL.md left on disk arms the skill: the index, the Skills page, the tab count "
+        f"and every prompt's skill list read it off presence alone: {row['reverted']}")
+    for armed in ("autonomy/1-task.md", "skills/bar/SKILL.md"):
+        assert armed in row["reverted"], (
+            f"{armed} is not a bare path in the row, so the row misreports a deletion "
+            f"that this refusal did perform: {row['reverted']}")
+        assert not any(e.startswith(armed) and " kept" in e
+                       for e in row["reverted"]), row["reverted"]
+    assert note.exists() and note.read_text(encoding="utf-8") == CREATED_NOTE_TEXT, (
+        "the two arming prefixes went and took the note with it, which is the old default "
+        f"back again: {row['reverted']}")
+
+
+@pytest.mark.parametrize("rel", KEPT_CLASSES,
+                         ids=[Path(rel).parent.name for rel in KEPT_CLASSES])
+def test_every_kept_path_is_annotated_and_the_marker_names_no_directory(vault, rel):
+    """#3375 clause 3: the marker describes any kept class, and no kept path is bare.
+
+    Two halves, one per risk. The parametrised half runs the whole kept-class list through
+    a real refusal, because the failure this file has already lived twice is a rule written
+    for one directory and inherited by the next: #3039 wrote `backlog/*.md`, #3272 found it
+    had silently excluded `.jsonl`, and #3375 found the same shape one directory up. The
+    wording half asserts the marker itself says nothing about a directory — "untracked
+    backlog file" was true of the old rule and would have booked #3366's note onto the
+    ledger row as a backlog file.
+    """
+    note = _created_note(vault, rel)
+    row = _refused_batch([rel, _broken_created_task(vault)])
+
+    assert note.is_file(), f"a refusal deleted a created {rel}"
+    assert row["reverted"][0] == rel + V.KEPT_UNTRACKED_NOTE, (
+        f"{rel} is not annotated as kept: {row['reverted']}")
+    marker = V.KEPT_UNTRACKED_NOTE
+    assert "backlog" not in marker.lower(), (
+        f"the kept marker still names one directory: {marker!r}")
+    assert "/" not in marker, (
+        f"the marker names a path class, which the kept class is no longer: {marker!r}")
+    for phrase in ("kept", "untracked", "left on disk", "no pre-round copy"):
+        assert phrase in marker, (
+            f"the marker lost {phrase!r}, and with it the fact that a kept path is the "
+            f"round's bytes rather than HEAD's: {marker!r}")
 
 
 # ── #3272: a witness-glob path is a landable file, not a permanently refused one ──
@@ -8395,13 +8528,18 @@ def test_a_land_of_a_new_promotions_extract_reaches_a_commit_and_one_ok_row(
 
 
 def test_a_refused_land_keeps_a_new_promotions_extract_and_still_deletes_a_task(vault):
-    """#3272 clause 5: the keep rule is all of `backlog/`, and no more than all of it.
+    """#3272 clause 5: a `.jsonl` under `backlog/` is kept, and an armed task still is not.
 
     One refusal over three new untracked files: the promotions extract whose refusal cost
     #3264 its bytes, and an `autonomy/1-task.md` the round created, which is #2437's case
     and must STILL be deleted — a task file left on disk arms the task the refusal exists
     to stop. The refusal comes from a third path with unparseable front matter, so neither
     file under test is what refused.
+
+    This node's own boundary sentence read "all of `backlog/`, and no more than all of it";
+    #3375 widened the rule past `backlog/`, so what is pinned here is the two things that
+    survived: the extract's extension carries none of the reason, and `autonomy/` stays
+    deleted because presence there arms a task.
 
     The row's `reverted` is graded alongside existence, because the row is the only record
     a later reader has: an entry naming the extract without the kept annotation would
