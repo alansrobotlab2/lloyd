@@ -35,8 +35,33 @@ move with the corpus. `qmd-watcher.sh` runs `qmd update` + `qmd embed` on every 
 write (60 s cooldown) and the nightly jobs write constantly, so the same ask answers at
 different depths on different days — re-measured on 2026-10-11 over that same arm, the
 five landed at 8, 45, 49, 51 and 141 in a 240-row pool. Nothing in this file asserts
-those depths as current; the live node asserts only that the five reach the pool.
-`measure_pre_rank_pool_ranks` is what measures them today:
+those depths as current; the live node asserts only that `ASSERTED_DOC_PREFIXES` reach
+the pool, and measures every prefix of `EVAL_DOC_PREFIXES` so a prefix that stops being
+asserted keeps being printed.
+
+`ASSERTED_DOC_PREFIXES` is that same kind of dated reading, and 2026-10-26 (#3369)
+narrowed it to four. Measured that day through `measure_pre_rank_pool_ranks`, on the arm
+the live node pins (collection fusion, qmd rerank, pool width 240):
+`autonomy/24-=rank 48`, `autonomy/48-=rank 45`, `autonomy/74-=rank 43`,
+`autonomy/67-=rank 132`, `autonomy/51-=absent`. The absent prefix is indexed and
+findable — 2026-10-26, `_qmd_daemon_search("conversation relation linking", 60,
+["autonomy"])` answers it at rank 1 — and is missing only for this query's own phrasing
+at that depth, so the two candidates for "what is wrong" were the corpus behind
+`autonomy/51-conversation-relation-linking.md` and the expectation that it has to reach
+depth 240. The expectation is the wrong side, and both halves of that are nodes rather
+than prose here: production does not run the arm this node pins (it asks
+`RECALL_GLOBAL_DOC_POOL` = 40 rows under global fusion and hands djev a
+`recall_djev_pool()` = 32-row canvas — `agent_mcp/vault.py`, pinned by
+`test_a_red_with_the_production_reranker_pinned_names_that_arm_and_its_32_row_ask`),
+where as recorded above four of the five cannot reach so narrow a pool at any depth; and
+the eval's contract for this query is not all five in a pool, which
+`test_the_eval_entry_asks_for_three_of_the_five_gold_documents_not_all_five` reads out of
+`eval/vault_recall_queries.yaml` instead of quoting it. A wider pool is not an available
+answer either: 240 is the cap (`RECALL_DOC_POOL = QMD_POOL_MAX`), and #1129 re-priced
+this arm fresh at 3,672-4,027 ms against 2,161-2,291 ms at a 40-row pool. So the four
+that reach 240 are asserted, `autonomy/51-` stays measured and printed in every witness,
+and a client-side cut or a daemon that stops handing over any of the four still reds.
+`measure_pre_rank_pool_ranks` is what measures the depths today:
 
     cd ~/lloyd && PYTHONPATH=$PWD:$PWD/tests \\
         ~/lloyd/.venvs/lloyd/bin/python tests/test_doc_candidate_pool.py
@@ -83,11 +108,13 @@ things hold the daemon-side half, and neither is a unit test:
 
   - `test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool`, at the end
     of the file, POSTs the real payload through the real `_vault_recall` to the index
-    production queries and asserts the same five paths enter the pre-rank pool. Run by
-    hand (2026-09-14): 235-row pool, the five at ranks 14, 17, 35, 39 and 175 — the
-    recording's own numbers. Its failure text now reports which reranker ran, how wide
-    the pool the demote loop actually saw was, and where each of the five landed, so a
-    red from a scheduled run is readable without re-running anything (#2571). It is
+    production queries and asserts the four `ASSERTED_DOC_PREFIXES` enter the pre-rank
+    pool, while `measure_pre_rank_pool_ranks` reports where all five
+    `EVAL_DOC_PREFIXES` landed. Run by hand (2026-09-14): 235-row pool, the five at
+    ranks 14, 17, 35, 39 and 175 — the recording's own numbers. Its failure text now
+    reports which reranker ran, how wide the pool the demote loop actually saw was, and
+    where each of the five landed, so a red from a scheduled run is readable without
+    re-running anything (#2571). It is
     marked `live_vault` because a round under test does not control that corpus, and
     the gate runs `-m "not live_vault"`, so this file is NOT the thing that stops a
     retrieval regression in review.
@@ -453,9 +480,22 @@ def test_a_daemon_that_does_not_answer_is_still_not_a_zero_hit():
 
 # The five expectations exactly as `eval/vault_recall_queries.yaml` writes them for
 # `kg-maintenance-tasks`: prefixes rather than filenames, so the assertion below is
-# the eval's own contract and not a transcription of it.
+# the eval's own contract and not a transcription of it. Every one of them is measured
+# and printed by `measure_pre_rank_pool_ranks` and `_pool_witness`, whatever the
+# asserted set below happens to be — a prefix leaves the assertions, never the report.
 EVAL_DOC_PREFIXES = ("autonomy/24-", "autonomy/48-", "autonomy/51-",
                      "autonomy/67-", "autonomy/74-")
+
+# The prefixes whose arrival inside the 240-row pre-rank pool the live node ASSERTS.
+# Narrowed 2026-10-26 (#3369) to exclude `autonomy/51-`: measured that day at ranks 48,
+# 45, 43 and 132 in a 240-row pool with `autonomy/51-` absent, on an arm production does
+# not run (production asks 40 rows and ranks a 32-row djev canvas), against an eval that
+# asks for three of the five gold documents, not all five — the dated reasoning, with
+# the two checks that back it, is in this module's header. Derived from
+# `EVAL_DOC_PREFIXES` rather than written out so the only way to re-assert 51- is to say
+# so here; `test_the_narrowing_is_dated_and_keeps_the_fifth_prefix_measured` pins the
+# four it holds.
+ASSERTED_DOC_PREFIXES = tuple(p for p in EVAL_DOC_PREFIXES if p != "autonomy/51-")
 
 
 def measure_pre_rank_pool_ranks(post=None, fusion=None, reranker=None):
@@ -524,7 +564,10 @@ def _pool_witness(m):
     distinguishable from a red under the 240-row qmd arm without re-running anything;
     and the pool width the demote loop actually saw next to where each of the five
     expectations landed, so "the pool was empty", "the pool was narrow" and "the pool
-    was wide but the file was not in it" are three different sentences.
+    was wide but the file was not in it" are three different sentences. All five are
+    printed whatever `ASSERTED_DOC_PREFIXES` holds — that is what keeps a narrowed
+    prefix's absence visible in every red — and the line names the asserted subset, so a
+    reader can tell "an asserted prefix went missing" from "the measured-only one did".
     """
     asked = m["asked"] or {}
     landed = ", ".join(
@@ -534,12 +577,20 @@ def _pool_witness(m):
             f"limit={asked.get('limit')} candidateLimit={asked.get('candidateLimit')} "
             f"over {len(asked.get('collections') or [])} collections "
             f"(POST count {m['post_count']}); pre-rank pool width the demote loop saw: "
-            f"{m['pool_width']}; the five expectations in that pool: {landed}; "
+            f"{m['pool_width']}; the five expectations in that pool: {landed} "
+            f"(asserted: {', '.join(ASSERTED_DOC_PREFIXES)}); "
             f"documents returned: {m['returned']}")
 
 
-def _assert_the_five_reach_the_pre_rank_pool(post=None, fusion=None, reranker=None):
+def _assert_the_asserted_prefixes_reach_the_pre_rank_pool(post=None, fusion=None,
+                                                          reranker=None):
     """The live node's assertions, in one function so a stubbed drive can prove them.
+
+    The containment assertion judges `ASSERTED_DOC_PREFIXES` — the prefixes whose
+    arrival at depth 240 this corpus supports, four as of 2026-10-26, dated in this
+    module's header and at the constant — and nothing else about the node moves: the
+    ask, the pool and the answer are asserted exactly as before, and the witness raised
+    on a red still prints all five `EVAL_DOC_PREFIXES`.
 
     Every message carries `_pool_witness`. Before #2571 the only width in the text was
     `pool width {vault.RECALL_DOC_POOL}` — the width the client ASKED for, not the
@@ -563,10 +614,10 @@ def _assert_the_five_reach_the_pre_rank_pool(post=None, fusion=None, reranker=No
     assert m["pool_width"], (
         "the doc leg POSTed and the pre-rank pool is empty — nothing survived the "
         f"fold — {w}")
-    missing = [p for p in EVAL_DOC_PREFIXES if m["ranks"][p] is None]
+    missing = [p for p in ASSERTED_DOC_PREFIXES if m["ranks"][p] is None]
     assert not missing, (
-        f"{len(missing)} of the five expectations never reached the pre-rank pool: "
-        f"{missing} — {w}")
+        f"{len(missing)} of the {len(ASSERTED_DOC_PREFIXES)} asserted expectations never "
+        f"reached the pre-rank pool: {missing} — {w}")
     assert m["returned"], f"the query still has to return an answer — {w}"
 
 
@@ -578,9 +629,13 @@ def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(collecti
     report is a client-side cut. This one posts the payload `_vault_recall` really
     builds — `VAULT_SEGMENTS` named, `limit` and `candidateLimit` both at
     `RECALL_DOC_POOL` (240) under the arm the test session pins — to the index on
-    :8181, and asserts the five files reach the pool the final ranker is handed. It is
-    the only assertion here that can fail because retrieval, rather than the client,
-    stopped returning them.
+    :8181, and asserts the four `ASSERTED_DOC_PREFIXES` reach the pool the final ranker
+    is handed, while the measurement behind it reports where all five
+    `EVAL_DOC_PREFIXES` landed. It is the only assertion here that can fail because
+    retrieval, rather than the client, stopped returning them. Which four are asserted,
+    and on what date that was last true of the corpus, is recorded with the constant and
+    in this module's header — never decided here, so a red at the daemon and a red at the
+    expectation set stay two different things.
 
     Its failure text now carries its own witnesses: which reranker arm the recall took,
     how wide the pool the demote loop actually saw was, and where each of the five
@@ -597,7 +652,7 @@ def test_the_live_daemon_hands_the_five_task_files_to_the_pre_rank_pool(collecti
     report, do not count the gate as having run it. The recorded depths are not
     asserted as current; `measure_pre_rank_pool_ranks` re-measures them (#2571).
     """
-    _assert_the_five_reach_the_pre_rank_pool()
+    _assert_the_asserted_prefixes_reach_the_pre_rank_pool()
 
 
 def test_a_forced_missing_expectation_reports_the_arm_the_pool_width_and_every_rank():
@@ -609,15 +664,28 @@ def test_a_forced_missing_expectation_reports_the_arm_the_pool_width_and_every_r
     is under test is the message: an `assert` whose witness no node ever reaches is
     prose, and the message that did render before this change named neither the arm nor
     the width, which is why a nightly red here cost an item and a triage pass.
+
+    `autonomy/67-` is one of the four `ASSERTED_DOC_PREFIXES`, which is what makes this a
+    red at all; the mirrored case for the measured-only prefix is
+    `test_a_reply_missing_only_the_unasserted_prefix_still_passes_and_still_prints_it`.
     """
     gone = "autonomy/67-"
+    assert gone in ASSERTED_DOC_PREFIXES, (
+        "this node only proves the red path while the prefix it removes is asserted; "
+        f"the asserted set is now {ASSERTED_DOC_PREFIXES}")
     with pytest.raises(AssertionError) as caught:
-        _assert_the_five_reach_the_pre_rank_pool(
+        _assert_the_asserted_prefixes_reach_the_pre_rank_pool(
             post=_always(_reply_missing(gone)), fusion="collection", reranker="qmd")
     text = str(caught.value)
     assert "reranker arm taken at call time: qmd" in text, text
     assert "pre-rank pool width the demote loop saw: 239" in text, text
+    assert f"never reached the pre-rank pool: ['{gone}']" in text, (
+        f"the red has to name the prefix that went missing, not merely print `absent`: "
+        f"{text}")
     assert f"{gone}=absent" in text, text
+    assert f"(asserted: {', '.join(ASSERTED_DOC_PREFIXES)})" in text, (
+        "a red has to say which prefixes it was asserting, or the reader cannot tell a "
+        f"narrowed set from a wide one that lost a member: {text}")
     for prefix, rank in (("autonomy/24-", 14), ("autonomy/48-", 17),
                          ("autonomy/74-", 35), ("autonomy/51-", 39)):
         assert f"{prefix}=rank {rank}" in text, text
@@ -647,7 +715,7 @@ def test_a_red_with_the_production_reranker_pinned_names_that_arm_and_its_32_row
 
     asked_pool = vault.recall_djev_pool()
     with pytest.raises(AssertionError) as caught:
-        _assert_the_five_reach_the_pre_rank_pool(
+        _assert_the_asserted_prefixes_reach_the_pre_rank_pool(
             post=lambda payload: _snapshot_reply()[:int(payload.get("limit", 20))],
             fusion="collection", reranker="djev")
     text = str(caught.value)
@@ -675,8 +743,8 @@ def test_a_refusing_daemon_fails_the_live_assertion_rather_than_softening_it():
     outcome: list = []
     try:
         try:
-            _assert_the_five_reach_the_pre_rank_pool(post=refuse, fusion="collection",
-                                                     reranker="qmd")
+            _assert_the_asserted_prefixes_reach_the_pre_rank_pool(
+                post=refuse, fusion="collection", reranker="qmd")
         except vault.QmdUnavailable:
             outcome.append("raised")        # the outage reached the caller: a red
         except AssertionError as red:
@@ -709,6 +777,97 @@ def test_the_live_node_still_carries_the_live_vault_mark_and_no_answer_of_its_ow
         assert banned not in src, (
             f"the live node's source mentions {banned!r}: it must keep the real POST "
             "with no answer of its own and keep failing when the daemon is down")
+
+
+def test_the_narrowing_is_dated_and_keeps_the_fifth_prefix_measured():
+    """#3369: which prefixes the live node asserts is a named, dated set — not whichever
+    ones happened to arrive.
+
+    Four of the five expectations reached the 240-row pool on the corpus of 2026-10-26
+    and one did not, and the two ways out — rewrite the corpus, or stop asserting that
+    one — are a decision. The decision is written down where a reader of a red finds it,
+    and this node is what stops it being un-made quietly in either direction: re-widening
+    the asserted set goes red here, and so does dropping `autonomy/51-` from
+    `EVAL_DOC_PREFIXES`, which would delete the only witness of its absence.
+    """
+    assert ASSERTED_DOC_PREFIXES == ("autonomy/24-", "autonomy/48-",
+                                     "autonomy/67-", "autonomy/74-"), (
+        "the asserted set moved; the dated record beside the constant and in this "
+        f"module's header has to move with it: {ASSERTED_DOC_PREFIXES}")
+    assert set(ASSERTED_DOC_PREFIXES) == set(EVAL_DOC_PREFIXES) - {"autonomy/51-"}
+    assert "autonomy/51-" in EVAL_DOC_PREFIXES, (
+        "the fifth prefix may leave the asserted set, never the measurement — every "
+        "red has to keep printing where it landed, absent included")
+
+    flat = " ".join((__doc__ or "").split())
+    assert "#3369" in flat and "2026-10-26" in flat, "the narrowing is undated"
+    for stated in ("autonomy/24-=rank 48", "autonomy/48-=rank 45",
+                   "autonomy/74-=rank 43", "autonomy/67-=rank 132",
+                   "autonomy/51-=absent"):
+        assert stated in flat, (
+            f"the reading that justified the narrowing ({stated}) is gone from the "
+            "header, so the set no longer carries the evidence it was chosen on")
+    assert "32-row" in flat and "40 rows" in flat, (
+        "the reason has to name the arm production actually runs; without it a narrowed "
+        "assertion reads as accommodating a retrieval miss")
+
+
+def test_a_reply_missing_only_the_unasserted_prefix_still_passes_and_still_prints_it():
+    """The narrowing's other direction: 51- is measured, not asserted, and says so.
+
+    Fed the recorded reply with `autonomy/51-` taken out, the live node's own assertions
+    have to pass — nothing client-side is broken and no asserted prefix went missing —
+    while the witness text still renders `autonomy/51-=absent` beside the four ranks. A
+    green run is the only place nobody looks, which is exactly why the printing is
+    proved here rather than assumed from the red path.
+
+    Three of the four ranks are the recording's (14, 17, 35 — they sit above the removed
+    row); `autonomy/67-` shows 174 rather than its recorded 175 because taking one row
+    out of the reply moves everything below it up one slot.
+    """
+    gone = "autonomy/51-"
+    m = measure_pre_rank_pool_ranks(post=_always(_reply_missing(gone)),
+                                    fusion="collection", reranker="qmd")
+    assert m["ranks"][gone] is None, m["ranks"]
+    w = _pool_witness(m)
+    assert f"{gone}=absent" in w, w
+    for prefix, rank in (("autonomy/24-", 14), ("autonomy/48-", 17),
+                         ("autonomy/74-", 35), ("autonomy/67-", 174)):
+        assert f"{prefix}=rank {rank}" in w, w
+    _assert_the_asserted_prefixes_reach_the_pre_rank_pool(
+        post=_always(_reply_missing(gone)), fusion="collection", reranker="qmd")
+
+
+def test_the_eval_entry_asks_for_three_of_the_five_gold_documents_not_all_five():
+    """The reason four asserted prefixes is defensible: the eval's own bar is three.
+
+    Read out of `eval/vault_recall_queries.yaml`, the file that owns the contract, and
+    not transcribed into a header sentence that can rot beside it. The entry still names
+    five `expect_docs` — that is the measurement set, and what `doc_recall` divides by —
+    while its note sets the bar at three of them. If that note is ever raised to five,
+    this node goes red and the asserted set has to be re-argued with the retrieval cost
+    in the room (240 is already the pool cap, and #1129 priced this arm at
+    3,672-4,027 ms fresh against 2,161-2,291 ms at 40 rows).
+    """
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(vault.__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    spec = next(s for s in yaml.safe_load(
+        (root / "eval" / "vault_recall_queries.yaml").read_text())["queries"]
+        if s.get("id") == "kg-maintenance-tasks")
+
+    assert set(spec["expect_docs"]) == set(EVAL_DOC_PREFIXES), (
+        "the yaml's five gold documents moved and this file's measurement set did not: "
+        f"{sorted(spec['expect_docs'])}")
+    notes = spec.get("notes") or ""
+    assert "3 of the 5" in notes, (
+        "the eval's bar for this query is no longer three of five, so asserting four of "
+        f"the five in the pool has to be re-decided against it: {notes!r}")
 
 
 def test_the_measurement_reports_the_pool_and_ranks_the_recording_witnesses():
