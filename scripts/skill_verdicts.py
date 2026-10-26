@@ -245,12 +245,19 @@ MINTED_BY_LEDGER = LEDGER_MINTED_STATUSES | {SUPERSEDED_STATUS}
 # sync and frontmatter routes all copy whole rows, so a field declared here and written in
 # this order is carried by every one of them, and a field added to only one of the two
 # lists is dropped by the others.
+# `evidence_truncated` sits beside `evidence_observed` for the same reason and by the same
+# argument as `first_decided_at`: it is a fact ABOUT the field to its left, the seed/sync and
+# frontmatter routes copy whole rows, and #3362 needs it to survive all of them — a reader
+# that cannot tell a stored whole observation from a stored prefix would have to guess, which
+# is the failure the in-band `…` this field replaces was. Absent on a pre-#3362 row, and a
+# falsy value means the same thing: the observation was stored whole.
 FIELDS = (
     "pattern_key",
     "verdict",
     "reason",
     "evidence_cmd",
     "evidence_observed",
+    "evidence_truncated",
     "occurrences_at_decision",
     "decided_at",
     "first_decided_at",
@@ -821,7 +828,9 @@ def record_verdict(
     `reason` and `evidence_cmd` are required: without the second, a verdict is an
     assertion a later run can only inherit. The command is *executed* before anything is
     written and an append whose combined output is empty is refused (#736 clause 2), and
-    the first line it printed is stored as `evidence_observed` (clause 3). Emptiness is not
+    what it printed is stored as `evidence_observed` (clause 3) — every line, in stdout
+    order, up to `EVIDENCE_OBSERVED_MAX` characters, with `evidence_truncated` saying
+    whether that cut happened (#3362). Emptiness is not
     runnability: an append whose command `evidence_cmd_status` — the classifier `check` and
     `audit` report from — calls UNRUNNABLE is refused too, because a command that never
     started still prints its own failure and quotes it as a measurement (#1586). The
@@ -988,7 +997,7 @@ def record_verdict(
             "owner_literal_phrase=…`, no `body_*` field. Either consume the stripped copy "
             "(`body_<field>=$(printf '%s\\n' \"$b\" | grep -ci '<pattern>')`) or drop the strip "
             "and stop claiming the scoping.")
-    rc, observed = run_evidence(evidence_cmd)
+    rc, observed, truncated = run_evidence(evidence_cmd)
     if not observed:
         raise ValueError(
             "evidence_cmd observed nothing: it ran (exit code "
@@ -1070,7 +1079,10 @@ def record_verdict(
             f"the live ledger's 109 latest-wins keys declared {INPUT_ROWS_FIELD}= on "
             f"2026-10-02 (#2052)"
         )
-    if rc == 0 and (blank := empty_valued_fields(observed)):
+    # `_first_observed_line`, not `observed`: since #3362 the stored value is every line the
+    # check printed, and this rail's scope is the line #2103 measured the half-empty shape
+    # on. See the helper's docstring for why widening it is a ruling rather than a cleanup.
+    if rc == 0 and (blank := empty_valued_fields(_first_observed_line(observed))):
         # The half-empty line, and the reason every rail above let it through: the command
         # ran, exited 0, printed a line, and declared a real denominator — all four rails read
         # that as healthy evidence, while three of the line's fields carried their names and no
@@ -1112,6 +1124,12 @@ def record_verdict(
         "reason": " ".join(reason.split()),
         "evidence_cmd": evidence_cmd,
         "evidence_observed": observed,
+        # Written beside the field it describes, in `FIELDS` order, so the seed/sync and
+        # frontmatter routes that copy whole rows carry the fact that the quotation is a
+        # prefix and not the whole answer. `False` on every mint that fit under the cap,
+        # which is what lets a pre-#3362 row — where the key is simply absent — read the
+        # same way as a fresh not-truncated one.
+        "evidence_truncated": truncated,
         "occurrences_at_decision": int(occurrences or 0),
         "decided_at": stamp,
         # Keys in `FIELDS` order, which the seed/sync/frontmatter writers copy whole rows
@@ -1181,10 +1199,27 @@ def read_candidate(file: Path) -> tuple[str, str, int, int]:
 UNRUNNABLE = 127
 
 
-#: An `evidence_observed` value is a quotation, not a log. The first line is what
-#: identifies the measurement; a falsifier that prints a 200-row diff would bury the
-#: ledger line it is quoted in.
-EVIDENCE_OBSERVED_MAX = 200
+#: An `evidence_observed` value is a quotation, not a log, and it is still bounded — but
+#: since #3362 the cap is measured over the WHOLE observation, every line the check
+#: printed, and not over its first line. The bound is what keeps it a quotation: a
+#: falsifier that prints a 200-row diff would bury the ledger line it is quoted in.
+#:
+#: 1000 is five times the old cap and it is not arbitrary. The longest observation the
+#: live ledger's keys produce today is 395 characters (`falsifier-seq-http-fetch-20261011.py`,
+#: the check behind `seq-2-http-fetch-err-http-fetch`, whose stored row #3362 measured at
+#: exactly 201 characters — the cap plus the `…` — with the whole `legs=[…]` tail lost), and
+#: a falsifier that prints more than this is printing findings rather than the measurement
+#: a decision rested on. Overflow stays legal and lossless-in-shape: the stored value is an
+#: exact prefix and `evidence_truncated` says so, so a later run comparing a fresh execution
+#: against the row knows the comparison is a prefix comparison rather than a disagreement.
+EVIDENCE_OBSERVED_MAX = 1000
+
+#: How the newlines inside a stored observation are shown on a confirmation line. The value
+#: is JSONL-safe as it stands — `json.dumps` escapes a newline, so a multi-line observation
+#: is still exactly one row of the ledger — but `record` and `reanchor` print the
+#: observation back to a human inside a one-line status, and an un-collapsed one would
+#: split that status across lines and break anything reading the job's stdout by line.
+OBSERVED_LINE_SEP = " ⏎ "
 
 #: The fifth answer a stored falsifier gives, and the only one no exit code carries: the
 #: command ran, exited 0, and declared that it read nothing — `input_rows=0` on its own
@@ -2075,6 +2110,34 @@ def candidate_body_defect(evidence_cmd: str) -> tuple[str, str] | None:
     return None
 
 
+def _first_observed_line(observed: str) -> str:
+    """The first non-empty line of a stored observation, or `""`.
+
+    This is what #2103's half-empty-field rail is pointed at, deliberately, even though
+    `evidence_observed` has been the whole output since #3362. Widening it to the whole
+    observation is a change of ruling, not a cleanup: the mint routes that pass
+    `require_input_rows=False` print prose on later lines — `cmd_repair`'s tombstone and its
+    root-move substitution, `cmd_seed`'s harvest grep — and a rail scanning all of it would
+    refuse those mints for a `name=` sitting in a sentence. Widening it would have to come
+    with a ruling on that prose, so the rail keeps the exact scope it had the night #2103 was
+    written, and this function is that scope made explicit rather than an accident of what
+    `run_evidence` happened to return.
+    """
+    return next((ln.strip() for ln in (observed or "").splitlines() if ln.strip()), "")
+
+
+def collapse_observed(observed: str) -> str:
+    """A stored observation as ONE printable line, its newlines replaced by
+    `OBSERVED_LINE_SEP`. Nothing else about the string changes — no truncation, no quoting.
+
+    Only the human-facing confirmations need this. The row itself is written through
+    `json.dumps`, which escapes a newline, so a multi-line observation is already exactly one
+    line of JSONL; a `print` of it is not, and `record`'s and `reanchor`'s confirmations are
+    read line-by-line by the nightly job that invokes them.
+    """
+    return (observed or "").replace("\n", OBSERVED_LINE_SEP)
+
+
 def empty_valued_fields(observed: str) -> list[str]:
     """The `name=` fields in one recorded evidence line that carry no value, in order.
 
@@ -2109,10 +2172,26 @@ def printed_count_is_zero(stdout: str) -> bool:
     return first == "0"
 
 
-def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> tuple[int, str]:
-    """Execute a check the way `record` needs it: `(rc, observed)`, `observed` being the
-    first non-empty line of its real output, truncated to `EVIDENCE_OBSERVED_MAX` and
-    empty when the command printed nothing at all.
+def run_evidence(evidence_cmd: str,
+                 timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> tuple[int, str, bool]:
+    """Execute a check the way `record` needs it: `(rc, observed, truncated)`.
+
+    `observed` is the check's real output — every line it printed, in the order it printed
+    them, with only the surrounding whitespace removed — cut at `EVIDENCE_OBSERVED_MAX`
+    characters, and empty when the command printed nothing at all. `truncated` is that cut
+    having happened, and it is the ONLY place the fact goes: nothing is appended to
+    `observed` itself, because the row is a quotation a later run compares against a fresh
+    execution, and an in-band marker makes the stored value a string no execution produces
+    (#3362). Under the cap, `observed` is the output byte-for-byte.
+
+    The cap used to be `200` characters over the FIRST line only, and both shapes the live
+    ledger holds defeat that: `Bash/logic`'s check prints two lines (line 2 is
+    `input_rows=95 files_naming_key=17`, the corpus leg and the denominator) and the row
+    stored 31 characters of line 1, while `falsifier-seq-http-fetch-20261011.py` prints 395
+    characters on one line and the row stored 201 of them ending in `…`. Meanwhile the
+    mint-time rails below `record_verdict` read the WHOLE stdout — `declared_denominator`
+    finds `input_rows=` wherever it sits — so a verdict could be accepted on a measurement
+    its own durable record did not carry.
 
     Two differences from `evidence_cmd_status`, which answers a different question. That
     one asks whether an *already stored* check can still run, so it keeps the exit code
@@ -2136,19 +2215,24 @@ def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> 
     except subprocess.TimeoutExpired:
         # Nothing printed within the bound is the same observation as nothing printed at
         # all: the caller refuses, and the rc names the shape of the silence.
-        return UNRUNNABLE, ""
+        return UNRUNNABLE, "", False
     except OSError as exc:  # no usable bash: the check cannot observe anything
         raise ValueError(f"evidence_cmd could not be executed at all: {exc}") from exc
     stdout, stderr = proc.stdout or "", proc.stderr or ""
     if not (stdout + stderr).strip():
-        return proc.returncode, ""
+        return proc.returncode, "", False
     # stdout first: that is where a measurement goes. stderr is the only answer for a
     # command that reports through it, and quoting it is what makes the falsifier's own
     # failure visible at the moment the decision is made rather than months later.
     source = stdout if stdout.strip() else stderr
-    line = next(ln.strip() for ln in source.splitlines() if ln.strip())
-    return proc.returncode, (line[:EVIDENCE_OBSERVED_MAX] + "…"
-                             if len(line) > EVIDENCE_OBSERVED_MAX else line)
+    # The whole output, surrounded whitespace removed, lines in the order they were
+    # printed. `strip()` and nothing cleverer: the trailing newline is the shell's, not a
+    # leg of the measurement, and every byte between the first and last non-whitespace byte
+    # has to survive untouched for the stored value to be something a later run can compare
+    # a fresh execution against character for character (#3362).
+    observation = source.strip()
+    return (proc.returncode, observation[:EVIDENCE_OBSERVED_MAX],
+            len(observation) > EVIDENCE_OBSERVED_MAX)
 
 
 def _run_stored_check(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
@@ -3390,8 +3474,11 @@ def cmd_reanchor(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    tail = (f"observed: {row.get('evidence_observed') or 'nothing'}" if not args.dry_run
-            else "nothing written")
+    # `collapse_observed`, so this status stays the single line the nightly reads it as: an
+    # observation with legs on two lines is now the normal case (#3362), and the separator
+    # keeps each leg visible rather than dropping every line after the first.
+    tail = (f"observed: {collapse_observed(row.get('evidence_observed') or 'nothing')}"
+            if not args.dry_run else "nothing written")
     print(f"{'would re-anchor' if args.dry_run else 're-anchored'} {row['pattern_key']}"
           f" -> {row.get('verdict')} (decision kept, occurrences "
           f"{row.get('occurrences_at_decision')}) {tail}")
@@ -3530,9 +3617,13 @@ def cmd_record(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+    # One line, whatever the observation contains: `collapse_observed` shows every leg where
+    # the old print would have split the confirmation across the file (#3362 clause 4). The
+    # truncated case needs no special wording — a prefix is a prefix, and the row's
+    # `evidence_truncated` is what tells a reader the quotation was cut.
     print(f"recorded {row['pattern_key']} -> {row['verdict']} at {row['decided_at']} "
           f"(occurrences {row['occurrences_at_decision']}, "
-          f"observed: {row['evidence_observed']})")
+          f"observed: {collapse_observed(row['evidence_observed'])})")
     return 0
 
 

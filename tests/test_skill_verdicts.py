@@ -63,8 +63,10 @@ mt = _load("mine_trajectories_530", "scripts/mine-trajectories.py")
 #: and this fixture is the one most nodes mint through, so it declares: `input_rows=1` is the
 #: honest count for a `grep -c` over the one file it names — the input it inspected. Two
 #: shapes here are load-bearing, and both are why adopting the field is cheap: the declaration
-#: rides on a SECOND line, because `run_evidence` stores the FIRST non-empty line as
-#: `evidence_observed` and nodes assert against that string; and the exit code is captured and
+#: rides on a SECOND line — and since #3362 `evidence_observed` holds BOTH lines, so a node
+#: asserting an observation with `==` states the whole output including this `input_rows=1`
+#: beneath its measurement (before #3362 it stored only the first line, which is what made
+#: the declaration free to sit below it); and the exit code is captured and
 #: re-raised, because `check` and `audit` read rc, and `cmd; echo …` alone would turn a
 #: falsifier answering no (rc 1) into one answering yes (rc 0).
 PRINTING_CMD = (f"grep -c '^def ' {_ROOT / 'scripts' / 'skill_verdicts.py'}; "
@@ -1599,8 +1601,10 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
 
     A later run sees `evidence_observed` beside the `evidence_cmd` that re-makes it, so a
     falsifier whose *value* has since moved is visible as a disagreement rather than as a
-    green check. Only the first line is kept, and truncated: the ledger is a JSONL of
-    decisions, not a log.
+    green check. It holds EVERY line the check printed, in stdout order, bounded by
+    `EVIDENCE_OBSERVED_MAX` over the whole observation: the ledger is a JSONL of decisions,
+    not a log, so the bound stays — but a bound on line 1 alone was #3362, which left the
+    corpus leg and the declared denominator out of the row while the mint accepted on them.
     """
     script = tmp_path / "seq_falsifier.py"
     script.write_text("print('sess=7 steps_ok=4 steps_err=3 has_error_recovery=True')\n"
@@ -1610,8 +1614,18 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
                     "--reason", "3 of 7 steps have no recovery, under the threshold",
                     "--evidence-cmd", minted, "--occurrences", "275", "--store", str(store)]) == 0
     row = sv.load_verdicts(store)["seq-2-read-write"]
-    assert row["evidence_observed"] == "sess=7 steps_ok=4 steps_err=3 has_error_recovery=True"
-    assert "not quoted" not in row["evidence_observed"], "the first line only"
+    assert row["evidence_observed"] == (
+        "sess=7 steps_ok=4 steps_err=3 has_error_recovery=True\n"
+        "this line is not quoted\ninput_rows=1"), row["evidence_observed"]
+    assert row["evidence_truncated"] is False, \
+        "26 characters of legs and one denominator line do not reach a 1000-character cap"
+    # This assertion used to read `assert "not quoted" not in row["evidence_observed"]` with
+    # the message "the first line only", and the second line is in the row now. What still
+    # holds, and is the only claim worth keeping here, is the opposite one: the fixture's
+    # second line reached the row *because* `record` stores every line, so a line the check
+    # prints is a line the ledger quotes — the first-line rule that hid it is gone.
+    assert "this line is not quoted" in row["evidence_observed"], \
+        "a leg the check printed is now a leg the row carries"
     assert row["evidence_cmd"] == minted, "the command is stored byte-for-byte as minted"
 
     # A command reporting through stderr is stored with what it printed, not with nothing.
@@ -1625,15 +1639,219 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
                     "--occurrences", "4", "--store", str(store)]) == 0
     assert sv.load_verdicts(store)["Write/logic"]["evidence_observed"] == "count=3"
 
-    # A long first line is a quotation, not an attachment.
+    # A wall of text is still a quotation and not an attachment — but the bound is now
+    # reported OUT of band, so the quoted bytes stay a prefix of what the check actually
+    # printed. This used to assert `len(observed) == sv.EVIDENCE_OBSERVED_MAX + 1` with the
+    # message "the cap plus an ellipsis": an appended `…` makes the stored value a string no
+    # execution can produce, which is exactly why a fresh-vs-stored byte comparison could
+    # never be drawn (#3362). See `test_an_over_cap_observation_is_an_exact_prefix_and_says_so`
+    # for the whole overflow contract.
     long_line = "M" * (sv.EVIDENCE_OBSERVED_MAX + 50)
     assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
                     "--reason", "a falsifier that prints a wall of text",
                     "--evidence-cmd", declares(f"printf '{long_line}\\n'"),
                     "--occurrences", "2", "--store", str(store)]) == 0
     observed = sv.load_verdicts(store)["Bash/logic"]["evidence_observed"]
-    assert len(observed) == sv.EVIDENCE_OBSERVED_MAX + 1, \
-        f"expected the cap plus an ellipsis, got {len(observed)}"
+    assert len(observed) == sv.EVIDENCE_OBSERVED_MAX, \
+        f"the cap is now a byte bound and nothing is appended to it: {len(observed)} chars"
+    assert not observed.endswith("…"), "the in-band ellipsis is gone from the value itself"
+    assert observed == long_line[:sv.EVIDENCE_OBSERVED_MAX], "an exact prefix of the line"
+    assert sv.load_verdicts(store)["Bash/logic"]["evidence_truncated"] is True
+
+
+#: The two lines `Bash/logic`'s stored falsifier prints, copied from the live ledger's
+#: `evidence_cmd` as re-executed on 2026-10-26: 31 characters of prepass verdict, then 33
+#: characters carrying the denominator (#2052) and the corpus leg. The row stored the first
+#: and 0 newlines, so the two legs the decision rested on existed only in the command.
+TWO_LEG_CMD_LEGS = ("prepass=fired names=arr[0] rc=0",
+                    "input_rows=95 files_naming_key=17")
+
+
+def test_a_two_line_observation_is_stored_whole_in_stdout_order(store):
+    """#3362 clause 1: every line the check printed is in `evidence_observed`, in stdout order.
+
+    Reverses the assertion this file used to make — `assert "not quoted" not in
+    row["evidence_observed"], "the first line only"` — because the rule that made it true was
+    the defect: `Bash/logic`'s stored row held 31 characters and no newline while its
+    `evidence_cmd` prints two lines, so `input_rows=95 files_naming_key=17`, the corpus leg
+    and the denominator the mint itself reads through `declared_denominator`, was accepted and
+    then not carried. Byte-order matters as much as inclusion here: the comparison a later run
+    draws is a whole-string one, so a reordered row is a false DIFF as surely as a missing leg.
+    """
+    cmd = f'echo {TWO_LEG_CMD_LEGS[0]!r}; echo {TWO_LEG_CMD_LEGS[1]!r}'
+    assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
+                    "--reason", "the prepass fires and the corpus leg is counted",
+                    "--evidence-cmd", cmd, "--occurrences", "95",
+                    "--store", str(store)]) == 0
+
+    row = sv.load_verdicts(store)["Bash/logic"]
+    observed = row["evidence_observed"]
+    assert "prepass=fired" in observed, observed
+    assert "files_naming_key=17" in observed, \
+        "the corpus leg is the line #3362 measured as never stored: 31 chars, nl=0"
+    assert "input_rows=95" in observed, "the declared denominator is a leg the mint read"
+    assert observed.count("\n") >= 1, "a two-line check no longer yields a one-line row"
+    assert observed == "\n".join(TWO_LEG_CMD_LEGS), \
+        f"both legs, in the order stdout printed them: {observed!r}"
+    assert row["evidence_truncated"] is False, "65 characters are nowhere near the cap"
+    assert len(store.read_text(encoding="utf-8").splitlines()) == 1, (
+        "a multi-line value is still exactly one JSONL row: json.dumps escapes the newline")
+
+
+def test_an_observation_under_the_cap_is_stored_byte_identical_with_no_marker(store):
+    """#3362 clause 2: the cap is a declared constant of at least 1000 chars over the whole
+    observation, and anything at or under it arrives in the row unchanged.
+
+    Two lengths are planted, both chosen from what the live ledger actually produces: a
+    400-character single line, which the old 200-character cap would have cut to 201
+    characters ending in `…`; and 395 characters, which is exactly what
+    `falsifier-seq-http-fetch-20261011.py` prints on its one line — the check behind
+    `seq-2-http-fetch-err-http-fetch`, whose stored row measured 201 characters on 2026-10-26
+    with the whole `legs=[…]` tail lost. 395 is planted rather than executed because that
+    script lives in gitignored `_pipeline`; the number is the measurement, the fixture is the
+    shape. Re-minting the live key is the post-landing demonstration, not a gate clause.
+    """
+    assert sv.EVIDENCE_OBSERVED_MAX >= 1000, \
+        f"the cap must clear the longest real observation several times over: {sv.EVIDENCE_OBSERVED_MAX}"
+
+    for length in (400, 395):
+        store.unlink(missing_ok=True)
+        # The denominator rides INSIDE the one line here, unlike `declares()`, so the
+        # observation's length is exactly `length` and the assertion below is about the
+        # measurement's own size rather than a sum with a second echo.
+        decl = f" {sv.INPUT_ROWS_FIELD}=1"
+        line = "M" * (length - len(decl)) + decl
+        assert len(line) == length, "the fixture is the length this node claims"
+        assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
+                        "--reason", "a long single-line measurement stored whole",
+                        "--evidence-cmd", f"printf '%s\\n' '{line}'",
+                        "--occurrences", "1", "--store", str(store)]) == 0
+        observed = sv.load_verdicts(store)["Bash/logic"]["evidence_observed"]
+        assert observed == line, (
+            f"a {length}-character observation under the cap must be byte-identical, got "
+            f"{len(observed)} characters")
+        assert len(observed) == length, "length preserved, not truncated to a bound"
+        assert "…" not in observed and "..." not in observed, \
+            "no marker of any spelling belongs inside a stored-whole observation"
+        assert sv.load_verdicts(store)["Bash/logic"]["evidence_truncated"] is False, (
+            f"a {length}-character observation is under a {sv.EVIDENCE_OBSERVED_MAX}-character "
+            "cap, so the row must not claim a cut")
+
+
+def test_an_over_cap_observation_is_an_exact_prefix_and_says_so(store, mirror):
+    """#3362 clause 3: overflow stores an exact byte prefix and reports itself in another field.
+
+    The two halves are one mechanism: a stored value that is a prefix is only usable if the
+    reader can tell it is one, and an in-band `…` destroys the property it is announcing —
+    the string is then neither the output nor a prefix a comparison can be drawn against.
+    So the marker moves to `evidence_truncated`, declared in `FIELDS` because the seed, sync
+    and frontmatter routes copy whole rows and a field on only one of the two lists is
+    dropped by the others (#2746's `first_decided_at` is the precedent, and the `sync` half
+    below is the cross-tree check that makes the declaration more than a name).
+    """
+    assert "evidence_truncated" in sv.FIELDS
+    assert sv.FIELDS.index("evidence_truncated") == sv.FIELDS.index("evidence_observed") + 1, (
+        "declared beside the field it describes, which is the order the row is built in")
+
+    real_stdout = "Z" * 1500 + f"\n{sv.INPUT_ROWS_FIELD}=1"
+    cmd = f'printf \'%s\\n\' \'{"Z" * 1500}\'; echo \'{sv.INPUT_ROWS_FIELD}=1\''
+    assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
+                    "--reason", "a falsifier whose findings exceed any quotation",
+                    "--evidence-cmd", cmd, "--occurrences", "1",
+                    "--store", str(store)]) == 0
+    row = sv.load_verdicts(store)["Bash/logic"]
+    observed = row["evidence_observed"]
+
+    assert len(observed) == sv.EVIDENCE_OBSERVED_MAX, len(observed)
+    assert real_stdout.startswith(observed), (
+        "the stored value has to be an exact byte prefix of what the command printed, or a "
+        "later run's prefix comparison is a disagreement about bytes that were never written")
+    assert observed == real_stdout[:sv.EVIDENCE_OBSERVED_MAX]
+    assert row["evidence_truncated"] is True
+    assert not observed.endswith("…"), "the fact is in the field, never appended in-band"
+    # The declaration the mint read sits past the cap (characters 1501-1513 of 1513), so this
+    # is the ledger's own version of #2052's both-sides warning: the verdict was accepted on a
+    # leg the row does not carry. `evidence_truncated` is what makes that visible to a reader
+    # instead of leaving them to diff against a string that cannot match.
+    assert f"{sv.INPUT_ROWS_FIELD}=1" not in observed, (
+        "the denominator is past the bound, which is what the truncation field is for")
+
+    assert tuple(row) == sv.FIELDS, (
+        f"the writer's key order and the declared list are one list: {tuple(row)}")
+    assert json.loads(store.read_text(encoding="utf-8").splitlines()[0])[
+        "evidence_truncated"] is True, "the flag is on disk, not only in the returned dict"
+
+    assert sv.main(["sync", "--store", str(store)]) == 0
+    assert sv.load_verdicts(mirror)["Bash/logic"]["evidence_truncated"] is True, (
+        "the durable copy must carry the flag, or a post-wipe reader sees a 1000-character "
+        "quotation with nothing saying it was cut")
+
+
+def test_a_row_without_the_flag_reads_as_not_truncated(store, mirror):
+    """#3362 clause 3's other edge: a row minted before the field existed reads as whole.
+
+    The field is mint-only — the latest-wins rows already in the live ledger are history and
+    none of them carries the key — so `absent` and `False` have to mean the same thing to every
+    reader, and no route may turn an absent flag into a claimed cut. The fixture is an honest
+    pre-#3362 line: a row minted through `record_verdict` with its `evidence_truncated` key
+    removed, which is what an older writer put on disk. (`stored_row` is not usable for this:
+    it writes a row with no `evidence_observed` at all, and this node is about a row that has
+    one.) The reader exercised is `sync`, because that is the whole-row copy route the field's
+    `FIELDS` declaration exists to survive — the durable copy must carry the line with the key
+    still absent rather than have a flag invented on the way through.
+    """
+    minted = sv.record_verdict(store=store, pattern_key="Bash/logic",
+                               verdict="reviewed_no_skill",
+                               reason="an observation recorded before the flag existed",
+                               occurrences=4, evidence_cmd=PRINTING_CMD)
+    pre_3362 = {k: v for k, v in minted.items() if k != "evidence_truncated"}
+    store.write_text(json.dumps(pre_3362) + "\n", encoding="utf-8")
+
+    row = sv.load_verdicts(store)["Bash/logic"]
+    assert "evidence_truncated" not in row, "the fixture is a pre-#3362 line: no such key"
+    assert not row.get("evidence_truncated"), (
+        "an absent flag reads as not-truncated; nothing may treat a missing key as a cut")
+    assert row["evidence_observed"], "the row is otherwise normal: the absence is the oddity"
+
+    assert sv.main(["sync", "--store", str(store)]) == 0
+    durable = sv.load_verdicts(mirror)["Bash/logic"]
+    assert "evidence_truncated" not in durable, (
+        "sync copies whole rows, so it may not mint a flag the line never had")
+    assert not durable.get("evidence_truncated"), "and the absent flag still reads as whole"
+    assert durable["evidence_observed"] == row["evidence_observed"]
+
+
+def test_the_record_and_reanchor_confirmations_stay_on_one_line(store, mirror, capsys):
+    """#3362 clause 4: an observation with legs on two lines still prints as one line.
+
+    The row was never at risk — `json.dumps` escapes a newline, which is why a multi-line
+    value is one JSONL row — but `record`'s and `reanchor`'s confirmations interpolate the
+    observation into a status line the nightly job reads, and before #3362 the observation
+    could not contain a newline at all. Two lines emitted where the job expects one is a new
+    failure mode the fix would have introduced, so each confirmation is pinned at exactly one
+    line with every leg still visible, separated by `OBSERVED_LINE_SEP` rather than dropped.
+    """
+    cmd = f'echo {TWO_LEG_CMD_LEGS[0]!r}; echo {TWO_LEG_CMD_LEGS[1]!r}'
+
+    assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
+                    "--reason", "the prepass fires and the corpus leg is counted",
+                    "--evidence-cmd", cmd, "--occurrences", "95",
+                    "--store", str(store)]) == 0
+    out = capsys.readouterr().out
+    assert len(out.strip().splitlines()) == 1, f"record split its confirmation: {out!r}"
+    assert out.startswith("recorded Bash/logic ->"), out
+    assert (f"observed: {TWO_LEG_CMD_LEGS[0]}{sv.OBSERVED_LINE_SEP}"
+            f"{TWO_LEG_CMD_LEGS[1]}") in out, out
+    assert "\ninput_rows=95" not in out, "the legs are collapsed, not embedded raw"
+
+    capsys.readouterr()
+    assert sv.main(["reanchor", "--store", str(store), "--pattern", "Bash/logic",
+                    "--evidence-cmd", cmd]) == 0
+    out = capsys.readouterr().out
+    assert len(out.strip().splitlines()) == 1, f"reanchor split its confirmation: {out!r}"
+    assert out.startswith("re-anchored Bash/logic ->"), out
+    assert (f"observed: {TWO_LEG_CMD_LEGS[0]}{sv.OBSERVED_LINE_SEP}"
+            f"{TWO_LEG_CMD_LEGS[1]}") in out, out
 
 
 def test_a_missing_ledger_is_an_alarm_when_the_corpus_still_carries_its_verdicts(tmp_path,
@@ -3481,8 +3699,10 @@ def test_record_refuses_a_check_that_declares_it_read_no_input_and_a_check_sayin
     rows = [json.loads(ln) for ln in store.read_text().splitlines()]
     assert [r["pattern_key"] for r in rows] == ["test/denominator-0", "test/denominator-1",
                                                 "test/denominator-2"], rows
-    assert rows[0]["evidence_observed"] == "count=0", \
-        "a zero conclusion measured over a real input records; only a zero INPUT is refused"
+    assert rows[0]["evidence_observed"] == "count=0\ninput_rows=1", \
+        "a zero conclusion measured over a real input records; only a zero INPUT is refused " \
+        "(#2048) — and since #3362 the row carries the denominator line beneath the " \
+        "conclusion it was measured over, the leg this mint used to accept on and not store"
     with pytest.raises(ValueError, match="input_rows="):
         sv.record_verdict(store=store, pattern_key="test/undeclared",
                           verdict="reviewed_no_skill",
@@ -4265,7 +4485,8 @@ def test_record_refuses_a_new_case_sensitive_owner_grep_and_names_the_case_insen
                       verdict="reviewed_no_skill", reason="owner holds the section",
                       evidence_cmd=grep_owner(skill, "one mechanism, two symptoms", flags="-ci"),
                       occurrences=11)
-    assert sv.load_verdicts(store)["seq-2-edit-err-read"]["evidence_observed"] == "1"
+    assert sv.load_verdicts(store)["seq-2-edit-err-read"]["evidence_observed"] == (
+        "1\ninput_rows=1"), "the count and its declared denominator, both in the row"
 
 
 def test_the_case_sensitive_mint_rail_leaves_other_shapes_and_the_stored_history_alone(
@@ -4639,9 +4860,9 @@ def test_the_whole_file_candidate_count_measures_the_verdict_it_decided(tmp_path
     the 2026-09-21 class rule, "bind a count to the record set, never to narrative prose",
     caught in the act of failing toward the tool's own liveness."""
     cand = candidate_2166(tmp_path)
-    rc, whole = sv.run_evidence(counting_cmd(cand, "whole"))
+    rc, whole, _ = sv.run_evidence(counting_cmd(cand, "whole"))
     assert rc == 0, whole
-    rc2, body = sv.run_evidence(counting_cmd(cand, "body"))
+    rc2, body, _ = sv.run_evidence(counting_cmd(cand, "body"))
     assert rc2 == 0, body
     assert f"worktree_shape={FM_MENTIONS + BODY_MENTIONS}" in whole, whole
     assert f"body_worktree_shape={BODY_MENTIONS}" in body, body
@@ -4802,7 +5023,7 @@ def test_a_strip_that_is_read_is_not_reported_as_dead(tmp_path):
             f"b=$(awk '/^---/{{n++; next}} n>=2' $f); echo ex=$(printf '%s\\n' \"$b\" | "
             f"grep -c 'Error:') {grep_owner(skill, 'old string', '-ci')}")
     assert sv.candidate_body_defect(dead) is None, dead
-    rc, out = sv.run_evidence(dead)
+    rc, out, _ = sv.run_evidence(dead)
     assert rc == 0 and "ex=2" in out, out      # two example lines, zero front-matter matches
 
 
