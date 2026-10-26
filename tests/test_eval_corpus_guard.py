@@ -4409,6 +4409,386 @@ def test_the_3076_upper_bound_guard_is_anchored_read_only_and_launches_nothing()
             "guard would be certifying a mirror of the file it is certifying")
 
 
+# ── #3342: the witness behind §3's upper bound, committed ──────────────────────
+#
+# §3 of `eval/measurements/lloyd-architecture-ab-2026-10-20.md` prints two tallies of the
+# same trial: the artifact's own `{"gold_in_top10":0,"gold_top1":0}` and, eight lines
+# later, the recomputed `{"gold_in_top5":9,"gold_top1":7}`. The node above this section
+# re-derives both from `~/lloyd-data/eval/3076/upper.json` on every gate run — which is
+# correct, and was the whole hazard: that file is the trial's scratch, and the trial
+# regenerates it. The provenance of the copy committed here is therefore the provenance
+# of the run it witnessed, fixed at the moment it was copied:
+#
+#   * source: `/home/alansrobotlab/lloyd-data/eval/3076/upper.json`, mtime
+#     `2026-10-20T08:09:08-0700` (the artifact's own `ran_at` is
+#     `2026-10-20T15:09:06.694580+00:00`, the same instant), 120 lines, 2,452 bytes,
+#     md5 `dc939960a33f1a68e5baed5895f25f03`;
+#   * the runner that wrote it, `~/lloyd-data/eval/3076/run_trial.py`, is UNTRACKED
+#     runtime scratch: `~/lloyd-data` is not a git repository at all, so nothing under it
+#     is versioned and neither file is fixable in-repo or in-vault;
+#   * its `summary` is a path-form bug, not a measurement: `run_trial.py:527` ranks a
+#     query with `f.endswith("/" + gold)` over the raw hits the qmd fork returned —
+#     `qmd://lloyd-architecture/<name>?index=arm` — and the `?index=arm` SUFFIX defeats
+#     every `endswith`, so all ten `rank_in_named_collection` values are null and the
+#     summary counts 0 / 0 / 0.0 for a run that was finding the gold document.
+#
+# So the bytes had no history: a re-run, a sweep or a deleted scratch directory ages both
+# the quoted zero and the recomputed tally with nothing left to check them against. They
+# are committed as witness — `tests/fixtures/eval_3076_upper.json`, admitted past the root
+# `*.json` rule by one scoped negation in `tests/fixtures/.gitignore`, in the tree rather
+# than in the vault's `backlog/data/` store because a pin has to travel with the code that
+# reads it. Being a witness is a limit on what these nodes may claim: the guard on the
+# LIVE artifact stays where it is, reading `TRIAL_UPPER`, so a trial re-run still turns it
+# red. Nothing here repoints it, and nothing here re-runs it.
+#
+# Four nodes below, one hazard each: the tracking node asks git whether these bytes are
+# admissible AND in the index; the re-derive node reads only the committed copy and compares
+# its tally with §3's anchor; the meta-node pins that re-derive node's skip set to the note
+# alone; and `test_the_committed_3076_upper_bound_witness_is_the_bytes_its_provenance_records`
+# hashes the copy against the md5 above and pins this block's own numbers, so the provenance
+# cannot be softened into prose about a different run. No node here opens the live scratch to
+# compare it with the copy — that comparison would go red the first time the trial is re-run,
+# which is the ordinary future of an UNTRACKED scratch directory, and the durable form of the
+# claim is the hash of the bytes we chose to keep.
+#
+# The fixture path is built from `ROOT`, and that is not the `$HOME`-steering the block
+# above forbids: the ban there exists because `ROOT` at the gate is the round's worktree,
+# which is the WRONG place for the trial's scratch and the vault. For a file that lives in
+# the tree, the round's worktree is exactly the right place — it is the tree the diff was
+# made in, and the only one in which "is this committed?" has an answer.
+
+#: The committed witness, and the name it has in this tree's index.
+EVAL_3076_FIXTURE_REL = "tests/fixtures/eval_3076_upper.json"
+EVAL_3076_FIXTURE = ROOT / "tests" / "fixtures" / "eval_3076_upper.json"
+#: A sibling name no negation rescues, so it exists to be ignored. Without it, a
+#: `check-ignore` answer of "the negation covers it" is indistinguishable from a
+#: `check-ignore` that answers that way to everything — which is what a broken positive
+#: control always looks like.
+EVAL_3076_FIXTURE_CONTROL_REL = "tests/fixtures/eval_3076_upper.control.json"
+#: The witness's own recorded shape: `wc -l -c` of the source, and the instant the trial
+#: stamped into it. Both are assertions, not decoration: the line count is what
+#: re-deriving the report from the copy means, and the stamp is what makes a re-run's
+#: file count as a different run rather than as an edit of this one.
+EVAL_3076_FIXTURE_LINES = 120
+EVAL_3076_FIXTURE_BYTES = 2452
+EVAL_3076_FIXTURE_RAN_AT = "2026-10-20T15:09:06.694580+00:00"
+#: Byte-identity as a hash rather than as prose. The line/byte counts, the stamp, the tally
+#: and the summary together do NOT pin these bytes: renaming the second hit of the `qmd`
+#: query `"subliminal.md?index=arm"` → `"sublimina1.md?index=arm"` — same length, and a
+#: NON-gold name, so no gold position moves — keeps 120 lines, 2,452 bytes, the `ran_at`, all
+#: ten null ranks and the tally at 9 / 7, and would pass every other node in this section
+#: while no longer being the file the trial wrote.
+EVAL_3076_FIXTURE_MD5 = "dc939960a33f1a68e5baed5895f25f03"
+#: The source of these bytes, as a path under the data root. Kept as a constant so the
+#: block's prose and the path the landed node reads can be compared by ALGEBRA: the provenance
+#: node below asserts this is where `TRIAL_UPPER` sits under `production_data_root()`, so the
+#: block cannot name some other file and stay green — and it does that without opening the
+#: artifact, which is the bound the rest of this section honours.
+EVAL_3076_SOURCE_REL = "eval/3076/upper.json"
+#: The source's recorded mtime, and why it is a constant and not a live `stat()`: the whole
+#: premise of committing these bytes is that the scratch they came from is expected to be
+#: regenerated or deleted, so an assertion that opened it would go red in the ordinary case
+#: and train readers to delete the assertion. The mtime is therefore witness prose, pinned to
+#: appear beside the constant that spells it, and the live check that keeps a re-run visible
+#: belongs to the node clause 4 leaves where it is.
+EVAL_3076_SOURCE_MTIME = "2026-10-20T08:09:08-0700"
+#: The section header of this block, and the header of the section that follows it — the
+#: bounds the provenance reader slices on. Named here rather than spelled inside a node so a
+#: reworded header makes the reader fail loudly instead of reading an empty span and reporting
+#: a clean block.
+EVAL_3076_PROVENANCE_HEADER = "# ── #3342: the witness behind §3's upper bound, committed"
+EVAL_3076_NEXT_SECTION = "# ── #3166: the #1599 block in `eval/run_eval.py`"
+#: What this section must keep saying, and how often. A needle has to appear at least TWICE,
+#: which is the difference between a record and a claim: once is where the block says it, once
+#: is the constant or assert message that checks it. Deleting the block, or retyping a figure
+#: out of it, drops a count to 1 and fails. The cautionary case is the section that follows
+#: this one: a block claiming a config drift in the present tense, which had already ended the
+#: day after it was written and stayed in the file for three weeks because nothing in the tree
+#: compared the comment to the config it described.
+EVAL_3076_PROVENANCE_NEEDLES = (
+    EVAL_3076_SOURCE_REL,                                    # where the bytes came from
+    EVAL_3076_SOURCE_MTIME,                                  # when the source last changed
+    EVAL_3076_FIXTURE_RAN_AT,                                # when the trial stamped them
+    EVAL_3076_FIXTURE_MD5,                                   # which bytes they are
+    "run_trial.py:527",                                      # the ranking line
+    "endswith",                                              # the failed predicate
+    "UNTRACKED",                                             # what the runner is
+)
+
+
+def _3076_provenance_span(src: str) -> str:
+    """This section's own source: its header up to the next section's header.
+
+    The end bound is searched for at a LINE START, because the string it looks for is also the
+    value of a constant defined inside this very span — an unanchored `index` would stop the
+    span at that definition and the node would then be grading a fragment and reporting the
+    tail of the section as clean.
+    """
+    start = src.index(EVAL_3076_PROVENANCE_HEADER)
+    return src[start:src.index("\n" + EVAL_3076_NEXT_SECTION, start)]
+
+
+def _3076_provenance_missing(span: str) -> tuple[str, ...]:
+    """Which provenance needles the given source says fewer than twice."""
+    return tuple(n for n in EVAL_3076_PROVENANCE_NEEDLES if span.count(n) < 2)
+
+
+def _3076_guarded_reads(tree) -> set[str]:
+    """The paths one guard skips ON — the first argument of each of its
+    `require_live_data(...)` calls, as written in the source.
+
+    A helper, not an inline comprehension, so the node that uses it can run it against a
+    positive control: a skip-set reader that detects nothing would report an empty set
+    for a guard that skips on six files, and "its skip set names the note only" would be
+    satisfied by the reader being broken rather than by the guard being lean.
+    """
+    import ast
+
+    return {ast.unparse(call.args[0]) for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id == "require_live_data" and call.args}
+
+
+def test_the_3076_upper_bound_witness_is_tracked_despite_the_root_json_rule():
+    """Clause 1, asked of the real mechanism on every run rather than assumed.
+
+    The root `.gitignore` ends every new JSON in the tree (`.gitignore:42` is `*.json`),
+    so this fixture is admissible only through one scoped negation in
+    `tests/fixtures/.gitignore` — and `git add` of an ignored path is SILENT: it exits 0
+    and commits nothing. That is family #11's failure mode in this directory: #2282's first
+    round `git add`ed its calibration bytes past `*.calibration.json` without complaint, the
+    suite stayed green, the fixture was not in the index, and the pin that was supposed to
+    stop a claim aging stopped nothing at all.
+
+    So ask `git check-ignore` what it resolves, and read the ANSWER rather than the exit
+    status: `-v` exits 0 for ANY matching rule, a negation included, and prints the
+    winning rule as `file:line:pattern` — a leading `!` on that pattern is what "the last
+    rule says this is NOT ignored" looks like. The sibling name with no negation of its
+    own is checked first and must come back ignored by a rule that is not the fixtures
+    file, or "negation" for the fixture would mean nothing. `ls-files` then carries the
+    half no ignore rule can prove: that these bytes are in this tree's index. That they are
+    THOSE bytes — the clause's other word — is the hash the provenance node below asserts.
+    """
+    def rule(rel: str) -> tuple[int, str]:
+        p = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
+                           capture_output=True, text=True)
+        return p.returncode, (p.stdout.strip().split("\t")[0] if p.stdout.strip() else "")
+
+    ctl_code, ctl_rule = rule(EVAL_3076_FIXTURE_CONTROL_REL)
+    assert ctl_code == 0 and ctl_rule and not ctl_rule.endswith(":!"), (
+        f"positive control broken: {EVAL_3076_FIXTURE_CONTROL_REL} resolved to "
+        f"{ctl_rule!r} (exit {ctl_code}), so `check-ignore` is not grading these paths at "
+        "all and the assertion below is being satisfied by silence")
+    assert not ctl_rule.startswith("tests/fixtures/"), (
+        f"the control is being ignored by tests/fixtures/.gitignore itself ({ctl_rule}), so "
+        "the negation block in that file is no longer a last-match-wins tail")
+
+    code, matched = rule(EVAL_3076_FIXTURE_REL)
+    assert code == 0 and matched.endswith(":!eval_3076_upper.json"), (
+        f"{EVAL_3076_FIXTURE_REL} resolves to {matched!r} (exit {code}): the scoped "
+        "negation is not the last matching rule, so `git add` of the witness would commit "
+        "nothing and §3's figures would be back to having no history")
+
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", EVAL_3076_FIXTURE_REL],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{EVAL_3076_FIXTURE_REL} is admissible but not in the index: "
+        f"{tracked.stderr.strip() or tracked.stdout.strip()}")
+
+
+def test_the_committed_3076_upper_bound_witness_still_reproduces_the_quoted_tally():
+    """Clauses 2 and 3: §3's recomputed figures are derivable from the committed copy
+    ALONE, and this node runs on a machine that has no `~/lloyd-data/eval/3076/`.
+
+    `gold_in_top5` and `gold_top1` are re-ranked out of the copy's own `queries[].top5` —
+    strip any `?index=` suffix, take the basename, compare it with that query's own
+    `gold` — through the same helper the live-artifact node uses, so the two readings
+    cannot disagree by arithmetic. They are then compared with the
+    `<!-- 3076:upper:recomputed -->` anchor read out of §3 of the note: today both say 10
+    queries, gold in the top five for 9 and at rank 1 for 7, one miss
+    (`research-pipeline`), and any drift between the witness and the note's copy is this
+    node going red. The note's verbatim quotation of the artifact's all-zero `summary` is
+    pinned against the copy's `summary` too, so the zero stays the zero the file holds.
+
+    The copy is read unconditionally and is in NO skip set: its absence is a deletion of a
+    tracked file, which is a fact about the tree, not a machine that never had the trial's
+    derived data — so it fails here rather than skipping into the same silence that
+    `TRIAL_UPPER`'s absence already causes for the node above. The note is the only thing
+    this node skips on, and the meta-node below pins that.
+    """
+    require_live_data(TRIAL_NOTE, "the #3076 measurement note", kind="file")
+    assert EVAL_3076_FIXTURE.is_file(), (
+        f"{EVAL_3076_FIXTURE_REL} is absent from a tree whose index carries it: the "
+        "witness behind §3's upper bound is tracked bytes, not derived data")
+
+    text = EVAL_3076_FIXTURE.read_text(encoding="utf-8")
+    # NEWLINES, not `splitlines()`: the artifact's last byte is `}` with no newline after
+    # it, so `wc -l` — which counts newline characters — says 120 where `splitlines()`
+    # would count 121 fragments. The clause's re-derive is `wc -l -c` of the copy, so this
+    # is the reading that has to be pinned, and an off-by-one here would be a witness that
+    # cannot reproduce the figure the item quotes for it.
+    assert text.count("\n") == EVAL_3076_FIXTURE_LINES, (
+        f"the committed witness holds {text.count(chr(10))} newlines, not the "
+        f"{EVAL_3076_FIXTURE_LINES} `wc -l` reports for the source it was copied from")
+    assert len(text.encode("utf-8")) == EVAL_3076_FIXTURE_BYTES, (
+        f"the committed witness is {len(text.encode('utf-8'))} bytes, not the "
+        f"{EVAL_3076_FIXTURE_BYTES} `wc -c` reports for the source")
+
+    art = json.loads(text)
+    assert art["ran_at"] == EVAL_3076_FIXTURE_RAN_AT, (
+        f"the copy's own stamp is {art['ran_at']}, not the trial's "
+        f"{EVAL_3076_FIXTURE_RAN_AT}: these are no longer the bytes of that run, so they "
+        "witness a different measurement and the block above this node is stale")
+    want = _3076_upper_tally(art)
+    assert (want["queries"], want["gold_in_top5"], want["gold_top1"]) == (10, 9, 7), want
+    assert want["misses"] == ["research-pipeline"], want
+
+    # The witness still witnesses the BUG as well as the correction: the summary is the
+    # broken one, and every rank is still null. Were either to change, these bytes would
+    # be from a run whose runner had been fixed, and §3's explanation would be prose about
+    # a file that no longer behaves that way.
+    assert art["summary"]["gold_in_top10"] == 0 == art["summary"]["gold_top1"], art["summary"]
+    assert [q.get("rank_in_named_collection") for q in art["queries"]] == [None] * len(
+        art["queries"]), "some rank is no longer null, so these are not the endswith-bug bytes"
+
+    anchors = _3076_anchor_map(_3076_section(TRIAL_NOTE.read_text(), "## 3."), "upper")
+    assert "recomputed" in anchors, f"§3 carries no recomputed anchor: {sorted(anchors)}"
+    assert anchors["recomputed"] == want, (
+        f"§3's anchor says {anchors['recomputed']} while the committed witness tallies "
+        f"{want}: the note and the bytes it quotes have come apart")
+    assert tuple(anchors["recomputed"]) == UPPER_RECOMPUTED_KEYS, anchors["recomputed"]
+    assert anchors["summary"] == art["summary"], (
+        f"§3 quotes {anchors['summary']} where the witness holds {art['summary']}: the "
+        "verbatim zero is no longer the artifact's own")
+
+
+def test_the_3076_witness_guard_skips_for_nothing_but_the_note():
+    """Clause 3's bound, read off the AST of the node above rather than off its prose.
+
+    The whole point of committing the bytes is a guard that still runs once the trial's
+    scratch is gone, and that scratch is untracked data on one disk: a checkout that never
+    ran the trial is ordinary, and so is the sweep or the re-run that replaces the directory.
+    The gate's farm is a third case and a live one — its `<round>/home/lloyd-data` is its own
+    tree with no `eval/3076` in it, which is why the sibling node's paths are production-
+    anchored instead of `$HOME`-derived, as the comment above that node explains. A node that
+    asked `require_live_data` about the fixture, or that called `_3076_require_trial()`, or
+    that named `TRIAL_UPPER` at all, would go quiet exactly when the live data is gone — which
+    is the only case in which it is load-bearing. So its skip set is asserted to name the
+    NOTE AND NOTHING ELSE, and the same check is run over the whole module for the
+    fixture's name: `TRIAL_UPPER` was left out of `_3076_require_trial()` for this reason
+    (the comment at its definition says a guard's skip set has to name only what it
+    actually opens), and a witness added to it later would silence itself.
+
+    `ast`, for the reason the sibling meta-node gives: the skip set is a property of the
+    compiled call graph, and a node's docstring must be allowed to name the things it must
+    not do. The helper is run against a positive control in the same breath, because an
+    assertion that detects nothing is the failure this file has been refused for twice.
+    """
+    import ast
+    import inspect
+
+    control = ast.parse(
+        "def f():\n"
+        "    require_live_data(A_NOTE, 'note', kind='file')\n"
+        "    require_live_data(B_DIR, 'dir')\n")
+    assert _3076_guarded_reads(control) == {"A_NOTE", "B_DIR"}, (
+        _3076_guarded_reads(control), "the skip-set reader detects nothing, so the "
+        "assertion below is satisfied by a broken helper rather than by a lean guard")
+
+    target = test_the_committed_3076_upper_bound_witness_still_reproduces_the_quoted_tally
+    tree = ast.parse(inspect.getsource(target))
+    assert _3076_guarded_reads(tree) == {"TRIAL_NOTE"}, (
+        _3076_guarded_reads(tree),
+        "the witness guard skips on something besides the note, so it goes quiet in "
+        "precisely the case it exists to grade")
+    for call in [c for c in ast.walk(tree) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name) and c.func.id == "require_live_data"]:
+        kwargs = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+        assert kwargs.get("kind") == "'file'", ast.unparse(call)
+        assert isinstance(call.args[-1], ast.Constant), "each skip names WHICH piece"
+
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "EVAL_3076_FIXTURE" in names, (
+        "the guard no longer reads the committed witness, so nothing re-derives the "
+        "figures from the bytes this round committed")
+    assert not {"TRIAL_UPPER", "TRIAL_DIR", "TRIAL_ARTIFACTS"} & names, (
+        sorted(names), "the guard reached the live trial data, which is the sibling "
+        "node's job and the thing that would make this one skip")
+    called = [ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    assert "_3076_require_trial" not in called, called
+    assert not [c for c in called if c.split(".")[0] in
+                {"subprocess", "os", "pty", "signal"}], called
+    imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names}
+    imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not {"subprocess", "os", "pty"} & imported, sorted(imported)
+    assert not _3076_home_reads(tree), _3076_home_reads(tree)
+
+    # And the two skip sets this round must not have grown: the trial helper's, and every
+    # `require_live_data` call in this file, none of which may name the witness.
+    trial_guarded = _3076_guarded_reads(ast.parse(inspect.getsource(_3076_require_trial)))
+    assert "TRIAL_UPPER" not in trial_guarded, sorted(trial_guarded)
+    assert not any("EVAL_3076" in g for g in trial_guarded), sorted(trial_guarded)
+    module_guarded = _3076_guarded_reads(ast.parse(Path(__file__).read_text(encoding="utf-8")))
+    assert not any("EVAL_3076" in g for g in module_guarded), (
+        sorted(module_guarded), "the committed witness was added to some guard's skip "
+        "set, which makes a tracked file's absence read as a machine with no data")
+
+
+def test_the_committed_3076_upper_bound_witness_is_the_bytes_its_provenance_records():
+    """Clause 5 made gradable: the copy IS the bytes the block above says it is, and that
+    block cannot be softened, retyped or deleted without this node failing.
+
+    A hash of the committed file, not a re-read of the live scratch — and that choice is the
+    substance of the node. The scratch is UNTRACKED and regenerates, so a node comparing the
+    two would go red the first time the trial is re-run, which is the ordinary future of a
+    scratch directory, and would teach whoever saw it to "fix" the failure by replacing the
+    witness with the newer bytes. That is how a copy stops witnessing the run it was copied
+    from, and it is why clause 4 leaves the live-artifact guard to the node already reading
+    it. Hashing what we chose to keep is the durable half of "byte-identical to the source",
+    and the rest of this section's pins do not add up to it between them: renaming a NON-gold
+    hit keeps 120 newlines, 2,452 bytes, the `ran_at`, all ten null ranks and the tally at
+    9 / 7, and would leave every other node green on bytes the trial never wrote.
+
+    Then the prose, because a provenance that lives only in a comment is the failure the
+    section after this one documents: each fact has to appear at least twice inside this
+    section — once where the block records it, once in the constant or assert message that
+    checks it — and the reader is run against a mangled copy in the same breath, since a
+    needle count that detects nothing reports a clean provenance for provenance with its
+    numbers deleted.
+    """
+    import hashlib
+
+    digest = hashlib.md5(EVAL_3076_FIXTURE.read_bytes()).hexdigest()
+    assert digest == EVAL_3076_FIXTURE_MD5, (
+        f"the committed witness hashes to {digest}, not {EVAL_3076_FIXTURE_MD5}: these are no "
+        "longer the bytes `run_trial.py:527` wrote, so §3's quoted zero and its recomputed "
+        "tally have a witness in name only")
+
+    assert TRIAL_UPPER == production_data_root() / EVAL_3076_SOURCE_REL, (
+        TRIAL_UPPER, EVAL_3076_SOURCE_REL,
+        "the source this section's provenance names is not the artifact the landed node reads, "
+        "so the block is describing some other file")
+
+    span = _3076_provenance_span(Path(__file__).read_text(encoding="utf-8"))
+    assert "def test_the_3076_witness_guard_skips_for_nothing_but_the_note" in span, (
+        f"the provenance span stops {len(span)} characters short of the end of this section, "
+        "so the needle counts below are taken over a fragment and report its tail as clean — "
+        "the end bound has to be the next section's header, matched at a line start")
+    assert not _3076_provenance_missing(span), (
+        _3076_provenance_missing(span),
+        "a provenance fact of this witness is now stated only once in this section: the record "
+        "and the assertion that checks it are meant to be two places, so that deleting or "
+        "retyping one of them fails something")
+
+    mangled = span.replace(EVAL_3076_SOURCE_MTIME, "")
+    assert mangled != span, "the mtime needle is not in the span the reader is grading"
+    assert _3076_provenance_missing(mangled) == (EVAL_3076_SOURCE_MTIME,), (
+        _3076_provenance_missing(mangled), "the needle reader does not notice a provenance "
+        "figure being deleted, so it pins none of them")
+
+
 # ── #3166: the #1599 block in `eval/run_eval.py` stated a drift that ended ─────
 #
 # The block said, in the present tense, that the tracked template declared fifteen

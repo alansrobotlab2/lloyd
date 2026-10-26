@@ -207,3 +207,30 @@
 # negation is the visible route; a force-add past `*.json` is the invisible one
 # this file exists to make unnecessary.
 !session_distill_bash_shapes.json
+
+# …and #3342's witness of #3076's named-collection upper bound: the whole
+# `upper.json` the trial wrote on 2026-10-20, §3 of
+# `eval/measurements/lloyd-architecture-ab-2026-10-20.md` re-derives its "gold in the
+# top 5 for 9 of 10 queries, gold at rank 1 for 7 of 10" from its `queries[].top5`, and
+# every one of those bytes currently exists in exactly one place — the trial's scratch
+# at `~/lloyd-data/eval/3076/`, which is NOT a git tree at all
+# (`git -C ~/lloyd-data rev-parse --show-toplevel` → `fatal: not a git repository`), so
+# a deleted or regenerated `eval/3076/` takes both the quoted figures and the tally
+# beside them with it and leaves nothing to check against.
+#
+# In the tree rather than in the vault's `backlog/data/` witness store, which is where
+# the item first asked for them, because a pin has to travel with the code that reads
+# it: the vault is a second live tree with no worktree, so a node that opened the vault
+# copy would be checking bytes no round's diff can show, and a checkout without a vault
+# would have the guard silently absent. `backlog/data/` stays the human-facing copy and
+# is a separate vault-surface landing (#2289: no code round's diff contains a vault
+# commit). Byte-identical to the source — md5 dc939960a33f1a68e5baed5895f25f03, 120
+# lines, 2,452 B — and
+# `test_the_committed_3076_upper_bound_witness_still_reproduces_the_quoted_tally`
+# re-derives both figures from these bytes on every run, so the copy cannot go stale
+# against the note without the suite going red.
+#
+# Scoped to this one filename, not to `*.json`: a live `upper.json` of this shape
+# belongs to a trial's scratch directory and is what a re-run overwrites, never here, so
+# the negation only ever reaches a witness somebody deliberately placed here.
+!eval_3076_upper.json

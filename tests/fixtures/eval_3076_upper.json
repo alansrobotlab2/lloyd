@@ -1,0 +1,121 @@
+{
+ "ran_at": "2026-10-20T15:09:06.694580+00:00",
+ "queries": [
+  {
+   "id": "qmd",
+   "gold": "qmd.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "qmd.md?index=arm",
+    "subliminal.md?index=arm"
+   ]
+  },
+  {
+   "id": "workers",
+   "gold": "workers.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "workers.md?index=arm",
+    "autonomy.md?index=arm",
+    "djev.md?index=arm"
+   ]
+  },
+  {
+   "id": "djev",
+   "gold": "djev.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "djev.md?index=arm",
+    "index.md?index=arm",
+    "infrastructure.md?index=arm",
+    "tools.md?index=arm"
+   ]
+  },
+  {
+   "id": "automod",
+   "gold": "automod.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "editing-safeguards.md?index=arm",
+    "workers-jobs.md?index=arm",
+    "threat-model.md?index=arm",
+    "automod.md?index=arm",
+    "tools.md?index=arm"
+   ]
+  },
+  {
+   "id": "harness",
+   "gold": "harness.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "editing-safeguards.md?index=arm",
+    "tools.md?index=arm",
+    "index.md?index=arm",
+    "subliminal.md?index=arm",
+    "harness.md?index=arm"
+   ]
+  },
+  {
+   "id": "retrieval",
+   "gold": "retrieval.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "retrieval.md?index=arm",
+    "subliminal.md?index=arm",
+    "index.md?index=arm",
+    "qmd.md?index=arm",
+    "tools.md?index=arm"
+   ]
+  },
+  {
+   "id": "context-window",
+   "gold": "context-window.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "context-window.md?index=arm",
+    "measurement.md?index=arm",
+    "harness.md?index=arm",
+    "vllm.md?index=arm",
+    "index.md?index=arm"
+   ]
+  },
+  {
+   "id": "threat-model",
+   "gold": "threat-model.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "threat-model.md?index=arm"
+   ]
+  },
+  {
+   "id": "testing",
+   "gold": "testing.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "testing.md?index=arm",
+    "data-home.md?index=arm",
+    "measurement.md?index=arm",
+    "automod.md?index=arm",
+    "skills.md?index=arm"
+   ]
+  },
+  {
+   "id": "research-pipeline",
+   "gold": "research-pipeline.md",
+   "rank_in_named_collection": null,
+   "top5": [
+    "tools.md?index=arm",
+    "djev.md?index=arm",
+    "guard-coverage.md?index=arm",
+    "workers.md?index=arm",
+    "autonomy-jobs.md?index=arm"
+   ]
+  }
+ ],
+ "summary": {
+  "queries": 10,
+  "gold_in_top10": 0,
+  "gold_top1": 0,
+  "mean_reciprocal_rank": 0.0
+ }
+}
