@@ -1661,106 +1661,182 @@ def _red_tree_settled_at_pickup(candidate) -> dict:
                 "reason": f"pickup probe errored: {type(exc).__name__}: {exc}"}
 
 
+def _decline_in_flight(item_id: int, *, name: str = "", slot: str | None,
+                       held_by: str, also_held: list[int] | None = None) -> dict:
+    """Say *skipped, already in flight* — and say who holds it, in the ledger.
+
+    The declining slot writes a `backlog_implement` row with `phase: "skipped"`
+    and no `started` row. Both halves matter. A `started` row here would make the
+    item's outcome `spent` and take an item out of rotation because someone
+    looked at it; and the bare sentence *"skipped, already in flight"* is
+    indistinguishable from *"no candidate"* to anyone reading the ledger a day
+    later, which is the distinction #3370 asks to keep. So the row names the
+    item and the holder — the other slot's queue key, which is what actually
+    holds the claim — plus every other held id, so a scheduler with two free
+    slots and one item reads as *"the other one has it"* rather than as an idle
+    loop.
+
+    **Dispatch-side only, deliberately, and the sibling check this does NOT add
+    is `scripts/automod/round.py::start` refusing a second open round for the
+    same item.** That is defence in depth behind this one, #3370 lists it as out
+    of scope and owes the ruling on it, and `round.py` is not in this diff — the
+    guard lives where the candidate is chosen, so no second session is ever
+    dispatched to discover the collision at its first `automod_start`.
+    """
+    from scripts.automod import state as S
+    S.append_event({"event": "backlog_implement", "item_id": item_id,
+                    "phase": "skipped", "slot": slot, "held_by": held_by,
+                    **({"name": name[:200]} if name else {}),
+                    **({"also_held": list(also_held)[:10]} if also_held else {}),
+                    "summary": f"skipped, already in flight: item {item_id} is held "
+                               f"by {held_by}"})
+    print(f"[autocode] item {item_id} declined: already in flight in {held_by}")
+    return {"status": "skipped", "item_id": item_id, "held_by": held_by,
+            "summary": f"skipped, already in flight: #{item_id} is held by {held_by}"}
+
+
 async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.automod import backlog as B, state as S
 
     free, why = _loop_is_free()
     if not free:
         return {"status": "skipped", "summary": why}
+    # The queue key is BOTH the warm-session key and the implement claim's key,
+    # so it is read once, here, above the selection it has to guard. One key for
+    # both is what makes a decline provable: the holder named in the skip row is
+    # the same string a reader can find in the item's later `started` row.
+    slot = getattr(item, "dedup_key", None)
     pair = B.select_confirmed(S.LEDGER_PATH)
     if pair is None:
-        return {"status": "skipped", "summary": "no confirmed item with an acceptance check"}
+        # "Nothing ready" is two different sentences and the ledger has to say
+        # which one this is. The pool is empty either because the board is empty
+        # or because the one ready item is in the OTHER slot's hands at this
+        # second — and the second is the state #3370 is about, which a reader
+        # would otherwise read as an idle loop.
+        held = B.implement_held_confirmed(S.LEDGER_PATH)
+        if held:
+            held_item, holder = held[0]
+            return _decline_in_flight(held_item.id, name=held_item.name, slot=slot,
+                                      held_by=holder,
+                                      also_held=[i for i, _ in held[1:]])
+        return {"status": "skipped", "slot": slot,
+                "summary": "no confirmed item with an acceptance check"}
     candidate, triage = pair
 
-    # A red-tree item whose red has already healed was picked up and worked
-    # anyway, because the only closer — `close_healed_red_tree` — is reachable
-    # solely from a FULL green `tests` rung. A heal that arrived on the vault
-    # surface has no closer on its own route at all (#2384's was vault commit
-    # `1f5900e1`, which runs no pytest), and a delta-only round never reaches the
-    # closer either; the item stayed `high` on the board and the loop spent a
-    # whole attempt learning what the item's own nodes answer in seconds (#2384:
-    # 22 turns, `round_id: null`, nothing to change; #1846: 14 turns, closed
-    # `unnecessary`). Ask before the `started` row below — that row is what spends
-    # the attempt, so a probe after it is a probe that already cost one.
-    settled = await asyncio.to_thread(_red_tree_settled_at_pickup, candidate)
-    if settled.get("action") == "closed":
-        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                        "phase": "skipped", "name": candidate.name[:200],
-                        "slot": getattr(item, "dedup_key", None),
-                        "reason": f"red tree healed before the attempt: "
-                                  f"{settled.get('reason', '')}"[:400]})
-        return {"status": "skipped", "item_id": candidate.id,
-                "summary": (f"#{candidate.id}: its own nodes pass at "
-                            f"{str(settled.get('head') or '')[:12]} — closed already_done, "
-                            f"no attempt spent")[:500]}
-
-    budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
-
-    # Read BEFORE the `started` row below, and this ordering is the whole
-    # fix. `implement_outcomes` judges an item by its LATEST implement row,
-    # and a `started` row with no round reads as `spent` — so a banner
-    # computed after it was always empty. 0 of the 92 autocode sessions on
-    # record to 2026-09-13 had ever been told they were a re-offer: no
-    # `from_branch`, no findings, no clause verdicts, every one a fresh start.
-    # Before the `started` row too: `_warm_session` reads this slot's latest
-    # turn, and this attempt's own row would otherwise be it. And before the
-    # strategy block: under the #1489 A/B a warm continuation inherits the
-    # arm of the session it continues.
-    slot = getattr(item, "dedup_key", None)
-    warm = await _warm_session(slot)
-    strategy, arm_fields = _strategy_for(candidate, triage, warm)
-    reoffer = _reoffer_for(candidate.id) + strategy
-
-    # Recorded BEFORE the turn. `implemented_ids` counts any event for the
-    # item, so this is what makes it one attempt per item: a turn that crashes
-    # or times out must not put the item back on the pile to be retried
-    # unattended.
-    started = time.time()
-    S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                    "phase": "started", "name": candidate.name[:200],
-                    "budget": budget, "slot": slot, **arm_fields,
-                    **({"continues_session": warm["session_id"], "chain": warm["chain"],
-                        "history_tokens": warm["history_tokens"]} if warm else {})})
-    B.set_status(candidate.id, "in_progress", "automod round starting")
+    # The hold is taken here — before the red-tree probe below, before the
+    # session warm, and long before the `started` row — and the placement IS the
+    # fix. The collision this closes is not a tight race: selection is a pure
+    # read, and between it and the first row that mentions the item on the ledger
+    # sit a probe bounded by `gate.PICKUP_PROBE_TIMEOUT` (300 s) and a session
+    # load, so two slots in one tick overlap for as long as that probe takes. The
+    # two observed collisions were 1 s and 2 s apart (item 3367 on 2026-10-26,
+    # item 3153 on 2026-10-22, which opened two rounds two minutes apart); the
+    # second of each is exactly what this line turns into a skip.
+    #
+    # It goes above the warm path for the same reason: `_warm_session` asks
+    # whether the SESSION is busy and nothing else, and 3367's second row was a
+    # warm continuation of the session that already held the item.
+    held_by = B.claim_for_implement(slot, candidate.id)
+    if held_by is not None:
+        return _decline_in_flight(candidate.id, name=candidate.name, slot=slot,
+                                  held_by=held_by)
     try:
-        return await _run_and_record(item, candidate, triage, budget, started, reoffer,
-                                     warm=warm, slot=slot)
+        # A red-tree item whose red has already healed was picked up and worked
+        # anyway, because the only closer — `close_healed_red_tree` — is reachable
+        # solely from a FULL green `tests` rung. A heal that arrived on the vault
+        # surface has no closer on its own route at all (#2384's was vault commit
+        # `1f5900e1`, which runs no pytest), and a delta-only round never reaches the
+        # closer either; the item stayed `high` on the board and the loop spent a
+        # whole attempt learning what the item's own nodes answer in seconds (#2384:
+        # 22 turns, `round_id: null`, nothing to change; #1846: 14 turns, closed
+        # `unnecessary`). Ask before the `started` row below — that row is what spends
+        # the attempt, so a probe after it is a probe that already cost one.
+        settled = await asyncio.to_thread(_red_tree_settled_at_pickup, candidate)
+        if settled.get("action") == "closed":
+            S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                            "phase": "skipped", "name": candidate.name[:200],
+                            "slot": getattr(item, "dedup_key", None),
+                            "reason": f"red tree healed before the attempt: "
+                                      f"{settled.get('reason', '')}"[:400]})
+            return {"status": "skipped", "item_id": candidate.id,
+                    "summary": (f"#{candidate.id}: its own nodes pass at "
+                                f"{str(settled.get('head') or '')[:12]} — closed already_done, "
+                                f"no attempt spent")[:500]}
+
+        budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
+
+        # The warm read happens BEFORE the `started` row below, and this ordering
+        # is the whole fix for what it reads. `implement_outcomes` judges an item
+        # by its LATEST implement row, and a `started` row with no round reads as
+        # `spent` — so a banner computed after it was always empty. 0 of the 92
+        # autocode sessions on record to 2026-09-13 had ever been told they were a
+        # re-offer: no `from_branch`, no findings, no clause verdicts, every one a
+        # fresh start.
+        # Before the `started` row too: `_warm_session` reads this slot's latest
+        # turn, and this attempt's own row would otherwise be it. And before the
+        # strategy block: under the #1489 A/B a warm continuation inherits the
+        # arm of the session it continues.
+        warm = await _warm_session(slot)
+        strategy, arm_fields = _strategy_for(candidate, triage, warm)
+        reoffer = _reoffer_for(candidate.id) + strategy
+
+        # Recorded BEFORE the turn. `implemented_ids` counts any event for the
+        # item, so this is what makes it one attempt per item: a turn that crashes
+        # or times out must not put the item back on the pile to be retried
+        # unattended.
+        started = time.time()
+        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                        "phase": "started", "name": candidate.name[:200],
+                        "budget": budget, "slot": slot, **arm_fields,
+                        **({"continues_session": warm["session_id"], "chain": warm["chain"],
+                            "history_tokens": warm["history_tokens"]} if warm else {})})
+        B.set_status(candidate.id, "in_progress", "automod round starting")
+        try:
+            return await _run_and_record(item, candidate, triage, budget, started, reoffer,
+                                         warm=warm, slot=slot)
+        finally:
+            # Every exit — landed, aborted, timed out, never ran, skipped for a
+            # drain — hands the item back to the ledger's verdict. Without this the
+            # early returns left an item `in_progress` that nothing would ever
+            # pick up again, which is the old failure wearing a new status.
+            #
+            # The settle sweep first. It otherwise runs only in housekeeping, once
+            # per `interval_seconds`, while `REPOLL_ON_COMPLETE` asks for the next
+            # round at once — so a vault landing this turn made (which needs no
+            # window) was reconciled back into `up_next` and re-picked before
+            # anything closed it. #575: round one ended 22:06:27Z, its item was
+            # `up_next` at :38 and in a second round at 22:08:44.
+            #
+            # Only after a turn that made a vault landing: the sweep walks the
+            # whole board (~2.3 s measured, on the event loop), and a code landing
+            # has the guardian's window to wait out, which housekeeping covers.
+            # Synchronous like the reconcile beside it, so a cancelled `execute`
+            # cannot run the two concurrently over the same item files.
+            try:
+                if _vault_landed_since(candidate.id, started):
+                    cfg = _source_cfg(NAME)
+                    for r in B.close_settled_items(
+                            S.LEDGER_PATH,
+                            close_members=bool(cfg.get("close_members_on_settle", True))):
+                        logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
+                                    "closed" if r["closed"] else "noted, left open", r["acceptance"])
+            except Exception as exc:
+                logger.warning("close_settled_items after #%s failed: %s", candidate.id, exc)
+            try:
+                B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=bool(
+                    _source_cfg(NAME).get("retriage_spent", True)))
+            except Exception as exc:
+                logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
+            # Beside the reaper, at turn end: this turn was the last thing a
+            # natural gap waits for. Its own slot row is still `running`.
+            _maybe_flush(exclude_key=getattr(item, "dedup_key", None))
     finally:
-        # Every exit — landed, aborted, timed out, never ran, skipped for a
-        # drain — hands the item back to the ledger's verdict. Without this the
-        # early returns left an item `in_progress` that nothing would ever
-        # pick up again, which is the old failure wearing a new status.
-        #
-        # The settle sweep first. It otherwise runs only in housekeeping, once
-        # per `interval_seconds`, while `REPOLL_ON_COMPLETE` asks for the next
-        # round at once — so a vault landing this turn made (which needs no
-        # window) was reconciled back into `up_next` and re-picked before
-        # anything closed it. #575: round one ended 22:06:27Z, its item was
-        # `up_next` at :38 and in a second round at 22:08:44.
-        #
-        # Only after a turn that made a vault landing: the sweep walks the
-        # whole board (~2.3 s measured, on the event loop), and a code landing
-        # has the guardian's window to wait out, which housekeeping covers.
-        # Synchronous like the reconcile beside it, so a cancelled `execute`
-        # cannot run the two concurrently over the same item files.
-        try:
-            if _vault_landed_since(candidate.id, started):
-                cfg = _source_cfg(NAME)
-                for r in B.close_settled_items(
-                        S.LEDGER_PATH,
-                        close_members=bool(cfg.get("close_members_on_settle", True))):
-                    logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
-                                "closed" if r["closed"] else "noted, left open", r["acceptance"])
-        except Exception as exc:
-            logger.warning("close_settled_items after #%s failed: %s", candidate.id, exc)
-        try:
-            B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=bool(
-                _source_cfg(NAME).get("retriage_spent", True)))
-        except Exception as exc:
-            logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
-        # Beside the reaper, at turn end: this turn was the last thing a
-        # natural gap waits for. Its own slot row is still `running`.
-        _maybe_flush(exclude_key=getattr(item, "dedup_key", None))
+        # Every exit, including the ones above that never reached a turn. A hold
+        # that outlived its turn would park the item out of every pool until the
+        # process restarted, which is a worse version of the bug this fixes; the
+        # re-offer path — an item whose attempt closed and whose round settled —
+        # has to find the pool empty of this slot's claim.
+        B.release_implement_claim(slot)
 
 
 def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,

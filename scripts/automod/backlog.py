@@ -6681,6 +6681,101 @@ def triage_claimed_ids() -> set[int]:
         return set().union(*_TRIAGE_CLAIMS.values()) if _TRIAGE_CLAIMS else set()
 
 
+# ── implement claims: two implement slots over one item ────────────────────
+#
+# The shape is `claim_for_triage`'s, for the same reason and because the gap is
+# wider than a race. `workers.sources.autocode.execute` reads its candidate with
+# one pure call (`B.select_confirmed`), and between that read and the
+# `phase=started` row that first puts the item on the ledger sit a red-tree
+# probe bounded by `gate.PICKUP_PROBE_TIMEOUT` (300 s) and a session warm-up
+# that loads and compacts a session JSON. Two slots woken by the same tick
+# therefore have seconds-to-minutes of guaranteed overlap, not microseconds, and
+# both select the same `up_next` item.
+#
+# Measured, not predicted. Over the 6,000 ledger lines to 2026-10-26T09:49Z
+# (233 `started` rows over 205 items) two pairs name one item from two slots
+# seconds apart: item 3153 at 14:11:13Z/14:11:15Z on 2026-10-22, which then
+# opened TWO rounds two minutes apart (`SM_20261022_141216`,
+# `SM_20261022_141423`), and item 3367 at 09:39:17Z/09:39:18Z on 2026-10-26,
+# whose second row was a warm continuation and whose first round
+# (`SM_20261026_094021`) was being edited by its own session while the second
+# session read the item's clauses. Every clause of that round was
+# unimplementable in the second session, which is what filed #3370.
+#
+# In memory, not on the ledger, because both slots are tasks in one backend
+# process and a restart that loses the set also kills the turns that held it.
+# It deliberately does not re-read the ledger either: the ledger already covers
+# every turn that wrote a row. A turn's own `started` row makes its outcome
+# `spent`, which `ready_confirmed` excludes, and a gate or landing still running
+# is `items_being_gated_or_landed`. What no ledger row can express is the turn
+# that is in flight and has written nothing yet — which is the entire gap. The
+# broader ledger predicate `items_with_unfinished_rounds` would close it as well,
+# by holding every item whose latest row is `started`: right for the fold and
+# retriage closers, which exist to fail closed, and a permanent park for the
+# dispatcher, because an abandoned round or an orphaned turn is released only by
+# `autocode.reap_abandoned_rounds` and `autocode.settle_orphaned_turns`, on the
+# housekeeping interval rather than on the tick.
+
+_IMPLEMENT_CLAIMS: dict[str, int] = {}
+_IMPLEMENT_CLAIMS_LOCK = threading.Lock()
+
+
+def claim_for_implement(slot, item_id) -> str | None:
+    """Hold `item_id` for `slot`: None when it is ours, the holding slot's key when it is not.
+
+    One call under one lock. `if item_id not in implement_claimed_ids(): claim(...)`
+    is the same race this exists to close, with the two slots scheduled between
+    the read and the write.
+    """
+    with _IMPLEMENT_CLAIMS_LOCK:
+        for held_slot, held_id in _IMPLEMENT_CLAIMS.items():
+            if held_id == int(item_id) and held_slot != str(slot):
+                return held_slot
+        _IMPLEMENT_CLAIMS[str(slot)] = int(item_id)
+        return None
+
+
+def release_implement_claim(slot) -> None:
+    """Hand the item back. Every exit from a turn calls it, including the exits that never ran it."""
+    with _IMPLEMENT_CLAIMS_LOCK:
+        _IMPLEMENT_CLAIMS.pop(str(slot), None)
+
+
+def implement_claimed_ids() -> set[int]:
+    """Ids some implement turn in this process is holding right now."""
+    with _IMPLEMENT_CLAIMS_LOCK:
+        return set(_IMPLEMENT_CLAIMS.values())
+
+
+def implement_claims() -> dict[int, str]:
+    """`{item_id: slot}` for every implement turn in flight in this process."""
+    with _IMPLEMENT_CLAIMS_LOCK:
+        return {int(i): s for s, i in _IMPLEMENT_CLAIMS.items()}
+
+
+def implement_held_confirmed(ledger: Path,
+                             boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                             items: list[Item] | None = None,
+                             outcomes: dict | None = None) -> list[tuple[Item, str]]:
+    """`(item, holding slot)` for items autocode would take but for an implement claim.
+
+    The second slot's second question, and the reason the pool may not simply
+    answer "nothing ready": *skipped, already in flight* and *no candidate* are
+    different states and a reader of the ledger has to tell them apart (#3370).
+    The same reads as `ready_confirmed` with the claims ignored, so an item here
+    is confirmed, ready and unspent — held by nothing but a live turn in this
+    process. Lowest id first, so a slot that finds several held names a
+    deterministic one.
+    """
+    holders = implement_claims()
+    if not holders:
+        return []
+    ready = ready_confirmed(ledger, boards, items=items, outcomes=outcomes,
+                            ignore_implement_claims=True)
+    return sorted(((item, holders[item.id]) for item, _ in ready
+                   if item.id in holders), key=lambda p: p[0].id)
+
+
 def triage_pool(ledger: Path,
                 boards: tuple[str, ...] | None = DEFAULT_BOARDS
                 ) -> tuple[list[Item], int]:
@@ -6896,7 +6991,8 @@ def select_confirmed(ledger: Path,
 
 def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
                     items: list[Item] | None = None,
-                    outcomes: dict | None = None) -> list[tuple[Item, dict]]:
+                    outcomes: dict | None = None,
+                    ignore_implement_claims: bool = False) -> list[tuple[Item, dict]]:
     """Every item autocode would actually take, unordered: `(item, triage_event)`.
 
     `select_confirmed` orders this; the triage depth gate and `board_health`
@@ -6904,6 +7000,11 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     count grouped members, human-only items, items with no acceptance, spent
     attempts and unexecuted hand-run carriers — none of which a round will ever
     start.
+
+    An item another slot in this process holds is not on that list either: two
+    sessions over one contract is what #3370 is about. `ignore_implement_claims`
+    is the one reader that wants them back — `implement_held_confirmed`, which
+    has to name what it refused rather than report an empty pool.
     """
     from scripts.automod import owed as _O
     confirmed = confirmed_verdicts(ledger)
@@ -6912,10 +7013,11 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     done = {iid for iid, (verdict, _) in outcomes.items() if verdict == "spent"}
     # A round the loop is still gating or landing after its turn ended.
     busy = items_being_gated_or_landed(ledger)
+    held = set() if ignore_implement_claims else implement_claimed_ids()
     ready = []
     for item in (items if items is not None else open_items(boards)):
         ev = confirmed.get(item.id)
-        if not ev or item.id in done or item.id in busy:
+        if not ev or item.id in done or item.id in busy or item.id in held:
             continue
         # The board is the state machine now: a confirmed item the loop may
         # take sits in `up_next`, and only there. A human parks one anywhere

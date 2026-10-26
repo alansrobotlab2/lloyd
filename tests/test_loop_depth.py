@@ -13,6 +13,7 @@ landing wait: with two rounds, a landing's idle wait IS the other round's turn.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 import threading
@@ -43,8 +44,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     B._TRIAGE_CLAIMS.clear()
+    B._IMPLEMENT_CLAIMS.clear()
     yield d
     B._TRIAGE_CLAIMS.clear()
+    B._IMPLEMENT_CLAIMS.clear()
 
 
 def write_item(d: Path, item_id, *, status="draft", days_old=100, tags=()):
@@ -856,3 +859,276 @@ def test_the_implement_source_asks_for_a_flush_before_the_free_check_and_at_turn
     src = inspect.getsource(I.enqueue_if_due)
     assert src.index("_maybe_flush") < src.index("_loop_is_free()")
     assert "_maybe_flush(exclude_key=getattr(item, \"dedup_key\", None))" in inspect.getsource(I.execute)
+
+
+# ── one item, two slots: the implement claim (#3370) ───────────────────────
+#
+# `autocode` runs `max_inflight` slots per tick, and every one of them asks the
+# same question — `B.select_confirmed` — over a board that the winner does not
+# move until after it has written its `started` row. The gap is not a tie-break
+# in microseconds: between the selection and that row sit a red-tree probe
+# bounded by `gate.PICKUP_PROBE_TIMEOUT` (300 s) and a session warm-up, so two
+# slots woken by one tick overlap for as long as that probe takes. Observed:
+# item 3367 at 09:39:17Z/09:39:18Z on 2026-10-26, and item 3153 at
+# 14:11:13Z/14:11:15Z on 2026-10-22, which then opened two rounds two minutes
+# apart (`SM_20261022_141216`, `SM_20261022_141423`). Both sessions read the
+# same acceptance clauses and both were entitled to close the item.
+
+_3367_ROWS = (
+    # promotions.jsonl line 21161, re-read from disk at 2026-10-26T10:4xZ.
+    {"ts": 1793007557.6407309, "created_at": "2026-10-26T09:39:17Z",
+     "event": "backlog_implement", "item_id": 3367, "phase": "started",
+     "name": "Blocks #3366: a first-ever `## Measured in Lloyd` section can never "
+             "pass the vault land's code-agreement probe",
+     "budget": 250, "slot": "autocode:round"},
+    # promotions.jsonl line 21162 — one second later, the other slot, and a WARM
+    # CONTINUATION of the session that already held the item.
+    {"ts": 1793007558.8161278, "created_at": "2026-10-26T09:39:18Z",
+     "event": "backlog_implement", "item_id": 3367, "phase": "started",
+     "name": "Blocks #3366: a first-ever `## Measured in Lloyd` section can never "
+             "pass the vault land's code-agreement probe",
+     "budget": 250, "slot": "autocode:round:1",
+     "continues_session": "20261026_011713_autocode_d51c", "chain": 2,
+     "history_tokens": 18067},
+)
+
+
+def _slot(key):
+    """One implement slot: `dedup_key` is the only field the claim reads off it."""
+    from types import SimpleNamespace
+    return SimpleNamespace(dedup_key=key, payload={"max_turns": 40})
+
+
+def _rows(event="backlog_implement"):
+    if not S.LEDGER_PATH.exists():
+        return []
+    return [json.loads(l) for l in S.LEDGER_PATH.read_text(encoding="utf-8").splitlines()
+            if l.strip() and json.loads(l).get("event") == event]
+
+
+def _ready(isolated, item_id, *, name="the thing"):
+    """An item the loop may take: `up_next`, confirmed, with an acceptance clause."""
+    (isolated / f"{item_id}-thing.md").write_text(
+        "---\n" + yaml.safe_dump({
+            "status": "up_next", "priority": "medium", "board": "lloyd", "id": item_id,
+            "name": name, "tags": [],
+            "created": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()})
+        + "---\nDo the thing.\n", encoding="utf-8")
+    S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
+                    "acceptance": "a test pins it"}, path=S.LEDGER_PATH)
+
+
+def _stub_the_turn(monkeypatch, seen):
+    """Stub everything a real round would do; the claim, the rows and the release stay real.
+
+    What is left running is the part under test: the selection, the claim, the
+    `started` row, the board move and the `finally` that hands the item back. The
+    red-tree probe is the one stub worth naming — the real one is a pytest run
+    bounded by 300 s, and it is the reason the window between selecting and
+    writing a row is minutes rather than microseconds. The probe's body records
+    what a selector can still see at the moment the winner is mid-flight.
+    """
+    seen.setdefault("runs", [])
+    seen.setdefault("probe", [])
+
+    def probe(candidate):
+        seen["probe"].append({
+            "claimed": sorted(B.implement_claimed_ids()),
+            "selector": B.select_confirmed(S.LEDGER_PATH),
+            "ready_ignoring_the_claim": [i.id for i, _ in B.ready_confirmed(
+                S.LEDGER_PATH, ignore_implement_claims=True)],
+            "rows_already_written": [r.get("phase") for r in _rows()
+                                     if r.get("item_id") == candidate.id]})
+        return {"action": "kept"}
+
+    async def warm(slot):
+        return None
+
+    async def run(item, candidate, triage, budget, started, reoffer, *,
+                  warm=None, slot=None):
+        seen["runs"].append({"slot": slot, "item_id": candidate.id,
+                             "claimed": sorted(B.implement_claimed_ids())})
+        S.append_event({"event": "round_start", "round_id": f"SM_SEEN_{candidate.id}",
+                        "item_id": candidate.id, "session_id": f"sess-{slot}"},
+                       path=S.LEDGER_PATH)
+        return {"outcome": "unnecessary", "session_id": f"sess-{slot}", "turns": 1,
+                "stop_reason": "stop"}
+
+    monkeypatch.setattr(I, "_loop_is_free", lambda depth=None: (True, "free"))
+    monkeypatch.setattr(I, "_red_tree_settled_at_pickup", probe)
+    monkeypatch.setattr(I, "_warm_session", warm)
+    monkeypatch.setattr(I, "_run_and_record", run)
+    monkeypatch.setattr(I, "_maybe_flush", lambda *a, **k: None)
+    monkeypatch.setattr(B, "close_settled_items", lambda *a, **k: [])
+    monkeypatch.setattr(B, "reconcile_statuses", lambda *a, **k: [])
+    return seen
+
+
+def _one_tick_two_slots():
+    """Two slots woken by one tick, over one board: both of their results, in slot order."""
+    async def go():
+        return await asyncio.gather(I.execute(_slot("autocode:round")),
+                                    I.execute(_slot("autocode:round:1")))
+    return asyncio.run(go())
+
+
+def test_two_slots_and_one_ready_item_give_one_started_row_and_one_decline(isolated, monkeypatch):
+    """The tick that took #3367 twice: one winner, and the other slot says so.
+
+    `autocode:round` and `autocode:round:1` are the two real slot keys, taken
+    from the 2026-10-26 rows, and they start together because `enqueue_if_due`
+    queues one row per free slot index — two concurrent turns over one candidate
+    is the intended steady state, and only the missing per-item claim made them
+    collide.
+    """
+    _ready(isolated, 40)
+    seen = _stub_the_turn(monkeypatch, {})
+    first, second = _one_tick_two_slots()
+
+    started = [r for r in _rows() if r.get("phase") == "started" and r.get("item_id") == 40]
+    assert len(started) == 1, f"two slots wrote two attempts: {started}"
+    assert started[0]["slot"] == "autocode:round"
+    assert len(seen["runs"]) == 1 and seen["runs"][0]["item_id"] == 40, \
+        "one item gets one implement session"
+    assert len([r for r in _rows("round_start") if r.get("item_id") == 40]) == 1
+    assert second["status"] == "skipped" and "already in flight" in second["summary"], second
+    assert first.get("outcome") == "unnecessary", first
+    assert B.implement_claimed_ids() == set(), "both turns are over: nothing is held"
+
+
+def test_the_item_is_claimed_before_its_started_row_and_a_selector_cannot_name_it(isolated,
+                                                                                  monkeypatch):
+    """The window #3370 is about, pinned at the moment the winner is mid-flight.
+
+    The probe runs after the claim and before the `started` row, so what it sees
+    is what the second slot saw: no ledger row naming the item, the board still
+    saying `up_next`, and — with the claim in the way — a pool that no longer
+    names it. `ready_ignoring_the_claim` is the counterfactual in the same
+    instant: the same pool with the claims dropped still offers the item, so the
+    hold is doing the work and not some accident of ordering.
+    """
+    _ready(isolated, 41)
+    seen = _stub_the_turn(monkeypatch, {})
+    _one_tick_two_slots()
+    assert len(seen["probe"]) == 1, "the declining slot never reaches the probe"
+    p = seen["probe"][0]
+    assert p["claimed"] == [41], p
+    assert p["rows_already_written"] == [], p
+    assert p["selector"] is None, p
+    assert p["ready_ignoring_the_claim"] == [41], p
+
+
+def test_the_decline_names_the_holder_and_is_not_the_no_candidate_skip(isolated, monkeypatch):
+    """"Skipped, already in flight" and "no candidate" must be told apart from the ledger.
+
+    Both are `phase: "skipped"`, and a reader a day later has only the row. The
+    decline names the item and the holder — the other slot's queue key, the same
+    string that appears in that slot's later `started` row — and writes no
+    `started` row of its own, because a `started` row would make the item's
+    outcome `spent` and retire an item because someone looked at it.
+    """
+    _ready(isolated, 42)
+    _stub_the_turn(monkeypatch, {})
+    _one_tick_two_slots()
+    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    assert len(skipped) == 1, skipped
+    assert skipped[0]["item_id"] == 42 and skipped[0]["held_by"] == "autocode:round", skipped[0]
+    assert skipped[0]["slot"] == "autocode:round:1", skipped[0]
+    assert "already in flight" in skipped[0]["summary"], skipped[0]
+    assert not [r for r in _rows() if r.get("phase") == "started"
+                and r.get("slot") == "autocode:round:1"], "the decline spends no attempt"
+
+    # …and the other sentence the loop can say, on a board with nothing on it.
+    for path in isolated.glob("*.md"):
+        path.unlink()
+    idle = asyncio.run(I.execute(_slot("autocode:round:2")))
+    assert idle["status"] == "skipped" and "in flight" not in idle["summary"], idle
+    assert set(idle) == {"status", "slot", "summary"}, \
+        "an idle tick names its slot and nothing else: no item, no holder"
+    assert len([r for r in _rows() if "already in flight" in str(r.get("summary", ""))]) == 1, \
+        "the idle tick wrote no in-flight row: the two states stay distinct"
+
+
+def test_the_two_3367_rows_replayed_one_second_apart_answer_already_in_flight():
+    """The real ledger rows, replayed through the predicate that would have refused them.
+
+    Copied verbatim from `~/.local/state/lloyd-automod/promotions.jsonl` lines
+    21161-21162. Feeding each row's `(slot, item_id)` to `claim_for_implement` in
+    ledger order is the replay: the first slot's claim is granted, the second
+    second later is refused and names the first.
+
+    The rows themselves are NOT the predicate. A `started` row reads `spent`, so
+    the ledger only protects an item once a slot has written something — and the
+    second slot chose before the first row existed. That is why the hold lives in
+    memory, above `_warm_session`: the second row is a warm CONTINUATION of the
+    session that already held the item, so a check that only asked whether the
+    SESSION was busy could never have seen this.
+    """
+    for row in _3367_ROWS:
+        S.append_event(dict(row), path=S.LEDGER_PATH)
+    taken = [B.claim_for_implement(r["slot"], r["item_id"]) for r in _3367_ROWS]
+    assert taken == [None, "autocode:round"], taken
+    assert B.implement_claimed_ids() == {3367}
+    B.release_implement_claim("autocode:round")
+    assert B.claim_for_implement("autocode:round:2", 3367) is None
+
+
+def test_the_hold_is_released_at_turn_end_and_an_item_whose_round_settled_dispatches_again(
+        isolated, monkeypatch):
+    """The re-offer path stays open: a hold that outlived its turn would be a worse bug.
+
+    Item 43 is the shape a turn ends in when the landing was lost to someone
+    else's job — `finished` beside a `land_failed` with an external blocker, which
+    `implement_outcomes` reads as `external`, not `spent`. Item 44 is what a slot
+    just released. Both must still be selectable, or the claim has quietly
+    replaced the ledger as the thing that parks an item forever.
+    """
+    _ready(isolated, 44)
+    _stub_the_turn(monkeypatch, {})
+    asyncio.run(I.execute(_slot("autocode:round")))
+    assert B.implement_claimed_ids() == set(), "the turn ended; the hold ended"
+    assert B.claim_for_implement("autocode:round:1", 44) is None, \
+        "the next slot may take an item the last turn released"
+
+    _ready(isolated, 43)
+    _implement(43, "SM_EXT", phase="started")
+    _implement(43, "SM_EXT")
+    S.append_event({"event": "land_failed", "round_id": "SM_EXT", "ok": False,
+                    "external_blocker": True, "detail": "backend never went idle"},
+                   path=S.LEDGER_PATH)
+    assert B.implement_outcomes(S.LEDGER_PATH)[43][0] == "external"
+    seen = _stub_the_turn(monkeypatch, {})
+    out = asyncio.run(I.execute(_slot("autocode:round")))
+    assert out.get("outcome") == "unnecessary", out
+    assert [r for r in _rows("round_start") if r.get("item_id") == 43], \
+        "an item whose attempt closed and whose round settled must dispatch again"
+    assert len(seen["runs"]) == 1 and seen["runs"][0]["item_id"] == 43
+
+
+def test_the_claim_lives_on_the_dispatch_side_and_round_start_still_cuts_any_second_round():
+    """Which of the two checks this diff adds, said out loud rather than discovered later.
+
+    #3370 lists `round.start` refusing a second open round as OUT OF SCOPE and
+    owes the ruling on it, so this node pins the scope from the code: the guard is
+    in the dispatcher, and `round.start` remains item-blind. If the owed-check job
+    rules for defence in depth, the second half of this node is the one that
+    changes — which is the point of pinning it.
+    """
+    import inspect
+    src = inspect.getsource(I.execute)
+    claim = src.index("B.claim_for_implement")
+    for after, what in (("_red_tree_settled_at_pickup, candidate)", "the red-tree probe"),
+                        ("_warm_session(slot)", "the warm-session load"),
+                        ('"phase": "started"', "the `started` row"),
+                        ("_run_and_record(", "the turn itself")):
+        assert claim < src.index(after), f"the claim must precede {what}"
+    assert src.index("B.release_implement_claim(slot)") > src.index("_run_and_record("), \
+        "the release is at the end of the turn, not before it"
+    # Identifier-level, not word-level: `round.py` has the word "claim" in an
+    # unrelated comment, and a check that matched prose would pass for the wrong
+    # reason the day someone writes about the claim there.
+    for banned in ("claim_for_implement", "implement_claimed_ids",
+                   "release_implement_claim"):
+        assert banned not in inspect.getsource(R), (
+            f"scripts/automod/round.py now reads the implement claim ({banned}): the "
+            "guard was meant to stay on the dispatch side (#3370)")
