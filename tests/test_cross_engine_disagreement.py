@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import urllib.error
 from pathlib import Path
@@ -902,3 +903,344 @@ def test_the_change_that_added_arm_1_touched_only_eval_and_tests():
     assert any("cross_engine_disagreement_arm1" in ln for ln in added), (
         "arm 1 touched architecture/measurement.md without adding its arms row, so the "
         "doc edit is not the one the doc-claim guard required")
+
+
+# ── #3345: Cohen's kappa against gold, degeneracy, and what a κ may license ──
+#
+# The published table reported uncorrected agreement, so the question "is djev close
+# enough to the primary judge to take this criterion off it" had to be derived by hand
+# from the artifact's rows — and the one thing that stops a wrong answer, an arm that
+# emits a single label on every row, was invisible. Two numbers from the shipped
+# artifacts, quoted below and re-derived by a node in this file:
+#
+#   durable-write-judge, 2026-10-16-103133, scored on `gold_verdict` —
+#       primary κ 0.1096 (po 0.480, pe 0.416, n 50, labels {'flag': 46, 'accept': 4})
+#       djev    κ 0.0000 (po 0.400, pe 0.400, n 50, labels {'flag': 50}) ← constant arm
+#   shadow-gold-sample, 2026-10-17-063430, scored on `gold`/`gold_verdict` (one
+#   vocabulary on this surface) — primary κ 0.9125, djev κ 0.7881, both over the shared
+#   116 non-abstaining pairs.
+#
+# Those rows also carry the misread this rail exists to kill: score the DURABLE surface
+# on its `gold` column (`bad`/`good`, the corpus's own label) and κ is 0.0000 for BOTH
+# engines with po 0.0 — not one row matches, because the vocabularies do not overlap.
+#
+# The fixtures below are synthetic and go through the real pipeline: `durable_rows`'
+# prompts, `Recorder`'s per-engine plan, `run_rows`, `parse_durable`, `localize`,
+# `markdown` and `write_artifact`. No node here opens a socket, and no node needs the
+# ~1,200-call live re-run to pin a figure.
+
+def _durable_plan_by_engine(rows_n: int, primary_of, djev_of) -> dict:
+    """Per-engine replies for `durable_rows(rows_n)`, keyed the way `Recorder` keys them.
+
+    `Recorder.plan` is shared by both transports, so a node that wants "primary says one
+    thing, djev says another" — the only pair shape disagreement can come from — has to
+    use `engine_plan`, which is keyed by URL. Both callables take the row index and return
+    the label that engine's five draws should all produce, so the argmax is a certainty
+    rather than a plurality.
+    """
+    out: dict[str, dict[str, list[str]]] = {}
+    for eng, fn in (("primary", primary_of), ("djev", djev_of)):
+        out[ENGINES[eng]["url"]] = {f"PROMPT-{i}": [flag(fn(i))] for i in range(rows_n)}
+    return out
+
+
+def _marginal_run(primary_of, djev_of,
+                  rows_n: int = 40) -> tuple[list[dict], dict]:
+    """The asked rows AND their cell, for the labels a node specifies.
+
+    Both are returned because `write_artifact` stores the rows beside the cell and the
+    shipped property is that the cell is recomputable from them; a node holding only the
+    cell could not test that. The shared `plan` is empty on purpose — every reply comes
+    from `engine_plan`, so the two engines cannot silently be shown the same text.
+    """
+    rows = durable_rows(rows_n)
+    rec = X.run_rows(rows, Recorder({}, engine_plan=_durable_plan_by_engine(
+        rows_n, primary_of, djev_of)), X.MIN_REPEATS, ENGINES)
+    return rec, X.localize(rec, X.SURFACE_DURABLE_WRITE)
+
+
+def _marginal_cell(primary_of, djev_of, rows_n: int = 40) -> dict:
+    return _marginal_run(primary_of, djev_of, rows_n)[1]
+
+
+def test_a_known_marginals_run_publishes_a_hand_computed_kappa_in_cell_and_table():
+    """Clause 1: κ over a fixture whose marginals are arithmetic, not folklore.
+
+    40 rows, gold flag on the 20 even indices and accept on the 20 odd ones. Primary
+    answers `flag` 24 times and `accept` 16 times, and is right on 32 rows: 18 of the 20
+    gold-flag rows and 14 of the 20 gold-accept rows. So
+
+        po = 32/40                 = 0.800
+        pe = (24/40)(20/40) + (16/40)(20/40) = 0.300 + 0.200 = 0.500
+        κ  = (0.800 - 0.500) / (1 - 0.500)   = 0.600
+
+    djev answers the gold label on every row, so po = 1.000 with the same 0.500 marginals
+    and κ = (1.000 - 0.500) / 0.500 = 1.000. Both over all 40 pairs, which is the point of
+    the shared denominator: a κ computed over a different row set is not this κ.
+    """
+    cell = _marginal_cell(
+        lambda i: "accept" if i in (36, 38) else ("flag" if i % 2 == 0
+                                                  else ("flag" if i >= 29 else "accept")),
+        lambda i: "flag" if i % 2 == 0 else "accept")
+    assert cell["non_abstaining"] == 40 and cell["measurable"]
+
+    pri, dje = cell["engine_kappa"]["primary"], cell["engine_kappa"]["djev"]
+    assert (pri["n"], pri["po"], pri["pe"], pri["kappa"]) == (40, 0.8, 0.5, 0.6), pri
+    assert (dje["n"], dje["po"], dje["pe"], dje["kappa"]) == (40, 1.0, 0.5, 1.0), dje
+    assert pri["labels"] == {"accept": 16, "flag": 24}, pri["labels"]
+    assert pri["column"] == dje["column"] == X.SCORED_GOLD_COLUMN == "gold_verdict"
+    assert pri["n_classes"] == 2 and pri["degenerate"] is False
+
+    text = X.markdown([cell], {"ran_at": "x", "repeats": X.MIN_REPEATS,
+                              "engines": ENGINES, "verdict": "NEGATIVE"})
+    line = next(l for l in text.splitlines() if l.startswith(f"- **{X.SURFACE_DURABLE_WRITE}**"))
+    assert "κ vs gold_verdict 0.600 (po 0.800, pe 0.500, n=40, 2 label(s) emitted)" in line, line
+    assert "κ vs gold_verdict 1.000 (po 1.000, pe 0.500, n=40, 2 label(s) emitted)" in line, line
+
+
+def test_the_kappa_and_its_scored_column_survive_into_the_artifact_and_recompute(tmp_path):
+    """Clause 1's other half: the JSON record, not only the rendered table.
+
+    `recompute()` re-runs `localize` over the artifact's own rows and the shipped
+    property is that the two agree, so a κ that lived only in the `.md` would be caught
+    here — as would a κ that could not be reproduced from stored per-row verdicts at all.
+    """
+    rec, cell = _marginal_run(lambda i: "flag" if i % 2 == 0 else "accept",
+                              lambda i: "flag" if i % 2 == 0 else "accept")
+    meta = {"ran_at": "2026-10-26T00:00:00+00:00", "repeats": X.MIN_REPEATS,
+            "engines": ENGINES, "verdict": "NEGATIVE",
+            "scored_gold_column": X.scored_gold_meta([cell])}
+    paths = X.write_artifact(tmp_path, meta, [cell], rec)
+    art = json.loads(paths["json"].read_text())
+
+    stored = art["surfaces"][0]["engine_kappa"]
+    # Both engines answer the gold label here, so po is 1.0 against pe 0.5 and κ is 1.0 —
+    # the arithmetic of a perfect arm, stored as data rather than as a rendered string.
+    assert stored["primary"]["kappa"] == 1.0 and stored["primary"]["n"] == 40, stored
+    assert stored["primary"]["column"] == "gold_verdict"
+    assert art["meta"]["scored_gold_column"][X.SURFACE_DURABLE_WRITE] == {
+        "column": "gold_verdict", "labels": ["accept", "flag"],
+        "kappa_basis": X.KAPPA_BASIS}
+    assert X.recompute(paths["json"])[X.SURFACE_DURABLE_WRITE]["engine_kappa"] == stored, (
+        "the published κ and the κ recomputed from the artifact's rows disagree, which "
+        "makes the number in the table unfalsifiable by anyone holding the artifact")
+    assert "κ vs gold_verdict" in paths["markdown"].read_text()
+
+
+def test_a_constant_label_arm_is_flagged_degenerate_and_its_kappa_is_not_a_number():
+    """Clause 2: the arm that prints 0.000 abstention and a perfect pass rate.
+
+    The shipped shape: on the 2026-10-16 durable artifact djev answered `flag` on 50 of
+    50 rows, which scores po 0.400 against pe 0.400 and κ exactly 0.0000 — while the same
+    .md line prints `abstains 0.000 [0.000,0.071] (0/50), per-case pass rate mean 1.0`
+    beside it. A constant arm's po IS its pe, by algebra and not by coincidence: its po is
+    the prevalence of its one class in gold, which is exactly what pe computes. So 0.000 is
+    not a measurement of agreement with gold, it is a measurement of the arm's own
+    constancy, and printing it is the failure this clause refuses.
+
+    Here: 50 rows, gold flag on the 25 even indices, djev answers `flag` on every row,
+    primary answers the gold label. κ for djev is 0.0 with po == pe == 0.5.
+    """
+    cell = _marginal_cell(lambda i: "flag" if i % 2 == 0 else "accept",
+                          lambda i: "flag", rows_n=50)
+    dje = cell["engine_kappa"]["djev"]
+    assert dje["n"] == 50 and dje["n_classes"] == 1 and dje["labels"] == {"flag": 50}
+    assert dje["degenerate"] is True and dje["kappa"] == 0.0
+    assert dje["po"] == dje["pe"], (dje["po"], dje["pe"],
+                                    "a constant arm's po is its pe by construction; if "
+                                    "that stops holding, the degeneracy argument here is "
+                                    "no longer the reason the number is uninformative")
+    assert dje["uninformative"].startswith(X.DEGENERATE_LABEL), dje["uninformative"]
+    assert cell["engine_kappa"]["primary"]["degenerate"] is False, (
+        "the flag fired on an arm that emitted both labels, so it is not a degeneracy "
+        "detector but a blanket refusal")
+
+    text = X.markdown([cell], {"ran_at": "x", "repeats": X.MIN_REPEATS,
+                              "engines": ENGINES, "verdict": "NEGATIVE"})
+    assert f"κ vs {X.SCORED_GOLD_COLUMN} UNINFORMATIVE — {X.DEGENERATE_LABEL}" in text
+    assert "κ vs gold_verdict 0.000" not in text, (
+        "the degenerate arm's κ is back to printing as a figure a routing call could "
+        "quote, which is the exact failure #3345 exists to close")
+    assert "po 0.500, pe 0.500, n=50" in text, (
+        "the refusal lost its margins: po on top of pe is the only evidence in the line "
+        "that the refusal is right rather than a missing number")
+
+
+def test_a_thin_cell_refuses_kappa_with_the_same_sentence_it_refuses_the_rates_in():
+    """Clause 3: `retrieval-labels-offered` is this shape — 107 rows, primary answered 3
+    and djev 26, and the table already prints UNMEASURABLE for its rates.
+
+    A κ computed over that thin n would be the one number in the row that ignored the
+    floor the whole table is built on, and 30 is the floor the module already ships
+    (`MIN_NON_ABSTAINING`). So the κ cell repeats the rates' own sentence rather than
+    inventing a second kind of refusal, and publishes its rating count while withholding
+    the statistic — `n` is what lets a reader see the cell is thin.
+    """
+    rows = durable_rows(29)
+    plan = {f"PROMPT-{i}": [flag("flag" if i % 2 == 0 else "accept")] for i in range(29)}
+    cell = X.localize(X.run_rows(rows, Recorder(plan), X.MIN_REPEATS, ENGINES),
+                      X.SURFACE_DURABLE_WRITE)
+    assert cell["non_abstaining"] == 29 and not cell["measurable"]
+
+    for eng in ("primary", "djev"):
+        k = cell["engine_kappa"][eng]
+        assert k["measurable"] is False and k["kappa"] is None, k
+        assert k["n"] == 29, (
+            "the ratings existed and the cell refused to average them, so the count is "
+            "what a reader needs; a κ printed here would be a figure under the floor")
+        assert k["uninformative"] == cell["unmeasurable"], (
+            "kappa invented its own refusal wording, so the table now states two "
+            "different reasons for the same missing number")
+        assert "po" not in k and "pe" not in k, k
+
+    text = X.markdown([cell], {"ran_at": "x", "repeats": X.MIN_REPEATS,
+                              "engines": ENGINES, "verdict": "NEGATIVE"})
+    assert text.count(f"κ vs gold_verdict {cell['unmeasurable']}") == 2, (
+        "both engines' κ cells must carry the UNMEASURABLE sentence; one of them is "
+        f"printing something else\n{text}")
+    assert "κ vs gold_verdict 0." not in text and "κ vs gold_verdict 1." not in text
+
+
+def test_every_surface_names_the_gold_column_it_scored_and_arm1_carries_its_caveat():
+    """Clause 4: the column, on every cell and in `meta`, plus the licence refusal.
+
+    The durable rows carry TWO gold columns of different vocabularies (`gold` = bad/good
+    alongside the `gold_verdict` = flag/accept the run scores), and scoring the shipped
+    2026-10-16 rows on the wrong one gives κ 0.0000 for both engines with po 0.0. Arm 1's
+    gold is worse in a different way: Lloyd wrote it, and its own README says it "does not
+    license" reopening #708 or flipping `automod.review.confirm` — so a κ of 1.000 there
+    measures two families agreeing with a key Lloyd wrote, and must not read as a routing
+    licence. `wires_nothing` already declines to wire the POSITIVE gate; this is the same
+    refusal applied to the newer number.
+    """
+    durable = _marginal_cell(lambda i: "flag" if i % 2 == 0 else "accept",
+                             lambda i: "flag" if i % 2 == 0 else "accept")
+    arm1 = X.localize(_arm1_pair_rows(40), X.SURFACE_ARM1)
+    assert arm1["measurable"] and arm1["non_abstaining"] == 40
+    # Two CLOSE kappas, not one: primary 1.000 and djev (0.950 − 0.475) / 0.525 = 0.9048.
+    # The gap the routing question would be asked about is 0.095, inside #3344's proposed
+    # 0.1 — on gold Lloyd wrote itself, which is the case the caveat exists for.
+    assert arm1["engine_kappa"]["djev"]["kappa"] == pytest.approx(0.9048, abs=1e-4), (
+        arm1["engine_kappa"]["djev"])
+
+    meta_named = X.scored_gold_meta([durable, arm1])
+    assert meta_named[X.SURFACE_DURABLE_WRITE]["column"] == "gold_verdict"
+    assert meta_named[X.SURFACE_DURABLE_WRITE]["labels"] == ["accept", "flag"]
+    # Two labels in the scored column, and the third one the fixture's menu holds is
+    # present only as a mistake: djev's `unrelated` on rows 1 and 3 moves its marginals.
+    assert meta_named[X.SURFACE_ARM1]["labels"] == ["consistent", "injected"]
+    assert all(v["kappa_basis"] == X.KAPPA_BASIS for v in meta_named.values())
+
+    caveat = arm1["engine_kappa"]["primary"]["gold_caveat"]
+    assert caveat and "Lloyd-authored" in caveat and "does not license" in caveat
+    assert "rubric.py" in caveat and "#708" in caveat, caveat
+    assert arm1["engine_kappa"]["djev"]["gold_caveat"] == caveat, (
+        "the caveat covers one engine's κ and not the other's, so half the comparison "
+        "still reads as a licence")
+    assert durable["engine_kappa"]["primary"]["gold_caveat"] is None, (
+        "the durable surface reuses a label another process wrote, so it carries no "
+        "authorship caveat; printing one there would dilute the one that matters")
+
+    text = X.markdown([arm1], {"ran_at": "x", "repeats": X.MIN_REPEATS,
+                              "engines": ENGINES, "verdict": "NEGATIVE"})
+    assert arm1["engine_kappa"]["primary"]["kappa"] == 1.0, (
+        "arm 1's fixture κ stopped being perfect, so the caveat below is no longer being "
+        "shown attached to a CLOSE kappa, which is the only case that could mislead")
+    lines = text.splitlines()
+    caveat_line = next(l for l in lines if "κ caveat:" in l)
+    assert caveat in caveat_line, caveat_line
+    # Order matters: the κ, the caveat and the POSITIVE verdict are three lines of one
+    # block, and a reader who stops at the first two must still meet the caveat before the
+    # sentence that starts "POSITIVE here" — the line a routing argument gets quoted from.
+    assert lines.index(caveat_line) < next(i for i, l in enumerate(lines)
+                                           if "POSITIVE here" in l)
+    assert lines.index(caveat_line) > next(i for i, l in enumerate(lines)
+                                           if l.startswith(f"- **{X.SURFACE_ARM1}**")), (
+        "the caveat now precedes the κ it qualifies, which reads as a note about "
+        "something else")
+
+
+def _arm1_pair_rows(n: int) -> list[dict]:
+    """Arm-1 rows through the real loader, parser and classifier, with gold varied.
+
+    Built from `_arm1_gold_rows` — the file's arm-1-shaped generator, real rubric hash and
+    artifact-naming warrant — because the loader validates the warrant and the parser
+    validates the label menu; hand-assembled rows would grade a vocabulary arm 1 does not
+    ship. Gold is varied here and nowhere else on this surface: `_arm1_gold_rows` keys
+    EVERY row to one label, and under a constant gold the chance term pe collapses, so an
+    arm's κ stops measuring agreement and starts measuring the fixture. Gold is
+    `consistent` on the even indices and `injected` on the odd ones; primary answers the
+    gold label on all n, and djev is wrong on rows 1 and 3, answering `unrelated`:
+
+        primary  po = 40/40 = 1.000, pe = (20/40)(20/40) + (20/40)(20/40) = 0.500
+                 κ   = (1.000 - 0.500) / 0.500 = 1.000
+        djev     po = 38/40 = 0.950, pe = (20/40)(20/40) + (18/40)(20/40) = 0.475
+                 κ   = (0.950 - 0.475) / 0.525 = 0.9048
+    """
+    gold_rows = _arm1_gold_rows(n)
+    for i, g in enumerate(gold_rows):
+        g["gold"] = "consistent" if i % 2 == 0 else "injected"
+    rows = X.arm1_rows(gold_rows)
+    plan: dict[str, dict[str, list[str]]] = {}
+    for i, row in enumerate(rows):
+        gold = row["gold_verdict"]
+        plan.setdefault(ENGINES["primary"]["url"], {})[row["prompt"]] = [gold]
+        plan.setdefault(ENGINES["djev"]["url"], {})[row["prompt"]] = [
+            "unrelated" if i in (1, 3) else gold]
+    return X.run_rows(rows, Recorder({}, engine_plan=plan), X.MIN_REPEATS, ENGINES)
+
+
+def test_a_published_run_names_the_scored_column_and_prints_every_kappa(tmp_path, capsys):
+    """Clauses 1 and 4 across the one boundary this module owns: argv in, artifact out.
+
+    The nodes above call `localize` / `markdown` directly, which is the right level for the
+    arithmetic and the wrong level for "does the published file carry it": a κ computed and
+    then dropped on the way to disk would satisfy every one of them. So this node runs
+    `main` exactly as the nightly does, over the SHIPPED durable corpus and recorded
+    verdicts, with the file's own always-`flag` transport — the same constant-arm shape
+    #3345 was filed over, now supplied to both engines, so both must be refused.
+
+    No arithmetic is asserted here: the corpus's gold marginals belong to the shipped
+    #2254 samples and this node must not restate numbers it did not compute. The hand-
+    computed figures live in the known-marginals node above; what is pinned below is that
+    the column is named, the refusals are published, and the basis line states the
+    denominator.
+    """
+    out = tmp_path / "cross-engine"
+    assert X.main(["--out", str(out), "--arms", X.SURFACE_DURABLE_WRITE],
+                  transport=ALWAYS_FLAG, engines=ENGINES) == 0
+    art_path = next(out.glob("cross-engine-disagreement-*.json"))
+    art = json.loads(art_path.read_text())
+    md = art_path.with_suffix(".md").read_text()
+
+    named = art["meta"]["scored_gold_column"][X.SURFACE_DURABLE_WRITE]
+    assert named["column"] == X.SCORED_GOLD_COLUMN == "gold_verdict", named
+    assert named["labels"] == ["accept", "flag"], (
+        f"the published vocabulary of the scored column changed: {named['labels']}")
+
+    stored = art["surfaces"][0]["engine_kappa"]
+    assert set(stored) == set(ENGINES), sorted(stored)
+    for eng, k in stored.items():
+        assert k["n"] == 50 and k["n_classes"] == 1 and k["degenerate"] is True, (eng, k)
+        assert k["uninformative"].startswith(X.DEGENERATE_LABEL), (eng, k)
+    assert art["surfaces"][0]["non_abstaining"] == 50 and art["surfaces"][0]["measurable"], (
+        "the cell stopped being measurable, so the refusals below would be the thin-n "
+        "kind and this node would be pinning the wrong one")
+
+    κ = next(l for l in md.splitlines() if l.startswith(f"- **{X.SURFACE_DURABLE_WRITE}**"))
+    assert κ.count(f"κ vs gold_verdict UNINFORMATIVE — {X.DEGENERATE_LABEL}") == 2, κ
+    assert "κ vs gold_verdict 0." not in κ and "κ vs gold_verdict 1." not in κ, κ
+    assert (f"κ basis: {X.KAPPA_BASIS} = 50 of 50 rows; scored gold column "
+            "gold_verdict = accept/flag") in md, (
+        "the table stopped stating what a κ was computed over and against which column, "
+        "leaving the figure a bare number with no denominator beside it")
+
+    # The runner's stdout is what a human reads first and what a re-run gets compared
+    # against, so the scored column travels there too — never as a number this time.
+    printed = capsys.readouterr().out
+    seg = re.search(r"kappa_vs_gold_verdict=\{([^}]*)\}", printed)
+    assert seg, f"stdout no longer names the scored column it scored: {printed}"
+    assert seg.group(1).count("UNINFORMATIVE-degenerate") == 2, seg.group(1)
+    assert not re.search(r"\d\.\d", seg.group(1)), (
+        f"stdout is back to publishing a number for the constant-label arms: "
+        f"{seg.group(1)} — the table refuses it and the terminal is the line people copy")

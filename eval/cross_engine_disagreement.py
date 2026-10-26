@@ -35,11 +35,22 @@ engines returned a usable argmax:
                                   never folded into "agreement", because it is the
                                   finding this whole exercise expects most
   abstention share                printed beside every rate, never inside one
+  Cohen's kappa vs gold           per engine, chance-corrected, over the SAME
+                                  non-abstaining pairs every other rate uses, against
+                                  the gold column the run actually scores. Agreement
+                                  rates are uncorrected for chance, so an engine that
+                                  emits one label on every row can print a respectable
+                                  number; kappa is the statistic that cannot, and it is
+                                  printed as UNINFORMATIVE rather than as a number when
+                                  the arm is degenerate (#3345).
 
 Definitions are single-valued on purpose: gold is one label per row, so a row where
 the engines disagree is automatically a row where at least one is wrong, and
 `errors = disagreements + both_wrong_and_agreeing` holds by construction. That is
-what makes recall the reportable quantity.
+what makes recall the reportable quantity. And it is why kappa's denominator is the
+pair set rather than every row an engine happened to answer: two kappa values computed
+over different row sets are not comparable, and "is djev close enough to the primary
+engine" is a question about two numbers measured on the same rows.
 
 The ceiling on the method is stated in the same source as the result (Olickel's
 talk): four model families once produced an identical wrong total to the cent
@@ -151,6 +162,39 @@ POSITIVE_MAX_VOLUME_SHARE = 0.35   # ...while covering <=35% of volume
 POSITIVE_MAX_BWA_SHARE = 0.10   # both-wrong-and-agreeing <10% of all errors
 
 AGREE, DISAGREE, ABSTAIN = "agree", "disagree", "abstain"
+
+# ── kappa against gold (#3345) ──────────────────────────────────────────────
+
+#: The ONE column every engine-vs-gold figure in this file is scored on. `run_rows`
+#: reads it (`gold = row["gold_verdict"]`), and it is published in `meta` per surface and
+#: on every kappa cell so a reader cannot re-score the durable arm on its other column:
+#: `durable_rows` carries `gold` = `bad`/`good` (the corpus's own label) ALONGSIDE
+#: `gold_verdict` = `flag`/`accept`, and those are different vocabularies, so scoring the
+#: 2026-10-16 rows on `gold` yields kappa 0.0000 for BOTH engines (po 0.0 — not one row
+#: matches) while the same rows scored on `gold_verdict` give 0.1096 and 0.0. Two columns
+#: of different shapes in one row is exactly how a zero gets read as a result. On
+#: `shadow-gold-sample` the two columns hold the same labels (arm 1's `gold_verdict` is a
+#: copy of its `gold`), so the trap is that one surface's `gold`, not both columns
+#: everywhere — and it is still the trap that costs a routing call.
+SCORED_GOLD_COLUMN = "gold_verdict"
+
+#: Whose rows kappa is computed over, spelled out in every cell. Deliberately the pair
+#: set, not "every row this engine answered": on the 2026-10-17 shadow artifact djev
+#: answered all 120 rows and the primary answered 116, so a per-engine denominator would
+#: print djev 0.7881 over 120 against primary 0.9125 over 116 — two numbers over two
+#: different row sets, which is not a comparison. Over the shared 116 the same artifact
+#: gives 0.7881 vs 0.9125, and `engine_error_rate` already uses this denominator.
+KAPPA_BASIS = "non-abstaining pairs (both engines returned an argmax)"
+
+#: The degeneracy this rail exists to catch, named in the table and in the record.
+DEGENERATE_LABEL = "degenerate: constant-label arm"
+
+#: Per-surface caveats printed ON the kappa cell, not merely filed in `meta` — because
+#: the cell is the thing a routing call would be quoted from. Arm 1's gold is authored by
+#: Lloyd under its own rubric, and its README says in as many words that it does not
+#: license a promotion; a kappa of 0.79 against a key the system wrote for itself is
+#: evidence about consistency, not about correctness.
+KAPPA_GOLD_CAVEATS: dict[str, str] = {}  # filled after SURFACE_* are bound below
 
 #: What a row needs to be ASKED but must not appear in the published record: the
 #: prompt itself (an artifact of ~3K chars per row, and the corpus already carries it
@@ -510,6 +554,18 @@ SURFACE_ARM1 = "shadow-gold-sample"
 PARSERS = {SURFACE_RETRIEVAL: parse_retrieval, SURFACE_DURABLE_WRITE: parse_durable,
            SURFACE_ARM1: parse_arm1}
 
+#: Arm 1's caveat, bound where its surface name is. Quoted from
+#: `eval/cross_engine_disagreement_arm1/README.md`, "What this arm does NOT measure, and
+#: what it does not license": it does not license "reopening #708, flipping
+#: `automod.review.confirm`, or any other promotion decision". The other two surfaces take
+#: their gold from an artifact that already carried the label, so they carry no caveat:
+#: this key is present only where a close kappa could be mistaken for a licence.
+KAPPA_GOLD_CAVEATS[SURFACE_ARM1] = (
+    "gold is Lloyd-authored under eval/cross_engine_disagreement_arm1/rubric.py, and that "
+    "arm's README says its own gold 'does not license' reopening #708, flipping "
+    "automod.review.confirm or any other promotion decision — a close kappa here measures "
+    "two families agreeing with a key Lloyd wrote, not either engine being right")
+
 
 # ── asking ──────────────────────────────────────────────────────────────────
 
@@ -570,6 +626,98 @@ def _rate(k: int, n: int) -> dict:
             "ci95": [round(lo, 4), round(hi, 4)]}
 
 
+def cohen_kappa(pairs: list[tuple[str, str]]) -> dict:
+    """Cohen's kappa for one set of ratings against another, over the same rows.
+
+    `po` is observed agreement, `pe` is the agreement the two raters' OWN marginal label
+    distributions predict by chance, and kappa is `(po - pe) / (1 - pe)`: 1.0 is perfect
+    agreement, 0.0 is exactly what chance predicts from those marginals, and a negative
+    value is worse than chance. It is the chance-corrected companion to an agreement rate,
+    which is not corrected for anything — an engine that answers `flag` on every row of a
+    corpus that is 40% `flag` agrees with gold on 40% of rows and prints that as a rate.
+
+    Three shapes the caller must not have to remember:
+
+      * `n == 0` → `kappa: None` with a reason. No ratings, no statistic.
+      * `pe == 1` (both sides constant on the SAME single class) → `kappa: None`: 1 - pe
+        is zero, and publishing 0.0 there would be arithmetic on a division that did not
+        happen. `degenerate` is true of that row too, which is where its meaning is.
+      * one side constant → kappa comes out 0.0 EXACTLY, by construction, whatever the
+        data: a constant rater's `po` IS the prevalence of its class in the other side,
+        which is precisely its `pe`. That identity is why a constant arm must never print
+        a number — 0.000 would read as "this engine agrees with gold no better than a
+        coin", when what it measured was an engine that never varied. Hence `degenerate`.
+
+    Returns `{"n", "po", "pe", "kappa", "n_classes", "degenerate", "labels", "reason"}`,
+    with `po`/`pe`/`kappa` rounded to 4 for publication and computed unrounded.
+    """
+    n = len(pairs)
+    labels = Counter(a for a, _ in pairs)
+    out: dict = {"n": n, "po": None, "pe": None, "kappa": None,
+                 "n_classes": len(labels), "degenerate": n > 0 and len(labels) < 2,
+                 "labels": dict(sorted(labels.items())), "reason": None}
+    if n == 0:
+        out["reason"] = "no scored pairs"
+        return out
+    po = sum(1 for a, b in pairs if a == b) / n
+    other = Counter(b for _, b in pairs)
+    pe = sum(labels[k] / n * other[k] / n for k in set(labels) | set(other))
+    out["po"], out["pe"] = round(po, 4), round(pe, 4)
+    if pe >= 1.0:
+        out["reason"] = ("both sides constant on one class, so pe = 1 and 1 - pe = 0: "
+                         "kappa has no denominator")
+        return out
+    out["kappa"] = round((po - pe) / (1.0 - pe), 4)
+    if out["degenerate"]:
+        (only, _), = out["labels"].items()
+        out["reason"] = (f"{DEGENERATE_LABEL}: all {n} ratings were {only!r}, and a "
+                         "constant arm scores kappa 0.000 by construction (its po IS its "
+                         "pe), so the number measures the arm's constancy, not its "
+                         "agreement with gold")
+    return out
+
+
+def _engine_kappa(pairs: list[dict], eng: str, surface: str,
+                  measurable: bool, unmeasurable: str | None) -> dict:
+    """One engine's kappa-against-gold cell, over the pairs where IT answered."""
+    scored = [(r["engines"][eng]["label"], r[SCORED_GOLD_COLUMN]) for r in pairs
+              if not r["engines"][eng]["abstain"]]
+    k = cohen_kappa(scored)
+    cell: dict = {"column": SCORED_GOLD_COLUMN, "basis": KAPPA_BASIS,
+                  "surface": surface, "measurable": measurable,
+                  "gold_caveat": KAPPA_GOLD_CAVEATS.get(surface)}
+    if not measurable:
+        # A thin cell prints the same stated reason the rates print, and kappa does not
+        # get to compute a number over the rows the rest of the table refused. The counts
+        # are still published — `n` is what a reader needs to see the cell is thin — but
+        # po/pe/kappa are not, because `localize` already ruled this cell not a result.
+        cell.update({"n": k["n"], "kappa": None, "uninformative": unmeasurable})
+        return cell
+    cell.update({k2: k[k2] for k2 in ("n", "po", "pe", "kappa", "n_classes",
+                                      "degenerate", "labels", "reason")})
+    if k["degenerate"] or k["kappa"] is None:
+        cell["uninformative"] = k["reason"]
+    return cell
+
+
+def scored_gold_meta(cells: list[dict]) -> dict:
+    """Per surface: WHICH column of the row is its gold, and what labels it holds.
+
+    A function rather than a line inside `main`, so a test can assert the naming without
+    two live engines — and so the claim is checkable against a fixture rather than only
+    against a run. A reader holding an artifact and no source needs this: the durable
+    rows carry `gold` = `bad`/`good` alongside the `gold_verdict` = `flag`/`accept` the run
+    scores, and re-deriving a kappa against the wrong one yields 0.0000 for BOTH engines
+    on the 2026-10-16 artifact (po 0.0 — no row matches), which is a figure a routing call
+    could act on. Naming the column and its vocabulary here is what makes that misread
+    visible instead of merely possible.
+    """
+    return {
+        c["surface"]: {"column": c["gold_column"], "labels": c["gold_labels"],
+                       "kappa_basis": KAPPA_BASIS}
+        for c in cells}
+
+
 def localize(rows: list[dict], surface: str) -> dict:
     """Every published figure for one surface, over non-abstaining rows only."""
     total = len(rows)
@@ -617,6 +765,11 @@ def localize(rows: list[dict], surface: str) -> dict:
             eng: _pass_rate_summary(rows, eng) for eng in engine_names
         },
         "measurable": n >= MIN_NON_ABSTAINING,
+        # Which column of the row this surface's gold actually is, and the vocabulary it
+        # holds. Published so a kappa can never be silently re-derived against the other
+        # column the durable rows also carry (`gold` = bad/good, a different shape).
+        "gold_column": SCORED_GOLD_COLUMN,
+        "gold_labels": sorted({r[SCORED_GOLD_COLUMN] for r in rows}),
         # How many rows in the cell carry a verdict a SHIPPED subsystem recorded. The
         # two original surfaces have one per row; arm 1 has none, because no shipped
         # reviewer ever put these canvases to a model. It does not empty the recall
@@ -637,6 +790,13 @@ def localize(rows: list[dict], surface: str) -> dict:
             f"UNMEASURABLE surface={surface} localization: none of the "
             f"{n} non-abstaining pairs contains an error, so recall has no "
             f"denominator and no rate is printed")
+    # Chance-corrected agreement with gold, per engine. Built after `measurable` and the
+    # `unmeasurable` sentence exist, because a kappa a thin cell has no business printing
+    # has to print the SAME reason the rates print rather than a number over n < 30.
+    cell["engine_kappa"] = {
+        eng: _engine_kappa(pairs, eng, surface, cell["measurable"],
+                           cell.get("unmeasurable"))
+        for eng in engine_names}
     cell["positive_gate"] = positive_for_surface(cell)
     return cell
 
@@ -745,8 +905,16 @@ def markdown(cells: list[dict], meta: dict) -> str:
             f"{_fmt(c['engine_abstain_rate'][eng])}, per-case pass rate mean "
             f"{(c['per_case_pass_rate'][eng] or {}).get('mean')}"
             f" (min {(c['per_case_pass_rate'][eng] or {}).get('min')}, "
-            f"max {(c['per_case_pass_rate'][eng] or {}).get('max')})"
-            for eng in meta["engines"]))
+            f"max {(c['per_case_pass_rate'][eng] or {}).get('max')}), "
+            f"κ vs {_k['column']} {_fmt_kappa(_k)}"
+            for eng, _k in ((e, c["engine_kappa"][e]) for e in meta["engines"])))
+        for _k in (c["engine_kappa"][e] for e in meta["engines"]):
+            if _k.get("gold_caveat"):
+                lines.append(f"  - κ caveat: {_k['gold_caveat']}")
+                break
+        lines.append(f"  - κ basis: {KAPPA_BASIS} = {c['non_abstaining']} of "
+                     f"{c['rows']} rows; scored gold column "
+                     f"{c['gold_column']} = {'/'.join(c['gold_labels']) or '—'}")
         lines.append(f"  - POSITIVE here: {c['positive_gate']['positive']} — "
                      + ("; ".join(c['positive_gate']['reasons']) or "all three hold"))
         if c.get("localization_unmeasurable"):
@@ -758,13 +926,60 @@ def markdown(cells: list[dict], meta: dict) -> str:
                   "errors flatters a pair that agrees on being wrong.", "",
               "This artifact wires nothing: no gate, rung or dispatch path reads it. "
               "Whether a POSITIVE number licenses reopening #708 or the shipped-but-off "
-              "`automod.review.confirm` switch is a ruling this run does not make.", ""]
+              "`automod.review.confirm` switch is a ruling this run does not make. "
+              "Kappa against gold is published for the same reason and with the same "
+              "limit: it says how much of an engine's agreement with the key survives "
+              "chance, and it says nothing at all about an arm that emitted one label — "
+              "least of all does it say whether a cheaper engine may take a decision off "
+              "the expensive one, which is the only question a routing bar answers.", ""]
     return "\n".join(lines)
 
 
 def _fmt(r: dict) -> str:
     return "—" if r["value"] is None else (
         f"{r['value']:.3f} [{r['ci95'][0]:.3f},{r['ci95'][1]:.3f}] ({r['num']}/{r['den']})")
+
+
+def _stdout_kappa(k: dict) -> str:
+    """The κ for the runner's one-line summary: a figure to 4 dp, or the refusal word.
+
+    stdout carries no room for the table's prose, so the two refusals are shortened rather
+    than dropped — and the shortening is deliberately not a number. Printing `0.0` for the
+    constant-label arm here would put back, on the line a person copies out of a terminal,
+    the figure clause 2 refuses to publish in the table.
+    """
+    if not k["measurable"]:
+        return "UNMEASURABLE"
+    if k.get("uninformative"):
+        return "UNINFORMATIVE-degenerate"
+    return f"{k['kappa']:.4f}"
+
+
+def _fmt_kappa(k: dict) -> str:
+    """One kappa cell as published text: a figure, or the reason there is no figure.
+
+    Two of the three states are refusals to print a number, and each says why in its own
+    words. A thin cell repeats the `UNMEASURABLE surface=… non_abstaining=…` sentence the
+    rates already print, so kappa cannot quietly report a statistic over rows the rest of
+    the table ruled out. A degenerate arm prints `UNINFORMATIVE` plus the reason and its
+    marginals — po beside pe is what shows the collapse (0.400 against 0.400 on the
+    2026-10-16 durable arm), and a reader who wants the arithmetic can still do it, but the
+    slot where a routing call would read a number holds prose instead.
+    """
+    if not k["measurable"]:
+        return k["uninformative"]
+    if k.get("uninformative"):
+        # The margins are printed precisely BECAUSE there is no figure: po sitting on top
+        # of pe (0.400 against 0.400 on the 2026-10-16 durable arm) is the visible form of
+        # the collapse, and it is the only evidence in the line that the refusal is right.
+        # po is absent only when there were no ratings to take a mean over, which a
+        # measurable cell cannot reach (its floor is MIN_NON_ABSTAINING pairs) but which
+        # must not turn the refusal into a traceback.
+        margin = ("" if k["po"] is None else
+                  f" (po {k['po']:.3f}, pe {k['pe']:.3f}, n={k['n']})")
+        return f"UNINFORMATIVE — {k['uninformative']}{margin}"
+    return (f"{k['kappa']:.3f} (po {k['po']:.3f}, pe {k['pe']:.3f}, "
+            f"n={k['n']}, {len(k['labels'])} label(s) emitted)")
 
 
 def write_artifact(out_dir: Path, meta: dict, cells: list[dict],
@@ -916,13 +1131,25 @@ def main(argv: list[str] | None = None, transport: Transport | None = None,
     }
     cells = [localize([r for r in asked if r["surface"] == s], s) for s in chosen]
     meta["verdict"] = overall_verdict(cells)
+    # Named per surface, derived from the cells rather than typed: the column the run
+    # scored is a property of the rows it read, and `meta` is where a reader of the
+    # artifact looks for what a number means. `labels` is the vocabulary, so re-scoring the
+    # durable arm on its `bad`/`good` column cannot be done by accident or by omission.
+    meta["scored_gold_column"] = scored_gold_meta(cells)
     paths = write_artifact(Path(args.out), meta, cells, asked)
     for cell in cells:
+        # The table's refusal rule, applied to the line a re-run prints: a degenerate or
+        # thin arm's κ reaches stdout as the word, never as `0.0`. stdout is what somebody
+        # pastes into a message when they ask "what did that run measure", and a bare 0.0
+        # there is exactly the number clause 2 refuses to publish in the table.
+        kappa_txt = ", ".join(f"{e}: {_stdout_kappa(k)}"
+                              for e, k in cell["engine_kappa"].items())
         print(cell.get("unmeasurable") or cell.get("localization_unmeasurable")
               or (f"{cell['surface']}: non_abstaining={cell['non_abstaining']} "
                   f"agreement={_rate(cell['agreement_rate']['num'], cell['agreement_rate']['den'])['value']} "
                   f"recall={cell['error_localization_recall']['value']} "
-                  f"both_wrong_and_agreeing={cell['both_wrong_and_agreeing']['count']}"))
+                  f"both_wrong_and_agreeing={cell['both_wrong_and_agreeing']['count']} "
+                  f"kappa_vs_{cell['gold_column']}={{{kappa_txt}}}"))
     print(f"VERDICT {meta['verdict']}")
     print(f"json {paths['json']}\nmarkdown {paths['markdown']}")
     return 0
