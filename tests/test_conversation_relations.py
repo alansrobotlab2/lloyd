@@ -2514,3 +2514,277 @@ def test_the_approve_line_reports_retired_rows_beside_the_other_three_counts(
     assert plain == ("Auto-approve floor 0.85: auto-approved 0 "
                      "| 1 LLM-classified below the floor, awaiting a review that "
                      "does not exist"), plain
+
+
+# ── #3364: the two stage commands were two unlocked whole-file writers ────────
+
+def _pair_rows(store, source, target):
+    """Active `conversation`-origin rows on one pair, either direction.
+
+    Either direction because Stage 1 aggregates co-occurrence without a direction,
+    so `(a, b)` and `(b, a)` are one pair; the defect #3364 closes is two live rows
+    on one pair, which a direction-sensitive lookup cannot see.
+    """
+    return [dict(r) for r in store.conn.execute(
+        "select id, source, target, type from edges "
+        "where origin='conversation' and expired_at is null "
+        "and ((source=? and target=?) or (source=? and target=?))",
+        (source, target, target, source))]
+
+
+def test_a_stale_stage2_save_leaves_an_approval_that_landed_mid_run_stamped(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """Clause 1: Stage 2's closing save cannot un-stamp an approval that landed
+    while it was running, with both commands entered through their real entry points.
+
+    The 2026-10-25 night, from #51's own log: `--classify` was launched as a
+    background Bash task (0-byte log, and a tool call that timed out at 120 s, in
+    `~/lloyd-data/autonomy-runs/51/run_51_20261026_060007.md`) while
+    `--approve-strong` ran in the foreground inside the same minute. The file ended
+    with 562 approvals carrying `edge_id` against 568 `conversation` edges in the
+    store: six approvals deleted by whichever command saved last, their edges still
+    written.
+
+    The overlap is injected at the call the real Stage 2 spends minutes inside —
+    `classify_relationship`, one HTTP round trip per proposal to the classifier —
+    which is the window the backgrounded run sat in while the approve run
+    committed. At base `save_proposals` was
+    `PROPOSALS_FILE.write_text(json.dumps(data, indent=2))`, so the copy Stage 2
+    loaded before the approval existed rewrote every row in the file from memory.
+    """
+    classified_src, classified_tgt = "knowledge/a.md", "knowledge/b.md"
+    approved_src, approved_tgt = "knowledge/c.md", "knowledge/d.md"
+    candidate = _needle_test_proposal(classified_src, classified_tgt, "race_c1")
+    approvable = _aged_proposal(cr, source=approved_src, target=approved_tgt)
+    # Only the candidate's trajectory exists, so `prune_unclassifiable` names the
+    # other row for deletion in the same save: the approve run's approval has to
+    # survive both the stale copy AND a deletion request for its row.
+    _session_file(tmp_path, _asked(f"compare {classified_src} and {classified_tgt}"),
+                  _answered(f"{classified_src} and {classified_tgt} cover one subject"),
+                  key="race_c1")
+    props = _stage2_props(tmp_path, [candidate, approvable])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "no-index.json")
+
+    def approve_while_stage2_waits(source, target, context, endpoint=None, model=None):
+        cr.cmd_approve()
+        return {"type": "related-to", "reason": "read together", "confidence": 0.95}
+
+    monkeypatch.setattr(cr, "classify_relationship", approve_while_stage2_waits)
+    monkeypatch.setattr(cr, "resolve_llm_target",
+                        lambda: ("http://127.0.0.1:1/v1/chat/completions", "fixture"))
+
+    cr.cmd_classify()
+    capsys.readouterr()
+
+    rows = {tuple(sorted((r["source"], r["target"]))): r
+            for r in json.loads(props.read_text())["proposals"]}
+    landed_row = rows[tuple(sorted((approved_src, approved_tgt)))]
+    assert landed_row["status"] == "approved", (
+        "the approve run's approval did not survive Stage 2's later save: a save "
+        "writes the copy it loaded before the approval existed over the file instead "
+        "of merging against what is on disk")
+    assert landed_row.get("edge_id"), (
+        "the approval kept its status but lost its `edge_id`, which is the field "
+        "`land_approved_edges` skips on — without the stamp the pair is landable "
+        "again while its edge is still in the store")
+    classified_row = rows[tuple(sorted((classified_src, classified_tgt)))]
+    assert classified_row["classification_source"] == "llm", (
+        "the merge threw away Stage 2's own verdict; protecting the other writer's "
+        "approval must not mean the file wins every field")
+    assert cr.count_store_conversation_edges() == 1, (
+        "the run wrote more than the one edge the approve run authorised")
+
+
+def test_no_save_can_write_the_proposals_file_with_fewer_rows_than_it_found(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """Clause 2: neither an empty read nor a torn one may cost the file its set —
+    the live file holds 1,143 proposals, and tonight's race lost 6 stamps while this
+    path was still able to lose all of them.
+
+    Two shapes of the same unlocked writer. (a) The bytes parse and the caller's set
+    is empty: `load_proposals` swallows `JSONDecodeError` and returns a fresh
+    `{proposals: []}`, so any process that read the 965 KB file mid-`write_text`
+    held nothing, and its next save wrote that nothing back as the corpus. (b) The
+    bytes do not parse at all: the save refuses, because "damaged" and "gone" are
+    different states and only one of them is repairable.
+    """
+    props = _approve_world(cr, tmp_path, monkeypatch, [
+        _aged_proposal(cr),
+        _aged_proposal(cr, source="knowledge/c.md", target="knowledge/d.md"),
+        _aged_proposal(cr, source="knowledge/e.md", target="knowledge/f.md",
+                       confidence=0.50)])
+    capsys.readouterr()
+    assert len(json.loads(props.read_text())["proposals"]) == 3
+
+    # (a) the caller loaded the file, then lost its rows to a swallowed parse error.
+    cr.save_proposals({**json.loads(props.read_text()), "proposals": []})
+    survivor_keys = {tuple(sorted((r["source"], r["target"])))
+                     for r in json.loads(props.read_text())["proposals"]}
+    assert len(survivor_keys) == 3, (
+        "a save holding no proposals replaced the file with none: the merge has to "
+        "treat an absent row as 'loaded before this existed', never as 'removed'")
+
+    # (b) the bytes on disk are a torn read of a bigger set: refuse, keep the bytes.
+    torn = '{"watermark": {"sessions_processed": 41}, "proposals": [{"source": '
+    props.write_text(torn)
+    with pytest.raises(RuntimeError) as raised:
+        cr.cmd_approve()
+    assert "do not parse" in str(raised.value), (
+        f"the save accepted torn bytes instead of refusing: {raised.value}")
+    assert props.read_text() == torn, (
+        "the refusal still rewrote the file, which is the loss the refusal exists to "
+        "prevent")
+
+
+def test_re_approving_a_landed_pair_under_another_type_stamps_the_existing_edge(
+        store, cr):
+    """Clause 3: one active conversation edge per pair, whichever relation type the
+    proposal now carries.
+
+    `land_approved_edges` deduped only on the proposal's own `edge_id`, and
+    `edges.add` looks the pair up by `source`, `target` AND `type` — so a proposal
+    that lost its stamp and was re-classified under a second relation inserted a
+    second live row on one pair, the #1161 class the store guards elsewhere with
+    `retype`. The base probe is this exact shape: remove the stamp, change the type,
+    call it twice, read two rows.
+    """
+    proposal = _aged_proposal(cr)
+    proposal["status"] = "approved"
+    assert cr.land_approved_edges([proposal]) == 1
+    first = _conversation_edge(store)
+
+    # What the 2026-10-25 race left behind: the row reads `approved`, its stamp is
+    # gone, and a later Stage 2 has re-typed the pair.
+    proposal.pop("edge_id", None)
+    proposal["type"] = "supersedes"
+    assert cr.land_approved_edges([proposal]) == 0, (
+        "the re-run counted an insert for an edge it did not create, which is what "
+        "made the nightly 'Edges landed in the store' line disagree with the store")
+    rows = _pair_rows(store, "knowledge/a.md", "knowledge/b.md")
+    assert len(rows) == 1, (
+        f"one pair now carries {len(rows)} active conversation edges: {rows}")
+    assert rows[0]["id"] == first["id"] == proposal["edge_id"], (
+        "the proposal was not stamped with the edge that already exists for its "
+        "pair, so the file and the store still disagree about that pair")
+
+
+def test_an_approve_run_that_dedupes_rows_still_deletes_them_and_says_the_number(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """The deletion a save is allowed to make still happens, with its count named.
+
+    The merge could just as well have been written as "the file never loses a row",
+    which would have made the relations-index dedupe a permanent no-op and let #51
+    re-approve pairs the vault already records. `dropped` is the caller saying which
+    pairs it removed on purpose, and the number has to be the count of that set: the
+    line used to subtract two list lengths, which under-counted as soon as one pair
+    appeared twice.
+    """
+    dup_one = _aged_proposal(cr, source="knowledge/old-a.md",
+                             target="knowledge/old-b.md", confidence=0.50)
+    dup_two = _aged_proposal(cr, source="knowledge/old-c.md",
+                             target="knowledge/old-d.md", confidence=0.50)
+    keeper = _aged_proposal(cr, source="knowledge/new-a.md",
+                            target="knowledge/new-b.md", confidence=0.50)
+    props = _approve_world(cr, tmp_path, monkeypatch, [dup_one, dup_two, keeper])
+    index = tmp_path / "relations-index.json"
+    index.write_text(json.dumps({"relationships": [
+        {"source": "knowledge/old-a.md", "target": "knowledge/old-b.md"},
+        {"source": "knowledge/old-c.md", "target": "knowledge/old-d.md"}]}))
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", index)
+    capsys.readouterr()
+
+    cr.cmd_approve()
+    out = capsys.readouterr().out
+    keys = {tuple(sorted((r["source"], r["target"])))
+            for r in json.loads(props.read_text())["proposals"]}
+    assert ("knowledge/old-a.md", "knowledge/old-b.md") not in keys
+    assert ("knowledge/old-c.md", "knowledge/old-d.md") not in keys
+    assert ("knowledge/new-a.md", "knowledge/new-b.md") in keys, (
+        "the merge kept a row the run had deliberately deduplicated away")
+    assert "Deduplicated against relations-index: 2 dropped" in out, (
+        f"the run did not name the deletions it made: {out!r}")
+
+
+def test_the_approve_run_reports_the_stamps_its_own_save_left_against_the_store(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """Clause 4: the report surface carries the file-vs-store comparison, so a night
+    like 2026-10-25 is visible in #51's own report instead of only to someone who
+    counted the store by hand.
+
+    The night the item was filed, the run printed `Edges landed in the store: 6` and
+    `Conversation edges in the store: 568` while the file held 562 stamped
+    approvals — six approvals the classify run had deleted. Neither printed number
+    described the file, so nothing on the surface said the two disagreed.
+    """
+    props = _approve_world(cr, tmp_path, monkeypatch,
+                           [_aged_proposal(cr, classification_source="llm",
+                                           confidence=0.95)])
+    cr.cmd_approve()
+    out = capsys.readouterr().out
+    assert ("Approval stamps in the file (approved rows carrying an edge_id): 1" in out), (
+        f"the run never reported what its own save left in the file: {out!r}")
+    assert "DIVERGENCE" not in out, (
+        "the run called a clean file a divergence:\n" + out)
+
+    # The filed shape: an edge in the store whose approval the file lost. Matched
+    # by hand here because producing it any other way would need the race.
+    assert store.edges.add({"source": "knowledge/lost.md",
+                            "target": "knowledge/gone.md", "type": "related_to",
+                            "provenance": "INFERRED", "confidence": 0.95},
+                           origin=cr.EDGE_ORIGIN) > 0
+    cr.cmd_approve()
+    out = capsys.readouterr().out
+    assert "DIVERGENCE" in out, (
+        "the file and the store disagree and the report says nothing about it:\n" + out)
+    assert "the proposals file holds 1 approved row(s) carrying an edge_id" in out
+    assert "the store holds 2 conversation-origin edges" in out, (
+        "the divergence line names one side only; both numbers are what makes it "
+        "checkable: " + out)
+    assert sum(1 for r in json.loads(props.read_text())["proposals"]
+               if r.get("edge_id")) == 1, (
+        "the file itself does not hold the count the line printed")
+
+
+def test_a_reverse_order_copy_of_an_approved_pair_merges_into_the_one_row(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """The merge's identity is the UNORDERED pair, which is what makes the store-side
+    guard and the file agree about what "one pair" is.
+
+    Stage 1 aggregates co-occurrence without a direction, so the same pair can reach
+    the file as `(a, b)` from one run and `(b, a)` from another. With an ordered key
+    the merge would keep both rows — two live proposals for one pair, one of them the
+    approval — while `_active_conversation_edge` still counted that pair as one and
+    refused to land the second, so the file and the store would disagree about the
+    pair's size forever. The live file holds 1,143 rows and 1,143 distinct pairs in
+    either spelling today, so this is the shape the key has to survive, not one it
+    has already been paid for by.
+    """
+    props = _approve_world(cr, tmp_path, monkeypatch,
+                           [_aged_proposal(cr, source="knowledge/x.md",
+                                            target="knowledge/y.md",
+                                            classification_source="llm")])
+    cr.cmd_approve()
+    capsys.readouterr()
+    on_disk = json.loads(props.read_text())
+    landed = [r for r in on_disk["proposals"] if r.get("edge_id")]
+    assert len(landed) == 1 and landed[0]["status"] == "approved"
+
+    stale = json.loads(json.dumps(on_disk))
+    stale["proposals"] = [{"source": "knowledge/y.md", "target": "knowledge/x.md",
+                           "status": "pending", "type": "related-to",
+                           "confidence": 0.95,
+                           "reason": "the reverse-order copy",
+                           "proposed_at": landed[0]["proposed_at"]}]
+    cr.save_proposals(stale)
+
+    rows = [r for r in json.loads(props.read_text())["proposals"]
+            if {r["source"], r["target"]} == {"knowledge/x.md", "knowledge/y.md"}]
+    assert len(rows) == 1, (
+        f"one pair is held by {len(rows)} proposals: an ordered merge key reads the "
+        f"reverse spelling as a different pair and appends the stale row beside the "
+        f"approval: {rows}")
+    assert rows[0]["status"] == "approved" and rows[0].get("edge_id"), (
+        f"the reverse-order copy un-stamped the approval: {rows[0]}")
+    assert cr.count_file_approval_stamps() == 1

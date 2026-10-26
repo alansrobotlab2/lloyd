@@ -32,6 +32,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, SESSIONS_DIR, VAULT_FACTS_ROOT_DEFAULT  # noqa: E402
 from app.kg_store import canonical_edge_type  # noqa: E402
+from app.atomic_io import atomic_write_text, commit_lock  # noqa: E402
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -42,6 +43,12 @@ FACTS_ROOT = VAULT_FACTS_ROOT_DEFAULT
 TRAJECTORY_DIR = PIPELINE_DIR / "trajectories"
 PROPOSALS_FILE = PIPELINE_DIR / "conversation-relation-proposals.json"
 RELATIONS_INDEX = PIPELINE_DIR / "relations-index.json"
+
+#: The `origin` facet every edge this script lands carries. One name because
+#: `land_approved_edges` writes it and `_active_conversation_edge` reads it back:
+#: a pair of literals that drift would make the idempotence check blind to the
+#: very rows the writer produces.
+EDGE_ORIGIN = "conversation"
 LLOYD_SESSIONS = SESSIONS_DIR
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
@@ -649,13 +656,146 @@ def parse_classification(text: str) -> Optional[dict]:
 
 # ── Proposals I/O ────────────────────────────────────────────────────────────
 
+def _read_proposals_bytes() -> Optional[dict]:
+    """The file's own current rows, or ``None`` when there is no readable file.
+
+    ``None`` splits into two cases the caller cannot tell apart from here, and
+    `save_proposals` treats them differently: no file at all (nothing to merge
+    with), and a file whose bytes will not parse (a set of rows that exists and
+    must not be written over blind).
+
+    It exists because `load_proposals` swallows `JSONDecodeError` and hands back a
+    fresh empty structure. On the old whole-file `write_text` that was a second,
+    larger way to lose the file than tonight's lost stamps: a reader that arrived
+    mid-write of the 965 KB file got a parse error, then wrote `{proposals: []}`
+    back as the whole corpus (#3364).
+    """
+    if not PROPOSALS_FILE.exists():
+        return None
+    try:
+        return json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+
+
+def _pair_of(proposal: dict) -> tuple:
+    """A proposal's identity: its (source, target) pair.
+
+    Not the dict, and not `edge_id` — the two stage commands never see each
+    other's objects, and the approve run's stamp is exactly the field a stale
+    Stage-2 copy is missing, so the pair is the only key both sides agree on.
+
+    UNORDERED on purpose, and it has to be: Stage 1 aggregates co-occurrence with no
+    direction, so `(a, b)` and `(b, a)` are one pair seen twice, and an ordered key
+    would merge one row into rows that are not its own — leaving two live proposals
+    for one pair while `_active_conversation_edge` still calls that pair one. Measured
+    2026-10-26 on the live file: 1,143 rows, 1,143 distinct pairs either way, so
+    sorting costs nothing today; it is what keeps it true if a direction ever flips.
+
+    A row missing either end gets a key of its own, so two malformed rows cannot
+    merge into each other and lose one.
+    """
+    source, target = proposal.get("source"), proposal.get("target")
+    if not source or not target:
+        return ("", "", id(proposal))
+    a, b = sorted((source, target))
+    return (a, b)
+
+
+def _keep_disk_row(disk_row: dict, incoming_row: dict) -> bool:
+    """Whether the file's copy of a pair outranks the caller's copy of it.
+
+    Only when the file holds an approval the caller never saw: an `edge_id`, or
+    `status: approved`. That is the asymmetry #3364 is about — an approval that
+    landed is not re-derivable, because `land_approved_edges` skips any row already
+    carrying `edge_id` and the store keeps no pointer back to the proposal, so a
+    save that writes a stale copy over it un-approves a row whose edge is still in
+    `kg.sqlite`. Everything else a caller changed (a Stage-2 type, a retired
+    status, a band mark) is newer than the file and wins.
+    """
+    if disk_row.get("edge_id") and not incoming_row.get("edge_id"):
+        return True
+    return bool(disk_row.get("status") == "approved"
+                and incoming_row.get("status") != "approved")
+
+
+def _approved_or_landed(proposal: dict) -> bool:
+    """Whether a row records a decision another run made, not this one's bookkeeping."""
+    return bool(proposal.get("edge_id")) or proposal.get("status") == "approved"
+
+
+def merge_proposals(disk: dict, incoming: dict, *,
+                    dropped: set | None = None) -> dict:
+    """Fold an in-memory copy onto the rows the file holds right now.
+
+    Rows already on disk keep their place and their order; the caller's copy
+    supplies the fields of any pair it holds (unless `_keep_disk_row` says the file
+    knows better), and any pair the caller added is appended. A disk row the caller
+    does not have is kept, not deleted — that is the difference between "I removed
+    this" and "I loaded the file before this existed", which a merged save cannot
+    otherwise tell apart. `dropped` is how a caller says which it meant, and today
+    only `cmd_approve`'s relations-index dedupe uses it.
+
+    The caller's `watermark` and `stats` are written as the caller holds them: they
+    are one run's own progress, and merging them needs a rule nobody has written
+    yet — recorded on the item rather than invented here.
+    """
+    drops = dropped or set()
+    disk_rows = disk.get("proposals") or []
+    incoming_rows = incoming.get("proposals") or []
+    incoming_by_pair: dict[tuple, dict] = {}
+    for row in incoming_rows:
+        incoming_by_pair.setdefault(_pair_of(row), row)
+
+    # Deletion is the one thing a save may not do to a row it did not author.
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for row in disk_rows:
+        pair = _pair_of(row)
+        seen.add(pair)
+        theirs = incoming_by_pair.get(pair)
+        if theirs is not None and not _keep_disk_row(row, theirs):
+            merged.append(theirs)
+        elif pair in drops and not _approved_or_landed(row):
+            continue
+        else:
+            merged.append(row)
+    merged.extend(row for row in incoming_rows if _pair_of(row) not in seen)
+
+    out = dict(incoming)
+    out["proposals"] = merged
+    return out
+
+
+def _salvageable_empty_bytes(path: Path) -> bool:
+    """Whether unreadable bytes hold nothing worth preserving: a zero-length file.
+
+    The one unreadable case it is safe to write over. A file that exists and holds
+    bytes this function could not parse is a set of proposals that is merely
+    damaged, and the caller's set was assembled from an empty read of it, so
+    writing would replace "damaged, repairable" with "gone" (#3364 clause 2). A
+    zero-length file has no rows in it under any reading.
+    """
+    try:
+        return path.stat().st_size == 0
+    except OSError:
+        return False
+
+
 def load_proposals() -> dict:
-    """Load existing proposals file."""
+    """Load existing proposals file.
+
+    An unparseable file still yields the empty structure callers are written for,
+    but says so: that silence was half of #3364, because the empty set it returns
+    is what the next save wrote back as the whole file.
+    """
     if PROPOSALS_FILE.exists():
-        try:
-            return json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        parsed = _read_proposals_bytes()
+        if parsed is not None:
+            return parsed
+        print(f"  [proposals] {PROPOSALS_FILE.name} is present but unreadable; "
+              f"continuing with an empty set — `save_proposals` will refuse to "
+              f"write over those bytes rather than replace them with this set")
     return {
         "watermark": {"last_trajectory_date": None, "sessions_processed": 0},
         "proposals": [],
@@ -663,10 +803,75 @@ def load_proposals() -> dict:
     }
 
 
-def save_proposals(data: dict) -> None:
-    """Write proposals file."""
+def save_proposals(data: dict, *, dropped: set | None = None) -> None:
+    """Merge into the file under a lock, then replace it atomically.
+
+    Three mechanisms, because #3364 has three distinct causes and fixing one of
+    them leaves the other two:
+
+    * `commit_lock` serialises the read-modify-write, so the classify run and the
+      approve run cannot be inside it at the same moment. A lock over the *write*
+      alone would fix nothing: each command holds its dict across minutes of LLM
+      calls, which is how 2026-10-25 produced 562 stamped approvals in the file
+      against 568 conversation edges in the store.
+    * `merge_proposals` is the actual fix — the lock makes the merge safe, the
+      merge is what stops a stale copy deleting a fresh row.
+    * `atomic_write_text` means no reader can observe a half-written file, which
+      is where the empty-read-and-wipe path came from at 965 KB.
+
+    A save may remove rows only by naming them in `dropped`, and never a row that
+    is approved or carries an `edge_id` — an approval is another run's decision, not
+    this one's bookkeeping to take back. It can never otherwise write a file holding
+    fewer proposals than the one it replaces, which is what keeps an empty or torn
+    read from costing the 1,143 rows the live file holds.
+    Bytes that will not parse are not an exception to that: they are a damaged set
+    of proposals, and the caller reading them got an empty one, so the write is
+    refused and the run fails loudly instead of filing the loss as a normal night.
+    """
     PROPOSALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PROPOSALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    with commit_lock(PROPOSALS_FILE):
+        disk = _read_proposals_bytes()
+        if disk is None:
+            if PROPOSALS_FILE.exists() and not _salvageable_empty_bytes(PROPOSALS_FILE):
+                raise RuntimeError(
+                    f"refusing to write {PROPOSALS_FILE}: its bytes do not parse, so "
+                    f"this run is working from an empty set and would replace a "
+                    f"damaged file of proposals with that empty set. Repair or "
+                    f"restore the file (#3364); its rows are the only record of which "
+                    f"edges #51 approved.")
+            payload = data
+        else:
+            payload = merge_proposals(disk, data, dropped=dropped)
+            before = len(disk.get("proposals") or [])
+            after = len(payload.get("proposals") or [])
+            if after < before - len(dropped or set()):
+                # Unreachable through merge_proposals, so it is a rail rather than a
+                # mechanism: a future caller that reassembles the list by hand would
+                # otherwise be able to shrink the file quietly again.
+                raise RuntimeError(
+                    f"refusing to write {PROPOSALS_FILE.name}: this save would hold "
+                    f"{after} proposals against the {before} on disk, naming only "
+                    f"{len(dropped or set())} as dropped")
+        atomic_write_text(PROPOSALS_FILE, json.dumps(payload, indent=2))
+
+
+def count_file_approval_stamps() -> Optional[int]:
+    """How many `approved` rows in the file carry an `edge_id`, counted off disk.
+
+    Counted from the file rather than from the dict the caller just saved, because
+    the caller's dict is the thing that lied on 2026-10-25: it held 562 stamps while
+    the store held 568 conversation edges, and nothing in the run's own report said
+    so. This is the file's number, read back after the write, to sit beside
+    `count_store_conversation_edges()` (#3364).
+
+    ``None`` when the file cannot be read: "cannot tell", not zero.
+    """
+    disk = _read_proposals_bytes()
+    if disk is None:
+        return None
+    return sum(1 for p in (disk.get("proposals") or [])
+               if p.get("status") == "approved" and p.get("edge_id"))
+
 
 
 def deduplicate_against_index(proposals: list[dict]) -> list[dict]:
@@ -1190,6 +1395,27 @@ def provenance_pointer(p: dict) -> Optional[str]:
     return p.get("evidence_trajectory") or p.get("source_doc") or None
 
 
+def _active_conversation_edge(st, source: str, target: str) -> Optional[dict]:
+    """The store's active conversation-origin edge on this pair, either direction.
+
+    Why the direction is not part of the key: Stage 1 aggregates undirected
+    co-occurrence, so `(a, b)` and `(b, a)` are one pair seen twice, and the
+    defect #3364 closes is exactly two live rows on one pair. `edges.add` matches
+    `source`, `target` AND `type`, so it catches the repeat only when Stage 2 kept
+    the same verdict — a pair re-classified between the lost stamp and the re-run
+    slips straight past it. This lookup is what `land_approved_edges` cannot do
+    through `find_active`.
+
+    Only conversation-origin rows: an extractor-derived edge on the same pair is a
+    different route's claim and must not silence #51's landing.
+    """
+    rows = st._query(
+        "SELECT * FROM edges WHERE expired_at IS NULL AND origin=? "
+        "AND ((source=? AND target=?) OR (source=? AND target=?))",
+        (EDGE_ORIGIN, source, target, target, source))
+    return dict(rows[0]) if rows else None
+
+
 def land_approved_edges(proposals: list[dict]) -> int:
     """Write approved links into the edge store, typed and attributable.
 
@@ -1201,12 +1427,20 @@ def land_approved_edges(proposals: list[dict]) -> int:
     retrieval and auditable afterwards. Each row also carries how it was
     accepted — see `acceptance_fields` — because most of what lands here was
     never read by anyone (#773).
+
+    A pair whose (source, target) already holds an active conversation-origin edge
+    is stamped with that edge's id and lands nothing, whatever relation type this
+    proposal now carries: the proposal's own `edge_id` cannot be the only guard,
+    because the 2026-10-25 save race deleted six of those stamps while their edges
+    stayed in the store, and `edges.add` matches `type` exactly, so the re-run of a
+    re-classified pair would have put a second active edge on one pair (#3364).
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from app.kg_store import StoreUnavailable, store
 
     landed = 0
+    reused = 0
     auto_marked = 0
     band_marked = 0
     band_unexpired = 0
@@ -1234,6 +1468,29 @@ def land_approved_edges(proposals: list[dict]) -> int:
             # A band edge arrives already carrying its own removal date
             # (#1653); every other row lands with `expired_at` NULL as before.
             expiry = band_landing_fields(p)
+            # Idempotence against the STORE, not only against this row's own stamp
+            # (#3364). The skip at the top of the loop trusts `edge_id`, and on
+            # 2026-10-25 the classify run's whole-file save deleted six of those
+            # stamps while the edges they authorised stayed in the store — so those
+            # pairs came back the next night as `approved` with no stamp. `add` is
+            # idempotent for the same type (it returns the already-active row's id),
+            # but it matches `type` exactly and this call never uses `retype`, so a
+            # pair Stage 2 re-classified under a different relation in the meantime
+            # would insert a SECOND active conversation edge — the #1161 class the
+            # store guards elsewhere. Stamp the existing edge instead of inserting:
+            # one active conversation edge per pair, whichever type was chosen.
+            existing = _active_conversation_edge(st, src, tgt)
+            if existing is not None:
+                p["edge_id"] = int(existing["id"])
+                reused += 1
+                if acceptance:
+                    auto_marked += 1
+                if expiry:
+                    # The same reading as the `prior_active` branch below: the band
+                    # does not retire an edge it did not admit, and this one it did
+                    # not create.
+                    band_unexpired += 1
+                continue
             # `edges.add` returns the id of an ALREADY ACTIVE row on this pair
             # rather than inserting a second one, so a band row whose pair the
             # floor admitted weeks ago would otherwise have its expiry applied to
@@ -1262,7 +1519,7 @@ def land_approved_edges(proposals: list[dict]) -> int:
                 "evidence": (p.get("reason") or "")[:500] or None,
                 **acceptance,
                 **expiry,
-            }, origin="conversation")
+            }, origin=EDGE_ORIGIN)
             p["edge_id"] = edge_id
             landed += 1
             if acceptance:
@@ -1294,6 +1551,14 @@ def land_approved_edges(proposals: list[dict]) -> int:
               f"stamped accepted_by={AUTO_ACCEPTED_BY} with the admitting "
               f"threshold (unreviewed), {landed - auto_marked} accepted by "
               f"another route and left unmarked")
+    if reused:
+        # `landed` stayed at zero for these, so the store total does not move and
+        # the tripwires above stay honest: a run that re-authorised six edges it had
+        # already written reports six re-stamped rows, not six new edges (#3364).
+        print(f"  [edges] {reused} approved pair(s) already held an active "
+              f"{EDGE_ORIGIN}-origin edge and were stamped with that edge's id "
+              f"instead of landing a second row — one active conversation edge per "
+              f"pair, whichever relation type the proposal now carries")
     if band_marked or band_unexpired:
         print(f"  [edges] of those, {band_marked} arrived through the "
               f"{BAND_FLOOR:g}-{BAND_CEILING:g} band and carry "
@@ -1626,11 +1891,18 @@ def cmd_approve(band: bool = False, band_cap: int = BAND_DEFAULT_CAP):
     data = load_proposals()
     # Also deduplicate against index
     before = len(data["proposals"])
+    loaded_pairs = {_pair_of(p) for p in data["proposals"]}
     data["proposals"] = deduplicate_against_index(data["proposals"])
+    # The pairs this run is deliberately removing, so `save_proposals` may remove
+    # them: rows merely absent from the caller's copy are otherwise indistinguishable
+    # from rows written by a writer that loaded the file earlier, and merging them
+    # back is the whole point of the save (#3364). Naming them is what lets the save
+    # honour an intentional prune without ever honouring a stale one.
+    dropped = loaded_pairs - {_pair_of(p) for p in data["proposals"]}
     print(f"Deduplicated against relations-index: {before - len(data['proposals'])} dropped")
     count = auto_approve_strong(data["proposals"], band=band, band_cap=band_cap)
     landed = land_approved_edges(data["proposals"])
-    save_proposals(data)
+    save_proposals(data, dropped=dropped)
     print(f"Auto-approved: {count}")
     if band:
         # Which gate ran, in the run's own output: #51 reports what this printed,
@@ -1650,6 +1922,33 @@ def cmd_approve(band: bool = False, band_cap: int = BAND_DEFAULT_CAP):
         print("Conversation edges in the store: UNKNOWN (store unavailable)")
     else:
         print(f"Conversation edges in the store: {in_store}")
+    # And the third measurement, which is what the pair above could never say
+    # apart: the stamps are in this file, and on 2026-10-25 the file carried 562 of
+    # them while the store held 568 conversation edges — six approvals a concurrent
+    # Stage-2 save had deleted, visible only to someone who counted both sides. The
+    # count is read back off the disk, after the save, because the dict this run
+    # held is the artefact that was wrong (#3364).
+    stamped = count_file_approval_stamps()
+    if stamped is None:
+        print("Approval stamps in the file (approved rows carrying an edge_id): "
+              "UNKNOWN (proposals file unreadable)")
+    else:
+        print("Approval stamps in the file (approved rows carrying an edge_id): "
+              f"{stamped}")
+    if stamped is not None and in_store is not None and stamped != in_store:
+        # Both numbers in the line, because the gap alone is the wrong statement:
+        # the store count covers every row this job ever wrote, expired band edges
+        # included and rows whose proposal has since been deduped out of the file,
+        # so a disagreement is a thing to look at and not yet a verdict. What it
+        # does rule out is reading the night as quiet.
+        print(f"DIVERGENCE: the proposals file holds {stamped} approved row(s) "
+              f"carrying an edge_id, the store holds {in_store} {EDGE_ORIGIN}-origin "
+              f"edges — they disagree by {abs(in_store - stamped)}. Every edge this "
+              f"job lands is authorised by one approved, stamped row, so match the "
+              f"extra side against (source, target): store rows with no stamp are "
+              f"either approvals the file lost (#3364) or expired band edges, and "
+              f"file stamps with no store row are edges lost from the graph "
+              f"(#1584).")
     # This is the run that creates the dead end, so this is where its size has
     # to appear: #51 reports what this command printed. (`--stats` carries the
     # same line; both come out of `format_acceptance_band`.)
