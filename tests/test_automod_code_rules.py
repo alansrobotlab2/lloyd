@@ -107,6 +107,115 @@ PLANTED: dict[str, tuple[str, str, int]] = {
     ),
 }
 
+#: The second arm of `opens-kg-store-outside-kg-store`: a store path that reached the
+#: `connect` through a name rather than a literal. It gets its own fixture dict keyed by
+#: the *binder*, because `PLANTED` is keyed by rule id and holds one source per rule, and
+#: because the firing test over that dict asserts `counts == 1` for this rule — folding a
+#: second shape into it would stop pinning that the original literal spelling still fires
+#: at its own line (#3357 clause 4). Both live non-owner openers are of this shape, which
+#: is why the arm exists: `agent-services/guardian/guardian.py:2897` is the parameter
+#: binder, `scripts/automod/promote.py:502` the assignment binder.
+#: binder -> (repo path, source, 1-based line of the `connect`, the name the hit must
+#: name back, the spelling the hit must credit as the source).
+#:
+#: The last two fields are what make each parametrized node a test of *its own* binder
+#: rather than a test that the arm fires somewhere in this file's neighbourhood: a hit
+#: that named the wrong binder — the assignment when the parameter is under test, say —
+#: would still put one hit on the expected line. `as_written` is the identifier as it
+#: appears inside the `connect`, `source_spelling` the binder the matcher resolved it to,
+#: and the reported detail is pinned as the sentence carrying both.
+#:
+#: Every fixture here is a module that parses AND defines what it uses: the runner only
+#: calls `ast.parse`, so an undefined name would not stop the arm firing, but it would
+#: leave a reader running the snippet by hand and blaming the NameError for the hit.
+PLANTED_RESOLVED: dict[str, tuple[str, str, int, str, str]] = {
+    "assigned-from-kg_store_for_root": (
+        "app/planted_resolved_root.py",
+        "import sqlite3\n"
+        "from app.data_root import kg_store_for_root\n"
+        "\n"
+        "def rows(root):\n"
+        "    db = kg_store_for_root(root)\n"
+        "    return sqlite3.connect(f\"file:{db}?mode=ro\", uri=True)\n",
+        6,
+        "db", "kg_store_for_root(...)",
+    ),
+    "assigned-from-kg_store_for_tree": (
+        "app/planted_resolved_tree.py",
+        "import sqlite3\n"
+        "from app.data_root import kg_store_for_tree\n"
+        "\n"
+        "def rows():\n"
+        "    store = kg_store_for_tree()\n"
+        "    con = sqlite3.connect(store)\n"
+        "    return con\n",
+        6,
+        "store", "kg_store_for_tree(...)",
+    ),
+    "assigned-from-KG_DB_RELATIVE": (
+        "app/planted_resolved_relative.py",
+        "import sqlite3\n"
+        "from app.data_root import KG_DB_RELATIVE\n"
+        "\n"
+        "def open_it(root):\n"
+        "    rel = KG_DB_RELATIVE\n"
+        "    return sqlite3.connect(str(root / rel))\n",
+        6,
+        "rel", "KG_DB_RELATIVE",
+    ),
+    "assigned-from-VAULT_KG_DB": (
+        "app/planted_resolved_vault.py",
+        "import sqlite3\n"
+        "from app.paths import VAULT_KG_DB\n"
+        "\n"
+        "def dump():\n"
+        "    path = VAULT_KG_DB\n"
+        "    con = sqlite3.connect(path)\n"
+        "    return con\n",
+        6,
+        "path", "VAULT_KG_DB",
+    ),
+    # The guardian's shape: the open sits in a function, and the store arrives as the
+    # argument this same file's own call passes it. A matcher that only reads assignments
+    # cannot see it, which is the whole of #3357. What is under test here is the
+    # PARAMETER, so the constant on line 4 is deliberately spelled as a plain `Path`
+    # join — an expression the arm does not read as a store spelling (no
+    # `kg_store_for_*` call, no `KG_DB`/`KG_DB_RELATIVE`/`VAULT_KG_DB` on the right-hand
+    # side), so this module has exactly one binder and it is `db_path`. The node's
+    # `as_written="db_path"` is what pins that: were the module-level assignment ever
+    # counted as the binder, the detail would credit the assignment, not the parameter.
+    "parameter-filled-by-this-file-s-call": (
+        "app/planted_resolved_param.py",
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "\n"
+        "VAULT_KG_DB = Path('_pipeline') / 'vault-derived' / 'kg.sqlite'\n"
+        "\n"
+        "\n"
+        "def count_rows(db_path):\n"
+        "    return sqlite3.connect(f\"file:{db_path}?mode=ro\", uri=True)\n"
+        "\n"
+        "\n"
+        "print(count_rows(VAULT_KG_DB))\n",
+        8,
+        "db_path", "VAULT_KG_DB",
+    ),
+}
+
+#: The remaining limit, planted as a fixture so the arm cannot silently grow into
+#: cross-file flow the runner's contract refuses: here the path crosses a module
+#: boundary before it reaches the name, and the matcher must say nothing.
+PLANTED_CROSS_FILE = (
+    "app/planted_resolved_imported.py",
+    "import sqlite3\n"
+    "from somewhere_else import store_path\n"
+    "\n"
+    "def rows(root):\n"
+    "    db = store_path(root)\n"
+    "    return sqlite3.connect(db)\n",
+    6,
+)
+
 
 # ---------------------------------------------------------------------------
 # Clause 1 — the rule file exists, is cited, and is capped.
@@ -393,6 +502,238 @@ def test_a_file_outside_a_rules_scope_is_not_scanned(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #3357 — the store-ownership rule learns to follow a path one hop.
+#
+# Before this, `opens_kg_store` fired only when the literal `kg.sqlite` sat inside the
+# `sqlite3.connect(...)` call. Evaluated over every tracked `.py` at HEAD, its whole
+# population was one test fixture: both non-owner openers that actually exist resolve
+# the path into a name first, so the guard could not report them and so could not ask
+# either to carry an exemption. Six kinds of node here: the new arm fires on each binder it
+# claims and names that binder back in its own detail; it stops at the module boundary it
+# claims to stop at; it leaves the literal arm's site and message exactly as they were
+# (#3357's clause 4, whose named node runs the literal fixture alone); it survives the
+# call path the gate's own rung takes, diff-scoped and line-filtered; the rule file's cite
+# describes the two openers that exist rather than the one that does not; and the two
+# witnesses are exempted in writing with the read-only handle named as the reason.
+# ---------------------------------------------------------------------------
+
+KG_RULE = "opens-kg-store-outside-kg-store"
+
+
+@pytest.mark.parametrize("binder", sorted(PLANTED_RESOLVED))
+def test_the_resolved_path_arm_fires_on_its_own_planted_violation(tmp_path, binder):
+    """Clause 1: a store path carried into `connect` by a name is the same open.
+
+    The line the hit lands on is the `connect`, not the assignment — the finding is about
+    opening a second handle, and a reader looking at the assignment has not been shown the
+    write-shaped call. The detail is pinned as a whole sentence rather than as a substring,
+    because it is the only part of the hit that says *which* binder fired: `db` on its own
+    names nothing, and a fixture with more than one binder in it (the guardian's shape has
+    a constant in the module as well as the parameter) would otherwise pass with a hit
+    credited to the wrong one. The reported sentence is
+    `… through `<name>`, one hop from <spelling>`.
+    """
+    rel, src, line, as_written, source_spelling = PLANTED_RESOLVED[binder]
+    tree, base = _scratch_repo(tmp_path, {rel: src})
+    res = CR.run(base, tree, rules_path=RULES_PATH)
+    assert res["status"] == CR.EVALUATED, res
+
+    hits = [h for h in res["hits"] if h["rule"] == KG_RULE]
+    assert [h["path"] for h in hits] == [rel], res["hits"]
+    assert hits[0]["line"] == line, (binder, hits[0])
+    assert res["counts"][KG_RULE] == 1, res["counts"]
+    assert hits[0]["detail"] == ("opens the knowledge-graph store outside its owner "
+                                f"through `{as_written}`, one hop from {source_spelling}"), (
+        f"the {binder} fixture's hit does not name the binder this node plants: "
+        f"{hits[0]['detail']}")
+
+
+def test_the_resolved_path_arm_stops_at_the_module_boundary_the_runner_refuses(tmp_path):
+    """The arm's limit, planted: a path that crossed a file to reach the name is silent.
+
+    `code_rules.py`'s own contract is that it parses one file at a time and does not do
+    cross-module analysis, so the honest description of this arm is "one hop inside the
+    file". A fixture whose store path arrives from an imported helper must produce nothing:
+    if it fired, the matcher would be doing flow analysis it cannot do reliably and the
+    docstring's promise would be the lie.
+    """
+    rel, src, _ = PLANTED_CROSS_FILE
+    tree, base = _scratch_repo(tmp_path, {rel: src})
+    res = CR.run(base, tree, rules_path=RULES_PATH)
+    assert res["status"] == CR.EVALUATED, res
+    # The zero below is only a verdict if the matcher actually saw the file: `run`
+    # skips a source it cannot parse and counts it in `parse_errors`, so an
+    # unparseable fixture would report "no hit" while proving nothing. Asserted
+    # before the emptiness, and it is the reason this fixture's module name is
+    # `somewhere_else` and not something with a keyword in it.
+    assert res["totals"]["parse_errors"] == 0, (
+        f"the runner could not parse the fixture ({rel}), so the empty hit list "
+        f"below is a skipped file, not a matcher that stopped at the boundary: "
+        f"{res['totals']}")
+    assert [h for h in res["hits"] if h["rule"] == KG_RULE] == [], res["hits"]
+
+
+def test_the_literal_arm_still_reports_its_own_line_beside_the_resolved_one(tmp_path):
+    """Clause 4: the arm that already existed is unchanged, line for line and word for word.
+
+    The sibling node `test_each_shipped_rule_fires_on_its_planted_violation[
+    opens-kg-store-outside-kg-store]` runs the literal fixture alone and pins its
+    `counts == 1`. Alone, that node cannot see an interference the widening could introduce:
+    a `connect` whose call carries both a `kg.sqlite` literal and a resolved name is one
+    expression the two arms both claim, and an implementation that appended from both would
+    report that open twice while every single-fixture node stayed green. So both fixtures
+    sit in one tree here. Three claims, all of them about the literal hit: it is still
+    reported, it is still reported at line 3 of its own file, and its message is still the
+    sentence it has always carried — no hop clause bolted onto it. The resolved file next to
+    it keeps its own hop-clause message, and the rule's count over the two files is exactly
+    2, which is the assertion that no open was counted twice.
+    """
+    lit_rel, lit_src, lit_line = PLANTED[KG_RULE]
+    res_rel, res_src, res_line = PLANTED_RESOLVED["assigned-from-kg_store_for_root"][:3]
+    tree, base = _scratch_repo(tmp_path, {lit_rel: lit_src, res_rel: res_src})
+    res = CR.run(base, tree, rules_path=RULES_PATH)
+    assert res["status"] == CR.EVALUATED, res
+
+    hits = [h for h in res["hits"] if h["rule"] == KG_RULE]
+    by_path = {h["path"]: h for h in hits}
+    assert len(hits) == 2 and set(by_path) == {lit_rel, res_rel}, res["hits"]
+    assert res["counts"][KG_RULE] == 2, res["counts"]
+    assert by_path[lit_rel]["line"] == lit_line, by_path[lit_rel]
+    assert by_path[res_rel]["line"] == res_line, by_path[res_rel]
+    assert by_path[lit_rel]["detail"] == "opens the knowledge-graph store outside its owner", (
+        "the literal arm's message moved while the resolved arm was added; clause 4 asks "
+        "for the original form unchanged — the hop clause belongs to the new arm only: "
+        f"{by_path[lit_rel]['detail']}")
+    assert "one hop" not in by_path[lit_rel]["detail"], by_path[lit_rel]
+    assert "one hop from" in by_path[res_rel]["detail"], by_path[res_rel]
+    for rel in (lit_rel, res_rel):
+        assert f"{KG_RULE}:{rel}" in res["labels"], (rel, res["labels"])
+
+
+def test_the_kg_store_cite_names_the_two_openers_that_exist_and_the_hop_the_rule_follows():
+    """Clause 3: the cite is the surface a reader trusts about who touches the store.
+
+    What it said before was false on its face: "The one allowed opener, the guardian's
+    read-only `count_kg_rows` tripwire ... opens no handle through `sqlite3.connect` on a
+    restated path (#1525)" — that tripwire is a `sqlite3.connect` on a restated path, and a
+    second file does the same thing the sentence never mentions. `architecture/autonomy-jobs.md`
+    §Build the graph had already been rewritten to name two openers, so the rule file was
+    the stale half of a pair. Pinned by substring rather than byte-for-byte
+    (`test_the_rule_gained_the_three_script_roots_and_its_cite_did_not_move` pins that
+    other rule's cite byte-for-byte) because this clause is a list of claims, and a reader
+    has to be able to see which claim a rewrite dropped.
+    """
+    rule = {r.id: r for r in CR.load_rules(RULES_PATH)}[KG_RULE]
+    cite = rule.cite
+
+    assert "opens no handle through `sqlite3.connect` on a restated path" not in cite, (
+        f"the refuted sentence is still the cite's account of the guardian:\n{cite}")
+    for who in ("agent-services/guardian/guardian.py", "scripts/automod/promote.py",
+                "count_kg_rows"):
+        assert who in cite, f"the cite never names {who}, one of the two openers it must:\n{cite}"
+    assert cite.count("?mode=ro") >= 2, (
+        "both witnesses are read-only handles and that is the property that makes each "
+        f"exemption survivable; the cite says it {cite.count('?mode=ro')} time(s):\n{cite}")
+    assert "one hop" in cite, f"the cite does not say how far the matcher follows:\n{cite}"
+    for spelling in ("kg_store_for_root", "kg_store_for_tree", "KG_DB_RELATIVE",
+                     "VAULT_KG_DB"):
+        assert spelling in cite, (
+            f"the cite omits {spelling}, one of the spellings the arm resolves:\n{cite}")
+    assert CR.CITATION_RE.search(cite), "a cite that names no item cannot be loaded anyway"
+
+
+def test_the_two_read_only_witnesses_are_exempted_by_name_with_the_ro_handle_as_the_why():
+    """Clause 2's other half: the exemptions exist, and each says what makes it safe.
+
+    The two witnesses held no allow entry before #3357 for the worst available reason: not
+    that they were judged and cleared, but that the guard could not see them to exempt them.
+    Routing them through the allow list is what makes a *future* unlisted reader cost its
+    author a written `why` — an exemption that names `?mode=ro` is checkable by anyone,
+    because `uri=True` plus `mode=ro` is what forbids the write the invariant is about. The
+    sibling node `test_the_live_tree_scores_zero_or_exactly_the_named_allowlist[
+    opens-kg-store-outside-kg-store]` is what pins the live tree to exactly these paths.
+    """
+    rule = {r.id: r for r in CR.load_rules(RULES_PATH)}[KG_RULE]
+    by_path = {a.path: a.why for a in rule.allow}
+
+    assert set(by_path) == {"tests/test_data_home.py",
+                            "agent-services/guardian/guardian.py",
+                            "scripts/automod/promote.py"}, sorted(by_path)
+    for path in ("agent-services/guardian/guardian.py", "scripts/automod/promote.py"):
+        why = by_path[path]
+        assert why.strip(), f"{path} is exempted with no reason at all"
+        assert "?mode=ro" in why, f"{path}'s exemption never names its read-only handle: {why}"
+        assert "uri=True" in why, (
+            f"{path}'s exemption names `?mode=ro` without `uri=True`, and mode=ro is only "
+            f"a query string until uri=True makes SQLite read it: {why}")
+
+
+def test_the_gate_s_own_call_form_carries_the_resolved_open_on_added_lines(tmp_path):
+    """The seam the review named, put under test: the rung calls `CR.run(base, worktree)`.
+
+    `scripts/automod/gate.py::rung_code_rules` invokes the runner with the two arguments a
+    round has and nothing else — no `files=`, no `whole_tree=True` — so the runner itself
+    enumerates the round's changed `.py` and then keeps only hits whose line the diff ADDED
+    (`_added_lines`; a site that predates the base is not this round's). That is a different
+    call path from every other node in this section, which either hands `run` a scratch diff
+    or hands it `git ls-files '*.py'` with `whole_tree=True`, and it is the path the soak's
+    denominator is actually built from. Line-based scoping is where a name-resolution arm
+    could go quietly wrong, because the binder and the `connect` are two different lines:
+    a hit filtered on the *binder's* line having been added would report nothing for the
+    common shape of a new `connect` written under an existing assignment.
+
+    Two files, then. `app/legacy_store_reader.py` is committed BEFORE the base, so its
+    resolved open predates the round: a diff-scoped run must say nothing about it, which is
+    the control that proves this run was scoped to the diff and not to the tree.
+    `app/planted_resolved_tree.py` (the same fixture the binder nodes plant) is added by the
+    round's commit with the assignment and the open both new, and it must come back as one
+    hit on the `connect`'s own line, which is line 6 of that source.
+    """
+    tree = tmp_path / "wt"
+    tree.mkdir()
+    _git(tree, "init", "-q", "-b", "main")
+    _git(tree, "config", "user.email", "rules@example.invalid")
+    _git(tree, "config", "user.name", "rules")
+    legacy_rel = "app/legacy_store_reader.py"
+    (tree / "README.md").write_text("base\n", encoding="utf-8")
+    p = tree / legacy_rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("import sqlite3\n"
+                 "from app.data_root import kg_store_for_root\n"
+                 "\n"
+                 "def rows(root):\n"
+                 "    db = kg_store_for_root(root)\n"
+                 "    return sqlite3.connect(f\"file:{db}?mode=ro\", uri=True)\n",
+                 encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "base")
+    base = _git(tree, "rev-parse", "HEAD").strip()
+
+    new_rel, new_src, new_line = PLANTED_RESOLVED["assigned-from-kg_store_for_tree"][:3]
+    p = tree / new_rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(new_src, encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "the round")
+
+    res = CR.run(base, tree, rules_path=RULES_PATH)      # exactly the rung's call form
+    assert res["status"] == CR.EVALUATED, res
+    assert res["scope"]["kind"] == "diff", res["scope"]
+    assert res["totals"]["parse_errors"] == 0, (
+        f"a fixture the runner could not parse would make the assertions below a skipped "
+        f"file rather than a verdict: {res['totals']}")
+    assert res["totals"]["files"] == 1, (
+        f"the diff-scoped runner was supposed to consider the one .py the round added, not "
+        f"{res['totals']['files']}: {res['totals']}")
+
+    hits = [h for h in res["hits"] if h["rule"] == KG_RULE]
+    assert [(h["path"], h["line"]) for h in hits] == [(new_rel, new_line)], res["hits"]
+    assert legacy_rel not in {h["path"] for h in res["hits"] + res["allowed"]}, (
+        "a pre-existing open was reported by a diff-scoped run, which means the run read "
+        f"the tree and the zero-hit half of this node proves nothing: {res['allowed']}")
+
+
+# ---------------------------------------------------------------------------
 # Clause 4 — the live-tree control: per rule, zero hits or exactly the allowlist
 # that rule itself names. Shape-based, and it fails on a stale allowlist entry
 # too, because an allowlist nobody can delete is how a rule stops meaning anything.
@@ -555,7 +896,9 @@ def test_the_live_tree_control_asks_what_it_actually_covered():
 # converted. Five nodes: the grep that filed the item now comes back empty; every
 # stamp left in those roots carries an explicit UTC zone; the rule's scope grew and
 # its cite did not; the widening is visible as a census figure and only for that
-# rule; and the whole-tree control is still zero hits over the five allowed sites.
+# rule; and the whole-tree control is still zero hits over the allowed sites it names
+# (five as #2810 left them, seven since #3357 made the two read-only kg-store witnesses
+# visible to the rule that had to excuse them).
 # ---------------------------------------------------------------------------
 
 #: The roots the widened scope reaches. `scripts/` at large is NOT one of them: the
@@ -717,15 +1060,19 @@ def test_the_widening_shows_up_as_this_rules_census_and_nobody_elses():
         "figure a landing event carries is not the scope the rule carries")
 
 
-def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sites():
-    """Clause 4: with the scope widened, HEAD still has nothing to report.
+def test_the_whole_tree_control_is_still_zero_hits_over_exactly_seven_allowed_sites():
+    """Clause 4 as #3357 moved it: HEAD reports nothing, and now names what it excuses.
 
-    The five sites are the whole allow population of the five rules at filing — two
+    The seven sites are the whole allow population of the five rules — two
     `broad-except-swallow-same-line` drains in `app/sessions_io.py`, the test suite's
-    scratch-root exports, and the guardian's read-only store tripwire in
-    `tests/test_data_home.py`. The line numbers move whenever those files are edited,
-    so what is pinned is the count and the paths, which is the part that carries the
-    claim "no new violator slipped in behind the widening".
+    scratch-root exports, and the three kg-store opens: the scratch-fixture open in
+    `tests/test_data_home.py`, plus the two read-only `?mode=ro` `count_kg_rows`
+    witnesses in `agent-services/guardian/guardian.py` and
+    `scripts/automod/promote.py`. Those two are new to the count because #3357 widened
+    the matcher to follow a store path one hop: before that they were not excused, they
+    were unseen, which is a different thing and a worse one. The line numbers move
+    whenever those files are edited, so what is pinned is the count and the paths, which
+    is the part that carries the claim "no new violator slipped in behind the widening".
     """
     res = CR.run("HEAD", ROOT, rules_path=RULES_PATH,
                  files=_tracked_python(ROOT), whole_tree=True)
@@ -735,9 +1082,10 @@ def test_the_whole_tree_control_is_still_zero_hits_over_exactly_five_allowed_sit
         + "; ".join(f"{h['rule']} at {h['path']}:{h['line']}" for h in res["hits"]))
     sites = sorted((h["rule"], h["path"]) for h in res["allowed"])
     print("allowed sites: " + "; ".join(f"{r} @ {p}" for r, p in sites))
-    assert len(sites) == 5, f"the control reports {len(sites)} allowed sites, not 5: {sites}"
+    assert len(sites) == 7, f"the control reports {len(sites)} allowed sites, not 7: {sites}"
     assert sorted(p for _, p in sites) == [
-        "app/sessions_io.py", "app/sessions_io.py", "tests/conftest.py",
+        "agent-services/guardian/guardian.py", "app/sessions_io.py",
+        "app/sessions_io.py", "scripts/automod/promote.py", "tests/conftest.py",
         "tests/test_data_home.py", "tests/test_youtube_artifact_phase.py"], sites
     for rid, n in sorted(res["counts"].items()):
         print(f"hits for {rid}: {n}")
@@ -1237,7 +1585,18 @@ RULE_SCOPES_AT_RECORDING = [
 #: The last commit that changed anything below the header block. A comment-only edit
 #: leaves the non-comment bytes exactly where this sha left them; a rule change moves
 #: this anchor on purpose, in the same shape as `RULE_IDS_AT_RECORDING` above.
-NON_COMMENT_SURFACE_ANCHOR = "1168247e"
+#:
+#: #3357 moved it, and moved it twice. Once for the rule change itself (the cite rewrite
+#: and the two new `allow` entries are non-comment bytes), and once again when the round
+#: was resumed: `automod_start(from_branch=…)` rebases the branch and deletes the old one,
+#: which rewrites every sha in it and left the pin naming a commit no ref can reach. An
+#: unreachable sha is not a failing test today — `git show` still resolves a loose object —
+#: it is a test that goes red on whoever runs `git gc` first, which is why this one now
+#: names a commit on the branch that is about to be `main`. The mechanism cannot be made
+#: sha-proof from inside the change: the sha of the commit that changes the rule file does
+#: not exist while that commit is still being written, so the anchor is always set one
+#: commit late (#2992's `c06cd68e` did the same thing).
+NON_COMMENT_SURFACE_ANCHOR = "b136d97a"
 
 
 def _non_comment_lines(text: str) -> list[str]:
@@ -1498,13 +1857,21 @@ OWNERSHIP_RULING = (
 #: edit is named, never implied, or the next round claims the licence by analogy.
 OWNERSHIP_RULING_ITEM = "#3263"
 
-#: Every allow entry the five rules ship, as #2810 left them. A comment-only edit adds
+#: Every allow entry the five rules ship, as #3357 left them. A comment-only edit adds
 #: none: an exemption for a shape the matcher cannot even see is a dead entry, and the
 #: rule it would blank is the one whose whole point is that nobody exports the data root.
+#:
+#: The list moved on purpose exactly once since #2810, in #3357, and it moved in the only
+#: direction this pin is meant to allow: the matcher learned to follow a store path one
+#: hop, so the two read-only `?mode=ro` `count_kg_rows` witnesses became sites the rule
+#: reports and therefore sites that need an exemption in writing. Each was invisible
+#: before, which is not the same as excused.
 ALLOW_ENTRIES_AT_RECORDING = [
     ("broad-except-swallow-same-line", "app/sessions_io.py"),
     ("exports-lloyd-data-to-process-environ", "tests/conftest.py"),
     ("exports-lloyd-data-to-process-environ", "tests/test_youtube_artifact_phase.py"),
+    ("opens-kg-store-outside-kg-store", "agent-services/guardian/guardian.py"),
+    ("opens-kg-store-outside-kg-store", "scripts/automod/promote.py"),
     ("opens-kg-store-outside-kg-store", "tests/test_data_home.py"),
 ]
 
@@ -1709,7 +2076,7 @@ def test_the_header_promises_no_section_that_the_rule_file_does_not_have():
 
 
 def test_the_comment_only_edit_carries_no_new_allow_entry():
-    """Clause 5's unpinned half: the exemption list is the four entries it always was.
+    """Clause 5's unpinned half: the exemption list is the list on this pin, no more.
 
     The rest of clause 5 — non-comment bytes, the five ids, matchers and scopes, the
     pinned strings, one published flip bound — is held by the anchor node, the precedent
@@ -1718,6 +2085,11 @@ def test_the_comment_only_edit_carries_no_new_allow_entry():
     the rule cannot report is dead weight that blanks that rule over that file, and
     `load_rules` checks only that an entry carries a why, never that the exception is
     needed by a hit.
+
+    The equality is over `ALLOW_ENTRIES_AT_RECORDING`, which is six as #3357 left them,
+    and that is the whole of how a change to the list is allowed: not by editing this
+    node's prose, but by making the matcher report the site first, which the live-tree
+    control then shows.
     """
     rules = CR.load_rules(RULES_PATH)
     entries = sorted((r.id, a.path) for r in rules for a in r.allow)

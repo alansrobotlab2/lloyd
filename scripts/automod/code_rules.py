@@ -288,20 +288,128 @@ def guardian_nonstdlib_import(ctx: "_FileCtx") -> list[tuple[int, str]]:
     return out
 
 
+#: The two functions that hand back a knowledge-graph store path. `app/data_root.py`
+#: owns both spellings, so a call to either is as much "the store" as the literal is.
+_KG_PATH_FUNCS = frozenset({"kg_store_for_root", "kg_store_for_tree"})
+
+#: The constants that name it. `KG_DB` is the guardian's own binding
+#: (`agent-services/guardian/policy.py`: `KG_DB, KG_DB_SOURCE = kg_db_path()`), and
+#: `KG_DB_SOURCE` is deliberately absent: it records *which branch* produced the path,
+#: not the path, so exempting it would exempt a string that is never opened.
+_KG_PATH_CONSTANTS = frozenset({"KG_DB", "KG_DB_RELATIVE", "VAULT_KG_DB"})
+
+
+def _kg_path_source(node: ast.AST | None) -> str | None:
+    """The spelling by which this expression denotes the knowledge-graph store, or None."""
+    if isinstance(node, ast.Call):
+        f = node.func
+        name = (f.attr if isinstance(f, ast.Attribute)
+                else f.id if isinstance(f, ast.Name) else "")
+        return f"{name}(...)" if name in _KG_PATH_FUNCS else None
+    if isinstance(node, (ast.Attribute, ast.Name)):
+        ident = node.attr if isinstance(node, ast.Attribute) else node.id
+        return ident if ident in _KG_PATH_CONSTANTS else None
+    return None
+
+
+def _kg_store_names(module: ast.Module) -> dict[str, str]:
+    """Local names holding a knowledge-graph store path, each mapped to its spelling.
+
+    Two binders, and each is exactly one hop inside this one module — the module
+    boundary is still the limit this file's docstring owns, so nothing here is
+    cross-file flow:
+
+    *   `name = <expression naming the store>` — the promoter's shape,
+        `db = kg_store_for_root(production_data_root())`;
+    *   a parameter whose call site *in this same file* hands over such an
+        expression — the guardian's shape, where `count_kg_rows(policy.KG_DB)` at
+        `agent-services/guardian/guardian.py:1058` fills the `db_path` the open at
+        `:2897` reads. A parameter is a binding like any other; skipping it is how
+        the witness stayed invisible.
+    """
+    names: dict[str, str] = {}
+    for n in ast.walk(module):
+        if isinstance(n, (ast.Assign, ast.AnnAssign)):
+            source = _kg_path_source(n.value)
+            if source is None:
+                continue
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    names.setdefault(t.id, source)
+
+    params: dict[str, list[str]] = {}
+    for node in ast.walk(module):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        a = node.args
+        params.setdefault(node.name, []).extend(
+            [p.arg for p in (*a.posonlyargs, *a.args)] + [p.arg for p in a.kwonlyargs])
+    for n in ast.walk(module):
+        if not isinstance(n, ast.Call):
+            continue
+        callee = (n.func.attr if isinstance(n.func, ast.Attribute)
+                  else n.func.id if isinstance(n.func, ast.Name) else "")
+        bound = params.get(callee)
+        if not bound:
+            continue
+        for i, arg in enumerate(n.args):
+            if i < len(bound):
+                source = _kg_path_source(arg)
+                if source is not None:
+                    names.setdefault(bound[i], source)
+        for kw in n.keywords:
+            if kw.arg in bound:
+                source = _kg_path_source(kw.value)
+                if source is not None:
+                    names.setdefault(kw.arg, source)
+    return names
+
+
+def _kg_reference_in_call(call: ast.Call, names: dict[str, str]) -> tuple[str, str] | None:
+    """Which store-naming value this `connect` reads: (name-as-written, its spelling)."""
+    for arg in (*call.args, *(kw.value for kw in call.keywords)):
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Name) and sub.id in names:
+                return sub.id, names[sub.id]
+            source = _kg_path_source(sub)
+            if source is not None and isinstance(sub, (ast.Name, ast.Attribute)):
+                return (sub.id if isinstance(sub, ast.Name) else sub.attr), source
+    return None
+
+
 def opens_kg_store(ctx: "_FileCtx") -> list[tuple[int, str]]:
     """`sqlite3.connect(...)` on a path that names the knowledge-graph store.
 
-    The narrow form of the store-ownership claim, deliberately: the broad one
-    (`kg.sqlite` as a literal) is an open set — 20+ files at HEAD name the path
-    for reasons that are not opening it. A store path held in a variable this
-    matcher cannot resolve is the same cross-expression limit as everywhere else.
+    Two arms, and both stop at the module boundary. The literal one is the narrow
+    form of the store-ownership claim: the broad one (`kg.sqlite` appearing at all)
+    is an open set — 20+ files at HEAD name the path for reasons that are not
+    opening it. The resolved one follows the path exactly one hop, through the two
+    binders `_kg_store_names` can see, because a store path handed to `connect`
+    through a name is the same open as one typed in: since #3357 the two live
+    read-only witnesses (`agent-services/guardian/guardian.py:2897`,
+    `scripts/automod/promote.py:502`) are both of that shape, so before this arm the
+    rule could not report either of them and so could not require either to carry an
+    exemption. What stays out is what always stayed out — a path that crossed a file
+    or a function boundary to reach the name, which is cross-file flow and out of
+    this file by construction, not by taste.
     """
     out: list[tuple[int, str]] = []
+    names = _kg_store_names(ctx.module)
     for n in ast.walk(ctx.module):
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "connect" and isinstance(n.func.value, ast.Name)
-                and n.func.value.id == "sqlite3" and "kg.sqlite" in ast.unparse(n)):
+                and n.func.value.id == "sqlite3"):
+            continue
+        if "kg.sqlite" in ast.unparse(n):
             out.append((n.lineno, "opens the knowledge-graph store outside its owner"))
+            continue
+        reference = _kg_reference_in_call(n, names)
+        if reference is not None:
+            written, source = reference
+            out.append((n.lineno,
+                        f"opens the knowledge-graph store outside its owner through "
+                        f"`{written}`, one hop from {source}"))
     return out
 
 

@@ -187,9 +187,19 @@ else reaches past `app.kg_store`'s WAL/busy_timeout and its rebuild-transaction 
 protocol, which is the same class as 2026-09-10's MEMORY.md clobber — a second \
 writer that no single reader can see."""
 cite = """CLAUDE.md §Knowledge graph: '`app.kg_store` is the only writer of the \
-store — no script, router or fixture writes or opens it for a mutation.' The one \
-allowed opener, the guardian's read-only `count_kg_rows` tripwire, is named there \
-and opens no handle through `sqlite3.connect` on a restated path (#1525)."""
+store — no script, router or fixture writes or opens it for a mutation.' Two openers \
+besides the owner read it, both for a row count, and neither names the store as a \
+literal inside the call: `count_kg_rows` in `agent-services/guardian/guardian.py` opens \
+`sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)`, the path arriving as \
+the parameter that file's own call site fills with `policy.KG_DB`, and `count_kg_rows` \
+in `scripts/automod/promote.py` opens the same `?mode=ro` handle over \
+`db = kg_store_for_root(production_data_root())`. The matcher therefore follows a store \
+path one hop inside the file — an assignment from `kg_store_for_root` or \
+`kg_store_for_tree`, a reference to `KG_DB`, `KG_DB_RELATIVE` or `VAULT_KG_DB`, or a \
+parameter this file's own call hands such a value — so both witnesses are reported and \
+carry their own exemption below instead of hiding in what the matcher could not resolve \
+(#1525, #3357; `architecture/autonomy-jobs.md` §Build the graph names the same two \
+openers)."""
 scope = ["**/*.py"]
 exclude = ["app/kg_store.py"]          # the owner
 allow = [
@@ -197,6 +207,19 @@ allow = [
 kg.sqlite it just created inside its own tmp_path scratch tree (#642), so the live \
 store is never touched. Named here rather than scoped out because the doc claim \
 above covers fixtures.""" },
+    { path = "agent-services/guardian/guardian.py", why = """the watchdog's own \
+read-only witness, and the only handle it may use: `count_kg_rows` opens \
+`sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)`, a `?mode=ro` handle \
+that cannot mutate, because the unit runs system python on a staged snapshot and cannot \
+import `app.kg_store` (#1525). The store reaches that call as the `db_path` parameter \
+this file's own call fills with `policy.KG_DB`, so the one-hop arm reports it (#3357): \
+an exemption the matcher needed, not one it never saw.""" },
+    { path = "scripts/automod/promote.py", why = """the promoter's read-only \
+`data_damage` witness: `count_kg_rows` opens \
+`sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)`, a `?mode=ro` handle that \
+cannot mutate, over `db = kg_store_for_root(production_data_root())` — the one shared \
+spelling of the layout, so the promoted baseline and the live store name one file \
+(#1525). The one-hop arm reports it (#3357).""" },
 ]
 
 [[rule]]
