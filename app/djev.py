@@ -504,11 +504,75 @@ def replay_stats(path: Any) -> dict[str, dict[str, int]]:
     return out
 
 
+#: How much of the engine's own 4xx message may be handed back to a caller.
+#: Enough for `question 'a': noul criteria must be an object with true and
+#: false` — the whole reason the message is worth quoting — and short enough
+#: that a validation dump over a wrongly-shaped body cannot ride a tool reply
+#: into the primary's context.
+REJECT_MESSAGE_MAX_CHARS = 400
+
+
+def _reject_message(raw: "bytes | str") -> str:
+    """The engine's own sentence about a 4xx, out of whatever body it sent.
+
+    The shape is OpenAI-style — `{"error": {"message": ..., "type":
+    "validation_error"}}`, which is what `structured_server.py` returns for a
+    bad question — with FastAPI's `{"detail": ...}` fallback for a request that
+    never reached a question. Anything unparseable yields "" and the caller
+    still has the status code.
+    """
+    try:
+        body = json.loads(raw)
+    except Exception:  # noqa: BLE001 — an unparseable body is a missing message
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"])
+    detail = body.get("detail")
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        # FastAPI's per-field items: "loc -> msg", joined so the field survives.
+        parts = [str(d.get("msg")) for d in detail
+                 if isinstance(d, dict) and d.get("msg")]
+        if parts:
+            return "; ".join(parts)
+    return ""
+
+
+def _fill_reject(reject: "dict | None", status: int, raw: "bytes | str") -> None:
+    """Say so in the caller's dict when the engine answered and refused.
+
+    Only ever called for a 4xx. A 5xx, a dead socket and a malformed body stay
+    a bare `None`, because for those there is genuinely nothing to quote: the
+    existing "engine unreachable, disabled, or the response was malformed"
+    sentence is the honest one, and #3376 is exactly about not saying it when
+    the engine did answer.
+    """
+    if reject is None:
+        return
+    reject["status"] = int(status)
+    msg = _reject_message(raw).strip()
+    if len(msg) > REJECT_MESSAGE_MAX_CHARS:
+        # A length, not a cut quote: a reader of the tool reply has to be able to
+        # tell "that was the sentence" from "there was more behind it".
+        msg = (msg[:REJECT_MESSAGE_MAX_CHARS].rstrip()
+               + f" … (+{len(msg) - REJECT_MESSAGE_MAX_CHARS} chars not quoted)")
+    if msg:
+        # Omitted, not blanked, when the body said nothing: the caller's reply then
+        # reads "it gave no message" instead of quoting an empty string, and a
+        # non-JSON body — a proxy's page, a login wall — is not quoted at all.
+        reject["message"] = msg
+
+
 def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
              timeout: float = DEFAULT_TIMEOUT_S, seam: str = "",
              floor: float | None = None, samples: int | None = None,
              instructions: str | None = None,
-             seed: int | None = None) -> Answers | None:
+             seed: int | None = None,
+             reject: "dict | None" = None) -> Answers | None:
     """One structured decision. `None` on any failure at all.
 
     `floor` is this schema's measured `label_mass` floor, from
@@ -517,6 +581,15 @@ def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
     and `low_trust` stays False rather than being decided by a number nobody
     measured. A fixed 0.5 would trip on real requests inside the window this
     design calls safe — the two earlier n=16 runs read 0.446 and 0.807.
+
+    `reject` is an optional caller-owned dict. A 4xx fills it with
+    `{"status": ..., "message": <the engine's own sentence>}` before this
+    returns `None`; every other failure leaves it untouched. It exists because
+    a 422 and a dead socket both returned `None` and the only tool-facing
+    sentence for both claimed an outage — measured 2026-10-26 over the session
+    transcripts, 9 of the 15 `djev_decide` calls ever made returned that
+    sentence and all 9 carried a prose `noul` criteria, which the engine refuses
+    with a 422. Callers that do not pass the dict are unaffected.
     """
     if not questions:
         return None
@@ -552,6 +625,14 @@ def ask_sync(state: Any, questions: Mapping[str, Mapping], *,
         _record(seam, "http_error", None)
         if replay:
             _replay_note(replay, "http_5xx" if exc.code >= 500 else "http_4xx")
+        if exc.code < 500:
+            # Read the body before it goes: this is the one failure whose cause
+            # the engine states, and the caller is the only one who can fix it.
+            try:
+                raw = exc.read()
+            except Exception:  # noqa: BLE001 — a bodyless 4xx still has a code
+                raw = b""
+            _fill_reject(reject, exc.code, raw)
         logger.debug("djev %s: HTTP %s", seam or "-", exc.code)
         return None
     except Exception as exc:  # noqa: BLE001 — every failure is `None`
@@ -584,12 +665,17 @@ async def ask(state: Any, questions: Mapping[str, Mapping], *,
               timeout: float = DEFAULT_TIMEOUT_S, seam: str = "",
               floor: float | None = None, samples: int | None = None,
               instructions: str | None = None,
-              seed: int | None = None) -> Answers | None:
+              seed: int | None = None,
+              reject: "dict | None" = None) -> Answers | None:
     """The async twin, for callers already on the event loop.
 
     httpx behind a function-local import so this module stays a stdlib leaf.
     A tool handler that reached for `ask_sync` on the loop would block it for
     as long as the engine takes, and djev serves one sequence at a time.
+
+    `reject` means the same thing here as on `ask_sync`, which is the point: the
+    tool path is this one, so a 4xx that quoted its cause on the sync side and
+    stayed silent here would move the lie instead of removing it.
     """
     if not questions:
         return None
@@ -606,6 +692,11 @@ async def ask(state: Any, questions: Mapping[str, Mapping], *,
             resp = await client.post(url, json=body)
         if resp.status_code != 200:
             _record(seam, "http_error", None)
+            if resp.status_code < 500:
+                # The same rule as the sync path, which the tool path actually
+                # uses: only a 4xx is the engine explaining our arguments. A 5xx
+                # is what a hung upstream read looks like and says nothing.
+                _fill_reject(reject, resp.status_code, resp.content)
             logger.debug("djev %s: HTTP %s", seam or "-", resp.status_code)
             return None
         payload = resp.json()

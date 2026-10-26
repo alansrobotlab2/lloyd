@@ -6,6 +6,7 @@ never raise, and never round a measurement into a verdict. These pin both.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 
@@ -90,6 +91,237 @@ def test_service_down_returns_none_not_empty_list():
     candidates matched", which is the opposite of what happened."""
     out = djev.ask_sync("s", {})
     assert out is None and out != []
+
+
+# ---------------------------------------------------------------------------
+# #3376 — the `reject` delta: `None` stays the return, and a 4xx explains itself
+#
+# `None` for every failure is the contract above, and this does not change it.
+# What was missing is that a 422 and a dead socket returned the same thing, so
+# the tool-facing sentence for both claimed an outage — 9 of the 15
+# `djev_decide` calls ever made, measured 2026-10-26, were the engine refusing a
+# prose `noul` criteria reported as "engine unreachable". `reject` is an optional
+# out-parameter: the engine's own sentence for the one failure it explains, and
+# nothing for the rest. Callers that never pass the dict are unaffected, which is
+# the reason every node above still passes.
+# ---------------------------------------------------------------------------
+
+#: Verbatim from `POST /v1/systemone` on 2026-10-26 for
+#: `{"type": "noul", "criteria": "needs a reply now"}`.
+_422_BODY = (b'{"error": {"message": "question \'a\': noul criteria must be an '
+             b'object with true and false", "type": "validation_error"}}')
+
+
+class _Body:
+    """A response body that reads once, like the socket behind a real
+    `HTTPError` — `exc.read()` is the only access the client gets.
+
+    `close()` is not decoration: `HTTPError` adopts the fp it is handed and the
+    stdlib later finalises it, so a stub without it surfaces as an unraisable
+    `AttributeError` in whatever test happens to trigger the GC — a warning pinned
+    to nothing, which is how a suite starts collecting failures it did not cause.
+    """
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self):
+        data, self._data = self._data, b""
+        return data
+
+    def close(self):
+        self._data = b""
+
+
+def _raise_http(monkeypatch, code: int, body: bytes) -> None:
+    def _open(req, timeout=None):
+        raise urllib.error.HTTPError("u", code, "nope", {}, _Body(body))
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _open)
+
+
+def test_a_4xx_fills_reject_with_the_engines_own_sentence(monkeypatch):
+    """The cause has to leave the process, because it names the field the caller
+    got wrong. Note the return value is still `None`: the caller's three-valued
+    reading is untouched, and the explanation travels beside it."""
+    _raise_http(monkeypatch, 422, _422_BODY)
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul",
+                                     "criteria": "needs a reply now"}},
+                         reject=reject) is None
+    assert reject["status"] == 422
+    assert reject["message"] == ("question 'a': noul criteria must be an object "
+                                 "with true and false")
+
+
+def test_a_4xx_that_is_not_json_reports_its_status_and_quotes_nothing(monkeypatch):
+    """A proxy's page or a login wall is not the engine's sentence, so it is not
+    quoted into a prompt: the status alone is the fact that survives, and it is
+    the one the caller needs — it says the engine answered and refused."""
+    _raise_http(monkeypatch, 400, b"<html>the front proxy said no</html>")
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject == {"status": 400}, reject
+
+
+def test_a_4xx_json_without_the_message_field_keeps_its_own_head(monkeypatch):
+    """`error.message` is what this engine sends; `detail` is what a FastAPI
+    validator in front of it sends. Both are the engine's words, so either is safe
+    to quote, and the fallback is why a shape change upstream does not silently
+    turn a refusal back into an unexplained `None`."""
+    _raise_http(monkeypatch, 422, b'{"detail":"canvas too wide"}')
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject["status"] == 422
+    assert "canvas too wide" in reject["message"], reject
+
+
+def test_a_5xx_leaves_reject_empty_so_the_caller_says_unreachable(monkeypatch):
+    """The distinction the whole change rests on, at the layer that makes it. The
+    body here is deliberately the *persuasive* 422 sentence, because that is the
+    shape of the risk: a vLLM upstream that dies mid-generation comes back 500
+    with text in it, and quoting that text would tell the caller its arguments
+    were wrong when nothing of the kind was established. A 500 on this path is
+    also what a hung upstream read looks like — there is no 504 — so the status
+    itself is not evidence of a refusal."""
+    _raise_http(monkeypatch, 500, _422_BODY)
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject == {}, reject
+
+
+@pytest.mark.parametrize("boom", [
+    urllib.error.URLError("dns"),
+    ConnectionRefusedError("no engine"),
+    TimeoutError("hung"),
+])
+def test_a_transport_failure_leaves_reject_empty(monkeypatch, boom):
+    """Same reason, the more common cause: nothing answered, so there is nothing
+    to quote and `reject` stays empty for the caller to read as an outage."""
+    def _open(req, timeout=None):
+        raise boom
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _open)
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject == {}
+
+
+def test_a_malformed_200_body_leaves_reject_empty(monkeypatch):
+    """200 with an unreadable body is a malformed answer, not a refusal: the
+    engine never said the arguments were wrong, so the caller must not be told it
+    can fix them."""
+    def _open(req, timeout=None):
+        class _R:
+            def read(self):
+                return b"<html>not json</html>"
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return _R()
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _open)
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject == {}
+
+
+def test_a_caller_that_passes_no_reject_dict_is_unaffected(monkeypatch):
+    """The back-compat half: four seam sites and the eval arms call this with no
+    new argument, and the fold they depend on must behave exactly as before."""
+    _raise_http(monkeypatch, 422, _422_BODY)
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}) is None
+
+
+def test_a_4xx_message_over_the_cap_is_marked_not_quoted(monkeypatch):
+    """The message is bound before it reaches a prompt: a tool reply is
+    re-hydrated into the primary's context, and an engine error body is text
+    someone else controls. Long becomes a length — `[:300]` alone would cut
+    mid-sentence and read as if that were all the engine said. The body is
+    parseable JSON on purpose: a non-JSON page is dropped whole by
+    `test_a_4xx_that_is_not_json_reports_its_status_and_quotes_nothing`, and this
+    node is about the cap, so nothing here asserts unless the message survives
+    parsing to be capped at all."""
+    _raise_http(monkeypatch, 422,
+                json.dumps({"error": {"message": "y" * 5000}}).encode())
+    reject: dict = {}
+    assert djev.ask_sync("s", {"a": {"type": "noul"}}, reject=reject) is None
+    assert reject["status"] == 422
+    msg = reject["message"]
+    assert "y" * djev.REJECT_MESSAGE_MAX_CHARS in msg, len(msg)
+    assert "y" * (djev.REJECT_MESSAGE_MAX_CHARS + 1) not in msg, len(msg)
+    assert "not quoted" in msg, msg
+    assert len(msg) < djev.REJECT_MESSAGE_MAX_CHARS + 40, msg
+
+
+def test_the_reject_cap_is_a_number_and_not_an_open_quote():
+    """The bound exists so that a validation dump cannot ride a tool reply into
+    the primary's context, where it is re-hydrated every turn it is repeated. A
+    node asserting the exact figure would be decorum and would go red on any
+    re-tune; the property worth pinning is that the field is capped at all — an
+    unbounded pass-through is the shape that does the damage."""
+    cap = djev.REJECT_MESSAGE_MAX_CHARS
+    assert isinstance(cap, int) and 0 < cap <= 1000, cap
+
+
+def _serve_httpx(monkeypatch, status: int, content: bytes, payload: dict) -> None:
+    """Stand in for `httpx.AsyncClient`, the transport `ask` uses and `ask_sync`
+    does not.
+
+    The tool handler reaches the engine through `ask`, so a file that mocks only
+    `urllib.request.urlopen` proves the sync twin and leaves the branch that
+    actually spent the 9 calls unexercised. `json()` returns a real, parsable
+    answer on purpose: were the client to parse a non-200 body, `ask` would return
+    `Answers` and the `is None` assertion below would fail, instead of the node
+    passing on an exception the client swallows.
+    """
+    import httpx
+
+    class _Resp:
+        status_code = status          # the class body reads the caller's scope
+
+        def __init__(self):
+            self.content = content
+
+        def json(self):
+            return payload
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.parametrize("status,should_quote", [(422, True), (500, False)])
+def test_the_async_twin_quotes_a_4xx_and_never_a_5xx(monkeypatch, status,
+                                                     should_quote):
+    """The tool's own path, across the transport the tool actually crosses.
+
+    `djev_decide` awaits `ask`, so the 4xx/5xx line clause 4 draws is really made
+    here, not in the urllib twin. Both arms are served the same persuasive body —
+    the real 422 sentence — because the failure worth guarding is a dead upstream
+    that answers 500 with text in it: quoting that would tell the caller its
+    arguments were wrong when nothing of the kind was established.
+    """
+    parsable = _response({"a": {"type": "noul", "noul": 0.9}},
+                         {"a": {"label_mass": 0.99, "argmax_is_label": True}})
+    _serve_httpx(monkeypatch, status, _422_BODY, parsable)
+    reject: dict = {}
+    assert asyncio.run(djev.ask("s", {"a": {"type": "noul"}},
+                                reject=reject)) is None
+    if should_quote:
+        assert reject["status"] == 422, reject
+        assert "noul criteria" in reject["message"], reject
+    else:
+        assert reject == {}, reject
 
 
 def test_disabled_slot_never_opens_a_socket(monkeypatch):

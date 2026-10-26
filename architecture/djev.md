@@ -1215,7 +1215,13 @@ a single judgement already in hand needs no call. Both descriptions lead with
   Never act on `value > 0.5`.
 - Read `label_mass` before trusting an answer, and treat
   `warning`/`warning_uninformative` as "no answer".
-- An error result means djev did not answer. Carry on with what you had.
+- Two different errors come back, and they want opposite reactions. "djev did not
+  answer" means carry on with what you had. "djev rejected the arguments" means the
+  engine is up and said what is wrong with the call — fix the shape and retry. A
+  `noul` question's `criteria`, if given at all, must be
+  `{"true": <what makes it yes>, "false": <what makes it no>}`; a bare sentence is
+  refused (#3376: 9 of the 15 `djev_decide` calls ever made were that mistake
+  reported as an outage).
 
 ### 9.2 From code
 
@@ -1389,7 +1395,7 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 
 - **Neither client entry point has a `samples` default**, one read or four. The
   ~40 ms headline is `samples=1`. `ask` and `ask_sync` both take `samples=None`
-  (`app/djev.py:510`, `:585`) and `_body` writes the key only when it is not
+  (`app/djev.py:570`, `:664`) and `_body` writes the key only when it is not
   `None`, so a caller that does not name one gets the **server's** `"auto"`
   policy (§3.3), not one read — which is what this page used to call "the
   client's default", a different claim about a different object. Both seams that

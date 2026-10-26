@@ -257,6 +257,45 @@ def _samples_arg(args: dict) -> "tuple[int | None, str | None]":
     return n, None
 
 
+#: The keys a `noul` rubric must carry. The engine renders its prompt from
+#: `crit.get("true")` / `crit.get("false")` and checks only `isinstance(crit,
+#: dict)` (`structured_server.py:742`, `:135`), so a `{"yes": ..., "no": ...}`
+#: object passes its door and answers with two empty label descriptions — a
+#: wrong call that reads as an answer. Checking the keys here refuses both the
+#: prose and the wrong keys, before a socket is opened.
+_NOUL_CRITERIA_KEYS = ("true", "false")
+
+
+def _noul_criteria_error(qid: str, crit: Any) -> str | None:
+    """Refuse a `noul` criteria the engine cannot read, without inventing one.
+
+    Absent is fine and is the shape most calls use: a noul with no rubric is
+    the plain "is this true of the state?" question, and the engine answers it —
+    all 6 `djev_decide` calls that ever got answers had criteria absent or typed
+    for `choice`/`score`. Present-but-unreadable is the case that cost 9 calls:
+    the schema invited prose by naming the shape for `choice` and `score` and
+    not for `noul`, every criteria-bearing call wrote prose, the engine answered
+    422, and the fold in `_decide` called that an outage.
+
+    The fix is a refusal, never an expansion. Turning `"needs a reply now"` into
+    `{"true": "needs a reply now", "false": ???}` would put words in the
+    caller's mouth that the engine then scores against as if the caller had
+    written the rubric — the same invention on the missing key as on the string.
+    """
+    if crit is None:
+        return None
+    if (isinstance(crit, dict)
+            and all(isinstance(crit.get(k), str) and crit[k].strip()
+                    for k in _NOUL_CRITERIA_KEYS)):
+        return None
+    return (f"question {qid!r}: a noul's criteria, if given, must be an object "
+            f"with a non-empty 'true' and a non-empty 'false' description — "
+            f"{{\"true\": \"what makes it yes\", \"false\": \"what makes it no\"}}. "
+            f"A prose string is refused rather than invented into a rubric, and "
+            f"the shape can be left out entirely for a plain yes/no. Nothing was "
+            f"decided; correct the shape and call again.")
+
+
 def _validate(questions: Any) -> str | None:
     if not isinstance(questions, dict) or not questions:
         return "questions must be a non-empty object of id -> question"
@@ -278,6 +317,10 @@ def _validate(questions: Any) -> str | None:
         if kind == "score" and (not isinstance(crit, list) or len(crit) < 2):
             return (f"question {qid!r}: a score needs criteria as an ORDERED "
                     f"list of at least two level names, worst first")
+        if kind == "noul":
+            bad = _noul_criteria_error(qid, crit)
+            if bad:
+                return bad
     return None
 
 
@@ -330,12 +373,24 @@ async def _decide(args: dict) -> str:
     if samples_err:
         return _err(samples_err)
 
+    # Filled only by a 4xx (`app/djev.py::_fill_reject`), which is the one
+    # failure the engine explains. A dict rather than an exception because the
+    # engine's own answer for every other failure is a bare None, and the
+    # outage sentence below is the honest reading of those.
+    reject: dict = {}
     out = await djev.ask(
         state, questions, seam="tool:decide",
         instructions=str(args.get("instructions") or "") or None,
-        samples=samples,
+        samples=samples, reject=reject,
         timeout=float(args.get("timeout_seconds") or djev.DEFAULT_TIMEOUT_S))
     if out is None:
+        if reject.get("status"):
+            return _err(
+                f"djev rejected the arguments (HTTP {reject['status']}, a "
+                f"schema/argument error, not an outage — the engine answered): "
+                f"{reject.get('message') or 'it gave no message'}. Nothing was "
+                f"decided; fix the question's shape and call again.",
+                http_status=reject["status"])
         return _err("djev did not answer (engine unreachable, disabled, or the "
                     "response was malformed). No decision was made.")
     body = out.as_dict() if args.get("verbose") else _compact(out)
@@ -468,13 +523,12 @@ async def list_tools():
                         "type": "object",
                         "description":
                             "id -> {type, instructions, criteria}. type is "
-                            "'noul' (yes/no, criteria optional), 'choice' "
-                            "(criteria maps option name -> description) or "
-                            "'score' (criteria is an ORDERED list of level "
-                            "names, worst first). Option order changes the "
-                            "answer, so keep it fixed across calls you intend "
-                            f"to compare. At most "
-                            f"{djev.CANVAS_CHUNK_QUESTIONS} questions.",
+                            "'noul' (yes/no; criteria, if given, "
+                            "{true: desc, false: desc}), 'choice' (criteria "
+                            "maps option name -> description) or 'score' "
+                            "(criteria is an ORDERED list of level names, "
+                            "worst first). Option order changes the answer, so "
+                            "keep it fixed across calls you intend to compare.",
                     },
                     "instructions": {"type": "string", "description":
                                      "Optional context prepended to every question"},
@@ -507,9 +561,8 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "verbose": {"type": "boolean", "description":
-                                "Accepted for symmetry with the other status "
-                                "tools; this route already returns everything "
-                                "it knows."},
+                                "Accepted for symmetry; this route already "
+                                "returns everything it knows."},
                 },
             },
         ),

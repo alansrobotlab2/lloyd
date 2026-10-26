@@ -726,3 +726,220 @@ def test_a_status_that_cannot_read_the_ranker_says_so(monkeypatch):
                         lambda: (_ for _ in ()).throw(RuntimeError("no config")))
     out = _call("djev_status", {})
     assert "error" in out["shadow"]["structurally_dark"]
+
+
+# ---------------------------------------------------------------------------
+# #3376 — a `noul` criteria the engine cannot read, and a 4xx that is not an outage
+#
+# Two defects, one reported symptom. `_validate` checked criteria shape for
+# `choice` and `score` and nothing for `noul`, so a prose criteria went to the
+# socket; the engine answered 422; `app.djev.ask` folded every failure into
+# `None`; and the handler's one sentence for `None` claimed the engine was
+# unreachable. Measured 2026-10-26 over ~/lloyd-data/sessions/*.json: 15
+# `djev_decide` calls ever made, 9 of them the outage sentence, all 9 carrying at
+# least one prose-string `noul` criteria, and the 6 that answered had `criteria`
+# absent or shaped for `choice`/`score`. The schema invited the prose by naming
+# the shape for the other two types and not for this one, so the fix is both
+# halves: refuse it here, and say the shape where the caller reads.
+#
+# Engine readings taken on this box on 2026-10-26, `POST /v1/systemone`, the
+# production body shape of `app/djev.py::_body`:
+#   criteria "needs a reply now"     -> HTTP 422, body reproduced as bytes below
+#   criteria {"true": …, "false": …} -> HTTP 200, answers.a.noul 0.9848,
+#                                       timing.reads 4 under policy auto/max 4
+#   criteria {"yes": …, "no": …}     -> HTTP 200 with two EMPTY label
+#     descriptions: the engine checks isinstance(dict) only
+#     (structured_server.py:742) and renders from crit.get("true")/("false")
+#     (:135). So a dict is refused on its keys too, client-side.
+# ---------------------------------------------------------------------------
+
+#: The engine's 422 body for a prose `noul` criteria, verbatim. Kept as bytes
+#: because the seam under test is what this client does with that body.
+ENGINE_422_BODY = (b'{"error": {"message": "question \'a\': noul criteria must '
+                   b'be an object with true and false", "type": '
+                   b'"validation_error"}}')
+ENGINE_422_MESSAGE = ("question 'a': noul criteria must be an object with true "
+                      "and false")
+
+
+@pytest.mark.parametrize("crit", [
+    "needs a reply now",                         # the prose 9 calls wrote
+    {"yes": "needs a reply", "no": "can wait"},  # passes the engine, answers blind
+    {"true": "needs a reply"},                   # half a rubric
+    {"true": "needs a reply", "false": "   "},   # whitespace is no description
+    {},                                          # an empty object is no rubric
+    ["needs a reply", "can wait"],               # an ORDERED list is score's shape
+    7,                                           # a number is nobody's shape
+])
+def test_decide_refuses_a_noul_criteria_the_engine_could_not_read(monkeypatch, crit):
+    """Clauses 1 and 2 together: named, refused, and no socket opened.
+
+    The error has to name the question id and the required keys, because the
+    alternative — the fold that spent 9 calls — told a caller the engine was down
+    when the caller's own arguments were wrong. And it has to stay a template:
+    filling the caller's sentence into `{"true": …}` and inventing the `false`
+    side would hand the engine a rubric nobody wrote, which is a worse decision
+    than refusing to decide.
+    """
+    seen = _capturing_ask(monkeypatch)
+    out = _call("djev_decide", {"state": "the mail asks for a reply now",
+                                "questions": {"a": {"type": "noul",
+                                                    "criteria": crit}}})
+    assert seen == [], "a criteria the engine cannot read must not be sent to it"
+    assert set(out) == {"error"}, out           # an error, never an answer
+    err = out["error"]
+    assert "'a'" in err, err                    # names the question
+    assert "criteria" in err and "noul" in err, err
+    assert '"true"' in err and '"false"' in err, err    # states the shape
+    assert "what makes it yes" in err and "what makes it no" in err, (
+        f"the shape is a template, not text invented for the caller: {err}")
+    assert "needs a reply" not in err, (
+        f"the caller's prose came back as if it had been made into a rubric: {err}")
+
+
+def test_a_refused_noul_call_says_nothing_was_decided(monkeypatch):
+    """The caller is deciding something and this call did not decide it. The old
+    text did say "No decision was made", beside a claim about the engine; the new
+    one has to keep saying so, or a refusal reads like a non-answer that can be
+    retried unchanged."""
+    _capturing_ask(monkeypatch)
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"b": {"type": "noul",
+                                                    "criteria": "prose"}}})
+    assert "nothing was decided" in out["error"].lower(), out
+    assert "'b'" in out["error"], out
+
+
+@pytest.mark.parametrize("questions", [
+    {"a": {"type": "noul"}},                                  # no rubric at all
+    {"a": {"type": "noul", "criteria": {"true": "now", "false": "later"}}},
+])
+def test_a_readable_noul_question_still_reaches_the_engine_unchanged(monkeypatch,
+                                                                     questions):
+    """Clause 3: the guard must not be the narrow one that blocks a working call.
+
+    The absent case is what every answered call in the measured traffic used, so
+    refusing it would turn 6 working calls into 0 to fix 9 broken ones. The
+    object case is the shape the engine answers today with `noul` 0.9848, and it
+    has to arrive as the caller wrote it — a client that rewrote the keys would
+    be the next silent rubric.
+    """
+    asked = []
+
+    async def _ask(*a, **k):
+        asked.append((a, k))
+        return None
+    monkeypatch.setattr(djev, "ask", _ask)
+    _call("djev_decide", {"state": "s", "questions": questions})
+    assert len(asked) == 1, asked
+    args, kwargs = asked[0]
+    # `state` and `questions` go positionally; a rewrite of either would have to
+    # be read out of where they actually landed.
+    sent = kwargs["questions"] if "questions" in kwargs else args[1]
+    assert sent == questions
+
+
+def test_the_other_two_types_keep_their_own_criteria_rules(monkeypatch):
+    """The rail against "fixing" this by generalising the noul rule over
+    everything: a `score` takes an ORDERED LIST and a `choice` a map of options,
+    and neither is an object with true/false. Applying the noul shape to them
+    would refuse both, which is why `_validate` keeps one predicate per type."""
+    asked = []
+
+    async def _ask(*a, **k):
+        asked.append(k)
+        return None
+    monkeypatch.setattr(djev, "ask", _ask)
+    _call("djev_decide", {"state": "s", "questions": {
+        "a": {"type": "score", "criteria": ["irrelevant", "relevant"]},
+        "b": {"type": "choice", "criteria": {"yes": "it does",
+                                             "no": "it does not"}}}})
+    assert len(asked) == 1, asked
+
+
+def _engine_answered(monkeypatch, status: int, body: bytes) -> None:
+    """`app.djev.ask` as it behaves on a non-200 answer: it fills the caller's
+    `reject` dict through the real `app.djev._fill_reject`, then returns None.
+
+    Not a hand-written dict — then this node would only prove the handler reads a
+    dict. The seam under test is that the engine's sentence survives from its
+    body into the tool's reply, so the real extractor is on the path.
+    """
+    async def _ask(*a, **k):
+        djev._fill_reject(k.get("reject"), status, body)
+        return None
+    monkeypatch.setattr(djev, "ask", _ask)
+
+
+def _engine_silent(monkeypatch) -> None:
+    """`app.djev.ask` as it behaves on every failure that gives no explanation:
+    a refused connection, a timeout, a 5xx (`_fill_reject` is not even reached at
+    that status) and a malformed body. `reject` stays empty and it returns None."""
+    async def _ask(*a, **k):
+        return None
+    monkeypatch.setattr(djev, "ask", _ask)
+
+
+def test_an_engine_4xx_reaches_the_caller_as_the_argument_error_it_is(monkeypatch):
+    """Clause 4. Nine calls were told "engine unreachable, disabled, or the
+    response was malformed" about a request the engine had just answered, in a
+    sentence naming three causes none of which applied — so they were retried
+    unchanged or abandoned. The engine's own message is the only thing that could
+    have told the caller what to fix."""
+    _engine_answered(monkeypatch, 422, ENGINE_422_BODY)
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"a": {"type": "noul"}}})
+    err = out["error"]
+    assert ENGINE_422_MESSAGE in err, err        # quotes the engine
+    assert "422" in err, err                     # and its status
+    assert "unreachable" not in err.lower(), err
+    assert "schema" in err.lower() or "argument" in err.lower(), err
+
+
+def test_an_engine_4xx_that_sends_no_body_still_does_not_claim_an_outage(monkeypatch):
+    """A 4xx that says nothing is still a 4xx: the status is the fact, and the
+    outage sentence would still be a claim about a socket that answered."""
+    _engine_answered(monkeypatch, 400, b"")
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"a": {"type": "noul"}}})
+    assert "400" in out["error"], out
+    assert "unreachable" not in out["error"].lower(), out
+    assert "no message" in out["error"].lower(), out
+
+
+def test_a_failure_that_gives_no_answer_keeps_the_outage_sentence(monkeypatch):
+    """The other side of clause 4, and the half that keeps this honest: a refused
+    connection, a timeout, a 5xx or a malformed body answer nothing at all, and
+    for those the existing sentence is the truth. `_fill_reject` records no 5xx
+    (`app/djev.py`), so the dict this branch reads can only be non-empty for a
+    4xx — which is what makes "the engine answered" a claim it can support."""
+    _engine_silent(monkeypatch)
+    out = _call("djev_decide", {"state": "s",
+                                "questions": {"a": {"type": "noul"}}})
+    assert "did not answer" in out["error"], out
+    assert "unreachable" in out["error"].lower(), out
+
+
+def test_the_advertised_questions_description_names_the_noul_shape():
+    """Clause 5, read off the advertised schema rather than out of the source:
+    the field said "criteria optional" and nothing else, which is the sentence
+    that let 9 callers write prose. The ceiling this wording lives under is
+    `tests/test_mcp_layer.py::test_advertised_catalog_stays_under_its_token_ceiling`
+    — 22,488 estimated tokens of 22,500 after this change against 22,494 before
+    it, paid for by dropping the question count from this field (the tool's own
+    first line still states it) and one clause of `djev_status`'s `verbose`."""
+    desc = _decide_props()["questions"]["description"]
+    assert "criteria optional" not in desc, desc
+    assert "{true: desc, false: desc}" in desc, desc
+    assert "'noul'" in desc and "'choice'" in desc and "'score'" in desc, desc
+
+
+def test_the_question_count_is_still_advertised_after_the_trim():
+    """The over-correction rail on that budget: the count came out of the
+    `questions` field, not out of the tool. `CANVAS_CHUNK_QUESTIONS` is 32 and the
+    engine refuses more, so a description that quietly stopped naming it would
+    push callers into a different, worse error path."""
+    from agent_mcp import djev as t
+    tool = next(x for x in asyncio.run(t.list_tools()) if x.name == "djev_decide")
+    assert djev.CANVAS_CHUNK_QUESTIONS == 32
+    assert str(djev.CANVAS_CHUNK_QUESTIONS) in tool.description, tool.description
