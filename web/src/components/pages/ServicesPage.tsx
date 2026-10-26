@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock } from "lucide-react";
-import { api, type ServiceStatus, type ServiceDetail, type LloydServiceUnit, type LloydServiceDetail } from "../../api";
+import { Activity, Play, Square, RotateCcw, RefreshCw, ChevronDown, Terminal, Cpu, HardDrive, Clock, Power } from "lucide-react";
+import { api, type GpuPowerStatus, type ServiceStatus, type ServiceDetail, type LloydServiceUnit, type LloydServiceDetail } from "../../api";
 import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
 
 export default function ServicesPage() {
@@ -24,6 +24,10 @@ export default function ServicesPage() {
   const [lloydExpandedUnit, setLloydExpandedUnit] = useState<string | null>(null);
   const [lloydDetail, setLloydDetail] = useState<LloydServiceDetail | null>(null);
   const [lloydDetailLoading, setLloydDetailLoading] = useState(false);
+
+  // GPU power switch
+  const [gpu, setGpu] = useState<GpuPowerStatus | null>(null);
+  const [gpuError, setGpuError] = useState<string | null>(null);
 
   const focusedService = lloydExpandedUnit || expandedId;
   useReportMcFocus(
@@ -74,6 +78,40 @@ export default function ServicesPage() {
     const interval = setInterval(refreshLloyd, 10000);
     return () => clearInterval(interval);
   }, [refreshLloyd]);
+
+  const refreshGpu = useCallback(async () => {
+    try {
+      setGpu(await api.gpuPower());
+    } catch {
+      // keep stale data
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshGpu();
+    const busy = gpu?.phase === "stopping" || gpu?.phase === "starting";
+    const interval = setInterval(refreshGpu, busy ? 2000 : 5000);
+    return () => clearInterval(interval);
+  }, [refreshGpu, gpu?.phase]);
+
+  const toggleGpu = async () => {
+    if (!gpu || gpu.phase === "stopping" || gpu.phase === "starting") return;
+    const turningOff = gpu.phase === "on";
+    if (turningOff) {
+      const ok = window.confirm(
+        "Pause the workers and stop every GPU service (primary LLM, djev, qmd, TTS, voice)? " +
+        "Chat, recall and voice will be unavailable until you bring them back.",
+      );
+      if (!ok) return;
+    }
+    setGpuError(null);
+    try {
+      setGpu(await api.setGpuPower(!turningOff));
+    } catch (err) {
+      setGpuError(err instanceof Error ? err.message : String(err));
+    }
+    refresh();
+  };
 
   const fetchDetail = useCallback(async (id: string) => {
     setDetailLoading(true);
@@ -282,6 +320,43 @@ export default function ServicesPage() {
           )}
         </div>
       </div>
+
+      {/* GPU power switch */}
+      {gpu?.phase && (() => {
+        const busy = gpu.phase === "stopping" || gpu.phase === "starting";
+        const off = gpu.phase === "off" || gpu.phase === "starting";
+        const label = {
+          on: "Stop GPU services",
+          stopping: "Stopping GPU services…",
+          off: "Start GPU services",
+          starting: "Starting GPU services…",
+        }[gpu.phase];
+        const sub = busy
+          ? gpu.detail
+          : off
+            ? `Workers paused, ${gpu.stopped.length} service(s) stopped` +
+              (gpu.since ? ` since ${new Date(gpu.since).toLocaleTimeString()}` : "")
+            : "Pauses workers and stops every service on a GPU";
+        const err = gpuError || gpu.error;
+        return (
+          <div className="space-y-1.5">
+            <button
+              onClick={toggleGpu}
+              disabled={busy}
+              className={`w-full flex items-center justify-center gap-3 rounded-xl px-5 py-4 text-white font-semibold transition-colors disabled:cursor-wait ${
+                off
+                  ? "bg-emerald-600 hover:bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.35)]"
+                  : "bg-red-600 hover:bg-red-500 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+              } ${busy ? "opacity-80" : ""}`}
+            >
+              {busy ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Power className="w-5 h-5" />}
+              <span className="text-base">{label}</span>
+              {sub && <span className="text-xs font-normal opacity-80 hidden sm:inline">· {sub}</span>}
+            </button>
+            {err && <div className="text-xs text-red-400 px-1">{err}</div>}
+          </div>
+        );
+      })()}
 
       {/* Gateway restart overlay */}
       {gatewayRestarting && (

@@ -490,7 +490,15 @@ async def _sync_llm_slots() -> None:
         log.info("services.sync_secondary_llm=false → skipping LLM slot reconcile")
         return
 
-    from app import llm_slots
+    from app import gpu_power, llm_slots
+
+    # The Services tab's GPU switch is off: starting a slot now would put djev
+    # back on GPU 2 behind the operator's back (`app/gpu_power.py`).
+    if gpu_power.is_off():
+        gpu_power.reacquire_lock_at_boot()
+        log.info("GPU services are switched off (%s) → skipping LLM slot reconcile",
+                 gpu_power.marker_path())
+        return
 
     wanted = llm_slots.enabled_slots(CONFIG)
     if len(wanted) > 1:

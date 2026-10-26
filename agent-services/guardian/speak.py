@@ -1201,6 +1201,23 @@ def speak_now(text: str, cfg: dict, state_dir: Path,
         return False
 
 
+#: Written by the backend's GPU power switch (`app/gpu_power.py`) into the guardian
+#: state dir while every GPU program, the synthesiser included, is deliberately
+#: stopped. Read here and by `guardian.evaluate_liveness`.
+GPU_OFF_MARKER = "gpu_off.json"
+
+
+def gpu_off_programs(state_dir: Path | None) -> frozenset:
+    """The programs the GPU switch stopped on purpose; empty when it is on."""
+    if state_dir is None:
+        return frozenset()
+    try:
+        data = json.loads((Path(state_dir) / GPU_OFF_MARKER).read_text(encoding="utf-8"))
+        return frozenset(str(p) for p in (data.get("programs") or []))
+    except (OSError, ValueError, AttributeError):
+        return frozenset()
+
+
 def dispatch(level: str, title: str, body: str, state_dir: Path, *,
              window: float, key: str | None = None,
              verbatim: str | None = None, force: bool = False) -> bool:
@@ -1235,6 +1252,11 @@ def dispatch(level: str, title: str, body: str, state_dir: Path, *,
         # One expression for the slot, and it crosses the worker boundary with the text:
         # the process that discovers the synthesiser is dead is not the process that
         # reserved the hour, so without `--key` it cannot know what to give back (#2256).
+        # The GPU switch stopped the synthesiser on purpose: an utterance now
+        # cannot be heard and must not be journaled as a voice loss.
+        if gpu_off_programs(state_dir):
+            _log(state_dir, f"GPU services switched off — withholding speech for {title!r}")
+            return False
         slot = key or title or "alert"
         if not should_speak(slot, state_dir, window, force=force):
             return False

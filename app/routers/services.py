@@ -1,10 +1,12 @@
 """Services tab endpoints — supervisord process health for infra + lloyd services."""
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app import gpu_power
 from app.paths import LOGS_DIR, SERVICE_LOGS_DIR
 from app.supervisor_client import (
     all_services,
@@ -157,3 +159,23 @@ async def get_agent_service_detail(unit: str = ""):
         "logLines": log_lines,
         "rawStatus": raw,
     })
+
+
+@router.get("/api/services/gpu-power")
+async def gpu_power_status():
+    """Whether the GPU services are switched off, and what the switch is doing."""
+    return JSONResponse(await asyncio.to_thread(gpu_power.status))
+
+
+@router.post("/api/services/gpu-power")
+async def gpu_power_set(request: Request):
+    """`{"on": false}` pauses the workers and stops every GPU program;
+    `{"on": true}` brings back the ones that were up. Returns at once — the
+    transition runs in the background and `GET` reports its phase."""
+    data = await request.json()
+    want_on = bool(data.get("on"))
+    refusal = gpu_power.begin_on() if want_on else gpu_power.begin_off()
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    asyncio.create_task(gpu_power.power_on() if want_on else gpu_power.power_off())
+    return JSONResponse(await asyncio.to_thread(gpu_power.status))

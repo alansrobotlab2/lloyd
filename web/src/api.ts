@@ -532,6 +532,17 @@ export interface BrowserNavigateResult {
   error?: string
 }
 
+export interface GpuPowerStatus {
+  /** `on` / `off` at rest; `stopping` / `starting` while a transition runs. */
+  phase: 'on' | 'off' | 'stopping' | 'starting'
+  detail: string
+  error: string | null
+  since: string | null
+  /** The programs the switch stopped, and will start again. */
+  stopped: string[]
+  programs: { id: string; state: string }[]
+}
+
 export interface ServiceDetail {
   id: string
   name: string
@@ -1443,6 +1454,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ serviceId, action }),
     })
+  },
+
+  gpuPower(): Promise<GpuPowerStatus> {
+    return fetch(`${API_BASE}/services/gpu-power`).then(r => r.json())
+  },
+
+  async setGpuPower(on: boolean): Promise<GpuPowerStatus> {
+    const r = await fetch(`${API_BASE}/services/gpu-power`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err?.detail || `gpu-power failed: ${r.status}`)
+    }
+    return r.json()
   },
 
   lloydServices(): Promise<LloydServicesData> {

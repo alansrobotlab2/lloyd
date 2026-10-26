@@ -877,6 +877,9 @@ class Guardian:
                       f"synthesized {seconds:.2f}s at rms={rms}")
 
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
+        # The Services tab's GPU switch: what it stopped is stopped on purpose,
+        # and `agent-tts` must not be "recovered" behind it (`app/gpu_power.py`).
+        gpu_off = speak.gpu_off_programs(getattr(self, "gdir", None))
         for program in self.programs:
             info = snap["procs"].get(program)
             result = snap["probes"].get(program)
@@ -938,8 +941,9 @@ class Guardian:
                 # path ever touches. #2256: `agent-tts` sat STOPPED unowned for
                 # 45 minutes, and an unqualified flag would have hidden it for as
                 # long as an unrelated backend quarantine happened to last.
-                intentional_stop=(self.state.is_halted()
-                                  and program in policy.RESTART_ORDER),
+                intentional_stop=((self.state.is_halted()
+                                   and program in policy.RESTART_ORDER)
+                                  or program in gpu_off),
             )
             if down:
                 return True, f"{program}: {reason}"
