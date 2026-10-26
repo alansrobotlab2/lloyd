@@ -20,7 +20,13 @@ logs its breakdown as one `[latency]` line — pipecat's
     first_clause    the first clause went to TTS
     first_tts_byte  the TTS server's first PCM
     first_pushed    the first frame went into the LiveKit source
-    first_played    that frame's estimated playout (push + audio already queued)
+    first_played    that frame's estimated playout (push + audio already queued) —
+                    the frame's *start*, not the first sample inside it that is
+                    audible. A frame is 100 ms, and `scripts/voice/tts_head_silence.py`
+                    measured what sits in front of the audio within it on production's
+                    first clause at p50 20 ms over N=44 (#3366; the engine samples, so
+                    p90 came out 60 ms and 97 ms on two runs): small, not zero, and no
+                    13th mark exists to close it.
 
 Marks are first-writer-wins, so a stage that happens many times (TTS bytes, a
 frame per 100 ms) records only its first occurrence. In the logged line
@@ -138,10 +144,19 @@ class TurnTimeline:
                         too would read as though `speech_end` never happened, which is
                         the survivorship half of the mistake the trend is built to
                         avoid.
-          `eos_to_audio`  end of speech to first audible audio, or `None` when either
-                        end is missing — a typed turn has no `speech_end`, a turn
-                        cancelled before any audio has no `first_played`. `None` and
-                        never 0.0: a zero there is the fastest turn on the box.
+          `eos_to_audio`  end of speech to the playout of the first pushed *frame*, or
+                        `None` when either end is missing — a typed turn has no
+                        `speech_end`, a turn cancelled before any audio has no
+                        `first_played`. `None` and never 0.0: a zero there is the fastest
+                        turn on the box. Not the first sound the caller hears: that frame
+                        is 100 ms and whatever silence precedes the speech inside it is
+                        attributed to nothing. #3366 measured that head on production's
+                        voice over 44 first clauses at p50 20 ms, twice
+                        (`scripts/voice/tts_head_silence.py`), which is why the mark was
+                        left standing and no `first_audible` stage added. The engine
+                        samples its tokens, so a percentile from one run of that script
+                        is a draw, not a property: re-run it, not this sentence, if a
+                        tighter bound is ever needed.
           `max_gap_s`   the longest silence inside the reply.
           `label`       `voice` or `typed:user`. Their stage sets differ, so the trend
                         splits on it rather than pooling them.
