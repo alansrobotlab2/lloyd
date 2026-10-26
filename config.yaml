@@ -417,6 +417,31 @@ mcp_servers:
     - discord_list_channels
     - discord_send
     - discord_send_embed
+    # Mail mutation is off by default: a rebuild must not boot email_delete /
+    # email_empty_trash live. These fifteen were switched off in the Tools
+    # page, which writes the gitignored
+    # ~/lloyd-data/data/tool_overrides.yaml, so a fresh clone would not see
+    # them, and `app/config.py::_merge_tool_overrides` overwrites this list
+    # with the override's wholesale — so this block is inert on a box that has
+    # the override and decisive on one that does not (#3128, #1060). Copied
+    # verbatim, never re-derived: email_account_access, email_accounts and
+    # email_list_filters are annotated read-only in agent_mcp/annotations.py,
+    # so a mutator predicate yields twelve, not fifteen (#3385).
+    - email_account_access
+    - email_accounts
+    - email_apply_filters
+    - email_create_filter
+    - email_create_folder
+    - email_delete
+    - email_delete_filter
+    - email_delete_folder
+    - email_empty_junk
+    - email_empty_trash
+    - email_list_filters
+    - email_move_folder
+    - email_rename_folder
+    - email_reorder_filters
+    - email_update_filter
     name: lloyd-mcp
     type: streamable-http
     url: http://127.0.0.1:8500/mcp
