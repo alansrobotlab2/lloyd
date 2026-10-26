@@ -127,7 +127,35 @@ changing any of these. Five tiers, covering every job the table above names. The
 do not follow the function groups, and the top row is the least uniform of them:
 writing a nightly reflection report, consolidating the skills library and
 rewriting the entity store are all "durable state", and they sit side by side —
-the row answers the permission question, never the size question:
+the row answers the permission question, never the size question.
+
+**The unit of account, because "durable state" is what the rows are built out of
+and the phrase defined nothing until #3335 put it here.** The permission above is
+descriptive, not permissive: the rows record what a run leaves behind when nobody
+is watching, not what some lane allows it to touch, and no row here is a grant or
+the lack of one. `FILE_NOTE` = `{Write, vault_write}`
+(`app/harness/capabilities.py:91`) is in every scheduled task's base set beside
+`Bash` and `Edit` (`app/harness/capabilities.py:346`), and
+`PROTECTED_WRITE_ROOTS` (`app/harness/protected_paths.py:151`) holds one vault
+path, `lloyd/SOUL.md`, while `PROTECTED_SHELL_RO_ROOTS`
+(`app/harness/protected_paths.py:222`) adds `lloyd/USER.md` and
+`lloyd/MEMORY.md` on the Bash lane — so every other vault path is
+reachable by every job in this table, and a tier is something to read off a run,
+not something a tool enforces. A write **is durable state** when it lands in a
+store the fleet or a human reads back as the system's record: prose under
+`knowledge/`, `memory/` or `backlog/`, a `SKILL.md` in the skills library, the
+derived fact tree, or an appended row of a dated series under `~/lloyd-data/`. It
+is **not** durable state when it is a job's own scratch — a file under
+`~/obsidian/skills/<skill>/scripts/` that the run rewrites for its own
+bookkeeping, prunes on a timer, and reads back itself, consumed by nothing
+downstream. **#68 is that case**, and it is the reason the definition is written
+down rather than implied: Step 5 rewrites
+`~/obsidian/skills/morning-brief-and-triage/scripts/state.json` — the ids already
+surfaced, pruned to 24 h each cycle — on every cycle that surfaces or suppresses
+an item, under the vault tree, and that write still earns it no row in the top
+tier. The unit is the reader, not the path: #47 rewriting a `SKILL.md` on that
+same tree *is* the top tier, because every later run reads what it wrote. The
+five rows, each with the count beside it:
 
 | Tier | Jobs | |
 |---|---|---|
@@ -261,9 +289,13 @@ mechanism and apply to every edge above:
 What the outside world did while nobody was looking. #30 and #53 write into
 `knowledge/`; #68 writes no knowledge note — what it produces for a human is a
 *conversation* (an inject that expires) rather than a file, which is why it has
-a write tier of its own. That tier answers the knowledge-prose question, not the
-"does it touch a file" one: Step 5 rewrites `scripts/state.json` inside its own
-skill directory, which is under the vault tree (#3334). It was also the only task file that
+a write tier of its own. That tier answers the durable-state question defined
+under [Write authority is the fault line](#write-authority-is-the-fault-line),
+not the "does it touch a file" one: Step 5 rewrites `scripts/state.json` inside
+its own skill directory, which is under the vault tree (#3334) — the write is
+real, and `scripts/state.json` is #68's own dedup scratch, pruned to 24 h each
+cycle and read back by nothing but its next run, so it is not durable state and
+earns no second row. It was also the only task file that
 named the **secondary** engine, the slot retired 2026-09-20: that line read
 `model: secondary` until #2632 set it to `primary` on 2026-10-13 — the value the
 job already ran at, because `resolve_model_alias` rewrites it (§#68). The park is

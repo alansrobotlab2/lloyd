@@ -729,15 +729,167 @@ def test_86_appears_in_exactly_one_write_authority_tier():
 
 
 def test_68_is_not_counted_as_a_durable_writer():
-    """#1505. #68's output is an inject into a live session (an entry with a
-    TTL) plus its own 24 h dedup state; it writes no vault file. The tier
-    table is the doc's answer to "what may write while nobody is watching", so
-    counting an injector there hides where the durable exposure really is.
+    """#1505, with its wording corrected by #3335. #68's output is an inject into
+    a live session (an entry with a TTL) plus its own 24 h dedup state — and it
+    *does* write a file under `~/obsidian/`: Step 5 rewrites
+    `~/obsidian/skills/morning-brief-and-triage/scripts/state.json` on every
+    cycle that surfaces or suppresses an item. That file is the job's own
+    bookkeeping, pruned to 24 h and read back by nothing but its next run, so it
+    is not durable state under the unit of account §Write authority now states;
+    this node's older blanket denial of any vault-tree write was false, which is
+    why #3334 could file the row as *hiding* a write. The tier table is the doc's
+    answer to "what does this job leave behind when nobody is watching", so
+    counting an injector in the durable row hides where the durable exposure
+    really is.
     """
     tiers = _table(TIERS_HEADER)
     hits = [t for t, (ids, _) in tiers.items() if "#68" in ids]
     assert hits == ["Injects expiring context unattended"], (
-        f"#68 is in {hits or 'no tier'}; its job writes no durable state")
+        f"#68 is in {hits or 'no tier'}; its only write is skill-local scratch "
+        "pruned to 24 h, which the unit of account excludes")
+
+
+# ── #3335 — the tier table's unit of account: what counts as "durable state" ──
+
+#: The label the definition paragraph carries in §Write authority is the fault
+#: line, and how the node below finds it. #1505 and #3334 filed the same row from
+#: opposite directions — one that the tier over-credited #68 with writes, one
+#: that it hid one — and neither could be settled from the document, because no
+#: sentence in it said which paths a write has to land in to be "durable state".
+#: The section says so now; this marker is what stops the saying rotting back
+#: into the bare phrase.
+_UNIT_OF_ACCOUNT_MARKER = "unit of account"
+
+#: Every case the definition has to keep naming. Each is load-bearing for one of
+#: the two readings that disagreed: the first two are the positive range (where a
+#: write *does* count), the next three are the excluded case spelled out rather
+#: than gestured at, and the last two pin the framing that the rows describe a
+#: run's output instead of licensing it — the framing #3335's own triage had to
+#: derive from `app/harness/capabilities.py` because the doc's "permission
+#: question" sentence implied a bar that no code enforces.
+_UNIT_OF_ACCOUNT_MUST_NAME = (
+    "knowledge/",                          # positive range: the vault's prose
+    "~/lloyd-data/",                       # positive range: the dated series
+    "~/obsidian/skills/<skill>/scripts/",   # the exclusion, as the doc spells it
+    "state.json",                          # the concrete case
+    "24 h",                                # what makes it scratch, not record
+    "#68",                                 # the job whose row was argued over
+    "descriptive",                         # the rows report; they do not license
+    "not permissive",
+)
+
+
+def _fault_line_paragraphs(text: str) -> list[str]:
+    """§Write authority is the fault line's paragraphs, raw, wraps intact.
+
+    Scoped to that section and cut at its next heading, because §Ingest, a hundred
+    lines below, restates the same ruling in its own words — and this file's
+    recurring defect (#1520, #1524) is two sections disagreeing while each one's
+    correct wording excuses the other's false one. Paragraphs, not lines: the doc
+    wraps near 88 columns, so the definition is one sentence across four lines and
+    matching it line by line would match nothing and read as absence.
+    """
+    after = text.split("### Write authority is the fault line", 1)
+    assert len(after) == 2, (
+        "architecture/autonomy-jobs.md has no §Write authority is the fault line "
+        "heading, so the tier table's unit of account has nowhere to live")
+    body = re.split(r"\n#{2,4} ", after[1], 1)[0]
+    return [p for p in re.split(r"\n\s*\n", body) if p.strip()]
+
+
+def _unit_of_account_paragraph(text: str) -> str | None:
+    """The paragraph defining what "durable state" ranges over; None if there is none.
+
+    Returns the *raw* text, so the node can delete exactly that paragraph and
+    demonstrate the failure on what is left instead of describing it.
+    """
+    for para in _fault_line_paragraphs(text):
+        flat = _flat(para).lower()
+        if _UNIT_OF_ACCOUNT_MARKER in flat and "durable" in flat:
+            return para
+    return None
+
+
+def test_the_tier_table_defines_what_counts_as_durable_state():
+    """#3335 clauses 1 and 2. The tier table is the doc's answer to what a job may
+    do "when nobody is watching", and the phrase its top row is built out of —
+    "durable state" — was defined nowhere in the file. That phrase is the whole
+    defect: #1505 read `| Injects expiring context unattended | #68 | 1 |` as
+    over-crediting #68 with writes, #3334 read the same row as hiding one, and the
+    document could settle neither, because #68 really does write under
+    `~/obsidian/` and really is not a durable writer. So the section states its
+    unit of account now, and a definition that has stopped naming the excluded
+    case no longer answers the question either filing asked.
+
+    Clause 2's "must fail on the pre-change doc" is demonstrated below on a seeded
+    copy — the definition deleted — rather than asserted, the way #2806's node
+    demonstrates its own seeded heading.
+    """
+    raw = _unit_of_account_paragraph(_text())
+    assert raw is not None, (
+        "§Write authority is the fault line types no unit-of-account definition "
+        f"(no paragraph pairs {_UNIT_OF_ACCOUNT_MARKER!r} with 'durable'), so 'may "
+        "this job touch the vault while unattended' is again a guess read off the "
+        "row that looks safest — the exact disagreement #1505 and #3334 ping-ponged")
+    missing = [m for m in _UNIT_OF_ACCOUNT_MUST_NAME if m not in _flat(raw)]
+    assert not missing, (
+        f"the unit-of-account paragraph no longer names {missing}; the exclusion is "
+        "the half that settles the mirror-image filings, and it has to name the "
+        "concrete case — #68's state.json, pruned to 24 h — not gesture at it")
+
+    # Stating the unit must not move anybody between tiers: #1505's recorded
+    # ruling was that the row is right and the definition was missing, so a diff
+    # that "fixes" the row instead of the prose is out of scope for this item.
+    hits = [t for t, (ids, _) in _table(TIERS_HEADER).items() if "#68" in ids]
+    assert hits == ["Injects expiring context unattended"], (
+        f"#68 is in {hits or 'no tier'}; #3335 defines the unit of account, it does "
+        "not re-tier for it")
+
+    # The failure this node exists to catch, demonstrated: delete the paragraph
+    # and the same read of the same file comes back with no definition. The tier
+    # table is proven to survive the deletion first, so what goes red is the
+    # missing definition and not a parse that broke alongside it.
+    stripped = _text().replace(raw, "", 1)
+    assert TIERS_HEADER in stripped and "| #68 | 1 |" in stripped, (
+        "the seeded deletion took the tier table with it, so the assertion below "
+        "would fire on an unreadable doc rather than an undefined one")
+    assert _unit_of_account_paragraph(stripped) is None, (
+        "the definition survives deleting its own paragraph, so another paragraph "
+        "also claims to carry it and the node would pass on a stripped doc — that "
+        "is not a check")
+
+
+def _ingest_lead(text: str) -> str:
+    """§Ingest's own prose, up to its first `###` subsection, unwrapped.
+
+    §#68 sits 56 lines inside the same group and states the same facts again;
+    clause 3 is about the sentence a reader meets first, so a node that scanned
+    the whole group would let §#68's wording excuse §Ingest's.
+    """
+    after = text.split("## Ingest: ", 1)
+    assert len(after) == 2, "architecture/autonomy-jobs.md has no `## Ingest:` heading"
+    return _flat(re.split(r"\n### ", after[1], 1)[0])
+
+
+def test_ingest_names_68s_state_write_and_says_it_is_not_durable_state():
+    """#3335 clause 3. §Ingest's #68 sentence used to be flatly false: it denied
+    that the job wrote anything under the vault while its own §#68, 56 lines
+    later, named the file. #3334's correction replaced the denial with the file
+    but left the verdict to inference, and an inference is what two reviews got
+    wrong in opposite directions — so this pins the sentence that names
+    `scripts/state.json` to also say the write is not durable state.
+    """
+    lead = _ingest_lead(_text())
+    assert "writes no vault file" not in lead, (
+        "§Ingest again denies that #68 writes under the vault, which its own §#68 "
+        "contradicts: Step 5 rewrites the skill's state.json on every cycle that "
+        "surfaces or suppresses an item")
+    naming = [s for s in re.split(r"(?<=[.!?])\s+", lead) if "state.json" in s]
+    assert naming, "§Ingest's lead prose never names the file #68 writes"
+    assert any("not durable" in s for s in naming), (
+        f"the sentence naming scripts/state.json does not say the write is not "
+        f"durable state ({naming[-1][:100]!r}); naming the file without the verdict "
+        "is how a row read as write-free produced the second mirror-image filing")
 
 
 def test_every_tier_row_count_equals_the_ids_listed_beside_it():
