@@ -325,6 +325,45 @@ the transcript scratch home from backlog #566:
     (store 7's rule), a non-directory entry is held and counted apart because this store
     is directories, and an absent root is reported and NEVER created (#2354).
 
+22. `tempfile.gettempdir()/<name>/` — the scratch an action turn names in Bash (#3379),
+    numbered twenty-second here because this list's numbers are its own order and this one
+    PRINTS LAST (the 24th store line). Store 16 bounds one family of names in `/tmp` —
+    pytest's numbered basetemps under `pytest-of-<user>/`. A top-level directory created by
+    someone typing `mkdir -p /tmp/repro-3153` belongs to no writer in this repository, so no
+    age rule anywhere reached it, and five items (#3107, #3237, #3348, #3361, #3373) each
+    closed `done` having deleted nothing: each ended on an owed line reading `human-only:
+    /tmp/<one name>`. Measured at triage 2026-10-26: 220,043 inodes in `repro-3153`, 122,753
+    in `pin3363`, 4,202 in `lloyd-ceiling-planted-tree` — 80% of the 428,454 inodes the tmpfs
+    was holding, in three directories nobody owns. DELETE a top-level ENTRY whose mtime is
+    older than TMP_SCRATCH_MAX_AGE_DAYS (3d) and which is not among the newest
+    TMP_SCRATCH_KEEP_DIRS (16) entries, provided it is a real directory owned by the uid
+    running the sweep, is not another store's root and contains none, and no live process
+    names it: the liveness check walks `/proc/[0-9]*/cwd` and `/proc/[0-9]*/fd` with
+    `os.readlink`, which reads the LINK and never the target, so nothing is followed and
+    nothing is opened. THREE rails are load-bearing and each answers a hazard the others
+    cannot. THE CLOCK IS mtime ALONE: `/tmp` is mounted with neither `noatime` nor `relatime`,
+    and the inode total this line reports is produced by `_count_inodes`, which lists every
+    directory it walks and so refreshes their atime — an atime condition would be refuted by
+    the reporting wrapped around it, which is also why `systemd-tmpfiles`' 10d rule took none
+    of the three orphans when it ran 2026-10-25T18:09 (the item's clause 6: `/tmp` residue is
+    never closable by OS cleanup). THE WINDOW IS 3d AND NOT 7d: a tmpfs corpus is bounded by
+    uptime (`tmpwatch.py:227-230`, "a reboot clears it to zero") and this box's measured
+    uptime was 6 d 11 h, so a 7-day window could never have fired. NO NAME LIST ANYWHERE: the
+    corpus is an open set — anything a turn may type after `mkdir -p ` — and a hand-kept
+    allowlist cannot close an open set, which is the ruling
+    `tests/test_guardian_tmpwatch.py:289` enforces against this tree growing a `KNOWN_GOOD`.
+    DIRECTORIES ONLY, and that is a protection rather than a limitation: `/proc` reports an
+    open SOCKET as `socket:[NNN]`, which resolves under no directory, so the supervisor's
+    held `/tmp/agent-supervisor.sock` and `/tmp/agent-supervisord.pid`
+    (`agent-services/supervisor/supervisord.conf:2,6`) are safe because they are not
+    directories, not because anything watched them. THE ROOT IS NEVER A CANDIDATE, only its
+    entries; entries owned by another uid are not counted and not touched; a symlink is held
+    and never followed (store 7's rule); and an entry that IS another store's root — store
+    16's `pytest-of-<user>` is the one today — is held by PATH IDENTITY, because deleting the
+    parent of a count-bounded store unbounds it (store 13's reason for keeping a round's
+    newest ledger row). A dry run prints the candidate count and the inode total and unlinks
+    nothing; `--apply` is the only route to `shutil.rmtree` (#3379).
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -2905,6 +2944,266 @@ def _pytest_tmp_line(p: dict) -> str:
             f"({seen} → {p['kept']} kept{tail}{other})")
 
 
+# ---------------------------------------------------------------------------
+# Store 22: scratch at the TOP LEVEL of the system temp dir (#3379).
+#
+# Store 16 bounds ONE family of names inside `/tmp` — pytest's numbered basetemps under
+# `pytest-of-<user>/`, on a count. Everything else the loop leaves at the top level is
+# bounded by nothing: an action turn that types `mkdir -p /tmp/repro-3153` in Bash names a
+# directory no writer in this repository owns, so no age rule anywhere reaches it. Five
+# backlog items (#3107, #3237, #3348, #3361, #3373) each closed `done` having deleted
+# nothing, because each ended on an owed line reading `human-only: /tmp/<one name>` — a
+# path the loop may name but may not remove. This store is what turns that residue into a
+# report line instead of a request.
+#
+# WHY THE WINDOW IS 3 DAYS AND NOT THE 7 THE ITEM ASKED FOR. `/tmp` on this box is tmpfs
+# (mounted `rw,nosuid,nodev,nr_inodes=1048576,inode64,…` — no `noatime`, no `relatime`), so
+# the whole corpus is uptime-bounded: `agent-services/guardian/tmpwatch.py:227-230` says the
+# thing it watches "is bounded by uptime: a reboot clears it to zero", and the uptime
+# measured when this item was triaged was 6 d 11 h. A 7-day window has therefore never had 7
+# days of life on this machine and would report 0 forever — the same silence
+# `systemd-tmpfiles`' own 10d rule kept: that policy ran 2026-10-25T18:09 and took none of
+# the three orphans named in the item. 3 days sits inside the reboot interval and inside the
+# 7d scratch horizon of stores 11b/21, and `TMP_SCRATCH_KEEP_DIRS` is the second rail, so a
+# burst of concurrent probes is never cut mid-flight.
+#
+# WHY THE CLOCK IS mtime AND NEVER atime. The item asked for mtime AND atime; atime cannot
+# be a condition here, because of this file's own mechanism. The report line clause 1 asks
+# for an inode total, and the only inode counter in this module is `_count_inodes`, which
+# `rglob`-lists every directory it walks — and on a mount with no `noatime`, listing a
+# directory IS a read of it. So every directory this store has ever counted, and every
+# directory a triage has measured with `find <dir> | wc -l` (which #3348, #3361 and #3373's
+# own activity lines all did), carries a same-day atime. A rule requiring an OLD atime would
+# be un-satisfiable by the reporting wrapped around it, and
+# `tests/test_retention_sweep.py::test_the_temp_store_ages_on_mtime_and_counting_never_un_ages_it`
+# proves the delete side never reads atime at all.
+# ---------------------------------------------------------------------------
+
+#: How long a top-level temp directory may sit untouched before it is a candidate, aged on
+#: its own mtime. 3 days, deliberately UNDER the reboot interval of an uptime-bounded tmpfs —
+#: see the block above for why 7, the window the item asked for, has never been able to fire
+#: on this box.
+TMP_SCRATCH_MAX_AGE_DAYS = 3
+
+#: How many of the most recently touched entries are NEVER candidates, whatever their mtime.
+#: Mirrors store 16's newest-N keep for the same reason: the guarantee that protects work in
+#: flight is that the freshest entries are not the ones collected. It is a floor of
+#: protection and NOT an inode ceiling — one orphan measured 220,043 inodes at triage, so no
+#: count of directories bounds inodes here — the age window is what bounds the store.
+TMP_SCRATCH_KEEP_DIRS = 16
+
+#: The store's root: the system temp dir itself, and only its top-level entries. A module
+#: constant so `tests/test_retention_sweep.py`'s fixture redirects it like every other
+#: deletable path in this file. Without that line a unit test reaching `main()` with
+#: `--apply` would collect the real `/tmp`, which is the one failure this file's guards
+#: exist to make impossible (`_unredirected_destructive_paths` reddens on it).
+TMP_SCRATCH_ROOT = Path(tempfile.gettempdir())
+
+
+def _proc_referenced_paths(proc_root: Path = Path("/proc")) -> list[tuple[str, ...]]:
+    """Every absolute path a running process names as its cwd or as one of its open files.
+
+    The liveness evidence for store 22, and the reason it is `/proc` rather than a name
+    list: the corpus this store collects is an OPEN set — anything an action turn may type
+    after `mkdir -p ` — and a hand-maintained allowlist cannot close an open set (the class
+    rule of 2026-09-20, and `tests/test_guardian_tmpwatch.py:289` exists to stop this tree
+    growing a `KNOWN_GOOD` list at all).
+
+    `os.readlink` reads the LINK and never the target, so nothing here follows a symlink or
+    opens the file it is describing: the scan cannot resurrect a deleted inode, wake a
+    device or drain a fifo someone is waiting on. Targets that name no directory
+    (`socket:[123]`, `pipe:[9]`, `anon_inode:[…]`) are dropped, because they resolve under
+    no directory — which is also why this store is directories-only: a held SOCKET or
+    pidfile path (`/tmp/agent-supervisor.sock`, `/tmp/agent-supervisord.pid`, named by
+    `agent-services/supervisor/supervisord.conf:2,6`) is protected by not being a directory,
+    not by this scan.
+
+    A path the kernel has already unlinked arrives as `<path> (deleted)`; the suffix is
+    stripped and the path still counts, because a process holding a file inside a directory
+    is exactly the case the rail exists for. Entries are returned as `Path.parts` tuples so
+    containment is compared component-wise: a string-prefix test would let `/tmp/foo-bar`
+    answer for the candidate `/tmp/foo`.
+    """
+    out: list[tuple[str, ...]] = []
+    try:
+        pids = [p for p in proc_root.iterdir() if p.name.isdigit()]
+    except OSError:                                  # no /proc: an absent box, or a test root
+        return out
+    for pid in pids:
+        links = [pid / "cwd"]
+        try:
+            links.extend(list((pid / "fd").iterdir()))
+        except OSError:
+            pass                                     # another uid's process, or it exited
+        for link in links:
+            try:
+                target = os.readlink(link)
+            except OSError:
+                continue                             # the process exited mid-scan
+            if target.endswith(" (deleted)"):
+                target = target[:-len(" (deleted)")]
+            if not target.startswith("/"):
+                continue                             # socket:[…], pipe:[…], anon_inode:[…]
+            out.append(Path(target).parts)
+    return out
+
+
+def _referenced_under(parts: tuple[str, ...],
+                      live: list[tuple[str, ...]]) -> bool:
+    """True when some live path is `parts` itself or lives inside it, component by component."""
+    n = len(parts)
+    return any(t[:n] == parts for t in live)
+
+
+def _abs_path(path: Path) -> Path:
+    """Absolute and normalised, WITHOUT resolving symlinks (`abspath`, not `resolve`)."""
+    return Path(os.path.abspath(path))
+
+
+def _tmp_scratch_nested_store_roots() -> list[Path]:
+    """Roots of OTHER stores in this file that sit inside `TMP_SCRATCH_ROOT`.
+
+    Store 16's `PYTEST_TMP_ROOT` is a direct child of the temp dir, so this store's entry
+    list contains it — and deleting it would unbound store 16 wholesale, taking every pytest
+    basetemp in one shot including the numbered run a suite may be writing. That is the same
+    hazard store 13 documents for the promotion ledger ("bounding this store would otherwise
+    unbound stores 11 and 12"), and the rule takes the same shape: hold the parent.
+
+    Identity, never a name: the comparison is against the constant store 16 itself uses, so
+    an entry is held because it IS that root (or contains it), not because of what it is
+    called. A directory named `pytest-of-testuser` that is not that root is collected like
+    any other — `test_no_name_is_special_in_the_temp_store` pins exactly that.
+    """
+    return [PYTEST_TMP_ROOT]
+
+
+def sweep_tmp_scratch(apply: bool, now: float, *, root: "Path | None" = None,
+                      proc_root: "Path | None" = None,
+                      keep_dirs: "int | None" = None,
+                      max_age_days: "int | None" = None) -> dict:
+    """Collect the loop's abandoned top-level temp dirs, and only those (#3379).
+
+    A candidate is an entry of `root` that is a real directory (a symlink is never followed
+    and never removed — store 7's rule — and a socket, a pidfile or any other plain file is
+    not this store's object), owned by the uid running this sweep, that is not one of the
+    newest `keep_dirs` entries by mtime, whose OWN mtime is older than `max_age_days`, that
+    is neither another store's root nor a directory containing one, and under which no live
+    process holds its cwd or any file open. Nothing else is consulted: no name list, no
+    atime.
+
+    THE ROOT ITSELF IS NEVER A CANDIDATE — only its entries are walked, and a sweep that
+    removed `gettempdir()` would take the X11 sockets, the display locks and every other
+    uid's state with it. Entries owned by another uid are neither counted nor touched: the
+    uid is the only ownership this sweep can judge, and `/tmp/systemd-private-*`,
+    `.X11-unix` and the sandbox uids are nobody's business but theirs.
+
+    A dry run reports the candidate count AND the inode total — the unit a tmpfs runs out in
+    — and unlinks nothing: `apply` is the only thing that reaches `shutil.rmtree`. Inodes are
+    counted over candidates only, never over kept entries, so the walk stays bounded to the
+    trees that are about to go.
+    """
+    root = Path(root) if root is not None else TMP_SCRATCH_ROOT
+    keep = TMP_SCRATCH_KEEP_DIRS if keep_dirs is None else int(keep_dirs)
+    days = (TMP_SCRATCH_MAX_AGE_DAYS if max_age_days is None else int(max_age_days))
+    out = {"apply": apply, "present": False, "dirs": 0, "stale": 0, "deleted": 0,
+           "held_newest": 0, "held_fresh": 0, "held_live": 0, "held_nested": 0,
+           "held_link": 0, "held_notdir": 0, "refused": 0, "inodes": 0,
+           "horizon_days": days, "keep_dirs": keep}
+    try:
+        entries = list(root.iterdir())
+    except OSError:                 # absent or unreadable root: reported, never created
+        return out
+    out["present"] = True
+    uid = os.getuid()
+    live = _proc_referenced_paths(Path(proc_root) if proc_root is not None
+                                  else Path("/proc"))
+    nested = [_abs_path(p).parts for p in _tmp_scratch_nested_store_roots()]
+    cutoff = now - days * 86400
+
+    owned: list[tuple[float, Path]] = []
+    for entry in entries:
+        try:
+            st = entry.lstat()
+        except OSError:
+            continue                                # vanished mid-walk
+        if st.st_uid != uid:
+            continue                                # not ours: not counted, never touched
+        if entry.is_symlink():
+            out["held_link"] += 1                   # never followed, never removed
+            continue
+        if not entry.is_dir():
+            out["held_notdir"] += 1                 # a socket, a pidfile: never a target
+            continue
+        abs_parts = _abs_path(entry).parts
+        if any(nested_parts[:len(abs_parts)] == abs_parts for nested_parts in nested):
+            out["held_nested"] += 1                 # another store bounds this one, better
+            continue
+        owned.append((st.st_mtime, entry))
+
+    out["dirs"] = len(owned)
+    owned.sort(key=lambda r: r[0], reverse=True)    # newest first: the keep is by recency
+    for index, (mtime, entry) in enumerate(owned):
+        if index < keep:
+            out["held_newest"] += 1                 # never a candidate, whatever its mtime
+            continue
+        if mtime >= cutoff:
+            out["held_fresh"] += 1
+            continue
+        if _referenced_under(_abs_path(entry).parts, live):
+            out["held_live"] += 1                   # a process is inside it, or holding it
+            continue
+        out["stale"] += 1
+        inodes = _count_inodes(entry)               # lists the tree: reads it, does not age it
+        if not apply:
+            out["inodes"] += inodes
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            out["refused"] += 1
+            print(f"  ! skip {entry.name}: {exc}", file=sys.stderr)
+            continue
+        out["deleted"] += 1
+        out["inodes"] += inodes
+    return out
+
+
+def _tmp_scratch_line(p: dict) -> str:
+    """One report line, identical in both modes except the verb and the `~` of a promise.
+
+    The shape is store 21's: the census first (`of N uid-owned dir(s)`), then every reason a
+    directory was NOT taken, named apart, then the action. The two rails a reader needs at
+    zero are printed always — the newest keep and the age window — because `0 would delete`
+    on a box holding 13 directories is only readable next to the rail that produced the 0;
+    the other clauses print only when non-zero. The inode total is the unit the alarm on this
+    store speaks: `df -i /tmp` runs out here long before `df -h` notices anything, and a dry
+    run says `~N inode(s) candidate` because until the delete happens the number is a promise
+    about a tree that is still there.
+    """
+    label = (f"  /tmp scratch dirs (top-level >{p['horizon_days']}d, "
+             f"keep newest {p['keep_dirs']})")
+    if not p["present"]:
+        head = "no temp root yet"
+    else:
+        head = f"of {p['dirs']} uid-owned dir(s), {p['held_newest']} held newest"
+        head += f", {p['held_fresh']} held <{p['horizon_days']}d"
+        if p["held_live"]:
+            head += f", {p['held_live']} held open by a process"
+        if p["held_nested"]:
+            head += f", {p['held_nested']} other store's root"
+        if p["held_link"]:
+            head += f", {p['held_link']} symlink held (never followed)"
+        if p["held_notdir"]:
+            head += f", {p['held_notdir']} non-dir entry held"
+    tail = f" ({p['refused']} would not remove, left in place)" if p["refused"] else ""
+    n = p["deleted"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    promised = "" if p["apply"] else "~"
+    return (f"{label}: {head} — {n} {verb}, "
+            f"{promised}{p['inodes']:,} inode(s) {unit}{tail}")
+
+
 def _turn_row_seconds(line: bytes) -> float | None:
     """The age a turn row carries in its own stamp, or None if it carries no readable one.
 
@@ -4090,6 +4389,13 @@ def main() -> int:
     # and `resolve_data_root_for_tree` has already decided which root this tree may reach
     # (#1415). It never takes the root itself as a candidate — see the store's block.
     session_scratch = sweep_session_scratch(args.apply, now)
+    # Store 22 (#3379). Run in both modes and outside the refusal guard like the four lines
+    # above it: `/tmp` belongs to neither the tree nor `$HOME`, so the guard that stops a
+    # round's worktree from deleting the live repo's refs has nothing to say about it, and a
+    # sweep that only ever runs from a gate would otherwise leave the loop's own scratch
+    # unbounded forever — which is precisely the state that made five items ask a human to
+    # `rm` one directory by name. Store 16 prints under the same reasoning.
+    tmp_scratch = sweep_tmp_scratch(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -4211,6 +4517,11 @@ def main() -> int:
     # positional guard reads them, and this line is the 23rd — the reason #2862 gave for
     # appending, inherited.
     print(_session_scratch_line(session_scratch))
+    # Store 22 (#3379), printed LAST and outside the refusal guard like the four lines above
+    # it. Appending rather than inserting keeps items 1-23 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188 and
+    # #3209 — and this line is the 24th.
+    print(_tmp_scratch_line(tmp_scratch))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

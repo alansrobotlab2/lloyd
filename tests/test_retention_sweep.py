@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -196,6 +197,28 @@ def rs(tmp_path, monkeypatch):
         # a scratch dir is seeding the pair production has, and a node that seeds one
         # WITHOUT the other is seeding the orphan this store exists to reclaim.
         ("SESSION_CWD_DIR", "session-cwd", True),
+        # Store 22 (#3379), the loop's scratch at the TOP LEVEL of the system temp dir.
+        # Without this line the store's root is `tempfile.gettempdir()` — the real `/tmp` — so
+        # one node reaching `main()` with `--apply` would collect the live tmpfs: the
+        # supervisor's socket tree, the display locks, another uid's chrome profiles and every
+        # pytest basetemp on the box. `_unredirected_destructive_paths` reddens on this
+        # constant for exactly that reason.
+        #
+        # The SECOND deletable root here that does not live under `DATA_ROOT`; store 16's
+        # `PYTEST_TMP_ROOT` is the other, and for the same reason — the tmpfs IS the store and
+        # no data-root arithmetic moves it (`resolve_data_root` #1415 decides which tree an
+        # `--apply` may reach and has nothing to say about `/tmp`). The constant is named
+        # `*_ROOT` like store 16's, so it stays outside the `_DIR`/`_FILE` set in
+        # `test_the_one_resolution_owns_every_directory_the_sweep_touches`; the suffix-free
+        # guard is the one that must see it.
+        #
+        # Redirected to a CHILD of `tmp_path`, deliberately not to `tmp_path` itself even
+        # though production has `pytest-of-<user>` as a DIRECT child of the temp dir: the other
+        # stores' fixture roots are children of `tmp_path`, so making the scratch root that
+        # directory would make each of them a candidate for this store and let an aged-mtime
+        # node `rmtree` its neighbour's root mid-test. The nested-root hold against the real
+        # topology is exercised by passing `root=` explicitly.
+        ("TMP_SCRATCH_ROOT", "tmp-scratch", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1903,7 +1926,7 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the 23 lines
+    side of the comparison is now the `_store_report` fixture — the 24 lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1916,11 +1939,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 23, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 24, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "23 unbounded-growth stores" in text, (
+    assert "24 unbounded-growth stores" in text, (
         "the skill's description states a store count other than 22")
-    assert "23 in all" in text, "the skill's body states a store count other than 23"
+    assert "24 in all" in text, "the skill's body states a store count other than 24"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2009,8 +2032,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twenty store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty stores by design")
+    assert "twenty-one store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty-one stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2125,7 +2148,12 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # that says "twenty stores are bounded" would otherwise raise
                       # `unrecognised store-count numeral` at the guard instead of being
                       # graded against the twenty the sweep prints.
-                      "twenty": 20, "21": 21, "22": 22, "23": 23, "1": 1, "2": 2, "3": 3, "4": 4,
+                      # #3379 added the twenty-fourth store (the loop's top-level /tmp
+                      # scratch), so a vault file saying "24 unbounded-growth stores" is now
+                      # graded against the 24 lines the sweep prints rather than raising
+                      # `unrecognised store-count numeral`.
+                      "twenty": 20, "21": 21, "22": 22, "23": 23, "24": 24,
+                      "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2169,8 +2197,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1, carried by #2472, widened by #2615, #2862, #2924 and #3188: the 23
-    lines `main()` prints are 23 stores, and the three the loop leaves outside the data root
+    """#1835 clause 1, carried by #2472, widened by #2615, #2862, #2924, #3188, #3209 and #3379:
+    the 24 lines `main()` prints are 24 stores, and the three the loop leaves outside the data root
     are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
@@ -2180,8 +2208,8 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 23, (
-        f"the sweep prints {len(_store_report)} store lines, not the 23 its report "
+    assert len(_store_report) == 24, (
+        f"the sweep prints {len(_store_report)} store lines, not the 24 its report "
         f"has had since #3209 added the session scratch dirs: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
@@ -2298,7 +2326,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_ref
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty store
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-one store
     lines while the skill says 22 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
     (just "22", which makes every sandbox run look like it lost three stores) or the
@@ -2310,7 +2338,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_ref
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twenty store lines plus one refusal
+    the rule. A refused run therefore still prints twenty-one store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2321,7 +2349,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_ref
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 20, f"a refusal run should report twenty stores: {report}"
+    assert len(report) == 21, f"a refusal run should report twenty-one stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2457,7 +2485,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the twenty lines below be
+    branch delete it never asked about — which is what lets the twenty-four lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2533,7 +2561,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 23, (
+    assert len(items) == len(_store_report) == 24, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2576,6 +2604,13 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     # since the directory is `session-cwd/` and nothing else in the report is.
     assert items[22][0] == 23, items[22]
     assert "session" in items[22][1] and "dirs" in items[22][1], items[22]
+    assert items[23][0] == 24, items[23]
+    # #3379's temp-scratch store: the item must name its own window constant, the same
+    # rule item 21 and item 22 above take. "/tmp" is the FIRST word of the printed label,
+    # so it is one of the two words the positional matcher requires — the item cannot be
+    # worded without it.
+    assert "TMP_SCRATCH_MAX_AGE_DAYS" in items[23][1], (
+        f"item 24 of the description does not name the script's window constant: {items[23][1]!r}")
     assert "SESSION_CWD_MAX_AGE_DAYS" in items[22][1], (
         f"item 23's label names no horizon constant, so a worker reading the enumeration "
         f"cannot tell which of the sweep's constants bounds it: {items[22][1]!r}")
@@ -7387,8 +7422,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "23 unbounded-growth stores" in front, front[:200]
-    assert "23 in all" in text, "the skill's body states a count other than 23"
+    assert "24 unbounded-growth stores" in front, front[:200]
+    assert "24 in all" in text, "the skill's body states a count other than 24"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -7848,7 +7883,22 @@ def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path,
         "promise the skill's table documents")
     assert _seed_pause_journal(rs.WORKERS_DB,
                                ages_days=[45.0, 31.0, 29.0, 1.0]) == 4
-    before = rs.WORKERS_DB.stat().st_size
+    # Measured over the database AS STORED — the main file plus its `-wal` sibling — rather
+    # than over the main file alone. The queue opens the store in WAL mode, so the rows this
+    # prune deletes live mostly in the WAL, and a checkpoint moves those bytes from one file
+    # into the other without changing what the store costs on disk. Whether a checkpoint has
+    # happened by the time `main()` returns is decided by when the interpreter finalises the
+    # last connection, which is decided by allocation counts, which is decided by what else
+    # the sweep does: reading only the main file, this node flipped from 4,096 to 61,440 on a
+    # diff that adds a store nowhere near this table (#3379, measured by running the node
+    # against both trees), so it was grading the interpreter's GC and not the prune. The
+    # bytes-on-disk bound this clause states is invariant under exactly that move.
+    def _stored_bytes() -> int:
+        return sum(f.stat().st_size
+                   for f in (rs.WORKERS_DB, Path(str(rs.WORKERS_DB) + "-wal"))
+                   if f.exists())
+
+    before = _stored_bytes()
 
     # `main()` runs EVERY sweep, so the stores this test is not about are moved out
     # of the way first: an unconditional `--apply` here archived the voice-turn rows
@@ -7890,8 +7940,8 @@ def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path,
         assert age_days < rs.PAUSE_JOURNAL_MAX_AGE_DAYS, (
             f"a hold started {age_days:.1f} d ago survived the "
             f"{rs.PAUSE_JOURNAL_MAX_AGE_DAYS}d horizon: {h}")
-    assert rs.WORKERS_DB.stat().st_size <= before + 4096, (
-        "a prune that only adds pages is not a prune")
+    assert _stored_bytes() <= before + 4096, (
+        "a prune that only adds pages is not a prune: the store on disk, main file plus WAL, is not bounded")
 
 
 # ── #2648: the bench family gets a 7-day horizon, everything else keeps 30 ─────
@@ -8462,10 +8512,10 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_fourth_last_and_the_refused_run_prints_twenty(
+def test_the_injection_canary_store_prints_fifth_last_and_the_refused_run_prints_twenty_one(
         rs, monkeypatch, capsys):
     """#2862 clause 4, re-pointed by #2924, #3188 and #3209: a refused run prints twenty
-    lines and a production run prints 23, with the canary line FOURTH-LAST in both.
+    lines and a production run prints 24, with the canary line FOURTH-LAST in both.
 
     Third-last is not a demotion, it is the pin that the append order is intact.
     `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
@@ -8480,7 +8530,7 @@ def test_the_injection_canary_store_prints_fourth_last_and_the_refused_run_print
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 20 (23 minus the three automod
+    says nothing about it. That is why the count is 21 (24 minus the three automod
     rungs that collapse into one refusal line) and not 19, and why the line still appears
     after the refusal. The ceiling store answers to `DATA_ROOT` and survives the same
     guard for the same reason; `test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal`
@@ -8488,14 +8538,14 @@ def test_the_injection_canary_store_prints_fourth_last_and_the_refused_run_print
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 23, f"a production run prints 23 store lines: {lines}"
-    assert lines[-4].split(":")[0].strip().startswith("injection-canary corpus"), lines[-4]
+    assert len(lines) == 24, f"a production run prints 24 store lines: {lines}"
+    assert lines[-5].split(":")[0].strip().startswith("injection-canary corpus"), lines[-5]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 20, (
-        f"a refused run prints twenty store lines plus the refusal: {refused}")
-    assert refused[-4].split(":")[0].strip().startswith("injection-canary corpus"), refused[-4]
+    assert len(refused) == 21, (
+        f"a refused run prints twenty-one store lines plus the refusal: {refused}")
+    assert refused[-5].split(":")[0].strip().startswith("injection-canary corpus"), refused[-5]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -8707,11 +8757,11 @@ def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, mo
     assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
 
 
-def test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_ceiling_sample_store_prints_fourth_last_and_survives_the_refusal(rs, monkeypatch,
                                                                        capsys):
     """Where the line prints, in both kinds of run.
 
-    Third-last since #3209 appended a store below it, second-to-last since #3188 did, and
+    Fourth-last since #3379 appended a store below it, third-last since #3209 did, and
     last before that: task 79's enumeration is matched to the printed lines POSITIONALLY, so
     appending keeps items 1-20 on their own rules — #2862's reason, #2924's, #3188's and now
     #3209's.
@@ -8724,12 +8774,12 @@ def test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal(rs,
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 23, f"a production run prints 23 store lines: {report}"
-    assert report[-3].split(":")[0].strip().startswith("ceiling sample rows"), report[-3]
+    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
+    assert report[-4].split(":")[0].strip().startswith("ceiling sample rows"), report[-4]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 20, f"a refused run prints twenty store lines: {refused}"
-    assert refused[-3].split(":")[0].strip().startswith("ceiling sample rows"), refused[-3]
+    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
+    assert refused[-4].split(":")[0].strip().startswith("ceiling sample rows"), refused[-4]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -8906,7 +8956,7 @@ def test_the_capture_store_horizon_is_the_shortest_window_in_the_file(rs):
         "behind 14 — the shortest delete window in this file — is stale")
 
 
-def test_the_capture_store_prints_second_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+def test_the_capture_store_prints_third_last_and_survives_the_refusal(rs, monkeypatch, capsys):
     """Clause 5's report-half: the 22nd line, printed SECOND-TO-LAST, in both kinds of run.
 
     Second-to-last since #3209 appended the session scratch store below it, and last before
@@ -8921,12 +8971,12 @@ def test_the_capture_store_prints_second_last_and_survives_the_refusal(rs, monke
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 23, f"a production run prints 23 store lines: {report}"
-    assert report[-2].split(":")[0].strip().startswith("canary tool-call captures"), report[-2]
+    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
+    assert report[-3].split(":")[0].strip().startswith("canary tool-call captures"), report[-3]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 20, f"a refused run prints twenty store lines: {refused}"
-    assert refused[-2].split(":")[0].strip().startswith("canary tool-call captures"), refused[-2]
+    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
+    assert refused[-3].split(":")[0].strip().startswith("canary tool-call captures"), refused[-3]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -9289,3 +9339,485 @@ def test_the_scratch_root_bounded_is_the_root_the_writer_writes_into(rs):
         "the bounded store is no longer a sibling of the transcript directory its pair rule "
         "reads: the sweep would be asking one root whether an entry is orphaned while "
         "deleting entries in another")
+
+
+# ── #3379 store 22 (the 24th printed line): loop scratch at the TOP LEVEL of the temp dir ──
+#
+# The five items this store exists to close (#3107, #3237, #3348, #3361, #3373) each ended
+# with an owed line reading `human-only: /tmp/<one name>`. Every node below is a statement
+# that the sweep, not a human, can be trusted with that directory: it is a candidate ONLY on
+# mtime, it is HELD by a live process, by being fresh, by being one of the newest entries, by
+# being a symlink or a non-directory, and by being another store's root. The delete side is
+# `--apply` and nothing else.
+
+TMP_DAY = 86400.0
+
+
+def _tmp_root(rs) -> Path:
+    """The fixture's stand-in for the temp dir (`<tmp_path>/tmp-scratch`)."""
+    return Path(rs.TMP_SCRATCH_ROOT)
+
+
+def _tmp_dir(rs, name: str, *, files: int = 1) -> Path:
+    """One scratch directory, the shape an action turn leaves: a dir with something in it.
+
+    `files` matters to the inode assertions: `_count_inodes` counts the directory itself plus
+    every object under it, so a directory seeded with two files is three inodes.
+    """
+    d = _tmp_root(rs) / name
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        (d / f"payload-{i}.txt").write_text(f"{name}\n", encoding="utf-8")
+    return d
+
+
+def _age(path: Path, *, days: float, atime_days: "float | None" = None) -> None:
+    """Backdate a directory's mtime, and its atime SEPARATELY.
+
+    The split is the point of two nodes below: an entry aged on mtime with a FRESH atime is
+    the state `/tmp` is actually in after anything has listed it (`_count_inodes`' own walk,
+    or a triage's `find | wc -l`), and the store has to take it anyway.
+    """
+    now = time.time()
+    atime = now if atime_days is None else now - atime_days * TMP_DAY
+    os.utime(path, ns=(int(atime * 1e9), int((now - days * TMP_DAY) * 1e9)))
+
+
+def _fake_proc(tmp_path: Path, *, name: str = "proc",
+               entries: "dict[str, list[str]] | None" = None,
+               cwd: "dict[str, str] | None" = None) -> Path:
+    """A stand-in `/proc`: `<root>/<pid>/cwd` and `<root>/<pid>/fd/<n>` symlinks.
+
+    A real `/proc` cannot be seeded — a test cannot open a file descriptor inside a scratch
+    directory and have the sweep's own scan see a process that does not exist — so the scan
+    takes `proc_root` and these are the two shapes it reads. The symlink is what `os.readlink`
+    is asked about, exactly as on the live box.
+
+    `cwd` maps a pid to a directory it is sitting in; `entries` maps a pid to the targets of
+    its file descriptors. A target that names no directory (`socket:[123]`) is a legal value
+    and is what pins that the scan drops it rather than holding everything.
+    """
+    root = tmp_path / name
+    for pid, target in (cwd or {}).items():
+        p = root / pid
+        (p / "fd").mkdir(parents=True, exist_ok=True)
+        os.symlink(target, p / "cwd")
+    for pid, targets in (entries or {}).items():
+        p = root / pid
+        (p / "fd").mkdir(parents=True, exist_ok=True)
+        for n, target in enumerate(targets):
+            os.symlink(target, p / "fd" / str(n))
+    return root
+
+
+def test_an_aged_unreferenced_temp_dir_is_collected_only_under_apply(rs, tmp_path):
+    """Clause 1 and clause 2 together: the delete side of the new store.
+
+    An aged, unreferenced top-level scratch directory is a candidate, is reported as one with
+    its inode total in a DRY RUN, and is not removed until `--apply`. The inode unit is the
+    reason the store exists at all: `df -i /tmp` was at 41% on 2026-10-26 with three
+    directories holding 80% of the used inodes, and the bytes behind them were nothing.
+    """
+    victim = _tmp_dir(rs, "aged-scratch", files=2)
+    _age(victim, days=5)
+
+    dry = rs.sweep_tmp_scratch(False, time.time(), proc_root=_fake_proc(tmp_path),
+                                keep_dirs=0)
+    assert dry["stale"] == 1, dry
+    assert dry["deleted"] == 0, dry
+    assert dry["inodes"] == 3, f"a dir plus its two payloads: {dry}"
+    assert victim.is_dir(), "a DRY RUN removed the candidate — `apply` is the only route"
+
+    hot = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path),
+                               keep_dirs=0)
+    assert hot["deleted"] == 1, hot
+    assert hot["inodes"] == 3, hot
+    assert not victim.exists(), f"--apply left the candidate behind: {sorted(_tmp_root(rs).iterdir())}"
+
+
+def test_the_temp_store_ages_on_mtime_and_counting_never_un_ages_it(rs, tmp_path):
+    """Clause 2's whole burden: the clock is mtime, and the reporting cannot defeat it.
+
+    Two directions, both required:
+
+    * an entry with a FRESH atime and an OLD mtime IS a candidate. This is the normal state
+      of `/tmp` on this box — the mount has neither `noatime` nor `relatime`, so listing a
+      directory is a read of it, and the inode total this store reports is produced by
+      `_count_inodes`, which lists every directory it walks. A rule that also demanded an old
+      atime would have been refuted by its own report line, which is why the item's clause 2
+      could not be implemented as written;
+    * taking a candidate's inode total does not un-age it: count, then re-select with a fresh
+      `now`, and it is still a candidate.
+
+    And the constant is 3, not the 7 the item asked for, because `/tmp` is tmpfs and the whole
+    corpus is bounded by uptime (`tmpwatch.py:227-230`) — this box's uptime at triage was
+    6 d 11 h, so a 7-day window has never had 7 days to fire in.
+    """
+    assert rs.TMP_SCRATCH_MAX_AGE_DAYS == 3, rs.TMP_SCRATCH_MAX_AGE_DAYS
+    old_mtime_fresh_atime = _tmp_dir(rs, "listed-today", files=1)
+    _age(old_mtime_fresh_atime, days=5, atime_days=0)
+    just_inside = _tmp_dir(rs, "yesterday", files=1)
+    _age(just_inside, days=2)
+
+    # keep_dirs=0 everywhere the AGE rule is what is under test: the newest-N keep is a
+    # separate rail, pinned by `test_the_temp_store_keeps_the_newest_entries...` below, and
+    # leaving it at 16 here would have both seeded dirs held for a reason this node is not
+    # asking about — a green that would also pass a store whose window never fired.
+    first = rs.sweep_tmp_scratch(False, time.time(), proc_root=_fake_proc(tmp_path),
+                                 keep_dirs=0)
+    assert first["stale"] == 1, f"a fresh atime un-aged an old mtime: {first}"
+    assert first["held_fresh"] == 1, f"the 2-day dir was a candidate: {first}"
+
+    # The report line's own walk has now listed `listed-today`, so its atime is seconds old.
+    line = rs._tmp_scratch_line(first)
+    assert "1 would delete" in line, line
+    again = rs.sweep_tmp_scratch(False, time.time(), proc_root=_fake_proc(tmp_path),
+                                   keep_dirs=0)
+    assert again["stale"] == 1, f"counting the candidate un-aged it: {again}"
+
+    body = inspect.getsource(rs.sweep_tmp_scratch)
+    assert ".st_mtime" in body, "the store no longer reads the clock it is supposed to age on"
+    assert "st_atime" not in body and "st_atim" not in body, (
+        "the delete side reads atime again, which is the field the report line's own inode "
+        "walk refreshes on a mount with no `noatime`")
+
+
+def test_the_temp_store_keeps_the_newest_entries_and_no_name_is_special(rs, tmp_path):
+    """Clause 4: the keep-side holds on the SAME measurement, and nothing keys on a name.
+
+    `TMP_SCRATCH_KEEP_DIRS` entries, ranked by mtime, are never candidates whatever their
+    mtime — here every directory in the root is aged to a decade, so the ONLY thing that saves
+    the newest sixteen is the keep, which is the same protection store 16 takes for pytest's
+    newest basetemp. And the collected one is collected because it is the oldest, not because
+    of what it is called: a directory named after a residue this store is famously asked about
+    is treated exactly like any other, which is the ruling
+    `tests/test_guardian_tmpwatch.py:289` enforces against this tree growing a `KNOWN_GOOD`.
+    """
+    assert rs.TMP_SCRATCH_KEEP_DIRS == 16, rs.TMP_SCRATCH_KEEP_DIRS
+    names = [f"seed-{i:02d}" for i in range(rs.TMP_SCRATCH_KEEP_DIRS)]
+    for i, name in enumerate(names):
+        d = _tmp_dir(rs, name)
+        _age(d, days=3650 + i)                       # all ancient; ordering is by recency
+    oldest = _tmp_dir(rs, "repro-3153")              # named for the real 220,043-inode orphan
+    _age(oldest, days=4000)
+
+    out = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path))
+    assert out["dirs"] == rs.TMP_SCRATCH_KEEP_DIRS + 1, out
+    assert out["held_newest"] == rs.TMP_SCRATCH_KEEP_DIRS, out
+    assert out["stale"] == 1 and out["deleted"] == 1, out
+    assert not oldest.exists(), (
+        "a name was protected: the keep is by mtime rank, never by an allowlist")
+    assert all((_tmp_root(rs) / n).is_dir() for n in names), "the newest keep lost an entry"
+
+    # A directory written THIS SECOND then joins the same root. It outranks every ancient
+    # seed on the mtime ladder, so the keep protects it, and the entry that falls off the
+    # bottom is a decade-old seed — which is the keep doing the age window's job on the way
+    # past it. The age rail on its own (`held_fresh`) is pinned by the node above, at
+    # keep_dirs=0, where a fresh entry cannot be hidden by rank.
+    fresh = _tmp_dir(rs, "written-this-second")
+    out2 = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path))
+    assert fresh.is_dir(), "a directory written this second was collected"
+    assert out2["dirs"] == rs.TMP_SCRATCH_KEEP_DIRS + 1, out2
+    assert out2["held_newest"] == rs.TMP_SCRATCH_KEEP_DIRS, out2
+    assert out2["stale"] == 1 and out2["deleted"] == 1, out2
+
+
+def test_a_directory_a_live_process_holds_is_never_a_candidate(rs, tmp_path):
+    """Clause 3's `/proc` rail, in the four shapes the live kernel actually presents.
+
+    A process's `cwd`, a file descriptor inside the directory, a descriptor for a file the
+    directory has already unlinked (`<path> (deleted)`), and — the negative half — a descriptor
+    that names no directory at all (`socket:[123]`), which resolves under nothing and so holds
+    nothing. The last one is why this store is directories-only rather than lucky.
+    """
+    held_by_cwd = _tmp_dir(rs, "probe-cwd", files=1)
+    _age(held_by_cwd, days=9)
+    held_by_fd = _tmp_dir(rs, "probe-fd", files=1)
+    _age(held_by_fd, days=9)
+    held_by_deleted = _tmp_dir(rs, "probe-deleted", files=1)
+    # The name the seed wrote, unlinked AFTER the descriptor was opened on the live box —
+    # here, the path `/proc` still reports, with ` (deleted)` on the end. The unlink comes
+    # BEFORE the ageing, because unlinking is a write to the directory: it moves the
+    # directory's mtime to now, and a directory aged before it is aged no more.
+    gone = held_by_deleted / "payload-0.txt"
+    gone.unlink()
+    free = _tmp_dir(rs, "free-to-go", files=1)
+    _age(free, days=9)
+    _age(held_by_deleted, days=9)
+
+    proc = _fake_proc(tmp_path,
+                      cwd={"4001": str(held_by_cwd)},
+                      entries={"4002": [str(held_by_fd / "payload-0.txt")],
+                               "4003": [f"{gone} (deleted)", "socket:[98765]"]})
+    out = rs.sweep_tmp_scratch(True, time.time(), proc_root=proc, keep_dirs=0)
+    assert out["held_live"] == 3, f"a live reference was not honoured: {out}"
+    assert out["deleted"] == 1, out
+    assert held_by_cwd.is_dir() and held_by_fd.is_dir() and held_by_deleted.is_dir(), out
+    assert not free.exists(), f"the unreferenced dir survived: {out}"
+
+
+def test_liveness_is_compared_by_path_component_not_by_string_prefix(rs, tmp_path):
+    """The one way a `/proc` rail becomes a rubber stamp: a string-prefix test.
+
+    The discriminating case is a candidate whose name is a STRING PREFIX of the protected path,
+    which is what `/tmp/probe` beside `/tmp/probe-2` always is — and the habit that produced
+    this store's corpus is `mkdir -p /tmp/probe` with a suffix on the next attempt, so the pair
+    is the normal shape of the corpus rather than a contrivance:
+
+    * process cwd = `<root>/probe-2`. A `startswith` on the rendered paths reads
+      `<root>/probe-2`.startswith(`<root>/probe`) → true, so it holds `probe` as well and that
+      directory is never collected, while the component comparison holds only `probe-2` and
+      takes `probe`. The held directory is the LONGER name and the collected one the shorter:
+      that is the direction a prefix test fails. Seeding it the other way round — protect
+      `probe`, offer `probe-2` — reads identically under the mutant and under the real rule,
+      which is exactly how the first version of this node passed a hand-planted `startswith`.
+    * a file descriptor on `<root>/probe-sub/payload-0.txt`. Here `probe-sub` IS the ancestor,
+      so it has to be held — the comparison cannot simply be inverted to
+      `candidate in target.parts[1:]`, which would drop the real reference while refusing the
+      fake one.
+
+    `probe` is deleted and the two real ancestors survive, so the node reddens under
+    `startswith`, under an inverted component test, and under a rule that holds everything.
+    """
+    prefix = _tmp_dir(rs, "probe", files=1)
+    held_by_cwd = _tmp_dir(rs, "probe-2", files=1)
+    held_by_fd = _tmp_dir(rs, "probe-sub", files=1)
+    for d in (prefix, held_by_cwd, held_by_fd):
+        _age(d, days=9)
+    proc = _fake_proc(tmp_path, cwd={"4100": str(held_by_cwd)},
+                      entries={"4101": [str(held_by_fd / "payload-0.txt")]})
+
+    out = rs.sweep_tmp_scratch(True, time.time(), proc_root=proc, keep_dirs=0)
+    assert out["held_live"] == 2, (
+        f"a string-prefix test held the name `probe` as well: {out}")
+    assert held_by_cwd.is_dir() and held_by_fd.is_dir(), (
+        f"the real ancestor was not held: {out}")
+    assert not prefix.exists(), (
+        "`probe` survived because its name is a string prefix of the protected path: the "
+        "comparison is over Path.parts, and a prefix test is a rubber stamp")
+
+
+def test_the_real_proc_scan_holds_a_directory_only_while_the_process_lives(rs):
+    """The process boundary itself: the scan that guards every deletion this store makes.
+
+    Every other node in this group feeds the scan a fixture `/proc` of symlink farms, because a
+    test cannot otherwise make the kernel hold a directory. This one does: a real child is
+    spawned with its cwd in an aged scratch directory AND a real file descriptor open inside the
+    same directory, and the sweep runs with NO `proc_root`, so the code walks the live
+    `/proc/[0-9]*/cwd` and `/proc/[0-9]*/fd` of ANOTHER process, past the uid filter and
+    `os.readlink`, as production does. The pytest process is the only reader in the suite, so
+    this node and not the nine beside it is what shows the scan reads anything at all.
+
+    The second half is the other half of the claim: once the child is reaped, its cwd and its
+    descriptor are gone and the SAME directory is collected on the next pass. A scan that failed
+    OPEN — returning everything, or failing to raise on a permission error and skipping the
+    whole root — would pass the first assertion and fail this one.
+    """
+    victim = _tmp_dir(rs, "live-child", files=1)
+    _age(victim, days=9)
+    payload = victim / "payload-0.txt"
+
+    stdin = open(payload, "rb")
+    try:
+        child = subprocess.Popen(["sleep", "30"], cwd=str(victim), stdin=stdin)
+        try:
+            # The pid is visible in /proc from the fork, so the scan can race the child's own
+            # setup. Poll the scan rather than sleeping a guess: it is the thing under test,
+            # and it converges in milliseconds.
+            # The production pair, not a paraphrase of it: `_proc_referenced_paths` reads the
+            # kernel, and `_referenced_under` is the predicate the sweep then applies to each
+            # entry it is about to delete.
+            vparts = rs._abs_path(victim).parts
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if rs._referenced_under(vparts, rs._proc_referenced_paths()):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"/proc never showed pid {child.pid} inside {victim}")
+
+            held = rs.sweep_tmp_scratch(True, time.time(), keep_dirs=0)
+            assert held["held_live"] >= 1, f"the live child did not hold its directory: {held}"
+            assert victim.is_dir(), "a directory a real process was sitting in got collected"
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
+    finally:
+        stdin.close()
+
+    gone = rs.sweep_tmp_scratch(True, time.time(), keep_dirs=0)
+    assert gone["deleted"] == 1, (
+        f"the hold outlived the process that created it: {gone}")
+    assert not victim.exists(), "a scratch dir stayed forever after its last reference closed"
+
+
+def test_symlinks_and_non_directories_are_held_and_never_followed(rs, tmp_path):
+    """Clause 3's other half: only directories are ever targets, and a link is never followed.
+
+    The hazard is a residue named `/tmp/lloyd-ceiling-planted-tree` becoming a delete of
+    whatever that name points AT — store 7's rule for the spill sidecar, inherited whole. A
+    plain file is held for the different reason that the supervisor's socket is safe:
+    `/proc` reports an open socket as `socket:[NNN]`, which resolves under no directory, so
+    the only thing protecting `/tmp/agent-supervisor.sock` and `/tmp/agent-supervisord.pid`
+    (`agent-services/supervisor/supervisord.conf:2,6`) is that this store takes directories.
+
+    Both held entries are aged PAST the window, and the root carries an aged ordinary directory
+    that IS collected in the same pass, so the holds are measured against a sweep that does
+    delete rather than against an empty one. The link is aged with `follow_symlinks=False`:
+    `os.utime` on a symlink otherwise re-stamps the TARGET and leaves the link itself fresh,
+    which would let the node pass by breaking out of the loop on age instead of on kind.
+    """
+    outside = tmp_path / "somewhere-else"
+    outside.mkdir()
+    (outside / "irreplaceable.txt").write_text("not scratch\n", encoding="utf-8")
+    link = _tmp_root(rs) / "lloyd-ceiling-planted-tree"
+    os.symlink(outside, link)
+    old = int((time.time() - 40 * TMP_DAY) * 1e9)
+    os.utime(link, ns=(old, old), follow_symlinks=False)
+    pidfile = _tmp_root(rs) / "agent-supervisord.pid"
+    pidfile.write_text("1\n", encoding="utf-8")
+    os.utime(pidfile, ns=(old, old))
+    collected = _tmp_dir(rs, "aged-ordinary-dir", files=1)
+    _age(collected, days=9)
+
+    out = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path),
+                                keep_dirs=0)
+    assert out["held_link"] == 1 and out["held_notdir"] == 1, out
+    assert out["deleted"] == 1 and not collected.exists(), (
+        f"the control directory was not collected, so the holds above prove nothing: {out}")
+    assert link.is_symlink(), "the sweep followed and removed the link"
+
+
+def test_another_store_root_inside_the_temp_root_is_held_by_identity(rs, tmp_path,
+                                                                     monkeypatch):
+    """The hazard this store has that no other store has: its root CONTAINS another store's.
+
+    Store 16's `PYTEST_TMP_ROOT` is a direct child of the temp dir in production, so this
+    store's entry list contains it. An `--apply` that removed the parent would unbound store
+    16 wholesale — every pytest basetemp on the box at once, including the numbered run in
+    progress — which is store 13's reason for keeping a round's newest ledger row, one level
+    up in the tree.
+
+    The hold is PATH IDENTITY against the constant store 16 itself uses, not against its name:
+    an entry called `pytest-of-someoneelse`, which is NOT that root, is collected like any
+    other scratch directory. A name-based hold would be the allowlist this tree has ruled
+    against twice (#3379's clause 2, `tests/test_guardian_tmpwatch.py:289`).
+
+    The topology is built under a dedicated parent rather than the fixture's scratch root
+    because this node needs a store root that is a DIRECT CHILD of the swept root, which is
+    what production has and the fixture's sibling layout deliberately does not.
+    """
+    scratch = tmp_path / "tempdir"                    # the stand-in system temp dir
+    store16 = scratch / "pytest-of-alansrobotlab"     # store 16's root, a direct child
+    (store16 / "pytest-9").mkdir(parents=True)
+    lookalike = scratch / "pytest-of-someoneelse"
+    lookalike.mkdir()
+    (lookalike / "payload.txt").write_text("scratch\n", encoding="utf-8")
+    other = scratch / "repro-3153"
+    other.mkdir()
+    (other / "payload.txt").write_text("scratch\n", encoding="utf-8")
+    for d in (store16, lookalike, other):
+        _age(d, days=30)                              # every entry past THIS store's window
+
+    monkeypatch.setattr(rs, "PYTEST_TMP_ROOT", store16)
+    out = rs.sweep_tmp_scratch(True, time.time(), root=scratch,
+                               proc_root=_fake_proc(tmp_path, name="fake-proc"), keep_dirs=0)
+    assert out["held_nested"] == 1, f"the nested store's root was a candidate: {out}"
+    assert store16.is_dir() and (store16 / "pytest-9").is_dir(), (
+        "the sweep took store 16's whole root with it, basetemps and all")
+    assert not lookalike.exists() and not other.exists(), (
+        "the hold keyed on the NAME rather than the path: an allowlist arrived")
+
+
+def test_the_temp_store_counts_only_the_uid_it_runs_as(rs, tmp_path, monkeypatch):
+    """The ownership gate, from both sides.
+
+    Entries owned by another uid are neither collected NOR counted in the census: `/tmp` holds
+    `systemd-private-*` and `.X11-unix` and the sandbox uid's chrome profiles, and a line that
+    counted them would make the report unreadable as a statement about OURS. The gate is faked
+    by moving the sweep's uid rather than by chowning the box — the direction that keeps the
+    test able to run as nobody.
+    """
+    aged = _tmp_dir(rs, "ours", files=1)
+    _age(aged, days=9)
+    out = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path),
+                                keep_dirs=0)
+    assert out["dirs"] == 1 and out["deleted"] == 1, out
+
+    aged2 = _tmp_dir(rs, "theirs", files=1)
+    _age(aged2, days=9)
+    real_uid = os.getuid()          # captured BEFORE the patch: `rs.os` IS this `os`
+    monkeypatch.setattr(rs.os, "getuid", lambda: real_uid + 1)
+    foreign = rs.sweep_tmp_scratch(True, time.time(), proc_root=_fake_proc(tmp_path),
+                                   keep_dirs=0)
+    assert foreign["dirs"] == 0, f"a uid saw entries it does not own: {foreign}"
+    assert foreign["deleted"] == 0, "a sweep deleted another uid's scratch"
+    assert aged2.is_dir(), "the uid gate did not hold"
+
+
+def test_the_temp_store_line_prints_last_and_survives_the_refusal(rs, monkeypatch, capsys,
+                                                                  tmp_path):
+    """Clause 1 and clause 5's report-half: the 24th line, printed LAST, in both kinds of run.
+
+    Last, appending rather than inserting, because task 79's enumeration is matched to the
+    printed lines POSITIONALLY — #2862's reason, inherited through #2924, #3188 and #3209, so
+    items 1-23 keep the rules each already names. And outside the production-checkout refusal,
+    because the store belongs to neither the tree nor the data root: `resolve_data_root`
+    (#1415) decides which tree an `--apply` may reach and says nothing about the tmpfs, so a
+    box whose sweep only ever runs from a gate would otherwise leave the loop's scratch
+    unbounded while its report said nothing about it — which is the exact silence that made
+    five items ask a human to remove one directory by name.
+
+    The dry-run line carries both numbers clause 1 asks for: the candidate count and the inode
+    total.
+    """
+    assert Path(rs.TMP_SCRATCH_ROOT) != Path(tempfile.gettempdir()), (
+        "the fixture did not redirect the temp store: a unit test would point it at real /tmp")
+    victim = _tmp_dir(rs, "aged-scratch", files=2)
+    _age(victim, days=5)
+    # The keep rail is another node's subject; zeroing it here is what lets this node say
+    # "one candidate" rather than "the one candidate was held because it is the newest".
+    monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
+    report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
+    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
+    last = report[-1]
+    assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
+    assert "1 would delete" in last, last
+    assert "inode(s) candidate" in last, last
+    assert victim.is_dir(), "the dry run deleted"
+
+    refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
+    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
+    assert refused[-1].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-1]
+
+
+def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
+                                                                        monkeypatch):
+    """Clause 5: what the store's root IS in production, and that no test can reach it.
+
+    `TMP_SCRATCH_ROOT` must equal `tempfile.gettempdir()` in a freshly loaded module — the
+    store is about the tmpfs the kernel exports, and a root built from `DATA_ROOT` or
+    `Path.home()` would bound a directory nothing writes. And because the default points at
+    the real `/tmp`, the redirect table in the `rs` fixture is the only thing between a unit
+    test and the live tmpfs; `_unredirected_destructive_paths` is the predicate that proves it.
+    """
+    mod = _load(monkeypatch, lloyd_data=tmp_path / "scratch-root")
+    assert mod.TMP_SCRATCH_ROOT == Path(tempfile.gettempdir()), mod.TMP_SCRATCH_ROOT
+
+    swept = {name for name, value in vars(mod).items()
+             if isinstance(value, Path) and not name.startswith("__")
+             and name not in NON_TARGET_PATHS}
+    assert "TMP_SCRATCH_ROOT" in swept, (
+        "the temp root is not a module-level Path constant, so `_unredirected_destructive_paths` "
+        "cannot see it, the fixture's table could go missing unnoticed, and a node reaching "
+        "main() with --apply would collect real /tmp")
+    # The predicate itself, run over the FIXTURE's patched module: every deletable root the
+    # sweep owns, the new one included, resolves under this test's tmp dir. That is the whole
+    # of clause 5 — one line in the fixture's table, checked by the guard every other store is
+    # checked by, rather than by a list of names in this file that a new store would not be in.
+    assert _unredirected_destructive_paths(rs, tmp_path) == [], (
+        f"the temp store's root escaped the fixture's redirect table: "
+        f"{_unredirected_destructive_paths(rs, tmp_path)}")
+    assert Path(rs.TMP_SCRATCH_ROOT) == tmp_path / "tmp-scratch", (
+        "the fixture no longer redirects the store to a directory of its own, which is what "
+        "keeps it from being the parent of the other stores' fixture roots")
