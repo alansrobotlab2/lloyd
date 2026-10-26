@@ -906,6 +906,21 @@ def _rows(event="backlog_implement"):
             if l.strip() and json.loads(l).get("event") == event]
 
 
+def _wait_for_row(item_id, phase, timeout=10.0):
+    """Block until a `phase` row naming `item_id` is on the ledger; say whether it was.
+
+    Called from inside the stubbed red-tree probe, which runs on a worker thread
+    while the event loop is free to run the other slot, so waiting here is how
+    the winner comes to see the ledger in the state a real probe sees it.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if any(r.get("item_id") == item_id and r.get("phase") == phase for r in _rows()):
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _ready(isolated, item_id, *, name="the thing"):
     """An item the loop may take: `up_next`, confirmed, with an acceptance clause."""
     (isolated / f"{item_id}-thing.md").write_text(
@@ -932,11 +947,18 @@ def _stub_the_turn(monkeypatch, seen):
     seen.setdefault("probe", [])
 
     def probe(candidate):
+        # The real `_red_tree_settled_at_pickup` is a pytest run bounded by
+        # `gate.PICKUP_PROBE_TIMEOUT` (300 s), and the declining slot writes its
+        # skip row a second into it. A stub that returns at once inverts that:
+        # it lets the winner read a ledger no production probe ever saw. So the
+        # stub waits for the decline first and records what the winner then sees.
+        decline_seen = _wait_for_row(candidate.id, "skipped")
         seen["probe"].append({
             "claimed": sorted(B.implement_claimed_ids()),
             "selector": B.select_confirmed(S.LEDGER_PATH),
             "ready_ignoring_the_claim": [i.id for i, _ in B.ready_confirmed(
                 S.LEDGER_PATH, ignore_implement_claims=True)],
+            "decline_seen": decline_seen,
             "rows_already_written": [r.get("phase") for r in _rows()
                                      if r.get("item_id") == candidate.id]})
         return {"action": "kept"}
@@ -998,22 +1020,40 @@ def test_two_slots_and_one_ready_item_give_one_started_row_and_one_decline(isola
 
 def test_the_item_is_claimed_before_its_started_row_and_a_selector_cannot_name_it(isolated,
                                                                                   monkeypatch):
-    """The window #3370 is about, pinned at the moment the winner is mid-flight.
+    """The window #3370 is about, pinned with the other slot's decline already down.
 
     The probe runs after the claim and before the `started` row, so what it sees
-    is what the second slot saw: no ledger row naming the item, the board still
-    saying `up_next`, and — with the claim in the way — a pool that no longer
-    names it. `ready_ignoring_the_claim` is the counterfactual in the same
+    is what the second slot saw: no `started` row spending the attempt, the board
+    still saying `up_next`, and — with the claim in the way — a pool that no
+    longer names it. `ready_ignoring_the_claim` is the counterfactual in the same
     instant: the same pool with the claims dropped still offers the item, so the
     hold is doing the work and not some accident of ordering.
+
+    The decline is waited for before the record is taken, and that is the state
+    this node is about, not a tolerance. In production the probe is a pytest run
+    bounded by `gate.PICKUP_PROBE_TIMEOUT` (300 s) and the declining slot writes
+    its row a second into it, so a `skipped` row already on the ledger at probe
+    time is the ordinary case. Asserting that NO row named the item asserted an
+    ordering the claim never promised — it held only because the stub returned in
+    microseconds, and it broke as soon as a loaded suite (`-n 8`, #3380 at base
+    `7be3a413`) scheduled the stub's thread after the other slot. The claim is
+    process memory, not a ledger row: what it guarantees is that no row of the
+    winner's own precedes it — the `started` row, which `execute` reaches only
+    after this probe and `_warm_session` have both returned.
     """
     _ready(isolated, 41)
     seen = _stub_the_turn(monkeypatch, {})
     _one_tick_two_slots()
     assert len(seen["probe"]) == 1, "the declining slot never reaches the probe"
     p = seen["probe"][0]
+    assert p["decline_seen"] is True, \
+        "the other slot never declined while the winner was in its probe: the " \
+        "interleaving this node pins did not happen"
     assert p["claimed"] == [41], p
-    assert p["rows_already_written"] == [], p
+    assert p["rows_already_written"] == ["skipped"], \
+        f"the only row the item may have while the winner is mid-probe is the " \
+        f"other slot's decline; a `started` row here is the claim taken too late: " \
+        f"{p['rows_already_written']}"
     assert p["selector"] is None, p
     assert p["ready_ignoring_the_claim"] == [41], p
 
