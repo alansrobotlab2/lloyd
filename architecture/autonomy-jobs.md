@@ -939,12 +939,13 @@ measured since #904 — `scripts/automod/board_decisions.py`, surfaced through
 `up_next` joined to the ledger event that made it and to its terminal state,
 per-day counts, and retirements later reversed. It sees #35 only when a round
 picks its promotion up (`unrecorded`, since the MCP store writes no ledger
-row); #65's registry conversion is still unmeasured.
+row); #65 has no such join — its proposals are counted only as registry state
+(`research_stats`' `by_status`), never attributed to the night that made them.
 
 | ID | Freq | Role |
 |----|------|---|
 | #65 | daily | Propose 5–8 research topics into `research.db` via `research_propose`, from the knowledge health report, session-distill gaps, open backlog and the last two daily notes |
-| #35 | daily | Promote 2–4 high-priority `draft` items into `up_next`, holding the queue to a **human attention budget** of eight to twelve promoted items and skipping when that is full unless critical/high blockers exist. The budget is what one person can review in a sitting, not the loop's intake limit: the depth gate is `implement_pool_bound`, derived as `max(implement_pool_floor, items landed in the trailing 7 days)` and counted over `ready_confirmed` items — read `implement_pool.bound` / `.ready` from `board_health`, and see [[automod]] for the bound's derivation |
+| #35 | daily | Promote 2–4 high-priority `draft` items into `up_next`, holding the queue to a **human attention budget** of eight to twelve promoted items and skipping when that is full unless a high-priority blocker of work already queued or assigned exists. The budget is what one person can review in a sitting, not the loop's intake limit: the depth gate is `implement_pool_bound`, derived as `max(implement_pool_floor, items landed in the trailing 7 days)` and counted over `ready_confirmed` items — read `implement_pool.bound` / `.ready` from `board_health`, and see [[automod]] for the bound's derivation |
 | #77 | weekly | Report-only census of the board — tally by status, flag stale drafts (>30 days untouched), duplicate ids, duplicate titles. Touches no file: archives nothing, edits nothing, deletes nothing, files nothing; every candidate it names is the user's act |
 
 **#65 feeds the `deep-research` worker and no longer reads or writes any queue
@@ -957,10 +958,12 @@ loop's own triage and implement passes are worker sources, not autonomy tasks,
 and run under [[automod]]'s gates — see [[backlog]] for the board itself and the
 quarantine rule that keeps the loop from eating what it files.
 
-**No job retires a closed item off the board, and that gap has an owner.** #77's
-census on 2026-09-26 counted 1,488 `status: done` files of 1,507 in
-`~/obsidian/backlog/` (98.7% terminal, no `archived/` directory of any kind), with
-665 of them completed on or after 2026-09-20 — roughly 110 a day arriving. Nothing
+**No job retires a closed item off the board, and that gap was closed by a ruling,
+not by an owner.** #77's
+census on 2026-09-26 counted 1,488 `status: done` files of 1,507; the same tally on
+2026-10-26 is 3,315 done of 3,345 (99.1% terminal, and still no `archived/`
+directory — `backlog/data/` is the only subdirectory), with 367 completed in the
+seven days before that date, so ~52 a day are arriving. Nothing
 moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions and
 run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
 ("One definition of 'record a backlog status move'") and never touches a path; the
@@ -968,13 +971,17 @@ only writer in the tree that removes a backlog file is `backlog_task_delete`
 (`app/routers/backlog.py:849`), which deletes rather than archives and is wired to
 no job. The board hides the pile after `DONE_WINDOW_DAYS = 7`
 (`web/src/components/pages/BacklogPage.tsx:572`), so nothing downstream feels it
-either. Archiving ~1,488 files is a bulk human-gated move in a protected path, and
-naming a job that may thereafter move board files is a scope call, so **it is not an
-autonomy task's to make: backlog #1566 is where that decision lives**, and a run
-that reports the pile cites it (`skills/weekly-backlog-hygiene/SKILL.md`, the prompt
-#77 runs, says the same). The older reading of this section — that the archiving
-happens and that #77 does it — is not true, and these are the sentences that
-replaced it.
+either. Whether anyone may retire the pile is **a closed question, not an owned one:
+backlog #1566** — whose held decision
+the owed-human sweep resolved on 2026-09-27 (delegated by Alan) and whose
+`owed_settled` entry of 2026-10-04 states it — accept the pile, no archive, because
+a bulk `git mv` breaks every non-recursive id-glob reader and every vault link for
+no measured gain while `status` already filters closed items. A reader who follows
+the older wording ("where that decision lives") books the pile as still awaiting a
+person, which it is not; `skills/weekly-backlog-hygiene/SKILL.md`, the prompt #77
+runs, still words its owner line that way. The older reading of this section — that
+the archiving happens and that #77 does it — is also not true, and these are the
+sentences that replaced it.
 
 ---
 
