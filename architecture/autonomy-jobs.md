@@ -748,7 +748,8 @@ rather than rewriting.
 
 **#83 runs unobserved, and the thing that used to stop it landing anyway is
 gone.** It sets no `inner_voice:` and the fleet default is `false`
-(`autonomy.inner_voice`, `config.yaml:302`). On 2026-09-11 the pass tried to land
+(`autonomy.inner_voice` in `config.yaml`, the row `inner_voice: false`). On
+2026-09-11 the pass tried to land
 a vault change through `automod_vault_land` and was refused, because the tool
 then gated on Inner Voice being attached and the observer attaches at turn start
 — switching it on mid-turn cannot cover the turn. **That refusal can no longer
@@ -756,7 +757,7 @@ happen to a job in this group:** #901 put a platform exemption ahead of both the
 refusal marker and the flag — `agent_mcp/automod.py:203` returns `None` for any
 session whose `platform` is in `NON_USER_PLATFORMS` (`app/sessions_io.py:101`,
 `{autonomy, worker}`) — and `automod.require_inner_voice` additionally defaults
-false in `agent_mcp/automod.py:36-50`, absent from `config.yaml`. #2670 then made
+false at `agent_mcp/automod.py:50`, absent from `config.yaml`. #2670 then made
 `automod_vault_land` the single standing worker ban an `autonomy-task:<id>` scope
 may be licensed around (`app/harness/capabilities.py:182`,
 `SCOPE_BAN_EXCEPTIONS`), and #38, #47, #83 and #54 each hold such a row now,
