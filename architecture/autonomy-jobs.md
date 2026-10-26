@@ -793,25 +793,41 @@ decision about which of two names an existing pair always should have shared.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
-| #24 | 6×/day | — | Content-hash-gated fact extraction over the `scripts/memory/next-gen-memory/pipeline_config.yaml` corpus, then index rebuild and a `kg_health` snapshot. Emits graph edges as it writes facts; no-ops when no source document changed |
-| #51 | daily | #56 | Session co-access pairs from trajectories → `co_accessed` edges, provenance `INFERRED`, the trajectory as `source_doc` |
+| #24 | 6×/day | — | Content-hash-gated fact extraction over the vault corpus **allow-listed** in `scripts/memory/next-gen-memory/pipeline_config.yaml` — `knowledge`, `projects`, `people`, `personal`, `work`, and `memory` only once a daily note has settled — then index rebuild. The `kg_health` snapshot is **Step 0, launched ahead of every gate**, so a run that exits early still writes one; it is not a tail step. Emits `mentions` edges as it writes facts; no-ops when no source document changed |
+| #51 | daily | #56 | Session co-access pairs from trajectories → edges **typed by the Stage-2 classifier**, `co_accessed` only as the fallback when nothing classified the pair (#420, 2026-09-12), provenance `INFERRED`, the trajectory session as `source_doc`. Measured 2026-10-26: 562 conversation-origin edges in the store, **none** of them `co_accessed` (321 `related_to`, 129 `implements`, 84 `depends_on`, 23 `derived_from`, 5 other) |
 | #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first |
 
-**#24 is the single most expensive job in the fleet** — 8.5 GPU-h over the seven
-days to 2026-09-11, against 28 runs. It and #68 carry 40% of the fleet's load
-between them.
+**#24 is the single most expensive job in the fleet** — 10.4 GPU-h over the seven
+days to 2026-10-26 (window unclamped), against 36 runs: 37% of the autonomy
+fleet's 27.9 h, and more than the next four tasks put together. The task this
+sentence used to pair it with, #68, has been parked by Alan since 2026-09-17 and
+has logged nothing since, so the pairing is gone; the second-heaviest task is this
+group's own #74 at 2.0 h (7%).
+
+**The `Depends` column is a freshness gate, not a clock order.** Measured over the
+seven days to 2026-10-26, #51 dispatched at ~06:00Z and its upstream #56 at
+~08:00Z **every night** — the dependent runs two hours ahead of the job it waits
+for and reads the *previous* night's trajectory file, released by the bound in its
+own row (`stale_bypass_hours: 12`) rather than by the ordering. #74 (~04:30Z)
+likewise precedes #48 (~17:50Z) on the same clock day, so the apply whose
+canonical names it trusts is the previous day's. #24 is what sits in that gap:
+running 6×/day, it writes `mentions` edges twice between #48's apply and #74's
+next run, and those are typed before #48 has ever seen their names.
 
 **#51 produced no graph at all until 2026-09-04**, when approval only flipped a
 status field in a JSON file nothing downstream read. It also ran every 15 minutes
 until it was moved to nightly, where 95 of 96 daily runs were no-ops — the input
 is written once a night by #56.
 
-**One store, one writer, and one read-only reader.** Edges, aliases, the entity
+**One store, one writer, and two read-only readers.** Edges, aliases, the entity
 registry and the fact index live in `_pipeline/vault-derived/kg.sqlite` behind
-`app.kg_store`, and nothing else **writes** it. It has a second opener: the
-guardian's data-damage tripwire opens it read-only for a row count
-(`count_kg_rows`, `agent-services/guardian/guardian.py`). That watchdog runs
-system python on a staged snapshot, so it can import neither `app.kg_store` nor
+`app.kg_store`, and nothing else **writes** it. Two openers besides the owner read
+it, both for a row count: the guardian's data-damage tripwire
+(`count_kg_rows`, `agent-services/guardian/guardian.py`) and the promoter's
+baseline (`scripts/automod/promote.py`), which is the number the watchdog is
+weighed against — the two still resolve the path by different rules, tree for one
+and production root for the other, the unification #1525 recorded rather than did.
+That watchdog runs system python on a staged snapshot, so it can import neither `app.kg_store` nor
 `app.paths`, and the path it counts comes from the stdlib-only
 `app/data_root.py` — the one spelling both readers share (#1525). See
 [[knowledge-graph]].
