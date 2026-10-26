@@ -502,16 +502,17 @@ Phase 2 dies at 1809–1826 s against a 1800 s cap while healthy runs take
 **The pairwise offset has since been undone, so the clock orders nothing.** All
 four once sat on 22–04 against `workers.slots: 2`, so #39 could be claimed in the
 hours #42 was still writing the handoff it was about to read; the 2026-09-09 fix
-narrowed #38 and #42 to 22–01. Read off the task files on 2026-09-26, both of them
-declare 22, 23 and 0–4 again, #39 declares 1–4 and #40 2–4 — every pair that
-consumes another's output now shares that output's whole window — and
+narrowed #38 and #42 to 22–01. Read off the task files again on 2026-10-26, both
+of them declare 22, 23 and 0–4 again, #39 declares 1–4 and #40 2–4 — every pair
+that consumes another's output now shares that output's whole window — and
 `workers.slots` is 6 (since 2026-09-18), not the 2 the windows were sized
 against. What orders the chain is the freshness half of `depends_on`, not the
 clock — which is the correct division of labour, and the reason the two holes
-above matter more than any window edit. The jobs are minutes (2026-09-26, the 78 h
-the route holds: #38 avg 445 s, #39 367 s, #40 335 s, against `timeout_seconds`
-1800 / 2400 / 1800), so whatever span the chain shows end to end is scheduling
-latency, not work.
+above matter more than any window edit. The jobs are minutes (measured 2026-10-26
+over the 7-day window `/api/workers/health` holds unclamped: #38 avg 508 s with
+its slowest run at 683 s against its 1800 s cap, #42 730 s, #39 774 s, #40 513 s,
+against `timeout_seconds` 1800 / 1800 / 2400 / 1800), so whatever span the chain
+shows end to end is scheduling latency, not work.
 
 Two tool-shaped rules, both learned expensively. `Write` refuses to overwrite a
 file it has not read this session, so a Phase 0 skeleton write is *refused on
@@ -559,13 +560,18 @@ out-of-scope source every time: 0 bundles across the 22 piloted runs in the wind
 to 2026-09-12, and `claims_checked: 0` over 713 fleet runs — which is also why
 #714's prediction of a first window full of `insufficient` gaps could not come
 true. The key is copied now when the model emitted one, and the pilot reports:
-measured 2026-09-26 over the 78 h the route holds, **22 claims checked, 22
-verified, 0 refuted, 0 insufficient, across 4 bundled runs** (#38 11, #39 6, #40
-5). #42 has no row because it did not run in that window. What is left is
-coverage, not plumbing — 68 of those 72 runs carry no bundle at all, because only
-these four tasks emit a claims block. #902 (coverage: 4 of the fleet's
-unattended writers) and #945 (this severance) are both closed; the first
-`insufficient` verdict is still unobserved. **Widened 2026-10-09 (#2482):** #53
+measured 2026-10-26 over the 7-day window the route holds unclamped, all seven
+piloted tasks together, **892 claims checked, 850 verified, 17 refuted, 25
+insufficient, over 77 runs that carried a bundle** out of the source's 253. That
+supersedes the 2026-09-26 reading (22 checked, 22 verified, 0 refuted, 0
+insufficient, across 4 bundled runs — #38 11, #39 6, #40 5): both `insufficient`
+and `refuted` are now observed in volume, and the chain's own analyst is its
+largest refuter — read off the runs table for the same window, #42 emitted 69
+claims of which 6 were refuted and 1 insufficient, against #39's 4 refuted and
+#38's 2. What is left is coverage, not plumbing — 176 of those 253 runs carry no
+bundle at all, because only the piloted tasks emit a claims block. #902
+(coverage: 4 of the fleet's unattended writers) and #945 (this severance) are
+both closed. **Widened 2026-10-09 (#2482):** #53
 Documentation Digester joined, so five tasks emitted a claims block on the day of that
 measurement, and its first live refutation is what the widening was for — the digester
 had filed a high-priority item over an audit store with no row in it anywhere on this
@@ -630,10 +636,13 @@ wrong thing.
 
 **What it mines is the human half of the day, by construction.** Post-session
 capture appends the daily-note summary only for a user session and routes
-background exports to `_pipeline/vault-derived/sessions-background/`, so the ~240
+background exports to `_pipeline/vault-derived/sessions-background/`, so the
 background sessions a day this machine runs for itself are not in the daily notes
-the pass falls back to. The trajectory JSONL is the wider corpus and does carry
-them.
+the pass falls back to — and the corpus is three times the size this paragraph
+said: 845, 903 and 728 session files on 2026-10-23, -24 and -25 (measured
+2026-10-26), the 10-25 population headed by `review` 212, `autotriage` 147,
+`owedcheck` 121 and `autocode` 68. The trajectory JSONL is the wider corpus and
+does carry them.
 
 #### Evidence integrity: three signals weaker than they look
 
@@ -737,11 +746,24 @@ advisory only, and it lives in [Measure](#measure-60-82-70-36-76-86). When the
 procedure itself has rotted, that is #83's Stage 3, which appends a correction
 rather than rewriting.
 
-**#83 runs unobserved, and that has a cost.** It sets no `inner_voice:` and the
-fleet default is `false`. On 2026-09-11 the pass tried to land a vault change
-through `automod_vault_land` and was refused, because that tool gates on Inner
-Voice being attached and the observer attaches at turn start — switching it on
-mid-turn cannot cover the turn.
+**#83 runs unobserved, and the thing that used to stop it landing anyway is
+gone.** It sets no `inner_voice:` and the fleet default is `false`
+(`autonomy.inner_voice`, `config.yaml:302`). On 2026-09-11 the pass tried to land
+a vault change through `automod_vault_land` and was refused, because the tool
+then gated on Inner Voice being attached and the observer attaches at turn start
+— switching it on mid-turn cannot cover the turn. **That refusal can no longer
+happen to a job in this group:** #901 put a platform exemption ahead of both the
+refusal marker and the flag — `agent_mcp/automod.py:203` returns `None` for any
+session whose `platform` is in `NON_USER_PLATFORMS` (`app/sessions_io.py:101`,
+`{autonomy, worker}`) — and `automod.require_inner_voice` additionally defaults
+false in `agent_mcp/automod.py:36-50`, absent from `config.yaml`. #2670 then made
+`automod_vault_land` the single standing worker ban an `autonomy-task:<id>` scope
+may be licensed around (`app/harness/capabilities.py:182`,
+`SCOPE_BAN_EXCEPTIONS`), and #38, #47, #83 and #54 each hold such a row now,
+minted under #2927 as "vault-land outputs only", expiring 2027-01-31. The
+whole-tree pre-flight commit above is still the path all four actually take;
+unobserved-and-licensed is nonetheless the new standing state, and the observer
+that the 2026-09-11 refusal was enforcing is now exempt by platform.
 
 ### #54 — the straggler
 
