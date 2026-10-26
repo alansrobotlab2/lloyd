@@ -228,6 +228,41 @@ _FOOTER_SECTION_LABEL_RE = re.compile(
 #: that merely contains a tag (`…the #1 reason`) is prose and stays.
 _HASHTAG_RUN_RE = re.compile(r"^\s*(?:#[^\W_][\w-]*\s+){1,}#[^\W_][\w-]*\s*$")
 
+#: Emoji and its marks: variation selectors, ZWJ, the combining enclosing/keycap
+#: marks, the flag tag chars, the dingbat/misc/arrows blocks and the pictographic
+#: planes. Nothing here is `\w`, and none of it is a letter of a tag.
+_DECORATION_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U000E0020-\U000E007F\u2000-\u2BFF"
+    "\u2E00-\u2E7F\u3297\u3299\u3030\u303D\uFE0E\uFE0F]+")
+
+#: A `#` with no word character behind it. Once the marks are gone a keycap
+#: (`#️⃣` = `#` + U+FE0F + U+20E3) leaves exactly this: a hash that is decoration,
+#: not a tag, and `_HASHTAG_RUN_RE` would choke on it the same way.
+_BARE_HASH_RE = re.compile(r"#+(?![^\W_])")
+
+
+def tag_decoration_free(line: str) -> str:
+    r"""`line` with a channel's emoji taken out, so its TAG tokens can be read.
+
+    #3399. `#️⃣ #softwaredevelopment #khadas #llm` is a hashtag run by any reading,
+    but the first token is three characters of which not one is `\w`, so
+    `_HASHTAG_RUN_RE`'s `[^\W_]` rejected it — and because that pattern is anchored
+    over the WHOLE line, rejecting one token rejected the line, `footer_residue_shape`
+    answered None, and `_drop_footer_residue`'s backwards walk broke on the first
+    line it ever asked about: three `— — — — — — — — —` rules and the run itself
+    were published under a 62-character summary (`test_no_shipped_digest_body_carries_a_tag_run_line`
+    was red on exactly those lines). Same blind spot as #3121's
+    `🛒 Gear Links 🛒`, one token earlier, and the same reason no read-side skip
+    covers it: a keycap is not `#{1,6}` followed by a space, so
+    `digest_structural_line` says False for it too.
+
+    Decoration is removed BEFORE the tokens are read rather than matched around
+    them, which is what keeps #2737's guard exact: `#1 reason the tiny PC loses`
+    still has word-bearing non-tag tokens and still reads as prose, and a body with
+    no decoration is handed to `_HASHTAG_RUN_RE` character for character unchanged.
+    """
+    return _BARE_HASH_RE.sub("", _DECORATION_RE.sub("", line))
+
 #: The remnant of the shape ` … / https://x / @handle` leaves when the URL is
 #: taken out: `   / @aidotengineer`. `_EMAIL_RE` cannot see it, because #1791's
 #: email rule needs a dot after the `@` and a channel handle has none.
@@ -344,7 +379,17 @@ def footer_residue_shape(line: str) -> "str | None":
     if _URL_RE.search(line):
         return None
     for name, pat in _FOOTER_RESIDUE_SHAPES:
-        if pat.search(line) if name == "email" else pat.match(line):
+        # Two shapes need the line adjusted before it is matched, and only them:
+        # `email` is found anywhere in a line, and `hashtag-run` cannot see its own
+        # tags through a channel's emoji (#3399, `tag_decoration_free`). Every other
+        # shape is matched against `line` exactly as it arrived.
+        if name == "email":
+            hit = pat.search(line)
+        elif name == "hashtag-run":
+            hit = pat.match(tag_decoration_free(line))
+        else:
+            hit = pat.match(line)
+        if hit:
             return name
     return None
 

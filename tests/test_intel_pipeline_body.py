@@ -5123,3 +5123,111 @@ def test_an_entry_is_never_filed_under_another_day_s_heading(intel_state):
     assert not list(digest.parent.glob(f"{digest.name}.*.tmp")), (
         "the atomic rewrite left its temporary file behind")
     assert digest.read_text(encoding="utf-8") == text
+
+
+# ── #3399: a KEYCAP-opened tag run is where the tail walk stopped ────────────
+#
+# The gate filed this item off round SM_20261026_192853's base probe: `main is
+# red`, one node, `test_no_shipped_digest_body_carries_a_tag_run_line`, firing on
+# three `— — — — — — — — —` lines in knowledge/ai-llms/youtube-digest.md at 4390,
+# 4392 and 4394, under that file's `## 2026-10-26` section — a date after
+# DIGEST_PRE_3121_DATE, so the node is right to fire and the published note is the
+# residue. The instrument did not get stricter and nothing structural moved: the
+# stored description that produced the entry ends in
+# `#️⃣ #softwaredevelopment #khadas #llm`, and the FIRST token of that run is a
+# keycap — `#` + U+FE0F + U+20E3, none of which is `\w` — so `_HASHTAG_RUN_RE`'s
+# `[^\W_]` refused the whole line, `footer_residue_shape` answered None, and
+# `_drop_footer_residue`'s backwards walk broke on the first line it ever asked
+# about. Verified at base 78dcac73: `strip_link_footer` returned that description
+# byte for byte. Three rule lines, one tag run and the blanks between them were
+# then published below 62 characters of prose.
+#
+# This is #3121's blind spot one token earlier. There, `🛒 Gear Links 🛒` needed
+# `_PROMO_HEADING_RE` because both label patterns demand a colon; here the run
+# needs the keycap seen because `_HASHTAG_RUN_RE` demands a word character. And no
+# read-side skip can cover it either: `digest_structural_line` says False for this
+# line too (a keycap is not `#{1,6}` followed by a space), which is exactly why the
+# node reported the three rules and kept silent about the run that hid them.
+
+SHORTS_KEYCAP_TAIL = "#️⃣ #softwaredevelopment #khadas #llm"
+
+#: The stored description verbatim: row `fUTx3VLYhK0` of
+# `_pipeline/vault-derived/memory/feeds/raw/2026-10-26.jsonl`, `summary`, read as
+# bytes off that file on 2026-10-26 and inlined rather than re-read, so this node
+# cannot go green-or-red on a rotated feed day. The digest entry it produced is the
+# one the shipped-file node above fires on.
+SHORTS_KEYCAP_ROW = (
+    "I Ran a 27B Model on This Tiny PC. I Was Fixing the Wrong Thing.\n"
+    "\n"
+    "— — — — — — — — —\n"
+    "\n"
+    "— — — — — — — — —\n"
+    "\n"
+    "— — — — — — — — —\n"
+    "\n"
+    "#️⃣ #softwaredevelopment #khadas #llm"
+)
+
+
+def test_a_keycap_opened_tag_run_is_the_shape_the_walk_stops_for():
+    """The one classification that decided whether this entry had a footer.
+
+    `hashtag-run` is what the walk needs; None is what it got, and a None at the
+    tail ends the walk before the rules below it are ever named. The negatives are
+    why the fix cannot simply widen the character class: a run with a WORD token in
+    it is prose whatever its emoji say, one tag is not a run, a tag inside a
+    sentence is that sentence's own text (#2737's guard), and `#1` is a number, not
+    a tag — all four answered None before this item and must still answer None.
+    """
+    assert body_mod.footer_residue_shape(SHORTS_KEYCAP_TAIL) == "hashtag-run"
+    assert body_mod.footer_residue_shape("#dgxspark #nvidia #llm") == "hashtag-run"
+    assert body_mod.footer_residue_shape("🔥 #shorts #ai") == "hashtag-run"
+
+    for prose in (
+        "🔥 Watch this build #llm",
+        "#1 reason the tiny PC loses",
+        "#softwaredevelopment one tag is not a run",
+        "I Ran a 27B Model on This Tiny PC.",
+    ):
+        assert body_mod.footer_residue_shape(prose) is None, prose
+
+
+def test_the_stored_shorts_row_strips_to_its_prose_with_the_rule_run_gone():
+    """The row the digest entry came from, through the real write-side stripper.
+
+    `footer_residue_lines` is asked first because it is the read side
+    (`corpus_shape.py`'s per-digest count) and it reads the SAME classifier: the
+    four lines named below are the four the nightly instrument sees, so a fix that
+    satisfied the strip while leaving the count blind would publish the residue and
+    report 0. Then the strip itself: the prose sentence survives, every rule run
+    and the keycap run do not, and the body the writer would have published has no
+    residue line left for the shipped-file node to report.
+    """
+    assert body_mod.footer_residue_lines(SHORTS_KEYCAP_ROW) == [
+        (3, "rule"), (5, "rule"), (7, "rule"), (9, "hashtag-run")
+    ], body_mod.footer_residue_lines(SHORTS_KEYCAP_ROW)
+
+    stripped = body_mod.strip_link_footer(SHORTS_KEYCAP_ROW)
+
+    assert stripped != SHORTS_KEYCAP_ROW, "the keycap run still anchored the footer"
+    assert stripped == "I Ran a 27B Model on This Tiny PC. I Was Fixing the Wrong Thing.", stripped
+    assert "— —" not in stripped, stripped
+    assert body_mod.footer_residue_lines(stripped) == [], stripped
+
+
+def test_a_body_the_keycap_rule_cannot_reach_is_still_returned_byte_identical():
+    """The fix reaches a footer, never a body — so three near-misses stay put.
+
+    #2737's phrase is the property: prose with a run MID-body, a body closing on
+    a single keycap tag, and a body that is only prose are each returned
+    character for character. A rule that widened the run into ordinary text would
+    delete a channel's sentence-final emoji or a writer's own divider, and the
+    cheapest way to see that is a strip that changed nothing where nothing should
+    change.
+    """
+    for text in (
+        "A short model on a tiny machine.\n\n#️⃣ #llm\n\nSubtitles by the crew.",
+        "The build fits in a pocket.\n\n#️⃣",
+        "I Ran a 27B Model on This Tiny PC. I Was Fixing the Wrong Thing.",
+    ):
+        assert body_mod.strip_link_footer(text) == text, text
