@@ -244,8 +244,14 @@ Three other writers:
   `forget` verbs that routed onto `fact_add` and `fact_invalidate` from
   2026-09-09 were retired on 2026-09-23; see `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
-  trajectories become `co_accessed` edges, `provenance: INFERRED`, with the
-  trajectory as `source_doc`. On the pre-rebuild tree it had produced **143
+  trajectories land as edges **typed by the Stage-2 classifier**, with
+  `provenance: INFERRED` and the trajectory as `source_doc`:
+  `land_approved_edges()` in `scripts/memory/conversation_relations.py` writes
+  `type = p.get("type") or p.get("relation_type") or "co_accessed"`, so
+  `co_accessed` is only the fallback for a pair nothing classified (#420,
+  2026-09-12) — measured 2026-10-26 through `app.kg_store`, **0** of the 562
+  `conversation`-origin edges in the store are `co_accessed`. On the
+  pre-rebuild tree it had produced **143
   active edges, 0 expired** and was writing daily (2 on 09-10, 31 on 09-12, 53
   on 09-15, 28 on 09-16, 15 on 09-17, 14 on 09-18). Those edges did not survive
   the 2026-09-23 swap: the carry-over set's `CARRY_EDGE_ORIGINS` is
@@ -799,6 +805,30 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-10-26 — #3354 fixed: the #51 writer bullet still typed its own edges.**
+  §The write chain said co-access pairs from session trajectories landed as plain
+  co-access edges, which stopped being true on 2026-09-12 (#420, `e4f6370f`):
+  `land_approved_edges()` has written the type the Stage-2 classifier returned and
+  kept `co_accessed` only as the fallback for a pair nothing classified. Measured
+  2026-10-26 through `app.kg_store`: **0** edges of that fallback type among the
+  562 `conversation`-origin edges, and none anywhere in the store, while the job
+  is live (newest such edge `created_at` 2026-10-25T06:08:03Z). The same sentence
+  stood in `architecture/autonomy.md`'s Knowledge-Graph Chain table and in the
+  vault's `architecture/knowledge-graph.md`; all three now read classifier-typed
+  with the fallback, and the vault note's write-path diagram lost its dry-run label
+  and its human-runs-`--apply` arrow too — the same pair corrected below on
+  2026-10-13 — with rule 2 of its own incidents list narrowed to match, so the note
+  no longer says a person must run `--apply` two lines under a diagram that says the
+  nightly run does it unattended. Pinned by
+  `tests/test_kg_doc_claims.py::test_the_51_writer_bullet_says_the_edge_is_classifier_typed`,
+  `::test_the_kg_chain_table_row_says_the_edge_is_classifier_typed`,
+  `::test_no_architecture_doc_says_pairs_simply_become_co_accessed_edges`,
+  `::test_the_51_claims_reject_the_pre_420_wording_when_restored`,
+  `::test_the_vault_note_says_the_edge_is_classifier_typed`, and
+  `::test_the_vault_note_diagram_shows_48_applying_the_mechanical_tiers`, with
+  `::test_the_quoted_fallback_chain_is_the_chain_the_code_runs` parsing
+  `land_approved_edges()` so the sentence is checked against the writer and not only
+  against itself.
 - **2026-10-24 — #3221 fixed: rule 3's floor had stopped moving.** The rule said a
   floor is "bootstrapped only by a run that went on to apply", and after #2968 that
   was true in a way nobody intended: the move put `update_baseline` below the guard

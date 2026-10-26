@@ -1117,7 +1117,7 @@ edges; #60 measures the result; #82 measures whether retrieval improved.
 | ID | Name | Freq | Depends | Applies? | Role |
 |----|------|------|---------|----------|------|
 | #24 | Data Pipeline | 6x/day | -- | yes | Extract facts from the `sources.paths` corpus; emit `mentions` edges with source_doc + evidence |
-| #51 | Conversation Relation Linking | daily | #56 | yes | Co-access pairs from trajectories -> `co_accessed` edges (provenance INFERRED) |
+| #51 | Conversation Relation Linking | daily | #56 | yes | Co-access pairs from trajectories -> edges **typed by the Stage-2 classifier**, `co_accessed` only as the unclassified fallback for a pair nothing classified (#420, 2026-09-12); provenance INFERRED |
 | #48 | Entity Resolution Sweep | daily | #24 | **CASE/PUNCT only** | Cluster near-duplicates, run the semantic gate, print the plan and #67's proposals — then apply the two mechanical shape tiers itself (`--apply --tiers CASE,PUNCT`, Alan's ruling on #990, 2026-09-16). A SUFFIX merge is still a human action |
 | #67 | Semantic Entity Resolution | weekly | -- | **no** | LLM-judge the pairs string rules cannot; write `semantic-proposals-latest.jsonl` for #48's review list |
 | #74 | KG Mention Classifier | daily | #48 | yes | Re-type `mentions` into typed relations via `edges.retype`, one transaction |

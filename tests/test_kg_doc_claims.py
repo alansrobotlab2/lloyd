@@ -40,6 +40,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "knowledge-graph.md"
 
@@ -510,3 +512,441 @@ def test_review_log_names_3221_and_where_the_ratchet_moved():
         f"the entry pins {sorted(missing)}, which neither test file defines — a pin to a "
         "node that does not exist is worse than no pin, because it closes the report "
         "that would have found the gap")
+
+
+# ── #3354: who types the edge #51 lands, and in which document ────────────────────
+#
+# #420 (`e4f6370f`, 2026-09-12) changed `land_approved_edges()` from
+# `"type": p.get("relation_type") or "co_accessed"` to
+# `"type": p.get("type") or p.get("relation_type") or "co_accessed"`
+# (`scripts/memory/conversation_relations.py`, inside `land_approved_edges`), so an
+# approved pair lands as the type the Stage-2 classifier returned and `co_accessed`
+# survives only as the fallback for a pair nothing classified. Three documents kept
+# asserting the pre-#420 behaviour, one of them this one; measured 2026-10-26 through
+# `app.kg_store`, **0** of the 562 `conversation`-origin edges in the store are
+# `co_accessed`, and none anywhere in it, with the newest conversation-origin edge
+# stamped 2026-10-25T06:08:03Z — so the sentence described a type the live job had not
+# written in six weeks, in a doc a person reads before trusting the graph's provenance.
+#
+# The corpus for clause 3 is `architecture/*.md` at the top level, which is bounded and
+# enumerable today (`git grep -l co_accessed -- 'architecture/*.md'` answers three
+# files), so the check globs rather than carrying a list a new doc can fall off.
+
+ARCH_DIR = ROOT / "architecture"
+AUTONOMY_DOC = ARCH_DIR / "autonomy.md"
+CHAIN_TABLE_SECTION = "Knowledge-Graph Chain"
+CHAIN_SECTION = "The write chain"
+
+#: The writer whose behaviour the #51 sentences describe. Read with `ast` by
+#: `test_the_quoted_fallback_chain_is_the_chain_the_code_runs`, which is what makes
+#: this section's prose falsifiable against something other than itself.
+RELATIONS_SRC = ROOT / "scripts" / "memory" / "conversation_relations.py"
+
+#: The vault's fork of this note. It is a 2026-09-04 copy of the repo doc, retrievable
+#: prose in segment `architecture`, so a stale sentence in it is served to recall just
+#: like one here.
+VAULT_KG = Path.home() / "obsidian" / "architecture" / "knowledge-graph.md"
+
+#: The two shapes the #51 claim took: prose in the writer bullet, a cell in the chain
+#: table. Both are asserted absent, so correcting one form and leaving the other is
+#: caught rather than traded.
+DEAD_RELATION_CLAIMS = (r"becom(?:e|es)\s+`?co_accessed`?\s+edges",
+                        r"->\s+`?co_accessed`?\s+edges")
+
+#: The three halves of the corrected sentence. See `_classifier_typed` for why each is
+#: required and not merely nice to have.
+_CLASSIFIER_RE = re.compile(r"stage[- ]2|classifier", re.I)
+_FALLBACK_RE = re.compile(r"\bfallback\b", re.I)
+_NOTHING_CLASSIFIED_RE = re.compile(r"nothing classif|unclassified", re.I)
+
+#: An inline citation to a test node is a pointer to a check, not a claim about the
+#: edge store, so it comes out before a unit is graded. This is not a hedge: §Review
+#: log's `Pinned by …` lists name the nodes that hold the correction, and one of those
+#: node names carries the very string this section polices, so an unstripped guard
+#: fires on its own pin.
+_CITATION_RE = re.compile(r"`(?:tests/\S+|::test_\w+)`")
+
+
+def _claim(unit: str) -> str:
+    """A unit with its test-node citations removed — see `_CITATION_RE`."""
+    return _CITATION_RE.sub("", unit)
+
+
+def _units(text: str) -> list[str]:
+    """Each markdown claim as one grading unit: a table row, or one prose sentence.
+
+    Two kinds because the corpus holds both. A `|` row is a unit on its own — the
+    Knowledge-Graph Chain table packs one claim per row, so folding the table into a
+    paragraph would let one row's `fallback` excuse another row's pre-#420 claim, the
+    same cross-section leak `_section` exists to stop. Prose lines are joined before
+    splitting because these docs are hard-wrapped near 78 columns and `co_accessed` and
+    the word `fallback` routinely sit on adjacent lines of one sentence; splitting at
+    every newline would put them in different units and fail a correct document.
+    """
+    units: list[str] = []
+    para: list[str] = []
+
+    def flush() -> None:
+        if para:
+            units.extend(_sentences(" ".join(para)))
+            para.clear()
+
+    for line in text.splitlines():
+        if not line.strip():
+            flush()
+        elif line.lstrip().startswith("|"):
+            flush()
+            units.append(line.strip())
+        elif re.match(r"[-*]\s|^\d+\.\s", line.lstrip()):
+            flush()          # a new list item is a new claim, not a wrapped sentence
+            para.append(line.strip())
+        else:
+            para.append(line.strip())
+    flush()
+    return units
+
+
+def _classifier_typed(units: list[str]) -> str | None:
+    """The one unit saying #51's landed edge carries the classifier's type.
+
+    All three halves are required. "Typed by the classifier" with no fallback erases
+    the type an abstaining Stage 2 still lands; "`co_accessed` is a fallback" with no
+    classifier leaves the pre-#420 default as the headline the reader skims; and a
+    fallback bounded by nothing ("fallback if needed") never says when it fires, which
+    is the vagueness that let the old sentence stay readable for six weeks after the
+    code stopped matching it.
+    """
+    for u in units:
+        c = _claim(u)
+        if ("co_accessed" in c
+                and _CLASSIFIER_RE.search(c)
+                and _FALLBACK_RE.search(c)
+                and _NOTHING_CLASSIFIED_RE.search(c)):
+            return u
+    return None
+
+
+def _fallback_named(units: list[str]) -> list[str]:
+    """Units that mention `co_accessed` without bounding it as the unclassified fallback.
+
+    Weaker than `_classifier_typed` on purpose: clause 3 governs every surviving
+    mention in the corpus, including ones that are only measuring the type's absence,
+    and demanding each restate the classifier would push a real fact ("0 of 562 are
+    `co_accessed`") out of the document. What a mention may never do is assert the type
+    as the plain outcome.
+    """
+    return [u for u in units
+            if "co_accessed" in _claim(u)
+            and not (_FALLBACK_RE.search(_claim(u))
+                     and _NOTHING_CLASSIFIED_RE.search(_claim(u)))]
+
+
+def _writer_bullet(text: str) -> str:
+    """The `conversation_relations.py` (#51) bullet, from its `- **` line to the next.
+
+    Bullet-scoped, not section-scoped: §The write chain also describes #24, #74 and #48,
+    and a true sentence about one of those must not be able to answer a claim about the
+    edges #51 lands.
+    """
+    section = _section(text, CHAIN_SECTION)
+    lines = section.splitlines()
+    start = next((i for i, l in enumerate(lines)
+                  if l.lstrip().startswith("- **") and "conversation_relations.py" in l),
+                 None)
+    assert start is not None, (
+        f"§{CHAIN_SECTION} lost its `conversation_relations.py` bullet entirely — every "
+        "check on #51's edge type has been silently deleted with it")
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].lstrip().startswith("- **")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def _bullet_units(text: str) -> list[str]:
+    return _sentences(" ".join(l.strip() for l in _writer_bullet(text).splitlines()))
+
+
+def _vault_note() -> str | None:
+    """The vault's copy of this note, or None when the note is not on disk.
+
+    Absent is a legitimate future state, not a broken checkout: the note is a
+    2026-09-04 fork of this doc, and the ruling #3354 leaves open is whether to keep it
+    maintained at all or archive it the way #2330 archived
+    `~/obsidian/architecture/autonomy-system.md`. This file is the authority; the two
+    vault nodes below exist so the fork cannot keep serving a refuted sentence to
+    retrieval while it is still live, so they grade it when it is on disk and say
+    nothing when it is not.
+    """
+    return VAULT_KG.read_text() if VAULT_KG.is_file() else None
+
+
+def _chain_table_row(text: str) -> str:
+    """#51's row in the Knowledge-Graph Chain table."""
+    section = _section(text, CHAIN_TABLE_SECTION)
+    row = next((u for u in _units(section) if re.match(r"\|\s*#51\s*\|", u)), None)
+    assert row is not None, (
+        f"architecture/autonomy.md has no #51 row in §{CHAIN_TABLE_SECTION} any more; "
+        "the job is daily and still writing edges, so the table is wrong by omission")
+    return row
+
+
+def test_the_51_writer_bullet_says_the_edge_is_classifier_typed():
+    """Clause 1. §The write chain's #51 bullet said co-access pairs "become
+    `co_accessed` edges", which has not been the rule since #420 (`e4f6370f`,
+    2026-09-12): `land_approved_edges()` writes the classifier's verdict first.
+
+    The corrected sentence has to be attributable, so the node also asks for the
+    change id and the measurement it rests on — `app.kg_store` on 2026-10-26, 0
+    `co_accessed` among the 562 `conversation`-origin edges. A rule with no
+    provenance is the sentence that goes stale next.
+    """
+    text = _text()
+    section = _claim(_section(text, CHAIN_SECTION))
+    for pat in DEAD_RELATION_CLAIMS:
+        assert not re.search(pat, section), (
+            f"§{CHAIN_SECTION} still matches {pat!r}: it names the type #51 lands "
+            "before Stage 2 has a verdict, and the store has not held that type since "
+            "the change that made it false")
+    claim = _classifier_typed(_bullet_units(text))
+    assert claim is not None, (
+        "the #51 writer bullet never says, in one sentence, that the landed edge "
+        "carries the Stage-2 classifier's type and `co_accessed` is only the fallback "
+        "for a pair nothing classified. `land_approved_edges()` writes "
+        "`p.get('type') or p.get('relation_type') or 'co_accessed'`; a reader "
+        "reasoning about the graph's provenance from this bullet gets it backwards")
+    assert "#420" in claim, (
+        "the sentence states the rule but not the change that made it, so the next "
+        "reader cannot tell which side of 2026-09-12 a bug report is on: " + claim[:120])
+    assert "app.kg_store" in claim and "2026-10-26" in claim, (
+        "the sentence recites the code without the measurement that would have caught "
+        "the old wording — a code quote is a claim about intent, the store is the "
+        "claim about behaviour: " + claim[:120])
+
+
+def test_the_kg_chain_table_row_says_the_edge_is_classifier_typed():
+    """Clause 2. `architecture/autonomy.md`'s Knowledge-Graph Chain table is the
+    surface an operator reads to learn what each job writes, and #51's row read
+    "-> `co_accessed` edges (provenance INFERRED)" — the pre-#420 default as the
+    job's whole role, in the one column nobody cross-checks against the code.
+    """
+    row = _chain_table_row(AUTONOMY_DOC.read_text())
+    for pat in DEAD_RELATION_CLAIMS:
+        assert not re.search(pat, _claim(row)), (
+            f"the #51 row still matches {pat!r}: {row[:160]!r}")
+    assert _classifier_typed([row]) is not None, (
+        "the #51 row never says the edge is typed by the Stage-2 classifier with "
+        f"`co_accessed` as the unclassified fallback: {row[:160]!r}")
+    assert "INFERRED" in row.upper(), (
+        "correcting the type must not drop the provenance half — INFERRED is what "
+        f"tells a reader nobody curated the edge: {row[:160]!r}")
+
+
+def test_no_architecture_doc_says_pairs_simply_become_co_accessed_edges():
+    """Clause 3, over the bounded corpus `architecture/*.md`.
+
+    Three files mention `co_accessed` today and the glob is the point: a hand-carried
+    allow-list closes a property only over the files someone remembered, and the defect
+    being fixed here is precisely one doc being corrected while its twin kept the
+    sentence. Every surviving mention has to sit in a sentence that bounds it as the
+    unclassified fallback, and neither dead form may appear at all.
+    """
+    documents = {p.name: p.read_text() for p in sorted(ARCH_DIR.glob("*.md"))}
+    assert documents, f"{ARCH_DIR} matched no markdown — the corpus glob resolved to nothing"
+    # Positive controls: the phrase under guard must still be somewhere in the corpus,
+    # or a 0-hit loop here would be indistinguishable from a passing check.
+    mentioning = sorted(n for n, t in documents.items() if "co_accessed" in t)
+    assert mentioning, (
+        "no architecture doc mentions `co_accessed` at all, so this node proves "
+        "nothing — the sentence was deleted rather than corrected")
+    for pat in DEAD_RELATION_CLAIMS:
+        hits = sorted(n for n, t in documents.items() if re.search(pat, _claim(t)))
+        assert not hits, f"{pat!r} still appears in {hits}"
+    bad = [(n, u) for n, t in documents.items() for u in _fallback_named(_units(t))]
+    assert not bad, ("these sentences name `co_accessed` without bounding it as the "
+                     "unclassified fallback:\n"
+                     + "\n".join(f"  {n}: {u[:110]}" for n, u in bad))
+
+
+def test_the_quoted_fallback_chain_is_the_chain_the_code_runs():
+    """The seam between the sentence and the writer.
+
+    Every node above grades prose against prose, which is how the pre-#420 sentence
+    survived six weeks: it read fine and nothing re-checked it against
+    `land_approved_edges()`. This one parses the function with `ast` and takes the
+    `or`-chain that decides an edge's `type`, so the literal the doc calls the fallback
+    has to be the literal the code falls back to. `ast` rather than a grep because a
+    grep is satisfied by the string in a comment just as happily as by the expression
+    that writes the row.
+    """
+    tree = ast.parse(RELATIONS_SRC.read_text())
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "land_approved_edges"), None)
+    assert fn is not None, (
+        f"{RELATIONS_SRC.relative_to(ROOT)} no longer defines `land_approved_edges`; "
+        "the three docs citing it are wrong by that much too")
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if (isinstance(k, ast.Constant) and k.value == "type"
+                        and isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or)):
+                    literals = [x.value for x in v.values if isinstance(x, ast.Constant)]
+                    assert literals == ["co_accessed"], (
+                        f"the writer's `type` chain now falls back through {literals}; "
+                        "every architecture doc naming `co_accessed` as the unclassified "
+                        "fallback is stale the moment that changes")
+                    assert isinstance(v.values[-1], ast.Constant), (
+                        "`co_accessed` is no longer the last resort in the `type` chain, "
+                        "so the docs' ''only the fallback'' wording describes an "
+                        "expression that does not exist")
+                    bullet = _writer_bullet(_text())
+                    assert re.search(r"or\s+`?\"?co_accessed\"?`?", bullet), (
+                        "the code still falls back to `co_accessed` but the #51 bullet "
+                        "no longer quotes it, so the reader has lost the half that says "
+                        "what an unclassified pair lands as")
+                    return
+    raise AssertionError(
+        "`land_approved_edges` no longer sets a `type` key from an `or` chain — the "
+        "sentence three docs carry describes an edge type the writer cannot produce")
+
+
+def test_the_51_claims_reject_the_pre_420_wording_when_restored():
+    """The nodes above must be able to fail, so each predicate is re-run against the
+    bytes with the pre-#420 wording spliced back — the writer bullet in this doc, the
+    row in `architecture/autonomy.md`, one site at a time.
+
+    One at a time is the shape of the original bug: the claim lived in three files, so
+    a check that passes because a *corrected* file mentions the classifier somewhere is
+    exactly the check that let the stale ones stand.
+    """
+    text = _text()
+    restored_doc = text.replace(
+        _writer_bullet(text),
+        "- **`conversation_relations.py`** (#51) — co-access pairs from session\n"
+        "  trajectories become `co_accessed` edges, `provenance: INFERRED`, with the\n"
+        "  trajectory as `source_doc`.\n", 1)
+    assert "become `co_accessed` edges" in restored_doc, (
+        "the splice did not take — nothing was tested")
+    assert _classifier_typed(_bullet_units(restored_doc)) is None, (
+        "the classifier-typed predicate passed the pre-#420 bullet, so it is not "
+        "reading which type an approved pair lands as")
+    assert _fallback_named(_units(restored_doc)), (
+        "the corpus predicate passed the pre-#420 bullet, so a mention with no "
+        "fallback bound walks past it")
+    assert re.search(DEAD_RELATION_CLAIMS[0], _writer_bullet(restored_doc)), (
+        "the dead-prose pattern does not match the sentence it replaced")
+
+    auto = AUTONOMY_DOC.read_text()
+    restored_auto = auto.replace(
+        _chain_table_row(auto),
+        "| #51 | Conversation Relation Linking | daily | #56 | yes | Co-access pairs "
+        "from trajectories -> `co_accessed` edges (provenance INFERRED) |", 1)
+    assert "-> `co_accessed` edges" in restored_auto, "the splice did not take"
+    assert _classifier_typed(_units(restored_auto)) is None, (
+        "the classifier-typed predicate passed the pre-#420 table row")
+    assert re.search(DEAD_RELATION_CLAIMS[1], _chain_table_row(restored_auto)), (
+        "the dead-table pattern does not match the row it replaced")
+
+
+def test_the_vault_note_says_the_edge_is_classifier_typed():
+    """Clause 4. The vault's `architecture/knowledge-graph.md` carried this doc's old
+    #51 bullet verbatim — the same sentence, the same falsity, in the copy retrieval
+    reads — and its frontmatter still claimed `updated: 2026-09-04`, which is what made
+    the fork look authoritative to a reader who could not see it predated #420 by a week.
+
+    Graded on the note only while it is on disk: see `_vault_note`.
+    """
+    note = _vault_note()
+    if note is None:
+        pytest.skip(f"{VAULT_KG} is not on disk — see _vault_note for why that is a "
+                    "state and not a broken checkout")
+    for pat in DEAD_RELATION_CLAIMS:
+        assert not re.search(pat, _claim(note)), f"the vault note still matches {pat!r}"
+    claim = _classifier_typed(_bullet_units(note))
+    assert claim is not None, (
+        "the vault note's #51 bullet never says the landed edge carries the Stage-2 "
+        "classifier's type with `co_accessed` as the fallback for a pair nothing "
+        "classified — the sentence #3354 was filed to remove")
+    assert "#420" in claim, (
+        "the corrected vault sentence names no change, so it cannot be checked against "
+        "the code it describes: " + claim[:120])
+    updated = re.search(r"^updated:\s*(\S+)\s*$", note, re.M)
+    assert updated is not None, "the vault note lost its `updated:` frontmatter"
+    assert updated.group(1) != "2026-09-04", (
+        f"`updated: {updated.group(1)}` — the fork still presents itself as predating "
+        "#420, which is the reason its stale prose was trusted")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated.group(1)), (
+        f"`updated: {updated.group(1)}` is not a date")
+
+
+def test_the_vault_note_diagram_shows_48_applying_the_mechanical_tiers():
+    """Clause 5. The fork's write-path diagram still labelled #48's daily run
+    `DRY RUN ONLY` and ended its arrow at a human running `--apply` — the identical
+    pre-#2641 defect, uncorrected in the copy while the original was fixed.
+
+    The note's own §Rules sentence for the same claim is graded here too, with this
+    module's existing predicates: correcting the diagram while rule 2 still read
+    "Applies are attended" would leave one file telling a reader both that the nightly
+    apply happens unattended and that a person must run it, which is the disagreement
+    that caused the original failure rather than a symptom of it.
+    """
+    note = _vault_note()
+    if note is None:
+        pytest.skip(f"{VAULT_KG} is not on disk — see _vault_note")
+    for dead in DEAD_DIAGRAM:
+        assert dead not in note, (
+            f"{dead!r} is still in the vault note; the diagram is the write-path map, "
+            "so a stale label there is what makes an unattended apply look "
+            "unauthorised")
+    node = _sweep_node(note)
+    header = node.splitlines()[0]
+    assert re.search(r"\bappl(?:y|ies)\b", header, re.I) and "CASE" in header \
+        and "PUNCT" in header, (
+        "#48's line in the vault diagram does not show the daily run applying the "
+        f"CASE/PUNCT tiers itself: {header!r}")
+    assert re.search(r"\bunattended\b|\bon schedule\b|\bnightly\b", node, re.I), (
+        "the vault node describes an apply but never says it happens with nobody "
+        "watching, which is the half that changed")
+    assert re.search(r"SUFFIX[^.]*?\b(human|person)\b|\b(human|person)\b[^.]*?SUFFIX",
+                     node, re.I), (
+        "the vault node states the apply without its bound, so a reader following the "
+        "arrows learns that #48 merges and never learns where it stops")
+    for dead in (DEAD_RULE_TITLE, DEAD_RULE_SENTENCE):
+        assert dead not in note, (
+            f"the diagram was corrected but the note's rulebook still carries {dead!r}, "
+            "so the same file now contradicts itself about whether a person must run "
+            "`--apply`")
+    assert _apply_sentence(_section(note, RULES_SECTION)) is not None, (
+        f"§{RULES_SECTION} of the vault note never says in one sentence that #48 "
+        f"applies {APPLY_CMD} unattended — the repo doc's rule, narrowed not repealed")
+
+
+def test_review_log_names_3354_and_the_three_sites():
+    """The section's own form, as for #2641 and #3221: a dated bullet naming what was
+    stale and ending `Pinned by …`. #3354's defect was specifically that one copy of a
+    sentence got corrected and its twins did not, so the entry has to name all three
+    sites — an entry that records only this file is the seed of the next round of the
+    same bug.
+    """
+    entry = next((e for e in _review_entries(_section(_text(), REVIEW_SECTION))
+                  if "#3354" in e), None)
+    assert entry is not None, (
+        "§Review log has no entry for #3354, so nothing records that #51's edge type "
+        "was corrected in three places rather than one")
+    assert entry.startswith("- **2026-10-26"), (
+        "the #3354 entry must carry the date the correction was made, the way every "
+        "other entry in this section does: " + entry[:40])
+    for site in ("write chain", "autonomy.md", "vault"):
+        assert site in entry.lower(), (
+            f"the entry names #3354 but never the {site} — three copies carried the "
+            "sentence and an entry that records one leaves two to be re-found")
+    assert "Pinned by" in entry and "tests/test_kg_doc_claims.py" in entry, (
+        "the entry does not follow the section's `Pinned by …` form naming this file, "
+        "so it reads as a claim rather than a checked one")
+    cited = set(re.findall(r"::(test_\w+)", entry))
+    assert cited, "the entry cites no test node by name, so its pin cannot resolve"
+    defined = {n.name for n in ast.walk(ast.parse(Path(__file__).read_text()))
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
+    missing = cited - defined
+    assert not missing, (
+        f"the entry pins {sorted(missing)}, which this module does not define — a pin "
+        "to a node that does not exist is worse than no pin, because it closes the "
+        "report that would have found the gap")
