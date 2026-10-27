@@ -1069,38 +1069,66 @@ contests, since that definition counts "an appended row of a dated series under
 
 ## Measure: #60, #82, #70, #36, #76, #86
 
-Say whether any of it is working. Five of the six change nothing; #76 is the only
-monitor in the fleet with authority to act on what it finds.
+Say whether any of it is working. Five of the six change nothing — four of the five
+that still run, plus #36, which has changed nothing since it was archived; #76 is
+the only monitor in the fleet with authority to act on what it finds.
 
 | ID | Freq | Watches | Role |
 |----|------|---------|---|
 | #60 | daily | the graph | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
-| #82 | daily | retrieval | 20-query retrieval eval against production's recall defaults; records the trend |
+| #82 | daily | retrieval | 81-query retrieval eval (measured 2026-10-26; grew from n=20 at `98fa216b`) against production's recall defaults; records the trend |
 | #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
-| #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and the id stay because the group tables pin each other; its task file is in `_archived/` and nothing dispatches it. Read the groundskeeper queue and report counts, health score, and whether the timer ran |
+| #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and the id stay because the group tables pin each other; its task file is in `_archived/` and nothing dispatches it. Read the groundskeeper queue and report counts, health score, and whether the timer ran — the queue and its write ledger are deleted now too (retention-sweep store 10, `d24c7ecd` #1574), so there is nothing left to read |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
-**Two of the six have no consumer.** #36's queue holds 31,291 items and
-nothing reads it back (below). #70's findings are advisory and reach #83 only if
-#83 happens to look — there is no `depends_on` between them. Under the chain
-grouping those were two unrelated facts in two different sections; grouped by
-function they are two of six, which is a pattern rather than two incidents.
+**Two of the six had no consumer; only one still has an artifact to leave
+unread.** #36's queue held 31,291 items and nothing read it back (below). The
+retention sweep has since deleted it: store 10 unlinks
+`_pipeline/groundskeeper-queue.json` and `groundskeeper-writes.jsonl` past
+`GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`, added by `d24c7ecd` (#1574) — measured
+2026-10-26, `ls ~/lloyd-data/_pipeline/groundskeeper*` returns no such file, so
+#36 no longer produces anything at all and the group's no-consumer case is one
+member deep. #70's findings are advisory and reach #83 only if #83 happens to
+look — there is no `depends_on` between them, and #83's own is `58`. Under the
+chain grouping those were two unrelated facts in two different sections; grouped
+by function they were two of six, which is a pattern rather than two incidents
+(#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
-worse than none.** #60 exits 2 and alerts when the store cannot be read, when
-active edges fall below half the baseline, when any directory holds facts about
-another entity, or when any fact file carries duplicate fact IDs; #84 exits 2
+worse than none.** #60 exits 2 (`EXIT_ALARM`, `knowledge-health-report.py:1838`)
+and alerts when the store cannot be read, when active edges fall below half the
+baseline, when any directory holds facts about another entity, when fact records
+carry no `entity:` tag over the hygiene floor (#2474), or when any fact file
+carries duplicate fact IDs — and since #3222 it also alarms when the baseline
+floor file itself cannot be read, because a rail made blind by a wiped floor
+would otherwise report a clean night. #84 exits 2
 when the graph could not be read. It is the same rule
-`_is_dependency_met`'s `if not dep_task: return True` gets wrong and the evidence
-verifier's `insufficient` verdict is written against.
+`_is_dependency_met` used to get wrong: `if not dep_task: return True` silently
+unblocked every dependent of an upstream whose file no longer answered, and #558
+(Alan's ruling, 2026-09-13) replaced it with a fail-closed gate —
+`_dependency_refusal` now warns and holds on an id no task file answers, which is
+the shape the evidence verifier's `insufficient` verdict is written against.
 
 **#82 must pass no flags.** Until 2026-09-04 it ran `graph_rerank=False/alpha=0.5`
 against a production serving `True/0.3` and scored a configuration nobody used.
 Every record now carries `matches_production_defaults`, and a `false` there means
-the run is not comparable to the others. It is ordered after #81's index
-maintenance by window only — it declares no `depends_on`, so a late #81 does not
-hold it. If a night's writes hurt recall, this is where it shows up.
+the run is not comparable to the others. The converse does not hold: the field is
+a conjunction over six knobs (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
+`graph_hops`, `seed_top_k`, `djev_rerank`, `eval/run_eval.py:2448`) and graph
+expansion is deliberately a *sibling* field (`expand_graph_matches_production`),
+because production defaults it False while the eval runs it on as a measurement
+choice (#1000) — the comment block introducing those knobs still counts them
+wrong (#3454). The corpus is no longer the 20 queries this row once advertised:
+`98fa216b` (2026-09-20) grew it n=20 → n=78 because at n=20 the nightly could not
+detect the change it exists to detect, and it holds 81 today (measured 2026-10-26).
+The 27-query reserve beside it (`eval/vault_recall_holdout_queries.yaml`, #1412) is
+scored only by the post-landing automod paired check — `run_eval.py` refuses a
+`nightly*` label over it — so this trend is a dev-set number by design. It is
+ordered after #81's index maintenance by window only — it declares no
+`depends_on`, so a late #81 does not hold it — and it takes 291–884 s against its
+1800 s ceiling (run records, 2026-10-24 to -26). If a night's writes hurt recall,
+this is where it shows up.
 
 **#70 owns half of "wrong skill".** Its `MISSING_DESC` and `DRIFT` cover the case
 where a skill's body is fine and its *description* is not, so retrieval fires it
@@ -1113,7 +1141,8 @@ rather than rewriting.
 per-task run records.** 237 pool-timeout rows
 carried a NULL `task_id` and were unreachable from any per-task view by
 construction — a task that timed out on every single run was indistinguishable
-from a healthy one. Its poison step is read-only: the deterministic sweep in
+from a healthy one. (That pile is history, not state: measured 2026-10-26 the
+`runs` table holds 0 NULL-`task_id` rows and its oldest row is 2026-09-26.) Its poison step is read-only: the deterministic sweep in
 `workers/maintenance.py` triages that pile — one bounded revive for a transient
 cause, `quarantined` for a structural one — and #76 reports those rows and the
 sweep's own escalation tally instead of overwriting them, because until #1578 its
@@ -1145,16 +1174,26 @@ anyone arms anything.
 --json` — which opens `usage.db` with `mode=ro` and writes nothing in it — and
 pipes the result into `scripts/iv_metrics_record.py`, which appends **one row
 per night** to `_pipeline/reflection/iv-metrics.jsonl`; it has run nightly since
-2026-09-15. What it watches is whether the observer's verdicts arrive at all:
+2026-09-15 (measured 2026-10-26: 43 rows, newest `recorded_at` 2026-10-26T08:02Z).
+Seven of its 31 runs since 2026-09-26 recorded `failed`, six of them the 300 s
+wall-clock hang #2704 closed on 2026-10-14 — the row lands ~15 s into the run, so
+the series kept its nights while the run reported failure, which is the mirror
+image of the alarm-night #2619 publishes. What it watches is whether the observer's verdicts arrive at all:
 `dropped_rate` is dropped verdicts over `llm_calls`, the share of the observer's
 judgment calls that returned nothing because the deadline expired or the call
 errored, so it turns "the observer seems quiet today" into a trend with a bound
 on it. Where that bound sits is a ruling and not an implementation detail, so it
 lives in `DEFAULT_THRESHOLD` in the recorder and is deliberately not copied here.
 This is the group's rarest shape — a report that has a consumer, and the consumer
-is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` rows decides a
-sustained breach and `announce`s it once, so the series is read back by the thing
-that alerts on it. Two prohibitions are contract rather than taste. **Nothing in
+is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` (7) rows
+decides a sustained breach once at least `MIN_BREACH_ROWS` (3) exist, and
+`announce(level="warning")` fires it once per breach, so the series is read back by
+the thing that alerts on it. There is a second consumer since #2121: the run also
+mirrors the file into `~/obsidian/knowledge/inner-voice/iv-metrics.jsonl` through
+`scripts/iv_metrics_mirror.py`, which refuses a shrink, a missing source or an
+empty one (`mirror-shrunk` / `source-missing` / `source-empty`) with exit 1,
+because on 2026-09-23 the data-root cutover let a bare `cp` write a 1-row file over
+the 11-row committed mirror. Two prohibitions are contract rather than taste. **Nothing in
 this job writes `usage.db`** — `scripts/iv_grade.py` keeps its read-only open, and
 `tests/test_iv_metrics_series.py::test_run_leaves_usage_db_byte_untouched`
 compares the store's SHA-256, mtime and `sqlite_master` dump across a full run.
@@ -1204,8 +1243,10 @@ and #34 (Groundskeeper Research) drained it; neither exists in
 `~/obsidian/autonomy/` nor in its `_archived/`, no live task names the
 `groundskeeper-loop` or `groundskeeper-research` skills, and
 `autonomy-runs/33/` and `/34/` are empty directories. As of the 2026-09-11 03:19
-run the queue holds 31,291 items — 27,399 pending, 3,892 skipped — at a health
-score of 58.4, and nothing reads it back.
+run the queue held 31,291 items — 27,399 pending, 3,892 skipped — at a health
+score of 58.4, and nothing read it back. Neither file survives: the retention
+sweep's store 10 deleted the queue and its write ledger (#1574; measured absent
+2026-10-26), which is the only repair this queue ever received.
 
 Four properties worth knowing before touching any of it:
 
@@ -1214,8 +1255,8 @@ Four properties worth knowing before touching any of it:
   skips it when the status is `done` or `skipped`. So a resolved item never comes
   back, anything re-emitted is always `pending`, and once something marks an item
   `skipped` no later survey raises it again however the vault changes.
-- **The write is atomic with an item-count check before the rename, and every
-  writer shares it.** Since 2026-09-19 (#899) the guard is one function,
+- **The write was atomic with an item-count check before the rename, and every
+  writer shared it.** Since 2026-09-19 (#899) the guard was one function,
   `scripts/groundskeeper/queue_io.write_queue_atomic`: serialise to a `.tmp`,
   re-read it, compare the re-read item count against what was intended, and
   rename only when they match — on mismatch the temp goes, the live queue is
@@ -1253,31 +1294,37 @@ Four properties worth knowing before touching any of it:
   describe; the fix is making the denominators real, since raising the constants
   only moves the cliff.
 
-Two defects that are live and unowned:
+Two defects the retirement left behind. Neither is live any more, and the second
+is now a lesson rather than a bug:
 
-- **The orphan skipper still runs; it is no longer anonymous.** 253 of the
+- **The orphan skipper ran, and was anonymous until #899.** 253 of the
   queue's 278 skipped `ORPHAN_FILE` items read reason `hub-page-linked-survey-bug`
   and 25 read `legitimate organized project file in folder hierarchy` — the two
   strings belong to two different scripts
   (`scripts/memory/process-groundskeeper-queue.py` and
   `scripts/memory/batch-process-orphans.py`), and only the first wrote a log row,
   so one of the two writers was invisible to `_pipeline/groundskeeper-log.jsonl`
-  entirely. The population is still growing: 30,990 log rows on 2026-09-19, one
+  entirely. The population was still growing at the last measurement: 30,990 log
+  rows on 2026-09-19, one
   batch on every one of the 15 days 09-04→09-18, at run times drifting between
-  10:21 and 14:23 UTC — not a timer, consistent with an agent turn. **What runs
-  them is still unidentified** (no timer, no autonomy task, no worker source, no
+  10:21 and 14:23 UTC — not a timer, consistent with an agent turn. **What ran
+  them was never identified** (no timer, no autonomy task, no worker source, no
   skill names either script), and the scripts were deliberately left in place at
   the time because deleting an unattributed nightly job turns a silent write into
   a silent failure. That decision did not survive the week: `201901b4` (#1012,
   2026-09-23) deleted both, with the survey and its queue writer. What changed on
-  2026-09-19 (#899) is that the next pass is nameable
-  from disk: both consumers now stamp a log row per item they touch — so the
-  second writer's reason finally appears in the log — and every queue write lands
+  2026-09-19 (#899) is that the next pass would have been nameable
+  from disk: both consumers stamped a log row per item they touch — so the
+  second writer's reason finally appears in the log — and every queue write landed
   a row in `_pipeline/groundskeeper-writes.jsonl` naming its script and pid.
-  Reading the caller off that file after two nightly passes is the open
-  needs-human step on #899. The compounding effect is unchanged and still needs
-  Alan's call on whether the auto-skip verdict should exist at all: a `skipped`
-  item is never re-raised, so a category worth 10% of the health score is
+  Reading the caller off that file after two nightly passes was the open
+  needs-human step on #899, and it is now unreachable: `201901b4` deleted the
+  scripts and store 10 of the retention sweep (#1574) later deleted the queue and
+  the write ledger, so no ledger survives to name the caller.
+  The compounding effect stopped with the queue, but the question it was carrying
+  did not: whether an auto-skip verdict should exist at all is Alan's call, because
+  a `skipped`
+  item is never re-raised, so a category worth 10% of a rebuilt score would be
   zeroed a little further every night by a repair for a bug that was fixed.
 - **Frontmatter is read in a 2,000-byte prefix.** `build_relation_inbound` and
   `check_stale_relations` both `read(2000)` and regex the front matter out of
@@ -1286,17 +1333,25 @@ Two defects that are live and unowned:
   broken paths are never reported at all. This is the shape of the bug the
   dashboard's `_frontmatter` reader had — a flat byte prefix hides precisely the
   files with the longest front matter, which are the files with the most
-  relations. Unfixed; recorded because it fails silently in both directions.
+  relations. Unfixed, and moot since `201901b4`: `build_relation_inbound` and
+  `check_stale_relations` match no file in the tree (measured 2026-10-26,
+  `grep -rn` over `~/lloyd` → 0 hits), so the code is git history and the shape is
+  what is left — it fails silently in both directions, which is why the dashboard's
+  reader had the same bug and why a byte prefix is the wrong primitive.
 
-**Two orphaned skills are still loadable.** `groundskeeper-loop` and
-`groundskeeper-research` remain under `~/obsidian/skills/` at `status: active`
-with no task naming either, and both still describe running the 40-minute survey
-inline — `groundskeeper-research` Step 1 is literally
-`Bash("python3 ~/lloyd/scripts/groundskeeper/groundskeeper-survey.py")`, which is
-the thing that cost ~12 GPU-hours a week until 2026-09-03. `groundskeeper-research`
-also instructs the agent to append to `groundskeeper-research-log.jsonl`, which
-has never existed on disk. An orphaned skill is not inert: it is retrievable by
-name.
+**Two orphaned skills were loadable; both are archived now and the orphan moved.**
+`978aa34b` (2026-09-19, item #900) set `status: archived` on the five unbound
+skills at once, so `groundskeeper-loop` and `groundskeeper-research` — whose Step 1
+was literally
+`Bash("python3 ~/lloyd/scripts/groundskeeper/groundskeeper-survey.py")`, the scan
+that cost ~12 GPU-hours a week until 2026-09-03, and whose log path
+`groundskeeper-research-log.jsonl` never existed — load nowhere and are absent from
+the advertised index; `groundskeeper-research` now sits under `skills/.archived/`.
+The lesson survived as a live defect on a third skill: `groundskeeper-survey` is
+still `status: active`, is named by no live task (#36 is archived), and its whole
+procedure is to read `_pipeline/groundskeeper-queue.json`, the file the retention
+sweep now deletes (#3452). An orphaned skill is not inert: it is retrievable by
+name, and being one generation retired is not the same as being gone.
 
 ---
 
