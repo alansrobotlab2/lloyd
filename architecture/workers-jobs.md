@@ -333,7 +333,7 @@ hygiene, inbound signal.
 
 ## 4. Self-modification — the loop that changes Lloyd's own code
 
-Eight sources are in this family. Five of them are one loop over the backlog,
+Nine sources are in this family. Five of them are one loop over the backlog,
 and they read best in pipeline order rather than priority order:
 
 ```
@@ -344,8 +344,10 @@ tree, file                          cluster         behind the gate worse
 what is wrong
 ```
 
-`board-steward` and `owed-check`, the family's other two members, are not
-stages of that chain. Each is one judgment running beside the state machine —
+`board-steward` and `owed-check` are not stages of that chain, and neither is
+the family's ninth member, `frontend-probe-canary`: it judges no board and
+touches no code, it checks that one gate rung's instrument still catches a
+broken build. The two judgment services each run beside the state machine —
 on the primary, one turn per tick or per item, with an `apply` flag that
 decides whether its answer is written or merely recorded.
 
@@ -461,8 +463,9 @@ module docstring's "the replacement" is the plan, not the present. With
 `apply: true` one mechanical writer would apply its moves and
 `select_confirmed` would take its pick.
 
-**That record is not yet evidence of anything** (measured 2026-09-27, 136 ticks
-over 7 d). Its successful ticks report `0 move(s) proposed, agreement 100% (0
+**That record was not evidence of anything when it was first read** (measured
+2026-09-27, 136 ticks over 7 d). Its successful ticks reported `0 move(s)
+proposed, agreement 100% (0
 agree, 0 disagree, 0 missed)` — a `rate` of 1.0 computed over zero judged
 decisions, which is the failure mode `config.yaml` itself warns of above the
 flip — and 17 of the 136 failed with `finalizer failed: output truncated at
@@ -470,9 +473,14 @@ flip — and 17 of the 136 failed with `finalizer failed: output truncated at
 a tick's record opens with the steward's own sentence and these counts follow
 it, because the counts took ~110 of the summary's 500 characters and the
 sentence up to 400, so half of all ticks lost the tail of their board state to
-the cap. What the counts *say* is unchanged; only their position is.) Until a
-tick proposes a move it disagrees about, `apply` has nothing to be flipped on
-the strength of.
+the cap. What the counts *say* is unchanged; only their position is.) It is
+evidence now, and the evidence is negative: over the rolling 7 d to 2026-10-27
+`judgement` reads 127 judged, 101 agree, 26 disagree — **rate 0.795, under the
+0.90 the flip needs** — on 279 ticks (267 ok, 12 failed, and the failures are no
+longer truncation: they are `output is not JSON`, an empty answer, a diverging
+finalizer and `ConnectTimeout`). So `apply: false` is no longer an unmade
+decision waiting on an
+unmeasured quantity; it is the reading of a bar this week does not clear.
 
 Since #1688 the record no longer claims what it did not measure. `agreement()`
 carries `judged` — the decisions both sides made — on the run meta and the
@@ -623,9 +631,10 @@ abort. Landing runs detached, exactly as when a human drives it.
   whether a round may start, so the interval's only job is to ask them
   often enough. At an hour it did not — one round settled at 19:16 and the next
   poll was 19:50, with four confirmed items waiting.
-- The longest-running job in the pool: ~1200 s over its last ten ok runs
-  (measured 2026-10-25), and over the 7 d to 2026-09-27, 246 of 300 runs ok (20 failed, 34 skipped)
-  for 116 GPU-hours — three fifths of the pool's 195 measured hours.
+- The longest-running job in the pool: ~1810 s mean over its 350 completed runs
+  (measured 2026-10-27), though its last ten ok runs averaged ~800 s. Over the 7 d
+  to 2026-10-27: 280 of 301 runs ok (13 failed, 8 skipped) for 152.8 GPU-hours —
+  just over half the pool's 295.2 measured hours.
 
 ### `automod-regression` — did the landing make anything worse?
 
@@ -689,9 +698,13 @@ sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
   measured numbers. 2, a crash, a timeout, or an exit 0 with no artifact from
   this run is a returned failure that says "not measured" and carries no rate —
   `latest.json` may still hold an older run.
-- **Measured state exists** (2026-10-25): 24 success runs, and `latest.json` reads
+- **Measured state exists** (2026-10-27): 7 runs over the 7 d, all ok, and
+  `latest.json` reads
   `seeds_measured: 16`, `detected: 16`, `rate: 1.0` with one blind seed
-  (`rate_counting_blind_as_misses` 0.94) — clear of the script's 90% bar.
+  (`rate_counting_blind_as_misses` 0.94) — clear of the script's 90% bar. That is
+  **one run a day, not one an hour**: `min_interval_seconds: 86400` floors the
+  3600 s poll, so the `interval_seconds` figure is how often it asks, not how
+  often it measures.
 
 ### `autoresearch` — the gate-less week, and why it runs again now
 
@@ -710,7 +723,7 @@ overwrote the operating contract *during* the round that was trimming it —
 re-inflating the gate stack to 64% ninety minutes after #377 had cut it to 48%,
 with a variant whose own hypothesis was the technique #377 was filed against.
 
-That is the property the other four in this family are built around, stated by
+That is the property the rest of this family is built around, stated by
 its absence: a member of a self-modification loop may not promote its own
 conclusion.
 
@@ -723,15 +736,24 @@ not at all — and with benching back, the promotion floors do the gatekeeping:
 `autoresearch.promotion` demands `min_composite_delta` 0.05,
 `min_bench_win_fraction` 0.5 (held at 0.5 on 2026-09-13, #428's false-positive
 measurement) and `require_safety_pass`. Alan pre-approved the re-arm on
-2026-09-13; config flipped it on 2026-09-16. The live record over the 7 d to
-2026-09-27 is 16 success / 35 failed, and all 35 are the pre-#1546 shape —
+2026-09-13; config flipped it on 2026-09-16. The 7 d to 2026-09-27 read 16
+success / 35 failed, all 35 the pre-#1546 shape —
 `TimeoutError: exceeded max_duration_seconds=1800`, the last of them at 05:46Z
-on 09-27. Every round since has completed and every one has ended
-`stopped at its 30 min budget, N task(s) not reached` (5 of 5 on 09-27, 1480–
-1537 s each), reporting `0 promotable, winner=none`. Read that correctly: it is
-**not** the floors refusing a finished round. A deadline-stop never promotes
-(below), so a round that cannot reach the end of its matrix cannot promote at
-all, and the gate has not been exercised since the cap fix. Every round does
+on 09-27. That failure mode is closed: over the 7 d to 2026-10-27 the source is
+41 runs, 41 ok, 0 failed, 6.18 GPU-hours, every round `stopped at deadline: no`
+at 212–849 s and reporting `3 variants evaluated, 0 promotable, winner=none`.
+It still promotes nothing, and the reason has moved off the cap twice over. The
+projection (#1605, below) shrinks the matrix on 40 of those 41 rounds
+(`matrix_shrunk` 40, `deadline_cut` 0), and separately at least one task in the
+round's targeted or held-out split scores on no arm — the 2026-10-27 22:13Z
+round's held-out `bench_005_replay_memory_update` is "not mechanically
+checkable", so all three variants end `HOLD — partial_heldout_coverage` before
+any delta is read (#549 / #416). Over the 176 rounds since 2026-09-26 the
+ledger holds 513 decisions and zero promotions: 309 `partial_heldout_coverage`,
+121 `partial_targeted_coverage`, 61 `safety_regression`, 22 `deadline_stopped`.
+Read that as the doc's older sentence being wrong: the gate **is** exercised on
+finished rounds now, and what refuses is coverage, not the floors doing their
+job. Every round does
 now score the frozen behavioural scenarios (#1549, landed 2026-09-26 alongside
 #1546) — report-only by construction: an axis in the report that feeds no
 promotion verdict until it has discriminated on a real one.
