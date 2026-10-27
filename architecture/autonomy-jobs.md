@@ -988,23 +988,38 @@ sentences that replaced it.
 ## Bound entropy: #79, #81, #78, #80, #90
 
 Stop the stores rotting or growing without limit. The group splits on write
-authority: #79 and #81 delete and rebuild, #78, #80 and #90 only report what they
-find.
+authority: #79 and #81 delete and rebuild, #78 and #80 only report what they find,
+and #90 writes exactly one thing — the dated row its own next run reads back as its
+diff base — and touches no corpus. Read the `Writes?` column as "changes state
+beyond its own output", or #90's row contradicts its own Role cell.
 
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | daily | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
+| #79 | daily | yes | Retention over the 24 stores it now bounds: delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
-| #90 | daily | no | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
+| #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
-both speed and accuracy. **#79** bounds the two unbounded-growth stores
-identified in the 2026-06-11 architecture review; its gzipped archives stay
-recoverable, but live consumers glob `*.json`, so archived sessions drop out of
-listings and recall by design.
+both speed and accuracy. `scripts/maintenance/qmd_index_maintenance.py` is #81,
+and since 2026-09-19 it works beside the running qmd daemon rather than stopping it
+first — the stop, not the prune, was the risk.
+
+**#79** is the group's widest-reaching write, and the store list this section used
+to carry was the oldest number in it: the sweep began as the two unbounded-growth
+stores of the 2026-06-11 architecture review and bounds **24** as of 2026-10-27,
+counted from its own report lines. Four of those are the self-modification loop's
+own state — `~/lloyd-work/` round worktrees and that directory's non-round entries,
+`refs/heads/automod/*`, and `~/.local/state/lloyd-automod/promotions.jsonl` — and
+what bounds the reach is a tree-identity guard, not a scope list: run from any tree
+that is not the production checkout those lines print `REFUSED: this sweep is
+running from …, a linked git worktree … no branch or round directory was touched`,
+so "what may #79 delete" is a question answered by reading that guard, and a sweep
+dispatched from an automod round's worktree deletes none of the loop's state. Its
+gzipped archives stay recoverable, but live consumers glob `*.json`, so archived
+sessions drop out of listings and recall by design.
 `scripts/groundskeeper/retention-sweep.py` is #79, pinned by
 `tests/test_retention_sweep.py`; its directory now holds this script alone —
 the sentence that used to read "three scripts, not two" named
@@ -1015,7 +1030,13 @@ deleted with #1012 (§#36) on 2026-09-23.
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
 report-only by design: neither has ever been asked to fix what it names, and the
 reports have no scheduled consumer, which puts them in the same position as two
-of the six jobs in Measure.
+of the six jobs in Measure. Both are green as of 2026-10-27 — one weekly run each in
+the seven days to that date, no failure and no timeout, 0.06 GPU-h between them — and
+the group's other three ran seven times each over the same unclamped window, 0.53
+GPU-h for all five (`/api/autonomy/health?days=7`). The number in this group worth
+watching is not a failure rate: #78's run of 2026-10-14 took 1,055.6 s of its
+1,200 s budget, 88% of it and the only approach to a cap any member has made, on a
+job whose own skill says a run killed at that cap records nothing at all (#3447).
 
 **#90 bounds growth the stores themselves cannot see.** #79 and #81 free bytes,
 and a memory file or a skills library can grow past its usefulness while every
@@ -1023,7 +1044,7 @@ file on disk stays small. So #90 measures shape rather than size — daily notes
 `USER.md`/`MEMORY.md`, `SKILL.md` bodies and trajectory rows, each by count,
 length p95, distinct-key ratio, duplicate rate and self-reference rate — writes
 one dated row per UTC day under `~/lloyd-data/_pipeline/metrics/`, keyed on the
-run's resolved UTC time rather than its second, and diffs it against the newest
+run's resolved UTC date rather than its second, and diffs it against the newest
 row from an earlier day: a second run inside one day writes nothing, so a retry
 cannot become the following night's diff base, and the base is always read before
 the day's own row exists, so no run gates on a file it wrote itself (#1576). One
@@ -1034,11 +1055,15 @@ recalibrated from day-over-day deltas over the first 8 clean UTC dates (2026-09-
 ten `knowledge/*/youtube-digest.md` digests is flagged by the intel pipeline's own
 interest-profile guard — counted per digest on every run, by that guard rather than
 by a phrase list, because the hand-written grep #2011 verified the corpus with caught
-10 of the 27 sentences published (#2039). Exit 0 prints
-`corpus shape: no finding`; either way it changes nothing outside its own series,
+10 of the 27 sentences published (#2039). Under the `--quiet` the task runs it with
+exit 0 prints nothing at all: `corpus shape: no finding` is the run's report, not
+the script's output. Either way it changes nothing outside its own series,
 which is why it sits in
 this group and in the Reports-only tier rather than in Measure, where the other
-trend recorders are. `scripts/maintenance/corpus_shape.py` is #90.
+trend recorders are — a placement the tier *table* makes and its own definition
+contests, since that definition counts "an appended row of a dated series under
+`~/lloyd-data/`" as durable state, which is exactly what this row is (#3445).
+`scripts/maintenance/corpus_shape.py` is #90.
 
 ---
 
