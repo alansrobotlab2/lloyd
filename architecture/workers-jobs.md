@@ -200,9 +200,12 @@ One source, and it is not really a job. It is the seam the entire autonomy
 fleet comes through: 45 task files in the vault, each with its own schedule,
 priority, skill and dependencies, all reaching the pool as
 `scheduled-task:<id>`. Everything the pool knows about the nightly KG chain or
-the morning triage, it knows through this one module — which is why it is both
-the busiest source in the table and the one with the least to say about what it
-does.
+the morning triage, it knows through this one module — which makes it the widest
+fan-in in the table rather than the busiest: one module for 45 schedules, but
+257 runs over the 7 days to 2026-10-27 (`/api/workers/health`, window unclamped),
+fifth behind `autotriage`, `owed-check`, `autocode` and `board-steward` — the
+rank §2's own table gave it at its 2026-09-28 stamp too. It is also the source
+with the least to say about what it does.
 
 ### `scheduled-task`
 
@@ -219,11 +222,27 @@ Four behaviours are load-bearing:
 
 - **It gates on the health of the model each task pins**, not just the
   primary. A task pinned to a dead secondary is skipped, not enqueued into a
-  retry loop that becomes a ConnectError flood.
-- **It passes the pool's cap into `run_task`** so the task's own timer always
+  retry loop that becomes a ConnectError flood. The named-model leg has no member
+  on this box as of 2026-10-27 — every one of the 45 task files pins
+  `model: primary` — and a pin `config.models` does not define resolves to the
+  *primary's* endpoint (`_model_health_url`, `workers/sources/scheduled_task.py:113`
+  falls through to `_primary_health_target()`), so until a pin names a real second
+  model this gate is a second copy of the fleet gate.
+- **It passes the pool's cap into `run_task`** (`max_duration_seconds: 3600`;
+  `run_task` keeps its own timeout 30 s under the value it is handed,
+  `_POOL_TIMEOUT_MARGIN`, `app/autonomy.py:4585`) so the task's own timer always
   wins. When the two were equal the pool cancelled the handler before it could
-  write anything: 237 runs and 73.6 GPU-hours in `workers.db` with a NULL
-  `task_id` are that bug.
+  write anything, and 237 runs and 73.6 GPU-hours recorded with a NULL `task_id`
+  were that bug — but the pair is `config.yaml`'s comment on the cap, not a row
+  anyone can re-query: `SELECT count(*) FROM runs WHERE source='scheduled-task'
+  AND task_id IS NULL` returned 0 on 2026-10-27, because those runs pre-date the
+  2026-09-22 wipe §2 records.
+- **It recovers claims the pool never finished**, ahead of both the gate and
+  `get_due_tasks`: `enqueue_if_due` calls `autonomy.recover_stuck_tasks` on every
+  tick (`workers/sources/scheduled_task.py:291`), because a worker that dies
+  mid-run leaves the task file `in_progress` and the task stops coming due. It
+  sits *before* the vLLM gate, so a dead claim is recovered even while dispatch is
+  paused.
 - **It does not watch the fleet. `workers/fleet_watchdog.py` does.** Until #1682
   the alarms below sat in this source's `enqueue_if_due`, so `enabled: false` on
   this one source — a dispatch-side switch — disarmed all of them and raised no
@@ -240,7 +259,16 @@ Four behaviours are load-bearing:
     from it), after `_STALL_ALARM_TICKS` ticks, rate-limited 6 h. And the
     `next_run` one, for a task whose own `next_run` is a full period stale with no
     queue row at all, after its own streak, rate-limited 24 h.
-  - **The invariant across both** (#938): an outage of the model server pauses
+  - **One alarm on that seat is not about due-ness, and did not come over with
+    #1682**: the failure-throughput census (#2890, added 2026-10-17; absolute floor
+    #2899, since-boot rate floor over `_THROUGHPUT_RATE_WINDOW_MINUTES = 15` min
+    #2956) counts the UTC day's failed runs across every source and posts at most
+    once a day on its own `throughput_day` watermark. `fleet_watchdog.tick` runs it
+    last, reading `runs` rather than task files — so §2's table is its subject, not
+    this group's due-ness, and a roster copied from `WorkerPool._watch_fleet`'s
+    docstring misses it: that docstring still names only the two stall alarms, the
+    starving clause and the scan.
+  - **The invariant across the two stall alarms** (#938): an outage of the model server pauses
     dispatch, never the watching. The vLLM gate stays here because it is dispatch,
     and its own threshold is 45 min of failed `/health` before `logger.error`
     plus discord. Which `/health` it checks is config-derived — the default
