@@ -1120,10 +1120,12 @@ whole window died at the ceiling with nothing written. The shared shape is still
 the diagnosis, but the defect that shape now shares is not the budget: it was a
 `done:` marker the ledger input wrote and never read (#1711, landed 2026-09-28 —
 that input now reads the same watermark set the failed-runs input always did),
-beside a calibration gate that scores the staging envelope instead of the
-candidate, which is still open. Both are named in the
-`bench-mine` subsection below. The family's third member, `gap-fill`, never ran at all and
-was retired on 2026-09-24 (§7).
+beside a calibration gate that scored the staging envelope instead of the
+candidate. Both are now closed: #1710 landed 2026-09-28 05:02Z, minutes after the
+readings stamped below were taken, and #1769 relabelled the notes the old route had
+already mis-stamped. What is still open in `bench-mine` is the cost, not the gate.
+The family's third member, `gap-fill`, never ran at all and was retired on
+2026-09-24 (§7).
 
 ### `session-distill` — mine a finished chat for patterns
 
@@ -1154,10 +1156,14 @@ wrote it**. Each gate is scar tissue:
   mined back in as observations about the user before this gate existed.
   `sessions_io.NON_USER_PLATFORMS` is the one definition.
 
-**Current state (7 days to 2026-09-28):** 1 of 29 runs failed, and it was not a
-cap death — an empty turn that stopped under the ceiling (`stop_reason=stop`,
-14 of 15). 28 notes staged; 1.3 GPU-hours. The 154-of-369 figure §2 carried before #1713
-re-measured it is the window to 2026-09-11 and no longer reproduces.
+**Current state (7 days to 2026-10-28, `/api/workers/health`, window unclamped):**
+12 ok of 13 runs, 1 failed, 0 skipped, 0.57 GPU-hours. The shape is unchanged from
+the 7 days to 2026-09-28 — 28 ok of 29, 28 notes staged, 1.3 GPU-hours, its one
+failure not a cap death but an empty turn that stopped under the ceiling
+(`stop_reason=stop`, 14 of 15). 105 notes sit staged on 2026-10-28 and every one is
+still `review_status: pending`: the distiller works and nothing has read what it
+produced. The 154-of-369 figure §2 carried before #1713 re-measured it is the
+window to 2026-09-11 and no longer reproduces.
 
 ### `bench-mine` — new bench tasks from failure signal
 
@@ -1221,34 +1227,63 @@ other session sources' — #896) and stages a candidate task under
   capability edge. A task the learner always passes and one it always fails both
   move the bench mean by noise rather than signal; of the 11 tasks with baseline
   rows in the ledger, none sits at mean 0.00 on 2026-09-28, and the live corpus is
-  28 files as of 2026-10-25, not the twenty this line used to count (filed). **And as measured it
-  scores the wrong document**: `_load_candidate` hands `load_bench_tasks` the
-  staging *directory*, so the thing given 10 real trials is `write_staging_note`'s
-  envelope — no `prompt`, no `objective_checks`, the layer the judge then awards
-  full marks for. All 118 notes staged in the 7 days to 2026-09-28 carry
-  `status: ok` with an empty `error`, and 145 of the 146 staged notes across the
-  family are `pending` against one `out_of_band`; the recorded means span 0.51 to
-  1.00, which includes a perfect score ten times over on a candidate mined from a
-  task the baseline scored 0.05. The edge gate is decorative and
-  it is the expensive step: 10 real bench trials per candidate, 6.4 GPU-hours for
-  the source in the window (filed).
+  28 files as of 2026-10-25, not the twenty this line used to count (filed). **It
+  used to score the wrong document**: `_load_candidate` handed `load_bench_tasks`
+  the staging *directory*, so the thing given 10 real trials was
+  `write_staging_note`'s envelope — no `prompt`, no `objective_checks`, the layer
+  the judge then awards full marks for. All 118 notes staged in the 7 days to
+  2026-09-28 carried `status: ok` with an empty `error` and means spanning 0.51 to
+  1.00, a perfect score ten times over among them, on candidates mined from a task
+  the baseline scored 0.05. **#1710 closed that on 2026-09-28**:
+  `calibrate_candidate` now takes the parsed candidate its caller already has
+  (`task=`), `_load_candidate` is a fallback for a real task file only, and
+  `_indiscriminable` returns a reason and spends **zero** trials on a dict with no
+  `prompt` or no non-empty `objective_checks` rather than handing back a verdict on
+  the wrong object. #1769 relabelled the 119 notes the old route had stamped —
+  `review_status: uncalibrated`, `calibration.status: stale_envelope`,
+  `measured_against: staging envelope (pre-#1710)` — so the
+  145-`pending`-against-one-`out_of_band` split this line used to report is not the
+  pile's shape
+  either (measured 2026-10-28: 519 `bench-mine` notes, 206 `pending`, 194
+  `out_of_band`, 119 `uncalibrated`). The gate is a measurement now, and it is
+  still the expensive step: 10 real bench trials per candidate, 13.87 GPU-hours for
+  the source in the 7 days to 2026-10-28 against 6.42 in the window to 2026-09-28
+  (filed).
 - **The human promotion step is the honesty gate.** Lloyd writing the tasks
   that grade Lloyd is the known self-grading failure mode; the human gate, the
   mechanical-check requirement, and mining from real failures rather than
-  invented ones are what hold against it. As of 2026-09-28 the gate has never
-  opened: none of the 20 live tasks under `~/obsidian/lloyd/bench/` carries a
+  invented ones are what hold against it. As of 2026-09-28 the gate had never
+  opened: none of the 20 live tasks then under `~/obsidian/lloyd/bench/` carried a
   staging provenance field, against 118 `bench-mine` candidates sitting staged —
-  113 of them the same slug, `mined-from-bench-007-skill-invocation`. The only
-  consumer of this group's output is a Review tab that has taken nothing from it.
+  113 of them the same slug, `mined-from-bench-007-skill-invocation`. Measured
+  2026-10-28 it has *still* never opened, and the ratio has moved the wrong way: 28
+  live files (highest `bench_028`) against 519 staged notes. The one-slug pile is
+  gone (430 distinct candidate ids, #1711 and #1774), so the duplication that closed
+  is not why nothing lands, and the tab's own rails are not the blocker either — it
+  refuses a candidate whose task block cannot be graded and refuses a stem the bench
+  already declares, which is a working gate waiting for a human. Six weeks of mining
+  and six weeks of nothing on the other side of it. The only consumer of this group's
+  output is that tab.
 - The idea is copied from Terminal-Universe (arXiv:2609.04148): a recorded
   trajectory, *including the failed ones*, reconstructed into a task with a
   deterministic pass/fail check.
 
-**Current state (7 days to 2026-09-28):** 163 runs, 118 ok, 32 failed — 30 of
-those one `ConnectError` burst on 2026-09-24 and 2 genuine cap deaths — plus 13
-skipped, 11 of them "no parseable bench-task frontmatter", again on
-`bench_007_skill_invocation`. 6.42 GPU-hours. The failure that matters is not in
-the failed column: it is 118 successes writing 113 copies of one candidate. §2's
+**Current state (7 days to 2026-10-28, `/api/workers/health`, window unclamped):**
+101 ok of 123 runs, 12 failed, 10 skipped — a 9.8% fail rate for 13.87 GPU-hours.
+11 of the 12 failures are `ConnectError: All connection attempts failed` on a
+single day, 2026-10-26, with the primary unreachable, and 8 of the source's 9
+quarantined queue rows carry that same error: an outage, not a source defect. All
+10 skips are "no parseable bench-task frontmatter" — a turn that ran to the end and
+returned a candidate the promote route would refuse — spread over five tasks
+(`bench_027` ×4, `bench_024` ×3, `bench_023`, `bench_007`, `bench_006`), so the ~8%
+that end unparseable is no longer `bench_007`'s quirk but a standing shape, and a
+skip is charged its duration and appears in no fail rate. The window to 2026-09-28
+measured 163 runs, 118 ok, 32 failed — 30 of those one `ConnectError` burst on
+2026-09-24 and 2 genuine cap deaths — plus 13 skipped, 11 of them "no parseable
+bench-task frontmatter" on `bench_007_skill_invocation`, for 6.42 GPU-hours; the
+failure that mattered there was not in the failed column but 118 successes writing
+113 copies of one candidate, the shape #1711 and #1774 closed. What is open on
+2026-10-28 is the ratio: 2.2× that window's GPU-hours for zero promotions. §2's
 former 49-of-60 was the window to 2026-09-11.
 
 ### `failure-ledger` — the same fault counted, and one run a day sent after it (#2079)
@@ -1316,7 +1351,15 @@ The prompt names at most `DISPATCH_MAX_RECORDS` finding ids plus a window of
 rows in above it: a worker turn has `Read` and `Bash`, not a reader for a second
 sqlite file, so forwarding the prompt alone would send a run off to describe rows
 it cannot open. `tests/test_failure_ledger_dispatch.py` pins exactly that — the
-sample text it asserts on is in the store and nowhere in the queue payload.
+sample text it asserts on is in the store and nowhere in the queue payload. **That
+turn is also the one in this section with no ceiling over it**:
+`failure-ledger` has no entry in `app/harness/capabilities.py:288`
+`SOURCE_CAPABILITIES`, whose keys are `session-distill`, `youtube-digest`,
+`deep-research`, `scheduled-task`, `autotriage` and `bench-mine`, and
+`envelope_for(source)` returns `None` for an undeclared name — which every
+`workers/sources/_common.py` call site reads as "no ceiling": no `tool_allowlist`
+reaches `turn_options`, and the empty `model` on `run_prompt_on_primary` leaves the
+legacy unbounded path (filed).
 
 **Registered, and scheduled as of 2026-10-06.** #2079 is measured on nothing yet, and
 this is the half of the reason: `WorkerPool._scheduler_pass` reaches a source's
@@ -1326,8 +1369,15 @@ Its block is in `config.yaml` now — `enabled: true`, `interval_seconds: 3600`,
 `min_interval_seconds: 86400`, `max_inflight: 1`, `max_duration_seconds: 900` — and
 what the wait cost was measurement, not mechanism: counting was proven against the
 real ledger and the real guard logs before it, and this is what it had done
-(measured 2026-10-03): `reconcile()` over the real store reported 313 events across 30
-families, the top two holding 80 and 41 of them. Counting is what the sweep does
+(measured 2026-10-03): the store counted 313 events across 30 signatures, the top
+two families holding 80 and 41 occurrences — the two figures `sweep()` returns as
+`{"signatures", "events"}` (`app/failure_ledger.py:395`), not `reconcile()`, which
+reports queue depths and run outcomes and cannot count an event. That pair reopens
+against no surviving state of the file: the #2893 witness
+(`backlog/data/failure-ledger.db`, cut 2026-10-17T14:46Z) holds 83 events across 7
+signatures, and the live store on 2026-10-28 holds 95 events across 10 signatures
+over 25 event days, with `failure_findings` and `failure_dispatches` both still at
+0 rows. Counting is what the sweep does
 alone; acting needs the pool. **The denominator is `runs`, not that event count** —
 `app/failure_ledger.py:670` `reconcile()` reports `runs_total` (`:701`) as
 `SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
@@ -1346,7 +1396,18 @@ one poisoned at `attempts = 0`, which is terminal.
 against named, dated open issues: owed-check's ruling, read on the daily note and the
 `[guardian]` board rather than the parked morning brief, and the #543 four-week
 delete-or-keep clock for the ledger starts at that first real run, not at this block's
-landing. What kept the loop from scheduling the source was never a fence around
+landing. **Measured 2026-10-28 that first real run has still not happened: 0 `runs`
+rows for `source='failure-ledger'` in `workers.db` all-time, and 0 queue rows.** The
+schedule is not the blocker — the pool asks hourly (`last_enqueue_check`
+2026-10-28T04:12Z), a pass completes daily (`last_enqueued` 2026-10-27T04:59Z), and
+`failure_findings` is still empty because neither detector can reach this store:
+`detect_new_onset` wants ≥3 occurrences of a signature within 24 h of its
+`first_seen` and the two newest families hold 2 and 1, while growth counts only the
+day before the pass, so every burst the store has ever produced (`04f90c87b03a`
+09-25 n=23 and 10-21 n=8, `a1afbe2e3b04` 09-06 n=6) closed before #3281's
+burst-from-silence arm landed on 2026-10-25 and no pass can review it now. The
+seven-day criterion and #543's clock are therefore not early: they wait on a burst
+with no arrival condition. What kept the loop from scheduling the source was never a fence around
 `config.yaml`: that claim was retired on 2026-10-05 by the
 `scripts/automod/spec.py::config_value_change` lane, whose denied set
 (`spec.py::CONFIG_DENIED_KEYS`)
