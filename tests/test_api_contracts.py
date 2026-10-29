@@ -140,6 +140,19 @@ WORKER_SOURCE_HEALTH_KEYS = {"name", "configured", "enabled", "inner_voice",
 #: gate, which is the same false absence this item set out to remove. `api.ts`
 #: declares it optional for exactly that reason.
 BOARD_STEWARD_HEALTH_KEYS = WORKER_SOURCE_HEALTH_KEYS | {"judgement"}
+#: #3530 adds one key to the TWO mining sources' rows: `staged_pending`, the
+#: depth of the pile their `max_staged_pending` bound is compared against. Kept
+#: out of the base set for #3089's reason — a `staged_pending: null` on the
+#: fourteen sources that have no pile bound is a gate nobody can see, and the
+#: whole point of the field is that the pile which stopped bench-mine on
+#: 2026-10-28 (519 notes staged, 0 promotions ever, `depth` reading a healthy
+#: `{completed: 533, quarantined: 9}`) was invisible to every page that existed.
+#: `api.ts` declares it optional for the same reason.
+MINING_PILE_HEALTH_KEYS = WORKER_SOURCE_HEALTH_KEYS | {"staged_pending"}
+#: Which rows carry it, written as a literal so the shape test can fail: a
+#: third source taking the bound has to arrive here too, and
+#: `test_the_pile_bound_belongs_to_exactly_these_sources` is what makes it loud.
+PILE_BOUND_SOURCES = {"bench-mine", "session-distill"}
 
 
 async def test_workers_health_shape(client, monkeypatch, tmp_path):
@@ -175,10 +188,23 @@ async def test_workers_health_shape(client, monkeypatch, tmp_path):
         "the seeded store spans the whole default window, so the payload must "
         "claim no clamp: %r" % ({k: body[k] for k in ("oldest_input",
                                                      "window_clamped_to_hours")},))
+    # An empty staging tree, so this test counts the SHAPE of the #3530 field and
+    # not the live pile: left alone it would read 600+ notes out of
+    # `~/lloyd-data/_pipeline/vault-derived/pending-research/` on every health
+    # test in the suite. The real figure's own test is
+    # `tests/test_workers_router.py::the_pile_figure_health_publishes_is_the_one
+    # _the_bound_reads`.
+    from workers.sources import _common as worker_common
+
+    monkeypatch.setattr(worker_common, "STAGING_ROOT", tmp_path / "staging")
+
     for src in body["sources"]:
         if src["name"] == "board-steward":
             # #3089's one addition, and it must stay on this row only.
             assert set(src) == BOARD_STEWARD_HEALTH_KEYS, sorted(src)
+        elif src["name"] in PILE_BOUND_SOURCES:
+            # #3530's addition, on the two rows whose source declares the bound.
+            assert set(src) == MINING_PILE_HEALTH_KEYS, sorted(src)
         else:
             assert set(src) == WORKER_SOURCE_HEALTH_KEYS, sorted(src)
         # `health` is None for a source with no runs in the window — a rate
@@ -188,6 +214,40 @@ async def test_workers_health_shape(client, monkeypatch, tmp_path):
     seeded = next(s for s in body["sources"] if s["name"] == "contract-src")
     assert seeded["configured"] is False and seeded["dispatch"] is None, seeded
     assert seeded["health"]["total"] == 1, seeded["health"]
+
+
+def test_the_pile_bound_belongs_to_exactly_these_sources():
+    """Which rows carry `staged_pending` is not a list this file may outlive.
+
+    The route decides by reading each registered source module's
+    `DEFAULT_MAX_STAGED_PENDING`, so a third source that takes the pile bound
+    starts emitting the field and silently breaks the shape pin above for a
+    reader who has no idea where the new row came from. Naming the two sources
+    here and re-deriving them from the registry turns that into a one-line edit
+    with the reason in the failure text.
+
+    Both defaults are also pinned against the pile they were set under — 206 and
+    105 `review_status: pending` notes measured 2026-10-28 — because clause 5 of
+    #3530 is that the bound BITES on the day it lands: a default above today's
+    count is a bound that waits for nobody.
+    """
+    from workers.sources import SOURCE_REGISTRY
+    from workers.sources import bench_mine as BM
+    from workers.sources import session_distill as SD
+
+    derived = {n for n, m in SOURCE_REGISTRY.items()
+               if getattr(m, "DEFAULT_MAX_STAGED_PENDING", 0)}
+    assert derived == PILE_BOUND_SOURCES, (
+        f"{sorted(derived)} declare a pile bound; this test and the shape set "
+        "above name them, so a new one is an edit here, not a surprise there")
+    assert BM.DEFAULT_MAX_STAGED_PENDING < 206, (
+        f"bench-mine's default cap {BM.DEFAULT_MAX_STAGED_PENDING} is not under "
+        "the 206 pending notes measured 2026-10-28, so the bound would not bite "
+        "when it landed (clause 5)")
+    assert SD.DEFAULT_MAX_STAGED_PENDING < 105, (
+        f"session-distill's default cap {SD.DEFAULT_MAX_STAGED_PENDING} is not "
+        "under the 105 pending notes measured 2026-10-28, so the bound would not "
+        "bite when it landed (clause 5)")
 
 
 def test_the_web_client_declares_every_field_the_route_returns():
@@ -221,12 +281,20 @@ def test_the_web_client_declares_every_field_the_route_returns():
     # in the type (`judgement?:`) because only board-steward's row carries it, so it
     # must not read as a field every row sends. It is checked as optional here and as
     # present-and-null-able on the route side in tests/test_workers_router.py.
-    assert declared - WORKER_SOURCE_HEALTH_KEYS == {"judgement"}, (
-        f"the client type gained or lost a field beyond #3089's one: "
-        f"{sorted(declared - WORKER_SOURCE_HEALTH_KEYS)}")
+    # #3530's `staged_pending` joins it for the same reason #3089's `judgement`
+    # did, and the pair is named rather than the ratchet dropped: two optional
+    # per-source fields is the honest set, and `== {...}` still goes red on a
+    # third field nobody looked at.
+    assert declared - WORKER_SOURCE_HEALTH_KEYS == {"judgement", "staged_pending"}, (
+        f"the client type gained or lost an optional field beyond #3089's and "
+        f"#3530's: {sorted(declared - WORKER_SOURCE_HEALTH_KEYS)}")
     assert "judgement?:" in block, (
         "`judgement` is declared REQUIRED, but every source row except "
         "board-steward's has no such field, so a required type lies about them")
+    assert "staged_pending?:" in block, (
+        "`staged_pending` is declared REQUIRED, but the route emits it only for "
+        "a source that declares a pile bound, so a required type lies about the "
+        "other rows")
     assert WORKER_SOURCE_HEALTH_KEYS - declared == {"dispatch"}, {
         "emitted_but_undeclared": sorted(WORKER_SOURCE_HEALTH_KEYS - declared),
         "expected": "exactly `dispatch`, the one pre-existing gap (see the docstring)"}

@@ -299,6 +299,18 @@ export interface WorkerSourceHealth {
   max_inflight?: number | null
   priority?: number | null
   depth: Record<string, number>
+  // #3530: the notes this source staged for a human that are still
+  // `review_status: pending` — the figure its own `max_staged_pending` bound is
+  // compared against, so the pile a producer is stopped by is readable without
+  // a hand-run `find` over pending-research. `depth` above counts rows waiting
+  // for a GPU slot; this counts notes waiting for a person, and on 2026-10-28
+  // the first read 9 while the second was 519.
+  //
+  // Optional exactly like `judgement`, and for the same reason: the route emits
+  // it only for a source that declares a pile bound (bench-mine,
+  // session-distill), so a required field would lie about every other row.
+  // `null` is the failed read, not an empty pile.
+  staged_pending?: { pending_count: number; cap: number; over_cap: boolean } | null
   // The queue's WAIT, not only its depth: how old the oldest row sitting in
   // state 'queued' is (from enqueued_at; a row parked by retry back-off does not
   // count), how many of that source's waiting rows are past the bound, and the

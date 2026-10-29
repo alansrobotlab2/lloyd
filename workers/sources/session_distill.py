@@ -36,8 +36,10 @@ from pathlib import Path
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
+from workers.sources import DECLINED
 from workers.sources._common import (
-    parse_confidence, run_prompt_on_primary, write_staging_note,
+    parse_confidence, run_prompt_on_primary, staged_pending_bound_hit,
+    write_staging_note,
 )
 
 logger = logging.getLogger("lloyd-workers.session_distill")
@@ -48,6 +50,24 @@ from app import kg_store  # read here to count this run's own writes (#1743)
 from app.paths import SESSIONS_DIR  # anchored to DATA_ROOT, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
+
+#: How many of this source's staged notes may sit `review_status: pending`
+#: before it stops offering work at all (#3530). The operator's number is
+#: `workers.sources.session-distill.max_staged_pending` — a key that did not
+#: exist when this was written, and the reason it exists now is that this
+#: source's per-tick output was a hard-coded `_MAX_ENQUEUE_PER_TICK` above, so
+#: until the pile bound landed the only lever on this producer at all was
+#: switching the whole source off.
+#:
+#: 60 sits BELOW the 105 `pending` notes measured in this source's staging tree
+#: on 2026-10-28, all 105 of them pending, so the bound bites the day it lands.
+#: It is lower than bench-mine's 150 because this pile is smaller and its one
+#: partial consumer — `skills/research-queue-generator/SKILL.md`, which reads
+#: the `## Gaps` sections of the LAST THREE DAYS of notes on job #65 — stops
+#: reading a note on day four, so a note older than three days is unreviewed in
+#: every sense. Not a tuned number: #3530's owed entry rules the value once the
+#: lane takes a promotion.
+DEFAULT_MAX_STAGED_PENDING = 60
 
 #: Iteration ceiling for one distill turn, when `workers.sources.session-distill`
 #: names no `max_turns`. It was a literal at the call site, so moving it took a
@@ -185,8 +205,22 @@ def _migrate_legacy_cursor(queue: WorkQueue) -> int:
     return seeded
 
 
-async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
+    """Offer a session to distil, unless the pile this source already staged is
+    still unreviewed past `max_staged_pending` (#3530), when it returns
+    `DECLINED` and offers nothing.
+
+    The bound returns BEFORE the scan, the enqueue and the cursor migration, so
+    it touches no watermark at all: the `done:<session>.json` markers are what
+    keep one session from being distilled twice, and a skipped tick that
+    dropped them would re-distill every eligible session the first time the
+    pile drained. Nothing here marks a session done on a skipped tick either, so
+    the same slate is offered again rather than retired.
+    """
     import asyncio
+
+    if await staged_pending_bound_hit(NAME, src_cfg, DEFAULT_MAX_STAGED_PENDING):
+        return DECLINED
 
     if not SESSIONS_DIR.exists():
         return

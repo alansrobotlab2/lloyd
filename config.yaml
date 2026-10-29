@@ -2381,6 +2381,17 @@ workers:
       # runs, read from `runs` after the landing. Absent, the code's default
       # is 8. Carried in the queue payload, so a change reaches new items only.
       max_turns: 12
+      # How many of this source's staged notes may sit `review_status: pending`
+      # before `enqueue_if_due` declines the tick (#3530). Absent, the code's
+      # default is 150 (`workers/sources/bench_mine.py`) — BELOW the 206 pending
+      # notes measured in this source's staging tree on 2026-10-28, so the bound
+      # bites the day it lands with nobody editing this file. That is the point:
+      # the source has run 13.87 GPU-hours a week and `~/obsidian/lloyd/bench/`
+      # holds 28 files, none promoted. `/api/workers/health`'s `staged_pending`
+      # row carries the count beside the cap; the skip logs
+      # `skip_reason=staged_pending_cap` rather than failing. Not a tuned value —
+      # the owed entry sets it once the lane has taken a promotion to measure.
+      max_staged_pending: 150
     # Researches one registry topic per run through the deep-dive-research
     # skill, and records the outcome back on the topic. Replaces
     # `domain-research`, whose prompt never told the model to search the web:
@@ -2481,6 +2492,17 @@ workers:
       # the call site, so no config key could move it. Absent, the code's
       # default is 15. Carried in the queue payload: a change reaches new items only.
       max_turns: 15
+      # How many of this source's staged notes may sit `review_status: pending`
+      # before `enqueue_if_due` declines the tick (#3530). Absent, the code's
+      # default is 60 (`workers/sources/session_distill.py`) — BELOW the 105
+      # pending notes measured 2026-10-28, all 105 of them pending. This source
+      # had NO rate lever before this key: its per-tick output was a hard-coded
+      # `_MAX_ENQUEUE_PER_TICK`, so switching the source off was the only option.
+      # 60 rather than bench-mine's 150 because the one reader these notes have
+      # (`skills/research-queue-generator`, over the last three days) stops
+      # reading a note on day four. Same named skip, same `/api/workers/health`
+      # `staged_pending` row; the value is owed a ruling, like bench-mine's.
+      max_staged_pending: 60
     # Turns the automod promotions ledger and the guard logs into dated, counted
     # failure issues (`${LLOYD_DATA}/failure-ledger.db`, `app/failure_ledger.py`
     # owns the schema) and sends ONE investigation turn a day after the strongest

@@ -87,7 +87,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from workers.queue import WorkQueue, QueueItem
-from workers.sources._common import run_prompt_on_primary, write_staging_note
+from workers.sources import DECLINED
+from workers.sources._common import (
+    run_prompt_on_primary, staged_pending_bound_hit, write_staging_note,
+)
 
 logger = logging.getLogger("lloyd-workers.bench_mine")
 
@@ -108,6 +111,25 @@ LEDGER_PATH = PIPELINE_DIR / "research" / "ledger.jsonl"
 #: default 5 against a declared 3 (#1712). Two worker slots shared with the
 #: nightly chain; this source is not the reason anyone is waiting.
 MAX_ENQUEUE_PER_TICK = 3
+#: How many of this source's staged notes may sit `review_status: pending`
+#: before it stops offering work at all (#3530). The operator's number is
+#: `workers.sources.bench-mine.max_staged_pending`; this constant is its
+#: default, and an absent key therefore still bounds the producer.
+#:
+#: 150 sits BELOW the 206 `pending` notes measured in this source's staging
+#: tree on 2026-10-28, so the bound bites the day it lands: the source resumes
+#: only when a human promotes enough of the pile to bring it under 150, not
+#: when the two-hour clock allows another tick. It is not a tuned number —
+#: #3530's owed entry rules the value once the lane has taken its first
+#: promotion, which to that date is zero (`~/obsidian/lloyd/bench/`: 28 files,
+#: none carrying the `promoted_at` key the promote route stamps). What the
+#: number is doing is bounding 13.87 GPU-hours a week against a consumer that
+#: has taken nothing, not optimising anything.
+#:
+#: `staged_pending_count` counts `pending` ALONE: 194 `out_of_band` plus 119
+#: `uncalibrated` rows in the same tree are already labelled droppable, and a
+#: cap that counted them could never be cleared by promoting.
+DEFAULT_MAX_STAGED_PENDING = 150
 #: Iteration ceiling for one mining turn, when `workers.sources.bench-mine`
 #: names no `max_turns`. It was a literal at both call sites, so no config
 #: key could move it: 112 of 115 all-time failures to 2026-09-18 were
@@ -350,7 +372,7 @@ def _recent_failed_runs(days: int = FAILURE_WINDOW_DAYS, limit: int = MAX_ENQUEU
 # Enqueue
 # ---------------------------------------------------------------------------
 
-async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     """Offer work from either input. Neither one gates the other.
 
     The first cut of this function returned early when the ledger's mtime had
@@ -361,7 +383,23 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     the day it was read, not here: this function does not open that directory,
     and the retention sweep prunes those files past 30 days, so any figure
     written into this docstring could only ever go stale.
+
+    Returns `DECLINED`, and offers nothing, while the notes it has already
+    staged await a human past `max_staged_pending` (#3530). That bound sits
+    ABOVE both inputs on purpose: it is the only thing between this source and
+    13.87 GPU-hours a week spent producing candidates nobody has read since the
+    source began (28 files in `~/obsidian/lloyd/bench/`, none promoted).
     """
+    # The pile bound is read FIRST — before either input, and therefore before
+    # this function writes a single watermark. A bound that ran after
+    # `_enqueue_ledger_losers` would advance `ledger_mtime` on the tick it
+    # skipped, and the slate covered by that watermark would never be offered
+    # again once a human finally drained the pile: the bound would have
+    # silently retired work rather than deferred it. Same for the `done:`
+    # markers, which only the enqueue path writes.
+    if await staged_pending_bound_hit(NAME, src_cfg, DEFAULT_MAX_STAGED_PENDING):
+        return DECLINED
+
     # One number, both inputs. `limit` used to be passed to the failed-runs
     # input alone while the ledger input ran at `_recent_ledger_losers`'s own
     # default 5 — the input that actually fires was the one the key did not

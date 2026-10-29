@@ -46,6 +46,24 @@ def q(tmp_path) -> WorkQueue:
     return WorkQueue(tmp_path / "workers.db")
 
 
+@pytest.fixture(autouse=True)
+def an_empty_staging_pile(tmp_path, monkeypatch):
+    """No test in this file reads the pile a human has, unless it asks to.
+
+    #3530 put a bound on two of these sources that reads
+    `pending-research/<source>/**` on every `enqueue_if_due`, and the live tree
+    is OVER that bound right now — 220 `bench-mine` notes pending against a
+    default cap of 150, 105 for `session-distill` against 60. Left pointing at
+    the real root, every pre-existing enqueue test here would silently take the
+    skip path and assert nothing about the input it was written for.
+
+    An empty pile is therefore the neutral starting state, the same one
+    `youtube-digest` runs in. A test that wants a pile sets one with
+    `_staged_pile`, whose own `monkeypatch.setattr` overwrites this one.
+    """
+    monkeypatch.setattr(C, "STAGING_ROOT", tmp_path / "no-staging")
+
+
 # ---------------------------------------------------------------------------
 # TurnResult — an empty answer is a failure, not a short success
 # ---------------------------------------------------------------------------
@@ -2831,3 +2849,319 @@ def test_cost_investigate_is_registered_and_its_config_block_is_written():
     assert cfg["margin"] == 1.5 and cfg["min_samples"] == 40
     assert cfg["cooldown_seconds"] == 21600
     assert cfg["interval_seconds"] == 86400, "the cost of registering it: one tick/day"
+
+
+# ---------------------------------------------------------------------------
+# #3530 — the unreviewed pile is the bound on a mining producer
+#
+# Both mining sources stage markdown for a HUMAN to promote, and nothing bounded
+# a producer against the depth of that queue. Measured 2026-10-28, in the source
+# of the item: `pending-research/` held 624 notes (bench-mine 519 = 206 pending /
+# 194 out_of_band / 119 uncalibrated; session-distill 105, all pending) while
+# `~/obsidian/lloyd/bench/` held 28 files, none of them carrying the
+# `review_status: promoted` + `promoted_at` pair `app/routers/workers.py` stamps
+# on a promotion, and there was no `_rejected/` tree at all — zero promotions and
+# zero rejections across bench-mine's whole life, against 13.87 GPU-hours in the
+# 7 days before it was measured. `interval_seconds` bounds the clock and
+# `max_enqueue_per_tick` bounds one tick; neither could see the pile.
+#
+# The tests below pin the bound from all five acceptance clauses: what is counted
+# (1), that bench-mine stops at BOTH inputs with no watermark moved (2), that
+# session-distill stops without losing its markers (3), that the stop is a named
+# decline and not a fault (4), and that the cap is `max_staged_pending` with
+# code defaults that bite (5).
+# ---------------------------------------------------------------------------
+
+from workers.sources import DECLINED  # noqa: E402  (section-local: this is the contract the section pins)
+
+
+def _staged_pile(tmp_path, monkeypatch, **per_source: dict) -> Path:
+    """Stage notes the way the writers do, and point the shared counter at them.
+
+    `per_source` maps a source name to `{review_status: count}`. Notes are spread
+    over TWO date directories, because the bound is over the pile and not over a
+    day: a counter that globbed today's directory, or the source directory's
+    top level, would return 0 against this fixture and pass nothing.
+
+    The envelope is written through `yaml.dump` exactly as
+    `write_staging_note` does it, and the body is prose with no second front
+    matter block — `_staged_notes_whose_envelope_is_not_pending_are_left_alone`
+    covers the two-block shape that real bench-mine notes have.
+    """
+    root = tmp_path / "pending-research"
+    monkeypatch.setattr(C, "STAGING_ROOT", root)
+    for source, tally in per_source.items():
+        for status, n in tally.items():
+            for i in range(n):
+                d = root / source / f"2026-10-{(i % 2) + 23:02d}"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{i:06d}-{status}.md").write_text(
+                    "---\n" + yaml.dump({"source": source, "confidence": 0.5,
+                                         "review_status": status},
+                                        default_flow_style=False,
+                                        allow_unicode=True)
+                    + "---\n\n## Idea\n\nsomething a human has not read\n",
+                    encoding="utf-8")
+    return root
+
+
+def test_the_pile_counter_counts_only_notes_awaiting_a_human(tmp_path, monkeypatch):
+    """Clause 1, and the reason the count is per-status rather than a file count.
+
+    313 of the 624 notes staged on 2026-10-28 carried `out_of_band` or
+    `uncalibrated` — labels that mean somebody already judged the note droppable,
+    written by `workers/sources/bench_mine.py` and by
+    `scripts/maintenance/relabel_stale_bench_calibration.py` (#1769). A cap that
+    counted every file could therefore never be cleared by promoting: bench-mine
+    would sit over any cap from the day it landed and the bound would be a
+    permanent stop, not a throttle. `promoted`/`rejected` rows are counted out for
+    the same reason in the other direction — a promotion MOVES the note out of
+    staging, and a rejection into `_rejected/`, a sibling of the source directory.
+
+    Each source counts only its own tree: the whole argument is that bench-mine's
+    unread notes are not session-distill's problem to be bound by.
+    """
+    _staged_pile(tmp_path, monkeypatch, **{
+        "bench-mine": {"pending": 3, "out_of_band": 4, "uncalibrated": 5,
+                       "promoted": 1, "rejected": 1},
+        "session-distill": {"pending": 2},
+    })
+
+    assert C.staged_pending_count("bench-mine") == 3, (
+        "the bound counted more than the notes a human still owes a reading, so "
+        "promoting three notes would not have lowered it")
+    assert C.staged_pending_count("session-distill") == 2
+
+
+def test_the_pile_counter_leaves_alone_notes_whose_envelope_is_not_pending(
+        tmp_path, monkeypatch):
+    """The shapes a real staging tree actually contains, none of them a pending note.
+
+    A bench-mine note is TWO documents in one file: the envelope
+    `write_staging_note` stamps, then the mined candidate's own front matter in
+    the body. The case that matters is the disagreement — envelope
+    `out_of_band`, body `pending` — because a loader that read the LAST block, or
+    grepped the file for `review_status:`, would resurrect a note the calibration
+    relabel had already retired and keep the bound tripped after every promotion.
+
+    An unparsable or absent envelope is not counted either, which is
+    `app/routers/workers.py::_parse_frontmatter`'s rule for the same files: an
+    unreadable status is not a claim that anyone owes a reading.
+    """
+    root = _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 1}})
+    day = root / "bench-mine" / "2026-10-23"
+    (day / "two-block.md").write_text(
+        "---\nsource: bench-mine\nreview_status: out_of_band\n---\n\n"
+        "---\nsource: bench_x\nconfidence: 0.5\nreview_status: pending\n---\n\n"
+        "## Task\n\ngraded by the harness\n", encoding="utf-8")
+    (day / "no-front-matter.md").write_text("just prose\n", encoding="utf-8")
+    (day / "broken-front-matter.md").write_text(
+        "---\nreview_status: [unclosed\n---\n\nprose\n", encoding="utf-8")
+    parked = root / "bench-mine" / "_parked"
+    parked.mkdir(parents=True, exist_ok=True)
+    (parked / "hidden.md").write_text(
+        "---\nreview_status: pending\n---\n\nprose\n", encoding="utf-8")
+    (day / "not-a-note.txt").write_text(
+        "---\nreview_status: pending\n---\n", encoding="utf-8")
+
+    assert C.staged_pending_count("bench-mine") == 1, (
+        "a relabelled, unparsable, headerless, parked or non-markdown file was "
+        "counted as a note awaiting a human")
+
+
+def test_the_pile_counter_reads_a_missing_tree_as_zero(tmp_path, monkeypatch):
+    """Clause 1's last arm, and the reason the bound cannot brick a source.
+
+    `youtube-digest` stages nothing today, and a source's first-ever tick has no
+    directory yet: reading a missing tree as an error (or as None, then comparing)
+    would either stop a producer that has never produced anything or raise out of
+    `enqueue_if_due` into the pool's `enqueue_if_due failed` path.
+    """
+    root = tmp_path / "pending-research"
+    monkeypatch.setattr(C, "STAGING_ROOT", root)
+
+    assert C.staged_pending_count("youtube-digest") == 0
+
+    (root / "bench-mine" / "2026-10-01").mkdir(parents=True)
+    assert C.staged_pending_count("bench-mine") == 0, (
+        "a directory that exists and holds no notes is not a pile")
+
+
+async def test_a_full_pile_stops_bench_mine_before_either_input(tmp_path, monkeypatch, q):
+    """Clause 2: NEITHER input runs, and NOTHING that was deferred is retired.
+
+    Both inputs are loaded and live here — three unmarked ledger losers through
+    the real selector, and one failed autonomy run of the shape #522 was filed
+    for — because the bug this clause exists to prevent is a bound bolted to one
+    input and the source continuing to spend through the other. It is also the
+    reason the bound sits ABOVE both: a bound checked after
+    `_enqueue_ledger_losers` would advance `ledger_mtime` on the tick it skipped,
+    and the slate under that watermark would never be offered again even after a
+    human drained the pile. Same for the `done:` markers, which only the enqueue
+    path writes.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, _five_unmarked_losers())
+    runs = tmp_path / "autonomy-runs"
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", runs)
+    _run_file(runs, "run_24_20260908_235954")
+    _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 151}})
+
+    out = await BM.enqueue_if_due(q, {})
+
+    assert out == DECLINED
+    assert q.list_items(source=BM.NAME) == [], (
+        "the pile was over the cap and bench-mine offered work anyway")
+    assert q.wm_get(BM.NAME, "ledger_mtime") is None, (
+        "the skipped tick advanced the ledger watermark, so the deferred slate is "
+        "now below the cursor and a drained pile would never re-mine it")
+    assert not [k for k in q.wm_keys(BM.NAME) if k.startswith("done:")], (
+        "the skipped tick marked rows done, which retires them rather than defers them")
+    assert q.wm_keys(BM.NAME) == [], (
+        f"a skipped bench-mine tick wrote watermarks at all: {q.wm_keys(BM.NAME)}")
+
+
+async def test_bench_mine_offers_its_usual_slate_when_the_pile_is_under_the_cap(
+        tmp_path, monkeypatch, q):
+    """The control the node above needs in order to be able to fail.
+
+    Identical inputs, empty pile: the ledger losers and the failed run must both
+    arrive, and the watermark must move. Without this, `assert q.list_items(...)
+    == []` above passes just as well when the inputs are dead for an unrelated
+    reason — which is precisely how #522's zero-item source read for its whole
+    life.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, _five_unmarked_losers())
+    runs = tmp_path / "autonomy-runs"
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", runs)
+    _run_file(runs, "run_24_20260908_235954")
+    _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 150}})
+
+    out = await BM.enqueue_if_due(q, {})
+
+    assert out is None
+    offered = q.list_items(source=BM.NAME)
+    assert len(offered) == 4, (
+        f"expected the 3 ledger losers plus the 1 failed run, got {len(offered)}: "
+        "an input is dead, so the empty-queue assertion next door proves nothing")
+    assert q.wm_get(BM.NAME, "ledger_mtime") is not None, (
+        "an under-cap tick left the ledger cursor where it was, so the watermark "
+        "in the node above is not the only thing that could move it")
+
+
+async def test_a_full_pile_stops_session_distill_without_touching_its_markers(
+        tmp_path, monkeypatch, q):
+    """Clause 3: the same bound on the same shape, against this source's own pile.
+
+    Its watermarks are the interesting half. `done:<session>.json` is what stops
+    a session being distilled twice, and the legacy `last_mtime` cursor is
+    migrated into those markers on the first tick that runs — so a bound placed
+    BELOW the migration would spend a skipped tick having already rewritten the
+    source's whole history, and a bound that marked sessions done would retire
+    the slate it was only meant to defer. bench-mine's pile is also irrelevant
+    here, which is why the fixture stages 200 bench-mine notes and this source
+    still runs.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(SD, "SESSIONS_DIR", sessions)
+    old = _session(sessions, "20260801_already_done", age_seconds=99999)
+    _session(sessions, "20260906_not_yet", age_seconds=7200)
+    q.wm_set(SD.NAME, f"done:{old.name}", json.dumps({"why": "distilled"}))
+    q.wm_set(SD.NAME, SD._LEGACY_CURSOR, repr(1234.5))
+    _staged_pile(tmp_path, monkeypatch,
+                 **{"session-distill": {"pending": 61},
+                    "bench-mine": {"pending": 200}})
+
+    out = await SD.enqueue_if_due(q, {})
+
+    assert out == DECLINED
+    assert q.list_items(source=SD.NAME) == []
+    assert json.loads(q.wm_get(SD.NAME, f"done:{old.name}"))["why"] == "distilled", (
+        "the skipped tick disturbed an existing done: marker")
+    assert q.wm_get(SD.NAME, "done:20260906_not_yet.json") is None, (
+        "the skipped tick marked an untouched session done, retiring the very "
+        "slate the bound was supposed to hold for the next human promotion")
+    assert q.wm_get(SD.NAME, SD._LEGACY_CURSOR) == repr(1234.5), (
+        "the skipped tick ran the legacy cursor migration, so the bound was not "
+        "the first thing this source did")
+
+
+async def test_session_distill_offers_a_session_when_its_own_pile_is_under_the_cap(
+        tmp_path, monkeypatch, q):
+    """The control for the node above: same two sessions, pile under the cap."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(SD, "SESSIONS_DIR", sessions)
+    new = _session(sessions, "20260906_not_yet", age_seconds=7200)
+    _staged_pile(tmp_path, monkeypatch, **{"session-distill": {"pending": 60}})
+
+    out = await SD.enqueue_if_due(q, {})
+
+    assert out is None
+    assert [i.payload["session_path"] for i in q.list_items(source=SD.NAME)] == [str(new)]
+
+
+async def test_a_pile_skip_is_a_named_decline_and_not_a_failed_run(
+        tmp_path, monkeypatch, q, caplog):
+    """Clause 4: the skip has to be legible, and it must not look like a fault.
+
+    A source that declines its own tick raises nothing and writes nothing, so
+    without a name on it "the pile is full" and "the source is broken" are the
+    same log. The line carries the source, the count and the cap, and the
+    machine-readable reason `C.STAGED_PENDING_SKIP_REASON`; a `failed` run row
+    would do the opposite — `workers/dispatch_watch.py` and the health rollup
+    both count failures, and a bound that worked would read as an outage.
+    """
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _run_file(runs, "run_24_20260908_235954")
+    _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 151}})
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.common"):
+        out = await BM.enqueue_if_due(q, {})
+
+    assert out == DECLINED
+    skip = [r.getMessage() for r in caplog.records
+            if C.STAGED_PENDING_SKIP_REASON in r.getMessage()]
+    assert len(skip) == 1, f"expected exactly one skip line, got {skip}"
+    assert "bench-mine" in skip[0] and "151" in skip[0] and "150" in skip[0], (
+        f"the skip line names neither the source, the count and the cap it tripped: {skip[0]}")
+    assert "max_staged_pending" in skip[0], (
+        f"the skip line does not name the key a human would raise: {skip[0]}")
+    assert not q.list_runs(source=BM.NAME), (
+        "the skip wrote a run record; a bound that works would then show up as "
+        "a failure rate on /api/workers/health")
+    assert not [r for r in caplog.records if r.levelno > logging.INFO], (
+        "the skip logged a warning or worse, which is what an outage looks like "
+        "to every alarm that reads this logger")
+
+
+async def test_max_staged_pending_is_the_key_and_the_code_defaults_still_bound(
+        tmp_path, monkeypatch, q):
+    """Clause 5: one key per source block, and an absent key is not an open door.
+
+    The three readings that matter: the operator's number moves the bound
+    (cap 300 over a 220-note pile runs), the operator's number tightens it (cap 2
+    over 3 notes stops), and NO KEY AT ALL still bounds the producer — the
+    default is what shipped under a pile measured at 206 and 105 pending, so the
+    bound bites the day it lands with nobody editing `config.yaml`.
+    """
+    assert BM.DEFAULT_MAX_STAGED_PENDING == 150
+    assert SD.DEFAULT_MAX_STAGED_PENDING == 60
+    assert C.staged_pending_cap({}, BM.DEFAULT_MAX_STAGED_PENDING) == 150
+    assert C.staged_pending_cap({C.MAX_STAGED_PENDING_KEY: 7},
+                                BM.DEFAULT_MAX_STAGED_PENDING) == 7
+
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _run_file(runs, "run_24_20260908_235954")
+
+    _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 3}})
+    assert await BM.enqueue_if_due(q, {C.MAX_STAGED_PENDING_KEY: 2}) == DECLINED, (
+        "the operator's `max_staged_pending: 2` did not bind a 3-note pile")
+
+    q2 = WorkQueue(tmp_path / "second.db")
+    _staged_pile(tmp_path, monkeypatch, **{"bench-mine": {"pending": 220}})
+    assert await BM.enqueue_if_due(q2, {C.MAX_STAGED_PENDING_KEY: 300}) is None, (
+        "an operator-raised cap did not let the source run, so the key is read "
+        "in only one direction")
+    assert q2.list_items(source=BM.NAME), (
+        "the raised cap returned DECLINED-adjacent nothing without saying so")

@@ -1104,6 +1104,36 @@ same program twice, and that is worth saying once rather than twice:
   Review tab is what promotes them; only `bench-mine` has a default destination
   in `_DEFAULT_DEST`, so for `session-distill` a human must name where it goes.
 
+- **A bound on the pile, not on the clock: `max_staged_pending`, under
+  `workers.sources.<source>` (#3530).** `write_staging_note` writes for a human, and for the family's whole
+  life nothing bounded a producer against how much of that nobody had read:
+  measured 2026-10-28 the tree held 624 notes (bench-mine 519 — 206 `pending`,
+  194 `out_of_band`, 119 `uncalibrated`; `session-distill` 105, all pending)
+  while `~/obsidian/lloyd/bench/` held 28 files, **none** carrying the
+  `review_status: promoted` + `promoted_at` pair the promote route stamps, and the
+  reject lane had never run either — zero promotions
+  and zero rejections,
+  against 13.87 GPU-hours in `bench-mine`'s 7-day window. `interval_seconds`
+  bounds frequency and `max_enqueue_per_tick` bounds one tick; neither could see
+  the queue. So `enqueue_if_due` in both sources now asks
+  `_common.staged_pending_count(source)` first and returns `DECLINED` — offering
+  from **neither** input, and moving **no** watermark, so a drained pile re-mines
+  the same slate — while that count exceeds the cap: code defaults **150** and
+  **60**, deliberately below the 206 and 105 pending then on disk, so the bound
+  bites the day it lands and an absent key is not an open door. The skip is a
+  named outcome (`skip_reason=staged_pending_cap`, one INFO line with the count
+  and the cap, no run row), and the same figure the bound reads is published on
+  `/api/workers/health` as that source's `staged_pending`, which is why the count
+  lives in `_common` rather than in either source.
+
+  The count is `review_status: pending` **alone**, and that is the whole design:
+  the 313 `out_of_band`/`uncalibrated` rows are notes somebody already labelled
+  droppable, so a cap over every file could never be cleared by promoting and
+  would have been a permanent halt wearing a throttle. The values themselves are
+  owed a ruling — 150 and 60 are positions, not measurements, because a number
+  describing how much backlog is tolerable needs a consumer to be measured
+  against, and to that date the lane has taken none.
+
 The shared helper is also why **both docstrings used to name a staging
 directory that does not exist** — `distill/` and `bench/<date>/`, from before
 the path was centralised. Harmless, and the kind of drift that makes a grep for

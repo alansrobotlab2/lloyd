@@ -230,6 +230,49 @@ async def workers_health(days: int = 7, runs: int = 10):
     except Exception as e:
         logger.warning("workers health depth failed: %s", e)
         depth = {}
+    # #3530: the pile the mining sources bind themselves against. `depth` above is
+    # the QUEUE — rows waiting for a worker slot — and it read health for a source
+    # whose real backlog was elsewhere: bench-mine's `{completed: 533,
+    # quarantined: 9}` said nothing about the 519 notes it had staged for a human
+    # who has promoted none in the source's whole life. `staged_pending` is that
+    # other figure, and it is the SAME function the source's own
+    # `enqueue_if_due` compares against (`workers/sources/_common.py::
+    # staged_pending_count`), because a published depth with its own walk of the
+    # tree is a second pile that drifts from the one the bound reads.
+    #
+    # Which sources have a bound is read off their own module constant
+    # (`DEFAULT_MAX_STAGED_PENDING`), not a list written here: a source that
+    # declares no bound gets no field rather than a `pending_count: 0` that reads
+    # as an empty pile behind a bound it never had — the #3089 `judgement`
+    # precedent, one field on the rows whose source actually has the gate.
+    # `None` for those rows on a failed read, for the same reason a failed
+    # `judgement` read is `None` and not an empty aggregate.
+    staged_defaults: dict[str, int] = {}
+    staged_readings: dict[str, dict] | None = {}
+    try:
+        from workers.sources import SOURCE_REGISTRY
+        from workers.sources._common import staged_pending_cap, staged_pending_count
+
+        staged_defaults = {n: int(d) for n, d in
+                           ((n, getattr(m, "DEFAULT_MAX_STAGED_PENDING", 0))
+                            for n, m in SOURCE_REGISTRY.items()) if d}
+
+        def _staged_pile_readings() -> dict[str, dict]:
+            out = {}
+            for src_name, default_cap in staged_defaults.items():
+                cap = staged_pending_cap(sources_cfg.get(src_name) or {}, default_cap)
+                count = staged_pending_count(src_name)
+                out[src_name] = {"pending_count": count, "cap": cap,
+                                 "over_cap": count > cap}
+            return out
+
+        # The walk is over every date directory a source has staged into — 624
+        # files on 2026-10-28 — so it is off the event loop like every other read
+        # on this page.
+        staged_readings = await loop.run_in_executor(None, _staged_pile_readings)
+    except Exception as e:  # noqa: BLE001 - a section, not the page
+        logger.warning("workers health staged-pending read failed: %s", e)
+        staged_readings = None
     # #2185: how long the oldest still-queued request has been standing, per source.
     # `depth` says how many rows wait and `rollup` how the last runs went, so the two
     # answer "how much work is there" and "how is the work going" — neither answers
@@ -346,6 +389,15 @@ async def workers_health(days: int = 7, runs: int = 10):
             "max_inflight": cfg.get("max_inflight"),
             "priority": cfg.get("priority"),
             "depth": depth.get(name, {}),
+            # #3530: the queue's `depth` above counts rows waiting for a GPU slot;
+            # this counts the markdown notes waiting for a HUMAN, which is the
+            # figure `max_staged_pending` is compared against. Present only on a
+            # source that declares the bound — see the read above for why a
+            # zero-filled field on the others would be a false absence — and
+            # `null` there when the read itself failed, so "the pile is empty"
+            # and "the pile could not be counted" stay two different payloads.
+            **({"staged_pending": (staged_readings or {}).get(name)}
+               if name in staged_defaults else {}),
             # #2185: the queue's WAIT, as two plain numbers and the bound stated
             # beside them. Zeros for a source with nothing queued — never null —
             # because a missing field renders as a gap a human has to go diagnose by

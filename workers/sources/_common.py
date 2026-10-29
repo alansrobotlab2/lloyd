@@ -256,7 +256,7 @@ def write_staging_note(
     fm = {
         "source": source,
         "confidence": round(confidence, 2),
-        "review_status": "pending",
+        "review_status": PENDING_REVIEW_STATUS,
         "rationale": rationale,
         "source_refs": source_refs or [],
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -264,6 +264,152 @@ def write_staging_note(
     content = f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True)}---\n\n{body}\n"
     path.write_text(content, encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# The unreviewed pile (#3530) — what a producer is bound against
+#
+# `write_staging_note` above stages a note for a HUMAN to promote, and for this
+# file's whole life nothing bounded a producer against the depth of that queue.
+# Measured 2026-10-28: 624 notes staged, `~/obsidian/lloyd/bench/` 28 files with
+# ZERO carrying the `review_status: promoted` / `promoted_at` pair
+# `app/routers/workers.py` stamps on a promotion, and no `_rejected/` tree at
+# all — zero promotions and zero rejections in bench-mine's life, against 13.87
+# GPU-hours in its previous 7-day window. `interval_seconds` bounds frequency
+# and `max_enqueue_per_tick` bounds one tick's output; neither reads the pile,
+# so both producers kept spending while the consumer took nothing.
+#
+# The fix is one number read from one place: the count below is what a source's
+# `max_staged_pending` is compared against in its own `enqueue_if_due`, and the
+# same function is what `/api/workers/health` publishes as `staged_pending`, so
+# the bound and the published depth cannot disagree about one pile.
+# ---------------------------------------------------------------------------
+
+#: The `review_status` that means a human still owes a note a reading. Stamped
+#: by `write_staging_note` above; rewritten to `promoted` by
+#: `POST /api/workers/pending/promote`, which moves the file into the vault and
+#: deletes the staging copy, and rejection moves it to `_rejected/`, a SIBLING of
+#: the source directories. The two labels that are already judged droppable are
+#: `out_of_band` (written by `workers/sources/bench_mine.py`) and
+#: `uncalibrated` (`scripts/maintenance/relabel_stale_bench_calibration.py`,
+#: #1769): of the 624 notes staged on 2026-10-28, 313 carried one of those two,
+#: which is exactly why a bound counts `pending` alone — a cap over every file
+#: could never be cleared by promoting and would halt the source on day one.
+PENDING_REVIEW_STATUS = "pending"
+
+#: The config key, under `workers.sources.<source>`, that moves a source's pile
+#: bound. Named once because three readers resolve it — the two mining sources'
+#: `enqueue_if_due` and `/api/workers/health` — and a key spelled twice drifts.
+MAX_STAGED_PENDING_KEY = "max_staged_pending"
+
+
+def _staged_front_matter(content: str) -> dict:
+    """The FIRST front matter block of a staged note; `{}` when there is none.
+
+    First, not last: a `bench-mine` note is two documents in one file — the
+    mining run's envelope written by `write_staging_note` above, then the
+    candidate task's own front matter inside the body — and the envelope is the
+    half that carries `review_status`. Same rule and same failure shape as
+    `app/routers/workers.py::_parse_frontmatter`, which is what the Review tab
+    lists these notes with: a block that will not parse has no readable status,
+    and an unreadable status is not a claim that anyone owes a reading.
+    """
+    if not content.startswith("---\n"):
+        return {}
+    parts = content.split("---\n", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return {}
+    return fm if isinstance(fm, dict) else {}
+
+
+def staged_pending_count(source: str) -> int:
+    """How many notes under `STAGING_ROOT/<source>/**` still await a human.
+
+    Recursive over every date directory the source has ever written, because
+    the pile is per-source, not per-day: the 206 `bench-mine` notes labelled
+    `pending` on 2026-10-28 span 2026-09-23 to 2026-10-28, and a per-day count
+    would read one day's ~15 and bound nothing.
+
+    Counts a note ONLY when its envelope's `review_status` is exactly
+    `PENDING_REVIEW_STATUS` — see that constant for what the other labels mean
+    and why a missing or unparsable one is not counted either. Directories
+    whose name starts with `_` or `.` are skipped, the same rule
+    `/api/workers/pending` applies to the source directories themselves, so a
+    tree an operator has parked out of sight never holds the bound.
+
+    Returns 0 for a tree that does not exist: an absent pile is a bound that
+    does not bite, not a read failure — the sources that have never staged a
+    note (`youtube-digest` stages nothing today) must keep enqueueing.
+    """
+    root = STAGING_ROOT / source
+    if not root.is_dir():
+        return 0
+    n = 0
+    for path in root.rglob("*.md"):
+        if any(part.startswith(("_", "."))
+               for part in path.relative_to(root).parts[:-1]):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if _staged_front_matter(content).get("review_status") == PENDING_REVIEW_STATUS:
+            n += 1
+    return n
+
+
+#: The name a source puts on a tick it skipped because of its pile. It exists
+#: so the skip is greppable: a source that declines its own tick raises nothing
+#: and writes no failed run, so with no name in the log "the pile was full" and
+#: "the source is broken" are indistinguishable from the outside — which is how
+#: #522's never-enqueued source read for weeks.
+STAGED_PENDING_SKIP_REASON = "staged_pending_cap"
+
+
+def staged_pending_cap(src_cfg: dict, default_cap: int) -> int:
+    """One source's pile bound: the operator's key, else the module's default.
+
+    An ABSENT key still bounds the producer — that is the point of shipping a
+    code default (150 for `bench-mine`, 60 for `session-distill`) under a pile
+    measured at 206 and 105 pending on 2026-10-28: the bound bites the day it
+    lands without anyone editing `config.yaml`. The default is each source
+    module's own `DEFAULT_MAX_STAGED_PENDING`, which is also how
+    `/api/workers/health` knows which sources have a bound at all, so there is
+    no second table of defaults to drift beside the first.
+    """
+    return int(src_cfg.get(MAX_STAGED_PENDING_KEY, default_cap))
+
+
+async def staged_pending_bound_hit(source: str, src_cfg: dict,
+                                   default_cap: int) -> bool:
+    """True when `source`'s unreviewed pile is over its cap, logging that once.
+
+    Shared because the decision has to be identical in both mining sources and
+    identical to what `/api/workers/health` publishes: two call-sites each
+    counting the tree their own way is two piles. The log line names the source,
+    the pending count and the cap it tripped, and carries
+    `STAGED_PENDING_SKIP_REASON` as the machine-readable half.
+
+    Never raises: an unreadable tree counts as 0 pending, so the worst this can
+    do is let one tick through, while raising would cost the source its
+    `last_enqueue_ok` watermark and take every dispatch alarm down with it
+    (`workers/dispatch_watch.py` reads that stamp, and `workers/pool.py` logs
+    `enqueue_if_due failed` on the raise path).
+    """
+    cap = staged_pending_cap(src_cfg, default_cap)
+    pending = await asyncio.to_thread(staged_pending_count, source)
+    if pending <= cap:
+        return False
+    logger.info(
+        "%s: skipped this enqueue tick, skip_reason=%s "
+        "(%d staged notes are review_status: %s, over %s=%d)",
+        source, STAGED_PENDING_SKIP_REASON, pending, PENDING_REVIEW_STATUS,
+        MAX_STAGED_PENDING_KEY, cap)
+    return True
 
 
 def reconcile_fact_writes(session_id: str, claimed,

@@ -2836,3 +2836,88 @@ def test_the_evidence_fields_are_window_scoped_and_partition_total(monkeypatch, 
     assert (wide["autotriage"]["health"]["runs_with_bundle"],
             wide["autotriage"]["health"]["runs_without_bundle"]) == (0, 1), (
         "the window widened and the bundle-less source's split did not follow it")
+
+
+# ---------------------------------------------------------------------------
+# #3530 — the pile the mining sources bind against, on `/api/workers/health`
+#
+# `depth` on this endpoint is the QUEUE, and for bench-mine it was a healthy-
+# looking `{completed: 533, quarantined: 9}` while 519 notes sat staged for a
+# human who has promoted none in the source's whole life. The figure that
+# actually bounds the producer has to be readable here, or the only way to ask
+# "why did mining stop" is a hand-run `find` over `pending-research/`.
+# ---------------------------------------------------------------------------
+
+
+def _stage(pile_root: Path, source: str, *, pending: int, labelled: int) -> None:
+    """Notes under `pile_root/<source>/<date>/`, split over two dates.
+
+    `labelled` notes carry `review_status: out_of_band` — the shape that makes up
+    313 of the 624 files measured 2026-10-28, and the reason a published depth
+    that counted every file would tell an operator the pile is unclearable.
+    """
+    import yaml as _yaml
+
+    for i in range(pending + labelled):
+        status = "pending" if i < pending else "out_of_band"
+        d = pile_root / source / f"2026-10-{(i % 2) + 23:02d}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{i:06d}-{status}.md").write_text(
+            "---\n" + _yaml.dump({"source": source, "review_status": status})
+            + "---\n\n## Idea\n\nunread\n", encoding="utf-8")
+
+
+def test_the_pile_figure_health_publishes_is_the_one_the_bound_reads(
+        monkeypatch, tmp_path):
+    """The published depth and the bound are one measurement, not two.
+
+    Two numbers over one pile drift, and this pair has to agree in front of an
+    operator who is deciding whether to promote a note or raise a cap: the row's
+    `pending_count` is what `staged_pending_count` returns for the same tree, its
+    `cap` is what `staged_pending_cap` resolves from the same config block, and
+    `over_cap` is exactly the condition the source's `enqueue_if_due` declines on.
+    """
+    import workers.sources._common as wc
+    from workers.sources import bench_mine as BM
+    from workers.sources import session_distill as SD
+
+    q = WorkQueue(tmp_path / "pile-health.db")
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: q)
+    cfg = {"workers": {"sources": {
+        "bench-mine": {"enabled": True, "interval_seconds": 7200,
+                       "max_staged_pending": 25},
+        "session-distill": {"enabled": True, "interval_seconds": 900},
+        "probe": {"enabled": True, "interval_seconds": 60}}}}
+    monkeypatch.setattr(router, "CONFIG", cfg, raising=False)
+    pile = tmp_path / "staging"
+    monkeypatch.setattr(wc, "STAGING_ROOT", pile)
+    _stage(pile, "bench-mine", pending=30, labelled=40)
+    _stage(pile, "session-distill", pending=5, labelled=0)
+
+    body = client.get("/api/workers/health?days=7").json()
+    rows = {s["name"]: s for s in body["sources"]}
+
+    bm = rows["bench-mine"]["staged_pending"]
+    assert bm["pending_count"] == 30, (
+        f"the published pile counted {bm['pending_count']} of the 30 notes awaiting "
+        "a human (40 more are already labelled droppable): a bound over every "
+        "file could never be cleared by promoting")
+    assert bm["cap"] == 25, "the operator's max_staged_pending did not travel"
+    assert bm["over_cap"] is True
+    assert bm["pending_count"] == wc.staged_pending_count("bench-mine"), (
+        "the route counted the pile its own way, so the figure and the bound "
+        "drift as soon as either walk changes")
+    assert bm["cap"] == wc.staged_pending_cap(
+        cfg["workers"]["sources"]["bench-mine"], BM.DEFAULT_MAX_STAGED_PENDING)
+
+    sd = rows["session-distill"]["staged_pending"]
+    assert sd == {"pending_count": 5,
+                  "cap": SD.DEFAULT_MAX_STAGED_PENDING, "over_cap": False}, (
+        "session-distill's row lost either its own count or the code default that "
+        "bounds it when config names no key")
+    assert sd["over_cap"] is (sd["pending_count"] > sd["cap"])
+
+    assert "staged_pending" not in rows["probe"], (
+        "a source with no pile bound was given a pile field, which reads as an "
+        "empty pile behind a gate that does not exist")

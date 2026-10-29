@@ -104,7 +104,7 @@ in-memory set, so a restart empties it together with the turns it described.
 
 What the turn may not
 use is a **deny-list over the whole chat toolbox**, not a grant list:
-`workers/sources/_common.py:1043` says outright that a worker
+`workers/sources/_common.py:1189` says outright that a worker
 session "is handed exactly the toolbox a chat gets", and `DISALLOWED`
 subtracts from that. It names `Write` (the doc exists — a new file is either
 a finding to file or a stray write), `Task` (a subagent's writes land on the
@@ -366,7 +366,8 @@ Kill switch: `workers.sources.arch-review.enabled`.
   2026-09-15. Corpus counts: 36 top-level docs, 23 `tests/test_*_doc_claims.py`
   files, and §1's "a first pass in about a week" is replaced by the division it
   was an estimate of, since the picklist is 47 units and not 33.
-  `workers/sources/_common.py` is `:1043`. Filed #2603 (the prompt/rail denominator
+  `workers/sources/_common.py` is `:1189` (the anchor has moved twice since this
+  line was written, which is the whole reason the span rule exists). Filed #2603 (the prompt/rail denominator
   mismatch, with the `group:workers-jobs:Dispatch` rejection it has already
   cost), #2604 (rail 4's "the model never runs git" is a prompt rule, not a
   rail — `Bash` is kept and `git commit` is tier 1), #2605 (the module's own
