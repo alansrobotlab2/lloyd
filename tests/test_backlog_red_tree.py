@@ -364,3 +364,56 @@ def test_a_closed_red_tree_item_is_not_probed_or_resurrected(isolated, repo):
                                             live_root=r)
     assert res["action"] == "closed" and "not open" in res["reason"]
     assert _events("red_tree_closed") == before, "one close, one row"
+
+
+def test_a_partial_landing_neither_closes_the_item_nor_hides_its_leftover_red(
+        isolated, repo):
+    """#3550 clause 5: a partial fix fakes no green tree, and loses no debt.
+
+    Six nodes over two files, filed as one red-tree item; a round greens `tests/test_a.py`
+    only and stamps its landing. Two things must hold, and the leniency this item adds to
+    the reviewer must not disturb either:
+
+    * the item is NOT closed as healed — the pickup probe credits nothing while a node of
+      its own is still red, and the item stays open for the file it never touched;
+    * the leftover red is FILED AGAIN: the landing stamps `automod_landed`, and the cooldown
+      suppressor only suppresses a report at a base that does not descend from that commit,
+      so a later round's tests rung opens a fresh item for what the first one left red.
+
+    The close sweep's note row for a landing whose review gave no structured outcome — the
+    third leg of the clause, and the one a guard placed before it killed the last round over
+    — is already pinned at tests/test_backlog_unattended.py::
+    `test_a_landing_with_no_outcome_row_closes_nothing_and_says_so`; it is cited here rather
+    than duplicated, and this diff changes nothing on that path.
+    """
+    a_nodes = [f"tests/test_a.py::test_{n}" for n in ("one", "two", "three")]
+    b_nodes = [f"tests/test_b.py::test_{n}" for n in ("four", "five", "six")]
+    base1 = repo[1]["c2"]          # the fixture's own commits: c1 -> c2 -> c3
+    first = B.file_red_tree_item(base1, list(a_nodes) + list(b_nodes), "SM_A")
+    assert first.get("action") == "created", first
+    iid = first["item_id"]
+    commit2 = repo[1]["c3"]        # a descendant of the round's base, as a landing's is
+
+    # The round landed its one file: the marker is stamped, the item is not closed.
+    B.close_landed(B.item_by_id(iid), commit=commit2, round_id="SM_A",
+                   settled_at="2026-10-29T00:00:01Z", close=False,
+                   why="the diff covers tests/test_a.py of the two red files")
+
+    # A node of its own is still red, so the probe credits nothing and it stays open.
+    def probe(nodes):
+        return {"head": commit2, "unresolved": list(b_nodes), "conclusive": True,
+                "note": f"{len(b_nodes)} unresolved"}
+    credited = B.close_healed_red_tree_at_pickup(B.item_by_id(iid), probe)
+    assert credited.get("action") != "closed", credited
+    assert "still red" in credited.get("reason", ""), credited
+    assert B.item_by_id(iid).status != "done", B.item_by_id(iid).status
+
+    # The red the landing left behind still reaches the board: the cooldown suppressor only
+    # suppresses a report at a base that does NOT descend from the item's stamped
+    # `automod_landed`, so a report filed AT the landed commit is recorded, not swallowed by
+    # that item's own healing. `created` or `merged` both mean a human/loop can see it; only
+    # `suppressed` would mean the leftover red vanished.
+    c_nodes = [f"tests/test_c.py::test_{n}" for n in ("seven", "eight")]
+    again = B.file_red_tree_item(commit2, c_nodes, "SM_B")
+    assert again.get("action") != "suppressed", again
+    assert again.get("action") in ("created", "merged"), again

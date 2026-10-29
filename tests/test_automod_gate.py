@@ -3970,3 +3970,100 @@ def test_the_probes_bodies_lay_where_gate_json_lays_not_in_the_worktree(tmp_path
     assert not worktree_root.exists()
     assert "assert False" in json.loads(p.read_text(encoding="utf-8"))[
         "excerpts"]["tests/test_pre.py::test_already_broken"], "the bodies died with the worktree"
+
+
+# ── #3550: a green diff lands though a DIFFERENT file's bound clause is red at base ──
+
+def _red_tree_wt(tmp_path):
+    """A round whose diff touches `app/x.py` + `tests/test_x.py`, in a tree where
+    `tests/test_old.py` — a file the diff never touches — is red at base.
+
+    `app/x.py` is ten lines, so the line numbers the stub grader cites are inside it.
+    `tests/test_old.py::test_before` is the node the `tests` rung measures failing at base
+    and passes over, and the node a bound clause names. That asymmetry is the whole item:
+    the round is scoped to one file pair and is refused today over a node in the third.
+    """
+    (tmp_path / "app").mkdir(exist_ok=True)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "app" / "x.py").write_text("".join(f"V{i} = {i}\n" for i in range(1, 11)),
+                                           encoding="utf-8")
+    (tmp_path / "tests" / "test_x.py").write_text("def test_one():\n    assert 1\n",
+                                                  encoding="utf-8")
+    (tmp_path / "tests" / "test_old.py").write_text("def test_before():\n    assert 0\n",
+                                                    encoding="utf-8")
+    return tmp_path
+
+
+def _two_clause_round(monkeypatch, tmp_path, clause2_nodes, clause2_note, red_nodes):
+    """Wire one rung: clause 1 the round's own scope, clause 2 the red file's."""
+    g = _ReviewGate(tmp_path)
+    g.report.changed_paths = ["app/x.py", "tests/test_x.py"]
+    g.report.rungs[-1].data = {"passed": 10, "pre_existing_failures": list(red_nodes)}
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "clauses": ["the promoted path checks the new condition (tests/test_x.py::test_one)",
+                    f"the audit claim holds ({clause2_nodes})"],
+        "human_clauses": [], "source": "backlog item #7", "item_id": 7})
+    _stub_grader(monkeypatch, tmp_path, {
+        "premise": "sound",
+        "clauses": [
+            {"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 3,
+             "test_node_id": "tests/test_x.py::test_one", "how_verified": "ran",
+             "note": "ran the changed test"},
+            {"clause": 2, "verdict": "partial", "evidence_path": "app/x.py",
+             "evidence_line": 4, "test_node_id": clause2_nodes, "how_verified": "ran",
+             "note": clause2_note},
+        ],
+        "test_honesty": [], "seams_unverified": [], "summary": "one scope closed"})
+    return g
+
+
+def test_rung_review_lands_a_green_diff_though_another_files_clause_is_red(tmp_path, monkeypatch):
+    """#3550 clause 4, end to end: the rung itself, at a base where another file is red.
+
+    This is the boundary the unit tests in tests/test_automod_review.py cannot cross:
+    `rung_review` reads `pre_existing_failures` off the tests rung's data, hands it to the
+    grader's prompt and to `parse_review`, and decides from what comes back. Clause 1 is the
+    round's own scope and is graded `met`; clause 2 names
+    `tests/test_old.py::test_before`, measured red at base and graded `partial` — exactly
+    what SM_20261029_173923's grader said of its clauses 2/3/4, which is what refused that
+    round (review rung ok: false, 514.93 s) after its tests rung had already passed over the
+    same seven nodes (ok: true, 980.14 s).
+
+    After the change the rung returns ok, clause 2 is recorded `post_landing` so it rides the
+    item's owed list with the grader's reason attached, and no finding quotes it.
+    """
+    _red_tree_wt(tmp_path)
+    g = _two_clause_round(monkeypatch, tmp_path, "tests/test_old.py::test_before",
+                          "that audit claim is still red", ["tests/test_old.py::test_before"])
+    ok, detail, data = g.rung_review()
+    assert ok is True, detail
+    by_clause = {c["clause"]: c for c in data["clauses"]}
+    assert by_clause[1]["verdict"] == "met", by_clause[1]
+    assert by_clause[2]["verdict"] == "post_landing", by_clause[2]
+    assert "that audit claim is still red" in by_clause[2]["note"], by_clause[2]["note"]
+    assert "audit claim" not in detail, detail
+
+
+def test_rung_review_still_refuses_when_one_cited_node_is_not_measured_red(tmp_path,
+                                                                           monkeypatch):
+    """#3550 clause 4, the other side of the same rung: one unmeasured node still refuses.
+
+    Identical setup except clause 2 also cites `tests/test_old.py::test_after`, which the
+    tests rung did NOT report. The leniency is per node and never covers a node the round
+    could have turned green, so the rung refuses and clause 2 keeps its blocking `partial`:
+    the relaxation cannot be widened by aiming a clause at a file that happens to hold one
+    red node.
+    """
+    _red_tree_wt(tmp_path)
+    (tmp_path / "tests" / "test_old.py").write_text(
+        "def test_before():\n    assert 0\n\n\ndef test_after():\n    assert 0\n",
+        encoding="utf-8")
+    g = _two_clause_round(
+        monkeypatch, tmp_path,
+        "tests/test_old.py::test_before, tests/test_old.py::test_after",
+        "the second half is still the round's to fix", ["tests/test_old.py::test_before"])
+    ok, detail, data = g.rung_review()
+    assert ok is False, detail
+    by_clause = {c["clause"]: c for c in data["clauses"]}
+    assert by_clause[2]["verdict"] == "partial", by_clause[2]
+    assert not by_clause[2]["note"].startswith("pre-existing:"), by_clause[2]["note"]

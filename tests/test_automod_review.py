@@ -335,6 +335,116 @@ def test_a_changed_test_beside_an_unrelated_red_file_still_stands(wt):
     assert parsed["clauses"][0]["verdict"] == "met"
 
 
+def test_a_clause_whose_cited_nodes_are_all_red_at_base_stops_blocking(wt):
+    """#3550 clause 1: the `tests` rung's measurement bounds what the round owes.
+
+    `tests/test_old.py::test_before` fails at this base with the diff absent (the fixture's
+    own untouched file, which the `tests` rung passes over), and it is the ONLY node this
+    clause cites. The grader says `partial`, which is exactly what SM_20261029_173923's
+    grader said of its clauses 2/3/4; `partial` is blocking, so that round was refused on a
+    node no diff at its base could close and re-offered at the same base — a ~25-minute
+    cycle (tests rung 980.14 s, review rung 514.93 s) that ended nowhere.
+
+    Recorded owed instead: verdict `post_landing` (the one CLAUSE_VERDICTS value
+    `_grade_entries` does not treat as blocking, and the one
+    `promoter_io.clauses_from_review` reports as owed to a later round), `ok` True, and no
+    refusal finding quoting the clause — while the grader's own reason survives inside the
+    clause note, so the red claim is carried, not deleted.
+    """
+    parsed = RV.parse_review(
+        _obj(verdict="partial", how_verified="ran",
+             test_node_id="tests/test_old.py::test_before",
+             note="the audit clause still fails at HEAD"),
+        worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1, tests_passed=True,
+        changed_paths=["app/x.py", "tests/test_x.py"],
+        pre_existing_failures={"tests/test_old.py::test_before"})
+    clause = parsed["clauses"][0]
+    blocking = RV.decide_with_entries(parsed, [])["blocking"]
+    assert blocking == [], blocking
+    assert clause["verdict"] == "post_landing", clause
+    assert clause["note"].startswith("pre-existing:"), clause["note"]
+    assert "tests/test_old.py::test_before" in clause["note"], clause["note"]
+    assert "the audit clause still fails at HEAD" in clause["note"], "the grader's reason"
+    advisory = RV.decide_with_entries(parsed, [])["advisory"]
+    assert any("audit clause" in a for a in advisory), (
+        "the red claim must ride the owed list, not vanish: " + str(advisory))
+
+
+def test_the_leniency_never_upgrades_a_met_resting_on_a_node_red_at_base(wt):
+    """#3550 clause 2: borrowed evidence still cannot buy a pass.
+
+    Same fixture, same node, same base — the one thing that changes is that the grader
+    claims `met`. The clause must NOT come back `met`, and must not come back `post_landing`
+    either: it must land on a blocking partial whose row carries `test_node_id cites a test
+    that fails at base too`. A relaxation symmetrical in both directions would let any round
+    pass by citing a file the base already reports red, which is the fraud #2186 exists to
+    stop; the asymmetry — a red node excuses a `partial`, never buys a `met` — is the whole
+    shape of this item, and it is the difference between this node and the one above.
+    """
+    parsed = RV.parse_review(
+        _obj(verdict="met", how_verified="ran",
+             test_node_id="tests/test_old.py::test_before"),
+        worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1, tests_passed=True,
+        changed_paths=["app/x.py", "tests/test_x.py"],
+        pre_existing_failures={"tests/test_old.py::test_before"})
+    clause = parsed["clauses"][0]
+    blocking = RV.decide_with_entries(parsed, [])["blocking"]
+    assert blocking, parsed["clauses"]
+    assert clause["verdict"] not in ("met", "post_landing"), clause
+    assert any("test_node_id cites a test that fails at base too" in d
+               for d in clause["downgraded"]), clause
+
+
+def test_one_cited_node_the_rung_did_not_measure_keeps_the_clause_blocking(wt):
+    """#3550 clause 3: the exemption is per NODE, so it never covers the round's work.
+
+    Two cited nodes, one file: `test_before` is measured red at base, `test_after` is not.
+    The file-wide read `_cites_pre_existing` uses for a `met` would call this whole clause
+    red-leaning and excuse it; the leniency is deliberately the narrower test, so the clause
+    stays a blocking `partial` and no `pre-existing:` prefix is written over the grader's
+    reason. `test_a_changed_test_beside_an_unrelated_red_file_still_stands` pins the mirror
+    half — a green test the diff itself changed is not covered either.
+    """
+    parsed = RV.parse_review(
+        _obj(verdict="partial", how_verified="ran",
+             test_node_id="tests/test_old.py::test_before, tests/test_old.py::test_after",
+             note="half of it is still red"),
+        worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1, tests_passed=True,
+        changed_paths=["app/x.py", "tests/test_x.py"],
+        pre_existing_failures={"tests/test_old.py::test_before"})
+    clause = parsed["clauses"][0]
+    blocking = RV.decide_with_entries(parsed, [])["blocking"]
+    assert blocking, parsed["clauses"]
+    assert clause["verdict"] == "partial", clause
+    assert not clause["note"].startswith("pre-existing:"), clause["note"]
+
+
+def test_a_clause_downgraded_for_its_own_evidence_is_not_excused_by_the_red_set(wt):
+    """#3550, the `downgraded` guard: a rail downgrade is this diff's own fault.
+
+    The cited node is red at base in a file the diff never touched, so the per-node test
+    passes, and the grader claims `met` — but `how_verified` is `inferred`, which the rails
+    refuse on their own. The clause is therefore downgraded to `partial` for a reason that
+    is about THIS round's evidence, and the leniency must not fire on it. Without the
+    `downgraded` guard any sloppy citation could be excused by aiming it at a red file,
+    which is clause 2's failure reached from the other side; the two reasons ride the clause
+    row together, which is what makes the case readable from `gate.json`.
+    """
+    parsed = RV.parse_review(
+        _obj(verdict="met", how_verified="inferred",
+             test_node_id="tests/test_old.py::test_before",
+             note="read the code, did not run it"),
+        worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1, tests_passed=True,
+        changed_paths=["app/x.py", "tests/test_x.py"],
+        pre_existing_failures={"tests/test_old.py::test_before"})
+    clause = parsed["clauses"][0]
+    blocking = RV.decide_with_entries(parsed, [])["blocking"]
+    assert blocking, parsed["clauses"]
+    assert clause["verdict"] == "partial", clause
+    assert "how_verified is not ran|read" in clause["downgraded"], clause["downgraded"]
+    assert not clause["note"].startswith("pre-existing:"), clause["note"]
+
+
 def test_the_grader_is_told_which_failures_predate_the_round(tmp_path):
     contract = {"id": 1, "title": "t", "body": "b", "clauses": ["c"]}
     kw = dict(contract=contract, diff="", diff_truncated=False, changed_tests=[],

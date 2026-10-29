@@ -1366,9 +1366,25 @@ def _pre_existing_block(pre_existing: list[str] | None) -> str:
         return ""
     shown = ", ".join(pre_existing[:20]) + (f", +{len(pre_existing) - 20} more"
                                             if len(pre_existing) > 20 else "")
+    # The last two sentences are the per-clause policy (#3550). It used to read
+    # `A clause leaning on one of them is at most `partial``, which is what made the two
+    # rungs contradict each other on one node list: the `tests` rung below passed the round
+    # over these very nodes, and `partial` is a blocking verdict in `_grade_entries`, so any
+    # bound clause naming one of them refused the round no matter what the diff did — for a
+    # red-tree item, forever, since no diff at this base can close a node the base itself
+    # reports red. `build_prompt`'s step 2 still prints the sentence `test_the_grader_is_
+    # told_which_failures_predate_the_round` asserts, so that node is not moved by this
+    # reword; what changed is that the set is now ALSO read as a bound on what the round
+    # owes, which is the half that was missing.
     return (f"These tests fail here AND at the round's base with the diff absent, so "
             f"they are not this diff's and the tests rung passed over them: {shown}. "
-            f"A clause leaning on one of them is at most `partial`.\n")
+            f"A `met` that rests on one of them is a `met` that cited nothing and is "
+            f"refused — name the node. But the same measurement bounds what this round "
+            f"owes: when EVERY test node a clause cites is in this set, no diff at this "
+            f"base could close that clause, so record it `post_landing` (or `partial`) and "
+            f"the gate files it owed on the item instead of refusing the round. A clause "
+            f"citing even one node absent from this set stays `partial` and does refuse: "
+            f"that one was the round's to turn green.\n")
 
 
 def build_prompt(*, contract: dict, diff: str, diff_truncated: bool,
@@ -3250,6 +3266,51 @@ def _bare_node_target(node: str, *, worktree: Path, changed) -> str:
     return f"{hits[0]}::{cand}" if len(hits) == 1 else node
 
 
+#: The head a clause note carries when the thing that stops it closing is not this
+#: round's work but the tree it was dispatched at (#3550): every test node the clause
+#: cites is in the `tests` rung's own measured `pre_existing_failures` for this round's
+#: base, so the rung below has already passed the round over them and the grader cannot
+#: refuse the round for citing them. Named in the note rather than silently recorded,
+#: because "which clauses did the round not have to satisfy" has to be readable off the
+#: entry, not inferred from an absence.
+PRE_EXISTING_HEAD = "pre-existing:"
+#: The verdict such a clause is recorded with, chosen from the existing vocabulary
+#: rather than added to it: `post_landing` is the one entry in `CLAUSE_VERDICTS` that
+#: `_grade_entries` does not treat as blocking (#1854/#1645 — a clause owed by a later
+#: round stops refusing the round without being called met), and
+#: `promoter_io.clauses_from_review` already reports it as "not landed and owed by a
+#: later round", which is exactly what a clause this round could not close is. It is NOT
+#: `met`: the node is still red and the item is not healed by this round's landing.
+PRE_EXISTING_VERDICT = "post_landing"
+
+
+def _every_cited_node_measured_red(cited, pre_existing_failures, changed_paths) -> bool:
+    """True when a clause cites at least one test node and EVERY one is measured red at
+    the base IN A FILE THIS DIFF NEVER TOUCHED.
+
+    Per node, not per file (#3550 clause 3): one cited node the `tests` rung did not
+    report at the round's base keeps the clause blocking, because that is a node the round
+    could have turned green and did not. The file-wide read `_cites_pre_existing` uses for
+    a `met` is the wrong scope here — it would excuse a whole clause because one of its
+    nodes shares a file with a red one — so this is deliberately the narrower test. An
+    empty citation list is never excused: a clause that cites nothing owes its evidence to
+    the rails above, not to the base.
+
+    A cited node inside a file the diff DID change is never excused either, for the mirror
+    reason: that file is the round's own work, so a clause resting on a red node in it is a
+    clause the round could have closed and left open. That is the #2186 shape
+    (`test_a_partial_on_a_cited_red_node_is_not_a_refusal_by_another_name`), which stays
+    blocking.
+    """
+    if not pre_existing_failures or not cited:
+        return False
+    pre = {str(n) for n in pre_existing_failures}
+    touched = {str(p) for p in (changed_paths or [])}
+    nodes = [str(n) for n in cited]
+    return (all(node in pre for node in nodes)
+            and not any(node.split("::", 1)[0] in touched for node in nodes))
+
+
 def _cites_pre_existing(node: str, pre_existing) -> bool:
     """Whether a `test_node_id` leans on a test that already fails at the
     round's base: the node itself, or any node in a file that holds one (a
@@ -3579,6 +3640,33 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 verdict = "partial"
                 downgraded.append(idx)
                 accepted = []
+        # #3550: a clause whose EVERY cited test node the `tests` rung measured failing at
+        # THIS base with this diff absent could not be closed by any diff at this base, so a
+        # `partial` on it is a statement about the tree the round was dispatched at and not
+        # about the diff — and `_grade_entries` makes every `partial` blocking, which is how
+        # SM_20261029_173923 spent ~25 minutes (tests rung 980.14 s PASS over 7 nodes, review
+        # rung 514.93 s REFUSED on clauses 2/3/4 naming those same 7) and was re-offered at
+        # the same base against the same contract. Recorded owed instead: `post_landing` is
+        # the one verdict in CLAUSE_VERDICTS that `_grade_entries` does not treat as blocking
+        # and that `promoter_io.clauses_from_review` already reports as owed, so the item
+        # keeps the claim and no gate.py change is needed for it to get there. Four guards
+        # keep this from becoming a way to pass on borrowed evidence:
+        #   * never a `met` — the downgrade above is untouched, so a clause that CLAIMED met
+        #     on a red node is still refused and still says why (clause 2);
+        #   * never a clause the rails downgraded (`idx in downgraded`): its `partial` is this
+        #     diff's own broken citation, which is the round's work, not the base's red tree;
+        #   * never a clause citing one node the rung did not measure, or any node in a file
+        #     this diff changed — `_every_cited_node_measured_red` (clause 3);
+        #   * the grader's own note is kept, prefixed by the reason, so what a refused
+        #     finding used to say is still legible and the owed line names the nodes.
+        cited_nodes = sorted({n for n in node.replace(",", " ").split() if n})
+        if (verdict == "partial" and idx not in downgraded
+                and _every_cited_node_measured_red(cited_nodes, pre_existing_failures,
+                                                   changed_paths)):
+            verdict = PRE_EXISTING_VERDICT
+            note = (f"{PRE_EXISTING_HEAD} every cited test node fails at this base with the "
+                    f"diff absent ({', '.join(cited_nodes)[:160]}) — owed on the item, not "
+                    f"this round's to close. " + note)
         clauses.append({"clause": idx, "verdict": verdict, "evidence_path": path,
                         "evidence_line": line,
                         "test_node_id": node, "how_verified": how if how in HOW_VERIFIED else "inferred",
