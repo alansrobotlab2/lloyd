@@ -1367,6 +1367,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     if _housekeeping_due(queue, src_cfg):
         await asyncio.to_thread(_housekeeping, src_cfg)
         queue.wm_set(NAME, HOUSEKEEPING_KEY, datetime.now(timezone.utc).isoformat())
+    # A `landing` record nothing is running holds every round below forever
+    # (2026-10-26: a reboot under a flush, 2.3 days, 128 items). Released
+    # first, so its merged commits are pending when the flush is asked.
+    await asyncio.to_thread(_release_stranded_quietly)
     # The land train, before the free check: at a natural gap the flush takes
     # it, and its marker then holds the next round (`_rounds_about_to_land`).
     await asyncio.to_thread(_maybe_flush, queue)
@@ -1476,6 +1480,19 @@ def _maybe_flush(queue: WorkQueue | None = None, *, exclude_key: str | None = No
             logger.info("autocode: land-train flush — %s", started)
     except Exception as exc:  # noqa: BLE001
         logger.warning("land-train flush trigger failed: %s", exc)
+
+
+def _release_stranded_quietly() -> None:
+    """`promote.release_stranded_landing`, guarded: never raises."""
+    try:
+        from scripts.automod import promote as P
+        out = P.release_stranded_landing(by="autocode")
+        if out:
+            logger.warning("autocode: released a stranded landing record for %s "
+                           "(requeued %s, not in main %s)", str(out.get("commit"))[:8],
+                           out.get("requeued"), out.get("not_in_main"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stranded-landing check failed: %s", exc)
 
 
 def _reap_quietly() -> None:

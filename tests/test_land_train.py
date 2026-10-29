@@ -650,3 +650,73 @@ def test_the_scorecard_reads_a_flush_as_the_restart_a_landing_used_to_be():
     assert "other" not in duty["gap_counts"], "a flush gap is not an unexplained one"
     assert duty["waits"]["flush"] == {"n": 1, "waited": 1, "minutes": 4.0,
                                       "median_s": 240.0, "max_s": 240.0}
+
+
+# ── a landing record nothing is running (2026-10-26) ───────────────────────
+
+def _strand(commits, *, entries=True):
+    """What a flush (or a promote) killed mid-restart leaves: `landing`, no window."""
+    rec = {"schema": 2, "round_id": "SM_K", "title": "killed", "commit": commits[-1],
+           "commits": list(commits), "state": "landing", "errors_until_ts": None,
+           "parent": "p", "changed_paths": ["app/mod.py"], "boot_id": "an-earlier-boot"}
+    if entries:
+        rec["entries"] = [{"commit": c, "round_id": f"SM_{i}", "restart": True,
+                           "changed_paths": ["app/mod.py"]} for i, c in enumerate(commits)]
+    S.write_verified(S.CURRENT_PATH, rec)
+
+
+def test_a_flush_killed_after_its_merge_is_flushed_again_not_waited_on(world, monkeypatch):
+    """The host rebooted under a flush that had merged; the services came back on
+    the code. The record said `landing` for 2.3 days and every reader waited on it."""
+    _train(monkeypatch)
+    a = _land(_round(world, "SM_A"))
+    b = _land(_round(world, "SM_B", rel="app/b.py"))
+    _strand([a["commit"], b["commit"]])
+    assert P.flush_due(0)[0] is False, "the stranded record holds the flush"
+    world["running"] = b["commit"]
+    out = P.flush_pending("test", by="test")
+    assert out["flushed"] is True and out["already_live"] is True and out["restarted"] is False
+    cur = S.read_current()
+    assert cur["state"] == "observing" and cur["commits"] == [a["commit"], b["commit"]]
+    row = _rows("current_cleared")[-1]
+    assert row["requeued"] == [a["commit"], b["commit"]] and row["not_in_main"] == []
+
+
+def test_a_promote_killed_after_its_merge_goes_back_on_the_train(world, monkeypatch):
+    _train(monkeypatch)
+    a = _land(_round(world, "SM_A"))
+    S.write_pending([])
+    _strand([a["commit"]], entries=False)
+    out = P.release_stranded_landing(by="test")
+    assert out == {"commit": a["commit"], "requeued": [a["commit"]], "not_in_main": []}
+    assert S.read_current() is None
+    (entry,) = S.read_pending()
+    assert entry["commit"] == a["commit"] and entry["restart"] is True
+    assert entry["title"] == "killed" and entry["merged_ts"]
+    assert P.flush_due(0)[0] is True
+
+
+def test_a_stranded_commit_that_never_reached_main_is_let_go(world, monkeypatch):
+    _train(monkeypatch)
+    _strand(["0" * 40], entries=False)
+    out = P.release_stranded_landing(by="test")
+    assert out["requeued"] == [] and out["not_in_main"] == ["0" * 40]
+    assert S.read_current() is None and S.read_pending() == []
+
+
+def test_a_landing_that_holds_the_lock_is_not_stranded(world, monkeypatch):
+    _strand(["0" * 40])
+    held = S.Lock(owner="land-SM_LIVE").acquire()
+    try:
+        assert P.release_stranded_landing(by="test") is None
+    finally:
+        held.release()
+    assert S.read_current()["state"] == "landing"
+
+
+@pytest.mark.parametrize("state", ["observing", None])
+def test_only_a_landing_record_is_ever_released(world, monkeypatch, state):
+    if state:
+        S.write_verified(S.CURRENT_PATH, {"commit": "c", "state": state})
+    assert P.release_stranded_landing(by="test") is None
+    assert (S.read_current() or {}).get("state") == state

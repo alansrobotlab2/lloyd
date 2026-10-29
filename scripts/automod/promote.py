@@ -2092,6 +2092,77 @@ def _live_pending(live: Path) -> list[dict]:
     return keep
 
 
+def release_stranded_landing(*, by: str) -> dict | None:
+    """Clear a `landing` record nothing is running, and hand its merged
+    commits back to the land train. `None` when there was nothing to do.
+
+    Both writers of a `landing` record hold the automod lock for its whole
+    life — `promote` under `land-<round>`, the flush under `flush` — so a
+    `landing` record readable while that lock can be taken is stranded,
+    whoever wrote it and on whichever boot. On 2026-10-26 the host rebooted
+    at 14:53 PT under a flush that had already merged f6471e40: the services
+    came back on it, but the record said `landing` for 2.3 days, and every
+    reader treats that as "the promoter is mid-flight" — autocode started no
+    round, `flush_due` and the flush refused, and the guardian, which skips a
+    `landing` record, never opened the window that would have settled it.
+    128 `up_next` items stacked up behind it.
+
+    `round._clear_dead_landing_record` covers a landing killed before its
+    merge; this covers the one killed after it. A commit that reached `main`
+    is not dropped — it goes back on `pending_restart.json`, so the next
+    flush observes it (restarting only what is not already live) and the
+    guardian settles it as usual. One that never reached `main` is just let
+    go. Never waits for the lock: a held lock is a running landing."""
+    cur = S.read_current()
+    if not cur or cur.get("state") != "landing":
+        return None
+    try:
+        lock = S.Lock(owner=f"stranded-landing {by}").acquire()
+    except S.LockHeld:
+        return None
+    try:
+        return _release_stranded_locked(LIVE_ROOT, by=by)
+    finally:
+        lock.release()
+
+
+def _release_stranded_locked(live: Path, *, by: str) -> dict | None:
+    """`release_stranded_landing` for a caller already holding the lock."""
+    cur = S.read_current()
+    if not cur or cur.get("state") != "landing":
+        return None
+    entries = [e for e in cur.get("entries") or [] if isinstance(e, dict) and e.get("commit")]
+    if not entries:
+        entries = [{k: cur.get(k) for k in ("commit", "parent", "round_id", "title",
+                                            "changed_paths", "tree_hash")}]
+    head = _live_head(live)
+    pending = {str(e.get("commit")) for e in S.read_pending()}
+    requeued, gone = [], []
+    for e in entries:
+        c = str(e.get("commit") or "")
+        if not (c and head and _is_ancestor(live, c, head)) or _settled(c):
+            gone.append(c)
+            continue
+        if c not in pending:
+            entry = {**e, "title": e.get("title") or cur.get("title"),
+                     # Unknown on a promote record, and the cautious answer: the
+                     # flush restarts nothing that is already running it.
+                     "restart": e.get("restart", cur.get("restart", True)) is not False,
+                     "queued_ts": time.time(), "requeued_from": "stranded landing"}
+            entry["merged_ts"] = e.get("merged_ts") or entry["queued_ts"]
+            S.append_pending(entry)
+        requeued.append(c)
+    S.clear_current()
+    S.append_event({"event": "current_cleared", "ok": True, "by": by,
+                    "round_id": cur.get("round_id"), "commit": cur.get("commit"),
+                    "requeued": requeued, "not_in_main": gone,
+                    "record_boot_id": cur.get("boot_id"),
+                    "reason": "a `landing` record with the automod lock free: its promoter "
+                              "or flush was killed; merged commits go back on the land "
+                              "train for the next flush to observe"})
+    return {"commit": cur.get("commit"), "requeued": requeued, "not_in_main": gone}
+
+
 def _stamp_batch(current: dict, batch: list[dict]) -> dict:
     """The batch fields on a promotion record: `commits` oldest..newest ending
     in the record's own commit, the oldest entry's parent as the rollback
@@ -2489,6 +2560,9 @@ def _flush_failed(detail: str, **extra) -> None:
 
 def _flush(reason: str, *, kill_turns: bool, by: str, force_restart: bool) -> dict:
     live = LIVE_ROOT
+    # First, so a commit a killed landing merged is in `entries` and gets the
+    # same rounds wait and drain as any other pending landing.
+    release_stranded_landing(by=f"flush {by}".strip())
     entries = S.read_pending()
     needs = force_restart or any(e.get("restart") for e in entries)
     rounds_s = settle_s = 0.0

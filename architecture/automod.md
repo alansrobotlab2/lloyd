@@ -1783,6 +1783,27 @@ on an exact range, `revert_commits` otherwise), `rollback_succeeded` names every
 commit, and if that fails the batch goes to the guardian as ONE request
 (`request_rollback(commits=…)`), which escalates if it cannot either.
 
+**Killed outright (a stranded `landing` record, 2026-10-26).** Neither
+failure path runs when the process is killed. At 14:53 PT on 2026-10-26 the
+host rebooted under a flush that had already merged #3399 and f6471e40, so
+`current.json` stayed `landing`. The services came back on the merged code,
+but every reader treats `landing` as "the promoter is mid-flight": autocode's
+`_loop_is_free` refused every poll, `flush_due` and `_flush_locked` refused,
+and the guardian, which skips a `landing` record (nothing deployed yet),
+never opened the window that would have settled it.
+`round._clear_dead_landing_record` covered only a landing killed before its
+merge. For 2.3 days no round started, and 128 items stacked up in `up_next`.
+`promote.release_stranded_landing` closes the gap. Both writers of a
+`landing` record hold the automod lock for its whole life, so a `landing`
+record read while the lock can be taken (without waiting) is stranded,
+whatever pid or boot wrote it. It clears the record (`current_cleared`,
+`requeued`, `not_in_main`) and puts every commit already in `main` and not
+yet settled back on `pending_restart.json`; `restart` is assumed true when
+the record does not say. The next flush then observes those commits like any
+pending landing, and `already_live` spares the restart when they are
+running. It is called at the top of every autocode look (before
+`_maybe_flush`) and at the top of `_flush`, so `round flush` recovers too.
+
 **Expected** (ledger replay): restarts 172 → ~60–95 a week, 20–26 of the 32
 idle hours back, `land_wait_settle` gone for merges, no turns killed by the
 loop. Watch the first night: `restart_flushed` count and batch sizes, row 14's
