@@ -890,3 +890,40 @@ def worker_turn_post(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     return captured
+
+
+@pytest.fixture()
+def credential_home(tmp_path, monkeypatch):
+    """A scratch `$HOME` holding one fake file at every credential-read deny root.
+
+    #3524's two test files both need this layout, and the point of the fixture is
+    what it is NOT: no test of the credential-read deny touches the real
+    `~/lloyd/.env`, `~/.ssh` or `~/.config/gh` on this box. The deny roots resolve
+    per call from `$HOME` (exactly like `protected_write_roots()`), so pointing
+    `$HOME` here exercises the mechanism against bytes this fixture wrote.
+
+    Alongside the roots it seeds the three paths the `youtube-digest` job actually
+    reads — its bundle transcript, `lloyd/eval/lloyd_profile.md`, and an existing
+    note under `obsidian/knowledge/youtube/` — plus `.env.example`, the sibling
+    whose name starts like the entry and must stay readable, and a `ssh_backups`
+    sibling of `~/.ssh` for the same reason.
+    """
+    home = tmp_path / "home"
+    seed = {
+        "lloyd/.env": "LLOYD_TEST_SECRET=do-not-read-in-production\n",
+        "lloyd/.env.example": "LLOYD_TEST_SECRET=\n",
+        ".ssh/id_ed25519": "-----TEST KEY-----\n",
+        ".config/gh/hosts.yml": "github.com:\n  oauth_token: test\n",
+        ".openclaw/config.json": "{}\n",
+        "ssh_backups/id_ed25519": "-----TEST KEY-----\n",
+        "lloyd/eval/lloyd_profile.md": "# profile the video is scored against\n",
+        "obsidian/knowledge/youtube/existing-note.md": "# an existing note\n",
+        "bundles/b1/transcript.txt": "[00:00] hello\n",
+    }
+    for rel, text in seed.items():
+        p = home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home

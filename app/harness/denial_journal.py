@@ -72,6 +72,7 @@ _HOOK_GUARDS: dict[str, str] = {
     "_policy_pretool_cb": "grant",
     "_content_pretool_cb": "outbound_content",
     "_bench_corpus_pretool_cb": "bench_corpus",
+    "_secret_read_pretool_cb": "secret_read",
     "write_scope_denial": "trial_write_scope",
 }
 

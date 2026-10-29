@@ -244,6 +244,16 @@ def build_turn_options(snapshot: SessionSnapshot, body: dict, kind: TurnKind, *,
     install_default_safety_hook(hooks)
     if grant_scope:
         install_policy_hook(hooks, scope=grant_scope)
+    # The credential-read deny (#3524). `identity[1]` is the session's `source`,
+    # and this is the only place it reaches the turn's options: `youtube-digest`
+    # and `deep-research`, the two sources whose entire input is somebody else's
+    # text, arrive through this builder and not through `_worker_run_options`.
+    # Armed per source, so a mission-control or voice turn — the turns whose user
+    # legitimately reads `~/.ssh` — gets no new hook, and the recorded
+    # `tests/fixtures/turn_options_head.json` table shows the hook list unchanged
+    # for every session shape it walks.
+    from app.harness.secret_read_deny import install_secret_read_deny
+    install_secret_read_deny(hooks, source=identity[1])
     if kind == "stream":
         # P10: the action reviewer, shadow only, worker turns only.
         _m._install_action_review(hooks, platform=platform, text=text,

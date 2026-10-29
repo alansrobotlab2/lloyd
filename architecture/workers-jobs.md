@@ -854,11 +854,36 @@ than to either job:
   the automod tools, the queue writers or the autonomy writers, and
   `deep-research` has no `READ_FILES` at all: no `Bash`, `Read`, `Write`,
   `Edit`, `Grep` or `Glob`, its note going out through `vault_write`. What the
-  example attack does *not* close is worth stating: `youtube-digest` declares
-  `READ_FILES`, so `~/lloyd/.env` is readable by the turn whose input is a
-  fetched transcript, and both sources declare `WEB_READ`
-  (`http_search`/`http_fetch`), so an outbound GET with a query string stays
-  available to both. `deep-research` additionally holds `BROWSER_READ`.
+  example attack does *not* close is worth stating, and since #3524 its two halves
+  have different answers. **The read half is closed** — by a rule that is not a
+  capability: `PROTECTED_READ_ROOTS` (`app/harness/protected_paths.py`, the one
+  owner of the table) names the credential files no digest, distill or research job
+  has a reason to read (`~/lloyd/.env`, `~/.ssh`, `~/.config/gh`, `~/.openclaw`),
+  and `app/harness/secret_read_deny.py` arms a `PreToolUse` deny over `Read`,
+  `Grep` and `Glob` for a turn whose source is in
+  `capabilities.UNTRUSTED_INGEST_SOURCES` — these two plus `session-distill`. The
+  envelope is deliberately unchanged by it: the video turn is still 23 tools with
+  `READ_FILES` in it, because the measured census says the job needs the reader
+  (2947 `Read` calls over the 458 retained transcripts, and 2666 of the 4217 read
+  calls land outside the bundle directory — `lloyd/eval/lloyd_profile.md` alone
+  399), so dropping the group would have stopped the job and bounding `Read` to the
+  bundle would have broken it. **The egress half is still open**: both sources
+  declare `WEB_READ` (`http_search`/`http_fetch`), `deep-research` additionally
+  holds `BROWSER_READ`, none of those three verbs is in `TIER2_TOOLS` or
+  `TIER3_TOOLS` so the outbound content gate never arms for them, and
+  `harness.egress_policy` runs with `enforce: false` — a destination is recorded,
+  never refused. `attacker.example/?k=…` is therefore still reachable from both
+  turns, and stays so until a human flips that flag (#628 closed with the flip
+  explicitly delegated; `deep-research`'s whole job is fetching arbitrary hosts, so
+  the flip needs an allow list widened around it). It is owed, not open work. One
+  further deliberate limits: the read deny is armed per source, never fleet-wide —
+  an attended turn reads `~/.ssh` legitimately (the `github-auth` skill), so the
+  same rule there would be an operator outage rather than a fix — and it is a rule
+  over three *path-taking* verbs. `session-distill`, the third member, also holds
+  `Bash`, whose command string no path rule reads (that is the fixture's
+  `untrusted_ingest_sources_with_unmeasured_bash` residual, and `--ro-bind` makes a
+  credential un-writable, not unreadable), so for that one member a shell read of the
+  same file remains available and rides on the egress ruling above with it.
 - **Disk decides, not the turn's own text.** The source computes the note path,
   puts it in the prompt, and checks the file afterwards. A confident `RESULT`
   block over an empty directory is a failed attempt, not a note — and supplying

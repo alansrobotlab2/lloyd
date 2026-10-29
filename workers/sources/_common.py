@@ -731,6 +731,15 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # or a search loop has nobody watching. `app/harness/turn_guards.py`.
     from app.harness.turn_guards import install_turn_guards
     install_turn_guards(hooks, platform="worker", source=source or "")
+    # The credential-read deny (#3524), armed per source: a turn whose entire
+    # input is text fetched from outside may not read `~/lloyd/.env` or `~/.ssh`,
+    # and `Read` has no path policy of its own to stop it. A no-op for every
+    # source outside `capabilities.UNTRUSTED_INGEST_SOURCES`, so the attended and
+    # the trusted-worker turns here are unchanged. The session-backed half of the
+    # fleet — which is where `youtube-digest`'s video turn actually runs — is
+    # armed at the matching site in `app/routers/turn_options.py`.
+    from app.harness.secret_read_deny import install_secret_read_deny
+    install_secret_read_deny(hooks, source=source or "")
 
     model_env = _get_model_env("primary")
 

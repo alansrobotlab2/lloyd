@@ -925,3 +925,221 @@ def test_a_variable_holding_the_live_path_is_still_the_live_checkout(tmp_path):
     ):
         assert check_live_git_writes(cmd, bg, cwd=str(live), live=str(live)) is None, \
             (name, cmd)
+
+
+# ---------------------------------------------------------------------------
+# The credential-read deny-set (#3524)
+# ---------------------------------------------------------------------------
+#
+# Three policies live in this module now. The read set exists because the
+# write set's counterpart did not: `agent_mcp/builtin_fs.py::_read` checks only
+# absolute / exists / not-a-directory, and `agent_mcp/_path_sandbox.py`'s
+# read-only binds are reached only from `agent_mcp/builtin_bash.py`, so a worker
+# turn that denies `Bash` (`youtube-digest`, the source whose whole input is a
+# transcript fetched off the internet) had no read-side path rule of any kind.
+# The behaviour the deny is applied WITH is pinned in `tests/test_secret_read_deny.py`;
+# these nodes pin the table itself, because membership of a deny-set is exactly
+# what one module has to own.
+
+#: The four roots #3524 shipped, template to reason. The same discipline
+#: `THE_SHIPPED_FOUR` holds the write set to: a re-labelled entry is a
+#: re-decided boundary, and the reason string is what both the refused model and
+#: the `denial_journal` row read back.
+THE_READ_FOUR = {
+    "~/lloyd/.env": "the runtime secret file the services load at boot",
+    "~/.ssh": "the SSH private keys",
+    "~/.config/gh": "the GitHub CLI credentials",
+    "~/.openclaw": "the OpenClaw credential tree",
+}
+
+
+def test_the_read_deny_set_is_exactly_one_constant():
+    """Membership is one module-level tuple, and it names the four credential
+    surfaces the §Intake example attack reaches for.
+
+    `~/lloyd/.env` is the file that example reads, and on this box it is real
+    (mode 600): the envelope that lets a transcript-injected turn `Read` it is
+    what this table is for. The other three are the same class of material —
+    a private key, a CLI token, the OpenClaw tree the write set already refuses
+    to write — and each entry's reason has to say what it covers, because the
+    refusal is the only thing the model reads before it moves on.
+    """
+    entries = dict(PP.PROTECTED_READ_ROOTS)
+    assert len(entries) == 4, list(entries)
+    assert entries == THE_READ_FOUR, entries
+    assert all(entries.values()), "every entry must say what it is"
+    # The file named by the doc's own example is in the set, not a directory
+    # above it: an entry of `~/lloyd` would refuse the digest job's 121
+    # legitimate greps of the code tree and protect nothing extra.
+    assert "~/lloyd/.env" in entries
+
+
+def test_read_deny_reason_covers_each_root_and_no_sibling(credential_home):
+    """The predicate, against a scratch `$HOME` full of fake secrets.
+
+    Whole-path-component matching, shared with the write rule via `_covers`: the
+    entry itself and anything below it are denied, a sibling whose name merely
+    starts with an entry's name is not. `.env.example` and `ssh_backups` are the
+    two spellings of that on this table, and `.env.example` matters twice over —
+    it is the file a developer legitimately opens, and a `**/*.example` glob that
+    matched it would mean the deny is a name filter rather than a location rule.
+    """
+    home = credential_home
+    for template, reason in THE_READ_FOUR.items():
+        root = os.path.expanduser(template)
+        assert PP.read_deny_reason(root) == reason, template
+        assert PP.read_deny_reason(os.path.join(root, "nested", "id_ed25519")) == reason
+    assert PP.read_deny_reason(str(home / "lloyd" / ".env.example")) is None
+    assert PP.read_deny_reason(str(home / "ssh_backups" / "id_ed25519")) is None
+    # The parents are NOT denied: `~/lloyd` is where the job works, `~/.config`
+    # and `~` are everywhere.
+    assert PP.read_deny_reason(str(home / "lloyd")) is None
+    assert PP.read_deny_reason(str(home / ".config")) is None
+    assert PP.read_deny_reason(str(home)) is None
+    # The three paths the digest job actually reads, from the census.
+    for rel in ("bundles/b1/transcript.txt", "lloyd/eval/lloyd_profile.md",
+                "obsidian/knowledge/youtube/existing-note.md"):
+        assert PP.read_deny_reason(str(home / rel)) is None, rel
+    assert PP.read_deny_reason("") is None
+    assert PP.read_deny_reason(str(credential_home / "lloyd" / ".env")) is not None
+
+
+def test_the_read_roots_follow_home_and_bake_in_no_absolute_path(
+        tmp_path, monkeypatch):
+    """Resolved per call from `$HOME`, exactly like `protected_write_roots()`.
+
+    The live-tree proof, and the reason no test here reads the real
+    `~/lloyd/.env`: the real home's `lloyd/.env` is denied while `$HOME` is the
+    real one, and the moment `$HOME` moves to a scratch directory with no secrets
+    in it that same absolute path is allowed and the scratch one is denied. A
+    table that had baked in `/home/alansrobotlab/...`, or that resolved its roots
+    once at import, would still deny the real path — and this node would pass
+    while the mechanism was broken for every relocated home (a container, a test,
+    a round's worktree). Nothing below opens any of those files; the predicate is
+    a string comparison.
+    """
+    real_home = os.path.expanduser("~")
+    assert PP.read_deny_reason(os.path.join(real_home, "lloyd", ".env")) is not None
+    first, second = tmp_path / "home-a", tmp_path / "home-b"
+    (first / "lloyd").mkdir(parents=True)
+    (second / "lloyd").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(first))
+    assert PP.read_deny_reason(str(first / "lloyd" / ".env")) is not None
+    assert PP.read_deny_reason(str(second / "lloyd" / ".env")) is None
+    monkeypatch.setenv("HOME", str(second))
+    assert PP.read_deny_reason(str(second / "lloyd" / ".env")) is not None
+    assert PP.read_deny_reason(str(first / "lloyd" / ".env")) is None, (
+        "the set still names the home it was first asked about")
+    assert PP.read_deny_reason(os.path.join(real_home, "lloyd", ".env")) is None, (
+        "an absolute path of the real box is still denied under a scratch $HOME")
+    # And the roots are computed, not cached on a flag: two calls agree.
+    assert PP.protected_read_roots() == PP.protected_read_roots()
+
+
+def test_the_read_deny_set_is_not_the_write_set(credential_home):
+    """Two sets, one for each direction, because the two questions disagree.
+
+    `~/.ssh` is readable by an attended turn — the `github-auth` skill reads a key
+    out of chat — and so is `~/lloyd/agent-services`, which a worker greps
+    legitimately; both are therefore read-allowed for the fleet and only the
+    untrusted-ingest subset is shut, by the hook. `~/lloyd/.venvs` is
+    write-denied to keep a turn from replacing the interpreter and unreadable-by
+    nobody. The one surface in both is `~/.openclaw`: credentials are the only
+    thing that is neither written nor read by ordinary work. Pinning the
+    disagreement is the point — `#1757`'s lesson is that a guard on one of two
+    surfaces is not a guard, and the fix for that is NOT to collapse the two
+    tables into one.
+    """
+    writes = dict(PP.PROTECTED_WRITE_ROOTS)
+    reads = dict(PP.PROTECTED_READ_ROOTS)
+    assert "~/.ssh" in reads and "~/.ssh" not in writes
+    assert "~/lloyd/.venvs" in writes and "~/lloyd/.venvs" not in reads
+    assert "~/lloyd/agent-services" in writes and "~/lloyd/agent-services" not in reads
+    assert set(reads) & set(writes) == {"~/.openclaw"}, (set(reads) & set(writes))
+    assert PP.read_deny_reason(str(credential_home / "lloyd" / ".venvs" / "x")) is None
+    assert PP.write_deny_reason(str(credential_home / ".ssh" / "id_ed25519")) is None
+
+
+def test_no_write_grant_lifts_the_read_deny(credential_home):
+    """The lift is a write-lane mechanism and stays one.
+
+    `_write_grant` exists because the nightly reflection has a sanctioned writer
+    inside the write set. Handing the same contextvar to the read rule would mean
+    any job runner that grants a memory write also un-shields the SSH keys, and
+    the read deny has no sanctioned reader to make that trade for.
+    """
+    target = str(credential_home / "lloyd" / ".env")
+    before = PP.read_deny_reason(target)
+    with PP.allow_protected_writes("test: every path", paths=()):
+        assert PP.protected_writes_granted() == ()
+        assert PP.read_deny_reason(target) == before
+        assert PP.write_deny_reason(target) is None, (
+            "control: the grant DID lift the write set, so the read set's answer "
+            "below is a ruling and not a no-op")
+    assert PP.read_deny_reason(target) == before
+
+
+def _code_string_literals(path: Path) -> list[str]:
+    """String literals in a module's CODE, its docstrings excluded.
+
+    Counted on the syntax tree for the reason this file already gives elsewhere:
+    a grep over the source fails whenever somebody improves a comment, and the
+    prose of this module has to NAME the secret file it exists to protect.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    doc_ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                doc_ids.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in doc_ids]
+
+
+def test_the_read_lane_holds_no_credential_literal_of_its_own():
+    """The clause-1 grep, run as written: one owner, one copy.
+
+    `app/harness/secret_read_deny.py` is the lane that applies the rule, so it may
+    not keep a copy of any entry — that is how the earlier four spellings of
+    "protected" on this box diverged. What it may do is import from the owner — the
+    predicate, and the resolved table beside it when it needs to ask a glob pattern
+    which root it could name — so the two halves of the check are: no root-shaped
+    string literal in its code, and every root question asked of
+    `app.harness.protected_paths`.
+    """
+    lane = REPO / "app/harness/secret_read_deny.py"
+    assert lane.exists(), "the read lane is gone: the deny is nobody's job now"
+    root_spelling = re.compile(
+        r"(^|/)\.env$|\.ssh$|^~/|\.ssh/|config/gh|openclaw|lloyd/\.env")
+    offenders = [s for s in _code_string_literals(lane) if root_spelling.search(s)]
+    assert offenders == [], offenders
+    src = lane.read_text(encoding="utf-8")
+    assert "PROTECTED_READ_ROOTS" not in src, (
+        "the lane restates the table instead of asking its owner")
+    assert re.search(
+        r"from app\.harness\.protected_paths import .*\bread_deny_reason\b", src), (
+        "the predicate is not asked of its owner; a copy in the lane is how the two "
+        "diverge")
+
+
+def test_the_read_deny_table_is_what_the_intake_doc_points_at():
+    """The doc and the table may not drift apart silently.
+
+    `architecture/workers-jobs.md` §Intake names this deny as the thing that
+    closes its example's read half. The doc keeps no copy of the roots — that
+    would be a fifth spelling — so the one thing it can promise is that every
+    file it names is in the table, and this node is what notices if a root is
+    dropped while the sentence stays.
+    """
+    doc = (REPO / "architecture" / "workers-jobs.md").read_text(encoding="utf-8")
+    assert "secret_read_deny" in doc, (
+        "the section no longer names the guard, so nothing ties this table to the "
+        "attack it was built to close")
+    section = doc.split("## 5. Intake", 1)[1].split("\n## 6.", 1)[0]
+    assert "~/lloyd/.env" in section, "the section's own example must stay named"
+    assert PP.read_deny_reason(os.path.expanduser("~/lloyd/.env")) is not None
