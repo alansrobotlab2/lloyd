@@ -190,9 +190,23 @@ items oldest first as rounds drain the pool. Do not move a held item to \
 loop implements it. Its `members` (tagged `grouped`) are the ones that stay \
 `draft` — the umbrella carries them. Do not confuse the two.
 - A `backlog_implement` `started` with nothing after it is a round in flight: \
-`in_progress`. A round that ended with a promotion that `settled` and an \
-outcome of `met` closes by itself; `not_met` / `deferred` leave it `up_next` \
-for one more attempt on exactly the unmet clauses.
+`in_progress`. **A `finished` row is not the end of a round** — it is the end of \
+one TURN inside it. A round is over only when its landing has settled, so while \
+any state below holds the item stays `in_progress` and is NEVER proposed \
+`up_next`, however final the `finished` row looks and however long ago it was: \
+the common case is a turn that finished minutes ago in a round that is still \
+running. A board line carrying `round_state=` is the machine telling you which \
+state holds, and it is read from the board and the process table, not inferred \
+from the events: `promoted` (its landing commit has neither a `settled` row nor \
+a `rollback_succeeded`, so the guardian has not ruled it landed or rolled it \
+back yet), `worktree` (the round's working tree under `~/lloyd-work/` is still \
+open — a gate or a review retry is running in it), `gate` (a gate process of \
+that round is alive), `landing` (a `land.running` marker with a live pid — the \
+`promoted` row has not been written yet). A line with a `finished` row and NO \
+`round_state` is a round that really is over: read its outcome. A round that \
+ended with a promotion that `settled` and an outcome of `met` closes by itself; \
+`not_met` / `deferred` leave it `up_next` for one more attempt on exactly the \
+unmet clauses.
 - A round that aborted for a reason outside its diff (`external`, a grader \
 that was down, a pre-existing red test, a rebase conflict) has NOT spent the \
 item: `up_next`.
@@ -214,8 +228,11 @@ move it nowhere; `not_met` → `up_next` (offered once more for exactly those \
 clauses) unless its attempt is `spent`, then `draft` + `needs-human`; \
 `deferred` to other items → `draft`, no tag; no recorded outcome → `draft` + \
 `needs-human`. A promotion still under \
-observation (promoted, not yet settled) is the one landed state that stays \
-`in_progress` — the round is not over until the guardian says so.
+observation (promoted, no `settled` row and no rollback yet) is the one landed \
+state that stays `in_progress` — the round is not over until the guardian says \
+so, and its line says so too: `round_state=promoted`. Settling changes nothing \
+about the promotion, so it also ends the marker; `item_landed` is the row to \
+read once it is gone.
 - `spent` is spent. An item whose one attempt was consumed by a verdict on \
 the change (`spent` in an outcome; "owed-check decides", or "a human decides" \
 on rows before 2026-10-05, in its status reason) goes to `draft` and stays \
@@ -460,13 +477,139 @@ def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVEN
     return out
 
 
-def _event_line(d: dict) -> str:
+#: The four states that make a round unfinished, in the machine's own words: "a
+#: gate, landing, worktree or observation is still live"
+#: (`items_with_unfinished_rounds`, scripts/automod/backlog.py). A round in any of
+#: them is NOT over whatever its latest `backlog_implement` row says, and that
+#: distinction is what #3546 was filed on: at the 2026-10-29T17:27:13Z tick the
+#: steward read #3518's `finished` row at 17:11 as the end of its round while the
+#: round's `review kind=retry` fired at 17:36:16, and proposed `up_next` for #3524
+#: while its promotion (16:47:56Z, commit 752cca1a…) had not settled. Neither fact
+#: was renderable from what it was shown.
+ROUND_STATES = ("promoted", "worktree", "gate", "landing")
+
+#: Ledger rows that are about a ROUND rather than an item, so they carry no
+#: `item_id` and `events_since` — which joins a row to an item through the row's
+#: own `item_id` (`:447-449`) — can never attach them to one. Measured over the
+#: live ledger on 2026-10-29: 0 of the 400 `promoted` rows carry an `item_id`, and
+#: 0 of the 381 `settled` rows carry a `round_id`, so a promotion the prompt asks
+#: the steward to reason about arrived unjoinable.
+ROUND_ONLY_EVENTS = ("promoted", "settled")
+
+
+def _unsettled_promotions(ledger: Path) -> set[str]:
+    """Rounds promoted whose landing commit has settled **neither** way.
+
+    "Under observation" in the literal the prompt uses it: promoted, and no
+    guardian verdict yet. `reverted` is the machine's own set (a rollback took the
+    commit off `main`), `settled` is the guardian's verdict that the window
+    closed. Both are read through the host's ledger decoder so the grounding and
+    the state machine cannot disagree about what a revert is.
+
+    The machine's `observing` set (`desired_statuses`) subtracts only the revert,
+    and for a status decision it need not subtract the settlement: the sweep that
+    settles a promotion closes the item in the same pass, and the branch above
+    matches `item_landed` first. A board line has no such ordering to lean on —
+    a `settled` row does not withdraw its `promoted` row — so a grounding that
+    copied the machine's arithmetic would render every item that ever landed as
+    unfinished forever, and would then be telling the steward never to offer it
+    again. That is the opposite failure from #3546 and a worse one.
+    """
+    from scripts.automod import backlog as B
+    gone = set(B._reverted_commits(ledger))
+    gone |= {str(d.get("commit") or "") for d in
+             B._ledger_events(ledger, "settled", require_item=False)}
+    return {str(d.get("round_id") or "") for d in
+            B._ledger_events(ledger, "promoted", require_item=False)
+            if d.get("round_id") and str(d.get("commit") or "") not in gone}
+
+
+def unfinished_rounds(ledger: Path, for_items: set[int]) -> dict[int, tuple]:
+    """`{item_id: (round_id, states)}` for the shown items whose round is not over.
+
+    `states` is a tuple drawn from `ROUND_STATES`, in that order, and an item is
+    in the map only if at least one holds: the line names a state that was read,
+    never one that was guessed. This is the round-level fact the prompt's rule
+    reasons about and which `_item_line` used to carry no field for.
+
+    The round named is the LATEST one, except when its unfinished state belongs to
+    an older round: #3524 at the filing tick was exactly that case —
+    `SM_20261029_150548` promoted at 16:47:56Z, then a second round
+    `SM_20261029_161851` abandoned eight seconds before the tick, which took its
+    worktree with it (`abort` keeps the branch, not the tree). Naming the newest
+    round with no state there would have hidden the live observation, so the
+    older round is named instead.
+    """
+    from scripts.automod import backlog as B, state as ST
+    from scripts.automod import worktree as WT
+    history = B.implement_history(ledger)
+    unsettled = _unsettled_promotions(ledger)
+    out: dict[int, tuple] = {}
+    for iid in for_items:
+        rids = [str(r["round_id"]) for r in (history.get(iid) or []) if r.get("round_id")]
+        if not rids:
+            continue
+        latest = rids[-1]
+        try:
+            wt_open = bool(WT.worktree_path(latest).exists())
+        except OSError:
+            wt_open = False
+        states = tuple(s for s, holds in (("promoted", latest in unsettled),
+                                          ("worktree", wt_open),
+                                          ("gate", bool(ST.gate_in_progress(latest))),
+                                          ("landing", bool(ST.land_in_progress(latest))))
+                       if holds)
+        if not states:
+            older = [r for r in rids if r in unsettled]
+            if not older:
+                continue
+            latest, states = older[-1], ("promoted",)
+        out[iid] = (latest, states)
+    return out
+
+
+def item_refs(ledger: Path) -> dict[str, int]:
+    """Every ref a round-bearing row may name a round by → the item it belongs to.
+
+    Keys are round ids and promoted commits, and the two namespaces cannot
+    collide: a round id is `SM_` plus a UTC timestamp, a commit is 40 hex
+    characters. Both are keyed because a `promoted` row names its round while a
+    `settled` row names only the commit, and only a `backlog_implement` row names
+    an item at all (698 of the live ledger's rows carry both a round and an item)
+    — which is what makes the join possible without changing a writer.
+    """
+    from scripts.automod import backlog as B
+    out: dict[str, int] = {}
+    for d in B._ledger_events(ledger, "backlog_implement"):
+        rid, iid = str(d.get("round_id") or ""), d.get("item_id")
+        if rid and isinstance(iid, int):
+            out[rid] = iid          # one round implements one item; any row of it says so
+    for d in B._ledger_events(ledger, "promoted", require_item=False):
+        iid = out.get(str(d.get("round_id") or ""))
+        commit = str(d.get("commit") or "")
+        if iid is not None and commit:
+            out[commit] = iid
+    return out
+
+
+def _event_line(d: dict, *, item_refs: dict[str, int] | None = None) -> str:
     keep = ("event", "item_id", "round_id", "phase", "verdict", "acceptance", "commit",
             "reason", "detail", "closed", "from", "to", "by", "outcome")
+    vals = {k: d[k] for k in keep if k in d and d[k] not in (None, "", [], {})}
+    if (item_refs and str(d.get("event") or "") in ROUND_ONLY_EVENTS
+            and "item_id" not in vals):
+        iid = (item_refs.get(str(d.get("round_id") or ""))
+               or item_refs.get(str(d.get("commit") or "")))
+        if iid is not None:
+            # Rendered under the same key every other row carries it under, so the
+            # steward joins a promotion to a board line the way it already joins
+            # every other event. It is resolved here, not read from the row: see
+            # `item_refs` for why the row cannot carry it.
+            vals["item_id"] = iid
     parts = []
     for k in keep:
-        if k in d and d[k] not in (None, "", [], {}):
-            v = d[k]
+        if k in vals:
+            v = vals[k]
             if isinstance(v, dict):
                 v = {kk: v[kk] for kk in ("acceptance", "landed") if kk in v}
             parts.append(f"{k}={str(v)[:120]}")
@@ -502,7 +645,17 @@ def board_view(items: list[Any], touched: set[int], *, max_items: int = DEFAULT_
     return (due + pool + rest)[:max_items]
 
 
-def _item_line(i: Any) -> str:
+def _item_line(i: Any, *, round_state: tuple | None = None) -> str:
+    """One board line. The bracketed status is the item's OWN status on disk and
+    nothing else: what `desired_statuses` wants is deliberately not rendered here,
+    because the agreement metric scores this prompt's proposals against that
+    table, and printing the answer on the line would be grading the steward off
+    the answer sheet. The round state is a fact about the board, not a verdict.
+
+    `round_state` is that item's entry from `unfinished_rounds`, or None — a None
+    renders the line exactly as it read before #3546, so an item with no live
+    round gains no bytes.
+    """
     body = " ".join((i.body or "").split())[:BODY_CHARS]
     tags = ",".join(i.tags or [])
     rel = []
@@ -512,6 +665,9 @@ def _item_line(i: Any) -> str:
         rel.append(f"members={len(i.members)}")
     if i.parent:
         rel.append(f"parent=#{i.parent}")
+    if round_state:
+        rid, states = round_state
+        rel.append(f"round={rid} round_state={'+'.join(states)}")
     return (f"#{i.id} [{i.status}] {i.name[:90]} | created={i.created[:10]} "
             f"tags={tags or '-'} {' '.join(rel)}\n    {body}")
 
@@ -560,14 +716,20 @@ def _decisions_line(d: dict | None) -> str:
 
 
 def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts: float,
-                 health: dict | None = None) -> str:
+                 health: dict | None = None, round_state: dict[int, tuple] | None = None,
+                 item_refs: dict[str, int] | None = None) -> str:
+    """`round_state` / `item_refs` are `unfinished_rounds` / `item_refs` for the
+    items in play (#3546); both default to nothing, which renders the prompt as it
+    read before that item. They are arguments rather than reads because the cheap
+    test path passes no ledger, and because the caller already holds the path."""
     since = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(since_ts)) if since_ts else "the beginning"
+    rs = round_state or {}
     return PROMPT.format(
         since=since, n_events=len(events),
-        events="\n".join(_event_line(d) for d in events) or "(none)",
+        events="\n".join(_event_line(d, item_refs=item_refs) for d in events) or "(none)",
         health=_health_lines(health),
         n_items=len(items), n_open=n_open,
-        board="\n".join(_item_line(i) for i in items) or "(empty)",
+        board="\n".join(_item_line(i, round_state=rs.get(i.id)) for i in items) or "(empty)",
     )
 
 
@@ -720,8 +882,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if not events and not any(i.status in ("up_next", "in_progress") for i in shown):
         return {"status": "skipped", "summary": "nothing happened since the last pass"}
 
+    # #3546: the round state the prompt reasons about has to be IN the prompt.
+    # `expected` is computed here and thrown away — it was never shown — and both
+    # disagreements the item records are items whose live round was real: legible
+    # to the machine, invisible on the board line.
+    round_state = await asyncio.to_thread(unfinished_rounds, ledger,
+                                          {i.id for i in shown})
+    refs = await asyncio.to_thread(item_refs, ledger)
     prompt = build_prompt(events=events, items=shown, n_open=len(open_items), since_ts=since_ts,
-                          health=health)
+                          health=health, round_state=round_state, item_refs=refs)
     try:
         run = await run_prompt_in_session(
             prompt, title=f"board steward ({len(events)} events)", source=NAME,

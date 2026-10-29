@@ -2390,3 +2390,194 @@ def test_a_below_floor_tick_files_the_item_and_moves_nothing(board, monkeypatch)
     assert len(rows) == 1 and rows[0]["rate"] == 0.7953
     ticks = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "board_steward"]
     assert len(ticks) == 1, "the reader wrote a second tick row"
+
+
+# ─────────── #3546: the steward is shown the round state its prompt reads ───────────
+#
+# The figures are the ones #3546 was filed on. The board-steward tick at
+# 2026-10-29T17:27:13Z proposed `up_next` for two items `desired_statuses` wanted
+# held `in_progress`: #3518 (round SM_20261029_161921, `review kind=retry` at
+# 17:08:17 and again at 17:36:16, worktree still open) and #3524 (round
+# SM_20261029_150548 promoted 16:47:56Z at commit 752cca1a…, unsettled until
+# `item_landed` closed:true at 17:34:32Z). The steward's own note for #3518 was
+# "round SM_20261029_161921 finished 17:11 … no promotion, no settlement, no
+# item_landed, so no round is running; unspent, offered again" — a correct read
+# of the events it was GIVEN and wrong about the round. It was given:
+#   * a board line (`_item_line`) carrying id, status, name, created, tags and
+#     body — no round id and no round state, and
+#   * a `promoted` ledger row that names a round and a commit but no item: 0 of
+#     the 400 `promoted` rows in the live ledger carry an `item_id`, and 0 of the
+#     381 `settled` rows carry a `round_id`, so `events_since`' item join (which
+#     reads the row's own `item_id`) can never attach either to #3524.
+# Every number below is one of those two rounds' or of the window that filed the
+# item (judged 119, agree 90, disagree 28, rate 0.7563 since 2026-10-22T17:48:54).
+
+DIS_ROUND = "SM_20261029_150548"           # #3524's promoted round
+DIS_COMMIT = "752cca1a" * 5                # its landing commit, 40 hex
+DIS_ROUND_3518 = "SM_20261029_161921"      # #3518's round, gate retried, worktree open
+
+
+def _led(led: Path, **row):
+    """One ledger row, written the way the writers write it. The path is a
+    parameter on purpose: these tests also read the row shapes back with
+    `item_refs`, and a helper that silently wrote the LIVE ledger would put a
+    fixture round into the file every reader in the fleet scans."""
+    S.append_event(row, path=led)
+
+
+def _promotion(led: Path, item_id: int, round_id: str, commit: str, *,
+               settle: bool, base: float) -> None:
+    """An implement turn that finished, its promotion, and its settlement or absence."""
+    _led(led, event="backlog_implement", item_id=item_id, phase="started", ts=base)
+    _led(led, event="backlog_implement", item_id=item_id, phase="finished",
+         round_id=round_id, ts=base + 1)
+    _led(led, event="promoted", round_id=round_id, commit=commit, ts=base + 2)
+    if settle:
+        _led(led, event="settled", commit=commit, ts=base + 3)
+
+
+def test_an_item_whose_round_is_unfinished_is_shown_the_round_and_the_state(
+        board, tmp_path, monkeypatch):
+    """Clause 1. The four states that make a round unfinished, in the machine's
+    own words ("a gate, landing, worktree or observation is still live",
+    `items_with_unfinished_rounds`), have to be visible on the board line —
+    #3518's worktree was open and #3524's promotion unsettled at the filing tick
+    and NEITHER was renderable from what the steward was given. A settled
+    promotion is a finished round and renders nothing: the same grounding that
+    holds a re-offer back must not park every item that ever landed."""
+    _write(board, 3524, "up_next")
+    _write(board, 3518, "up_next")
+    _write(board, 3610, "up_next")
+    _write(board, 3620, "up_next")
+    _write(board, 3600, "up_next")
+    led = S.LEDGER_PATH          # the board fixture points this at tmp_path
+    _promotion(led, 3524, DIS_ROUND, DIS_COMMIT, settle=False, base=1)
+    _led(led, event="backlog_implement", item_id=3518, phase="finished",
+         round_id=DIS_ROUND_3518, ts=10)
+    _led(led, event="backlog_implement", item_id=3610, phase="finished",
+         round_id="SM_GATE", ts=20)
+    _led(led, event="backlog_implement", item_id=3620, phase="finished",
+         round_id="SM_LAND", ts=30)
+    _promotion(led, 3600, "SM_SETTLED", "a" * 40, settle=True, base=40)
+
+    live = tmp_path / "wt" / DIS_ROUND_3518 / "home" / "lloyd"
+    live.mkdir(parents=True)
+    monkeypatch.setattr("scripts.automod.worktree.worktree_path",
+                        lambda rid: live if rid == DIS_ROUND_3518 else tmp_path / "no-such-wt")
+    monkeypatch.setattr(S, "gate_in_progress",
+                        lambda rid: {"pid": 4242} if rid == "SM_GATE" else None)
+    monkeypatch.setattr(S, "land_in_progress",
+                        lambda rid: {"pid": 4343} if rid == "SM_LAND" else None)
+
+    ids = {3524, 3518, 3610, 3620, 3600}
+    st = W.unfinished_rounds(S.LEDGER_PATH, ids)
+    assert st[3524] == (DIS_ROUND, ("promoted",)), "promoted and unsettled"
+    assert st[3518] == (DIS_ROUND_3518, ("worktree",)), "its worktree is still open"
+    assert st[3610] == ("SM_GATE", ("gate",)), "a gate process is running"
+    assert st[3620] == ("SM_LAND", ("landing",)), "a landing is running"
+    assert 3600 not in st, "a promotion that SETTLED is a round that is over"
+
+    line = next(l for l in W.build_prompt(
+        events=[], items=[_item(3524, "up_next")], n_open=5, since_ts=0,
+        round_state=st).splitlines() if l.startswith("#3524 "))
+    assert f"round={DIS_ROUND}" in line, line
+    assert "round_state=promoted" in line, line
+    # The bracketed status is the item's OWN (`up_next` on disk), which is the
+    # fact the steward needs. `desired_statuses` wants `in_progress` for this
+    # item — that is the disagreement #3546 exists to settle — and printing the
+    # machine's answer on the line would score agreement off the prompt.
+    assert "[up_next]" in line, line
+    for leak in ("desired", "want", "machine", "expected"):
+        assert leak not in line, f"the machine's verdict leaked onto the line: {line}"
+    # And structurally: the grounding renderer is never even handed the table.
+    import inspect
+    assert "expected" not in inspect.signature(W._item_line).parameters
+    assert "expected" not in inspect.signature(W.build_prompt).parameters
+
+
+def test_a_promoted_or_settled_event_line_names_the_item_its_round_belongs_to(tmp_path):
+    """Clause 2. `promoted` carries `round_id` + `commit` and no `item_id` (0 of
+    400 rows carry one), `settled` carries `commit` and no `round_id` (0 of 381
+    rows carry one), and `events_since` attaches a row to a shown item only
+    through the row's own `item_id` — so the observation rule the prompt states
+    was applied to a row that could not be joined to any item. The join runs
+    through `round_id` to the ledger's `backlog_implement` rows, which DO carry
+    an item; a round no `backlog_implement` row names renders no item."""
+    led = tmp_path / "ledger.jsonl"
+    _promotion(led, 3524, DIS_ROUND, DIS_COMMIT, settle=True, base=1)
+    # A promotion whose round no `backlog_implement` row names: its implement turn
+    # diverged, so the round exists and its item does not appear anywhere.
+    _led(led, event="promoted", round_id="SM_ORPHAN", commit="b" * 40, ts=50)
+
+    def row(**over):
+        d = {"ts": 3, "event": "promoted", "round_id": DIS_ROUND, "commit": DIS_COMMIT}
+        d.update(over)
+        return d
+
+    refs = W.item_refs(led)
+    assert refs[DIS_ROUND] == 3524, "a round id is a key"
+    assert refs[DIS_COMMIT] == 3524, "so is the commit, which is all a settled row names"
+
+    line = W._event_line(row(), item_refs=refs)
+    assert "event=promoted" in line and f"round_id={DIS_ROUND}" in line, line
+    assert "item_id=3524" in line, f"a promotion must name its item: {line}"
+    settled = W._event_line(row(event="settled", ts=4), item_refs=refs)
+    assert "item_id=3524" in settled, f"a settlement must name its item: {settled}"
+
+    orphan = W._event_line(row(round_id="SM_ORPHAN", commit="b" * 40), item_refs=refs)
+    assert "SM_ORPHAN" in orphan, orphan
+    assert "item_id=" not in orphan, f"a round with no implement row got a guessed item: {orphan}"
+    assert "item_id=" not in W._event_line(row()), "no refs passed: the line is as it was"
+
+
+def test_the_prompt_says_a_finished_turn_is_not_the_end_of_a_round():
+    """Clause 3. The prompt's in-flight rule was turn-level — "a
+    `backlog_implement` `started` with nothing after it is a round in flight" —
+    while the machine's is round-level, and #3518's proposal note is the gap
+    verbatim: a `finished` row read as the end of the round when its gate was
+    retried 25 minutes later. The prompt must say the turn/round distinction and
+    define the four `round_state` tokens it now points at."""
+    text = W.PROMPT
+    assert "`finished`" in text and "not the end of a round" in text
+    assert "stays `in_progress`" in text
+    assert "NEVER proposed `up_next`" in text, "the up_next trap must be closed in words"
+    assert "round_state=" in text, "the prompt must point at the marker on the board line"
+    for state in W.ROUND_STATES:
+        assert f"`{state}`" in text, f"`{state}` is not defined in the prompt"
+    assert W.ROUND_STATES == ("promoted", "worktree", "gate", "landing")
+
+
+def test_the_disagreement_item_says_how_much_of_the_window_it_does_not_cover(board, tmp_path):
+    """Clause 4. `file_or_update` takes its ids from the CURRENT tick while the
+    numbers it cites are the 7-day aggregate: the item filed at 17:27:13Z names 2
+    rows against a window holding 28 disagreements over 25 distinct items, so a
+    ruler reading it sees 2 and believes the case is small. The body must state
+    the arithmetic — window `disagree` minus the rows it writes — and say so again
+    after a merge adds rows."""
+    from workers.board_disagreement import file_or_update
+
+    out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                         window=_window7(), backlog_dir=board,
+                         ledger=tmp_path / "ledger.jsonl")
+    assert out["action"] == "filed" and out["rows"] == 5
+    body = _filed(board)[0].body
+    assert "## Coverage" in body
+    assert "21 of the window's 26 disagreement rows are not represented here" in body, body
+
+    more = file_or_update(_agree(3119), DIS_MOVES + [
+        {"item_id": 3119, "status": "draft", "note": "no triage verdict"}],
+        {**DIS_EXPECTED, 3119: ("up_next", "confirmed with acceptance")},
+        window=_window7(), backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert more["action"] == "merged" and more["new_ids"] == [3119]
+    body = _filed(board)[0].body
+    assert "now names 6 of the window's 26 disagreement rows" in body, body
+    assert "20 are not represented" in body, body
+
+    # A tick that names the whole window says so instead of claiming a gap.
+    small = tmp_path / "small"
+    small.mkdir()
+    file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                   window=_window7(disagree=5), backlog_dir=small,
+                   ledger=tmp_path / "small.jsonl")
+    covered = _filed(small)[0].body
+    assert "all 5 of the window's 5 disagreement rows are represented" in covered, covered

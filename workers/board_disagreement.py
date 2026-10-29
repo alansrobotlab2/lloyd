@@ -179,6 +179,38 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
                    backlog_dir=backlog_dir, ledger=ledger)
 
 
+def _coverage(named: int, window: dict, *, merged: bool = False) -> str:
+    """What these rows do NOT cover, in numbers.
+
+    The ids are the CURRENT tick's (`file_or_update` takes them from
+    `agreement()["disagree"]`, one tick), while every figure the body otherwise
+    cites is the rolling window's. The item filed at 2026-10-29T17:27:13Z named 2
+    rows against a window holding 28 disagreements over 25 distinct items: a ruler
+    reading it saw a two-row case and was never told the rest sat in the same
+    window whose numbers it was being asked to judge (#3546).
+
+    State the zero too. An item that does cover its window has to say so, or a
+    reader cannot tell a genuinely small case from an unstated large one — and a
+    merge moves both sides of the subtraction, so it is re-derived, not kept.
+    """
+    total = int(window.get("disagree") or 0)
+    un = max(0, total - int(named))
+    if merged:
+        first = (f"- this item now names {named} of the window's {total} disagreement "
+                 f"rows; {un} are not represented here.")
+    elif un:
+        first = (f"- **{un} of the window's {total} disagreement rows are not "
+                 f"represented here**: the ids above are one tick's, the window is "
+                 f"seven days, and no ruling made on this item reaches them.")
+    else:
+        first = (f"- all {named} of the window's {total} disagreement rows are "
+                 f"represented here; nothing in the window is unruled by omission.")
+    return ("## Coverage\n\n" + first + "\n"
+            f"- the window itself: {window.get('judged')} judged, `rate="
+            f"{window.get('rate')}` against owed-check's {FLIP_MIN_RATE} floor, since "
+            f"{window.get('window_since')}.\n\n")
+
+
 def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple],
             window: dict, stamp: str, *, backlog_dir: Path | None,
             ledger: Path | None) -> dict:
@@ -198,6 +230,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"stored nowhere else — `response_json` is empty in every board-steward "
         f"`runs` row — so this item is the record.\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
+        + _coverage(len(ids), window) +
         f"## What to decide\n\n"
         f"Per item, rule which side is wrong:\n\n"
         f"- the **steward's** prompt/grounding (`workers/sources/board_steward.py`) — then "
@@ -220,6 +253,30 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
             "ids": ids, "rows": len(rows)}
 
 
+def _strip_coverage(body: str) -> str:
+    """Drop the `## Coverage` section, which `_coverage` re-derives on every write.
+
+    A merge moves both sides of the subtraction — the row count grew and the
+    window may have moved — so keeping the filed body's line beside the new one is
+    the exact unreadable the section exists to prevent: "#21 are not represented"
+    and "#6 of 26 now named" in one file, with nothing saying which is current.
+    Heading-scoped, because the section is prose and its own bounds are its
+    headings; a row of `## Rows` is untouched, and so is an `### Added` section,
+    which is a sub-heading.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in (body or "").splitlines():
+        if line.startswith("## Coverage"):
+            skipping = True
+            continue
+        if skipping and line.startswith("## "):
+            skipping = False
+        if not skipping:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            expected: dict[int, tuple], window: dict, stamp: str, *,
            backlog_dir: Path | None, ledger: Path | None) -> dict | None:
@@ -235,9 +292,14 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
         logger.debug("disagreement item #%s already names %s", item.id, ids)
         return None
     rows = disagreement_rows(fresh, moves, expected)
-    new_body = ((body or "").rstrip("\n") + "\n\n"
+    # Coverage moves with the merge: `seen | fresh` is what the file names the
+    # moment this write lands, and the window's count is the denominator. Both
+    # sides of the subtraction moved, so the filed body's line is dropped rather
+    # than left beside this one — see `_strip_coverage`.
+    new_body = (_strip_coverage(body or "").rstrip("\n") + "\n\n"
                 f"### Added {stamp} (window `judged={window.get('judged')}`, "
-                f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n")
+                f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n\n"
+                + _coverage(len(seen | set(fresh)), window, merged=True))
     _write_body(Path(item.path), fm, new_body, B,
                 activity=f"board-steward disagreement: {len(fresh)} row(s) added")
     _event(ledger, item_id=item.id, action="merged", ids=ids, window=window,
