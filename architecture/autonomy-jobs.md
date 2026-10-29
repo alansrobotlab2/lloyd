@@ -979,9 +979,10 @@ a bulk `git mv` breaks every non-recursive id-glob reader and every vault link f
 no measured gain while `status` already filters closed items. A reader who follows
 the older wording ("where that decision lives") books the pile as still awaiting a
 person, which it is not; `skills/weekly-backlog-hygiene/SKILL.md`, the prompt #77
-runs, still words its owner line that way. The older reading of this section — that
-the archiving happens and that #77 does it — is also not true, and these are the
-sentences that replaced it.
+runs, states the ruling in its own words now, so the weekly census and this section
+agree on what is settled. The older reading of this section — that the archiving
+happens and that #77 does it — is also not true, and these are the sentences that
+replaced it.
 
 ---
 

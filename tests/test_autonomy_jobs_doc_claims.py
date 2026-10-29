@@ -2174,12 +2174,18 @@ def test_queue_the_work_names_an_owner_for_the_closed_pile():
 
 
 def test_the_hygiene_skill_points_the_closed_pile_at_its_owner():
-    """Clause 4, on the other side of the boundary. #77 is report-only three times
-    over, so it cannot file the closed pile or land it; the only durable instruction
-    it carries is this skill, and until it named an owner every run re-reported the
-    pile as a fresh finding (2026-09-08, 2026-09-15). The doc's pointer and the
-    skill's line are one fix in two surfaces, and this node is what stops the doc
-    claiming an owner the prompt never tells the run to cite.
+    """Clause 4 as #1566 filed it, re-pinned by #3409 for what the ruling now is. #77
+    is report-only three times over, so it cannot file the closed pile or land it; the
+    only durable instruction it carries is this skill, and until it named an owner every
+    run re-reported the pile as a fresh finding (2026-09-08, 2026-09-15). Naming an
+    owner was right; naming one whose decision was already made and framing that
+    decision as open was not. #1566 is `status: done`, its activity log records the
+    owed-human sweep of 2026-09-27 ruling (delegated by Alan) `Accept the pile, no
+    archive`, and its `owed_settled` carries `outcome: ruling` at 2026-10-04T20:58:20
+    with settled re-checks on 2026-10-04 and 2026-10-20. The consequence the old line
+    produced is worse than a wasted report: the newest run, `run_77_20261020_151925.md`
+    :96-98, obeyed it and told its reader `the decision is still unmade`. An
+    instruction to present a recorded ruling as pending makes the run deny the ruling.
     """
     skill = _hygiene_skill()
     flat = _flat(skill)
@@ -2198,6 +2204,56 @@ def test_the_hygiene_skill_points_the_closed_pile_at_its_owner():
     assert "what gets archived" not in flat and "Archive stale" not in flat, (
         "the skill has taken on the archiving role the doc just gave up. It is "
         "report-only; the owner it names is #1566, not itself")
+    # #3409 clause 1: the decision, stated as decided, with where it is recorded.
+    assert re.search(r"accept the pile[^.]{0,120}no archive", flat, re.I), (
+        "the skill stopped stating what was decided. The ruling is `Accept the pile, "
+        "no archive` (owed-human sweep 2026-09-27, delegated by Alan); a run told only "
+        "that something owns the pile re-opens the question")
+    assert re.search(r"owed_settled", flat) and "2026-09-27" in flat, (
+        "the skill states a ruling with nowhere to check it. Name #1566's "
+        "`owed_settled` front matter and the 2026-09-27 ruling it records, so a reader "
+        "can re-derive the claim instead of trusting the skill")
+    for open_question in ("whether to archive", "exists to hold"):
+        assert open_question not in flat, (
+            f"{open_question!r} is back in #77's prompt. Both phrase the closed pile as "
+            f"a question still owed, and #1566 answered it on 2026-09-27 — the run of "
+            f"2026-10-20 read that framing and reported the ruling as unmade")
+    # #3409 clause 3: reversal is gated on code, so no run sends the pile to a person.
+    assert re.search(r"no job (in the fleet )?moves? board files", flat, re.I), (
+        "the skill no longer says plainly that no job moves board files. That is why "
+        "reversing the ruling is a code change and not a filing")
+    assert re.search(r"non-recursive glob", flat, re.I), (
+        "the skill dropped the prerequisite for archiving: the board's readers are "
+        "non-recursive globs, which is the measured reason a bulk `git mv` was refused")
+
+
+def test_queue_the_work_no_longer_calls_the_hygiene_skill_stale_about_the_closed_pile():
+    """#3409 clause 4. §Queue the work was corrected first and, being right about the
+    ruling, went on to flag the lagging surface: `skills/weekly-backlog-hygiene/SKILL.md,
+    the prompt #77 runs, still words its owner line that way.` That sentence was true
+    only while the skill was stale, and this suite could not see it go false — the node
+    reading the skill checked the owner line, never the doc's claim about it. So a
+    correct doc shipped a standing false claim about the vault, dated to 2026-10-26. Pin
+    the absence, and re-pin the ruling paragraph the section leans on: it is what the
+    skill's line now agrees with, and the negator node above keeps its `no archive`
+    explicit.
+    """
+    flat = _flat(_group_section(QUEUE_HEADER))
+    assert "still words its owner line" not in flat, (
+        "§Queue the work is calling the hygiene skill stale again. Re-read "
+        f"{HYGIENE_SKILL} before keeping the sentence: if the skill states the ruling, "
+        f"the claim is a false report about a live vault file")
+    assert not re.search(r"\bskill\b[^.]{0,140}\bstill\b", flat, re.I), (
+        "a `skill … still …` sentence is back in §Queue the work. Any sentence here "
+        "about the skill must state what it says now, not what it used to say — that "
+        "past-tense shape is exactly how the stale claim survived a month")
+    assert re.search(r"closed question, not an owned one", flat, re.I), (
+        "the section stopped saying the pile's fate is a closed question rather than an "
+        "unowned one, which is the distinction #1566's ruling turns on")
+    assert re.search(r"2026-09-27[^.]{0,200}no archive", flat, re.I), (
+        "the ruling paragraph no longer ties the 2026-09-27 delegated ruling to its "
+        "content, `no archive`. A date without a decision is the cross-reference that "
+        "produced #3409")
 
 
 # ── #1568: what #35's eight-to-twelve actually is ───────────────────────────
