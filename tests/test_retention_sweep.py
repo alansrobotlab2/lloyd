@@ -6507,13 +6507,19 @@ _TURNS_ROWS_PER_DAY = 8 / 13
 
 
 def _turn_row(days_ago: float, *, turn_id: str = "a1b2c3d4e5f6", label: str = "voice",
-              epoch="default", at="default"):
+              epoch="default", at="default", now: float | None = None):
     """One row as `app.voice_turns.turn_row()` builds it from a timeline.
 
     The field set is the worker's (`ReplySpeaker._turn_row`), assembled here without
     importing LiveKit. The sweep only reads `epoch` and `at`, but the age it reads has to
     be the age the real writer emits — otherwise a row-format change turns this store's
     window into a no-op that still prints a number.
+
+    `days_ago` ages from the wall clock, or from `now` when a caller passes one. A node
+    that asserts WHICH archive bucket a row lands in has to pass the same instant it
+    passes to the sweep, because `sweep_voice_turns` takes `now` as an argument and the
+    bucket is a calendar month: two ages that are in different months today are in the
+    same month on another day, and the node then reds on a commit that changed nothing.
     """
     row = {"v": 1, "turn_id": turn_id, "room": "lloyd-20261006_063000",
            "interrupted": False, "queued_behind": False, "tools_ran": True,
@@ -6524,7 +6530,7 @@ def _turn_row(days_ago: float, *, turn_id: str = "a1b2c3d4e5f6", label: str = "v
                       "first_pushed": 0.959, "first_played": 0.05},
            "eos_to_audio": 1.009, "max_gap_s": 6.0}
     if epoch == "default":
-        row["epoch"] = time.time() - days_ago * 86400
+        row["epoch"] = (time.time() if now is None else now) - days_ago * 86400
     elif epoch is not None:
         row["epoch"] = epoch
     if at == "default":
@@ -6552,13 +6558,27 @@ def _turn_line(stdout: str) -> str:
 def test_turn_rows_past_the_window_archive_into_their_month_and_younger_keep_their_bytes(
         rs):
     path = rs.VOICE_TURNS_FILE
-    old1, old2, fresh = _turn_row(120), _turn_row(95), _turn_row(1)
+    # Aged from the instant `_turn_row` stamps into `at`, not from the wall clock. The
+    # bucket a row archives into is a CALENDAR month of its own stamp, so "120 days ago"
+    # and "95 days ago" sit in different months only for some values of today: measured
+    # from the real clock on 2026-10-29 they are 2026-07-01 and 2026-07-26 — one month,
+    # one bucket, both rows in one file, and this node reds on any commit at all. The
+    # sweep takes `now` as an argument, so the fixture passes it the instant it aged
+    # from, which also makes the row's two stamps agree: a real writer emits an `epoch`
+    # and an `at` for the same instant, and the wall-clock version did not.
+    now = rs._iso_seconds("2026-10-06T06:30:00.500Z")
+    old1, old2, fresh = (_turn_row(120, now=now), _turn_row(95, now=now),
+                         _turn_row(1, now=now))
     _seed_turn_rows(path, [old1, old2, fresh])
     before = len(path.read_bytes())
     m1 = time.strftime("%Y%m", time.gmtime(old1["epoch"]))
     m2 = time.strftime("%Y%m", time.gmtime(old2["epoch"]))
+    assert m1 != m2, (
+        f"both aged rows fall in bucket {m1}, so the two archive assertions below cannot "
+        "tell the months apart — age the rows from instants in different calendar "
+        "months before reading a two-row bucket as a sweep bug")
 
-    out = rs.sweep_voice_turns(True, time.time(), path=path)
+    out = rs.sweep_voice_turns(True, now, path=path)
     assert out["moved"] == 2 and out["archived"] == 2 and out["undated"] == 0
     assert out["before"] == before and out["after"] == len(json.dumps(fresh) + "\n"), \
         "the line reports both sizes, so an operator can see what the pass cost"

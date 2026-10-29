@@ -5002,6 +5002,15 @@ REOPEN_CONDITION = re.compile(
 #: the line under test cannot report that line as closed.
 MEASURE_IDS_AT_RULING = ("#60", "#82", "#70", "#36", "#76", "#86")
 
+#: A cite of the item the 2026-10-17 placement ruling is about, and nothing longer.
+#: `#100` is a prefix of `#1000`, `#1004`, `#1012`, …, so a raw `in` test for this id
+#: matches a citation of any later item that happens to be written near it — which is
+#: how §Measure read as "closed over the ruling" on 2026-10-29 while its only such
+#: mention was `its turns are capped at 30 (#1000)`. `_watch_intro()`'s row scan
+#: already draws the line with `(?!\d)`; this is that rule named once so the
+#: negative half of a placement ruling cannot be undone by an unrelated id.
+RULING_CITE = re.compile(r"#100(?!\d)")
+
 
 def _watch_intro() -> str:
     """§Watch the machinery's opening paragraph, its table excluded.
@@ -5225,9 +5234,63 @@ def test_measure_stays_closed_to_100_after_the_ruling():
     assert rows == list(MEASURE_IDS_AT_RULING), (
         f"§Measure's id table holds {rows}. Its heading and its table are the two "
         f"membership statements of one group and both are closed to #100")
-    assert "#100" not in _measure_section(), (
+    assert not RULING_CITE.search(_measure_section()), (
         "#100 is named inside the §Measure section — the placement the ruling ruled "
         "out, and a mention there is what a later round would read as precedent")
+
+
+def test_the_ruling_id_match_does_not_swallow_a_longer_id():
+    """`#100` is a prefix of `#1000`, so a substring scan for the ruling's id is a
+    scan for every item whose id starts with those four characters.
+
+    The node above read "#100 is named inside the §Measure section" on 2026-10-29
+    while the only such mention was `its turns are capped at 30 (#1000)` — a
+    different item's id, sitting in §Measure for a reason of its own. A guard that
+    reds on an unrelated item's citation is a guard nobody can satisfy without
+    deleting true prose, and the easy wrong fix is to move the #1000 sentence out
+    of the section it belongs in. This file already draws the line this way:
+    `_watch_intro()` scans `#100(?!\\d)` for exactly the reason stated at its own
+    docstring, so the negative half of the ruling was the one place left doing raw
+    `in`. Pinned here rather than only fixed in place, because the same prefix
+    collision catches any later `#1NN` item cited near a ruling about `#1N`.
+    """
+    probe = "its turns are capped at 30 (#1000) and (#1004); the ruling left #100 out"
+    assert not [m.group(0) for m in RULING_CITE.finditer(probe) if m.group(0) != "#100"]
+    assert [m.start() for m in RULING_CITE.finditer(probe)] == [
+        probe.index("#100 out")], "the matcher must find the exact id and only that one"
+    assert "#100" in _measure_section(), (
+        "the section no longer cites #1000 at all, so the boundary this node exists for "
+        "is untested here — restore the sentence or delete this node with it")
+
+
+def test_a_seeded_ruling_id_in_measure_reds_the_closed_set(tmp_path, monkeypatch):
+    """The negative half is demonstrated, not described: seed `#100` into §Measure's
+    prose and the closed-set assertion must be the thing that fails.
+
+    `test_the_measure_membership_guard_fires_on_a_seeded_100` seeds the HEADING and
+    the TABLE; neither path exercises the raw-prose scan, which is the half that
+    broke. Without this, the seeded probes prove the table guards and leave the
+    sentence-level one unweighed — the same gap #2806 names for a membership claim.
+    """
+    doc = _text()
+    lines = doc.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## Measure:")), None)
+    assert start is not None, "the doc's §Measure heading is not a `## Measure:` line"
+    lines.insert(start + 1, "Seeded: #100 belongs here after all.")
+    path = tmp_path / "seeded-prose-autonomy-jobs.md"
+    path.write_text("\n".join(lines))
+    # The control first, on the unseeded doc through the same helper: §Measure already
+    # cites #1000, so without this the raised AssertionError below could be the prefix
+    # collision answering a seed that never arrived.
+    assert not RULING_CITE.search(_measure_section()), (
+        "the unseeded section already trips the closed-set assert, so the seeded probe "
+        "would be weighing a seed against a region that was already red")
+    monkeypatch.setitem(globals(), "DOC", path)
+    assert RULING_CITE.search(_measure_section()), (
+        "the seed did not arrive inside `_measure_section()`, so this node proved "
+        "nothing about the scan")
+    with pytest.raises(AssertionError, match="named inside the §Measure section"):
+        test_measure_stays_closed_to_100_after_the_ruling()
 
 
 def test_the_measure_membership_guard_fires_on_a_seeded_100(tmp_path, monkeypatch):

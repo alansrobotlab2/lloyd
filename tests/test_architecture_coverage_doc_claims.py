@@ -2469,8 +2469,18 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # agent-services/guardian/guardian.py | grep '^@@'` shows those two hunks and nothing
     # else, and `grep -n '^    def evaluate_liveness\|^def main'
     # agent-services/guardian/guardian.py` prints 879 with 2942 below it.
-    assert heads[guardian]["main"] == 2942, (
-        f"`main` moved off :2942 ({heads[guardian]['main']}) — if it is gone "
+    # 2942 → 2946 is `38a2599c` (the Services tab's GPU power switch): two hunks,
+    # `@@ -877,6 +877,9 @@` (+3 — the `gpu_off = speak.gpu_off_programs(...)` read and
+    # the two comment lines above it, INSIDE `evaluate_liveness` and below its `def`,
+    # which is why that head stays at 879) and `@@ -938,8 +941,9 @@` (+1, the
+    # `intentional_stop=` flag widened with `or program in gpu_off`, also inside
+    # `evaluate_liveness`, whose span is 879-974). Both are above `main`, so only
+    # `main` moves, by exactly +4. Re-check as before: `git diff
+    # <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` shows those
+    # two hunks and nothing else, and `grep -n '^    def evaluate_liveness\|^def main'
+    # agent-services/guardian/guardian.py` prints 879 with 2946 below it.
+    assert heads[guardian]["main"] == 2946, (
+        f"`main` moved off :2946 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 879, (
         f"`evaluate_liveness` moved off :879 "

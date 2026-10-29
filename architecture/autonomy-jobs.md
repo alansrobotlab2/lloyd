@@ -1082,22 +1082,24 @@ the only monitor in the fleet with authority to act on what it finds.
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
-**Two of the six had no consumer; only one still has an artifact to leave
-unread.** #36's queue held 31,291 items and nothing read it back (below). The
-retention sweep has since deleted it: store 10 unlinks
-`_pipeline/groundskeeper-queue.json` and `groundskeeper-writes.jsonl` past
-`GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`, added by `d24c7ecd` (#1574) — measured
-2026-10-26, `ls ~/lloyd-data/_pipeline/groundskeeper*` returns no such file, so
-#36 no longer produces anything at all and the group's no-consumer case is one
-member deep. #70's findings are advisory and reach #83 only if #83 happens to
-look — there is no `depends_on` between them, and #83's own is `58`. Under the
-chain grouping those were two unrelated facts in two different sections; grouped
-by function they were two of six, which is a pattern rather than two incidents
-(#3453).
+**Two of the six have no consumer.** Only one of them still leaves an artifact to
+leave unread. #36's queue held 31,291 items and nothing read it back (below).
+The retention sweep has since deleted it: store 10 unlinks `groundskeeper-queue.json`
+and `groundskeeper-writes.jsonl` from the `_pipeline` store directory past
+`GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`
+(`scripts/groundskeeper/retention-sweep.py:585`), added by `d24c7ecd` (#1574) —
+measured 2026-10-26 and again 2026-10-29, `ls ~/lloyd-data/_pipeline/groundskeeper*`
+returns no such file, so #36 no longer produces anything at all and the group's
+no-consumer case is one member deep. #70's findings are advisory and reach #83
+only if #83 happens to look — there is no `depends_on` between them, and #83's own
+is `58`. Under the chain grouping those were two unrelated facts in two different
+sections; grouped by function they are two of six, which is a pattern rather than
+two incidents (#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
-worse than none.** #60 exits 2 (`EXIT_ALARM`, `knowledge-health-report.py:1838`)
-and alerts when the store cannot be read, when active edges fall below half the
+worse than none.** #60 exits 2 (`EXIT_ALARM`,
+`scripts/memory/knowledge-health-report.py:1838`) and alerts when the store
+cannot be read, when active edges fall below half the
 baseline, when any directory holds facts about another entity, when fact records
 carry no `entity:` tag over the hygiene floor (#2474), or when any fact file
 carries duplicate fact IDs — and since #3222 it also alarms when the baseline
@@ -1349,7 +1351,7 @@ that cost ~12 GPU-hours a week until 2026-09-03, and whose log path
 the advertised index; `groundskeeper-research` now sits under `skills/.archived/`.
 The lesson survived as a live defect on a third skill: `groundskeeper-survey` is
 still `status: active`, is named by no live task (#36 is archived), and its whole
-procedure is to read `_pipeline/groundskeeper-queue.json`, the file the retention
+procedure is to read the `_pipeline` store's `groundskeeper-queue.json`, the file the retention
 sweep now deletes (#3452). An orphaned skill is not inert: it is retrievable by
 name, and being one generation retired is not the same as being gone.
 

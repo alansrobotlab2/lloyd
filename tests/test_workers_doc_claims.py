@@ -1097,13 +1097,17 @@ BANNED_SECTION2_CONCLUSIONS = (
     "has no row to read",
 )
 
-#: The window §2's table was measured over. Clause 5's "window end at 2026-09-28"
-#: is about the END of the prose window; the SQL predicate keeps its unbounded
-#: `>=` and its date, and §6's copy of the same date keeps its prose ("the 7 days
-#: to 2026-09-11", "days to 2026-09-28"), which `test_section2_and_section6_report_one_measurement`
-#: holds equal across the two sections.
-SECTION2_WINDOW_END = "2026-09-28"
-SECTION2_SQL_FLOOR = "2026-09-21"
+#: The window §2's table was measured over, as re-read from `workers.db` on
+#: 2026-10-29. Clause 5's "window end" is about the END of the prose window, and it
+#: is the date `test_section2_and_section6_report_one_measurement` holds equal to the
+#: latest window §6 quotes (whose current figures are the 7 days to 2026-10-28); the
+#: SQL floor is the other end of the same sentence. The predicate §2 now states is
+#: bounded at both ends (`>= '2026-10-22'` AND `< '2026-10-29'`), where the read it
+#: replaced had only the `>=` — so these two constants are the whole named window,
+#: and a doc that quietly moves one of them without moving its read stamp is what
+#: the node below still catches.
+SECTION2_WINDOW_END = "2026-10-28"
+SECTION2_SQL_FLOOR = "2026-10-22"
 
 
 def _sec2_prose() -> str:

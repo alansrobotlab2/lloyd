@@ -98,38 +98,44 @@ reads as off too: `source_inner_voice` falls back to False since #1015, when
 
 ## 2. What actually ran
 
-Seven days to 2026-09-28 (`runs.completed_at >= '2026-09-21'`), read
-2026-09-29T02:19Z from `~/lloyd-data/workers.db`. That predicate has a start and
-**no upper bound**, so the window is whatever the store held at the moment of the
-read and the stamp below is the second half of the number, not a caption: this is
-the same window §6 quotes, and §6 read it earlier, so its two mining figures sit
-under these rows by exactly the runs that landed in between — `bench-mine` 118 ok
-of 163 against 123 of 169 here (+6 runs, +5 ok), `session-distill` 28 ok of 29
-against 34 of 43 (+14 runs, +6 ok). Neither section is wrong; quoting one without
-its stamp is. Rows are the registered sources; `ok` is `status = 'success'`, and
+Seven days to 2026-10-28 (`runs.completed_at >= '2026-10-22' AND
+completed_at < '2026-10-29'`), read 2026-10-29T18:48Z from
+`~/lloyd-data/workers.db`. The upper bound is the change: the read this one
+replaced had a start and **no upper bound**, so its window was whatever the store
+held at the moment of the read, and §2 and §6 could both say "the same week" while
+disagreeing by the runs that landed between their two stamps. A bounded window has
+one number. §6's mining figures are `/api/workers/health`'s own unclamped 7-day read
+taken at its own instant, so they stay a few runs off these rows — `bench-mine` 101
+ok of 123 against 107 of 129 here, `session-distill` 12 ok of 13 against 11 of 12 —
+and neither section is wrong: the endpoint's floor moves with the read, this one
+does not, and quoting either without its stamp is what made them look contradictory.
+Rows are the registered sources that ran; `ok` is `status = 'success'`, and
 `failed` / `skipped` are the other two statuses a run can end in, with the residue
-`interrupted` (3 `autocode`, 1 `scheduled-task`). `runs` is pruned at 30 days, so
-re-measure before quoting this table — what it is for is the gap between what a
-source's config implies and what its row says. The stamp before this one,
-`2026-09-28T05:32Z`, is the cautionary case: thirteen hours old by the time this
-section's own `automod-regression` row was checked against the store, it had that
-source reporting nothing at all while the window already held two runs of it.
+`interrupted` (1 `bench-mine`, 1 `youtube-digest`, 1 `arch-review`). `runs` is pruned
+at 30 days, so re-measure before quoting this table — what it is for is the gap
+between what a source's config implies and what its row says. The stamp before this
+one, `2026-09-29T02:19Z`, is the cautionary case, and it stays quoted as one: its own
+predecessor `2026-09-28T05:32Z` was thirteen hours old by the time this section's
+`automod-regression` row was checked against the store, and it had that source
+reporting nothing at all while the window already held two runs of it — a window with
+no end cannot be age-checked against a stamp, which is what the upper bound above
+removes.
 
 | source | family | runs | ok | failed | skipped | avg |
 |---|---|---|---|---|---|---|
-| `autotriage` | self-mod | 654 | 419 | 0 | 235 | 143 s |
-| `autocode` | self-mod | 438 | 371 | 26 | 38 | 1312 s |
-| `board-steward` | self-mod | 171 | 124 | 20 | 27 | 86 s |
-| `bench-mine` | mining | 169 | 123 | 33 | 13 | 148 s |
-| `scheduled-task` | dispatch | 159 | 154 | 4 | 0 | 518 s |
-| `owed-check` | self-mod | 61 | 51 | 10 | 0 | 232 s |
-| `autoresearch` | self-mod | 58 | 23 | **35** | 0 | 1379 s |
-| `youtube-digest` | intake | 53 | 39 | 14 | 0 | 149 s |
-| `session-distill` | mining | 43 | 34 | 9 | 0 | 135 s |
-| `backlog-cluster` | self-mod | 38 | 38 | 0 | 0 | 4 s |
-| `deep-research` | intake | 21 | 20 | 1 | 0 | 418 s |
-| `arch-review` | self-mod | 20 | 20 | 0 | 0 | 827 s |
-| `automod-regression` | self-mod | 2 | 2 | 0 | 0 | 0.5 s |
+| `autotriage` | self-mod | 1573 | 549 | 0 | 1024 | 74 s |
+| `owed-check` | self-mod | 715 | 684 | 27 | 4 | 185 s |
+| `board-steward` | self-mod | 354 | 343 | 11 | 0 | 90 s |
+| `scheduled-task` | dispatch | 261 | 257 | 4 | 0 | 385 s |
+| `autocode` | self-mod | 260 | 239 | 13 | 8 | 1797 s |
+| `bench-mine` | mining | 129 | 107 | 11 | 10 | 387 s |
+| `youtube-digest` | intake | 96 | 54 | 41 | 0 | 205 s |
+| `backlog-cluster` | self-mod | 62 | 62 | 0 | 0 | 9 s |
+| `autoresearch` | self-mod | 41 | 41 | 0 | 0 | 568 s |
+| `deep-research` | intake | 24 | 23 | 1 | 0 | 444 s |
+| `arch-review` | self-mod | 22 | 19 | 2 | 0 | 495 s |
+| `session-distill` | mining | 12 | 11 | 1 | 0 | 154 s |
+| `frontend-probe-canary` | self-mod | 7 | 7 | 0 | 0 | 77 s |
 
 - **The mining pair's cap deaths are history, and so is the code that set the
   cap.** Over the 7 days to 2026-09-11 both failed most of their runs at
@@ -229,9 +235,9 @@ Four behaviours are load-bearing:
   falls through to `_primary_health_target()`), so until a pin names a real second
   model this gate is a second copy of the fleet gate.
 - **It passes the pool's cap into `run_task`** (`max_duration_seconds: 3600`;
-  `run_task` keeps its own timeout 30 s under the value it is handed,
-  `_POOL_TIMEOUT_MARGIN`, `app/autonomy.py:4585`) so the task's own timer always
-  wins. When the two were equal the pool cancelled the handler before it could
+  `run_task` (`app/autonomy.py:4585`) keeps its own timeout 30 s under the value
+  it is handed, the margin being `_POOL_TIMEOUT_MARGIN`) so the task's own timer
+  always wins. When the two were equal the pool cancelled the handler before it could
   write anything, and 237 runs and 73.6 GPU-hours recorded with a NULL `task_id`
   were that bug — but the pair is `config.yaml`'s comment on the cap, not a row
   anyone can re-query: `SELECT count(*) FROM runs WHERE source='scheduled-task'
