@@ -482,6 +482,34 @@ finalizer and `ConnectTimeout`). So `apply: false` is no longer an unmade
 decision waiting on an
 unmeasured quantity; it is the reading of a bar this week does not clear.
 
+**Below the floor, the disagreement now has a reader** (#3519). A measured fail
+is actionable in a way an unmeasured one is not, and until now the 26 disagreeing
+ids were published on a health route that nobody consumed: `autotriage` triages
+items, `owed-check` answers owed entries, `arch-review` reads docs. So
+`workers/board_disagreement.py` runs as the last act of an ordinary tick
+(`execute`, after the watermark and after the tick's own `board_steward` ledger
+row): it asks `judgement_aggregate` — the same function this section's `judgement`
+figures come from — and only when the window is **measured and under the floor**
+(summed `judged` ≥ 50 with agree `rate` < 0.90, and not `truncated`) does it file
+**one** draft item on the `lloyd` board, tagged `board-steward-disagreement`. Its
+rows name both sides of each disagreement — the status the steward proposed, from
+its parsed moves, and the status `desired_statuses` wants, with that rule's
+`why` — because the proposed move is stored nowhere else (every board-steward
+`runs` row has an empty `response_json`) and the question "which side is wrong"
+cannot be answered from the store. A later below-floor tick **adds its new ids to
+the same item** rather than filing a second one, and an item a round is already
+working (`in_progress`) is left unrewritten. Each file-or-merge appends one
+`board_steward_disagreement` row to the promotions ledger carrying that window's
+`judged`, `disagree` and `rate`, since the run summary is capped at 500 characters
+(#1606) and 77 of 154 rows already stop at exactly 500. Filing is a report on the
+tick, never its outcome: it cannot reach the tick's `status` or `summary`, it
+changes no item's status, and a filing that raises is logged and swallowed — the
+agreement record is built from tick *success*, so a reader that could break the
+instrument would make the flip harder to earn. **The flip itself is unchanged:
+`apply` still turns only on owed-check's bar** (summed `judged` ≥ 50 and agree
+`rate` ≥ 0.90, #3089 asked / #3329 ruled), which this module restates as its
+trigger and does not own.
+
 Since #1688 the record no longer claims what it did not measure. `agreement()`
 carries `judged` — the decisions both sides made — on the run meta and the
 `board_steward` ledger row, and its `rate` is `None` when `judged` is 0; such a

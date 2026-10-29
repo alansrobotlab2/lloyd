@@ -38,6 +38,10 @@ from pathlib import Path
 from typing import Any
 
 from workers.queue import WorkQueue, QueueItem
+# #3519's reader. A sibling source module, and the one import of it this gets:
+# `board_disagreement` imports no host module at its own top level, so this line
+# adds nothing to the `app` closure the import-surface test guards.
+from workers.board_disagreement import _file_quietly
 
 logger = logging.getLogger("lloyd-workers.board-steward")
 
@@ -799,6 +803,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "next_pick_reason": parsed["next_pick_reason"],
                     "agreement": agree, "applied": applied, "board_health": health,
                     "session_id": run.get("session_id"), "summary": parsed["summary"]})
+    # #3519: the disagreement signal gets its reader. Deliberately the LAST thing
+    # the tick does — after the watermark (`_write_state`) and after this tick's
+    # ledger row, so the tick is fully recorded whatever the filing does — and its
+    # return value is discarded for the same reason: it cannot reach `status`,
+    # `summary` or `meta` below, so it cannot change the outcome the agreement
+    # record is built from. `apply` was read at the top of the tick and is not
+    # re-read here, which is why filing a question cannot widen what the steward
+    # writes. Runs in a thread: it reads the queue and may write a backlog item,
+    # and blocking this event loop is how a steward tick starves the pool.
+    await asyncio.to_thread(_file_quietly, agree, parsed["moves"], expected)
     verb = "applied" if apply else "proposed (dry run)"
     # The steward's own sentence leads, and the counts follow it (#1606). This
     # string is capped at 500 characters on its way into `runs.summary`, the

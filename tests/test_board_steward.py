@@ -528,16 +528,29 @@ def _run_item():
 
 # ── #1688: a tick that judged nothing reports no agreement percentage ─────
 
-def _steward_tick(board, monkeypatch, *, moves=(), expected=None):
+#: An unmeasured window: the #3519 reader files only on a MEASURED disagreement,
+#: so the default here is inert and every test that does not ask about the reader
+#: cannot file an item or open the queue. Its own tests pass a real one.
+NO_WINDOW = {"judged": 0, "agree": 0, "disagree": 0, "rate": None,
+             "ticks_in_window": 0, "ticks_with_judged": 0, "truncated": False,
+             "window_since": "2026-10-20T00:00:00+00:00"}
+
+
+def _steward_tick(board, monkeypatch, *, moves=(), expected=None, window=None):
     """Run one dry-run tick on the ten-item board and return (result, ledger row).
 
     `expected` replaces `desired_statuses` so a test can hand the machine an
     opinion (or none) without building the ledger history that produces one.
+    `window` is the trailing-7-day judgement the tick's #3519 reader sees; the
+    default is an unmeasured window, so the reader stays inert for every test
+    that is not about it.
     """
     import asyncio
 
     from workers.sources import _common as C
+    from workers import board_disagreement as D
 
+    monkeypatch.setattr(D, "window_now", lambda **kw: dict(window or NO_WINDOW))
     _ten_item_board(board)
     if expected is not None:
         monkeypatch.setattr(B, "desired_statuses", lambda ledger: expected)
@@ -2146,3 +2159,234 @@ def test_the_timeout_branch_still_returns_the_string_it_returned_before(board,
     out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
     assert out == {"status": "failed", "summary": "steward turn timed out: 120s"}, out
     assert _steward_rows() == [], "the timeout branch writes no row today, still"
+
+
+# ─────────────────────────── #3519: a reader for the disagreement ───────────
+#
+# The figures the reader triggers on are the live ones it was filed on, from
+# `GET /api/workers/health?days=7` on 2026-10-27: judged 127, agree 101, disagree
+# 26, rate 0.7953. Volume leg cleared (127 ≥ 50), agreement leg under the 0.90 the
+# flip needs (#3089 asked, #3329 ruled), and no code path read the 26 ids.
+
+
+def _window7(**over):
+    """The published rolling-7-day judgement block, with overrides."""
+    w = {"judged": 127, "agree": 101, "disagree": 26, "rate": 0.7953,
+         "ticks_in_window": 279, "ticks_with_judged": 267, "truncated": False,
+         "window_since": "2026-10-20T23:49:13+00:00"}
+    w.update(over)
+    return w
+
+
+def _agree(*ids):
+    """The tick's agreement block, with the keys `agreement()` actually returns."""
+    return {"judged": len(ids), "agree": [], "disagree": sorted(ids),
+            "no_opinion": [], "missed": [], "machine_moves": len(ids),
+            "proposed": len(ids), "rate": 0.0}
+
+
+def _filed(board_dir):
+    """The disagreement items on the board, by tag rather than by filename."""
+    return [i for i in B.all_items(("lloyd",), backlog_dir=board_dir)
+            if "board-steward-disagreement" in (i.tags or ())]
+
+
+#: One tick's worth of the real disagreement: the steward moved five `up_next`
+#: items to `draft` for having no triage verdict in their history, and the state
+#: machine wanted them left `up_next` — run `board-steward` 2026-10-27 22:56:40Z,
+#: agreement 0% of 5 judged.
+DIS_AGREE = [3024, 3041, 3068, 3196, 3284]
+DIS_MOVES = [{"item_id": i, "status": "draft", "note": "no triage verdict in its history"}
+             for i in DIS_AGREE]
+DIS_EXPECTED = {i: ("up_next", "has a confirmed triage with acceptance text")
+                for i in DIS_AGREE}
+
+
+def test_below_floor_needs_both_legs_of_the_flip_bar():
+    """The gate is owed-check's bar restated, not a new number: volume AND
+    agreement, so a thin or unmeasured window cannot file and a well-measured
+    passing one cannot either. `truncated` means the aggregate hit its scan cap,
+    which is the same 'not yet evidence' state #1688 stopped summarising as 100%.
+    """
+    from workers.board_disagreement import below_floor
+
+    assert below_floor(_window7())[0] is True
+    assert below_floor(_window7(rate=0.90))[0] is False, "0.90 is the floor, not under it"
+    assert below_floor(_window7(rate=0.95))[0] is False
+    assert below_floor(_window7(judged=49, rate=0.10))[0] is False, "volume leg unmet"
+    assert below_floor(_window7(judged=50, rate=0.10))[0] is True, "50 judged is the leg"
+    assert below_floor(_window7(rate=0.10, truncated=True))[0] is False
+    assert below_floor(_window7(judged=0, rate=None))[0] is False
+
+
+def test_a_measured_below_floor_tick_files_one_item_naming_both_sides(board, tmp_path):
+    """Clause 1. 127 judged at rate 0.7953 is a measured fail, and the artifact
+    has to carry both sides: the status the steward proposed and the status
+    `desired_statuses` wants. The proposed move is stored nowhere else — every
+    board-steward `runs` row has an empty `response_json` (1142 of 1142, triage
+    2026-10-27) — so a reader holding only the item must be able to rule."""
+    from workers.board_disagreement import file_or_update
+
+    out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                         window=_window7(), backlog_dir=board,
+                         ledger=tmp_path / "ledger.jsonl")
+    assert out is not None and out["action"] == "filed"
+    items = _filed(board)
+    assert len(items) == 1, f"expected exactly one item, got {[i.id for i in items]}"
+    it = items[0]
+    assert it.status == "draft" and it.board == "lloyd"
+    for i in DIS_AGREE:
+        assert f"#{i}" in it.body, f"#{i} missing from the filed body"
+    assert "up_next" in it.body and "draft" in it.body
+    assert "steward proposed `draft`" in it.body
+    assert "the state machine wants `up_next`" in it.body
+    assert "has a confirmed triage with acceptance text" in it.body, "the machine's why"
+
+
+def test_nothing_is_filed_above_the_floor_or_before_the_volume_leg(board, tmp_path):
+    """Clause 1's negatives, on the same board and the same disagreement: an
+    agreement that clears the bar is a steward doing its job, and 49 judged is the
+    unmeasured region the item's own text warns is 'not yet evidence of anything'."""
+    from workers.board_disagreement import file_or_update
+
+    for w in (_window7(rate=0.94), _window7(judged=49, rate=0.10),
+              _window7(judged=0, rate=None)):
+        assert file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=w, backlog_dir=board,
+                             ledger=tmp_path / "ledger.jsonl") is None
+    assert _filed(board) == []
+
+
+def test_filing_again_adds_the_new_ids_to_the_same_item(board, tmp_path):
+    """Clause 2. A second below-floor tick naming three ids it has not named
+    before extends the one open item; a second item on the same subject is the
+    duplicate this clause exists to prevent, and the 500-char summary cap (#1606)
+    means the item IS the record."""
+    from workers.board_disagreement import file_or_update
+
+    first = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board,
+                           ledger=tmp_path / "ledger.jsonl")
+    assert first["action"] == "filed"
+    more = DIS_AGREE + [3119]
+    moves = DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                          "note": "the vec0 index needs a hand-side copy rebuild"}]
+    want = dict(DIS_EXPECTED)
+    want[3119] = ("up_next", "in_progress by no round, ready by its acceptance")
+    second = file_or_update(_agree(3119), moves, want, window=_window7(),
+                            backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert second["action"] == "merged"
+    items = _filed(board)
+    assert len(items) == 1, f"the second tick filed a second item: {[i.id for i in items]}"
+    assert items[0].id == first["item_id"]
+    for i in more:
+        assert f"#{i}" in items[0].body
+
+
+def test_an_item_a_round_is_working_is_left_unrewritten(board, tmp_path):
+    """Clause 2's other half: the same rule `file_red_tree_item` keeps for a
+    round holding a `blocked: red-tree` item. A round working the disagreement
+    item already IS the reader this window wanted."""
+    from workers import board_disagreement as D
+
+    first = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(), backlog_dir=board,
+                             ledger=tmp_path / "ledger.jsonl")
+    it = _filed(board)[0]
+    B.update_frontmatter(it.path, {"status": "in_progress"})
+    before = it.path.read_bytes()
+    assert D.file_or_update(_agree(3119), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                            backlog_dir=board,
+                            ledger=tmp_path / "ledger.jsonl") is None
+    assert it.path.read_bytes() == before, "the in_progress item was rewritten"
+    assert len(_filed(board)) == 1
+    assert first["action"] == "filed"
+
+
+def test_each_file_or_merge_appends_one_ledger_event_with_the_window(tmp_path):
+    """Clause 3. The run summary is capped at 500 characters and 77 of the 154
+    board-steward rows already stop at exactly 500, so the counts cannot live
+    there; one row per write carries that window's judged, disagree and rate."""
+    from workers.board_disagreement import file_or_update
+
+    led = tmp_path / "ledger.jsonl"
+    board = tmp_path / "backlog"
+    board.mkdir()
+    file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                   backlog_dir=board, ledger=led)
+    file_or_update(_agree(3119), DIS_MOVES, DIS_EXPECTED, window=_window7(rate=0.70),
+                   backlog_dir=board, ledger=led)
+    rows = [e for e in S.read_events(path=led)
+            if e.get("event") == "board_steward_disagreement"]
+    assert len(rows) == 2, rows
+    assert [r["action"] for r in rows] == ["filed", "merged"]
+    assert [r["judged"] for r in rows] == [127, 127]
+    assert [r["disagree"] for r in rows] == [26, 26]
+    assert [r["rate"] for r in rows] == [0.7953, 0.70]
+    assert rows[0]["item_id"] == rows[1]["item_id"]
+    assert rows[0]["tick_item_ids"] == DIS_AGREE
+    assert rows[1]["new_item_ids"] == [3119]
+
+
+def test_a_filing_that_raises_cannot_change_the_tick(board, monkeypatch):
+    """Clause 4. `agreement` is computed from tick SUCCESS, so a reader that can
+    break the instrument makes the flip harder to earn: every failure mode is
+    caught, logged and swallowed, and nothing below the call is skipped."""
+    from workers.sources import _common as C
+    from workers import board_disagreement as D
+
+    _ten_item_board(board)
+    monkeypatch.setattr(D, "window_now", lambda **kw: _window7())
+
+    def explode(*a, **k):
+        raise RuntimeError("backlog is a smoking crater")
+    monkeypatch.setattr(D, "file_or_update", explode)
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [], "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success", out
+    # `apply` is not a meta key; the dry-run proof is the summary's own wording
+    # plus the fact that no item on the board moved.
+    assert "dry run" in out["summary"], out["summary"]
+    assert _filed(board) == [], "a filing that raised must leave no partial item"
+
+
+def test_a_below_floor_tick_files_the_item_and_moves_nothing(board, monkeypatch):
+    """Clauses 1 and 4 end to end: the reader runs as the last act of an ordinary
+    tick, and the tick's outcome, its ledger row, the flip flag and every item's
+    status are exactly what they were without it — #7 stays `up_next`, which is
+    the disagreement itself, left for a person or autotriage to rule on."""
+    from workers.sources import _common as C
+    from workers import board_disagreement as D
+
+    _ten_item_board(board)
+    monkeypatch.setattr(B, "desired_statuses",
+                        lambda ledger: {7: ("up_next", "confirmed with acceptance")})
+    monkeypatch.setattr(D, "window_now", lambda **kw: _window7())
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [{"item_id": 7, "status": "draft",
+                                          "note": "never triaged"}],
+                               "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+
+    assert out["status"] == "success", out
+    assert "dry run" in out["summary"], out["summary"]
+    assert out["meta"]["agreement"]["disagree"] == [7]
+    items = _filed(board)
+    assert len(items) == 1
+    assert "#7" in items[0].body
+    seven = next(B.load_item(q) for q in board.glob("7-*.md"))
+    assert seven.status == "up_next", "the reader moved an item"
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "board_steward_disagreement"]
+    assert len(rows) == 1 and rows[0]["rate"] == 0.7953
+    ticks = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "board_steward"]
+    assert len(ticks) == 1, "the reader wrote a second tick row"
