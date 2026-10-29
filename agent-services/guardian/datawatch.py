@@ -36,9 +36,12 @@ Stdlib only. CLI:  datawatch.py status | clear | snapshot-gate | snapshot-age | 
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -507,6 +510,53 @@ _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 SHADOW_MAX_DEPTH = 6
 SHADOW_MAX_ENTRIES = 1_000_000
 
+#: There is deliberately NO byte bound on the content probe, and the reason is the
+#: acceptance check this item was written against.
+#:
+#: An earlier draft carried `SHADOW_PROBE_MAX_BYTES = 8 MiB`, reasoned from the cost of
+#: opening the root's populated stores — `workers.db` at 32 MB, `usage.db` at 40 MB, the
+#: declared KG store at 172 MB. It was wrong in the one place that matters: the probe is
+#: also how the check decides WHICH copy of a name to trust, the declared store is exactly
+#: such a copy, and a declared store over the cap reads as "not measurable", so the pairing
+#: fell back to a 24,576-byte witness copy under `_scratch/` and reported the live stray as
+#: `declared: false` — the acceptance check's stated shape, missed by the cap. Measured on
+#: the live root the same day: all 94 database-suffixed regular files, 9,460,412,416 bytes
+#: of them, probed in 0.066 s total with none declining, because the query is
+#: `select exists(select 1 from t)`, which costs one b-tree page read whatever the table
+#: holds and returns at the first table that has a row. A cost bound on a probe whose work
+#: does not scale with file size buys a false answer and no speed.
+
+#: Tables that hold bookkeeping rather than content, so a store whose only row lives in
+#: one of them is still EMPTY TO A READER (#3481).
+#:
+#: `meta` is `app/kg_store.py:_SCHEMA`'s key/value table, and `_init_schema` writes
+#: `('schema_version', '1')` into it as part of PROVISIONING a database — so every store
+#: `KGStore(path)` ever created has exactly one row and answers `select count(*) from
+#: facts_idx` with a clean `0`. Counting that row would make the content test unsatisfiable
+#: at the exact byte size of the live incident (81,920 bytes, one `meta` row, four empty
+#: data tables), which is the shape this check was written for and did not see. Only
+#: `meta` is here, on purpose: a name is decided by its copies under this root, so a store
+#: that carries a table no sibling has is a different store, and its content counts.
+SHADOW_BOOKKEEPING_TABLES = frozenset({"meta"})
+
+#: `struct flock` for the `F_GETLK` query, in NATIVE alignment: `l_type` and `l_whence`
+#: (2 bytes each), padding to 8, then `l_start`, `l_len` (8 each) and `l_pid` at offset 24.
+#: 28 bytes on this x86_64 build, and the size is asserted rather than assumed: on an ABI
+#: where the format stops being 28 the query declines to answer (`_flock_holder` checks
+#: `calcsize`) instead of reading a layout it did not measure.
+#:
+#: What makes this constant a proof and not a guess: `fcntl.lockf` has no test mode on
+#: Linux — `F_TEST` is a FreeBSD constant absent from its `fcntl.h`, and the first draft of
+#: this probe died on that `AttributeError` — and `F_TLOCK` would ACQUIRE a write lock on
+#: somebody's live database to learn the answer, so a wrong struct size here is not a loud
+#: failure: it reads "free" for every candidate, which is a rail that never fires. Measured
+#: on this box 2026-10-29 against a lock this process does not hold, a child taking
+#: `F_SETLK(F_WRLCK)` made the query answer `l_type = 1` with `l_pid` 1194437, and the same
+#: query answered `l_type = 2` (`F_UNLCK`) once the child died. The two child-process nodes
+#: in `tests/test_guardian_data_root_shadow.py` re-run exactly that pair.
+_FLOCK_STRUCT = "hhqqi"
+_FLOCK_SIZE = struct.calcsize(_FLOCK_STRUCT)      # 28 on this x86_64 build
+
 
 def _declared_db_relatives(repo: str) -> dict[str, str]:
     """`{basename: root-relative path}` for every `*_DB_RELATIVE` the repo declares.
@@ -541,21 +591,247 @@ def _declared_db_relatives(repo: str) -> dict[str, str]:
     return out
 
 
+def _flock_holder(path: str) -> tuple[bool, int]:
+    """`(locked, pid)` for the POSIX record lock another process holds on `path`.
+
+    (`False`, 0) answers only "no conflicting lock was found at the instant of the query".
+    A SQLite connection takes an `F_SETLK` write lock on the main file while it commits and
+    holds one on its `-shm` index for the life of the connection, so this is the query that
+    distinguishes a database being written from one whose `-wal`/`-shm` pair a killed
+    process left behind — which the bare existence test cannot do, and the live
+    `/home/alansrobotlab/lloyd-data/kg.sqlite` proves: it has both sidecars, stamped
+    2026-10-27 07:32 and 07:35, and no descriptor anywhere on the box holds either.
+
+    Returns (`locked`, `pid_of_holder`), `pid` 0 when unlocked. `F_GETLK` answers for
+    another process's lock only: POSIX record locks do not conflict within one process, so
+    this can never be exercised by taking a lock here — which is why the two nodes that pin
+    it spawn a child that locks the file and holds it across the check.
+
+    The pid is measured and dropped rather than used. `F_GETLK` reports the pid of the
+    process that owns the conflicting lock, and reporting it on an alert would be the
+    oldest stale-data failure in this tree: a pid is reused, and a daily note naming one
+    hours later accuses an innocent process (`_stale_pid_text`). The fact a human needs is
+    the boolean — somebody is writing this file, do not touch it.
+
+    (`False`, 0) is also the answer for a file that cannot be opened or queried. That is
+    deliberately the same answer as "free": this function only ever EXCLUDES, so an
+    unreadable file stays a candidate and the content probe, which must open it anyway, is
+    the one that decides.
+    """
+    if _FLOCK_SIZE != 28:                    # not the ABI this layout was measured on
+        return False, 0
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False, 0
+    try:
+        # `l_start` 0 and `l_len` 0 is the whole file, which is what makes the answer the
+        # strict one: SQLite byte-range locks (a shared reader at one offset, the write
+        # lock at another) all fall inside it, so any lock another connection holds counts.
+        query = struct.pack(_FLOCK_STRUCT, fcntl.F_WRLCK, 0, 0, 0, 0)
+        reply = struct.unpack(_FLOCK_STRUCT,
+                              fcntl.fcntl(fd, fcntl.F_GETLK, query))
+        held = reply[0] != fcntl.F_UNLCK
+        return held, (reply[4] if held else 0)
+    except OSError:
+        return False, 0
+    finally:
+        os.close(fd)
+
+
+def _held_by_another_process(path: str) -> bool:
+    """Does some process hold `path`, or a SQLite sidecar beside it, under a record lock?
+
+    This REPLACES the 0-byte class's `os.path.lexists(shadow + suffix)` test for the
+    candidates this check now measures, and the reason is a measurement, not a preference:
+    `/home/alansrobotlab/lloyd-data/kg.sqlite` carries `kg.sqlite-wal` (0 bytes, stamped
+    2026-10-27 07:32) and `kg.sqlite-shm` (32,768 bytes, 07:35), and no descriptor on this
+    box has either — a WAL connection that died leaves the pair standing over a store nobody
+    has open, and SQLite unlinks them only when the LAST connection closes cleanly. Reading
+    their existence as "a writer has it open" therefore suppressed the one finding #3481
+    exists to report, so file-not-exists and file-not-held are now different questions and
+    only the second one excludes.
+
+    The lock query still excludes exactly what it used to where it mattered: a live SQLite
+    writer holds a `F_SETLK` lock on the main file while it commits and one on the `-shm`
+    index for the life of its connection, so both are asked. `tests/test_guardian_data_root_
+    shadow.py` pins both directions with a child process that really takes the lock, because
+    a same-process lock would not conflict with this process's own query and the rail would
+    pass while doing nothing.
+
+    A candidate the query cannot ask about (unreadable, vanished) is NOT excluded here:
+    `_content_rows` has to open the same file to decide anything, and it declines on the
+    same failure, so an unreadable candidate ends up unreported by that route rather than by
+    a lock answer nobody measured.
+    """
+    for probe in (path, *(path + suffix for suffix in _SQLITE_SIDECARS)):
+        if os.path.lexists(probe) and _flock_holder(probe)[0]:
+            return True
+    return False
+
+
+def _read_open(path: str) -> "str | None":
+    """The one URI query `path` may be measured with, or `None` to decline measuring it.
+
+    Exactly one open per candidate, chosen from what stands beside the file, because the
+    two safe-in-one-way opens are each unsafe in the other. Measured 2026-10-29 against
+    hand-built fixtures on BOTH SQLite builds this box runs — 3.54.0 (`/usr/bin/python3`,
+    which is what the guardian executes) and 3.53.1 (the venv, which is what the tests
+    execute) — and the two agree on every row:
+
+    * **No `-wal`, or a `-wal` with no bytes in it** → `mode=ro&immutable=1`. A log that
+      holds no bytes holds no frames — WAL content is appended after a 32-byte header — so
+      the main file is the whole store and reading it alone is the true answer (measured on
+      a WAL-mode store whose rows were checkpointed and whose `-wal` was then re-created
+      empty: `immutable=1` answered 3 rows, correct). It takes no lock and, unlike the
+      other open, **creates nothing**: measured with the sidecar set absent before the open
+      and empty after. The alternative open on the same file created `kg.sqlite-wal` AND
+      `kg.sqlite-shm` — which is the review's finding on clause 3 of #3481, and the reason
+      the WAL-aware open is no longer tried first: a probe that manufactures a sidecar
+      writes into a person's data root and leaves a file the next tick has to explain.
+    * **A `-wal` with bytes in it, and a `-shm` beside it** → `mode=ro`. Only a WAL-aware
+      open applies the log, and `immutable=1` on such a file answers **0 rows for a store
+      with 3 committed un-checkpointed rows in it** (measured, both builds). That is
+      clause 2's forbidden error — an alert telling a person to delete a populated store —
+      so the cheaper open is not offered here even though it creates nothing. With the
+      index already standing there, this open creates nothing either (measured: sidecar set
+      identical before and after, and the store was not checkpointed by the read).
+    * **A `-wal` with bytes in it and NO `-shm`** → `None`, declined. `immutable=1` would
+      lie about it (measured: 0 rows, same file `mode=ro` answers 3), and `mode=ro` has to
+      BUILD the index, which creates `<db>-shm` (measured: `-shm` absent before the open,
+      32,768 bytes of it after). This check does not write into the data root, so the
+      candidate goes unmeasured rather than being measured wrongly: an unanswered question
+      is not emptiness (#2056), and this is the re-entry case the module already refuses on
+      for a read that fails partway. The shape is a WAL connection that died between
+      writing its log and materialising its index; it is re-measured every tick, and the
+      `test_a_wal_log_without_its_index_is_declined_and_never_written_into` node pins it, with the
+      lying open and the writing open each reproduced as a control inside that same node.
+
+    `os.stat` and not `os.path.lexists` for the log's bytes: one syscall answers both
+    "is it there" and "does it hold anything", and a zero-length `-wal` is the ordinary
+    residue of a checkpointed-and-killed connection — the live
+    `/home/alansrobotlab/lloyd-data/kg.sqlite` has exactly one, 0 bytes, stamped
+    2026-10-27 07:32, which is why the empty-log branch is the load-bearing one.
+    """
+    try:
+        wal_bytes = os.stat(path + "-wal").st_size
+    except OSError:
+        return "mode=ro&immutable=1"       # no log beside it: the main file is the store
+    if wal_bytes == 0:
+        return "mode=ro&immutable=1"       # a log with no frames in it holds no content
+    return "mode=ro" if os.path.lexists(path + "-shm") else None
+
+
+def _content_rows(path: str, size: int) -> tuple[bool, int, int]:
+    """Measure whether `path` holds content, opening it read-only: `(ok, tables, rows)`.
+
+    `rows` is whether any data table holds a row, reported as 0 or 1 — the only question
+    the caller asks is "is any of this readable content", and
+    `select exists(select 1 from t)` costs one b-tree page read whatever the table holds,
+    so a populated store is answered as cheaply as an empty one and the probe's cost does
+    not grow with file size (which is why no byte bound was kept; see the note above
+    `SHADOW_BOOKKEEPING_TABLES`). `ok=False` means the open was declined or could not be
+    made or the query did not answer: not a database, unreadable, a header too torn to
+    parse, or a WAL log standing without its index (`_read_open`). Then `tables`/`rows`
+    are meaningless, and an unanswered question is NOT emptiness — #2056's rule applied to
+    content. `size` is the caller's measured byte count and is not used: after #3481 bytes
+    decide nothing here, and the parameter stays because every caller passes its own
+    measurement and a probe that re-`stat`ed would be reading a different instant.
+
+    Which single open is chosen, and why exactly one, is `_read_open`'s subject: the safe
+    choice depends on whether a write-ahead log beside the file holds bytes, and both of
+    the two candidate opens is wrong for one of those shapes — one creates a sidecar, the
+    other reads a populated store as empty. A read that fails partway is likewise NOT an
+    answer of zero rows: the WAL-aware open reads real file locks, so on a store another
+    process is mid-commit in it can raise `database is locked`, and a lock error recorded
+    as "empty" would hand a human a POPULATED store to delete. Such a candidate is
+    declined and re-measured on the next tick — which is also why `_held_by_another_process`
+    asks the kernel about the lock first: a live writer should be excluded before its file
+    is opened at all.
+
+    Threading mode is not assumed: SQLite's URI docs name `SQLITE_OPEN_READONLY` and
+    `SQLITE_OPEN_FULLMUTEX` without saying which mode URI `mode` selects, so the connection
+    is used on this thread, closed before returning, and never shared. `immutable=1` also
+    asserts the file cannot change underneath the read; if that is false for a file, the
+    query raises and `ok=False` turns the candidate away, which is the direction that
+    cannot call a populated store empty.
+    """
+    query = _read_open(path)
+    if query is None:
+        return False, 0, 0
+    try:
+        con = sqlite3.connect("file:" + _uri_encode_ro(path) + "?" + query, uri=True)
+    except sqlite3.Error:
+        return False, 0, 0                  # this open cannot be made: nothing is known
+    try:
+        names = [row[0] for row in con.execute(
+            "select name from main.sqlite_master "
+            "where type = 'table' and name not like 'sqlite_%'")]
+        data_tables = [n for n in names if n not in SHADOW_BOOKKEEPING_TABLES]
+        rows = 0
+        for name in data_tables:
+            # A table cannot be parameterised, so the identifier is quoted the only
+            # safe way: doubled, and inside double quotes SQLite treats it as one
+            # identifier whatever it contains. A malicious name cannot reach here
+            # anyway — `sqlite_master` reports it only for a file that really is a
+            # SQLite database, which this probe just proved.
+            if con.execute('select exists(select 1 from main."%s")'
+                           % name.replace('"', '""')).fetchone()[0]:
+                rows = 1
+                break                  # populated: the answer, no further table asked
+        return True, len(data_tables), rows
+    except sqlite3.Error:
+        return False, 0, 0
+    finally:
+        _close_quietly(con)
+
+
+def _uri_encode_ro(path: str) -> str:
+    """Percent-encode everything sqlite3's URI parser would eat: `?`, `#`, `%`, `"` and
+    the control bytes, leaving `/` and every other byte intact. sqlite3's own
+    `filename_uri` test suite (test/e_data1.test) is what pins its grammar to
+    scheme + path + `?`-parameters, and `?` in a path segment is the realistic failure: a
+    file named `usage.db?mode=ro` would otherwise ask for a parameter twice.
+    """
+    out = []
+    for byte in os.fsencode(path):
+        if byte in (0x3F, 0x23, 0x25, 0x22) or byte < 0x20 or byte == 0x7F:
+            out.append("%%%02X" % byte)
+        else:
+            out.append(chr(byte))
+    return "".join(out)
+
+
+def _close_quietly(con) -> None:
+    try:
+        con.close()
+    except Exception:      # pragma: no cover - close on a read-only handle has no failure
+        pass
+
+
 def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
                       now: float | None = None) -> list[dict]:
-    """Every 0-byte database in the data root whose name is populated elsewhere under
-    the same root, as `(shadow, trusted)` pairs. READ-ONLY: never creates, moves,
-    truncates or unlinks anything.
+    """Every content-empty database in the data root whose name holds content elsewhere
+    under the same root, as `(shadow, trusted)` pairs. READ-ONLY: never creates, moves,
+    truncates or unlinks anything, and opens every candidate it tests in a mode where a
+    write is not possible.
 
-    The shape, from the live root: `kg.sqlite` at 0 bytes at the top while the knowledge
-    graph the code opens — `app.paths.VAULT_KG_DB`, `_pipeline/vault-derived/kg.sqlite` —
-    holds 160,882,688 bytes. A 0-byte file is a valid *empty* SQLite database, so a probe
-    that opened the bare name from the wrong cwd does not get an error; it gets 0 rows,
-    and prints "the KG is empty" about a populated store. That is the 2026-08-23/24
-    incident class this item names, and the same origin as the 2026-10-02 in-tree
-    `workers.db` story: `sqlite3` creates the file on connect. It happened twice in
-    opposite directions (`_pipeline/workers.db` at 0 bytes beside the populated queue
-    store at the top), which is why the check runs both ways.
+    Two live shapes of one hazard, both named here. (1) `kg.sqlite` at 0 bytes at the top
+    while the knowledge graph the code opens — `app.paths.VAULT_KG_DB`,
+    `_pipeline/vault-derived/kg.sqlite` — holds 160,882,688 bytes. A 0-byte file is a valid
+    *empty* SQLite database, so a probe that opened the bare name from the wrong cwd does
+    not get an error; it gets 0 rows, and prints "the KG is empty" about a populated store.
+    (2) Since #3481, the same file at 81,920 bytes: `KGStore('/home/alansrobotlab/lloyd-data/
+    kg.sqlite')` run from an agent's Bash heredoc at 2026-10-26 23:47 laid the SHIPPED
+    schema plus a `meta` version row and no data, which answers `select count(*) from
+    facts_idx` with a clean `0` while the declared store held 178,001 facts — the identical
+    false reading, at a byte size the 0-byte predicate could not see. Both came from the
+    same origin as the 2026-10-02 in-tree `workers.db` story: `sqlite3` creates the file on
+    connect, and `KGStore(path)` provisions an absent path by design (#1236's guard is
+    `_require_database`, which covers the READ route only). The class is therefore content,
+    not size; the 2026-08-23/24 incident named above is what the check exists for, and it
+    happened twice in opposite directions (`_pipeline/workers.db` empty beside the populated
+    queue store at the top), which is why the check runs both ways.
 
     Why a new predicate and not the existing two. `stray_in_tree` is scoped to the CODE
     tree by construction — its candidates are git's untracked entries, and the data root
@@ -570,11 +846,32 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
     compares names — no name list to maintain, and no new entry in `RUNTIME_NAMES`, which
     is the axis the item rules out.
 
-    Both halves of a pair must be measurements, and the exclusions are the same ones
-    `inert_residue` earns its right to act on: a regular file, one name, zero bytes,
-    untouched for `INERT_MIN_AGE_SECONDS`, no SQLite sidecar beside it. `CACHE_DIRS` is
-    not scanned (a rebuild in progress is not a shadow), and the scan does not follow a
+    Both halves of a pair must be measurements. The populated half is a file with bytes in
+    it and at least one row; the empty half is a file the probe could open and that answered
+    no row for any data table, at ANY byte size (#3481: the 0-byte-only rule was the blind
+    spot this item exists to close). The rest of the exclusions are the ones `inert_residue`
+    earns its right to act on: a regular file, one link, untouched for
+    `INERT_MIN_AGE_SECONDS`, and no SQLite writer holding it — which for a candidate that
+    holds bytes is a `F_GETLK` query (`_flock_holder`) and not the bare existence of a
+    sidecar. Existence is what the 0-byte rule used, and it would have kept this finding
+    unreported: the live `kg.sqlite` has a 0-byte `-wal` and a 32,768-byte `-shm` beside it
+    from a WAL connection that died on 2026-10-27, with no descriptor on either. `CACHE_DIRS`
+    is not scanned (a rebuild in progress is not a shadow), and the scan does not follow a
     symlink or descend past `SHADOW_MAX_DEPTH`.
+
+    Reading content is why this check opens files it used to only `lstat`, so the four
+    things that make that safe are each pinned by a node in
+    `tests/test_guardian_data_root_shadow.py`: the one open it uses is chosen by whether a
+    write-ahead log beside the candidate holds bytes (`_read_open`), so the probe never
+    writes — a `-wal`/`-shm` pair is not created beside a candidate, which the WAL-aware
+    open alone would do, and the pair is this check's residue to explain rather than
+    something it may manufacture — while a store whose newest rows are still sitting
+    un-checkpointed in its log is measured as POPULATED and never as empty, which the
+    sidecar-safe `immutable=1` open alone would do; a candidate that can only be measured
+    by writing an index into the root is DECLINED, not measured; a file the probe cannot
+    parse is never called empty, so a database-named file whose bytes are not a database
+    stays untouched; and a database another PROCESS holds with an `F_SETLK` lock is left
+    alone, which is the rail the existence rule was standing in for.
 
     The trusted half is the populated copy the ROOT itself declares — whichever store
     `app/data_root.py` names for that basename via a `*_DB_RELATIVE` constant — and it
@@ -637,10 +934,13 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
 
     out: list[dict] = []
     for name, recs in sorted(found.items()):
-        empties = sorted((p, d) for d, sz, p in recs if sz == 0)
         populated = sorted(((p, d, sz) for d, sz, p in recs if sz > 0),
                            key=lambda r: (r[1], -r[2], r[0]))
-        if not empties or not populated:
+        if not populated:
+            # Every copy of this name is byte-empty: there is no store here to shadow,
+            # and no reader can be pointed at a populated one. (#3481 moved the empty half
+            # of the pair off bytes and onto the row probe below, which is why the byte
+            # test survives on the POPULATED side: a file with no bytes cannot hold a row.)
             continue                      # one side of the pair is missing: no shadow
         # The store to trust is the one the repo DECLARES for this name whenever that copy
         # is itself populated; the shallowest-then-largest sort is only the fallback for a
@@ -655,21 +955,74 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
         # scandir path are two spellings of one file.
         rel = declared.get(name)
         declared_path = os.path.normpath(os.path.join(root, rel)) if rel else None
-        trusted_path, trusted_depth, trusted_size = next(
-            (r for r in populated
-             if declared_path and os.path.normpath(r[0]) == declared_path),
-            populated[0])
+        # One measurement per path per name per tick (`measured`): the trusted pick and the
+        # candidate sweep read through this, so three copies of a name cost three probes.
+        measured: dict[str, tuple[bool, int, int]] = {}
+
+        def content(path: str, size: int) -> tuple[bool, int, int]:
+            if path not in measured:
+                measured[path] = _content_rows(path, size)
+            return measured[path]
+
+        # The store to TRUST is the copy that holds rows, and the declared one wins when it
+        # does. #3481's row measure has to reach this pick too: `populated` is sorted by
+        # bytes, and a zero-row copy of a name can be the biggest file under it (the live
+        # `kg.sqlite` at 81,920 bytes sat in `populated[0]` in a fixture where the real
+        # store was smaller), so trusting bytes here would name an empty file as the store
+        # a human should count — inverting the one thing the alert exists to say. The
+        # declared copy is tried first so `declared: True` means what #3127 says it means;
+        # the (depth, then size) order is the fallback for a name the layout does not
+        # declare, and it is not cosmetic — a 2-deep copy outranks a 3-deep one on depth.
+        # The age, link-count and lock rails below are NOT applied to this pick: they exist
+        # because a finding invites a person to delete, and nothing is invited here. A torn
+        # read of a database mid-commit makes `content` decline, which leaves the name
+        # unpaired for this tick and re-measured on the next one.
+        ordered = populated
+        if declared_path:
+            ordered = sorted(
+                populated,
+                key=lambda r: (os.path.normpath(r[0]) != declared_path, r[1], -r[2], r[0]))
+        measured_populated = [(p, d, sz) for p, d, sz in ordered
+                              if content(p, sz)[0] and content(p, sz)[2]]
+        if measured_populated:
+            trusted = measured_populated[0]
+        else:
+            # Nothing under this name is a readable database WITH rows in it. The copies may
+            # still be databases that are all empty, or files that are not SQLite at all —
+            # `state.db` ships as a Berkeley DB (`policy.RUNTIME_DATA_NAMES`), and its probe
+            # declines for both halves — so this falls back to the pre-#3481 answer, the
+            # byte-populated copy the sort puts first. Requiring a readable populated half
+            # would silently un-report a 0-byte `state.db` shadowing a real Berkeley one,
+            # which is coverage this check has had since #3109 and this round does not own.
+            # A name whose copies are ALL readable-and-empty lands here too, and the
+            # candidate sweep below reports each non-trusted copy on its own measurement.
+            trusted = ordered[0]
+        trusted_path, trusted_depth, trusted_size = trusted
         trusted_norm = os.path.normpath(trusted_path)
-        for shadow, depth in empties:
+        # Every copy of the name except the trusted one is a candidate, and content is what
+        # decides — the byte size only ever ordered the old rule.
+        for shadow, depth, size in sorted(((p, d, sz) for d, sz, p in recs),
+                                          key=lambda r: (r[0], r[1], r[2])):
+            if os.path.normpath(shadow) == trusted_norm:
+                continue                  # the store to trust is never its own shadow
             try:
                 st = os.lstat(shadow)
             except OSError:
                 continue
-            if not stat.S_ISREG(st.st_mode) or st.st_size != 0 or st.st_nlink != 1:
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 continue
             if now - st.st_mtime < INERT_MIN_AGE_SECONDS:
                 continue
-            if any(os.path.lexists(shadow + suffix) for suffix in _SQLITE_SIDECARS):
+            if st.st_size != size:
+                # The file changed between the walk and the decision, so this tick's
+                # measurement is not this file's measurement. Skip; the next tick re-measures.
+                continue
+            if _held_by_another_process(shadow):
+                continue
+            readable, data_tables, data_rows = content(shadow, size)
+            if not readable or data_rows:
+                # Either the probe could not answer — an unreadable file is not an empty
+                # one, #2056 — or the copy holds content, which makes it a store.
                 continue
             out.append({
                 "shadow": shadow, "name": name, "depth": depth,
@@ -678,6 +1031,11 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
                 "declared": declared_path is not None
                 and trusted_norm == declared_path,
                 "declared_relative": rel,
+                # Measured content, and the bytes it sits in. Both go on the alert: after
+                # #3481 a finding's byte size says nothing about its emptiness, so the row
+                # count is the number a person decides on.
+                "shadow_size": size, "data_tables": data_tables,
+                "data_rows": data_rows,
             })
     out.sort(key=lambda f: f["shadow"])
     if truncated:

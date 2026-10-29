@@ -381,30 +381,54 @@ Four layers, in the order a turn meets them:
    delete; `log.jsonl` there records each one. Anything else — one byte, a directory,
    an unlisted name — alerts as before. `datawatch.py inert` lists what the next check
    would move.
-4. **A 0-byte database inside the data root that shadows a populated one is named, never
-   moved** (`datawatch.data_root_shadows`, measured in the same `_runtime_data_incident`
+4. **A content-empty database inside the data root that shadows a populated one is named,
+   never moved** (`datawatch.data_root_shadows`, measured in the same `_runtime_data_incident`
    tick, #3109). The check above cannot see it: its candidates are git's untracked entries
-   and the data root is not a repository. The shape came from the live root — a 0-byte
-   `kg.sqlite` at the top while `_pipeline/vault-derived/kg.sqlite` held 160,882,688
-   bytes as measured then (the store grows; re-stat it rather than quote this figure),
-   and the same accident in the opposite direction as a 0-byte
-   `_pipeline/workers.db` — and a 0-byte file is a valid *empty* SQLite database, so a
-   probe opened at the wrong path prints 0 rows instead of failing. The verdict comes from
-   enumerating the root and comparing basenames across depths, both directions, with no
-   name list; the store to trust is the one `app/data_root.py` declares for that basename
-   through a `*_DB_RELATIVE` constant, the same single spelling `policy.kg_db_path` reads,
-   so a root or layout move moves the answer with it. Same inertia tests as the move above
-   — one name, zero bytes, `INERT_MIN_AGE_SECONDS`, no sidecar — and then it stops:
-   **report-only**, raised with `needs_human=True`, because a
-   file under the data root is a person's to remove. Since #3124 the heading is the
-   condition, chosen in the one raise: a check that also found a code-tree stray keeps
-   `RUNTIME_DATA_ALERT_TITLE`, and one that found only data-root residue gets
-   "A 0-byte database under the data root is shadowing a populated store" — the shared
-   heading had toasted hourly over files all under the data root while telling the
-   operator to go find a writer in the checkout. An all-clear walks both headings, so a
-   section opened under the older string still closes. A scan that cannot walk the root
-   raises rather than answering `[]`, and the day's note is not cleared on a tree-only
-   measurement.
+   and the data root is not a repository. The shape came from the live root — a
+   content-empty `kg.sqlite` at the top while `_pipeline/vault-derived/kg.sqlite` held
+   160,882,688 bytes as measured then (the store grows; re-stat it rather than quote this
+   figure), and the same accident in the opposite direction as a
+   `_pipeline/workers.db` that held no rows — and an empty database is a valid *empty*
+   SQLite database, so a probe opened at the wrong path prints 0 rows instead of failing.
+   **Emptiness is rows, not bytes (#3481).** The live stray is 81,920 bytes: `KGStore(path)`
+   provisions an absent path by design (#1236's `_require_database` guards the read route
+   only), so that file carries the whole shipped schema plus a `('schema_version','1')` row
+   and no data — a count answers cleanly at any size a `size == 0` predicate could have
+   seen. `meta` is bookkeeping and not content. The probe performs **one** open per
+   candidate, chosen by `datawatch._read_open` from what stands beside the file, because the
+   two opens that are each safe one way are unsafe the other: with no `-wal` beside it, or a
+   `-wal` holding no bytes, it reads `mode=ro&immutable=1`, which takes no lock and creates
+   nothing, and a frameless log cannot hold content; with a `-wal` that holds frames *and* a
+   `-shm` to index it, it reads `mode=ro`, the only open that applies the log, so a store
+   whose rows are still sitting un-checkpointed in that log measures as populated instead of
+   tempting a human to delete it; with frames but no `-shm`, the candidate is **declined** —
+   `immutable=1` would answer 0 rows over real ones and `mode=ro` would have to build the
+   missing index, which is a file written into a person's data root. All three branches were
+   measured on both SQLite builds this box runs (3.54.0 and 3.53.1), which agree. The check
+   is no longer `stat`-free: it opens what it judges, and bytes it cannot parse are declined
+   and never called empty. The verdict comes from enumerating the root and comparing
+   basenames across depths, both directions, with no name list; the store to trust is the
+   populated one `app/data_root.py` declares for that basename through a `*_DB_RELATIVE`
+   constant, the same single spelling `policy.kg_db_path` reads, so a root or layout move
+   moves the answer with it. Same inertia tests as the move above — one name, one link,
+   `INERT_MIN_AGE_SECONDS` — and then it stops: **report-only**, raised with
+   `needs_human=True`, because a file under the data root is a person's to remove. What
+   counts as a live writer was amended by #3481 too: the old rule was the *existence* of a
+   SQLite sidecar, and the live `kg.sqlite` carries a 0-byte `-wal` and a 32,768-byte
+   `-shm` from a connection that died on 2026-10-27 with no descriptor on the box, which is
+   what kept this finding unreported for two days. The rail is now a `F_GETLK` query of the
+   candidate and of each sidecar — does a process HOLD it — and a database another process
+   holds is never named. Since #3124 the heading is the condition, chosen in the one raise:
+   a check that also found a code-tree stray keeps `RUNTIME_DATA_ALERT_TITLE`, and one that
+   found only data-root residue gets "Content-empty databases under the data root are
+   shadowing Lloyd's populated stores" — the shared heading had toasted hourly over files
+   all under the data root while telling the operator to go find a writer in the checkout.
+   The line for each finding prints the measured bytes AND the measured rows, so an 81,920
+   byte file is never described as 0 bytes (#3481 clause 4). An all-clear walks both
+   headings — the live one and `RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED`, because
+   `notify.resolve` matches a daily-note heading literally and a retired heading the walk
+   stops passing seals a section forever — and a scan that cannot walk the root raises
+   rather than answering `[]`, so the day's note is not cleared on a tree-only measurement.
 
 ## The move (2026-09-22)
 

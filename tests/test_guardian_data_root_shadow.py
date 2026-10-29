@@ -23,12 +23,28 @@ here from `test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer` onwa
 (#3124: a shadow is not a stray, and does not get the code tree's words); the incident
 cycle around it, including the clearance that retracts both headings, is in
 `tests/test_guardian_predicates.py`.
+
+A schema-current, content-empty duplicate is the SAME hazard at a different byte size, and
+the check used to be blind to it (#3481): `KGStore('/home/alansrobotlab/lloyd-data/kg.sqlite')`
+run from an agent's Bash heredoc on 2026-10-26 23:47 laid an 81,920-byte file with the whole
+shipped schema and a `meta` version row and NOTHING else — 0 rows in `entities`, `aliases`,
+`edges` and `facts_idx`, while the declared store it shadows held 178,001 facts. A 0-byte
+store answers a count with an error; a provisioned one answers `select count(*)` with `0`,
+cleanly, which is the confident false "the KG is empty" of the 2026-08-23/24 incident class.
+`empties = sorted((p, d) for d, sz, p in recs if sz == 0)` could not see it, so the check now
+measures rows instead of bytes and the alert says which. Nodes from
+`test_an_80_kib_schema_only_copy_of_the_declared_store_is_a_shadow` onwards (#3481); the
+row probe's own non-mutation and the lock query that keeps a live writer unnamed are pinned
+beside them.
 """
 from __future__ import annotations
 
+import ast
 import os
 import shutil
+import sqlite3
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -288,12 +304,24 @@ def test_a_zero_byte_file_with_no_counterpart_is_not_reported(tmp_path):
     assert _shadows(data, repo) == []
 
 
-def test_a_sidecar_beside_an_empty_copy_means_a_writer_has_it_open(tmp_path):
-    """A `-wal` is a live handle: the same rule `inert_residue` applies in the tree.
+def test_a_sidecar_beside_a_copy_amends_to_a_lock_and_not_to_its_existence(tmp_path):
+    """#3109 clause 4's rule, AMENDED by #3481: existence is not evidence of a writer.
 
-    Naming a database that is mid-open as a shadow to delete is how a check gets
-    switched off. It is left for the next tick, which is what the age floor below is
-    for as well.
+    This node pinned "a `-wal` beside it means a writer has it open", and that inference is
+    false on this box: the live `/home/alansrobotlab/lloyd-data/kg.sqlite` has a 0-byte
+    `-wal` stamped 2026-10-27 07:32 and a 32,768-byte `-shm` stamped 07:35 — over forty
+    hours after the file itself — and no descriptor on the machine held either, because
+    SQLite unlinks that pair only when the last connection closes cleanly. Under the old
+    rule the file this item exists for stayed invisible. So the rail is now the question it
+    was standing in for: does a process HOLD the file, asked of the kernel with `F_GETLK`
+    (`_held_by_another_process`), over the candidate and each sidecar.
+
+    The other half of #3109 clause 4 is untouched and still pinned: a database that really
+    is mid-write is never named —
+    `test_a_process_holding_the_candidate_locked_keeps_it_unreported` and
+    `test_a_process_holding_the_wal_locked_keeps_it_unreported` both hold a real `F_SETLK`
+    lock in a child process across the check, which is what makes those rails measurable
+    rather than declarative.
     """
     data = tmp_path / "lloyd-data"
     repo = _shipped_layout_repo(tmp_path)
@@ -301,7 +329,9 @@ def test_a_sidecar_beside_an_empty_copy_means_a_writer_has_it_open(tmp_path):
     _store(data / "kg.sqlite-wal", 0)
     _store(data / SHIPPED_KG, 4096)
 
-    assert _shadows(data, repo) == []
+    assert _reported(_shadows(data, repo)) == [str(data / "kg.sqlite")], (
+        "an unheld `-wal` is residue, and the file beside it is the finding #3481 was "
+        "written to stop losing")
 
 
 def test_a_sidecar_is_never_itself_reported(tmp_path):
@@ -501,6 +531,659 @@ def test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer(tmp_path, mo
         "the daily note still heads a data-root shadow with the wording a stray owns")
 
 
+# ── #3481: bytes are not rows — the schema-current, content-empty duplicate ──
+
+#: The data tables of the shipped schema, i.e. every table but the `meta` bookkeeping
+#: one. Named here so a node can say what "no rows" was measured over.
+KG_DATA_TABLES = ("entities", "aliases", "edges", "facts_idx")
+
+
+def _kg_schema() -> str:
+    """The `_SCHEMA` literal of `app/kg_store.py`, read out of the source text.
+
+    Read, not imported: the guardian runs on `/usr/bin/python3` with no venv and cannot
+    import `app.*` at all (which is why the layout module is loaded by file path in
+    `_repo_declaring`), and a fixture schema typed out here would drift from the shipped
+    one the moment a migration landed — the #1525/#2110 rule this file already holds for
+    `KG_DB_RELATIVE`. Parsing the assignment means the fixture provisions the database the
+    incident actually provisioned, including `meta`, which is the table this item's
+    predicate has to look past.
+    """
+    src = (ROOT / "app" / "kg_store.py").read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        if (isinstance(node, ast.Assign)
+                and getattr(node.targets[0], "id", "") == "_SCHEMA"):
+            return ast.literal_eval(node.value)
+    raise AssertionError("app/kg_store.py no longer assigns a _SCHEMA literal")
+
+
+def _provisioned(path: Path, *, facts_rows: int = 0, pad_rows: int = 0,
+                 now: float = OLD) -> Path:
+    """A REAL SQLite database carrying the shipped KG schema in WAL mode, aged to `now`.
+
+    What `KGStore(path)` leaves behind: `_SCHEMA` executed, one `meta` row carrying
+    `schema_version`, and no data. `pad_rows` inserts that many rows into `facts_idx`
+    and deletes them again WITHOUT vacuuming, which is how a database ends up holding
+    free pages: bytes, zero rows, and a fully valid file. `facts_rows` leaves its rows
+    in place, which is the populated side of the pair.
+
+    **WAL mode, because that is what the shipped store is.** `KGStore._open()` runs
+    `PRAGMA journal_mode=WAL` (`app/kg_store.py:228-229`) on the connection it hands out, so
+    every database `KGStore(path)` has ever provisioned carries `journal_mode=wal` in its
+    header — the live `/home/alansrobotlab/lloyd-data/kg.sqlite` of this incident among them
+    (it answers `wal`). This is not decoration: the journal mode decides which read open the
+    probe can use, and a rollback-journal fixture made the non-mutation node below
+    trivially true of its own fixtures, which is how the review found clause 3 unmet —
+    `mode=ro` creates `-wal` and `-shm` beside a WAL-mode file and nothing beside a
+    rollback-journal one (measured 2026-10-29 on SQLite 3.54.0 and 3.53.1). Closing the
+    last connection checkpoints the log and unlinks both sidecars, so what the fixture
+    leaves on disk is a WAL-mode store with no residue beside it: the one shape where the
+    WAL-aware open manufactures files that were not there.
+
+    Unlike `_store`, this writes bytes SQLite can open, so the row probe reaches a real
+    verdict instead of declining.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    try:
+        con.executescript(_kg_schema())
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1') "
+                    "ON CONFLICT(key) DO NOTHING")
+        for i in range(facts_rows):
+            con.execute("INSERT INTO facts_idx(entity, category, text_hash, file_path) "
+                        "VALUES (?, 'state', ?, ?)",
+                        (f"E{i}", f"h{i}", f"memory/{i}.md"))
+        for i in range(pad_rows):
+            con.execute("INSERT INTO facts_idx(entity, category, text_hash, file_path) "
+                        "VALUES (?, 'state', ?, ?)",
+                        (f"P{i}", f"p{i}", f"pad/{i}.md"))
+        if pad_rows:
+            con.execute("DELETE FROM facts_idx WHERE entity LIKE 'P%'")
+        con.commit()
+        assert con.execute("PRAGMA journal_mode").fetchone()[0] == "wal", (
+            f"{path} is not a WAL-mode store, so every non-mutation claim built on this "
+            "fixture is a claim about a shape the shipped store never has")
+    finally:
+        con.close()
+    for side in ("-wal", "-shm"):
+        assert not os.path.lexists(str(path) + side), (
+            f"{path}{side} survived the close, so the fixture starts with residue and "
+            "'the probe created nothing' below would not be this run's claim")
+    os.utime(path, (now, now))
+    return path
+
+
+_LOCK_CHILD = (
+    "import fcntl, os, struct, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "fcntl.fcntl(fd, fcntl.F_SETLK, "
+    "struct.pack('hhqqi', fcntl.F_WRLCK, 0, 0, 0, 0))\n"
+    "sys.stdout.write('locked\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(60)\n")
+
+
+def _lock_held_by_another_process(path: Path) -> subprocess.Popen:
+    """Hold an exclusive POSIX record lock on `path` from a CHILD process.
+
+    A child and not this one, because POSIX record locks are per-process: a lock this
+    process takes cannot conflict with this process's own query, so a same-process
+    fixture would pass whether or not the probe can see a writer at all. The child is
+    the same class of writer the check must leave alone — SQLite takes exactly these
+    `F_SETLK` locks on the main file and on its `-shm` index.
+    """
+    child = subprocess.Popen([sys.executable, "-c", _LOCK_CHILD, str(path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    first = child.stdout.readline()
+    assert first == "locked\n", (
+        f"the child never took the lock on {path}: {first!r}")
+    return child
+
+
+def _kill(child: subprocess.Popen) -> None:
+    child.kill()
+    child.wait(timeout=10)
+
+
+def test_an_80_kib_schema_only_copy_of_the_declared_store_is_a_shadow(tmp_path):
+    """Clause 1, at the live incident's own byte count: 81,920 bytes, 0 rows.
+
+    The stray this item exists for is not 0 bytes — it is a database the shipped schema
+    was provisioned into, so `select count(*) from facts_idx` answers `0` instead of
+    failing. `empties = sorted((p, d) for d, sz, p in recs if sz == 0)` dropped it before
+    the pairing test ever ran, which is why three checks that could have named it on
+    2026-10-26 named nothing and this item is the only report it will ever get. The
+    fixture is built from `_SCHEMA`, so its size is the shipped schema's size, and the
+    predicate under test must be rows and not bytes.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    real = _provisioned(data / SHIPPED_KG, facts_rows=40)
+
+    found = _shadows(data, repo)
+    # The live stray is 81,920 bytes; provisioning the same schema from `KGStore` right
+    # now lands at 77,824, because the live file's page count also carries a WAL
+    # checkpoint and a fill factor this fixture never had. Tens of kilobytes and zero
+    # rows is the shape the clause is about; the exact page count is not the predicate,
+    # and `shadow_size` below is asserted to be whatever the file actually measures.
+    assert os.path.getsize(stray) > 65_536, (
+        f"the fixture has collapsed to {os.path.getsize(stray)} bytes, so this node is "
+        "no longer about a file the old 0-byte predicate could not see")
+    assert _reported(found) == [str(stray)], (
+        f"a provisioned 0-row copy of the declared store must be named: {found}")
+    assert found[0]["declared"] is True, (
+        "the trusted half is the store `KG_DB_RELATIVE` declares, which is what tells "
+        "the reader which of the four live kg.sqlite files to count")
+    assert found[0]["trusted"] == str(real)
+    assert found[0]["data_rows"] == 0, found[0]
+    assert found[0]["data_tables"] == len(KG_DATA_TABLES), (
+        "the emptiness has to be measured over the four data tables the schema "
+        f"provisions, not over nothing: {found[0]}")
+    assert found[0]["shadow_size"] == os.path.getsize(stray), (
+        "the alert prints this number, so it must be the file's measured bytes and not "
+        f"the 0 the old line printed: {found[0]}")
+
+
+def test_a_larger_zero_row_copy_is_reported_on_the_same_measurement(tmp_path):
+    """Clause 1's "whatever its byte size" half, at 4x the byte count.
+
+    The same four tables, still empty, but the file is 327,680 bytes because it once
+    held rows that were deleted without a vacuum. Any predicate that reads size as a
+    proxy for content gets one finding here and not two, so both files are reported and
+    the larger one is not silently demoted to "a store".
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    thin = _provisioned(data / "notes.sqlite")
+    fat = _provisioned(data / "sub" / "notes.sqlite", pad_rows=4000)
+    _provisioned(data / "_pipeline" / "notes.sqlite", facts_rows=200)
+    fat_bytes = os.path.getsize(fat)
+    assert fat_bytes > 4 * os.path.getsize(thin), (
+        f"the padded fixture is {fat_bytes} bytes against "
+        f"{os.path.getsize(thin)}, so this node no longer tests a bigger file")
+
+    found = _shadows(data, repo)
+    assert _reported(found) == [str(thin), str(fat)], (
+        f"both zero-row copies are shadows; got {found}")
+    assert {f["data_rows"] for f in found} == {0}
+    assert sorted(f["shadow_size"] for f in found) == sorted(
+        [os.path.getsize(thin), fat_bytes])
+
+
+def test_a_version_row_alone_does_not_make_a_copy_populated(tmp_path):
+    """What `meta` is, and why the row count looks past it.
+
+    `KGStore._init_schema` inserts `('schema_version', '1')` as part of PROVISIONING a
+    database, so every freshly-created store — including the live stray this item names —
+    has exactly one row in `meta` and none anywhere else. Counting it would make the
+    predicate unsatisfiable at the exact byte size the incident has, and the check would
+    answer "0 findings" about the file it was written for.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    _provisioned(data / SHIPPED_KG, facts_rows=5)
+    with sqlite3.connect(str(stray)) as con:
+        assert list(con.execute("SELECT key, value FROM meta")) == [
+            ("schema_version", "1")], "the fixture lost the provisioning row"
+        for table in KG_DATA_TABLES:
+            assert con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+
+    assert _reported(_shadows(data, repo)) == [str(stray)]
+
+
+def test_one_row_in_facts_idx_is_a_populated_copy_and_not_a_shadow(tmp_path):
+    """Clause 2: a candidate holding a row is a store, at any depth.
+
+    This is also the false-positive bound on the whole leg. The populated declared store
+    shares the basename, so a predicate that misread it would print an instruction to
+    delete a 169 MB store of 178,001 facts — and the reverse direction matters just as
+    much: the shallow copy below the top is a real store the moment it has a row in it.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    _provisioned(data / "kg.sqlite", facts_rows=1)
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    assert _shadows(data, repo) == [], (
+        "a copy with one row is a store; naming it is how a check gets switched off")
+
+    data2 = tmp_path / "lloyd-data2"
+    _provisioned(data2 / "kg.sqlite", facts_rows=40)
+    _provisioned(data2 / "sub" / "kg.sqlite", facts_rows=1)
+    assert _shadows(data2, repo) == []
+
+
+def test_bytes_that_are_not_a_database_are_never_claimed_empty(tmp_path):
+    """A probe that cannot read the file cannot prove it empty, so it reports nothing.
+
+    `_store` writes the SQLite magic plus filler: `sqlite3` opens that and answers
+    "file is not a database". Answering `0 rows` for bytes the probe could not parse
+    would be #2056's unreadable-is-not-empty in a new costume, and here it would be the
+    sentence on an alert telling a person to delete the file.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    junk = _store(data / "kg.sqlite", 81_920)
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+
+    assert _shadows(data, repo) == [], (
+        f"an unparseable 81,920-byte file was reported as empty: {junk}")
+
+
+def test_testing_a_candidates_content_mutates_nothing_on_disk(tmp_path):
+    """Clause 3: the row probe is a read, provably, per inode and per directory entry.
+
+    The check opens every database-named candidate on every hourly tick, including stores a
+    person may still care about, so "it only reads" has to be a measurement and not a
+    description of the URI. Both fixtures are WAL-mode, and the journal mode is what makes
+    this node able to fail: a `mode=ro` open **creates `-wal` AND `-shm` beside a WAL-mode
+    file that had none** (measured 2026-10-29 on `/usr/bin/python3`'s SQLite 3.54.0 and the
+    venv's 3.53.1 — sidecars absent before the open, both present after it) and creates
+    nothing beside a rollback-journal one. The first version of this node built its fixtures
+    in the second shape and the review found clause 3 unmet on it: every claim it made was
+    true of files `KGStore` never produces, while the stores it claimed to protect took the
+    open that writes. `_provisioned` now sets the shipped store's own journal mode, so the
+    fixture reproduces the failure.
+
+    So: both stores keep their bytes and their mtime, no `-wal`, `-shm` or `-journal`
+    appears beside either, and the root's directory entries are the ones it started with. A
+    manufactured sidecar is worse than litter — the check reads a sidecar as residue to
+    explain and asks the kernel who holds it, so inventing one rewrites the next tick's
+    reading of the file — and it is still a file the watchdog wrote into a person's data
+    root. That is why `_read_open` takes `immutable=1` whenever no log with bytes in it
+    stands beside the candidate, and why the WAL-aware open is only used where a `-shm`
+    already exists for it to use.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    real = _provisioned(data / SHIPPED_KG, facts_rows=40)
+    # That `_provisioned` came back at all is the WAL claim: it asserts
+    # `PRAGMA journal_mode` answers `wal` on its own way out, then asserts both sidecars are
+    # gone, because a WAL-mode file with a live connection HAS them and the check would
+    # legitimately decline to explain a store somebody has open.
+    before = {stray: _fingerprint(stray), real: _fingerprint(real)}
+    for path in before:
+        for suffix in ("-wal", "-shm", "-journal"):
+            assert not os.path.lexists(str(path) + suffix), (
+                f"{path}{suffix} exists before the check ran, so 'created nothing' "
+                "below is not this run's claim")
+
+    found = _shadows(data, repo)
+
+    assert _reported(found) == [str(stray)], "the fixture must hold a real shadow"
+    assert found[0]["trusted"] == str(real) and found[0]["declared"] is True, (
+        "and the probe has to have READ the populated store to know that: a declined "
+        f"declared store would fall through to this assertion anyway: {found[0]}")
+    for path, was in before.items():
+        assert _fingerprint(path) == was, f"{path} changed under a read-only probe"
+        for suffix in ("-wal", "-shm", "-journal"):
+            assert not os.path.lexists(str(path) + suffix), (
+                f"the probe created {path}{suffix}: the next tick reads that as a store "
+                "with a connection of its own, and the data root is not ours to write")
+    assert sorted(os.listdir(data)) == ["_pipeline", "kg.sqlite"], (
+        "the root holds exactly the entries it started with")
+
+
+def test_a_wal_log_without_its_index_is_declined_and_never_written_into(
+        tmp_path, monkeypatch):
+    """The one shape where BOTH opens are unsafe is declined, and both wrong answers are
+    reproduced here so the decline is what the node pins.
+
+    A `-wal` holding frames with no `-shm` beside it. `mode=ro&immutable=1` reads the main
+    file alone and answers 0 rows for a store whose committed rows are sitting in that log
+    (measured 2026-10-29, both SQLite builds: 3 rows committed un-checkpointed, `mode=ro`
+    answers 3 and `immutable=1` answers 0) — clause 2's forbidden error, an alert telling a
+    person to delete a populated store. `mode=ro` answers correctly but has to BUILD the
+    missing index, measured the same day as a 32,768-byte `-shm` appearing where none
+    stood: the check writing into the data root to answer a question it asked for its own
+    bookkeeping. So `_read_open` returns `None` and the candidate goes unmeasured — the
+    safe direction, because an unanswered question is not emptiness (#2056), and the file
+    is measured for real on the tick after its log is checkpointed or its index returns.
+
+    Like its sibling node this one puts the WAL copy in the CANDIDATE's seat, which the
+    first draft did not: as the declared deeper store it was the trusted pick, the sweep
+    skips the trusted pick, and the review measured that the lying open left the findings
+    unchanged — the node passed on a store the check never asked about. With the copy
+    shallow and the declared deeper store populated in its main file, the two controls
+    below each produce their own consequence: the lying open names the populated store for
+    deletion, and the WAL-aware open materialises the `-shm` this node says must not exist.
+
+    The writer is SIGKILLed BEFORE the check runs, exactly as in
+    `test_a_candidate_store_whose_rows_are_still_in_its_wal_is_not_reported`: a live writer
+    would be excluded by the lock query instead, and the decline would never be reached.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    declared = _provisioned(data / SHIPPED_KG, facts_rows=20)
+    wal_store = data / "kg.sqlite"          # the CANDIDATE, as in the sibling node
+    wal_store.parent.mkdir(parents=True, exist_ok=True)
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _WAL_WRITER, str(wal_store)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        child.stdin.write(_kg_schema())
+        child.stdin.close()                # the child reads the schema to EOF: leave no pipe
+        assert child.stdout.readline().strip() == "written", "the writer did not commit"
+        child.kill()
+        child.wait()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    assert os.path.getsize(str(wal_store) + "-wal") > 0, (
+        "the log holds nothing, so the node is no longer about content that only a "
+        "WAL-aware open can see")
+    os.unlink(str(wal_store) + "-shm")     # the index that connection never finished
+    assert not os.path.lexists(str(wal_store) + "-shm")
+    os.utime(wal_store, (OLD, OLD))
+    os.utime(Path(str(wal_store) + "-wal"), (OLD, OLD))
+    assert datawatch._read_open(str(wal_store)) is None, (
+        "a frames-bearing log with no index is the shape the decline exists for")
+
+    found = _shadows(data, repo)
+
+    assert _reported(found) == [], (
+        f"a declined candidate was reported anyway: {found}")
+    assert not os.path.lexists(str(wal_store) + "-shm"), (
+        "the check built the missing wal-index to get its answer, writing a file into the "
+        "data root it has no right to create")
+
+    # ── control 1: the lying open. It must NAME the store, or the decline above is
+    # indistinguishable from the check not looking, which is the defect the review found.
+    monkeypatch.setattr(datawatch, "_read_open", lambda path: "mode=ro&immutable=1")
+    forced = _shadows(data, repo)
+    assert _reported(forced) == [str(wal_store)], (
+        "forcing the sidecar-safe open produced no finding, so the decline is not what "
+        f"keeps this store out of the alert: {forced}")
+    assert forced[0]["data_rows"] == 0, (
+        "the control's whole point is the wrong number over a populated file: "
+        f"{forced[0]}")
+    assert forced[0]["trusted"] == str(declared) and forced[0]["declared"] is True, (
+        "and the alert it would print names the WAL copy as the empty half while pointing "
+        f"at the declared store as the one to keep: {forced[0]}")
+    monkeypatch.undo()
+
+    # ── control 2: the WAL-aware open. It answers the rows correctly AND writes, which is
+    # why correctness alone does not license it here.
+    monkeypatch.setattr(datawatch, "_read_open", lambda path: "mode=ro")
+    _shadows(data, repo)
+    assert os.path.lexists(str(wal_store) + "-shm"), (
+        "the WAL-aware open did NOT create the missing index, so the decline above was "
+        "avoiding a cost this fixture does not actually have and the node's reason is "
+        "wrong even though its verdict is right")
+
+
+def test_a_stale_sidecar_no_process_holds_does_not_hide_the_shadow(tmp_path):
+    """The live stray has a `-wal` and a `-shm` beside it, and no process has either.
+
+    `kg.sqlite-wal` is 0 bytes and `kg.sqlite-shm` is 32,768, both stamped 2026-10-27
+    07:32 and 07:35 — a day and a half after the file itself, two days before this node
+    was written, with no descriptor on either. SQLite allocates those two files to the
+    first WAL-mode connection and unlinks them when the last one closes, so a process
+    killed mid-session leaves them standing over a store nobody has open. Reading their
+    mere existence as "a writer has it open" — which is what the 0-byte class does, and
+    keeps doing — would have kept the one finding this item owns unreported, so for a
+    provisioned candidate the check asks the kernel who holds the file instead.
+
+    `os.utime` on the sidecars is the only fiction here: the fixture's own bytes and
+    sizes are the live ones.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    (data / "kg.sqlite-wal").write_bytes(b"")
+    (data / "kg.sqlite-shm").write_bytes(b"\0" * 32_768)
+    for side in ("kg.sqlite-wal", "kg.sqlite-shm"):
+        os.utime(data / side, (OLD, OLD))
+
+    found = _shadows(data, repo)
+    assert _reported(found) == [str(stray)], (
+        "a `-wal`/`-shm` pair that no process holds is residue of a dead connection, "
+        f"not a writer: {found}")
+
+
+def test_a_process_holding_the_candidate_locked_keeps_it_unreported(tmp_path):
+    """The other side of that query: a real writer, in another process, is still a rail.
+
+    Nothing about this fixture is mocked — a child process takes the `F_SETLK` write lock
+    SQLite takes during a transaction and holds it across the check, which is the process
+    boundary the probe is read across. The same scenario for a 0-byte file is pinned by
+    `test_a_sidecar_beside_an_empty_copy_means_a_writer_has_it_open`; this is the class
+    whose file is provisioned, where existence no longer decides.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+
+    child = _lock_held_by_another_process(stray)
+    try:
+        assert _shadows(data, repo) == [], (
+            "the check named a database another process is writing to")
+    finally:
+        _kill(child)
+
+    assert _reported(_shadows(data, repo)) == [str(stray)], (
+        "with the lock released the same candidate must be named again, or the rail "
+        "above is the fixture failing rather than the probe answering")
+
+
+def test_a_process_holding_the_wal_locked_keeps_it_unreported(tmp_path):
+    """A WAL-mode writer locks the `-shm` index, not the main file — so sidecars are
+    probed too, not just the candidate.
+
+    Without this the check would see a free main file and report a store whose write-ahead
+    log is mid-append, which is the one case the original existence rule existed for.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    _provisioned(data / "kg.sqlite")
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    shm = data / "kg.sqlite-shm"
+    shm.write_bytes(b"\0" * 32_768)
+    os.utime(shm, (OLD, OLD))
+
+    child = _lock_held_by_another_process(shm)
+    try:
+        assert _shadows(data, repo) == [], (
+            "the check named a store whose WAL index another process holds")
+    finally:
+        _kill(child)
+
+
+def test_the_declared_store_is_trusted_whatever_its_byte_size(tmp_path):
+    """The probe has no byte bound, and this node is the reason one was never kept.
+
+    A draft of the fix carried an 8 MiB cap on the probe, reasoned from the cost of opening
+    big stores. On the live root that cap made the 172 MB declared KG store unreadable to
+    the probe, so the pairing fell back to a 24,576-byte witness copy buried under
+    `_scratch/` and reported the very stray this item names as `declared: false` — the
+    acceptance check's shape, missed. The declared store here is 9 MiB, over that cap and
+    over every size a cost bound would plausibly sit at, and it must still be the trusted
+    half with `declared: True`.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _provisioned(data / "kg.sqlite")
+    real = _provisioned(data / SHIPPED_KG, facts_rows=1)
+    _pad_to_over(real, 8 * 1024 * 1024)
+    assert os.path.getsize(real) > 8 * 1024 * 1024, (
+        f"the declared store is {os.path.getsize(real)} bytes, so this node no longer "
+        "tests a store a byte cap would have had to decline")
+    assert os.path.getsize(stray) < 1024 * 1024
+
+    found = _shadows(data, repo)
+    assert _reported(found) == [str(stray)], found
+    assert found[0]["declared"] is True, (
+        "a byte bound that makes the declared store unmeasurable silently re-points the "
+        f"alert at some other copy: {found[0]}")
+    assert found[0]["trusted"] == str(real)
+
+
+_WAL_WRITER = (
+    "import sqlite3, sys, time\n"
+    "con = sqlite3.connect(sys.argv[1])\n"
+    "con.execute('PRAGMA journal_mode=WAL')\n"
+    "con.execute('PRAGMA wal_autocheckpoint=0')\n"
+    "con.executescript(sys.stdin.read())\n"
+    "con.execute(\"INSERT INTO facts_idx(entity, category, text_hash, file_path) \"\n"
+    "            \"VALUES ('E0', 'state', 'h0', 'memory/0.md')\")\n"
+    "con.commit()\n"
+    "sys.stdout.write('written\\n'); sys.stdout.flush()\n"
+    "time.sleep(60)\n")
+
+
+def test_a_candidate_store_whose_rows_are_still_in_its_wal_is_not_reported(tmp_path,
+                                                                           monkeypatch):
+    """Clause 2 against the one open that can lie, on a store the sweep can actually reach.
+
+    `immutable=1` is what keeps the probe from creating sidecars, and its price is that
+    SQLite will not consult a `-wal` with it — a database whose committed rows are still
+    sitting un-checkpointed in the log reads back as an EMPTY main file under that open
+    alone. `_read_open` therefore hands a candidate whose `-wal` holds bytes the WAL-aware
+    `mode=ro` open and never offers it `immutable=1`: naming such a file for a human to
+    delete is the one error this check could make.
+
+    **The store under test stands in the candidate's seat, which the first draft of this
+    node did not.** The review measured that the earlier version's headline assertion could
+    not fail for the open it named: the WAL store was the DECLARED deeper copy, the declared
+    copy is ordered first as the trusted pick, and the trusted pick is skipped by the
+    candidate sweep — so the lying open left the finding list unchanged at `[kg.sqlite]`
+    and the node passed on a store it never asked. A WAL-mode store now sits at the top of
+    the root as a copy of a name whose declared deeper store is populated in its main file,
+    which is the shape that makes the assertion bite: the top-level copy is a candidate, so
+    the two opens disagree about whether it is reported at all. The control below forces the
+    lying open and shows the finding appearing; the node therefore pins the open choice and
+    not merely the check's indifference.
+
+    The fixture is a writer process SIGKILLed after committing with autocheckpoint off,
+    which is how the live `kg.sqlite` came to carry sidecars at all: the connection died
+    and SQLite never got to checkpoint and unlink them. A `-wal` of hand-written zeros
+    would prove nothing, because SQLite ignores a log whose header it cannot parse.
+    `test_a_wal_log_without_its_index_is_declined_and_never_written_into` is this node's
+    other half: the same log with its `-shm` taken away can only be measured by writing a
+    file into the root, so the candidate is declined instead.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    declared = _provisioned(data / SHIPPED_KG, facts_rows=20)
+    wal_store = data / "kg.sqlite"          # the CANDIDATE: a copy of the declared name
+    wal_store.parent.mkdir(parents=True, exist_ok=True)
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _WAL_WRITER, str(wal_store)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        child.stdin.write(_kg_schema())
+        child.stdin.close()                # the child reads the schema to EOF: leave no pipe
+        assert child.stdout.readline().strip() == "written", "the writer did not commit"
+        assert (data / "kg.sqlite-wal").stat().st_size > 0, (
+            "the rows went to the main file, so this node no longer tests a store that "
+            "an immutable open would read as empty")
+        assert _data_rows_of(str(wal_store)) == 1
+        assert _immutable_open_sees_nothing(str(wal_store)), (
+            "the premise of this node is that `immutable=1` alone answers 0 rows here; if "
+            "the engine changed and applies the log anyway, the node is vacuous")
+        child.kill()
+        child.wait()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    for f in (wal_store, Path(str(wal_store) + "-wal"), Path(str(wal_store) + "-shm")):
+        if f.exists():
+            os.utime(f, (OLD, OLD))
+    assert os.path.lexists(str(wal_store) + "-shm"), (
+        "the index is what lets the WAL-aware open answer without writing, so its absence "
+        "here would silently swap in the decline node's shape")
+    wal_bytes = (data / "kg.sqlite-wal").stat().st_size
+    declared_before = _fingerprint(declared)
+    # The branch itself, not just its consequence: a frames-bearing log with its index
+    # standing is the one input that must select the WAL-aware open.
+    assert datawatch._read_open(str(wal_store)) == "mode=ro"
+    assert datawatch._read_open(str(declared)) == "mode=ro&immutable=1", (
+        "a store with no log beside it must take the open that creates nothing")
+
+    found = _shadows(data, repo)
+
+    assert _reported(found) == [], (
+        f"a populated WAL store was reported as an empty shadow to delete: {found}")
+    assert (data / "kg.sqlite-wal").stat().st_size == wal_bytes, (
+        "the check checkpointed or truncated a log it was only measuring, which is a write "
+        "into somebody's store")
+    assert _data_rows_of(str(wal_store)) == 1, (
+        "the store no longer holds the row the check declined to report it for")
+    assert _fingerprint(declared) == declared_before, (
+        "the declared store changed under a read-only probe")
+
+    # ── control: the lying open, forced. The finding MUST appear, or the assertion above
+    # is this suite's own vacuity — the exact defect the review found in the first draft.
+    monkeypatch.setattr(datawatch, "_read_open", lambda path: "mode=ro&immutable=1")
+    forced = _shadows(data, repo)
+    assert _reported(forced) == [str(wal_store)], (
+        "forcing the sidecar-safe open produced no finding, so the node's headline "
+        f"assertion cannot fail and proves nothing about the open: {forced}")
+    assert forced[0]["data_rows"] == 0 and forced[0]["shadow_size"] > 0, (
+        "the control has to reproduce the harm, not just a finding: an alert reading "
+        f"`0 rows` over a store with a row in it: {forced[0]}")
+    assert forced[0]["trusted"] == str(declared) and forced[0]["declared"] is True, (
+        "and it points at the populated WAL copy as the file to remove while naming the "
+        f"real store as the one to keep: {forced[0]}")
+
+
+def _data_rows_of(path: str) -> int:
+    """Rows across the data tables, measured WAL-aware: what the check has to agree with."""
+    con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+    try:
+        tables = [r[0] for r in con.execute(
+            "select name from main.sqlite_master "
+            "where type = 'table' and name not like 'sqlite_%'")
+            if r[0] not in datawatch.SHADOW_BOOKKEEPING_TABLES]
+        return sum(con.execute('select count(*) from main."%s"'
+                               % t.replace('"', '""')).fetchone()[0] for t in tables)
+    finally:
+        con.close()
+
+
+def _immutable_open_sees_nothing(path: str) -> bool:
+    """Does an `immutable=1` open of `path` answer 0 rows for every data table?"""
+    con = sqlite3.connect("file:" + path + "?mode=ro&immutable=1", uri=True)
+    try:
+        for row in con.execute("select name from main.sqlite_master "
+                               "where type = 'table' and name not like 'sqlite_%'"):
+            t = row[0]
+            if t in datawatch.SHADOW_BOOKKEEPING_TABLES:
+                continue
+            if con.execute('select exists(select 1 from main."%s")'
+                           % t.replace('"', '""')).fetchone()[0]:
+                return False
+        return True
+    finally:
+        con.close()
+
+
+def _pad_to_over(path: Path, target: int) -> None:
+    """Grow `path` past `target` bytes with real pages, then leave it closed.
+
+    Deliberately a fill rather than a sparse `truncate`: a hole costs SQLite nothing to
+    open and so would not distinguish a real byte bound from a size read.
+    """
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS pad (b BLOB)")
+        con.executemany("INSERT INTO pad VALUES (zeroblob(4096))", [()] * 3000)
+        con.commit()
+    finally:
+        con.close()
+    assert os.path.getsize(path) > target
+
+
 def test_a_missing_data_root_is_an_error_and_not_an_empty_result(tmp_path):
     """A root that cannot be read must not answer `[]`.
 
@@ -513,3 +1196,167 @@ def test_a_missing_data_root_is_an_error_and_not_an_empty_result(tmp_path):
     with pytest.raises(OSError):
         datawatch.data_root_shadows(str(tmp_path / "no-such-data-root"),
                                     repo=str(repo), now=NOW)
+
+
+# ── seam: the engine the guardian runs, which is not the engine this suite runs ──
+#
+# The review named this as unverified and it is a real boundary: the guardian is a systemd
+# unit, `agent-services/systemd/lloyd-guardian.service`, whose interpreter is
+# `/usr/bin/python3` (SQLite 3.54.0, `sqlite3.sqlite_version` measured 2026-10-29), while
+# every node above runs the venv's Python, whose SQLite is 3.53.1 (same measurement).
+# `mode=ro` creating a wal-index and `immutable=1` skipping a log are engine behaviours,
+# not Lloyd's, so a node that measures one engine pins its own interpreter. The script
+# below is run whole by BOTH and its readings are asserted to agree, which is the claim
+# `datawatch._read_open`'s docstring makes when it cites "both builds this box runs".
+
+#: Standalone: stdlib only, argv is a directory to work in, prints one JSON line. It
+#: decides nothing about the check — the assertions stay below, in Python, where a failure
+#: names the engine and the shape that disagreed.
+_ENGINE_PROBE = r'''
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+
+ROOT = sys.argv[1]
+SCHEMA = "CREATE TABLE t (a); CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);"
+WRITER = (
+    "import sqlite3, sys, time\n"
+    "con = sqlite3.connect(sys.argv[1])\n"
+    "con.executescript(sys.argv[2])\n"
+    "con.execute('PRAGMA journal_mode=WAL')\n"
+    "con.execute('PRAGMA wal_autocheckpoint=0')\n"
+    "for i in range(3): con.execute('INSERT INTO t VALUES (?)', (i,))\n"
+    "con.commit()\n"
+    "open(sys.argv[3], 'w').write('ok')\n"
+    "time.sleep(30)\n")
+
+
+def build(path, checkpoint):
+    con = sqlite3.connect(path)
+    con.executescript(SCHEMA)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    for i in range(3):
+        con.execute("INSERT INTO t VALUES (?)", (i,))
+    con.commit()
+    if checkpoint:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.commit()
+    con.close()
+
+
+def run_writer(path):
+    ready = path + ".ready"
+    proc = subprocess.Popen([sys.executable, "-c", WRITER, path, SCHEMA, ready],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 30
+    while time.time() < deadline and not os.path.exists(ready):
+        time.sleep(0.05)
+    if not os.path.exists(ready):
+        proc.kill(); proc.wait()
+        raise SystemExit("the writer never signalled its commit")
+    proc.kill()
+    proc.wait()
+
+
+def sides(path):
+    return sorted(s for s in ("-shm", "-wal") if os.path.lexists(path + s))
+
+
+def read(path, query):
+    before = sides(path)
+    con = sqlite3.connect("file:" + path + "?" + query, uri=True)
+    rows = con.execute("select count(*) from main.t").fetchone()[0]
+    con.close()
+    return {"rows": rows, "created": [s for s in sides(path) if s not in before]}
+
+
+out = {"sqlite_version": sqlite3.sqlite_version, "executable": sys.executable}
+build(os.path.join(ROOT, "a.sqlite"), True)
+assert sides(os.path.join(ROOT, "a.sqlite")) == [], "fixture left residue beside itself"
+out["no_log"] = {"mode_ro": read(os.path.join(ROOT, "a.sqlite"), "mode=ro")}
+build(os.path.join(ROOT, "b.sqlite"), True)
+out["no_log"]["immutable"] = read(os.path.join(ROOT, "b.sqlite"), "mode=ro&immutable=1")
+run_writer(os.path.join(ROOT, "c.sqlite"))
+assert "-shm" in sides(os.path.join(ROOT, "c.sqlite")), "no index to use"
+assert os.path.getsize(os.path.join(ROOT, "c.sqlite") + "-wal") > 0, "log has no frames"
+out["frames_with_index"] = {
+    "mode_ro": read(os.path.join(ROOT, "c.sqlite"), "mode=ro")}
+run_writer(os.path.join(ROOT, "d.sqlite"))
+out["frames_with_index"]["immutable"] = read(
+    os.path.join(ROOT, "d.sqlite"), "mode=ro&immutable=1")
+run_writer(os.path.join(ROOT, "e.sqlite"))
+os.unlink(os.path.join(ROOT, "e.sqlite") + "-shm")
+run_writer(os.path.join(ROOT, "f.sqlite"))
+os.unlink(os.path.join(ROOT, "f.sqlite") + "-shm")
+out["frames_no_index"] = {
+    "mode_ro": read(os.path.join(ROOT, "e.sqlite"), "mode=ro"),
+    "immutable": read(os.path.join(ROOT, "f.sqlite"), "mode=ro&immutable=1")}
+print(json.dumps(out))
+'''
+
+
+@pytest.mark.parametrize("interp", [sys.executable, "/usr/bin/python3"],
+                         ids=["this-suites-interpreter", "the-guardians-interpreter"])
+def test_the_two_opens_behave_identically_on_the_engine_the_guardian_runs(tmp_path,
+                                                                         interp):
+    """Every premise `_read_open` chooses between is measured on both engines, not one.
+
+    The decision table this check is built on is SQLite's behaviour, so the suite running
+    on one SQLite and the unit running on another means the nodes above pin an interpreter,
+    not the box. `/usr/bin/python3` here is the guardian's ExecStart interpreter
+    (`agent-services/supervisord.conf`, `[program:lloyd-guardian]`), and the venv's Python
+    is what the gate and this file run on.
+
+    What must agree, shape by shape:
+      * WAL store, log checkpointed, nothing beside it: `mode=ro` CREATES both sidecars —
+        the write clause 3 forbids — and `immutable=1` creates none and still reads all 3
+        rows, which is why the empty-log branch is safe.
+      * a frames-bearing log with its index standing: `mode=ro` reads the 3 rows and
+        creates nothing; `immutable=1` reads 0, the lie clause 2 forbids.
+      * the same log with its index gone: `mode=ro` answers 3 rows but creates `-shm`, and
+        `immutable=1` lies again — the pair of costs the decline avoids.
+    """
+    import json as _json
+
+    if not os.path.exists(interp):
+        pytest.skip(f"{interp} is not on this box, so this engine's half is unmeasured")
+    script = tmp_path / "engine_probe.py"
+    script.write_text(_ENGINE_PROBE, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    proc = subprocess.run([interp, str(script), str(work)],
+                          capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        f"{interp} ({os.uname().sysname}) failed the probe: {proc.stderr[-1200:]}")
+    out = _json.loads(proc.stdout.strip().splitlines()[-1])
+    who = f"{out['executable']} sqlite {out['sqlite_version']}"
+
+    assert out["no_log"]["mode_ro"]["created"] == ["-shm", "-wal"], (
+        f"{who}: `mode=ro` created {out['no_log']['mode_ro']['created']} beside a WAL "
+        "store with no log, and the clause-3 fix is keyed on that being the hazard")
+    assert out["no_log"]["mode_ro"]["rows"] == 3, who
+    assert out["no_log"]["immutable"]["created"] == [], (
+        f"{who}: `immutable=1` created {out['no_log']['immutable']['created']}, so the "
+        "open this fix routes every plain candidate to is not the non-writing one")
+    assert out["no_log"]["immutable"]["rows"] == 3, (
+        f"{who}: `immutable=1` read {out['no_log']['immutable']['rows']} of 3 rows from a "
+        "checkpointed WAL store whose log was empty, so the empty-log branch would be "
+        "reporting populated stores as empty")
+    assert out["frames_with_index"]["mode_ro"] == {"rows": 3, "created": []}, (
+        f"{who}: the WAL-aware open over a frames-bearing log with its index standing "
+        f"answered {out['frames_with_index']['mode_ro']}")
+    assert out["frames_with_index"]["immutable"] == {"rows": 0, "created": []}, (
+        f"{who}: the lying open stopped lying — answered "
+        f"{out['frames_with_index']['immutable']} — which makes the branch this fix added "
+        "unmotivated on this engine and the node above vacuous there")
+    assert "-shm" in out["frames_no_index"]["mode_ro"]["created"], (
+        f"{who}: `mode=ro` did not build the missing wal-index "
+        f"({out['frames_no_index']['mode_ro']}), so declining that shape avoids a cost it "
+        "does not pay here")
+    assert out["frames_no_index"]["mode_ro"]["rows"] == 3, who
+    assert out["frames_no_index"]["immutable"]["rows"] == 0, (
+        f"{who}: `{out['sqlite_version']}` read the log under immutable=1")

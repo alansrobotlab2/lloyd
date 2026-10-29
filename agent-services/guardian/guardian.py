@@ -182,8 +182,23 @@ RUNTIME_DATA_ALERT_TITLE = "Runtime data is being written into the code tree"
 #: past it: it may say the file is empty and that a populated store of that name exists,
 #: and may not name who made it or where the empty one sits relative to the repo — the
 #: same rule `_WRITER_CLAIM` states for the stray alert's cause sentence (#2057).
+#: AMENDED by #3481. The old words were "A 0-byte database under the data root is shadowing
+#: a populated store", and the check that raised it could only ever find a 0-byte one. Once
+#: the predicate measures rows, a finding may be the 81,920-byte `kg.sqlite` the live root
+#: carries — provisioned with the shipped schema, one `meta` row, and nothing a reader would
+#: call content — and a heading asserting 0 bytes about it is false at the moment it prints.
+#: #3124's rule is that the heading is the condition, and a condition-dependent heading is
+#: only allowed to depend on what the check actually measured.
 RUNTIME_DATA_SHADOW_ALERT_TITLE = (
-    "A 0-byte database under the data root is shadowing a populated store")
+    "Content-empty databases under the data root are shadowing Lloyd's populated stores")
+
+#: The heading the one above replaced, retired by #3481 and kept reachable for the whole
+#: life of any note that was opened under it (#3124's rule, stated on the tuple below).
+RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED = (
+    "A 0-byte database under the data root is shadowing a populated store",
+)
+
+
 
 #: Every heading this one incident could have been opened under, and the complete set an
 #: all-clear has to walk (#3124). `Notifier.resolve` is title-scoped and matches the
@@ -193,8 +208,8 @@ RUNTIME_DATA_SHADOW_ALERT_TITLE = (
 #: which is why the set names both constants rather than the current condition's title
 #: alone. `resolve` writes nothing when no section of its title is open, so walking the
 #: set on an already-clear note is silent and the hourly idempotence contract holds.
-#: A future retitle adds its retired string to a tuple like this one; deleting the live
-#: entry from it is what orphans a section, and
+#: A future retitle adds its retired string to `RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED`
+#: below; deleting the live entry from it is what orphans a section, and
 #: `tests/test_guardian_alert_retraction.py` holds the code-tree wording as its OWN
 #: literal so a rename cannot quietly drop a heading that is still standing somewhere.
 #:
@@ -205,7 +220,8 @@ RUNTIME_DATA_SHADOW_ALERT_TITLE = (
 #: coalesced call used to give one — which is why the flip is only allowed between checks,
 #: never within one.
 RUNTIME_DATA_ALERT_TITLES = (RUNTIME_DATA_ALERT_TITLE,
-                             RUNTIME_DATA_SHADOW_ALERT_TITLE)
+                             RUNTIME_DATA_SHADOW_ALERT_TITLE,
+                             *RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED)
 
 #: The third condition reported by the same hourly leg, and deliberately NOT in the tuple
 #: above (#3210). That tuple exists because #3124 found ONE heading's retraction sealing
@@ -356,30 +372,58 @@ def _shadow_alert_body(data_root: str, shadows, now: float) -> str:
     stays report-only is a ruling no round makes (owed on #3109).
     """
     paras = [
-        f"A 0-byte database inside {data_root} has the same name as a populated database "
-        f"elsewhere under that same root ({len(shadows)} such "
+        f"A content-empty database inside {data_root} has the same name as a populated "
+        f"database elsewhere under that same root ({len(shadows)} such "
         f"file{'s' if len(shadows) != 1 else ''}, checked "
-        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}). An empty file is a "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}). An empty database is a "
         "valid SQLite database, so opening one answers a count with 0 instead of failing: "
         "a probe run with the wrong cwd reports an empty store while the real one is "
-        "populated. This check moves and deletes NOTHING — a file under the data root is "
-        "a person's call, and this alert is the whole action.",
+        "populated. Emptiness is measured as rows, not bytes — the file can hold a full "
+        "schema and every page of it, and a byte size is not a statement about its "
+        "content (#3481). This check moves and deletes NOTHING — a file under the data "
+        "root is a person's call, and this alert is the whole action.",
         "",
-        "Each empty file, and the populated store to trust beside its name:",
+        "Each empty file, with the bytes and the rows it was measured at, beside the "
+        "populated store to trust under the same name:",
     ]
     for f in shadows:
-        line = (f"- empty `{f['shadow']}` (0 bytes) — trust `{f['trusted']}` "
-                f"({f['trusted_size']:,} bytes)")
+        # #3481 clause 4: bytes are how big the file is, rows are whether it holds
+        # anything, and only the second is the reason the finding exists. `(0 bytes)` used
+        # to be true of every finding here because the predicate could only find 0-byte
+        # files; naming an 81,920-byte provisioned database with those words is a sentence
+        # a person would act on. The `get` defaults are for a finding carried over from an
+        # older ledger, not for `data_root_shadows`, which sets all three fields — and
+        # `data_rows == 0` is what makes the finding, so the value is pinned against the
+        # measured ones by `test_an_80_kib_schema_only_copy_of_the_declared_store_is_a_shadow`.
+        # The plural is as much a fact as the number: a one-data-table store printed
+        # "0 rows in 1 tables", which is the shape a single-table shadow really has, and an
+        # alert whose own numbers are ungrammatical is one a reader discounts. Same pattern
+        # as the file count in the paragraph above.
+        rows = f.get("data_rows", 0)
+        tables = f.get("data_tables") or 0
+        empties = f"{rows} row{'s' if rows != 1 else ''}"
+        if tables:
+            empties += f" in {tables} table{'s' if tables != 1 else ''}"
+        line = (f"- empty `{f['shadow']}` ({f.get('shadow_size', 0):,} bytes, {empties}) "
+                f"— trust `{f['trusted']}` ({f['trusted_size']:,} bytes)")
         if f.get("declared"):
             line += (" — the store `app/data_root.py` declares for that name through its "
                      "*_DB_RELATIVE constant")
         paras.append(line)
+    # #3481: the check now names files that DO print tables, so the verification step has
+    # to ask the question the finding was measured on. The old words ("`.tables` must print
+    # nothing, and no `-wal` or `-shm` may sit beside it") would have told a person the
+    # 81,920-byte `kg.sqlite` was not removable, when the measurement that produced the
+    # finding is that every one of its four data tables holds zero rows — and an unheld
+    # `-wal`/`-shm` pair is ordinary residue beside such a file, not a writer.
     paras.append(
-        "Before removing an empty file, confirm it holds nothing: "
-        "`sqlite3 -readonly <path> .tables` must print nothing, and no `-wal` or `-shm` "
-        "may sit beside it. Then find the writer that opened the wrong path — each of "
-        "these was a command run with the data root as its cwd against a bare database "
-        "name, which is how `kg.sqlite` came to exist at the root at all (#3109).")
+        "Before removing one, confirm the rows, not the table list: "
+        "`sqlite3 -readonly <path> 'select count(*) from <table>'` must answer 0 for every "
+        "table `.tables` prints (`meta` holding only a `schema_version` row is part of "
+        "creating a database, not content in one). Then find the writer that opened the "
+        "wrong path — each of these was a command run with the data root as its cwd "
+        "against a bare database name, or a store opened by absolute path at the wrong "
+        "one, which is how `kg.sqlite` came to exist at the root at all (#3109, #3481).")
     return "\n\n".join(paras)
 
 

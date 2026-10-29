@@ -4498,10 +4498,16 @@ def test_a_clean_data_root_raises_no_alert(tmp_path, monkeypatch):
 
     assert alerts == [], f"a clean data root raised: {alerts}"
     assert scan.calls == 1, "the data root was not measured on this check"
-    # Both headings: a clean check has no condition to name, so it must not open a
-    # section under either (#3124 added the second heading this check could reach).
-    assert [_sections(note, t) for t in gmod.RUNTIME_DATA_ALERT_TITLES] == [[], []], (
-        "a clean data root wrote a section anyway")
+    # Every heading the walk carries: a clean check has no condition to name, so it must
+    # not open a section under any of them (#3124 added the second heading this check could
+    # reach; #3481 renamed it and added the retired wording to the walk, so the count is
+    # read from the tuple rather than hard-coded — a third heading appearing must still be
+    # asserted unwritten here, and hard-coding `[[], []]` would fail as a plumbing error
+    # instead of telling anyone which heading got written).
+    written = {t: _sections(note, t) for t in gmod.RUNTIME_DATA_ALERT_TITLES}
+    assert not any(written.values()), (
+        "a clean data root wrote a section anyway: "
+        f"{ {t: len(v) for t, v in written.items() if v} }")
 
 
 def test_a_failed_shadow_scan_claims_nothing_and_retracts_nothing(tmp_path, monkeypatch):

@@ -2479,10 +2479,25 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` shows those
     # two hunks and nothing else, and `grep -n '^    def evaluate_liveness\|^def main'
     # agent-services/guardian/guardian.py` prints 879 with 2946 below it.
-    assert heads[guardian]["main"] == 2946, (
-        f"`main` moved off :2946 ({heads[guardian]['main']}) — if it is gone "
+    # 2946 → 2990 AND 879 → 923 is #3481: four hunks, every one of them ABOVE
+    # `evaluate_liveness` — `@@ -182,8 +182,23 @@` (+15: the re-worded shadow heading with its
+    # #3481 comment, and the new `RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED` tuple),
+    # `@@ -193,8 +208,8 @@` (+0, two comment lines re-worded to point at that tuple),
+    # `@@ -205,7 +220,8 @@` (+1, one more comment line about the same tuple) and
+    # `@@ -356,30 +372,58 @@` (+28, `_shadow_alert_body` printing the measured ROWS beside the
+    # measured bytes, so an 81,920-byte zero-row file is never called 0 bytes). Nothing moved
+    # between the two heads or below `main`, so BOTH heads move by the same +44: 879 + 44 =
+    # 923 and 2946 + 44 = 2990 — which is again why this node, and not a per-method one, is
+    # where a new hourly-leg heading gets noticed. `architecture/threat-model.md:145`'s T-26
+    # cell cites the `evaluate_liveness` head and moves in the same commit. Re-check as
+    # before: `git diff <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'`
+    # shows those four hunks and nothing else, and `grep -n
+    # '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py` prints 923
+    # with 2990 below it.
+    assert heads[guardian]["main"] == 2990, (
+        f"`main` moved off :2990 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 879, (
+    assert heads[guardian]["evaluate_liveness"] == 923, (
         f"`evaluate_liveness` moved off :879 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1502,3 +1503,150 @@ def test_a_data_root_the_check_cannot_read_neither_alerts_nor_retracts(
     assert [t for t, _ in cleared if t == G2.RUNTIME_DATA_ARRIVALS_ALERT_TITLE] == [], (
         "clause 4 / #2056: a measurement that did not happen retracted the heading anyway "
         f"— unreadable read as clean: {cleared}")
+
+
+# ── #3481 clause 4: the alert line states rows beside bytes, and the heading says
+#    "duplicate", because the file it now names is not 0 bytes ─────────────────────────
+#
+# `_shadow_alert_body` used to print `(0 bytes)` for every finding, because every finding
+# was 0 bytes. Once the check measures content, a line reading "0 bytes" over an 81,920-byte
+# file is a number the reader will act on — and the shape of the file decides the heading
+# too: `RUNTIME_DATA_SHADOW_ALERT_TITLE` literally asserts every finding is 0 bytes, so
+# naming a provisioned database under it would order a person to delete a copy that may be
+# the half they care about. These nodes pin both halves: the rendered line, and the same
+# line reaching the daily note through the hourly leg.
+
+
+def _tiny_kg(path: Path, rows: int) -> Path:
+    """A real SQLite database in WAL mode: `meta` plus one data table, `rows` in it.
+
+    Small and hand-built on purpose. The alert body is rendered from the finding's measured
+    fields, so what this has to be is a file the row probe can open and answer for — not a
+    copy of the shipped schema, which `tests/test_guardian_data_root_shadow.py` builds from
+    `app/kg_store.py` for the measurement nodes.
+
+    WAL mode, because that is the journal mode of every store `KGStore` provisions
+    (`app/kg_store.py:228-229`) and therefore the only shape this leg meets in the live
+    root: the journal mode decides which read open the probe may use, so a rollback-journal
+    fixture would exercise an open the hourly check never performs on a real store.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    try:
+        con.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+            "CREATE TABLE things (id INTEGER PRIMARY KEY, note TEXT);")
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+        con.executemany("INSERT INTO things(note) VALUES (?)", [("x",) for _ in range(rows)])
+        con.commit()
+    finally:
+        con.close()
+    return path
+
+
+def test_the_shadow_line_states_measured_rows_beside_measured_bytes():
+    """Clause 4, on the renderer, over the live incident's own measurements.
+
+    The finding carries the numbers `data_root_shadows` produced for
+    `/home/alansrobotlab/lloyd-data/kg.sqlite` on 2026-10-29: 81,920 bytes, 4 data tables,
+    0 rows, and a 172,789,760-byte declared store at `_pipeline/vault-derived/kg.sqlite`.
+    Those same fields are asserted against a real fixture in
+    `test_an_80_kib_schema_only_copy_of_the_declared_store_is_a_shadow`, so this node is
+    pinned to the measurement and not merely to itself.
+    """
+    import guardian as G
+
+    finding = {
+        "shadow": "/home/alansrobotlab/lloyd-data/kg.sqlite",
+        "name": "kg.sqlite", "depth": 1,
+        "trusted": ("/home/alansrobotlab/lloyd-data/_pipeline/vault-derived/kg.sqlite"),
+        "trusted_depth": 3, "trusted_size": 172_789_760,
+        "declared": True, "declared_relative": "_pipeline/vault-derived/kg.sqlite",
+        "shadow_size": 81_920, "data_tables": 4, "data_rows": 0,
+    }
+    body = G._shadow_alert_body("/home/alansrobotlab/lloyd-data", [finding], _NOW)
+
+    assert ("- empty `/home/alansrobotlab/lloyd-data/kg.sqlite` "
+            "(81,920 bytes, 0 rows in 4 tables)") in body, body
+    assert "(0 bytes)" not in body, (
+        "an 81,920-byte file described as 0 bytes is the sentence a person would act on: "
+        + body)
+    assert ".tables` must print nothing" not in body, (
+        "the verification step has to ask the question the finding was measured on: a "
+        "file this check now names prints five tables, so that instruction reads as "
+        "'not removable' over a zero-row file: " + body)
+    # The trusted half still has to be identified, and at its real size — that is what
+    # makes a 4-deep live store recoverable to a human.
+    assert "172,789,760 bytes" in body
+    assert "_pipeline/vault-derived/kg.sqlite" in body
+    assert "moves and deletes NOTHING" in body
+
+
+def test_the_hourly_leg_alerts_a_zero_row_copy_under_a_heading_that_says_duplicate(
+        tmp_path, monkeypatch):
+    """Clause 4 end to end: the measured line, the shape-true heading, and the all-clear.
+
+    The heading is the part the byte-blind check got away with. `RUNTIME_DATA_SHADOW_ALERT_TITLE`
+    says "0-byte databases"; #3124 established that the title must describe the finding,
+    because `notify.resolve` matches the daily-note heading literally and an all-clear that
+    does not match the heading the alert was opened under leaves the section standing open
+    forever (`tests/test_guardian_alert_retraction.py`). So the rename has to be a pair: the
+    constant, and this retired tuple.
+    """
+    G2, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    _tiny_kg(data / "kg.sqlite", rows=0)
+    _tiny_kg(data / "_pipeline" / "kg.sqlite", rows=20)
+    size = os.path.getsize(data / "kg.sqlite")
+    # Aged past `INERT_MIN_AGE_SECONDS` relative to the fixed `_NOW` this file drives the
+    # check with: a file stamped at real wall clock is YOUNGER than `_NOW`, and the age
+    # floor correctly declines it, which reads as a silent leg rather than a missing one.
+    os.utime(data / "kg.sqlite", (_NOW - 7200, _NOW - 7200))
+    os.utime(data / "_pipeline" / "kg.sqlite", (_NOW - 7200, _NOW - 7200))
+
+    g._runtime_data_incident(_NOW)
+
+    assert [t for t, _, _ in alerts] == [G2.RUNTIME_DATA_SHADOW_ALERT_TITLE], (
+        f"a top-level zero-row duplicate must alert under the heading a person can act on: "
+        f"{[t for t, _, _ in alerts]}")
+    assert "0-byte" not in G2.RUNTIME_DATA_SHADOW_ALERT_TITLE, (
+        "the heading is the condition (#3124), and a heading asserting 0 bytes about an "
+        "81,920-byte file is false the moment it prints: "
+        + G2.RUNTIME_DATA_SHADOW_ALERT_TITLE)
+    # The rename has to be a PAIR: the heading an alert was opened under is the heading
+    # `resolve` has to carry, or a pre-#3481 note seals forever (#1536's standing claim).
+    assert G2.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED == (
+        "A 0-byte database under the data root is shadowing a populated store", ), (
+        "the retired wording is the one an open daily-note section may still carry")
+    assert set(G2.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED) <= set(
+        G2.RUNTIME_DATA_ALERT_TITLES), (
+        "a retired heading the hourly all-clear does not walk is how a section survives "
+        "its own fix")
+    body = alerts[0][1]
+    # Singular, and it is a fact about this fixture rather than a tolerance: `_tiny_kg`
+    # provisions ONE data table, so the measured count is one and the line has to read
+    # "1 table". The first draft of the renderer printed "0 rows in 1 tables" and the
+    # review named it; the plural is pinned by
+    # `test_the_shadow_line_states_measured_rows_beside_measured_bytes` above, at the
+    # live finding's 4 tables.
+    assert f"{size:,} bytes, 0 rows in 1 table)" in body, body
+    assert "1 tables" not in body, body
+    assert "(0 bytes)" not in body, body
+    assert "moves and deletes NOTHING" in body, body
+
+    (data / "kg.sqlite").unlink()
+    g._runtime_data_incident(_NOW + _DAY)
+    assert [ok for t, ok in cleared if t == G2.RUNTIME_DATA_SHADOW_ALERT_TITLE] == [True], (
+        "removing the duplicate must seal the section it was opened under, and the "
+        f"clearance is title-matched: {cleared}")
+    # Membership in the walk list is not a clearance. The review named this as the unverified
+    # half: a section opened BEFORE this round under the old heading is closed only if the
+    # hourly leg sends `ok=True` under THAT title, because `notify.resolve` matches the
+    # heading literally (#1536's standing claim is a section that survived its own fix).
+    assert (G2.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED[0], True) in cleared, (
+        "the retired heading was walked but not cleared, so a pre-#3481 daily-note section "
+        f"stays open over an empty note forever: {sorted(cleared)}")
+    assert set(G2.RUNTIME_DATA_ALERT_TITLES) <= {t for t, _ in cleared}, (
+        f"the hourly all-clear has to walk every heading this incident could ever have "
+        f"been opened under, retired ones included: {sorted(cleared)}")
+    assert quarantined == []
