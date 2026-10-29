@@ -218,6 +218,21 @@ _THROUGHPUT_CLASSES: tuple[tuple[str, str], ...] = (
 #: defect was argued in ("with a post-boot rate of 0 / 15 min, report the post-boot
 #: rate beside the raw day count"), so the line keeps that unit.
 _THROUGHPUT_RATE_WINDOW_MINUTES = 15
+#: How wide the failure CLUSTER the #3494 field measures is, in minutes. This is the
+#: ONLY place that width appears: `_throughput_census` hands it to
+#: `_largest_failure_cluster` and `_throughput_alert_message` prints it, both by name,
+#: for the reason #3063 recorded one constant above — a literal unit agrees with its
+#: divisor only until the divisor moves, and here the thing it would silently disagree
+#: with is the window a reader judges a burst against.
+#:
+#: It is NOT `_THROUGHPUT_RATE_WINDOW_MINUTES`, and the two must never be unified:
+#: that one is the denominator a since-boot RATE is normalised to (15 min, the unit the
+#: #2956 defect was argued in), this one is the sliding window a COUNT is taken over.
+#: Five minutes is the item's stated width, adopted by its 2026-10-27 triage as the
+#: contract's call, and it is wide enough to hold the 2026-10-26 signature that the
+#: day totals cannot see — 15 failures in 207 s across 4 sources, which is one shared
+#: dependency failing at once, not four defective sources.
+_THROUGHPUT_CLUSTER_WINDOW_MINUTES = 5
 #: Where the host's uptime is read (#2956). `/proc/uptime`'s first field is seconds
 #: since boot, so boot is `now - uptime`, and that is one `open()` beside the
 #: `workers.db` read the census already does. `uptime -s` returns the same instant and
@@ -1323,6 +1338,61 @@ def _host_boot_instant():
     return (now - _dt.timedelta(seconds=uptime_seconds)).replace(microsecond=0)
 
 
+def _largest_failure_cluster(points, window_minutes: int) -> dict | None:
+    """The densest `window_minutes`-wide stretch of a day's failures, or None.
+
+    `points` is `[(aware_instant, source), …]` — the same parsed instants the census
+    already walks for the since-boot count, so a stamp `_parse_iso_safe` rejects is
+    absent from the cluster exactly as it is absent from that count. The window SLIDES
+    over those INSTANTS and never over the `started_at` strings: the column is ISO-8601
+    with a `+00:00` offset and microsecond precision, so a lexical delta across a
+    second boundary either truncates or throws, and 2026-10-26's tightest cluster
+    contains a pair 46.6 MILLISECONDS apart (`14:24:28.112615` and `14:24:28.159224`) that
+    a minute-granular reading would silently count once.
+
+    The window is CLOSED at both ends: a failure exactly `window_minutes` after the
+    first one is inside it, because `[14:23:00, 14:28:00]` is a five-minute window and
+    both instants sit in it. Ties go to the EARLIEST densest window, which is the one
+    onset a reader is being asked about.
+
+    It exists because two day totals and a min/max span are arithmetically incapable of
+    telling one bad day apart from two unrelated episodes inside a day. 2026-10-26
+    posted "41 failed runs on UTC 2026-10-26 against 9 on UTC 2026-10-25 (floor rule:
+    >= 40) … ; failures span 2026-10-26T05:25Z to 2026-10-26T22:23Z" — measured from
+    this store, min/max of the day's 41 failed `started_at` — and a 16 h 58 min span is
+    worse than uninformative: it is the arithmetic mean of two events that have nothing
+    to do with each other, 9 failures in 220 s from 14:23:00Z across 3 sources, and 15
+    in 207 s from 20:36:20Z across 4. A same-instant multi-source failure is the
+    signature of ONE shared dependency, not of N defective sources, and a count of 41
+    over a span that wide cannot say that while 15 in 207 s across 4 says it out loud.
+
+    Returns `{"count", "start", "end", "sources"}` — `sources` being the DISTINCT
+    `source` values inside the winning window, which is what makes a shared dependency
+    visible at all — or None when there are no parsed instants to cluster.
+    """
+    import datetime as _dt
+
+    if not points:
+        return None
+    ordered = sorted(points, key=lambda p: p[0])
+    width = _dt.timedelta(minutes=window_minutes)
+    best: dict | None = None
+    end = 0
+    for i in range(len(ordered)):
+        # `end` only ever moves forward: the instant ordering is fixed, so a window
+        # starting later cannot need an earlier close, and the scan stays O(n).
+        end = max(end, i + 1)
+        while end < len(ordered) and ordered[end][0] - ordered[i][0] <= width:
+            end += 1
+        members = ordered[i:end]
+        if best is None or len(members) > best["count"]:
+            best = {"count": len(members),
+                    "start": members[0][0],
+                    "end": members[-1][0],
+                    "sources": len({src for _instant, src in members if src})}
+    return best
+
+
 def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
     """The newest COMPLETE UTC day's failed runs, against its own predecessor.
 
@@ -1363,6 +1433,14 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
     what lets a reader tell "43 failures in a boot ramp" from "45 failures spread
     across a day of pressure" — the first is the machine coming up, the second is the
     pool failing now.
+
+    `cluster` is #3494, and it is the same kind of reading rather than a third rule: the
+    day's densest `_THROUGHPUT_CLUSTER_WINDOW_MINUTES`-wide stretch of failures, from
+    `_largest_failure_cluster` over the instants this loop already parsed, carrying the
+    count, the two bounding instants and the number of DISTINCT `source` values inside
+    it. The two day totals answer "how bad was the day"; the span answers "how long was
+    it"; neither answers "was it ONE event", and 2026-10-26 proved that a day can be
+    two. It is reported, never read by a leg.
 
     `now` is the census's clock, defaulted to wall clock: the day gate and
     `minutes_since_boot` are both read from it, so a test that pins it pins the whole
@@ -1409,8 +1487,12 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
         by_floor = newer >= _THROUGHPUT_FLOOR
         if not (by_ratio or by_floor):
             return None
+        # `source` is read HERE, in the one query that already fetches this day's
+        # failed rows, because the cluster field below has to count DISTINCT sources and
+        # a second `SELECT` over `runs` would be a second reading of a store the census
+        # is supposed to have taken once (#2956's invariant, restated at the loop).
         rows = conn.execute(
-            "SELECT summary, started_at FROM runs WHERE status = 'failed' "
+            "SELECT summary, started_at, source FROM runs WHERE status = 'failed' "
             "AND substr(started_at, 1, 10) = ?", (day,)).fetchall()
         # Read after the legs, so a tick that trips neither — the ordinary case, every
         # minute of the day — never opens the uptime file for a figure nobody prints.
@@ -1442,8 +1524,22 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
     # it is left out of `stamps`, instead of being compared against an aware instant
     # and raising past the census. A row stamped exactly at the boot instant counts:
     # the boot ramp's failures are the whole reason the figure exists.
+    #
+    # The parse is no longer conditional on knowing the boot, because one parsed instant
+    # now serves two figures: the same `(instant, source)` pair that feeds the
+    # since-boot comparison is the point `_largest_failure_cluster` slides its window
+    # over. Parsing once per row is what keeps this a single reading in substance and not
+    # only in SQL — and it is why an unparseable stamp is missing from the CLUSTER as
+    # well as from the count, rather than being counted in a burst it cannot be placed
+    # in. `first`/`last` stay the lexical min/max they have always been: they bound the
+    # printed span, and the cluster bounds are printed from the parsed instants the
+    # window was measured on, so the two can disagree only on a stamp this parser
+    # rejects — which is already the shape of the span today. #3494's clause 4 pins that
+    # span byte-identical, so the divergence is recorded as a finding on the item rather
+    # than changed by this round.
     since_boot = 0 if boot is not None else None
-    for summary, started_at in rows:
+    stamped: list[tuple[object, object]] = []
+    for summary, started_at, source in rows:
         text = summary or ""
         hit = False
         for label, needle in _THROUGHPUT_CLASSES:
@@ -1453,10 +1549,12 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
         matched += 1 if hit else 0
         if started_at:
             stamps.append(started_at)
-            if boot is not None:
-                stamp = _parse_iso_safe(started_at)
-                if stamp is not None and stamp >= boot:
+            stamp = _parse_iso_safe(started_at)
+            if stamp is not None:
+                stamped.append((stamp, source))
+                if boot is not None and stamp >= boot:
                     since_boot += 1
+    cluster = _largest_failure_cluster(stamped, _THROUGHPUT_CLUSTER_WINDOW_MINUTES)
     # Whole minutes, floored: `// 60` on seconds is the same reading the rate below
     # takes, and a fractional minute is precision the line cannot use. A boot in the
     # future — a clock step, an NTP correction — goes negative here and is clamped by
@@ -1480,7 +1578,52 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
         # does not have. None is also the shape a test overrides the helper to return.
         "boot": boot, "since_boot": since_boot,
         "minutes_since_boot": minutes_since_boot,
+        # #3494, and it travels with the rest rather than being computed at print time:
+        # the formatter would then have to re-derive the instants the census already
+        # parsed, and a line whose cluster came from a second reading of the store is
+        # the thing this census exists to avoid. None only when no row of the day
+        # carried a parsable stamp.
+        "cluster": cluster,
     }
+
+
+def _cluster_stamp(instant) -> str:
+    """A parsed instant as the `2026-10-26T20:36:20Z` the line prints its bounds in.
+
+    Converted to UTC rather than sliced: `started_at` is written in UTC, but a row from
+    a source that stamped a local zone arrives with that offset on it, and the label
+    this prints says `Z`. The span clause above prints lexical digits because its clause
+    pins the string; this one has the parsed instant, so it prints what the instant IS.
+    """
+    import datetime as _dt
+
+    return instant.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _boot_cluster_relation(boot, cluster) -> str | None:
+    """Where the host boot sits relative to the day's largest cluster, in words.
+
+    The whole of #3494's correction, and it is a sentence rather than a number because
+    the number it replaces was being READ the wrong way. `; 15 of them since host boot
+    2026-10-26T21:53:25+00:00` reads as an ONSET — the failures started when the machine
+    came up — and on 2026-10-26 it was the exact opposite: 26 of that day's 41 failures
+    precede the boot, the boot is the outage's TERMINUS, and the one cluster on the line
+    (15 failures in 207 s across 4 sources, 20:36:20Z–20:39:47Z) is over an hour before
+    it. One word — precedes / falls inside / follows — turns a false cause into a fact
+    about timing.
+
+    The window is CLOSED, so a boot landing exactly on a bound `falls inside` the
+    cluster: the bound instant is in the cluster, and a boot ramp beginning at the first
+    failure of a burst is that burst, not something beside it. None when either side is
+    missing, which leaves the since-boot count standing alone exactly as it reads today.
+    """
+    if boot is None or not cluster:
+        return None
+    if boot < cluster["start"]:
+        return "boot precedes the largest cluster"
+    if boot > cluster["end"]:
+        return "boot follows the largest cluster"
+    return "boot falls inside the largest cluster"
 
 
 def _throughput_alert_message(census: dict) -> str:
@@ -1522,10 +1665,29 @@ def _throughput_alert_message(census: dict) -> str:
     hard the pool is failing, and would itself read as the incident this clause is
     meant to discount.
 
-    When the machine would not give an instant the clause is absent entire — no count,
-    no rate, no anchor — because the alternative is printing a rate measured from a boot
-    the census does not know, which is the invention the defect being fixed was. The
-    line is otherwise byte-identical to the one before this clause existed.
+    When the machine would not give an instant the BOOT clause is absent entire — no
+    count, no rate, no anchor — because the alternative is printing a rate measured from
+    a boot the census does not know, which is the invention the defect being fixed was.
+    Everything else keeps its exact bytes: the day counts, the fired-rule parenthetical,
+    the class tally and the `failures span …` bounds are what made the 2026-10-16 line
+    triageable and no clause of #3494 moves them.
+
+    The cluster clause is #3494, and it says the thing the two day totals cannot. 2026-
+    10-26 posted 41 failures against 9 over `failures span 2026-10-26T05:25Z to
+    2026-10-26T22:23Z` — 16 h 58 min, the min/max of this store's own 41 rows — with
+    "15 of them since host boot 2026-10-26T21:53:25+00:00", a clause that reads as an
+    ONSET and was the reverse. 26 of those 41 PRECEDE that boot: the machine came up
+    after the damage,
+    and the day was not one bad day but two unrelated episodes, 9 failures in 220 s
+    across 3 sources at 14:23Z and 15 in 207 s across 4 at 20:36Z. So the line names the
+    counted day's densest `_THROUGHPUT_CLUSTER_WINDOW_MINUTES`-wide stretch —
+    `; largest cluster 15 failures over 207 s inside a 5 min window
+    (2026-10-26T20:36:20Z to 2026-10-26T20:39:47Z) across 4 sources` — and then states
+    the boot's position against it in three words: `boot precedes`, `falls inside`, or
+    `follows the largest cluster`. The since-boot COUNT is untouched, because three nodes
+    and the owed re-pricing of the floor count those lines; what changed is that it no
+    longer has to carry a causal reading on its own. The cluster and the relation are both
+    printed and read by nothing — the trip arithmetic is exactly as #2899 priced it.
     """
     parts = [f"{label} {n}" for label, n in census["classes"] if n]
     parts.append(f"other {census['other']}")
@@ -1538,6 +1700,22 @@ def _throughput_alert_message(census: dict) -> str:
     if census["first"] and census["last"]:
         bounds = (f"; failures span {census['day']}T{census['first'][11:16]}Z to "
                   f"{census['day']}T{census['last'][11:16]}Z")
+    cluster = census["cluster"]
+    cluster_part = ""
+    if cluster:
+        # Whole seconds, ROUNDED: the bounds are printed to the second, and 207 s is the
+        # reading of `20:36:20.730021 → 20:39:47.501810` (206.77) that the item quotes and
+        # a reader recomputes. Flooring it would print 206 beside bounds that every reader
+        # subtracts to 207.
+        seconds = round((cluster["end"] - cluster["start"]).total_seconds())
+        # The width is interpolated from the constant for the reason #3063 gives one
+        # clause below: a literal `5` here agrees with the window today and stops
+        # agreeing the day it moves, and this one is the width a burst is judged by.
+        cluster_part = (
+            f"; largest cluster {cluster['count']} failures over {seconds} s inside a "
+            f"{_THROUGHPUT_CLUSTER_WINDOW_MINUTES} min window "
+            f"({_cluster_stamp(cluster['start'])} to {_cluster_stamp(cluster['end'])}) "
+            f"across {cluster['sources']} sources")
     boot_part = ""
     if census["boot"] is not None:
         window = max(census["minutes_since_boot"], _THROUGHPUT_RATE_WINDOW_MINUTES)
@@ -1550,10 +1728,15 @@ def _throughput_alert_message(census: dict) -> str:
                      f"{census['boot'].isoformat()} = {rate:.2f} "
                      f"/ {_THROUGHPUT_RATE_WINDOW_MINUTES} min "
                      f"({census['minutes_since_boot']} min since boot)")
+        # …and the count stops being the whole clause (#3494). The count is what #2956
+        # shipped; the relation is what makes it mean the thing it says.
+        relation = _boot_cluster_relation(census["boot"], cluster)
+        if relation:
+            boot_part += f"; {relation}"
     return (
         f"worker pool failure throughput: {census['newer']} failed runs on UTC "
         f"{census['day']} against {census['older']} on UTC {census['prev']} "
-        f"({'; '.join(rules)}){boot_part}; classes: "
+        f"({'; '.join(rules)}){cluster_part}{boot_part}; classes: "
         f"{', '.join(parts)}{bounds}. Times and days are UTC; this note is keyed to "
         f"America/Los_Angeles, so the day named is not necessarily this note's day.")
 

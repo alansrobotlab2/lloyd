@@ -2296,8 +2296,14 @@ def _forget_census_day(monkeypatch) -> None:
     monkeypatch.setitem(fw._state, fw._THROUGHPUT_WM_KEY, None)
 
 
+#: The `runs.source` the seeder writes when a row does not name one. It is the value
+#: every node written before #3494 seeded (the seeder used to hardcode it), so those
+#: nodes' readings are unchanged by the widening.
+_THROUGHPUT_SOURCE = "owed-check"
+
+
 def _throughput_queue(path, pairs) -> WorkQueue:
-    """Seed a `runs` table. `pairs` is `[(utc_day, summary, 'HH:MM'), …]`, one per row.
+    """Seed a `runs` table. `pairs` is `[(utc_day, summary, when, source?), …]`, one per row.
 
     The day is written into `started_at` exactly as this store writes it — ISO with a
     `+00:00` offset — because the census groups on the leading 10 characters of that
@@ -2305,15 +2311,29 @@ def _throughput_queue(path, pairs) -> WorkQueue:
     have. Every row is `status='failed'`: the census counts failures, and seeding a
     success row to pad a count would let a green pass hide a `WHERE` clause that
     dropped the status filter.
+
+    `when` is `'HH:MM'` (the minute shape every pre-#3494 node passes, expanded to
+    `{day}T{HH:MM}:00+00:00`) or a FULL ISO instant, inserted verbatim. The full form
+    exists because #3494's window is measured on parsed instants and the burst it is
+    argued from contains a pair 46.6 MILLISECONDS apart — `14:24:28.112615` and
+    `14:24:28.159224` — which a minute-granular seeder cannot put on a board at all.
+    Detection is by the `T`, which this store's own format always carries.
+
+    The optional 4th element is `source`, defaulting to `_THROUGHPUT_SOURCE`. It exists
+    because the cluster field counts DISTINCT sources: with one hardcoded value, 15 rows
+    across 4 sources and 15 rows across 1 are the same fixture, and the number that says
+    "one shared dependency failed" could not be pinned by any node.
     """
     q = WorkQueue(path)
     conn = sqlite3.connect(str(path))
-    for n, (day, summary, hhmm) in enumerate(pairs):
-        stamp = f"{day}T{hhmm}:00+00:00"
+    for n, row in enumerate(pairs):
+        day, summary, when = row[0], row[1], row[2]
+        source = row[3] if len(row) > 3 else _THROUGHPUT_SOURCE
+        stamp = when if "T" in when else f"{day}T{when}:00+00:00"
         conn.execute(
             "INSERT INTO runs (run_id, queue_id, source, task_id, status,"
             " started_at, completed_at, summary) VALUES (?,?,?,?,?,?,?,?)",
-            (f"run-{n}", None, "owed-check", None, "failed", stamp, stamp, summary))
+            (f"run-{n}", None, source, None, "failed", stamp, stamp, summary))
     conn.commit()
     conn.close()
     return q
@@ -3224,3 +3244,484 @@ async def test_the_async_census_route_forwards_its_pinned_clock_across_the_hop(
     assert seen[1][0] is None, (
         "the two-argument route the tick takes must leave the census on the wall "
         f"clock, so a shipped alarm cannot report a frozen window: {seen[1][0]!r}")
+
+
+# ── #3494: a cluster field, so a multi-episode day cannot read as one bad day ──
+# Two day totals, a rule list and a min/max span are arithmetically incapable of
+# telling ONE bad day from TWO unrelated episodes inside a day, and the one temporal
+# clause #2956 added — `; 15 of them since host boot <iso>` — was being read as an
+# ONSET on the day it shipped, when the boot was the outage's TERMINUS: 26 of that
+# day's 41 failures precede 2026-10-26T21:53:25+00:00, and the day's real event
+# (15 failures in 207 s across 4 sources) is over an hour BEFORE it. These nodes pin
+# the reading that fixes it: the densest five-minute stretch of the counted day, its
+# two instants, how many distinct sources sat inside it, and the boot's position
+# against it in three words. Nothing here moves a threshold — the fixtures trip the
+# floor leg exactly as the day did, and `test_the_census_posts_on_a_137_versus_7_day_
+# and_stays_silent_at_8_versus_7` still answers None for the 8-versus-7 neighbour.
+#
+# The fixtures are SYNTHETIC rows on `_THROUGHPUT_DAY`, never a read of
+# `~/lloyd-data/workers.db`: the store is above the witness byte ceiling, it moves
+# under every run, and the shape is what is being pinned, not the day.
+
+#: The boot the 2026-10-26 alarm named, and which `uptime -s` confirmed as the live
+#: one (14:53:25 PDT). Chosen because of where it falls: AFTER the day's largest
+#: cluster, which is the reading the line got backwards.
+_THROUGHPUT_CLUSTER_BOOT = dt.datetime.fromisoformat(
+    f"{_THROUGHPUT_DAY}T21:53:25+00:00")
+
+#: 9 failures in 220 s across 3 sources, `14:23:00.381464Z` to `14:26:40.350172Z` —
+#: the store's own 9 rows of that episode, read back 2026-10-29, stamps and sources.
+#: `14:24:28.112615` and `14:24:28.159224` are 46.6 MILLISECONDS apart and are the pair
+#: clause 2 is about: any reading that truncates the stamp to a second, a minute, or a
+#: lexical slice loses one of them and reports 8.
+_EPISODE_A = (
+    ("14:23:00.381464", "autocode"),
+    ("14:24:28.112615", "board-steward"),
+    ("14:24:28.159224", "owed-check"),
+    ("14:24:38.449895", "owed-check"),
+    ("14:25:00.325311", "owed-check"),
+    ("14:25:30.262251", "board-steward"),
+    ("14:26:32.699756", "owed-check"),
+    ("14:26:36.462642", "owed-check"),
+    ("14:26:40.350172", "owed-check"),
+)
+
+#: 15 failures in 207 s across 4 sources, `20:36:20.730021Z` to `20:39:47.501810Z`,
+#: opening with 4 rows inside ONE SECOND (0.074 s apart) — again the store's own rows. Four sources failing in the same second is one
+#: shared dependency, which is the whole reason the field exists — and it is invisible
+#: to every number the line carried before this item.
+_EPISODE_B = (
+    ("20:36:20.730021", "youtube-digest"),
+    ("20:36:20.731048", "arch-review"),
+    ("20:36:20.799738", "owed-check"),
+    ("20:36:20.804447", "bench-mine"),
+    ("20:36:41.939759", "bench-mine"),
+    ("20:37:09.193391", "owed-check"),
+    ("20:37:09.250245", "bench-mine"),
+    ("20:37:18.865458", "owed-check"),
+    ("20:37:24.461853", "owed-check"),
+    ("20:37:40.579869", "bench-mine"),
+    ("20:37:42.821587", "bench-mine"),
+    ("20:37:45.039304", "bench-mine"),
+    ("20:38:43.594820", "bench-mine"),
+    ("20:38:47.601149", "bench-mine"),
+    ("20:39:47.501810", "owed-check"),
+)
+
+#: The 17 rows that are NOT an episode, and the only synthetic stamps here: 2 isolated
+#: failures hours before the boot (`unclassified`, so `other` stays non-zero and
+#: visible) and 15 spread 5 minutes apart after it, chosen to reproduce the day's
+#: 26 pre-boot against 15 since-boot — the arithmetic the shipped line inverted. The
+#: day's real first and last failures are 05:25:38.217235Z and 22:23:47.078957Z, so the
+#: `failures span …` literals below are this fixture's own shape, not the day's. The spread is deliberate: no window of it reaches 3 rows, so
+#: it can never be mistaken for the day's largest cluster.
+_CLUSTER_AFTER_BOOT = ("21:58", "22:03", "22:08", "22:13", "22:18", "22:23", "22:28",
+                       "22:33", "22:38", "22:43", "22:48", "22:53", "22:58", "23:03",
+                       "23:08")
+_CLUSTER_STRAGGLERS = (("07:12:05.118244", "board-steward"),
+                       ("12:40:31.902776", "autocode"))
+
+
+def _episode_rows(day, episode, summary):
+    """Seeding rows for an episode tuple, stamped in this store's own ISO format."""
+    return [(day, summary, f"{day}T{when}+00:00", source)
+            for when, source in episode]
+
+
+def _two_episode_day(day=_THROUGHPUT_DAY):
+    """41 failures shaped like UTC 2026-10-26: two episodes, 26 of them pre-boot.
+
+    Against 9 on the predecessor, so the FLOOR leg fires and the ratio leg does not —
+    the same pair of verdicts the real day reached (41 is 4.6x nine, nowhere near 10x),
+    which is what lets these nodes assert the printed rule list as a literal.
+    """
+    return (_episode_rows(day, _CLUSTER_STRAGGLERS, "unclassified thing happened")
+            + _episode_rows(day, _EPISODE_A, "run failed: no structured answer")
+            + _episode_rows(day, _EPISODE_B,
+                            "ConnectError: all connection attempts failed")
+            + [(day, "run failed: no structured answer", when,
+                ("owed-check", "autocode", "board-steward")[n % 3])
+               for n, when in enumerate(_CLUSTER_AFTER_BOOT)])
+
+
+def _spread_rows(day, count, every_minutes=6, first_minute=0):
+    """`count` rows `every_minutes` apart — a spread too thin to cluster at width 5."""
+    return [(day, f"run {n} failed: no structured answer",
+             f"{first_minute + n * every_minutes // 60:02d}:"
+             f"{first_minute + n * every_minutes % 60:02d}")
+            for n in range(count)]
+
+
+def _instants(pairs):
+    """`[(HH:MM:SS.ffffff, source), …]` → the `[(aware_instant, source), …]` the helper reads."""
+    return [(dt.datetime.fromisoformat(f"{_THROUGHPUT_DAY}T{when}+00:00"), source)
+            for when, source in pairs]
+
+
+def test_the_census_reports_the_largest_cluster_of_the_counted_day(monkeypatch, tmp_path):
+    """Clauses 1, 3 and 5: 15 rows, 207 s, 4 sources — and the boot AFTER it.
+
+    The fixture is `_two_episode_day()`: 41 failures against 9, episode A 9 in 220 s
+    across 3 sources at 14:23Z and episode B 15 in 207 s across 4 at 20:36Z. The field
+    has to name B, not A — which is precisely the half the filing pass got wrong, since
+    it compared A's tight 220 s against B's FULL 79-minute extent and called A the
+    day's largest. Over a five-minute window B wins on count (15 > 9), and that is the
+    whole point: the window is what makes the shared-dependency signature visible.
+
+    `sources` is 4 because four jobs died inside the same second, and 220/207 are the
+    rounded whole seconds a reader gets by subtracting the two printed bounds.
+    """
+    _boot_pinned(monkeypatch, _THROUGHPUT_CLUSTER_BOOT)
+    q = _throughput_queue(tmp_path / "cluster.db",
+                          _two_episode_day() + _throughput_rows(_THROUGHPUT_PREV, 9))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None, (
+        "41 failed against 9 trips the pinned floor of 40, so there is a census to "
+        "report a cluster on and there was not one")
+    assert census["newer"] == 41 and census["older"] == 9, (
+        f"the day counts the alarm already printed changed: {census['newer']} against "
+        f"{census['older']} — #3494 adds a clause, it does not move these")
+
+    cluster = census["cluster"]
+    assert cluster is not None, (
+        f"the census carried no cluster at all: {census}")
+    assert cluster["count"] == 15, (
+        f"episode B's 15 rows inside 20:36:20Z–20:39:47Z is the day's densest "
+        f"five-minute stretch; the field reported {cluster['count']}, which means the "
+        f"window is not five minutes wide or episode A won on the wrong arithmetic")
+    assert cluster["sources"] == 4, (
+        f"the winning window spans bench-mine, owed-check, arch-review and "
+        f"youtube-digest — 4 distinct sources is the reading that says ONE shared "
+        f"dependency failed, and the field said {cluster['sources']}")
+    assert cluster["start"] == dt.datetime.fromisoformat(
+        f"{_THROUGHPUT_DAY}T20:36:20.730021+00:00"), (
+        f"the cluster starts at the first row's parsed instant, microseconds and all, "
+        f"got {cluster['start']!r}")
+    assert cluster["end"] == dt.datetime.fromisoformat(
+        f"{_THROUGHPUT_DAY}T20:39:47.501810+00:00"), (
+        f"got {cluster['end']!r}")
+    seconds = round((cluster["end"] - cluster["start"]).total_seconds())
+    assert seconds == 207, (
+        f"20:36:20.730021Z to 20:39:47.501810Z is 206.77 s, which reads as the 207 s "
+        f"the item quotes and not as 206: got {seconds}")
+    assert cluster["start"] > _THROUGHPUT_CLUSTER_BOOT or \
+        cluster["end"] < _THROUGHPUT_CLUSTER_BOOT, (
+        "these nodes render the boot RELATION, and it only means anything if the "
+        "cluster and the boot are the two separated things the day had")
+
+
+def test_the_cluster_window_slides_on_parsed_instants_not_on_the_stamp_strings(
+        monkeypatch, tmp_path):
+    """Clause 2: the 46.6-millisecond pair is TWO rows, so episode A is 9 and not 8.
+
+    Episode A alone is made the day's densest stretch here — 9 rows over 220 s against
+    32 spread 6 minutes apart, 41 in all — so the census has to walk that pair to
+    report its count. The bounds are asserted as the exact parsed instants, down to
+    `microsecond == 381464`: a cluster computed by slicing `started_at`, or by
+    truncating it to a second or a minute, cannot produce a number with those digits in
+    it however it counts. The three nodes of arithmetic after the census are the same
+    claim aimed at the window's EDGE, which is where a unit error lives: a pair exactly
+    five minutes apart is inside a CLOSED five-minute window, and one five minutes and
+    one microsecond apart is not.
+    """
+    _boot_pinned(monkeypatch, _THROUGHPUT_CLUSTER_BOOT)
+    q = _throughput_queue(
+        tmp_path / "microseconds.db",
+        _episode_rows(_THROUGHPUT_DAY, _EPISODE_A, "run failed: no structured answer")
+        + _spread_rows(_THROUGHPUT_DAY, 32)
+        + _throughput_rows(_THROUGHPUT_PREV, 9))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["newer"] == 41, (
+        "9 clustered rows plus 32 spread ones is 41, over the pinned floor, and this "
+        f"node asserts episode A's numbers: {census and census['newer']}")
+    cluster = census["cluster"]
+    assert cluster["count"] == 9, (
+        "episode A is 9 rows and two of them are 46.6 ms apart, so a cluster reporting "
+        f"{cluster['count']} has read the stamp as a string, a second, or a minute and "
+        "lost one of the pair")
+    assert cluster["sources"] == 3, (
+        f"autocode, board-steward and owed-check are the 3 sources of that episode, "
+        f"got {cluster['sources']}")
+    assert cluster["start"].microsecond == 381464 and \
+        cluster["end"].microsecond == 350172, (
+        f"{cluster['start']!r} to {cluster['end']!r} are not the two instants the "
+        f"episode is stamped at: the bounds are printed from the parsed instants the "
+        "window slid on, and a lexical reading has no microseconds to report")
+
+    width = fw._THROUGHPUT_CLUSTER_WINDOW_MINUTES
+    exact = fw._largest_failure_cluster(
+        _instants((("14:00:00.000000", "owed-check"),
+                   ("14:05:00.000000", "arch-review"))), width)
+    assert exact["count"] == 2, (
+        "a pair exactly five minutes apart is inside a closed five-minute window, so "
+        f"the window is open at the far end: {exact}")
+    over = fw._largest_failure_cluster(
+        _instants((("14:00:00.000000", "owed-check"),
+                   ("14:05:00.000001", "arch-review"))), width)
+    assert over["count"] == 1, (
+        "five minutes plus one MICROSECOND is outside the window, and a reading that "
+        f"rounds the stamp to a second cannot tell the two apart: {over}")
+    assert fw._largest_failure_cluster([], width) is None, (
+        "an empty day yielded a cluster instead of nothing to report")
+
+
+class _RecordingConnection:
+    """The census's own connection, with every SQL it issues kept for the record.
+
+    Wrapping rather than re-implementing: the census only ever `execute`s and `close`s,
+    and the point of the shim is that the census cannot know it is being watched — a
+    `SELECT` added to the census shows up here whether its author meant to be seen or
+    not, which is the only way to pin "one reading of the store" from outside it.
+    """
+
+    def __init__(self, conn, seen):
+        self._conn = conn
+        self._seen = seen
+
+    def execute(self, sql, params=()):
+        self._seen.append(sql)
+        return self._conn.execute(sql, params)
+
+    def executescript(self, sql):
+        self._seen.append(sql)
+        return self._conn.executescript(sql)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._conn.close()
+        return False
+
+    def close(self):
+        self._conn.close()
+
+
+def _query_recorder(monkeypatch) -> list[str]:
+    """Record the SQL the CENSUS issues. Install it AFTER the queue is seeded."""
+    seen: list[str] = []
+    real = WorkQueue._connect
+
+    def spy(self):
+        return _RecordingConnection(real(self), seen)
+
+    monkeypatch.setattr(WorkQueue, "_connect", spy)
+    return seen
+
+
+def test_the_cluster_reads_source_from_the_query_the_census_already_makes(
+        monkeypatch, tmp_path):
+    """Clause 3: `source` rides along on the day's own SELECT — no second read of `runs`.
+
+    The distinct-source count is a column the census did not fetch before this item, and
+    the cheap way to get it is a second `SELECT` over the same store on the same tick.
+    That is the thing this node refuses: exactly three statements touch `runs` per census
+    (the day-is-complete probe, the two-day counts, the day's rows), and the one that
+    fetches the day's rows is the one that names `source`. The 4 in `sources` is then
+    asserted against the same fixture, so a query that selected a literal or a join that
+    collapsed the sources cannot pass it either.
+    """
+    _boot_pinned(monkeypatch, _THROUGHPUT_CLUSTER_BOOT)
+    q = _throughput_queue(tmp_path / "one-reading.db",
+                          _two_episode_day() + _throughput_rows(_THROUGHPUT_PREV, 9))
+    seen = _query_recorder(monkeypatch)
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None, (
+        "41 against 9 has to reach a census before its SQL can be graded")
+
+    over_runs = [s for s in seen if "FROM runs" in s]
+    assert len(over_runs) == 3, (
+        f"the census is supposed to read `runs` three times per verdict (complete-day "
+        f"probe, day counts, the day's rows) and issued {len(over_runs)}: "
+        f"{over_runs}")
+    day_query = [s for s in over_runs if "substr(started_at, 1, 10) = ?" in s]
+    assert len(day_query) == 1, (
+        f"exactly one statement fetches the counted day's rows, so the cluster's "
+        f"sources have to come from it; there were {len(day_query)}: {day_query}")
+    assert "source" in day_query[0].lower(), (
+        f"the day's own query does not select `source`, so a distinct-source count is "
+        f"a second read of the store: {day_query[0]}")
+    assert census["cluster"]["sources"] == 4, (
+        f"the same query has to yield the 4 sources of episode B, and the census "
+        f"reported {census['cluster']['sources']}")
+
+
+def test_the_line_prints_the_cluster_and_the_boot_s_position_against_it(
+        monkeypatch, tmp_path):
+    """Clause 4: the new clause is on the line and the old text is byte-for-byte intact.
+
+    The four substrings asserted as literals are the ones #2890 and #2899 pinned and the
+    ones #3494's clause 4 says are untouched — the two day counts, the fired-rule
+    parenthetical, the class tally and the `failures span …` bounds — so they are written
+    out in full rather than re-derived, and a reflowed line that "keeps the same
+    information" fails here instead of shipping. Then the two new readings: 15 failures
+    over 207 s inside a 5 min window across 4 sources, and `boot follows the largest
+    cluster`, which is the sentence that replaces the false onset the since-boot count
+    used to imply while leaving that count exactly where #2956 put it.
+    """
+    _boot_pinned(monkeypatch, _THROUGHPUT_CLUSTER_BOOT)
+    q = _throughput_queue(tmp_path / "cluster-line.db",
+                          _two_episode_day() + _throughput_rows(_THROUGHPUT_PREV, 9))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["cluster"]["count"] == 15, (
+        f"this node renders the fixture clause 5 describes, got {census and census['cluster']}")
+    line = fw._throughput_alert_message(census)
+
+    assert (f"worker pool failure throughput: 41 failed runs on UTC {_THROUGHPUT_DAY} "
+            f"against 9 on UTC {_THROUGHPUT_PREV} (floor rule: >= 40)") in line, line
+    assert ("; classes: no structured answer 24, connect error 15, other 2"
+            f"; failures span {_THROUGHPUT_DAY}T07:12Z to "
+            f"{_THROUGHPUT_DAY}T23:08Z.") in line, line
+    assert (f"largest cluster 15 failures over 207 s inside a "
+            f"{fw._THROUGHPUT_CLUSTER_WINDOW_MINUTES} min window "
+            f"({_THROUGHPUT_DAY}T20:36:20Z to {_THROUGHPUT_DAY}T20:39:47Z) "
+            f"across 4 sources") in line, line
+    assert "15 of them since host boot " \
+        f"{_THROUGHPUT_CLUSTER_BOOT.isoformat()} = 1.72 / 15 min " in line, line
+    assert "(131 min since boot); boot follows the largest cluster" in line, (
+        f"the since-boot count is on the line with no statement of where the boot sits "
+        f"against the cluster — the bare count is the defect: {line}")
+    assert "boot precedes the largest cluster" not in line, line
+    assert "boot falls inside the largest cluster" not in line, line
+
+
+def test_the_cluster_prints_and_the_boot_clause_stays_absent_without_a_boot_instant(
+        monkeypatch, tmp_path):
+    """Clause 4's other half: no anchor means no boot clause, and the cluster still prints.
+
+    The two things are independent by construction — the cluster is computed from the
+    day's rows, and only the RELATION needs the host clock — so a machine that will not
+    say when it came up loses the relation and keeps the burst. The absence assertions are
+    #2956's, kept verbatim in force: a rate measured from a boot the census does not know
+    is the invention that defect was about.
+    """
+    monkeypatch.setattr(fw, "_host_boot_instant", lambda: None)
+    q = _throughput_queue(tmp_path / "cluster-no-boot.db",
+                          _two_episode_day() + _throughput_rows(_THROUGHPUT_PREV, 9))
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["boot"] is None \
+        and census["since_boot"] is None, (
+        f"the census invented a boot out of a missing anchor: {census}")
+    assert census["cluster"] is not None and census["cluster"]["count"] == 15, (
+        f"the cluster comes from the day's own rows, so a missing boot cannot take it "
+        f"away: {census['cluster']}")
+
+    line = fw._throughput_alert_message(census)
+    assert f"largest cluster 15 failures over 207 s inside a " \
+        f"{fw._THROUGHPUT_CLUSTER_WINDOW_MINUTES} min window" in line, line
+    assert "across 4 sources" in line, line
+    assert "since host boot" not in line, (
+        f"the line names a boot instant the census does not have: {line}")
+    assert "/ 15 min" not in line, (
+        f"the line printed a rate with no window to compute it from: {line}")
+    assert "largest cluster" in line and "boot follows" not in line, (
+        f"the relation was printed without one of its two sides: {line}")
+
+
+def test_the_cluster_width_is_read_from_the_constant_and_not_from_the_rate_window(
+        monkeypatch, tmp_path):
+    """Clause 1: move `_THROUGHPUT_CLUSTER_WINDOW_MINUTES` and the window moves with it.
+
+    #3063's method, applied to the new constant. Three rows 3 minutes apart at width 5
+    make a cluster of 2; at width 6 the far row joins and it is 3 — and the printed unit
+    says 6, because the label interpolates too. Then the mirror of the same claim: the
+    since-boot RATE window is patched to the cluster width's value, which must change
+    the rate and leave the cluster alone. The two constants measure different things (a
+    denominator in one case, a burst width in the other) and a diff that unified them
+    would move one figure and silently move the other; this is the node that notices.
+    """
+    assert fw._THROUGHPUT_CLUSTER_WINDOW_MINUTES == 5, (
+        "five minutes is the item's stated width and its triage adopted it as the "
+        "contract's call; the nodes below assert 9-and-15-row clusters over it")
+    pairs = (_spread_rows(_THROUGHPUT_DAY, 41, every_minutes=3)
+             + _throughput_rows(_THROUGHPUT_PREV, 9))
+    q = _throughput_queue(tmp_path / "width.db", pairs)
+    _boot_pinned(monkeypatch, _THROUGHPUT_CLUSTER_BOOT)
+
+    at_five = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert at_five is not None and at_five["cluster"]["count"] == 2, (
+        f"rows 3 minutes apart put 2 of them in a closed 5-minute window, got "
+        f"{at_five and at_five['cluster']}")
+    monkeypatch.setattr(fw, "_THROUGHPUT_CLUSTER_WINDOW_MINUTES", 6)
+    at_six = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert at_six["cluster"]["count"] == 3, (
+        "at width 6 the third row is inside the window (0, 3, 6 min spans exactly 360 "
+        f"s), so a count still 2 means the width is a literal somewhere: "
+        f"{at_six['cluster']}")
+    line = fw._throughput_alert_message(at_six)
+    assert "inside a 6 min window" in line, (
+        f"the census widened to 6 and the line still prints a literal width: {line}")
+    assert "inside a 5 min window" not in line, line
+
+    # …and the mirror image. The rate window is moved to a value the cluster width does
+    # NOT share: if the two constants had been unified, the cluster would widen to 11
+    # rows (a 3-minute spread inside half an hour) and the label would follow.
+    monkeypatch.setattr(fw, "_THROUGHPUT_CLUSTER_WINDOW_MINUTES", 5)
+    monkeypatch.setattr(fw, "_THROUGHPUT_RATE_WINDOW_MINUTES", 30)
+    rate_only = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    rate_line = fw._throughput_alert_message(rate_only)
+    assert rate_only["cluster"]["count"] == 2, (
+        "the since-boot RATE window is the denominator of a different figure: widening "
+        f"it to 30 minutes moved the cluster to {rate_only['cluster']['count']}, which "
+        "is the two constants having been unified")
+    assert "inside a 5 min window" in rate_line, (
+        f"the cluster's printed width followed the rate constant: {rate_line}")
+    assert "/ 30 min" in rate_line, (
+        "the rate patch did not take effect at all, which would let the assertion above "
+        f"pass by moving nothing: {rate_line}")
+
+
+def test_the_cluster_width_appears_only_as_the_constant():
+    """Clause 1's other half: no literal 5 in the census, and no reuse of the rate one.
+
+    Behaviour above proves the numbers follow the constant; this pins the shape that
+    keeps them doing so. `_throughput_census` must name
+    `_THROUGHPUT_CLUSTER_WINDOW_MINUTES` and must not name
+    `_THROUGHPUT_RATE_WINDOW_MINUTES` at all — the census reads neither today except for
+    the cluster width, and the day it someone reaches for the 15 to widen a burst, the
+    rate silently changes too. The formatter is checked with its DOCSTRING cut off,
+    because that prose quotes an example line containing `5 min window` and the thing
+    under judgement here is the f-string.
+    """
+    census_src = inspect.getsource(fw._throughput_census)
+    assert "_THROUGHPUT_CLUSTER_WINDOW_MINUTES" in census_src, (
+        "the census no longer reads the width from the module constant")
+    assert "_THROUGHPUT_RATE_WINDOW_MINUTES" not in census_src, (
+        "the census is reading the rate window, which is the denominator of a "
+        "different figure")
+
+    src = inspect.getsource(fw._throughput_alert_message)
+    doc_end = src.index('"""', src.index('"""') + 3)
+    body = src[doc_end + 3:]
+    assert "{_THROUGHPUT_CLUSTER_WINDOW_MINUTES} min window" in body, (
+        "the printed width is no longer interpolated from the constant, so it is a "
+        "literal in the f-string: #3063 is exactly this defect one clause away")
+
+
+def test_the_relation_helper_states_all_three_positions_and_needs_both_sides():
+    """Clauses 3 and 4: precedes / falls inside / follows, and nothing when either side is absent.
+
+    Three words are the entire correction, so all three are asserted by their printed
+    spelling rather than by an enum a reader has to chase. The endpoints belong to the
+    cluster — the window is closed — so a boot exactly at a bound `falls inside`: a boot
+    ramp that begins at a burst's first failure IS that burst, which is 2026-10-17's
+    shape (#2956), and reading it as "follows" would put the reboot before the damage.
+    """
+    start = dt.datetime.fromisoformat(f"{_THROUGHPUT_DAY}T20:36:20.730021+00:00")
+    end = dt.datetime.fromisoformat(f"{_THROUGHPUT_DAY}T20:39:47.501810+00:00")
+    cluster = {"count": 15, "start": start, "end": end, "sources": 4}
+
+    assert fw._boot_cluster_relation(start - dt.timedelta(seconds=1),
+                                     cluster) == "boot precedes the largest cluster"
+    assert fw._boot_cluster_relation(end + dt.timedelta(seconds=1),
+                                     cluster) == "boot follows the largest cluster"
+    assert fw._boot_cluster_relation(start + dt.timedelta(seconds=30),
+                                     cluster) == "boot falls inside the largest cluster"
+    assert fw._boot_cluster_relation(start, cluster) == "boot falls inside the largest cluster", (
+        "the window is closed, so a boot at the cluster's first instant is inside it")
+    assert fw._boot_cluster_relation(end, cluster) == "boot falls inside the largest cluster"
+
+    assert fw._boot_cluster_relation(None, cluster) is None, (
+        "a boot the machine would not name produced a relation anyway")
+    assert fw._boot_cluster_relation(start, None) is None, (
+        "a relation to a cluster that does not exist produced text")
