@@ -9882,3 +9882,78 @@ def test_the_page_no_longer_tells_a_reader_to_edit_the_test_to_fix_a_citation():
     assert _correction_claim_gaps(stale) == list(RETIRED_CORRECTION_INSTRUCTIONS), (
         "the retired instruction did not fire on the sentence it was taken out of, so the "
         "absence asserted above is a pattern that could never have matched this page")
+
+
+# --------------------------------------------------------------------------- #
+# measurement.md's floor-record arithmetic (#3586)
+# --------------------------------------------------------------------------- #
+
+def test_measurement_doc_states_which_floor_term_can_actually_bind():
+    """Clause 4: the bullet that funds the a/b pair says what that pair decides.
+
+    `architecture/measurement.md` §Which measurement stands between a round and
+    landing tells a person to spend ~6 min of engine time refilling
+    `eval/noise_floor_tool_choice.yaml`, and said nothing about the arithmetic
+    that makes the refill unable to move a verdict: `compare_tool_choice` decides
+    against `max(binomial 2σ, measured spread)`, and `binomial_sigma` clamps p
+    into `[1/n, 1-1/n]`, so a spread binds only above `2σ·sqrt((1/n)(1-1/n)/n)` —
+    0.097 at this corpus's 20 queries, while the record's largest spread is 0.071.
+
+    The numbers are re-derived here from the record and the query file rather
+    than trusted from the prose, and the inertness assertion is a branch, not a
+    constant: the day a refill produces a spread that clears the threshold — or
+    the corpus grows so the threshold falls under it — this node stops accepting
+    the sentence, which is the acceptance's "stops being true the day a spread
+    can bind" made mechanical.
+    """
+    import yaml
+
+    from eval import compare_tool_choice as C
+
+    text = _text("measurement.md")
+    heading = "## Which measurement stands between a round and landing"
+    assert heading in text, "the tool-choice rung section is gone from measurement.md"
+    # Every positive assertion below is scoped to the section that owns the floor
+    # record, not to the file. Prose that only has to appear `in body` can be
+    # satisfied by a Review-log confession or by a sentence in an unrelated
+    # section, and the reader this clause is for arrives at this heading.
+    rung = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    assert rung.count("sqrt((1/n)(1-1/n)/n)") == 1, (
+        "the binding condition belongs in one place — the floor-record bullet; "
+        f"it appears {rung.count('sqrt((1/n)(1-1/n)/n)')} times in §{heading}")
+
+    rec = C.load_floor_record(EVAL / "noise_floor_tool_choice.yaml")
+    obs = C.observed_spreads(rec)
+    assert obs, "the floor record is empty, so there is no spread to characterize"
+    top = max(obs.values())
+    queries = yaml.safe_load((EVAL / "tool_choice_queries.yaml").read_text())
+    n_corpus = len(queries["queries"])
+    # The narrowest floor any compared metric can reach is the one at the
+    # widest denominator, and no metric's denominator exceeds the corpus.
+    threshold = C.min_binomial_floor(n_corpus)
+
+    assert f"{top:.3f}" in rung, (
+        f"the floor-record bullet does not name the record's largest "
+        f"observed_spread ({top:.3f} at n={n_corpus}); it is asserting about "
+        "numbers it does not quote")
+    assert f"{threshold:.3f}" in rung, (
+        f"the floor-record bullet does not name the binding threshold "
+        f"({threshold:.3f} at n={n_corpus})")
+    if top < threshold:
+        assert "cannot bind" in rung, (
+            f"the measured spread cannot bind ({top:.3f} < {threshold:.3f}) and "
+            "the bullet does not say so — `0 of 5` left to be read as a near-miss")
+        assert "provenance-only" in rung, "the inert record is not labelled as such"
+    else:
+        assert "cannot bind" not in rung, (
+            f"the bullet still claims the measured term cannot bind, but the "
+            f"record's {top:.3f} now clears the {threshold:.3f} floor at "
+            f"n={n_corpus} — the sentence has to be rewritten, not re-asserted")
+    # The claim is about these values, never a general impossibility: a fresh
+    # pair moving a metric by more than its own floor binds at today's corpus.
+    assert "at this record's values" in rung, "the claim is not bound to its values"
+    # Guarded over the WHOLE file, Review log included: an overstatement is a
+    # false claim wherever it is written, and the log is the likeliest place for
+    # a later pass to paraphrase the bullet into one.
+    assert "can never bind" not in text and "never binds" not in text, (
+        "measurement.md overstates the arithmetic into a general impossibility")

@@ -36,6 +36,17 @@ spread on record in `noise_floor_tool_choice.yaml`, which
 beside the delta it decided against, so a reader can see which side of the
 noise a movement is on rather than which side of a constant.
 
+Which of those two terms can decide at all is arithmetic this file computes
+rather than prose it remembers: `binomial_sigma` clamps p into `[1/n, 1-1/n]`, so
+the narrowest binomial floor at denominator n is `2σ·sqrt((1/n)(1-1/n)/n)`, and a
+spread below it cannot be the `max` for any metric at those denominators, at any
+rates. `min_binomial_floor` and `measured_term_binding` work that out from the
+record and the comparison's own `n`s on every call, and `_floor_report` prints
+the answer in words — so a record whose every spread sits under the threshold is
+called what it is at this corpus (provenance for the spread, the binomial term
+doing the deciding) instead of leaving `0 of 5` to be read as a near-miss, and
+the sentence retires itself the day a spread is wide enough to bind (#3586).
+
 The cost of that honesty is stated in the output: at n=20 this instrument can
 only certify movements larger than about 0.14. Raising n is the way to certify
 smaller ones; lowering the tolerance is not.
@@ -173,6 +184,23 @@ def binomial_sigma(p: float, n: int) -> float:
     return math.sqrt(p_eff * (1.0 - p_eff) / n)
 
 
+def min_binomial_floor(n: int) -> float:
+    """The narrowest binomial term a metric over `n` trials can ever be priced at.
+
+    `noise_floor` prices the binomial term at the WORSE of the two rates, and
+    `binomial_sigma` clamps every rate into `[1/n, 1-1/n]` first, so the
+    smallest value that term can take at denominator `n` is the one at the
+    clamp, `BINOMIAL_SIGMAS * sqrt((1/n)(1-1/n)/n)` — 0.097 at n=20, 0.138 at
+    n=14, 0.304 at n=6. A measured spread below it therefore cannot be the
+    `max` in `noise_floor` at ANY pair of rates this instrument produces, which
+    is the arithmetic #3586 says the report has never stated in words.
+    """
+    n = int(n)
+    if n < 2:
+        return 1.0
+    return BINOMIAL_SIGMAS * binomial_sigma(0.0, n)
+
+
 def observed_spreads(record: dict[str, Any] | None) -> dict[str, float]:
     """Per-metric largest same-tree spread from the floor record, or {}."""
     if not isinstance(record, dict):
@@ -183,6 +211,42 @@ def observed_spreads(record: dict[str, Any] | None) -> dict[str, float]:
         if isinstance(v, (int, float)):
             out[metric] = float(v)
     return out
+
+
+def measured_term_binding(floors: dict[str, dict[str, Any]],
+                          observed: dict[str, float]) -> dict[str, Any] | None:
+    """Could the recorded same-tree spread be the term that decides, in THIS run?
+
+    `None` when the question has no denominator to ask it of — no comparable
+    metric, or a record holding no spread for any metric this comparison covers.
+    Otherwise `{binds, max_observed, max_metric, threshold, threshold_n,
+    threshold_metric}`, with `binds` False only when EVERY recorded spread is
+    below the narrowest binomial floor any compared metric can reach. That is
+    deliberately coarser than per-metric arithmetic and it is the one direction
+    this file may assert in words: below the clamp-level floor no recorded
+    spread can win the `max` for any metric, whatever the two runs' rates turn
+    out to be. Everything in it is re-derived from the record and the
+    comparison's own denominators on every call, so the sentence it feeds stops
+    being true the day a measured spread gets large enough to bind, or the
+    query corpus grows small enough a threshold for one (#3586).
+    """
+    usable = {m: int(b.get("n") or 0) for m, b in (floors or {}).items()}
+    usable = {m: n for m, n in usable.items() if n >= 2}
+    scored = {m: float(observed[m]) for m in usable if m in observed}
+    if not usable or not scored:
+        return None
+    # Sorted iteration so a tie names the same metric on every machine.
+    max_metric = max(sorted(scored), key=lambda m: scored[m])
+    threshold_metric = min(sorted(usable), key=lambda m: min_binomial_floor(usable[m]))
+    threshold = min_binomial_floor(usable[threshold_metric])
+    return {
+        "binds": scored[max_metric] > threshold + 1e-9,
+        "max_observed": scored[max_metric],
+        "max_metric": max_metric,
+        "threshold": threshold,
+        "threshold_n": usable[threshold_metric],
+        "threshold_metric": threshold_metric,
+    }
 
 
 def load_floor_record(path: Path | str | None = None) -> dict[str, Any] | None:
@@ -260,6 +324,46 @@ def same_tree_pairs(directory: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def binding_note(per_metric: dict[str, float],
+                 metric_ns: dict[str, int]) -> str:
+    """The sentence a floor record has to carry about its own numbers (#3586).
+
+    `measure_floor` regenerates `note:` from a template and rewrites the whole
+    file, so anything a reader needs beside the spread lives HERE — a
+    hand-edited note is destroyed by the next `--measure-floor`. Both branches
+    are computed from the record's values and the denominators its own pairs
+    ran at, and neither claims the measured term is inert in general: at n=20 a
+    fresh pair moving `no_tool_call_rate` by more than 0.097 would bind, so the
+    only honest claim is about the values being written.
+    """
+    scored = {m: float(v) for m, v in per_metric.items()}
+    usable = {m: int(n) for m, n in metric_ns.items() if int(n) >= 2 and m in scored}
+    if not scored or not usable:
+        return (" Whether a spread here can decide anything is arithmetic: it binds "
+                "only above that metric's binomial term, whose narrowest value at "
+                f"denominator n is {BINOMIAL_SIGMAS:g}σ·sqrt((1/n)(1-1/n)/n).")
+    max_metric = max(sorted(scored), key=lambda m: scored[m])
+    threshold_metric = min(sorted(usable), key=lambda m: min_binomial_floor(usable[m]))
+    threshold = min_binomial_floor(usable[threshold_metric])
+    condition = (" Whether a spread here can decide anything is arithmetic, not "
+                 "policy: it binds only above that metric's own binomial term, "
+                 f"whose narrowest value at denominator n is "
+                 f"{BINOMIAL_SIGMAS:g}σ·sqrt((1/n)(1-1/n)/n)")
+    if scored[max_metric] > threshold + 1e-9:
+        return (condition +
+                f" — {threshold:.3f} at n={usable[threshold_metric]} — and the "
+                f"largest spread this record holds is {scored[max_metric]:.3f} "
+                f"(`{max_metric}`), ABOVE that, so wherever a spread beats its "
+                "metric's own binomial term it is the deciding term there.")
+    return (condition +
+            f" — {threshold:.3f} at n={usable[threshold_metric]} — and the largest "
+            f"spread this record holds is {scored[max_metric]:.3f} "
+            f"(`{max_metric}`), below that, so at this record's values the "
+            "measured term cannot bind and the binomial term alone decides every "
+            "floor: this record is a provenance-only artefact for the spread, "
+            "not a load-bearing term in the verdict (#3586).")
+
+
 def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
     """Measure the same-tree floor and write `out_path`, but only if it measured something.
 
@@ -283,12 +387,20 @@ def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
     """
     pairs = same_tree_pairs(directory)
     per_metric: dict[str, float] = {}
+    metric_ns: dict[str, int] = {}
     pair_rows = []
     for a, b in pairs:
         ra, rb = load(a), load(b)
         oa, ob = overall(ra), overall(rb)
         if (oa.get("errors") or 0) or (ob.get("errors") or 0):
             continue          # an errored run measures the harness, not the model
+        # The denominators these spreads were measured over, kept at the LARGEST
+        # n a metric was seen at so the note's threshold is the narrowest one the
+        # record was ever measured against: claiming "cannot bind" is only safe
+        # against the tightest floor, not the one that happens to be first.
+        for metric, n in denominators(ra).items():
+            if isinstance(n, int) and n >= 2:
+                metric_ns[metric] = max(metric_ns.get(metric, 0), n)
         spread: dict[str, float] = {}
         for metric in METRICS:
             x, y = oa.get(metric), ob.get(metric)
@@ -311,6 +423,7 @@ def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
             "reproduced both magnitudes at the opposite sign. These are floors, "
             "not budgets: compare_tool_choice decides against max(this, 2σ "
             "binomial at the metric's own denominator)."
+            + binding_note(per_metric, metric_ns)
         ),
         "binomial_sigmas": BINOMIAL_SIGMAS,
         "pairs": pair_rows,
@@ -442,11 +555,33 @@ def _floor_report(result: Comparison, observed: dict[str, float],
     else:
         named = sum(1 for m, b in result.floors.items()
                     if f"measured same-tree spread={b['floor']:.3f}" in str(b["src"]))
+        # `0 of N decided by the measured spread` has two entirely different
+        # causes, and only one of them is a coincidence of two close numbers: at
+        # this corpus the narrowest binomial floor is 0.097 and no recorded
+        # spread reaches it, so the measured term CANNOT be the max at any of
+        # these denominators (#3586). Say which cause is operating, computed from
+        # the record and this run's own denominators, so `0 of 5` stops being read
+        # as a load-bearing measured term — and so the sentence retires itself the
+        # day a spread is big enough to bind.
+        binding = measured_term_binding(result.floors, observed)
+        inert = ("" if not binding or binding["binds"] else
+                 f" At these denominators the measured spread cannot bind: the largest "
+                 f"spread on record is {binding['max_observed']:.3f} "
+                 f"(`{binding['max_metric']}`), below the "
+                 f"{binding['threshold']:.3f} that is the narrowest binomial floor "
+                 f"this comparison's denominators can produce "
+                 f"(= {BINOMIAL_SIGMAS:g}σ at the 1/n clamp, "
+                 f"sqrt((1/n)(1-1/n)/n) at n={binding['threshold_n']} for "
+                 f"`{binding['threshold_metric']}`), so at this record's values the "
+                 f"binomial term alone decides every floor and "
+                 f"{FLOOR_RECORD.name} is provenance only for this comparison — a "
+                 f"spread above {binding['threshold']:.3f} would decide instead.")
         out.append(f"  floor source: every floor is max(binomial {BINOMIAL_SIGMAS:g}σ at its own "
                    f"denominator, measured same-tree spread); {named} of "
                    f"{len(result.floors)} compared metric(s) were decided by the measured "
                    f"spread, the rest by the binomial term "
-                   f"({FLOOR_RECORD.name}, {len(observed)} metric(s) on record).")
+                   f"({FLOOR_RECORD.name}, {len(observed)} metric(s) on record)."
+                   + inert)
     out.append("  a movement smaller than a floor is NOT evidence of anything: to certify "
                "smaller ones raise the query count, never the tolerance.")
     return out

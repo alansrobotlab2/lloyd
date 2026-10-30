@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 import pytest
 import yaml
@@ -647,6 +648,243 @@ def test_the_committed_floor_record_is_valid_and_nonempty():
         assert floor >= spread and floor >= C.noise_floor(metric, 0.5, 0.5, n, {})[0], metric
     assert "under eval/baselines" not in rec["note"]
     assert "lloyd-data/eval/baselines/tool-choice" in rec["note"], rec["note"]
+
+
+# ── #3586: can the measured term decide anything AT THESE DENOMINATORS? ──────
+#
+# `floor = max(binomial 2σ, measured same-tree spread)` carries a term that
+# cannot be the max here at all: `binomial_sigma` clamps p into [1/n, 1-1/n], so
+# the NARROWEST binomial floor a metric over n trials can ever be priced at is
+# `2·sqrt((1/n)(1-1/n)/n)` — 0.0975 at n=20 — while the largest
+# `observed_spread` the record has ever held is 0.071. So the comparator's
+# `0 of 5 … decided by the measured spread` was not a coincidence of two close
+# numbers: it was arithmetic, and nothing said so. These nodes pin the sentence
+# that now says it, and — because a sentence computed from a record is worth
+# nothing unless it retires — that it disappears on a spread that CAN bind.
+# The direction matters in both senses: what is false is "the measured term can
+# never bind", since a fresh same-tree pair moving `no_tool_call_rate` by more
+# than 0.097 would bind at today's corpus; what is true is "no spread at this
+# record's values can bind at these denominators".
+
+#: The clamp-level binomial term at n=20, spelled independently of the module
+#: under test so an assertion can demand the printed threshold match the maths
+#: rather than match whatever the module decided to print.
+N20_THRESHOLD = 2.0 * math.sqrt((1.0 / 20) * (1.0 - 1.0 / 20) / 20)
+
+
+def _committed_record():
+    return C.load_floor_record(ROOT / "eval" / "noise_floor_tool_choice.yaml")
+
+
+def _committed_observed():
+    """The spreads the shipped record actually holds, read from the file.
+
+    Every figure the report-line assertions below compare against comes out of
+    this, never out of a constant in this file: an assertion quoting a
+    module-level 0.071 would still pass if the comparator started printing a
+    number the record does not contain.
+    """
+    return C.observed_spreads(_committed_record())
+
+
+def _floor_source_line(lines) -> str:
+    hits = [ln for ln in lines if "floor source:" in ln]
+    assert len(hits) == 1, hits
+    return hits[0]
+
+
+def test_min_binomial_floor_is_the_closed_form_at_the_clamp():
+    """The threshold is the clamp-level binomial term, exactly.
+
+    Pinned against the closed form rather than against the function itself, and
+    at 6/14/20/60 because those are the denominators this instrument's metrics
+    actually have. `27 > 0.071 > 28` is the crossover a 0.071 spread would need
+    to start mattering: n=28, not the n=60 #3586's own arithmetic guessed.
+    """
+    top = max(_committed_observed().values())     # the record's own widest spread
+    for n in (6, 14, 20, 60):
+        assert C.min_binomial_floor(n) == pytest.approx(
+            2.0 * math.sqrt((1.0 / n) * (1.0 - 1.0 / n) / n), abs=1e-12)
+    assert C.min_binomial_floor(20) == pytest.approx(N20_THRESHOLD, abs=1e-12)
+    # n=28 is where a spread the size of this record's would start to matter —
+    # not the n=60 #3586's own arithmetic guessed.
+    assert C.min_binomial_floor(27) > top > C.min_binomial_floor(28)
+    assert C.min_binomial_floor(1) == 1.0          # no denominator, no bound
+
+
+def test_measured_term_binding_is_computed_from_the_record_and_the_denominators():
+    """The judgement, as data: same spread inert at n=20, binding at n=60."""
+    top = max(_committed_observed().values())
+    r = C.compare(NOISE_B, NOISE_A)
+    inert = C.measured_term_binding(r.floors, {"correct_rate": top})
+    assert inert["binds"] is False
+    assert inert["threshold"] == pytest.approx(N20_THRESHOLD, abs=1e-12)
+    assert inert["threshold_n"] == 20 and inert["max_metric"] == "correct_rate"
+
+    wide = C.measured_term_binding(
+        {"correct_rate": {"floor": 0.05, "src": "x", "n": 60}},
+        {"correct_rate": top})
+    assert wide["binds"] is True and wide["threshold_n"] == 60
+
+    bigger = C.measured_term_binding(r.floors, {"correct_rate": 0.20})
+    assert bigger["binds"] is True
+    # Nothing to ask the question of: no spread, or none for a metric this
+    # comparison covers. Neither may be reported as inert.
+    assert C.measured_term_binding(r.floors, {}) is None
+    assert C.measured_term_binding(r.floors, {"uncompared_metric": 0.9}) is None
+
+
+def test_the_report_says_the_measured_spread_cannot_bind_at_these_denominators():
+    """Clause 1, on the record the repo actually ships.
+
+    The line has to name the cause in words AND print the threshold it compared
+    against, because `0 of 5` alone reads as a near-miss between two similar
+    numbers rather than as a term that is structurally unable to win.
+    """
+    obs = _committed_observed()
+    assert obs, "the shipped record holds no spreads, so there is nothing to report"
+    top = max(obs.values())
+    r = C.compare(NOISE_B, NOISE_A, obs)
+    line = _floor_source_line(C._floor_report(r, obs, False))
+    assert "0 of 5 compared metric(s) were decided by the measured spread" in line
+    assert "cannot bind" in line, line
+    # Both numbers the line prints are demanded as the record's own and as the
+    # closed form's, formatted here rather than grepped for as a substring
+    # someone happened to type: the report quoting 0.080 while the record holds
+    # 0.071, or printing a threshold that is not 2σ at the 1/n clamp, fails here.
+    assert f"{top:.3f}" in line, line
+    assert f"{N20_THRESHOLD:.3f}" in line, line
+    assert "sqrt((1/n)(1-1/n)/n)" in line, line
+    assert "at this record's values" in line, line
+    assert "provenance only" in line, line
+    # The qualified claim only: never a general "can never bind".
+    assert "can never bind" not in line and "never bind at n=20" not in line
+
+
+def test_a_spread_that_clears_the_floor_is_reported_as_deciding_not_inert():
+    """Clause 2: the sentence is computed, so it retires when a spread can bind.
+
+    0.150 on `no_tool_call_rate` is above that metric's own n=20 binomial term
+    (0.0975), so the measured term IS the floor and the count is non-zero — and
+    the inertness text must be gone, because a hard-coded warning would still be
+    printing it and would be the exact false claim this node exists to catch.
+    """
+    obs = {"no_tool_call_rate": 0.150}
+    r = C.compare(NOISE_B, NOISE_A, obs)
+    assert r.floors["no_tool_call_rate"]["floor"] == pytest.approx(0.150)
+    joined = "\n".join(C._floor_report(r, obs, False))
+    line = _floor_source_line(joined.splitlines())
+    assert "1 of 5 compared metric(s) were decided by the measured spread" in line
+    assert "cannot bind" not in joined, joined
+    assert "provenance only" not in joined, joined
+
+
+def test_a_refreshed_note_carries_the_binding_condition_and_its_own_values(tmp_path):
+    """Clause 3: the sentence must live in the template, or a refresh eats it.
+
+    `measure_floor` rebuilds `note:` from an f-string and rewrites the whole
+    file with `safe_dump`, so a hand-edited YAML note does not survive the next
+    `--measure-floor` — which is why this asserts on a REGENERATED record, at
+    the same denominators the committed one was measured at.
+    """
+    runs = _pair_dir(tmp_path)
+    floor = tmp_path / "floor.yaml"
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 0
+    rec = yaml.safe_load(floor.read_text(encoding="utf-8"))
+    note = rec["note"]
+    top = max(C.observed_spreads(rec).values())   # what the run just measured
+    assert "sqrt((1/n)(1-1/n)/n)" in note, note
+    assert "cannot bind" in note and "provenance-only" in note, note
+    assert f"{top:.3f}" in note and f"{N20_THRESHOLD:.3f}" in note, note
+    assert "at this record's values" in note, note
+    assert "http_tool_first_rate" in note, note
+
+
+def test_the_committed_record_says_the_same_thing_as_the_template_that_made_it():
+    """The file a person actually opens, not only the template that regenerates it.
+
+    The note is the template's output, so this is a round-trip check on the
+    shipped bytes: it must be the conditional the template writes for THESE
+    spreads at THESE denominators today. That is why it is conditional — a
+    refresh that measured a wider pair legitimately flips the branch, and this
+    node has to follow the arithmetic rather than freeze one sentence in YAML.
+    """
+    rec = _committed_record()
+    obs = C.observed_spreads(rec)
+    assert obs, "the shipped record holds no spreads to state a condition about"
+    # The denominators the record was measured at, taken from its own `pairs:`
+    # provenance: the condition in the note has to match THOSE, not the ones
+    # some later comparison happens to have.
+    metric_ns = {m: max(int(q["n_queries"]) for q in rec["pairs"]) for m in obs}
+    top = max(obs.values())
+    tightest = min(C.min_binomial_floor(n) for n in metric_ns.values())
+    note = rec["note"]
+    assert "sqrt((1/n)(1-1/n)/n)" in note, note
+    if top < tightest:
+        assert "cannot bind" in note and "provenance-only" in note, note
+    else:
+        assert "cannot bind" not in note and "ABOVE that" in note, note
+    assert f"{top:.3f}" in note, note
+    assert "at this record's values" in note, note
+
+
+def test_the_floor_record_the_cli_reads_decides_which_sentence_is_printed(tmp_path,
+                                                                          capsys):
+    """Clauses 1 and 2 across the seam that actually runs.
+
+    Seeding `compare(..., observed=)` proves the arithmetic; the gate runs the
+    script, which reads a YAML file off disk and rebuilds the spreads through
+    `observed_spreads`. Both branches are asserted at that boundary, because a
+    record the CLI could not load — or loaded and ignored — would satisfy the
+    in-process nodes and still print nothing useful on a gate run.
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    base = runs / "base.json"
+    cur = runs / "cur.json"
+    base.write_text(json.dumps(_run(correct_rate=0.90)), encoding="utf-8")
+    cur.write_text(json.dumps(_run(correct_rate=0.85)), encoding="utf-8")
+    common = ["--current", str(cur), "--baseline", str(base)]
+
+    inert = tmp_path / "inert.yaml"
+    inert.write_text(yaml.safe_dump(
+        {"metrics": {m: {"observed_spread": s} for m, s in _committed_observed().items()}},
+        sort_keys=False), encoding="utf-8")
+    assert C.main([*common, "--floor-record", str(inert)]) == 0
+    line = _floor_source_line(capsys.readouterr().out.splitlines())
+    assert "0 of 5 compared metric(s) were decided by the measured spread" in line, line
+    assert "cannot bind" in line and "provenance only" in line, line
+
+    # 0.150 on `no_tool_call_rate` clears that metric's own binomial term (the
+    # clamp-level 0.097 at its n=20), so it IS the floor: the count goes non-zero
+    # and the inertness text has to disappear.
+    binding = tmp_path / "binding.yaml"
+    binding.write_text(yaml.safe_dump(
+        {"metrics": {"no_tool_call_rate": {"observed_spread": 0.150}}},
+        sort_keys=False), encoding="utf-8")
+    assert C.main([*common, "--floor-record", str(binding)]) == 0
+    line = _floor_source_line(capsys.readouterr().out.splitlines())
+    assert "1 of 5 compared metric(s) were decided by the measured spread" in line, line
+    assert "cannot bind" not in line and "provenance only" not in line, line
+
+
+def test_a_refresh_with_a_binding_spread_writes_a_note_without_the_inertness(tmp_path):
+    """Clause 3's other edge: the template branches, it does not assert."""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    cfg = {"system_prompt_chars": 43000, "model": "qwen"}
+    (runs / "big-a-20261030-120000.json").write_text(
+        json.dumps({**_run(correct_rate=0.95), "config": cfg}), encoding="utf-8")
+    (runs / "big-b-20261030-120130.json").write_text(
+        json.dumps({**_run(correct_rate=0.15), "config": cfg}), encoding="utf-8")
+    floor = tmp_path / "floor.yaml"
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 0
+    rec = yaml.safe_load(floor.read_text(encoding="utf-8"))
+    assert rec["metrics"]["correct_rate"]["observed_spread"] == pytest.approx(0.8)
+    assert "cannot bind" not in rec["note"], rec["note"]
+    assert "ABOVE that" in rec["note"], rec["note"]
 
 
 # ── the CLI contract that already existed ────────────────────────────────────

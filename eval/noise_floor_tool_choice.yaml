@@ -5,7 +5,12 @@ note: "Largest per-metric movement two runs of the SAME unmodified tree produced
   \ Backlog #691 measured the same pair on 2026-09-09 82 s apart (correct_rate +0.050, http_tool_first_rate\
   \ +0.071); the 875noise pair on 2026-09-13 reproduced both magnitudes at the opposite sign. These are\
   \ floors, not budgets: compare_tool_choice decides against max(this, 2\u03C3 binomial at the metric's\
-  \ own denominator)."
+  \ own denominator). Whether a spread here can decide anything is arithmetic, not policy: it binds only\
+  \ above that metric's own binomial term, whose narrowest value at denominator n is 2\u03C3\xB7sqrt((1/n)(1-1/n)/n)\
+  \ \u2014 0.097 at n=20 \u2014 and the largest spread this record holds is 0.071 (`http_tool_first_rate`),\
+  \ below that, so at this record's values the measured term cannot bind and the binomial term alone decides\
+  \ every floor: this record is a provenance-only artefact for the spread, not a load-bearing term in\
+  \ the verdict (#3586)."
 binomial_sigmas: 2.0
 pairs:
 - a: noise-a-20261001-085419.json

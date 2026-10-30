@@ -302,6 +302,23 @@ rung of `scripts/automod/gate.py` and nothing else.
   `measured_at` and `pairs` under `superseded`, because the run files a floor
   was measured from get swept routinely and the spread cannot be re-derived
   afterwards.
+- Whether a recorded spread can decide anything is arithmetic, not policy. A
+  spread matters only above that metric's own binomial term, whose narrowest
+  value at denominator `n` is `2σ·sqrt((1/n)(1-1/n)/n)` — 0.097 at n=20, 0.138 at
+  n=14, 0.304 over the 6 controls — because `binomial_sigma` clamps every rate
+  into `[1/n, 1-1/n]` before pricing it. The record's largest `observed_spread`
+  is 0.071 (`http_tool_first_rate`), under that 0.097, so **at this record's values**
+  the measured term cannot bind at this corpus's denominators: the
+  binomial term alone decides every floor and the record is a provenance-only
+  artefact for the spread. Both figures are the record's and the run's, not this
+  doc's — `compare_tool_choice`'s `floor source:` line recomputes and prints the
+  judgement on every run rather than leaving `0 of 5 … decided by the measured
+  spread` to be read as a near-miss between two close numbers, and the same
+  conditional is regenerated into the record's own `note:` by `--measure-floor`,
+  which is why it lives in that template and not in a hand-edited YAML field.
+  What would change the verdict is a spread above 0.097 — a bigger query corpus
+  or a noisier engine — not a fresher pair, and the sentence is worded to retire
+  itself the day one exists (#3586).
 - Exit codes come from the script, not a copy of its contract: 0 pass, 1
   regression, 2 nothing to compare against — which is not a pass — and 3
   instrument failure, meaning the control set moved so the comparison certified
@@ -336,6 +353,18 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   reinstated by this one.
 
 ## Review log
+
+- **2026-10-30 — bullet added (#3586).** The floor-record bullet now says which of
+  the two floor terms can bind at all: a spread decides only above
+  `2σ·sqrt((1/n)(1-1/n)/n)` at its own denominator, and the record's largest
+  spread (0.071) sits under the 0.097 that is the narrowest floor this corpus's
+  denominators produce, so at those values the binomial term alone decides and a
+  refill buys provenance, not a different threshold. Filed because the
+  `measured_at` entry below asks whether the record is current enough, which is
+  the wrong question while one denominator decides everything: the comparator's
+  `floor source:` line, the regenerated `note:` and
+  `tests/test_architecture_coverage_doc_claims.py` now carry the same statement
+  computed from the record and the run, so all four retire together.
 
 - **2026-10-30 — stale.** Re-checked against `af268b481770`. Two `path:NNN` anchors had
   been overtaken by the code they cite (`eval/run_eval.py:2055` → `:2686`;
