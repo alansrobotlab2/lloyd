@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, browser, chrome-extension, sidepanel]
 type: reference
 status: implemented
-date: 2026-09-29
+date: 2026-10-30
 ---
 
 # Lloyd — the browser side panel
@@ -61,15 +61,22 @@ service worker is the guard (#1765, `tests/test_sidepanel_spawn_guard.py`).
    panel's first `GET /status` inside the turn instead of racing it — fired and
    forgotten, the panel reached a session whose turn did not exist yet and showed
    no in-progress state for the entire kickoff. `spawnSession` has no way to
-   skip this step: it takes no flag for it, so a session is never minted
-   without its kickoff (#1767).
+   skip this step: it takes no flag for it (#1767). What the await does not buy
+   is the mint — `setMapping` commits the tab before it and the rejection is
+   swallowed, so one refused POST (a 503 from the self-mod drain window) leaves a
+   mapped session with no turn, and the first guard below then refuses to retry
+   that URL for the rest of the browser session (#3569).
 4. The panel switches to that session.
 
 Re-checking the **same canonical URL** re-focuses the existing session and does
 not re-fire the kickoff — that is the first guard in `handleManualCheck`.
 Navigating away drops the tab's mapping, so the next check on that tab is fresh.
 Switching tabs re-focuses the panel on the matching session or on the
-not-checked state. Closing a tab orphans the session, which stays in Lloyd's
+not-checked state — but that one push is built by hand and carries no `canCheck`,
+while the panel reads the field as `Boolean(msg.canCheck)`, so activating an
+already-loaded tab leaves the button disabled and the panel saying "no checkable
+page here" of a checkable page until the next navigation (#3568). Closing a tab
+orphans the session, which stays in Lloyd's
 session list: the panel's lifecycle is the tab's, the transcript's is not.
 Closing the panel does not stop the run ([[background-runs]]).
 
@@ -136,9 +143,11 @@ on after the output directory had already been emptied.
 
 - **The browser as a tool.** `agent_mcp/browser.py` — navigation, snapshots, the
   SSRF guard that refuses private and internal hosts and lets loopback through on
-  purpose (`_host_block_reason` at `agent_mcp/browser.py:194` returns allow for a
+  purpose (`_host_block_reason` in `agent_mcp/browser.py` returns allow for a
   hostname whose every resolved address is loopback, before `_is_private_host` is
-  reached) — is the agent driving a
+  reached — cited by symbol, because the line number this clause carried had
+  drifted fifteen lines into the function's unrelated empty-host comment) — is
+  the agent driving a
   browser, and is [[tools]]. This doc is the human driving Lloyd from a tab, and
   the two share only a backend.
 - **Chat mechanics.** Sessions, titles, SSE and the `platform` tag are
@@ -188,8 +197,16 @@ on after the output directory had already been emptied.
   comment still point at the retired exemption (#1702/#1722), which is the same
   two-surfaces-one-rule failure one directory over. Re-measured and still true:
   all seven line counts in §The pieces, the three routes and their payloads, the
-  tracked `chrome-extension/dist/` files, the manifest's absence from git, the build command, and
-  `measurement`'s silence on browser sessions. Filed: the rotted `messages.py`
+  tracked `chrome-extension/dist/` files, the build command, and
+  `measurement`'s silence on browser sessions. **One item in that list was not
+  re-measured:** "the manifest's absence from git" is the pre-#1701 state, which
+  the hand-landing entry below retired the day before and the tree refutes now —
+  `git ls-files` holds both `chrome-extension/manifest.json` and
+  `chrome-extension/dist/manifest.json`, pinned by
+  `tests/test_chrome_extension_manifest_tracked.py`, and §Build says they are
+  tracked. The clause stays quoted because the pair is the finding: a retired
+  claim and the entry that retired it sat eight days apart in one section of one
+  doc, and only the body was read. Filed: the rotted `messages.py`
   citations in the two client comments (#1766) and `spawnSession`'s unreachable
   `kickoff` default, the last seam of the retired auto-spawn path (#1767).
 - **2026-09-28 — hand-landed (#1701).** Both manifests are tracked through
@@ -210,3 +227,29 @@ on after the output directory had already been emptied.
   call passes four arguments, and §What one check does now says a session is
   never minted without its kickoff. `chrome-extension/dist/` rebuilt with the
   command in §Build.
+- **2026-10-30 — stale (arch-review, `5348fadd`).** Stale for one claim, which is
+  in this section rather than the body: the 2026-09-29 entry above lists "the
+  manifest's absence from git" among things it calls re-measured, and that state
+  died with #1701 the day before its own entry — both manifests are tracked.
+  Quoted and corrected there rather than deleted, since the pair is the failure.
+  Everything the body asserts was re-measured and holds: the seven line counts in
+  §The pieces are exact, the three routes and their payloads match
+  `chrome-extension/src/background/` against `app/routers/sessions.py` and
+  `app/routers/messages.py` (where `enqueue_turn` at :2109 still precedes the
+  `StreamingResponse` at :2113), `chrome-extension/dist/` is tracked with its
+  manifest byte-identical to the source and every current string from
+  `chrome-extension/src/` present in
+  the bundles, `vite.chrome.config.ts` still refuses a missing manifest before
+  `emptyOutDir`, `ApiPeerGate` still decides on the peer address alone, and
+  `measurement` is still silent on browser sessions. Three sentences described
+  intent rather than behaviour and are filed, not fixed here: the tab-activation
+  push carries no `canCheck`, so the button this doc calls the only entry point
+  arrives disabled on any already-loaded tab (#3568); the awaited kickoff does not
+  gate the mint, so one refused POST closes that URL for the browser session
+  (#3569); and nothing pins `chrome-extension/dist/` to `chrome-extension/src/`,
+  which is load-bearing precisely
+  because automod can neither edit `chrome-extension/` nor rebuild it (#3571).
+  Replaced the one drifted pointer — `agent_mcp/browser.py:194` is a comment about
+  empty hosts, not the loopback branch it was cited for — with the symbol, the way
+  #2208 ruled for `authority-surfaces.md`; the same citation rots in eight places
+  outside this doc (#3570).
