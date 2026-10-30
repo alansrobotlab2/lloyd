@@ -25,7 +25,7 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships fifteen nodes: fourteen that read a vault tree through git — the live
+It ships sixteen nodes: fourteen that read a vault tree through git — the live
 vault's for thirteen of them, and one throwaway vault this file builds for the #3272 pair —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
@@ -40,9 +40,9 @@ vault's for thirteen of them, and one throwaway vault this file builds for the #
 `test_every_dated_promotions_extract_is_committed_and_parses`,
 `test_the_promotions_directory_check_passes_on_an_extract_that_is_not_committed_yet`,
 `test_the_2759_promotions_extract_reproduces_its_published_lag_percentiles` and
-`test_the_3039_promotions_extract_reproduces_the_refused_and_landed_vault_land_pair` — plus
-`test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
-paragraph against the module's own bytes on every run.
+`test_the_3039_promotions_extract_reproduces_the_refused_and_landed_vault_land_pair`; plus
+`test_the_docstring_names_every_node_this_file_ships`, the rail re-checking this paragraph
+against the module's own bytes, and `test_both_retired_names_date_under_a_free_probe`.
 
 That rail exists because the review rung's advisory on the previous round was
 exactly this paragraph: it said "all three nodes here run" while `pytest -v`
@@ -632,10 +632,52 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 15, (
-        "fourteen nodes that read a vault tree through git plus this rail. The count is "
-        "spelled out so that adding a node has to come back here and re-read the "
-        "paragraph, instead of leaving it a sentence behind")
+    assert len(shipped) == 16, (
+        "fourteen nodes that read a vault tree through git, this rail, and the emitter "
+        "node beside it. The count is spelled out so that adding a node has to come back "
+        "here and re-read the paragraph, instead of leaving it a sentence behind")
+
+
+def test_both_retired_names_date_under_a_free_probe():
+    """#3398: both retired basenames still come back DATED out of the emitter.
+
+    #3398 moved the dated-name rule behind one derived predicate
+    (`_witness_name_must_be_dated`), which now also answers yes for a rolling state file
+    — the new half being there because `data_watch.json`, rewritten every 60 s by the
+    data watcher, was being demanded as the undated `backlog/data/data_watch.json`. This
+    file holds the two retired witnesses, so their names' fate is pinned here as well as
+    in `tests/test_witness_artifact_clause.py`: with the free-name probe forced to
+    answer "free" — the answer it can only ever give for the slot #2064 deleted, and the
+    true answer for the journal #2879 added, which was never committed at all — each
+    basename must still return its dated sibling, never the bare slot.
+
+    No vault bytes are read and the store is never opened: the question is what the
+    emitter CALLS a source. The import is inside the node rather than at the top because
+    every other module-level import here is a vault or git reader, and this is the one
+    node that asks the triage emitter instead.
+    """
+    from scripts.automod import backlog as B
+
+    # Each mark is built by concatenation, exactly as #2523's node below builds its own:
+    # that node scans THIS FILE's bytes for the automod state directory's name and fails
+    # the file if it appears anywhere, because that scan is what keeps the committed
+    # extracts the only home of its figures. A node that spelled the path plainly would
+    # not fail here — it would fail the node protecting someone else's witness. The
+    # expected names are the emitter's own output, whose state-dir tag is spelled out by
+    # design, so they are composed rather than typed whole for the same reason.
+    state_dir = Path.home() / (".local" "/state") / ("lloyd" "-automod")
+    ledger_tag = "lloyd" "-automod"
+    for name, item_id, want in (
+            ("promotions.jsonl", 2444,
+             f"backlog/data/2026-10-11.2444-{ledger_tag}-promotions.jsonl"),
+            ("landed_outcomes.jsonl", 2861,
+             f"backlog/data/2026-10-11.2861-{ledger_tag}-landed_outcomes.jsonl")):
+        src = state_dir / name
+        got = B._witness_artifact(src, taken=lambda d, n: False,
+                                  day="2026-10-11", item_id=item_id)
+        assert got == want, f"{name}: {got}"
+        assert got != f"{B.WITNESS_ARTIFACT_DIR}/{name}", (
+            f"the bare slot came back out of a retired basename: {got}")
 
 
 def test_the_2444_promotions_extract_reproduces_the_at_the_max_ratio():

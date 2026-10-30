@@ -2503,10 +2503,15 @@ def test_a_retired_witness_name_is_never_offered_as_free(tmp_path, isolated):
         "a free name nobody retired was rewritten into a dated one")
     assert B._witness_artifact(tmp_path / "state/lloyd-automod/sessions.jsonl",
                                taken=lambda d, n: False) == "backlog/data/sessions.jsonl"
-    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl",
-                                             "landed_outcomes.jsonl"}, (
-        "the set is keyed on BASENAME: the full retired path is legal in only eight "
-        "files under tests/ and scripts/, and backlog.py is not one of them")
+    # #3398 moved the DATED requirement off this set's literal membership and onto
+    # `_witness_name_must_be_dated`, which also answers yes for a rolling state file
+    # (the section below). What this set still owns, and what is pinned here, is that
+    # both retired names reach it BY BASENAME: the full retired path is legal in only
+    # eight files under tests/ and scripts/, and backlog.py is not one of them.
+    assert B._witness_name_must_be_dated("promotions.jsonl") is True
+    assert B._witness_name_must_be_dated("landed_outcomes.jsonl") is True
+    assert not any("/" in n for n in B._RETIRED_WITNESS_NAMES), (
+        f"a member stopped being a basename: {sorted(B._RETIRED_WITNESS_NAMES)}")
 
 
 def test_the_over_bound_demand_for_2444_names_a_dated_extract(tmp_path, monkeypatch):
@@ -2656,6 +2661,157 @@ def test_the_landed_outcomes_demand_text_agrees_with_the_emitter():
     assert named[0] == B._witness_artifact(src, day=m.group(1), item_id=2861), (
         "the demand and the emitter disagree on the name — which is exactly how "
         "#2861 ended up with a committed witness name no emitter produces")
+# ══ #3398: a source a live process REWRITES is dated by rule, not by a hand-list.
+#
+# `_RETIRED_WITNESS_NAMES` was the only thing standing between the free branch and the
+# bare slot, and a hand-list only covers what someone remembered. `data_watch.json` is
+# the third rolling basename aimed at that slot (`promotions.jsonl` #2064,
+# `landed_outcomes.jsonl` #2879) and the first that was never even named: as triaged,
+# `backlog/3095-…md:90` and `backlog/3153-…md:119` already carried
+# "copy `~/.local/state/lloyd-guardian/data_watch.json` to
+# `backlog/data/data_watch.json` … re-derive … with `wc -l -c`", against a file the data
+# watcher rewrites every `PERSIST_EVERY_SECONDS = 60.0`
+# (agent-services/guardian/vaultwatch.py:66, fired at :530) — measured at 626 bytes at
+# 11:57, 625 at 11:59 and 626 again at 12:00 during that triage. The dating now comes
+# from one registry, `_ROLLING_STATE_NAMES`, and the four nodes below are the directions
+# that rule has to hold in: a declared source dates, an undeclared one does not, the
+# emitted NOTE says the dated copy, and a fifth declared source dates with no edit to the
+# ban.
+
+#: The day pinned for this section, so every expected name below is literal.
+_STAMP_3398 = "2026-10-26"
+
+
+def _state_store(tmp_path: Path, name: str, sub: str = "lloyd-guardian") -> Path:
+    """A live state file where one lives: a guardian-style state dir, on disk, outside
+    every git tree and well under the witness bound.
+
+    The two assertions are the fixture's whole purpose, not decoration: the free-name
+    probe must REALLY answer "free" for the slot, because that answer is the branch that
+    emitted the undated demand. A fixture the probe called taken would pass every node
+    below against the pre-#3394 code too, and a test that cannot fail is worse than none.
+    """
+    d = tmp_path / "state" / sub
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text('{"checks": {"_pipeline": 63}, "last_run": "2026-10-26T11:59:02Z"}\n',
+                 encoding="utf-8")
+    assert B.in_git_tree(p) is False, f"the fixture must sit outside every tree: {p}"
+    assert B._artifact_taken(B.WITNESS_ARTIFACT_DIR, name) is False, (
+        "positive control: the free-name probe must read this slot as free — that is "
+        "exactly the answer that produced the undated demand")
+    return p
+
+
+def test_a_declared_rolling_source_is_demanded_at_a_dated_name(tmp_path):
+    """#3398 clause 1: for a file a live process rewrites, the free branch must not run.
+
+    The registry is what dates it, and the registry is keyed on the basename the owning
+    process declares: `data_watch.json` is `agent-services/guardian/datawatch.py:1275
+    state_file`, and the copy demanded of it is re-derived with `wc -l -c`, which goes
+    false on the next persist. Both the production probe (the isolated fixture's vault is
+    empty, so it really does say "free") and a probe explicitly forced to say "free" must
+    return the dated sibling — the two ways the bare slot used to escape.
+    """
+    src = _state_store(tmp_path, "data_watch.json")
+    assert "data_watch.json" in B._ROLLING_STATE_NAMES, "the registry is the rule"
+    want = "backlog/data/2026-10-26.3398-lloyd-guardian-data_watch.json"
+
+    assert B._witness_artifact(src, day=_STAMP_3398, item_id=3398) == want
+    assert B._witness_artifact(src, taken=lambda d, n: False,
+                               day=_STAMP_3398, item_id=3398) == want
+    bare = f"{B.WITNESS_ARTIFACT_DIR}/data_watch.json"
+    assert bare not in want, want
+    assert B._witness_name_must_be_dated("data_watch.json") is True
+
+
+def test_the_emitted_demand_for_a_rolling_source_offers_a_dated_copy(tmp_path,
+                                                                     monkeypatch):
+    """#3398 clause 1 across the seam that matters: the NOTE a later round obeys.
+
+    The hazard was never the string the emitter returns; it is the sentence an item's
+    owed list publishes and some future round commits to. So this drives the real
+    producer — `add_witness_artifact_clause` on the owed route, over body text citing
+    the watcher's state file — and asks three things of the demand it writes: the
+    destination is the dated sibling, the bare `backlog/data/data_watch.json` appears
+    nowhere in the note, and the re-derive command is `wc -l -c` over THAT artifact, so
+    the figure the item quotes is re-derived from bytes that cannot move.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: f"{_STAMP_3398}T12:05:00")
+    src = _state_store(tmp_path, "data_watch.json")
+    artifact = "backlog/data/2026-10-26.3398-lloyd-guardian-data_watch.json"
+
+    clauses, owed = B.add_witness_artifact_clause(
+        list(_AUTHORED), _BODY_1869.format(witness=src), route_to_owed=True,
+        item_id=3398)
+
+    assert clauses == list(_AUTHORED), f"the graded list is untouched: {clauses}"
+    assert len(owed) == 1, owed
+    note = owed[0]
+    assert f"to `{artifact}`" in note, note
+    assert "`backlog/data/data_watch.json`" not in note, (
+        f"the demand still offers the undated slot: {note}")
+    assert f"`wc -l -c < {artifact}`" in note, note
+    assert len(note) <= B.CLAUSE_MAX_CHARS, (
+        f"{len(note)} chars, past the {B.CLAUSE_MAX_CHARS} clean_clauses truncates at")
+
+
+def test_an_undeclared_source_with_a_free_name_keeps_the_bare_slot(tmp_path):
+    """#3398 clause 2: the key is the DECLARATION, not the directory.
+
+    `state/qmd/index.db` and `state/lloyd-automod/sessions.jsonl` are pinned bare here
+    as they are in #2560's node, and #2560's node already says why: `sessions.jsonl` is
+    a rolling store in real life, so a "anything under a state dir" heuristic would have
+    rewritten both of them into dated names. The third case is the discriminator: an
+    UNDECLARED file in the SAME directory as a declared one — `ALERT.md` beside
+    `data_watch.json` — stays bare while its neighbour dates. Same directory, different
+    answer, which is only possible if the rule reads the registry.
+    """
+    free = lambda d, n: False                                    # noqa: E731
+    assert B._witness_artifact(tmp_path / "state/qmd/index.db",
+                               taken=free) == "backlog/data/index.db"
+    assert B._witness_artifact(tmp_path / "state/lloyd-automod/sessions.jsonl",
+                               taken=free) == "backlog/data/sessions.jsonl"
+
+    neighbour = _state_store(tmp_path, "ALERT.md")
+    assert "ALERT.md" not in B._ROLLING_STATE_NAMES, "the fixture is the undeclared one"
+    assert B._witness_artifact(neighbour, taken=free,
+                               day=_STAMP_3398) == "backlog/data/ALERT.md"
+    declared = _state_store(tmp_path, "data_watch.json")
+    assert B._witness_artifact(declared, taken=free, day=_STAMP_3398,
+                               item_id=None) == (
+        "backlog/data/2026-10-26.lloyd-guardian-data_watch.json"), (
+        "the two files in one directory came back the same shape")
+
+
+def test_a_fifth_rolling_source_dates_without_touching_the_ban(tmp_path, monkeypatch):
+    """#3398 clause 4: the registry is the single knob, and the ban is a separate one.
+
+    The whole point of deriving the rule instead of hand-listing is that the NEXT
+    guardian state file is dated by the rule. `pool-silence.json` is the shape of one
+    (`agent-services/guardian/poolwatch.py:56 STATE_NAME`) and is deliberately NOT a
+    member today: adding it to the registry alone must date its witness, leave the
+    retired set's membership exactly as it was, and leave a name in neither set on the
+    bare convention. Run against the pre-#3398 emitter this fails on the first assert,
+    which is what makes it the clause's rail rather than its description.
+    """
+    before = set(B._RETIRED_WITNESS_NAMES)
+    fifth = "pool-silence.json"
+    assert fifth not in B._ROLLING_STATE_NAMES, "the fifth must be unregistered today"
+    monkeypatch.setattr(B, "_ROLLING_STATE_NAMES",
+                        B._ROLLING_STATE_NAMES | {fifth})
+
+    src = _state_store(tmp_path, fifth)
+    assert B._witness_artifact(src, taken=lambda d, n: False, day=_STAMP_3398,
+                               item_id=3398) == (
+        "backlog/data/2026-10-26.3398-lloyd-guardian-pool-silence.json")
+    assert set(B._RETIRED_WITNESS_NAMES) == before, (
+        "the banned-name set moved, which is the collapse this clause forbids")
+    assert B._witness_artifact(tmp_path / "state/lloyd-guardian/pool-report.md",
+                               taken=lambda d, n: False) == (
+        "backlog/data/pool-report.md"), "a name in neither set lost its bare slot"
+
+
 # ---------------------------------------------------------------------------
 # #3175 — an over-bound demand points at the extracts it would duplicate.
 #

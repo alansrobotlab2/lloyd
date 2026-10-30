@@ -1756,12 +1756,74 @@ def _artifact_taken(artifact_dir: str, name: str) -> bool:
 #     snapshot of a file that keeps moving, whose own `wc -l -c` re-derivation
 #     goes false the day the journal gains a row. Here the ban is what forces the
 #     cut date into the name, and the date is the witness.
-# The set is keyed on BASENAME, and a third basename aimed at the bare slot means
-# the rule is no longer "a list of retired names" but "a live rolling store's
-# vault copy is always dated" — at that point derive it from the rolling-store
-# registry instead of hand-adding a fourth line to this comment.
+# The set is keyed on BASENAME, and `landed_outcomes.jsonl` was the second member
+# for a reason that is NOT retirement — it is a live rolling store. A third such
+# basename arrived on 2026-10-26 (`data_watch.json`, #3398), which is the shape this
+# comment predicted: the rule is no longer "a list of retired names" but "a live
+# rolling store's vault copy is always dated". That rule now lives in
+# `_ROLLING_STATE_NAMES` below, and this set keeps only its own judgement — a slot the
+# vault must never hold again, which `_artifact_taken` structurally cannot see.
 _RETIRED_WITNESS_NAMES = frozenset(
     {"promotions.jsonl", "landed_outcomes.jsonl"})
+
+
+#: Rolling state sources, keyed on BASENAME exactly as the retired ban above is: the
+#: files a live process REWRITES IN PLACE, so bytes copied out of one are a snapshot of
+#: something that keeps moving. `_artifact_taken` calls every one of them a free slot,
+#: and the bare name it then hands out is a demand for a witness that stops matching
+#: its own source on the next write — the `wc -l -c < backlog/data/data_watch.json`
+#: re-derivation an owed note orders goes false at the next persist
+#: (`PERSIST_EVERY_SECONDS = 60.0`, agent-services/guardian/vaultwatch.py:66, fired at
+#: :530). Measured while triaging #3398: the live `data_watch.json` read 626 bytes at
+#: 11:57, 625 at 11:59 and 626 again at 12:00, while `backlog/3095-…md:90` and
+#: `backlog/3153-…md:119` were already publishing an UNDATED demand for that slot and
+#: `wc -l -c` figures for it. Putting the day in the NAME is what makes the claim
+#: permanent: the date is the moment the snapshot was cut.
+#:
+#: KEYED ON A DECLARED BASENAME, never on a "sits under a state dir" pattern.
+#: `tests/test_witness_artifact_clause.py` pins `state/qmd/index.db` and
+#: `state/lloyd-automod/sessions.jsonl` as BARE names under the same free probe, and
+#: `sessions.jsonl` is a rolling store in real life — a directory heuristic would
+#: silently rewrite both, which is why membership here is a declaration, not a
+#: location. Each member is therefore named by the line that declares it:
+#:   `data_watch.json`          datawatch.py:1275 (`state_file`, the data watcher)
+#:   `vault_watch.json`         vaultwatch.py:58 (`STATE_FILE`, the vault watcher)
+#:   `data-root-arrivals.json`  datawatch.py:1098 (`ARRIVALS_STATE_FILE`)
+#:   `heartbeat.json`           policy.py:696 (`HEARTBEAT_NAME`), written every loop at guardian.py:570
+#:   `logcursors.json`          guardian.py:463 (`logtail.LogCursor(self.gdir / …)`)
+#:   `signatures.json`          guardian.py:1028 (the chronic-error cache, re-written when it refreshes)
+#:   `voice.json`               speak.py:126 (`CONFIG_NAME`), re-written into the state dir at every guardian stage by bin/sync-voice-config.py:28
+#:
+#: The guardian cannot be IMPORTED for this (`agent-services/guardian/` has no
+#: `__init__.py`; `scripts/` reads those files by path only, as promote.py:533 does), so
+#: the registry is declared here and its members are traceable to the lines above. A
+#: fifth store is dated by adding ITS basename to this set: the banned-name set above is
+#: a different judgement, and
+#: `tests/test_witness_artifact_clause.py::test_a_fifth_rolling_source_dates_without_touching_the_ban`
+#: is the rail that keeps the two from collapsing back into one hand-list.
+_ROLLING_STATE_NAMES = frozenset({
+    "data_watch.json",
+    "vault_watch.json",
+    "data-root-arrivals.json",
+    "heartbeat.json",
+    "logcursors.json",
+    "signatures.json",
+    "voice.json",
+})
+
+
+def _witness_name_must_be_dated(name: str) -> bool:
+    """True when a witness copied from a source named `name` may not take the bare slot.
+
+    Two reasons, one predicate, so `_witness_artifact` has a single question to ask:
+    the vault must never hold this path again (`_RETIRED_WITNESS_NAMES`, #2560/#2879),
+    or the source is a file a live process rewrites and an undated copy of it is a
+    figure that goes false on the next write (`_ROLLING_STATE_NAMES`, #3398). Both
+    fire INDEPENDENT of `_artifact_taken`: for a retired slot the probe is always wrong
+    in the safe-looking direction, and for a rolling one it is right about the slot and
+    wrong about the bytes.
+    """
+    return name in _RETIRED_WITNESS_NAMES or name in _ROLLING_STATE_NAMES
 
 
 def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
@@ -1774,9 +1836,11 @@ def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
     the dated-sibling form the two items that hit this by hand settled on —
     `<date>.<item>-<source directory>-<name>`, e.g.
     `backlog/data/2026-10-10.2512-SM_20261010_204036-gate.json`: a name the vault
-    already holds (#2513), and a basename `_RETIRED_WITNESS_NAMES` rules out (#2560),
-    which fires even when the free-name probe says the slot is empty, because for a
-    retired slot the probe is always wrong in the safe-looking direction. The source
+    already holds (#2513), and a basename `_witness_name_must_be_dated` rules out —
+    either a retired slot (#2560) or a rolling state file a live process rewrites
+    (#3398) — which fires even when the free-name probe says the slot is empty, because
+    for a retired slot the probe is always wrong in the safe-looking direction, and for
+    a rolling one it reads the SLOT correctly and the BYTES wrongly. The source
     directory is what keeps two items copying two DIFFERENT `gate.json` files on
     one day apart; the item id is what makes the name readable from the item that
     owes it, and it is optional because the emitter is also called by tests and by
@@ -1789,7 +1853,7 @@ def _witness_artifact(source, artifact_dir: str = WITNESS_ARTIFACT_DIR, *,
     src = _witness_target(source)
     name = src.name
     probe = taken if taken is not None else _artifact_taken
-    if name not in _RETIRED_WITNESS_NAMES and not probe(artifact_dir, name):
+    if not _witness_name_must_be_dated(name) and not probe(artifact_dir, name):
         return f"{artifact_dir}/{name}"
     day = day or now_stamp()[:10]
     # One rule for the tag, shared with `_witness_family_pattern`: the sibling probe
@@ -1923,8 +1987,9 @@ ANCHOR_WITNESS_FIGURES = ("n_queries", "entity_hit_rate", "doc_hit_rate",
 
 #: `reason` values that mean "this witness already has history" — no demand, no note.
 #: A plain basename the vault holds can only be OUR earlier copy: `_witness_artifact`
-#: hands out a dated sibling name once the plain one is taken, and this family's names
-#: are never in `_RETIRED_WITNESS_NAMES`, so taken ⟺ archived by a previous pass.
+#: hands out a dated sibling name once the plain one is taken, and this family's
+#: `nightly-*` names are in neither `_RETIRED_WITNESS_NAMES` nor `_ROLLING_STATE_NAMES`,
+#: so taken ⟺ archived by a previous pass.
 ANCHOR_WITNESS_DONE = "taken"
 #: `reason` values that mean "the copy failed for a reason that is not a guard's
 #: judgement" — the demand falls back, because a witness that silently stops being
@@ -2361,8 +2426,9 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     figure that goes stale on purpose, and the demand does not need it — the ceiling is
     the number that governs the work.
 
-    The artifact it names comes from `_witness_artifact`, so a store whose basename is
-    `_RETIRED_WITNESS_NAMES` is asked for at a dated sibling rather than at the free
+    The artifact it names comes from `_witness_artifact`, so a store whose basename
+    `_witness_name_must_be_dated` answers yes for — a retired slot, or a rolling state
+    file — is asked for at a dated sibling rather than at the free
     slot the vault must not hold (#2444 owed 1, 2026-10-11: the demand against the live
     ledger named `promotions.jsonl`, a path three tests keep absent and whose deletion
     is why the free-name probe could not see it).
