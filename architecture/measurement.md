@@ -33,9 +33,9 @@ missing has written the drift into the file that is supposed to catch it.
 | `eval/` (repo) | the runners, the arm fixtures and corpora, and a small set of committed baselines | a commit |
 | `$LLOYD_DATA/eval/baselines/` | every baseline a run produced since the runtime data root moved | the runners themselves |
 
-`app/paths.py:121` is the one definition — `EVAL_BASELINES_DIR = DATA_ROOT /
-"eval" / "baselines"` — and `eval/run_eval.py:2686` writes its record there, not
-beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
+The one definition is `EVAL_BASELINES_DIR` at `app/paths.py:121` —
+`EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"` — and the record is written
+by `main` at `eval/run_eval.py:2686`, into that directory, not beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
 context-rot, compaction-recall and skills-index pins, for instance) so a reader
 knows the *shape*; the directory that answers "what has actually been measured
 lately" is under the data root, and it holds runs from the last few days rather
@@ -271,8 +271,8 @@ rung of `scripts/automod/gate.py` and nothing else.
   canary on the shipped tree wearing a gate's clothes: red on drift a round did
   not cause, green over a round that regressed tool choice.
 - The baseline that run writes stays **outside both trees**, which is what lets
-  the launch sit in a worktree at all. It goes to `EVAL_BASELINES_DIR`
-  (`eval/run_tool_choice_eval.py:498`), and `_child_env` with `live_data` set
+  the launch sit in a worktree at all. It goes to `EVAL_BASELINES_DIR` written by
+  `main` at `eval/run_tool_choice_eval.py:498`, and `_child_env` with `live_data` set
   names the production data root in `LLOYD_DATA` rather than leaving it unset.
   Unset was never a location; it was an instruction to inherit one from the tree
   the script ran in, and a worktree keeps its data inside itself — rule 3 of
@@ -288,14 +288,14 @@ rung of `scripts/automod/gate.py` and nothing else.
   same-tree run pair named `<stem>-a-<ts>.json` / `<stem>-b-<ts>.json` — two
   runs of an **unmodified** tree, taken as `eval/run_tool_choice_eval.py` twice
   with `--label noise-a` and then `--label noise-b`, whose filenames come out
-  `noise-a-<YYYYMMDD-HHMMSS>.json` and `noise-b-<…>.json`
-  (`eval/run_tool_choice_eval.py:498`). `same_tree_pairs()` matches those stems
+  `noise-a-<YYYYMMDD-HHMMSS>.json` and `noise-b-<…>.json` that `main` names at
+  `eval/run_tool_choice_eval.py:498`. `same_tree_pairs()` matches those stems
   only when the two runs recorded an identical `config` block, and
   `eval/compare_tool_choice.py --measure-floor` is what measures the spread from
   them. No automated label can ever produce a pair: the rung above labels the
-  run `item<id>` or `gate-<round_id>` (`scripts/automod/gate.py:3043`), so its
-  arm residue is never `-a`/`-b`, and nothing calls `--measure-floor` on a
-  schedule either. A person does it, or the record ages. Since #1888 that
+  run `item<id>` or `gate-<round_id>` in `rung_prompt_surface`
+  (`scripts/automod/gate.py:3043`), so its arm residue is never `-a`/`-b`, and
+  nothing calls `--measure-floor` on a schedule either. A person does it, or the record ages. Since #1888 that
   command refuses to write when no pair survived into the record — no pair on
   disk, or every pair dropped for an errored run — and exits 2 on the bytes it
   left alone; and a rewrite that does happen carries the previous record's
@@ -354,6 +354,22 @@ round's own prefix twice per run. The full ladder is in [[automod]].
 
 ## Review log
 
+- **2026-10-30 — anchors re-typed (#3580).** This page is the first doc whose line
+  anchors must each name the definition they point into. Every `.py:` citation here
+  now sits beside a backticked symbol — `EVAL_BASELINES_DIR`, `main`,
+  `rung_prompt_surface` — and the stale pair recorded below is written as prose
+  ("line 2055 of `eval/run_eval.py`") instead of a citation, because a number kept
+  as a record of drift must not be graded as a live pointer. The reason a
+  citation needed a name: the guard's rule checks the named symbol's span, but its
+  fallback accepts a line inside *any* definition, and both of the drifts below
+  landed inside one — `print_failures`, and the `def` line of
+  `_green_full_tests_data` — while the sentences naming them named nothing. A
+  drifted number inside a long function was therefore invisible to both anchor
+  nodes, which is the hole `fallback_decision` in
+  `tests/test_architecture_coverage_doc_claims.py` now closes for this page. Only
+  this page is graded that way; the other 23 architecture docs still rest on the
+  fallback, and widening the list is owed on #3580.
+
 - **2026-10-30 — bullet added (#3586).** The floor-record bullet now says which of
   the two floor terms can bind at all: a spread decides only above
   `2σ·sqrt((1/n)(1-1/n)/n)` at its own denominator, and the record's largest
@@ -367,9 +383,10 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   computed from the record and the run, so all four retire together.
 
 - **2026-10-30 — stale.** Re-checked against `af268b481770`. Two `path:NNN` anchors had
-  been overtaken by the code they cite (`eval/run_eval.py:2055` → `:2686`;
-  `scripts/automod/gate.py:1590` → `:3043`, that line now sitting inside the #3143
-  skip-ceiling block), and three quantities in the arms table's cells had moved: the
+  been overtaken by the code they cite — line 2055 of `eval/run_eval.py` stood where
+  `main`'s baseline write is now, and line 1590 of `scripts/automod/gate.py` was the
+  head of `_green_full_tests_data` rather than the rung's label assignment, which the
+  #3143 skip-ceiling block had moved — and three quantities in the arms table's cells had moved: the
   supply-chain fixture set is 63 planted names since #3206, `substrate_fuzz` ships 60
   corpus tasks over its 8 domains, and `--arms` is declared by nine scripts rather
   than six. One path was named by its in-code attribute instead of its file's key: the

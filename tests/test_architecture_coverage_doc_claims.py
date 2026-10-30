@@ -2183,6 +2183,61 @@ def anchor_span_report(text: str) -> tuple[list[tuple[str, Path, int]], list[str
     return graded, bad
 
 
+#: The docs whose line anchors must each be graded against a symbol their own
+#: citing sentence names, rather than against "inside SOME definition". Opt-in by
+#: design: the corpus currently holds 169 anchors across 24 architecture docs that
+#: pass on the containment fallback (#3580), so a corpus-wide rule is a 24-doc
+#: prose sweep and not a guard — and the one doc that has already carried two
+#: drifted numbers through a green suite is the one that starts paying for it.
+#: Extending the list is the scope call owed on #3580.
+NAMED_SYMBOL_RAIL_DOCS = ("measurement.md",)
+
+#: No anchor in a rail doc may rest on the fallback. A non-zero value here would
+#: mean the rail was opened with its own doc non-compliant.
+NAMED_SYMBOL_UNNAMED_FLOOR = 0
+
+
+def fallback_decision(text: str) -> list[dict]:
+    """Each graded anchor in `text` whose verdict the containment fallback decided.
+
+    `anchor_span_report` is the shipped guard, and #3047 gave it the right rule
+    (`_span_verdict` checks the named symbol's own span) but left its fallback
+    open: `named_symbol` returns None unless an identifier sits within six
+    non-word characters of the citation, and with no name the verdict degrades to
+    "the line falls inside SOME definition". #3580's two drifts passed exactly
+    that way — `eval/run_eval.py:2055` lands inside `print_failures`, and
+    `scripts/automod/gate.py:1590` is the `def` line of `_green_full_tests_data`,
+    which the doc never mentions — so a citation pointing at an unrelated
+    function inside a long file was graded as fine by both nodes.
+
+    One row per graded anchor, with how it was decided:
+
+      * `mode` "named"    — the sentence named a symbol the file defines, and
+        that symbol's own span decided the anchor (the strong verdict).
+      * `mode` "mispicked" — it named something the file defines too, but not a
+        definition enclosing the line; containment decided, which is the weaker
+        verdict wearing the stronger one's label.
+      * `mode` "unnamed"  — it named nothing, or nothing the file defines, so
+        containment alone decided.
+
+    A rail doc may contain none of the latter two; the docs outside the rail are
+    what the 169 count is about, and they are measured here, never graded.
+    """
+    rows: list[dict] = []
+    for span, hit, line in anchor_span_report(text)[0]:
+        spans = definition_spans(hit) or []
+        enc = sorted({n for lo, hi, n in spans if lo <= line <= hi})
+        defs = {n for _lo, _hi, n in spans}
+        named = {_symbol_before(text[max(0, i - 90):i])
+                 for i in _occurrences(text, span)} - {None}
+        picked = sorted(named & defs)
+        rows.append({"span": span, "file": str(hit.relative_to(ROOT)), "line": line,
+                     "enclosing": enc, "named": sorted(named), "named_defs": picked,
+                     "mode": ("named" if picked and set(picked) <= set(enc) else
+                              ("mispicked" if picked else "unnamed"))})
+    return rows
+
+
 @pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
 def test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition(slug):
     """Clause 1 and clause 4 (#2583): a line anchor is graded on its span, over
@@ -2575,6 +2630,109 @@ def test_an_anchor_naming_no_symbol_keeps_the_shipped_span_rule():
     assert anchor_span_report(inside)[1] == [], (
         "an unnamed anchor inside SOME definition must still pass — the widened "
         "rule only constrains a citation that names a symbol")
+
+
+def test_the_named_symbol_rail_reports_an_anchor_the_containment_fallback_decided():
+    """Clause 1: in a rail doc, an anchor decided by containment is a finding.
+
+    The node above pins the shipped rule's silence as its boundary; this is the
+    rail that closes it where the corpus opted in. Three synthetic sentences over
+    one real anchor, `eval/run_eval.py:2686` — the baseline write inside `main` —
+    so the graded line itself never moves and cannot go stale:
+
+      * named:      `main` at `eval/run_eval.py:2686` → the #3047 verdict decided
+        it, which is what a rail doc must contain;
+      * unnamed:    the bare path cite → nothing to grade against, so the
+        containment fallback decided, and #3580's two drifts passed exactly here;
+      * mispicked:  a name the file does define but whose definition does not hold
+        the line (`print_failures` ends 620 lines above it) → `named_symbol`
+        returned it, yet the shipped rule let containment decide, so this too is a
+        finding. It is the quieter half: the sentence reads as though its own
+        symbol graded the anchor when nothing of the sort happened;
+      * misnamed:   a name the cited file never defines (`EVAL_BASELINES_DIR` is
+        imported here, not assigned) → the sentence looks named and is not, so
+        containment decided this one too.
+    """
+    named = "the record is written by `main` at `eval/run_eval.py:2686`.\n"
+    unnamed = "it goes to `eval/run_eval.py:2686`, beside the script.\n"
+    mispicked = "`print_failures` at `eval/run_eval.py:2686` writes it.\n"
+    misnamed = "`EVAL_BASELINES_DIR` at `eval/run_eval.py:2686` writes it.\n"
+    for text, want in ((named, "named"), (unnamed, "unnamed"),
+                       (mispicked, "mispicked"), (misnamed, "unnamed")):
+        rows = fallback_decision(text)
+        assert len(rows) == 1, f"{text!r} graded {len(rows)} anchors, want 1"
+        assert rows[0]["mode"] == want, (
+            f"the rail graded `{rows[0]['span']}` as {rows[0]['mode']}, want {want}: "
+            f"enclosing={rows[0]['enclosing']} named={rows[0]['named_defs']}")
+    assert [r["mode"] for r in fallback_decision(unnamed)] != ["named"], (
+        "the fallback case now reads as a named verdict, so the rail below is "
+        "grading nothing")
+    assert "EVAL_BASELINES_DIR" not in {
+        n for _lo, _hi, n in definition_spans(ROOT / "eval/run_eval.py")}, (
+        "eval/run_eval.py now assigns EVAL_BASELINES_DIR, so the misnamed seed is "
+        "a defined name and the fourth case above proves nothing")
+
+
+def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
+    """Clauses 2, 3 and 4: the rail over the one doc that opted in.
+
+    `NAMED_SYMBOL_RAIL_DOCS` is the opt-in, and it holds exactly `measurement.md`
+    — the other 23 architecture docs are left graded by containment alone, which
+    today is 194 fallback-decided anchor occurrences (168 distinct `path:NNN`
+    spans, heaviest `threat-model.md` at 44) that this rail does not touch. The
+    counts are #3580's owed scope call, not a slip in this node.
+
+    The doc must then carry no fallback-decided anchor at all. All six of its
+    graded spans are re-typed to satisfy that — the five the item names
+    (`app/paths.py:121`, `eval/run_eval.py:2686`, `scripts/automod/gate.py:3043`,
+    and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
+    count missed because it appears twice and named nothing either time.
+    `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
+    lines, and the Review log's stale pair became prose — "line 2055 of
+    `eval/run_eval.py`" — because a number recorded as *drifted* cannot be graded
+    as a live anchor by either node. That is the same move the path-citation rail
+    already makes for such cites with its `historical` kind (the four admitted
+    kinds are generated, historical, other-tree, stale).
+
+    Then the failure the rail exists for: seed the two real drifts back in, in the
+    same symbol-naming sentences, and both must be reported. Their numbers sit
+    inside definitions — `print_failures` and the head of
+    `_green_full_tests_data` — which is why containment passed them for a month,
+    but naming the symbol is what lets the drift be seen at all.
+    """
+    assert NAMED_SYMBOL_RAIL_DOCS == ("measurement.md",), (
+        f"the rail covers {NAMED_SYMBOL_RAIL_DOCS}; extending it is the owed scope "
+        "call on #3580 and needs each doc's anchors re-typed first")
+    text = _text("measurement.md")
+    rows = fallback_decision(text)
+    assert rows, (
+        "measurement.md exposes no graded line anchor, so the rail asserts "
+        "nothing — this is the #1699 shape #2582 was filed against")
+    assert [r["span"] for r in rows if r["mode"] != "named"] == [], (
+        f"these anchors rest on the containment fallback: "
+        f"{[(r['span'], r['mode'], r['enclosing']) for r in rows if r['mode'] != 'named']}")
+    assert {r["mode"] for r in rows} == {"named"}
+    assert NAMED_SYMBOL_UNNAMED_FLOOR == 0
+
+    # Clauses 1 and 3 of #2583 stay green with the re-typed sentences in place:
+    # containment still grades the doc, and the rule is still shown able to fail.
+    test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition(
+        "measurement.md")
+    test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
+
+    seeded = text.replace("eval/run_eval.py:2686", "eval/run_eval.py:2055")
+    seeded = seeded.replace("scripts/automod/gate.py:3043", "scripts/automod/gate.py:1590")
+    assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
+    flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
+    assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
+        f"the two drifts #3580 was filed with came back {flagged}; the rail is not "
+        "reading the names these sentences now carry")
+    assert sorted(anchor_span_report(seeded)[1]) == sorted(flagged), (
+        "the rail flagged anchors the shipped rule does not, so the two guards "
+        "have drifted apart")
+    assert anchor_span_report(text)[1] == [], (
+        "the doc as written is reported by the shipped rule, so the rail above is "
+        "grading a tree this node's re-typing does not describe")
 
 
 def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
