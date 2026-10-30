@@ -100,6 +100,7 @@ from persistence_arms import (  # noqa: E402
     settle,
     workers_db,
 )
+from scripts.automod.state import read_current  # noqa: E402  # the promoter's own record
 
 PRIMARY = "agent-llm-primary"
 HOLD_ID = "kv-dtype-arm"
@@ -218,6 +219,50 @@ class ArmHold(PersistenceHold):
                 return False
             self.log.append(f"fleet busy ({busy}); waiting before taking the hold")
             await asyncio.sleep(poll_s)
+
+
+#: The two promoter states in which `round restart` refuses without `--force`
+#: (`promote.restart_stack`). Read from the same record, so the window waits on exactly
+#: what would refuse its leg rather than finding out from the leg.
+OBSERVING_STATES = ("landing", "observing")
+
+
+def observing_commit() -> str | None:
+    """The commit under observation, or None when a restart leg would not be refused."""
+    cur = read_current()
+    if cur and cur.get("state") in OBSERVING_STATES:
+        return str(cur.get("commit") or "?")[:8]
+    return None
+
+
+async def wait_settled(wait: float, poll_s: float) -> str | None:
+    """Wait out a landing's observation window. None when clear; the commit when not.
+
+    On 2026-10-30 an arm took the hold, staged bf16, and had its leg refused because
+    `da46cb62` was under observation (#3188): the window cost a drained fleet and left the
+    one-shot file behind. The observation window is minutes (`errors_window_s`, clamped to
+    one hour), so waiting is the cheap answer and `--force` is never this window's to pass."""
+    deadline = time.monotonic() + wait
+    while True:
+        commit = observing_commit()
+        if commit is None or time.monotonic() >= deadline:
+            return commit
+        await asyncio.sleep(poll_s)
+
+
+def unstage_env(path: Path, dtype: str) -> bool:
+    """Remove the one-shot file iff it still holds exactly the line this window wrote.
+
+    A boot that never happened did not consume it, and a file left behind turns the next
+    restart of the primary — by anyone, for any reason — into an arm nobody chose. Anything
+    else in the file is not ours, so it stays."""
+    try:
+        if path.read_text(encoding="utf-8") != f"export KV_CACHE_DTYPE={dtype}\n":
+            return False
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def stage_env(path: Path, dtype: str) -> None:
@@ -418,6 +463,12 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
             # able to tell "no arm" from "an arm whose fold wrote nothing".
             before: int | None = None
             try:
+                commit = await wait_settled(cfg["settle_wait_s"], cfg["poll_s"])
+                if commit is not None:
+                    warn(f"refused: {commit} is still under observation after "
+                         f"{cfg['settle_wait_s']:.0f} s; the gated restart would refuse the "
+                         "arm boot. Nothing was staged or booted.")
+                    return 2, hold.ours
                 stage_env(env_file, cfg["dtype"])
 
                 # The offset is taken BEFORE the leg that boots, not after it. The gated leg
@@ -428,11 +479,13 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
                 offset = log_offset(log_path)
                 ok, _ = await run_leg(root, f"kv-{cfg['dtype']}-arm")
                 if not ok:
+                    removed = unstage_env(env_file, cfg["dtype"])
                     staged = env_file.exists()
                     warn("the arm boot failed. "
                          + ("The staged file is STILL THERE, so the next boot comes up on "
                             f"{cfg['dtype']} unless you remove it: {env_file}" if staged
-                            else "Nothing is staged, so the next boot is the shipped dtype.")
+                            else (f"Unstaged {env_file}, " if removed else "Nothing is staged, ")
+                            + "so the next boot is the shipped dtype.")
                          + f"\n  restore by hand: "
                            f"{restart_cmd(root, f'kv-{RESTORE_DTYPE}-restore')}")
                     return 2, hold.ours
@@ -537,6 +590,7 @@ def config(dtype: str) -> dict[str, Any]:
         "drain_wait_s": float(os.environ.get("KV_ARM_DRAIN_WAIT_S", "900")),
         "boot_wait_s": float(os.environ.get("KV_ARM_BOOT_WAIT_S", "1500")),
         "step_wait_s": float(os.environ.get("KV_ARM_STEP_WAIT_S", "600")),
+        "settle_wait_s": float(os.environ.get("KV_ARM_SETTLE_WAIT_S", "3600")),
         "poll_s": float(os.environ.get("KV_ARM_POLL_S", "10")),
     }
 

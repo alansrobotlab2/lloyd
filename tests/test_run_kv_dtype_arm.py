@@ -858,3 +858,41 @@ def test_the_paths_the_window_prints_resolve_in_the_real_checkout(tree, tmp_path
     assert ran.returncode != 0, (
         f"LLOYD_DATA absent staged into a default tree: {combined[-400:]}")
     assert "LLOYD_DATA" in combined, combined[-400:]
+
+
+# ── #3188, 2026-10-30: a refused arm boot left bf16 staged for the next restart ──
+def test_an_arm_boot_that_fails_unstages_the_file_it_wrote(tree):
+    """The leg was refused (an observation window), so no boot consumed the one-shot file.
+    Left there, the next restart of the primary by anyone comes up on the arm dtype."""
+    _boots(tree, "FAIL")
+    proc, out, staged = _win(tree, wait=120)
+    assert proc.returncode == 2, _fail(proc, out)
+    assert not staged.exists(), "the one-shot arm file outlived the boot that never happened"
+    assert "Unstaged" in out and "STILL THERE" not in out, out[-900:]
+    assert tree["stub"].resumed(), "the hold was left set"
+
+
+def test_a_foreign_one_shot_line_is_never_unstaged(tree):
+    """Only exactly the line this window wrote is ours to remove."""
+    from eval.kv_dtype_arm import unstage_env
+    f = tree["tmp"] / "arm.env"
+    f.write_text("export KV_CACHE_DTYPE=fp8_e5m2\n", encoding="utf-8")
+    assert unstage_env(f, ARM) is False and f.exists()
+    f.write_text(f"export KV_CACHE_DTYPE={ARM}\n", encoding="utf-8")
+    assert unstage_env(f, ARM) is True and not f.exists()
+    assert unstage_env(f, ARM) is False
+
+
+def test_an_observation_window_that_does_not_settle_refuses_before_staging(tree):
+    """`round restart` refuses while a landing is observed, so the window waits on the same
+    record and, past its bound, refuses with nothing staged and nothing booted."""
+    state = tree["tmp"] / ".local/state/lloyd-automod"
+    state.mkdir(parents=True)
+    (state / "current.json").write_text(
+        json.dumps({"state": "observing", "commit": "da46cb62deadbeef"}), encoding="utf-8")
+    proc, out, staged = _win(tree, wait=120, KV_ARM_SETTLE_WAIT_S="0.3")
+    assert proc.returncode == 2, _fail(proc, out)
+    assert "da46cb62 is still under observation" in out, out[-900:]
+    assert not staged.exists()
+    assert tree["stub"].restarts.read_text() == "", "a leg ran into a refusal it could see"
+    assert tree["stub"].resumed(), "the hold was left set"
