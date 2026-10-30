@@ -465,11 +465,11 @@ def topic_slug_error(stem: str) -> str:
 #: `topic_size_error`. So 4 is the pre-authorized multiple the ruling named, taken on
 #: its own terms: still bounded, still derived, and MEMORY.md's ceiling unmoved.
 #:
-#: What the multiple does NOT buy is stability. At the measured +2,235 B a night the
-#: new headroom is ~12 nights, and the durable fix is a bounded-history rule for the
-#: `checked:` stamp in the curation skill's §2 — a vault-side change, which §1 of that
-#: skill currently forbids ("do not rewrite the ledger shorter to fit another row"), so
-#: it needs its own authorized ruling rather than being folded in here.
+#: What the multiple does NOT buy is stability, and the fix for that landed 2026-10-30:
+#: §2 item 2 of `skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md` now bounds
+#: one `checked:` re-stamp — the date, one note that REPLACES the row's previous note, one
+#: earlier-date. Measured headroom, not an estimate: 86,023 B of ledger on 2026-10-30 leaves
+#: 16,377 B, ~17 writes at the +924 B/write mean over the 11 writes since `2c7480d3`.
 #:
 #: Both means re-derive live under `~/obsidian/` with `wc -c lloyd/MEMORY.md`, and over
 #: `lloyd/memory/memory-md-ledger.md`:

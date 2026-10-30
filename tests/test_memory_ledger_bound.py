@@ -514,8 +514,8 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (22,788 B / 82 lines, as
-        re-measured by the #3282 re-freeze), and it names `topics/memory-md-ledger`, so a
+      * the corpus is the whole file at its exact bytes (23,718 B / 82 lines, as
+        re-measured by the #3440 re-freeze), and it names `topics/memory-md-ledger`, so a
         0-hit below cannot be a wrong path or an empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
         carries its own positive and negative control, so the pattern is proven able to
@@ -588,9 +588,18 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # 82 lines. Both literals below are this copy's own, re-measured from the copy after
     # it was written — `wc -c` 22,788 and `tr -cd '\n' | wc -c` 82 — not carried from the
     # item, which quoted the pre-fix 22,287 / 82 and would have been a false receipt.
-    assert len(raw) == 22_788 and text.count("\n") == 82, (
+    # 2026-10-30, #3440: the sixth such pairing, after #2284 (`3c1c9515`), #2415
+    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628 and #3282. Vault
+    # `1ab109f4` bounded what one `checked:` re-stamp may write (§2 item 2: the date, at
+    # most one replacing note of at most 160 characters, at most one bare earlier-date) and
+    # scoped §1's shorter-rewrite ban to `to fit a row past a refusal`, growing the skill by
+    # 930 B on the same 82 lines. Both literals below are this copy's own, re-measured from
+    # the copy after it was written — `wc -c` 23,718 and `tr -cd '\n' | wc -c` 82 — and not
+    # carried from the item, which quoted the pre-land 22,788 / 82 and would have been a
+    # false receipt had a nightly appended to the skill before this landed.
+    assert len(raw) == 23_718 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "22,788 B / 82 lines of the whole skill file — a partial copy would make the "
+        "23,718 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -769,6 +778,179 @@ def test_the_completion_note_templates_quote_the_guard_rather_than_a_remembered_
         assert not _denominator_remembered_a_cap(denominator), (
             f"the predicate fires on the corrected denominator {denominator!r}, which "
             "states a source and no figure — the over-broad ban this file refuses")
+
+
+# ── #3440: the bytes ONE `checked:` re-stamp may leave on a row ────────────────
+#
+# §2 item 2 told a curator to "Run each `check` and set `checked:` to today" and bounded
+# only WHICH rows get stamped (10 a night), never what one stamp WRITES. Each of those 10
+# stamps therefore appends rather than replaces, and the ledger pays for it on every row
+# it touches: measured 2026-10-30, a row's `checked:` value averages 300.9 B over 91 rows
+# and the file is 86,023 B of the bound `ledger_ceiling('memory-md-ledger')` answers,
+# where a date plus one short note is ~40 B. That is #3015's durable fix, named in
+# `app/memory_ceiling.py` and left unlanded by #3282.
+
+#: The two halves of the bound, matched loosely on purpose. The defect this pins is a
+#: bound that is ABSENT, not one spelled a particular way: the next item that re-wraps the
+#: sentence must not have to edit this pattern to be seen by it.
+CHECKED_NOTE_CAP = re.compile(r"at most one\b.{0,80}?\b160[- ]char", re.S)
+CHECKED_ONE_EARLIER_DATE = re.compile(r"at most one[^.]{0,120}?— earlier:", re.S)
+
+
+def _states_the_checked_stamp_bound(prose: str) -> bool:
+    """True if this stretch of §2 prose bounds what one `checked:` re-stamp may leave.
+
+    Three halves, all required: it is about `checked:` at all, it caps the one note the
+    stamp may keep, and it caps the retained history at one earlier-date. Two of the three
+    present is the regression this exists to catch — #3282 landed the re-stamp instruction
+    without the byte bound, and a predicate satisfied by either half alone would have
+    called that green.
+    """
+    return ("checked:" in prose
+            and bool(CHECKED_NOTE_CAP.search(prose))
+            and bool(CHECKED_ONE_EARLIER_DATE.search(prose)))
+
+
+def _skill_check_item(rel: str, text: str) -> str:
+    """§2's item 2 line — the one place the bound can live.
+
+    Sliced, not searched over the whole file, for the same reason `_module_docstring`
+    slices a docstring: a corpus-wide "is the bound anywhere" is satisfied by a sentence
+    about something else, and the rule's whole point is that the run which stamps 10 rows
+    tonight meets it by reading the line that tells it to stamp them. Three guards make
+    the slice honest, because an empty or mis-taken one hands the assert below back for
+    free: the item is found exactly once, it is a real sentence rather than a heading
+    fragment, and it is about `checked:` — the subject the bound bounds.
+    """
+    items = [ln for ln in text.splitlines() if ln.startswith("2. **Check**")]
+    assert len(items) == 1, (
+        f"{rel} has {len(items)} lines opening `2. **Check**`, not the one §2 item 2 — "
+        "the bound is pinned to the instruction that does the stamping, so a slice that "
+        "cannot say which line that is proves nothing about it")
+    item = items[0]
+    assert len(item) > 60, (
+        f"{rel}'s §2 item 2 is {len(item)} chars, which is a fragment rather than a "
+        "sentence — an empty or truncated slice would hand the bound assert below a "
+        "vacuum to pass in. The floor is deliberately below the 115 chars the UNBOUNDED "
+        "instruction ran at before this item: a taller floor would be a claim about how "
+        "long a bounded rule must be, and the predicate, not the length, is the judge")
+    assert "checked:" in item, (
+        f"{rel}'s §2 item 2 never names `checked:`, so it is not the re-stamp instruction "
+        "and the bound assert below is reading the wrong line")
+    return item
+
+
+def test_the_witness_bounds_what_one_checked_stamp_may_leave_on_a_row():
+    """#3440 clause 4: §2 item 2 of the frozen corpus bounds a re-stamp's own bytes.
+
+    `_assert_no_ledger_ceiling_claim`'s shape, for the reason that helper carries its
+    controls: the assertion here is that a rule IS present, and a substring search is
+    worth nothing until someone has shown the string it looks for can be missing. So the
+    positive control fires the predicate on a sentence of exactly the shape §2 now
+    requires, and the negative control proves it silent on the instruction this item
+    replaced — quoted verbatim from the corpus #3282 re-froze. A pattern that matched the
+    old line too would report green on the text that has no bound in it, which is the
+    0-hit that reads as a clean bill of health.
+
+    What is asserted about the slice, in falsifiable order: the predicate fires on it
+    (`_states_the_checked_stamp_bound` needs all three halves, so the assert cannot be
+    bought by one of them); each half is then named separately, so a later edit that keeps
+    the note cap and drops the earlier-date cap fails with a message saying which; the
+    prose says what a re-stamp DISCARDS, since a "replace the note" rule that never says
+    the older clauses go is the rule that gets read as an append; and the slice states no
+    ledger cap figure, which is #3282's ban applied to the new text rather than a rule
+    this item invented.
+
+    Read over the committed witness, like clause 5's node: the `live_vault` byte-compare
+    below is what makes these bytes the file the nightly loads.
+    """
+    assert _states_the_checked_stamp_bound(
+        "Set `checked:` to today, with at most one 160-char note that replaces the note "
+        "the row carried, and at most one bare — earlier: <YYYY-MM-DD>"), (
+        "the predicate does not fire on a sentence carrying the whole bound, so the "
+        "assert below is a pattern nobody has shown can fire")
+    assert not _states_the_checked_stamp_bound(
+        "Run each `check` and set `checked:` to today."), (
+        "the predicate fires on the instruction this item replaced, which bounded nothing "
+        "— the green below would be readable on the unbounded text")
+
+    raw = SKILL_WITNESS.read_bytes()
+    assert raw, f"{SKILL_WITNESS.name} is empty, so the slice below proves nothing"
+    item = _skill_check_item(SKILL_WITNESS.name, raw.decode("utf-8"))
+    assert _states_the_checked_stamp_bound(item), (
+        f"{SKILL_WITNESS.name} §2 item 2 does not bound one `checked:` re-stamp: "
+        f"{item[-200:]!r}")
+
+    assert CHECKED_NOTE_CAP.search(item), (
+        "§2 item 2 lost the cap on the note a re-stamp may keep — the replacing note is "
+        "where the bytes actually go (300.9 B mean over 91 `checked:` values measured "
+        "2026-10-30), so a bound on retained history alone is not this rule")
+    assert CHECKED_ONE_EARLIER_DATE.search(item), (
+        "§2 item 2 lost the one-earlier-date cap, so history still accumulates one clause "
+        "a night however short each night's note is")
+    assert "drop every older" in item, (
+        "§2 item 2 caps what may be kept without saying the older clauses are dropped, "
+        "which is the reading that turns a replace rule into an append rule")
+    _assert_no_ledger_ceiling_claim(
+        "step-2a-ter-curation.md §2 item 2 (committed witness)", item)
+
+
+#: §1's ban on shortening the ledger, both scopes. `OLD_...` is how §1 spelled it from
+#: #1881 until #3440, quoted from the corpus this round re-froze over; it survives here
+#: only so the absence below is a result rather than a typo.
+OLD_SHORTER_REWRITE_BAN = "do not rewrite the ledger shorter to fit another row"
+NEW_SHORTER_REWRITE_BAN = "do not rewrite the ledger shorter to fit a row past a refusal"
+
+
+def _shorter_rewrite_ban_line(rel: str, text: str) -> str:
+    """The one line of §1 that carries the "Never make room" ban.
+
+    Sliced to that line because clause 2 is narrow by design: the ban GAINS a scope and is
+    otherwise unchanged, and the three bans it must keep are in the same sentence. Reading
+    the whole file would let the scope land anywhere and the surviving bans be deleted from
+    the ban they belong to. Two guards, both directions of the slice being wrong: exactly
+    one line carries the phrase (zero is the removed-ban case, two is the wrong corpus),
+    and that line names the anchors and fields the same sentence protects.
+    """
+    lines = [ln for ln in text.splitlines() if "Never make room:" in ln]
+    assert len(lines) == 1, (
+        f"{rel} carries `Never make room:` on {len(lines)} lines, not the one §1 ban — "
+        "clause 2 scopes one sentence, so a corpus that cannot show which one is the "
+        "wrong slice and every assert below is free")
+    assert "anchor" in lines[0] and "drop fields" in lines[0], (
+        f"{rel}'s `Never make room:` line does not carry the anchor and field bans, so it "
+        "is not §1's sentence and the asserts below are reading the wrong corpus")
+    return lines[0]
+
+
+def test_the_witness_scopes_the_shorter_rewrite_ban_to_a_refusal():
+    """#3440 clause 2: §1's ban now says WHICH shortening it forbids, and keeps the rest.
+
+    The unscoped ban is what made #3015's fix un-followable: a re-stamp that replaces a
+    long note with a short one does make the ledger shorter, and §1 read as though that
+    were the room-making #1881 banned. Both readings were defensible from the sentence, so
+    the run that stamped 10 rows tonight took the safe one and appended. The scope is
+    therefore a two-direction assert, and each direction is a positive control for the
+    other: the old scope must be GONE, and the new scope must be PRESENT in the same
+    sentence — a substring search that cannot find the new phrase is not reading the line,
+    which is exactly how the 0-hit above would be bought.
+
+    Then the three bans clause 2 says are "otherwise unchanged", quoted as §1 spells them.
+    A scope edit made by rewriting the sentence would satisfy the first two asserts and
+    silently drop the anchor protection #1730 exists for; these three are what stop that.
+    """
+    ban = _shorter_rewrite_ban_line(SKILL_WITNESS.name,
+                                    SKILL_WITNESS.read_text(encoding="utf-8"))
+    assert NEW_SHORTER_REWRITE_BAN in ban, (
+        f"§1's ban does not carry the scope {NEW_SHORTER_REWRITE_BAN!r}: {ban[-260:]!r}")
+    assert OLD_SHORTER_REWRITE_BAN not in ban, (
+        f"§1 still bans shortening in general ({OLD_SHORTER_REWRITE_BAN!r}), which is the "
+        "reading that left #3015's bounded-stamp fix un-followable for eleven days")
+    for kept in ("do not shorten or re-wrap anchors", "do not drop fields",
+                 "do not start a second *live* ledger file"):
+        assert kept in ban, (
+            f"§1's ban no longer reads {kept!r} — clause 2 scopes one phrase and leaves "
+            "the other three standing exactly as #1730/#1881 wrote them")
 
 
 #: Same reason as the gate node, opposite question: is the file the nightly reads still
@@ -1155,6 +1337,142 @@ def test_the_still_owed_sentence_is_gone_from_the_module_that_carried_it():
         f"the same grep, the same pathspec, must find {MULTIPLIER_DECL!r} — if it cannot, "
         f"the 0-hit above is a broken invocation and not an absence: rc="
         f"{still.returncode} {still.stdout!r}{still.stderr!r}")
+
+
+#: The sentence #3440 removed from the multiplier block, quoted as `app/memory_ceiling.py`
+#: wrote it at `68425af5` (the commit this round branched from), where it closed the
+#: stability paragraph: "... a vault-side change, which §1 of that skill currently forbids
+#: (...), so it needs its own authorized ruling rather than being folded in here." It
+#: survives here only as the positive control below. The review of this round's FIRST
+#: attempt refused the diff because no test named the retired sentence at all: an absence
+#: nobody can show was ever written is indistinguishable from a paragraph that never said
+#: anything, and the node that supposedly covered the clause asserted only phrases from
+#: paragraphs this round never touched.
+OLD_STABILITY_DEFERRAL = ("it needs its own authorized ruling rather than being"
+                          " folded in here")
+
+#: Where clause 5 says the bound now lives, and the CLASS of sentence it forbids. A class,
+#: not `OLD_STABILITY_DEFERRAL`, because the sentence a future edit restores is a
+#: REWORDING: a literal-match ban lets "the fix requires a separate ruling" back in with the
+#: suite green, which is the same hole wearing a different font.
+SKILL_LANDING = "step-2a-ter-curation.md"
+AUTHORITY_DEFERRAL = re.compile(
+    r"\b(needs|requires|awaits|lacks)\b[^.]{0,80}?\b(authorized ruling|authorisation"
+    r"|authorization|sign-off|ruling|vault decision|human decision)\b", re.I)
+
+#: A headroom restated FROM a measurement: a byte figure and the date it was measured, in
+#: one sentence. The VALUES are deliberately not pinned — the ledger grows on every nightly
+#: pass, and a node that reddens because a vault file got longer is a false alarm filed
+#: against somebody else's change. What is pinned is that the figure came from a measurement
+#: at all, which is what clause 5 asked for in place of the retired "~12 nights" estimate.
+MEASURED_RECEIPT = re.compile(
+    r"\b\d{1,3}(?:,\d{3})+ B\b[^.]{0,160}?\b20\d\d-\d\d-\d\d\b"
+    r"|\b20\d\d-\d\d-\d\d\b[^.]{0,160}?\b\d{1,3}(?:,\d{3})+ B\b")
+
+
+def _landed_bound_paragraph() -> str:
+    """The one paragraph of the multiplier block that says where the stamp rule landed.
+
+    Sliced paragraph by paragraph rather than asserted over the block, because the block
+    ALREADY carries a dated byte figure two paragraphs up — #3015's firing record, "75,863 B
+    against a 20,449 B budget" on 2026-10-19 — so a block-wide "does it cite a measurement"
+    is satisfied by a sentence this item never touched. Two guards, one for each direction
+    the slice can be wrong: the landing pointer sits in exactly one paragraph (zero hits IS
+    clause 5's failure — the paragraph having been deleted), and that paragraph is about
+    `checked:`, so a stray path mention cannot stand in for the receipt.
+    """
+    block, _flat = _multiplier_block()
+    paras: list[str] = []
+    cur: list[str] = []
+    for line in block.splitlines():
+        if line.strip() in ("", "#:", "#"):
+            if cur:
+                paras.append(" ".join(ln.lstrip("#:").strip() for ln in cur))
+            cur = []
+        else:
+            cur.append(line)
+    if cur:
+        paras.append(" ".join(ln.lstrip("#:").strip() for ln in cur))
+    hits = [p for p in paras if SKILL_LANDING in p]
+    assert len(hits) == 1, (
+        f"the multiplier block names the landed bound in {len(hits)} paragraphs, not one: "
+        f"{SKILL_LANDING!r} is where clause 5 says the rule lives, and a corpus that cannot "
+        "point at the paragraph carrying it makes every assert below free")
+    para = hits[0]
+    assert "checked:" in para, (
+        f"the paragraph naming {SKILL_LANDING!r} never names `checked:`, so it is not the "
+        "stamp rule's own receipt and the asserts below would be reading the wrong text")
+    return para
+
+
+def test_the_module_records_the_stamp_bound_as_landed_not_owed_an_authorization():
+    """#3440 clause 5: the guard says the bound LANDED, and cannot say it is owed one.
+
+    `test_the_still_owed_sentence_is_gone_from_the_module_that_carried_it` retires a
+    different claim — the multiplier's. Nothing pinned this one, and the review said so:
+    putting "it needs its own authorized ruling" back, or any rewording of it, left the
+    suite green. Three parts, each falsifiable on its own:
+
+      * the pattern FIRES — on the retired sentence exactly as the module wrote it, and on
+        four rewordings, since the sentence that would return is not the sentence that left.
+        And it stays quiet on the two sentences the block keeps that speak of authorization
+        legitimately, because a ban that also forbids the correct prose gets paid for by
+        deleting the true sentence rather than the false one (the over-broad ban #3282's own
+        node refuses);
+      * the retired sentence and the class are absent — from the sliced paragraph, the block
+        lined and flat, and the whole module lined and flat. Module-wide on purpose: the
+        block is one paragraph from the constant, and a deferral edited one paragraph down
+        is still a deferral a curator reads before writing a row;
+      * what replaced it is IN that paragraph: the skill the bound landed in, the section of
+        it, and a byte figure tied to the date it was measured.
+    """
+    assert AUTHORITY_DEFERRAL.search(OLD_STABILITY_DEFERRAL), (
+        "the pattern misses the sentence this item actually removed, so every 0-hit below is "
+        "a pattern nobody has shown can fire")
+    for reworded in ("the fix requires a separate ruling before it can be written",
+                     "the bounded-stamp rule awaits an authorization from the vault lane",
+                     "this needs a vault decision, not a self-mod round",
+                     "the rule lacks sign-off from the guard"):
+        assert AUTHORITY_DEFERRAL.search(reworded), (
+            f"the pattern misses the rewording {reworded!r} — the ban below is then a "
+            "literal match, and a paraphrase restores the deferral for free")
+    for kept in ("So 4 is the pre-authorized multiple the ruling named, and this constant is "
+                 "that decision made on its own terms: still bounded, still derived, and "
+                 "MEMORY.md's ceiling unmoved.",
+                 "The tighten input is a ceiling the loader admits, not a size that merely "
+                 "happens to be smaller."):
+        assert not AUTHORITY_DEFERRAL.search(kept), (
+            f"the pattern fires on {kept!r}, which the block states correctly today — the "
+            "ban is over-broad, and only deleting true prose would clear it")
+
+    rel = "app/memory_ceiling.py"
+    block, flat = _multiplier_block()
+    para = _landed_bound_paragraph()
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    src_flat = " ".join(line.strip() for line in src.splitlines())
+    assert OLD_STABILITY_DEFERRAL not in src_flat, (
+        f"{rel} carries the retired deferral again: {OLD_STABILITY_DEFERRAL!r}")
+    for where, text in ((f"{rel} §stability paragraph", para), (f"{rel} multiplier block", block),
+                        (f"{rel} multiplier block flattened", flat), (rel, src),
+                        (f"{rel} flattened", src_flat)):
+        hit = AUTHORITY_DEFERRAL.search(text)
+        assert hit is None, (
+            f"{where} defers the stamp rule to an authorization again: {hit.group(0)!r} — the "
+            "bound landed in the vault on 2026-10-30, so the module states WHERE it landed, "
+            "not what it is still waiting for")
+
+    assert SKILL_LANDING in para and "§2 item 2" in para, (
+        "the paragraph no longer says WHERE the bound landed, which is the half of clause 5 "
+        f"that replaces the retired deferral ({SKILL_LANDING!r}, '§2 item 2'): {para[-220:]!r}")
+    assert MEASURED_RECEIPT.search(para), (
+        "the paragraph's headroom is not restated from a measurement — a byte figure and the "
+        "date it was measured — so a reader cannot tell it from the estimate this item "
+        f"replaced: {para[-220:]!r}")
+    assert not MEASURED_RECEIPT.search(
+        "At the measured +2,235 B a night the new headroom is ~12 nights, and the durable fix "
+        "is a bounded-history rule for the `checked:` stamp in the curation skill's §2."), (
+        "the receipt pattern fires on the estimate this item replaced, which quotes a rate "
+        "and no date — the assert above would then be true of the old text too")
 
 
 def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
