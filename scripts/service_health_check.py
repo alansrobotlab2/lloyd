@@ -1355,6 +1355,13 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
     name always collides with its tracked tree file, so the reverse walk never
     reports one; anything under `system/` is excluded by the globs being one level
     deep, which is the same reason the installer never sees it.
+
+    A `SYSTEM_SCOPE_UNITS` name is graded on one condition only, and it is presence
+    (#3450): nowhere in `deployed_dir` is what the installer leaves there and reads ok,
+    so it files no row and can never read `missing:`; somewhere in it is a decoy the
+    installer never put there — a landing's link, or a hand copy — and that is one
+    `decoy:` fault. Both halves come off the same read of the installer's array, so
+    neither needs an edit here when the array changes.
     """
     skip = _system_scope_units(installer)
     if skip is None:
@@ -1376,10 +1383,30 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
     rows = []
     for pattern in UNIT_GLOBS:
         for tracked in sorted(tree_dir.glob(pattern)):
+            deployed = deployed_dir / tracked.name
             if tracked.name in skip:
+                # The exclusion was always about ABSENCE: this is the one tracked unit
+                # whose non-deployment is the intended state, so grading it would file
+                # `missing:` against the installer's own deliberate gap (#2714 clause 4,
+                # which stays). Its PRESENCE is the opposite fault and #3450 is the
+                # reason it is graded now: `scripts/automod/promote.py` linked the unit
+                # in on a landing, and the exclusion meant the decoy produced no row at
+                # all — 21 rows, none naming it.
+                if deployed.is_symlink() or deployed.exists():
+                    rows.append(_unit_link_row(
+                        tracked.name, False,
+                        f"decoy: {deployed} is a user-scope entry for {tracked}, which "
+                        f"{installer} declares SYSTEM_SCOPE and refuses to place here — "
+                        f"the manager reading it cannot use it, and the copy that "
+                        f"actually clamps the hardware is the system one already graded "
+                        f"by the byte pair above. Its only effect is to make a "
+                        f"user-scope act on {tracked.name} look like the right command "
+                        f"mid-Xid-79, which is why the installer skips it; "
+                        f"`scripts/automod/promote.py` prunes it on the next landing "
+                        f"that touches a unit, or remove {deployed} by hand",
+                        tracked, deployed))
                 continue
             want = tracked.resolve()
-            deployed = deployed_dir / tracked.name
             if deployed.is_symlink():
                 target = _link_target(deployed)
                 if target == want:

@@ -71,7 +71,7 @@ Two traps this script exists to avoid:
      this build, and PASSES = 5 stands as the safety margin around that bound.
      The idle, freshly booted run this bullet used to send a reader to was retired
      on 2026-09-29 by #1635's ruling on it: that window closes within minutes of a
-     boot only Alan gates (_restart_primary, scripts/automod/promote.py:1930), the
+     boot only Alan gates (_restart_primary, scripts/automod/promote.py:2039), the
      figure is uncapturable outside it, and no dedicated restart is ever warranted
      for a number this bullet already bounds from the loaded side.
 

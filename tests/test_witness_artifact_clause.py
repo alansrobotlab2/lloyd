@@ -3042,7 +3042,7 @@ def test_the_docstring_says_how_far_the_name_actually_repeats(tmp_path, monkeypa
 # additionally `git init`s that same directory, because a route that commits has
 # to be tested against a tree that can commit — and against a temp one, because a
 # node that resolved the vault at import time would run `git add` against
-# `~/obsidian` instead (`promote.py:1099` records exactly that failure).
+# `~/obsidian` instead (`promote.py:1208` records exactly that failure).
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -3226,7 +3226,7 @@ def test_an_archived_baseline_quotes_the_blob_and_leaves_no_copy_demand(tmp_path
 
 def test_the_vault_is_resolved_at_call_time_not_at_import(tmp_path, monkeypatch):
     """A node that cannot move the vault root is a node that runs `git add` against
-    `~/obsidian` — the failure `promote.py:1099` records, and the constraint the
+    `~/obsidian` — the failure `promote.py:1208` records, and the constraint the
     autouse `isolated` fixture exists to satisfy.
 
     Proved by archiving into the fixture vault, moving `VAULT_ROOT` to a SECOND

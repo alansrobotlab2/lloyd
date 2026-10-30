@@ -472,8 +472,8 @@ def _no_live_service_control_in_tests(monkeypatch):
     soon as `sup_down_streak` passes `policy.SUPERVISORD_DOWN_STREAK` (3) —
     `agent-services/guardian/guardian.py:1233-1236`, `policy.py:54` — `_stop_sync`
     issues a real `pkill -f "sync --path …"` at `guardian.py:1054`, and the promoter
-    reaches `systemctl --user daemon-reload` (`scripts/automod/promote.py:601`) and
-    `systemctl --user restart lloyd-guardian` (`:610`) through its own thin `_run`
+    reaches `systemctl --user daemon-reload` (`scripts/automod/promote.py:710`) and
+    `systemctl --user restart lloyd-guardian` (`:719`) through its own thin `_run`
     wrapper (`promote.py:542`), which calls the module-global `subprocess.run`.
 
     Until #1853 the only protection was each test remembering its own

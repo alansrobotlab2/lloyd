@@ -361,7 +361,7 @@ autonomy task binds it. Its skill is archived; an unbound copy survives as
 `~/obsidian/skills/nightly-morning-briefing/` still carrying "Runs at 6:00 AM PST
 daily" and "Use announce mode", and **there is no announce delivery mode for
 autonomy tasks anywhere in the code** — the `announce()`s that do exist (the
-guardian's alert fan-out, `scripts/automod/promote.py:676`, `announce_breach` in
+guardian's alert fan-out, `scripts/automod/promote.py:785`, `announce_breach` in
 `scripts/iv_metrics_record.py`) are notification helpers for other purposes. Its
 documented output, `memory/reflection/morning-briefing-latest.md`, exists nowhere
 on disk. Today's run writes no report file at all: its output is the injected

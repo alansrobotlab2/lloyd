@@ -544,6 +544,80 @@ def _run(argv: list, timeout: float = 60.0) -> subprocess.CompletedProcess:
                           timeout=timeout, check=False)
 
 
+#: The tracked unit directory, and the installer that owns what belongs in the user
+#: manager. Both are read at CALL time — never as a default argument, which would
+#: freeze them at import — so a test can point the deployer at a synthetic tree.
+#: `SYSTEMD_UNIT_TREE` is the whole extent of a user-unit deploy:
+#: `agent-services/setup/install-services.sh` globs this directory ONE level deep
+#: (:102), so a unit below `system/` is a root-scope unit installed by hand and no
+#: user unit directory is ever meant to receive it (#3450 clause 3).
+#: `INSTALL_SERVICES` is where `SYSTEM_SCOPE_UNITS` is read from: the installer owns
+#: that array for the deployer exactly as it owns it for `service_health_check.py`'s
+#: `INSTALL_SERVICES`, so a unit added to the array needs no edit in either Python
+#: file. Declared here rather than beside `SYSTEMD_USER_DIR` (:96) because this
+#: deployer and no other code in the module reads them.
+SYSTEMD_UNIT_TREE = LIVE_ROOT / "agent-services" / "systemd"
+INSTALL_SERVICES = LIVE_ROOT / "agent-services" / "setup" / "install-services.sh"
+
+
+def _system_scope_unit_names(installer: "Path | None" = None):
+    """The units the installer refuses to place in the user manager, or `None`.
+
+    The reader is `scripts/service_health_check.py::_system_scope_units`, whose
+    `SYSTEM_SCOPE_RE` pulls `SYSTEM_SCOPE_UNITS=(...)` straight out of the installer's
+    shell text — the same seam #2714 opened for the health check. Reading it rather
+    than restating the array here is what keeps the deployer and the checker agreeing
+    on one list: a unit added to `install-services.sh` stops being linked and stops
+    being graded as a gap with no edit to either Python file.
+
+    Imported lazily, not at module scope: this module is the process that has to
+    survive to finish a landing, and a scope read is not worth coupling it to a
+    CLI script of some 2,400 lines. `None` is the blind answer — installer absent, or
+    no array in it — and the caller reports it instead of skipping units it has no
+    evidence about.
+    """
+    try:
+        from scripts.service_health_check import _system_scope_units
+    except Exception:
+        return None
+    return _system_scope_units(installer if installer is not None
+                               else INSTALL_SERVICES)
+
+
+def _prune_system_scope_decoys(unit_scope) -> list:
+    """Clear user-unit entries an earlier landing left for system-scope units.
+
+    The decoy is not hypothetical: the landing of SM_20261025_103401 recorded
+    `installed nvidia-power-limit.service` and its link still sat in
+    `~/.config/systemd/user` when #3450 was filed — inert (`is-active` inactive, in
+    no target), but present, which is exactly the state `install-services.sh:46-50`
+    refuses to create: it makes `systemctl --user restart nvidia-power-limit.service`
+    look like the right command during an Xid-79 investigation, while the unit that
+    actually clamps the GPU is the hand install under `/etc/systemd/system/`.
+
+    Matched on what the entry RESOLVES TO, not on its name: a user unit dir entry
+    pointing somewhere else is somebody's deploy, and `wrongtarget:` is
+    `check_unit_file_links`' row to raise, not a promotion's to delete. Only the
+    LINK is unlinked — never its target, which is the tracked unit file.
+    """
+    notes: list[str] = []
+    deployed_dir, unit_tree = SYSTEMD_USER_DIR, SYSTEMD_UNIT_TREE
+    for name in sorted(unit_scope):
+        entry = deployed_dir / name
+        if not entry.is_symlink():
+            continue
+        if os.path.realpath(entry) != os.path.realpath(unit_tree / name):
+            continue
+        try:
+            entry.unlink()
+        except OSError as exc:
+            notes.append(f"FAILED to remove {name} from {deployed_dir}: {exc}")
+            continue
+        notes.append(f"removed {name} from {deployed_dir}: system scope — the link an "
+                     f"earlier landing put there, which the user manager cannot use")
+    return notes
+
+
 def _apply_service_changes(changed: list[str]) -> list[str]:
     """Make changed service DEFINITIONS take effect. Returns human-readable notes.
 
@@ -572,9 +646,39 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
             notes.append(f"supervisorctl {verb}: "
                          f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
+    # Two kinds of touched unit are not the user manager's, and the loop knew
+    # neither: a name in the installer's `SYSTEM_SCOPE_UNITS` (a tracked ROOT-scope
+    # unit — a user copy of it is a decoy, see `_prune_system_scope_decoys`), and
+    # anything below `agent-services/systemd/system/`, which the installer's
+    # one-level globs never reach. Both used to be symlinked at
+    # `SYSTEMD_USER_DIR / src.name` regardless, which is how the landing of
+    # SM_20261025_103401 put `nvidia-power-limit.service` back into the manager
+    # #1108 had taken it out of, and how a changed `system/` unit would have been
+    # flattened onto its basename. Read once per call, like the globs it bounds.
+    unit_scope = _system_scope_unit_names() if touched_units else set()
+    if unit_scope is None:
+        # Blind, and saying so: refusing to link here would strand every user unit
+        # this landing changed, and silently linking would re-create the decoy the
+        # check on the other side exists to catch. `check_unit_file_links`' unknown
+        # row is the precedent for reporting the read failure instead of grading.
+        notes.append(f"unit scope unknown: SYSTEM_SCOPE_UNITS could not be read "
+                     f"from {INSTALL_SERVICES} — every touched unit was linked, so a "
+                     f"system-scope decoy may have been placed in {SYSTEMD_USER_DIR}")
+        unit_scope = set()
+
     for rel in touched_units:
         src = LIVE_ROOT / rel
         if not src.is_file():
+            continue
+        if src.name in unit_scope:
+            notes.append(f"skipped {src.name}: system scope per {INSTALL_SERVICES} — "
+                         f"the user manager cannot use it; the copy that runs is "
+                         f"installed under /etc/systemd/system")
+            continue
+        if src.parent != SYSTEMD_UNIT_TREE:
+            notes.append(f"skipped {rel}: below {SYSTEMD_UNIT_TREE}/system/, which "
+                         f"{INSTALL_SERVICES}' one-level globs never place into "
+                         f"{SYSTEMD_USER_DIR} — root-scope and installed by hand")
             continue
         dst = SYSTEMD_USER_DIR / src.name
         try:
@@ -598,6 +702,11 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
         except OSError as exc:
             notes.append(f"FAILED to install {src.name}: {exc}")
     if touched_units:
+        # Clearing a decoy an EARLIER landing left is part of applying this one: the
+        # link outlived the landing that made it, so waiting for someone to notice it
+        # is what let it survive five days of landings before #3450. The reload below
+        # is what tells systemd the entry is gone.
+        notes.extend(_prune_system_scope_decoys(unit_scope))
         r = _run(["systemctl", "--user", "daemon-reload"])
         notes.append("daemon-reload: "
                      f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")

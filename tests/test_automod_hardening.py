@@ -1240,7 +1240,7 @@ def test_a_link_to_a_foreign_file_is_replaced_not_written_through(monkeypatch, t
 
     The old copy path silently SUCCEEDED in this state: it followed the link, put
     the repo's bytes into the foreign file, and left the unit pointing at it — the
-    `wrongtarget:` shape `scripts/service_health_check.py:1364` exists to report,
+    `wrongtarget:` shape `scripts/service_health_check.py:1371` exists to report,
     made worse by an unrelated file having been overwritten by a promotion.
     """
     from scripts.automod import promote as P
@@ -1341,6 +1341,256 @@ def test_the_unit_deployer_holds_no_copy_path_and_no_dead_import():
     assert not dead, (
         f"module-level imports nothing binds: {dead} — pyflakes calls this F401 and "
         f"the gate's delta rung flags findings new to the diff")
+
+
+# ── #3450: a SYSTEM-scope unit must never reach the user manager ────────────────
+#
+# `agent-services/setup/install-services.sh` declares `SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)`
+# at :60, skips each name in it at :105-107, and globs the unit directory one level
+# deep at :102. The skip exists because a user-scope copy of a root-scope unit is a
+# decoy: `systemctl --user restart nvidia-power-limit.service` looks like the right
+# command in the middle of an Xid-79 investigation, while the thing that actually
+# clamps the GPU is the hand install under `/etc/systemd/system/`.
+#
+# `_apply_service_changes` never read that list. It collected every changed path
+# under `agent-services/systemd/` and symlinked each one at `SYSTEMD_USER_DIR /
+# src.name`, so the landing of SM_20261025_103401 recorded `installed
+# nvidia-power-limit.service` and put the decoy back on disk. These nodes run the
+# deployer against a synthetic repo tree, because against the real tree a name the
+# deployer had hardcoded and a name it parsed out of the installer are
+# indistinguishable — and only the second one is what the fix promises.
+
+#: Body for a synthetic unit file. The deployer never reads a unit's content, only
+#: its path, so this is filler.
+_SYNTH_UNIT = "[Unit]\nDescription=synthetic\n\n[Service]\nType=oneshot\n"
+
+#: The installer text the deployer's scope read is graded against: the same
+#: `SYSTEM_SCOPE_UNITS=(...)` shape as the real `install-services.sh:60`, which is the
+#: shape `SYSTEM_SCOPE_RE` matches (`^` anchored, MULTILINE, up to the close paren).
+_SYNTH_INSTALLER = """#!/usr/bin/env bash
+SYSTEMD_SRC="$PROJECT_DIR/systemd"
+SYSTEMD_DST="$HOME/.config/systemd/user"
+SYSTEM_SCOPE_UNITS=({names})
+"""
+
+
+class _SynthDeploy:
+    """A synthetic repo tree, installer and user unit dir for one deployer call.
+
+    `LIVE_ROOT`, `SYSTEMD_UNIT_TREE`, `SYSTEMD_USER_DIR` and `INSTALL_SERVICES` are
+    all re-bound, so the deployer's `LIVE_ROOT / rel` finds a real file it is allowed
+    to link while no node here reads or writes this box's unit state — which matters,
+    because this box HAS a decoy link right now, and a test that could see it could
+    not tell the fix's work from the residue of the old landing.
+
+    `_run` is stubbed for the suite's own guard
+    (`tests/test_conftest_subprocess_guard.py:243`): an unstubbed `_run` would
+    `daemon-reload` the real session manager mid-test.
+    """
+
+    def __init__(self, P, monkeypatch, tmp_path, scope, units):
+        self.P = P
+        self.repo = tmp_path / "repo"
+        self.unit_dir = self.repo / "agent-services" / "systemd"
+        self.unit_dir.mkdir(parents=True)
+        for name in units:
+            (self.unit_dir / name).write_text(_SYNTH_UNIT, encoding="utf-8")
+        self.user = tmp_path / "user-units"
+        self.installer = tmp_path / "install-services.sh"
+        self.set_scope(*scope)
+        self.calls = []
+        monkeypatch.setattr(P, "LIVE_ROOT", self.repo)
+        monkeypatch.setattr(P, "SYSTEMD_UNIT_TREE", self.unit_dir)
+        monkeypatch.setattr(P, "SYSTEMD_USER_DIR", self.user)
+        monkeypatch.setattr(P, "INSTALL_SERVICES", self.installer)
+        monkeypatch.setattr(P, "_run", lambda argv, timeout=60.0: self.calls.append(
+            [str(a) for a in argv]) or type("R", (), {"returncode": 0, "stdout": "",
+                                                      "stderr": ""})())
+
+    def set_scope(self, *names):
+        """Rewrite the installer's `SYSTEM_SCOPE_UNITS` array — the one lever a
+        deployer that restated the list instead of parsing it would ignore."""
+        self.installer.write_text(_SYNTH_INSTALLER.format(names=" ".join(names)),
+                                  encoding="utf-8")
+
+    def apply(self, *rels):
+        return self.P._apply_service_changes(list(rels))
+
+    def entries(self):
+        """Every path the deployer placed anywhere under the user unit dir."""
+        if not self.user.is_dir():
+            return []
+        return sorted(p.relative_to(self.user).as_posix()
+                      for p in self.user.rglob("*"))
+
+    def reloads(self):
+        return [c for c in self.calls if "daemon-reload" in " ".join(c)]
+
+
+def test_a_system_scope_unit_is_skipped_while_its_user_unit_sibling_links(
+        monkeypatch, tmp_path):
+    """Clauses 1 and 2 together: the system-scope name is not placed, and the
+    user-scope name passed in the same call still is, with exactly one reload.
+
+    Both halves in one call is the point. A deployer that skipped everything — or that
+    raised its way out of the loop — would satisfy "no `nvidia-power-limit.service` in
+    the user unit dir" while leaving every real unit's change undeployed, and clause 2
+    is what makes that read as a failure. The target check is the repo file the link
+    must resolve to, so the control also proves the user unit went through the normal
+    link-not-copy path rather than being placed some other way.
+    """
+    from scripts.automod import promote as P
+    d = _SynthDeploy(P, monkeypatch, tmp_path,
+                     scope=["nvidia-power-limit.service"],
+                     units=["nvidia-power-limit.service",
+                            "lloyd-graph-backup.service"])
+
+    notes = d.apply("agent-services/systemd/nvidia-power-limit.service",
+                    "agent-services/systemd/lloyd-graph-backup.service")
+
+    assert "nvidia-power-limit.service" not in d.entries(), (
+        "a unit the installer refuses to place was linked into the user manager, "
+        "which is the decoy a `systemctl --user restart` under an Xid-79 finds")
+    assert not any("installed nvidia-power-limit.service" in n for n in notes), notes
+    skip = [n for n in notes if "nvidia-power-limit.service" in n]
+    assert skip, f"the skip has to be reported, not silently done; notes were {notes}"
+    assert any("system scope" in n for n in skip), (
+        f"a reader of the landing row must learn WHY nothing was installed; "
+        f"notes were {skip}")
+
+    link = d.user / "lloyd-graph-backup.service"
+    assert link.is_symlink(), (
+        "clause 2: the user-scope unit co-changed in the same call was not linked — "
+        f"the user unit dir holds {d.entries()}")
+    assert os.path.realpath(link) == os.path.realpath(
+        d.unit_dir / "lloyd-graph-backup.service"), os.readlink(link)
+    assert "installed lloyd-graph-backup.service" in notes, notes
+    assert len(d.reloads()) == 1, (
+        f"systemd is owed exactly one daemon-reload per touched-unit run, got "
+        f"{d.reloads()}")
+
+
+def test_which_unit_is_skipped_is_what_the_installers_array_says(monkeypatch, tmp_path):
+    """Clause 1's control: the skip set is the installer's array, read at call time.
+
+    `synth-root.service` has never existed on this box, so its being skipped can only
+    come from the array written here; and `nvidia-power-limit.service`, this box's one
+    real system-scope unit, is LINKED in the same call once its name leaves that
+    array. A deployer with the name baked in gets both halves wrong. The last block is
+    the blind direction: with no array to read, the deployer cannot tell a deliberate
+    gap from an ordinary unit, so it links (as it must, for the user units that depend
+    on it) and says so loudly — the same "say you graded nothing" precedent as
+    `check_unit_file_links`' unknown row.
+    """
+    from scripts.automod import promote as P
+    d = _SynthDeploy(P, monkeypatch, tmp_path, scope=["synth-root.service"],
+                     units=["nvidia-power-limit.service", "synth-root.service"])
+
+    notes = d.apply("agent-services/systemd/synth-root.service",
+                    "agent-services/systemd/nvidia-power-limit.service")
+
+    assert "synth-root.service" not in d.entries(), (
+        "a name only this node's installer declares was still linked, so the filter "
+        "is not reading the installer")
+    assert (d.user / "nvidia-power-limit.service").is_symlink(), (
+        "nvidia-power-limit.service is not in the array any more, and a deployer that "
+        f"hardcoded it still skipped it; entries were {d.entries()}")
+    assert any("system scope" in n for n in notes), notes
+
+    for blind in ("installer absent", "installer has no scope array"):
+        if blind == "installer absent":
+            d.installer.unlink()
+        else:
+            d.installer.write_text("#!/usr/bin/env bash\necho nothing\n",
+                                   encoding="utf-8")
+        notes = d.apply("agent-services/systemd/synth-root.service")
+        assert (d.user / "synth-root.service").is_symlink(), (
+            f"{blind}: a deployer that cannot read the list must not start skipping "
+            "units it has no evidence about — the user units depend on this link")
+        loud = [n for n in notes if "could not be read" in n]
+        assert loud, (
+            f"{blind}: it linked blind and said nothing; notes were {notes}")
+
+
+def test_a_unit_below_the_system_subdirectory_is_not_flattened_into_the_user_dir(
+        monkeypatch, tmp_path):
+    """Clause 3: `agent-services/systemd/system/` is not a user unit directory.
+
+    That subtree holds the root-scope units installed by hand
+    (`lloyd-data-snapshot-prune.*`), and the installer's globs at
+    `install-services.sh:102` are one level deep precisely so those never reach the
+    user manager. The deployer matched on the `agent-services/systemd/` prefix and then
+    named the destination `src.name`, which flattened the subtree into the top of the
+    user unit dir — a second decoy shape, and one the health check cannot see from
+    either side because its own globs are one level deep too. The user-scope sibling is
+    passed in the same call so this cannot pass by placing nothing.
+    """
+    from scripts.automod import promote as P
+    d = _SynthDeploy(P, monkeypatch, tmp_path, scope=[],
+                     units=["lloyd-graph-backup.service"])
+    (d.unit_dir / "system").mkdir()
+    (d.unit_dir / "system" / "lloyd-data-snapshot-prune.service").write_text(
+        _SYNTH_UNIT, encoding="utf-8")
+
+    notes = d.apply("agent-services/systemd/system/lloyd-data-snapshot-prune.service",
+                    "agent-services/systemd/lloyd-graph-backup.service")
+
+    assert not (d.user / "lloyd-data-snapshot-prune.service").exists(), (
+        "the loop flattened a nested path onto `src.name`, so a root-scope unit "
+        "appeared at the top level of the user unit dir")
+    assert "system/lloyd-data-snapshot-prune.service" not in d.entries(), (
+        f"nothing under the user unit dir may hold a unit the installer never puts "
+        f"there; entries were {d.entries()}")
+    assert (d.user / "lloyd-graph-backup.service").is_symlink(), (
+        "clause 2's shape applies here too: the nested unit is skipped, the user unit "
+        "is deployed")
+    assert not any(n.startswith("installed lloyd-data-snapshot-prune")
+                   for n in notes), notes
+    assert len(d.reloads()) == 1, d.reloads()
+
+
+def test_a_decoy_link_left_by_an_earlier_landing_is_pruned_at_apply_time(
+        monkeypatch, tmp_path):
+    """Clause 4: the residue of an earlier landing clears itself on the next one.
+
+    The link planted here is exactly what SM_20261025_103401 left behind: a user-unit
+    entry whose target is the tracked file of a `SYSTEM_SCOPE_UNITS` unit. The call
+    touches a DIFFERENT unit, because that is the real case — the decoy outlived the
+    landing that made it, and the fix has to clear it whenever the loop applies unit
+    changes at all. Three things are asserted beside the removal: the user unit's own
+    link survives, so this is a scope prune and not a wipe; the tracked unit file is
+    still on disk, so a prune that followed the link did not delete the repo's copy,
+    which is the failure mode a `dst.unlink()` sitting beside `os.symlink` invites; and
+    the removal is noted, so the landing row says the decoy went away.
+    """
+    from scripts.automod import promote as P
+    d = _SynthDeploy(P, monkeypatch, tmp_path,
+                     scope=["nvidia-power-limit.service"],
+                     units=["nvidia-power-limit.service",
+                            "lloyd-graph-backup.service"])
+    d.user.mkdir(parents=True)
+    decoy = d.user / "nvidia-power-limit.service"
+    os.symlink(d.unit_dir / "nvidia-power-limit.service", decoy)
+    keep = d.user / "lloyd-graph-backup.service"
+    os.symlink(d.unit_dir / "lloyd-graph-backup.service", keep)
+
+    notes = d.apply("agent-services/systemd/lloyd-graph-backup.service")
+
+    assert not decoy.is_symlink() and not decoy.exists(), (
+        "the decoy survived the next landing, so the user manager still offers "
+        "`systemctl --user restart nvidia-power-limit.service`")
+    assert keep.is_symlink() and os.path.realpath(keep) == os.path.realpath(
+        d.unit_dir / "lloyd-graph-backup.service"), (
+        f"a prune that also removed the user unit is not a scope prune; "
+        f"entries were {d.entries()}")
+    assert (d.unit_dir / "nvidia-power-limit.service").is_file(), (
+        "the prune destroyed the tracked unit by acting on the target instead of the "
+        "link")
+    removal = [n for n in notes if "nvidia-power-limit.service" in n]
+    assert removal and any("removed" in n and "system scope" in n for n in removal), (
+        f"the landing row has to record that the decoy was cleared; notes were {notes}")
+    assert any("already linked" in n for n in notes), notes
+    assert len(d.reloads()) == 1, d.reloads()
 
 
 def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):

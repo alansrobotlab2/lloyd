@@ -2101,7 +2101,7 @@ def commit_anchor_witness(source, artifact: str, *,
     clause this route exists to replace.
 
     The vault is resolved AT CALL TIME through `_vault_witness_dir`, which reads
-    `app.paths.VAULT_ROOT` from the module — the constraint `scripts/autoresearch/promote.py:1099`
+    `app.paths.VAULT_ROOT` from the module — the constraint `scripts/autoresearch/promote.py:1208`
     records as the failure mode of resolving it at import: a test that cannot move the
     vault root is a test that runs `git add` against `~/obsidian`. `max_files` and
     `max_total_bytes` are parameters so the budget's arithmetic is testable without
@@ -2142,7 +2142,7 @@ def commit_anchor_witness(source, artifact: str, *,
     # reads the tree that is actually there, and because both spellings of the vault are
     # movable by a test — `LLOYD_VAULT` rebinds `vault_round.VAULT` (`vault_round.py:64`)
     # while `app.paths.VAULT_ROOT` is monkeypatched, and the one that is captured at
-    # import time is the one `promote.py:1099` says must never be used to `git add`.
+    # import time is the one `promote.py:1208` says must never be used to `git add`.
     top = None
     try:
         # The dir a fresh vault clone may not have yet. Guarded because the failure
@@ -2318,7 +2318,7 @@ def commit_anchor_witness(source, artifact: str, *,
     # Read at CALL time, like the vault root: `land()` takes its tree from the module
     # attribute `vault_round.VAULT` when it runs, so a test that rebinds that attribute
     # works against a temporary repo and no node stages a thing against `~/obsidian` — the
-    # failure `promote.py:1099` records for an import-time binding.
+    # failure `promote.py:1208` records for an import-time binding.
     from scripts.automod import vault_round as VR
 
     before = head()

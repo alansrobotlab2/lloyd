@@ -184,9 +184,12 @@ def test_the_cli_runs_the_pairs_under_its_own_category():
     assert units, f"the #2714 rows are absent from the heading they were filed under: {sorted(rows)}"
     for row in rows.values():
         assert row["category"] == shc.DEPLOY_CATEGORY
+        # `decoy:` is #3450 clause 5: a SYSTEM-scope unit that IS present in the user
+        # unit dir. Its absence stays ungraded, so which verbs this box actually
+        # prints is host state — the set is the ceiling, not a checklist.
         assert row["status"].split(":")[0] in {
             "ok", "drift", "missing", "copy", "wrongtarget", "unknown",
-            "untracked"}, row["status"]
+            "untracked", "decoy"}, row["status"]
         assert row["healthy"] is row["status"].startswith("ok:"), row["status"]
 
 

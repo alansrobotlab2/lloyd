@@ -547,7 +547,7 @@ def test_the_arm_scripts_gate_survives_being_sourced_under_set_uo():
 @pytest.mark.live_vault
 @pytest.mark.skipif(not RESTART_SKILL.exists(), reason=f"vault not present at {RESTART_SKILL.parent}")
 def test_the_restart_skill_cites_the_gate_by_symbol_and_quotes_the_shared_numbers():
-    """#1340 clause 4. `promote.py:930` was 596 lines from `_restart_primary`,
+    """#1340 clause 4. `promote.py:1039` was 596 lines from `_restart_primary`,
     which is how a skill stayed wrong for weeks: a line number is a pointer only
     until the file grows. So the skill names the symbol and no line number, and
     the four GiB figures it quotes are read out of its own sentence and compared

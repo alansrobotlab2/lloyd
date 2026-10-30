@@ -693,18 +693,29 @@ def test_a_link_to_any_other_path_is_unhealthy_naming_that_target(fleet):
 
 
 # ---------------------------------------------------------------------------
-# Clause 4 — a gap the installer leaves on purpose is never a FAIL
+# #2714 clause 4 + #3450 clause 5 — the gap the installer leaves on purpose, and the
+# decoy that must not use that gap as cover
 # ---------------------------------------------------------------------------
 
-def test_the_units_the_installer_skips_by_scope_are_never_reported(fleet):
-    """Clause 4: a name in `SYSTEM_SCOPE_UNITS` is not graded, so the one unit the
-    installer `continue`s past cannot become a false FAIL for not being linked.
+def test_a_system_scope_unit_is_a_fault_when_present_and_ungraded_when_not(fleet):
+    """#3450 clause 5, which turns this node's old assertion around on ONE side only.
 
-    `nvidia-power-limit.service` is that unit, and the copy that runs is a hand install
-    under `/etc/systemd/system/` already graded by the existing byte pair. Both names
-    are tracked here and deployed nowhere, which is the state that would otherwise read
-    `missing:` — and `synth-root.service` is the proof that the exclusion is the
-    installer's list rather than one name this file happens to know.
+    #2714 clause 4 survives unchanged: `nvidia-power-limit.service` nowhere in the
+    deploy directory is what `install-services.sh` leaves there on purpose — the copy
+    that runs is a hand install under `/etc/systemd/system/`, already graded by
+    `check_deployed_copies` — so its absence files no row and can never read
+    `missing:`. What was never asked is the other side. When `promote.py`'s
+    `_apply_service_changes` linked that unit into `~/.config/systemd/user` on the
+    landing of SM_20261025_103401, the real run here returned 21 rows and not one
+    named it: the exclusion covered the decoy exactly as well as it covered the gap. A
+    user-scope entry for a root-scope unit is the precise thing the installer's
+    `continue` exists to prevent, so presence is now one fault row.
+
+    `synth-root.service` is the positive control on both halves, unchanged from #2714:
+    it is a SECOND name added to the installer's array by this node, so a check that had
+    memorised `nvidia-power-limit.service` cannot produce its row — and the array is
+    rewritten at the end to take the name back out, which is what makes this node fail
+    if the parser goes blind or the list is ever restated in Python.
     """
     fleet.installer.write_text(
         INSTALLER_STUB.replace("SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)",
@@ -716,8 +727,38 @@ def test_the_units_the_installer_skips_by_scope_are_never_reported(fleet):
     fleet.track("alpha.service")
     fleet.link_to_tree("alpha.service")
 
+    # Absence: #2714 clause 4, still exactly one row, and it is not about these two.
     assert fleet.names() == {"unitlink:alpha.service"}, (
-        "a unit the installer deliberately does not link was reported")
+        "a unit the installer deliberately does not link was reported for not being "
+        "linked — the deliberate gap must survive the new presence rule")
+
+    # Presence: a link left by a promotion, and a hand copy, are both the decoy.
+    fleet.link_to_tree("nvidia-power-limit.service")
+    fleet.copy("synth-root.service")
+
+    rows = {r["name"]: r for r in fleet.rows()}
+    assert set(rows) == {"unitlink:alpha.service",
+                         "unitlink:nvidia-power-limit.service",
+                         "unitlink:synth-root.service"}, rows
+    assert rows["unitlink:alpha.service"]["healthy"] is True, rows
+    for name in ("nvidia-power-limit.service", "synth-root.service"):
+        row = rows[f"unitlink:{name}"]
+        assert row["healthy"] is False and row["exit_code"] == 1, row
+        assert row["category"] == shc.DEPLOY_CATEGORY, row
+        assert row["status"].startswith("decoy:"), row
+        assert "missing:" not in row["status"], (
+            f"a system-scope unit's fault row must not read like the gap clause 4 "
+            f"excuses: {row['status']}")
+        assert str(fleet.deployed / name) in row["status"], row
+
+    # The control, in the blind direction: with the name out of the array, the same
+    # deployed entry is graded as the ordinary tracked-unit fault it looks like, while
+    # the name still in the array keeps its `decoy:` row.
+    fleet.installer.write_text(INSTALLER_STUB, encoding="utf-8")
+    rows = {r["name"]: r for r in fleet.rows()}
+    assert rows["unitlink:synth-root.service"]["status"].startswith("copy:"), rows
+    assert rows["unitlink:nvidia-power-limit.service"]["status"].startswith(
+        "decoy:"), rows
 
 
 def test_units_under_the_system_subdirectory_are_never_reported(fleet):
@@ -768,8 +809,16 @@ def test_the_exclusion_list_is_the_installer_s_and_not_a_name_written_here():
 
     A green suite over temp installers would still say nothing if the default read a
     file that is not the installer, exactly as #1108's sibling node says about the byte
-    pairs. And the real run must not name the system-scope unit — that assertion is
-    what a regression to a hardcoded set, or to no set, breaks immediately.
+    pairs. And the real run's verdict about the system-scope unit is read off the real
+    deploy directory rather than assumed — which is the half #3450 changed. This node
+    used to assert `"unitlink:nvidia-power-limit.service" not in names` flatly, and that
+    assertion is what a decoy landing satisfied silently: it pinned the blind spot as the
+    contract, so `promote.py` could link the unit into `~/.config/systemd/user` on the
+    landing of SM_20261025_103401 and this suite stayed green. Clause 5 of #3450 is the
+    rule now, stated as the biconditional it is — a row exists for a system-scope unit
+    exactly when an entry for it is on disk, and the row is never the `missing:` verdict
+    clause 4 exists to prevent. A regression to a hardcoded set, or to no set, still
+    breaks here immediately.
     """
     assert shc._system_scope_units() == {"nvidia-power-limit.service"}, (
         "the exclusion list no longer comes from install-services.sh's "
@@ -778,8 +827,18 @@ def test_the_exclusion_list_is_the_installer_s_and_not_a_name_written_here():
                                    / "install-services.sh")
     assert shc._system_scope_units(ROOT / "setup" / "does-not-exist.sh") is None
 
-    names = {r["name"] for r in shc.check_unit_file_links()}
-    assert "unitlink:nvidia-power-limit.service" not in names
+    rows = {r["name"]: r for r in shc.check_unit_file_links()}
+    for name in sorted(shc._system_scope_units()):
+        deployed = shc.USER_UNIT_DIR / name
+        present = deployed.is_symlink() or deployed.exists()
+        row = rows.get(f"unitlink:{name}")
+        assert present == (row is not None), (
+            f"{deployed}: present on disk = {present}, row = {row and row['status'][:80]}"
+            " — a system-scope unit is graded iff it is there, and this box's deploy "
+            "directory is the arbiter")
+        if row is not None:
+            assert row["status"].startswith("decoy:"), row["status"]
+            assert "missing:" not in row["status"], row["status"]
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +865,16 @@ def test_the_default_constants_point_at_the_repo_tree_and_the_user_unit_dir():
                for pattern in ("*.service", "*.timer")
                for p in shc.SYSTEMD_UNIT_TREE.glob(pattern)}
     want = {f"unitlink:{name}" for name in tracked}
-    want -= {f"unitlink:{name}" for name in shc._system_scope_units()}
+    # A SYSTEM-scope name is graded iff an entry for it is actually present (#3450
+    # clause 5); nowhere in the deploy directory is the installer's deliberate gap and
+    # files nothing. Computed from this box rather than asserted, for the same reason
+    # the orphanunit rows below are shape-checked where they appear and never
+    # presence-asserted: whether the decoy is on disk right now is host state.
+    scope = shc._system_scope_units()
+    present = {name for name in scope
+               if (shc.USER_UNIT_DIR / name).is_symlink()
+               or (shc.USER_UNIT_DIR / name).exists()}
+    want -= {f"unitlink:{name}" for name in scope - present}
     want |= {f"orphanunit:{p.name}"
              for pattern in ("*.service", "*.timer")
              for p in shc.USER_UNIT_DIR.glob(pattern)
@@ -843,8 +911,12 @@ def test_the_default_cli_run_grades_the_units_under_the_deploy_category():
     assert units, payload["services"]
     assert {s["category"] for s in units} == {shc.DEPLOY_CATEGORY}
     for row in units:
-        assert row["status"].split(":")[0] in {"ok", "missing", "copy", "wrongtarget"}, (
-            row["status"])
+        # `decoy:` joins the vocabulary for #3450 clause 5: a SYSTEM-scope unit that IS
+        # present in the deploy directory. The set is the whole point of the node — a
+        # row whose verb is not one of these is the CLI emitting a shape no formatter
+        # or category summary was written for.
+        assert row["status"].split(":")[0] in {
+            "ok", "missing", "copy", "wrongtarget", "decoy"}, (row["status"])
     for row in payload["services"]:
         if not row["name"].startswith("orphanunit:"):
             continue
