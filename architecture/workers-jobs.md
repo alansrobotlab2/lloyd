@@ -1352,7 +1352,13 @@ other session sources' — #896) and stages a candidate task under
   refuses a candidate whose task block cannot be graded and refuses a stem the bench
   already declares, which is a working gate waiting for a human. Six weeks of mining
   and six weeks of nothing on the other side of it. The only consumer of this group's
-  output is that tab.
+  output is that tab. One cause of the pile's shape is now fixed (#3531): the mining
+  prompt used to show `id: bench_XXX_<slug>` and leave the number to the turn, but the
+  number a turn can read advances only when a human promotes, so every candidate since
+  `bench_028` answered `bench_029` and 324 of the notes staged by 2026-10-29 declared
+  that one id. The number is now minted by `_mint_bench_id` at staging time — one past
+  the highest held by the live corpus and the staging pile together — and the prompt
+  asks only for a slug.
 - The idea is copied from Terminal-Universe (arXiv:2609.04148): a recorded
   trajectory, *including the failed ones*, reconstructed into a task with a
   deterministic pass/fail check.

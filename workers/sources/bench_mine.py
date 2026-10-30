@@ -88,9 +88,19 @@ from typing import Any, Callable, Optional
 
 from workers.queue import WorkQueue, QueueItem
 from workers.sources import DECLINED
+# `_common` as a MODULE, not its names: `_staged_bench_numbers` has to resolve
+# `STAGING_ROOT` at call time so the pile scan follows the same redirect
+# `write_staging_note` does — a test that moves the pile must move both, or the mint
+# numbers itself against the live 500-note tree while writing into a tmp_path one.
+from workers.sources import _common
 from workers.sources._common import (
     run_prompt_on_primary, staged_pending_bound_hit, write_staging_note,
 )
+from app.paths import VAULT_ROOT
+# The rail's own reader for "the id this file declares", reused rather than
+# re-implemented (#3531): a mint that parsed ids its own way would disagree with the
+# write rail about which ids exist, which is the bug class this item is a case of.
+from app.harness.bench_authoring import frontmatter_id
 
 logger = logging.getLogger("lloyd-workers.bench_mine")
 
@@ -594,7 +604,7 @@ _TASK_SCHEMA = (
     "~/obsidian/lloyd/bench/:\n\n"
     "```\n"
     "---\n"
-    "id: bench_XXX_<slug>\n"
+    "id: <short-slug>\n"
     "category: <replay|synthetic|adversarial|safety>\n"
     "objective: <one line>\n"
     "max_tool_calls: <int>\n"
@@ -608,7 +618,14 @@ _TASK_SCHEMA = (
     "safety_critical: <true|false>\n"
     "---\n\n"
     "<one line on what success looks like>\n"
-    "```\n"
+    "```\n\n"
+    "The `id:` above is a SHORT SLUG and nothing else — `recall_wake_phrase_counts`, "
+    "`schedule-task-replay`. Do NOT put a task number in it: the pipeline numbers the "
+    "id itself when it stages the note (#3531), because the number a turn could read "
+    "off the bench has not moved since the last task LANDED — it advances only when a "
+    "human promotes, and asking every turn for the next one is how hundreds of "
+    "candidates came to declare the same id. A slug is also what survives promotion: "
+    "the destination file is named after the id the pipeline wrote.\n"
 )
 
 #: `judge._score_objective` returns 1.0 for a task with no `objective_checks`
@@ -935,6 +952,186 @@ async def _mine_failure(item: QueueItem, turn, source_label: str) -> dict[str, A
                      "num_turns": turn.num_turns}}
 
 
+# ---------------------------------------------------------------------------
+# Minting the task id (#3531)
+# ---------------------------------------------------------------------------
+
+#: Where a promoted candidate lands — the same relative path the promote route's
+#: `_DEFAULT_DEST["bench-mine"]` names, spelled out here because importing that
+#: module would drag FastAPI into the worker process. The number minted below is
+#: chosen against THIS directory's contents, so the two must not drift: a number
+#: taken against the wrong corpus is the collision this section exists to stop.
+BENCH_CORPUS_REL = "lloyd/bench"
+
+#: Test seam for the corpus directory; None means "the real vault". See
+#: `_bench_corpus_dir`.
+_BENCH_DIR_OVERRIDE: Path | None = None
+
+#: The numeric part's zero-padded width — `bench_007_…`, the shape every live file
+#: carries and what `bench_authoring.BENCH_TASK_FILE_RE` accepts. A constant rather
+#: than a literal inside the f-string below, for the reason #3063 recorded one
+#: comment away in `fleet_watchdog`: a literal agrees with the thing it formats only
+#: until that thing moves, and here the thing is the name of a graded task file.
+BENCH_NUMBER_WIDTH = 3
+
+#: An id of the bench's own shape, capturing its number and its slug.
+_BENCH_ID_RE = re.compile(r"^bench_([0-9]+)_?(.*)$")
+#: Any `id:` line, for replacing the one inside the candidate's block. Anchored to
+#: line starts under MULTILINE so a `prompt:` that quotes the word "id:" mid-sentence
+#: is not the match; the FIRST match is the task block's, because a candidate's front
+#: matter is the first thing in the file it was written to be.
+_TASK_ID_LINE_RE = re.compile(r"(?m)^id:[ \t]*[^\n]*$")
+#: The opening fence of a front-matter block, for inserting an `id:` the turn omitted.
+_FM_OPEN_RE = re.compile(r"^---[ \t]*\r?\n", re.MULTILINE)
+
+
+def _bench_id_number(raw: object) -> Optional[int]:
+    """The number in a bench id, or None for an id that carries no number.
+
+    The underscore after the digits is OPTIONAL in `_BENCH_ID_RE`, measured rather than
+    intended-by-luck: `bench_006b_x` yields 6 and `bench_029b_zz` yields 29, so a
+    letter-suffixed id DOES hold its number and the mint steps over it. That is the
+    conservative direction and why the pattern stays this way — reserving a number can
+    only ever cost a skipped integer, while failing to reserve one mints a number some
+    existing note already carries, which is the pile shape #3531 is fixing. An id with no
+    digits after `bench_` at all (`my-task`) yields None and blocks nothing: it is not a
+    numbered id, and clause 4's job is to stop one being minted, not to let it reserve
+    anything.
+    """
+    m = _BENCH_ID_RE.match(str(raw or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def _bench_corpus_dir() -> Path:
+    """Where the live bench corpus lives, resolved at CALL time.
+
+    `VAULT_ROOT / BENCH_CORPUS_REL`, which is the same directory the promote route
+    writes into (`_DEFAULT_DEST["bench-mine"] == "lloyd/bench"`). `_BENCH_DIR_OVERRIDE`
+    exists because a mint that could only read the real corpus could only ever be tested
+    against the real corpus: the number it hands out would depend on how many tasks a
+    human has promoted that morning, and the clause this file pins is about arithmetic.
+    """
+    return _BENCH_DIR_OVERRIDE or (VAULT_ROOT / BENCH_CORPUS_REL)
+
+
+def _live_bench_numbers() -> set[int]:
+    """Every number the LIVE bench corpus declares, read through the real loader.
+
+    `scripts.autoresearch.common.load_bench_tasks` is the same call
+    `app/routers/workers.py::_bench_ids_in` makes, so the mint and the promote rail
+    count the corpus identically — and it inherits that loader's own rule that an
+    absent directory is an empty corpus (a bench with no files has no numbers, which
+    is a real reading, not a failure) while a per-file parse error is logged and
+    skipped, exactly as the rail's check skips it.
+
+    Raises when the call itself fails, which is the rail's policy, not a new one:
+    "no ids in use" is the verdict that lets a duplicate land, and a guard that
+    cannot see its own input has no verdict to give.
+    """
+    from scripts.autoresearch.common import load_bench_tasks
+
+    return {n for n in (_bench_id_number(t.get("id"))
+                        for t in load_bench_tasks(_bench_corpus_dir()))
+            if n is not None}
+
+
+def _staged_bench_numbers() -> set[int]:
+    """Every number this source's STAGING pile already declares.
+
+    The live corpus alone cannot answer "which number is free", and that IS the
+    defect: 324 of the notes staged by 2026-10-29 declare `bench_029` while the
+    corpus tops out at `bench_028`, because the number only advances on a human
+    promotion and there has never been one. So the pile is part of the taken set, and
+    the number becomes the pile's one monotone counter — re-mining anything burns a
+    number, which `staged_pending_count`'s bound and the `done:<key>` watermark
+    already keep to the odd note.
+
+    Read through `bench_authoring.frontmatter_id`, the shipped reader for "the id this
+    file declares", because a staged note is TWO documents: the staging envelope's
+    block comes first and declares no id, the candidate's block is below it, and only
+    the second carries the number.
+
+    A note that cannot be read contributes no number — unlike the live corpus, where
+    an unreadable scan refuses the mint. That asymmetry is the cost of being wrong: a
+    repeated STAGED id costs a 409 at promotion time, loudly, while a repeated LANDED
+    id means one graded task measured twice and another never, with the file count
+    still going up.
+
+    `STAGING_ROOT` is read off the module at call time, the same way
+    `write_staging_note` resolves its own root, so a test that redirects the pile
+    redirects this scan with it.
+    """
+    root = _common.STAGING_ROOT / NAME
+    if not root.is_dir():
+        return set()
+    nums: set[int] = set()
+    for path in root.rglob("*.md"):
+        if any(part.startswith(("_", "."))
+               for part in path.relative_to(root).parts[:-1]):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        n = _bench_id_number(frontmatter_id(content))
+        if n is not None:
+            nums.add(n)
+    return nums
+
+
+def _candidate_slug(raw_id: object, fallback: str) -> str:
+    """The slug part of whatever the turn wrote, safe for a bench file name.
+
+    Three shapes reach this: a well-formed `bench_001_old_name` (keep `old_name`), a
+    junk id like `bench_006b_x` or `my-task` (keep the whole thing minus a leading
+    `bench_`, so the number is fixed and the turn's words survive), and no id at all
+    (fall back to the slug the caller already derived from the mined run or ledger
+    row). Characters outside `BENCH_TASK_FILE_RE`'s class collapse to `-` rather than
+    being dropped, so `two tasks!` and `two-tasks` mint the same file name.
+    """
+    text = str(raw_id or "").strip()
+    m = _BENCH_ID_RE.match(text)
+    stem = m.group(2) if m else re.sub(r"^bench[_-]?", "", text)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._")
+    if not slug:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(fallback or "").lower()).strip("-._")
+    return slug or "untagged"
+
+
+def _mint_bench_id(candidate_id: object, fallback_slug: str) -> str:
+    """One past the highest number the corpus AND the pile hold, with the turn's slug.
+
+    This is the line #3531 is about. The number used to be asked of the mining turn,
+    which could only read the live corpus — a corpus whose number advances when a
+    human promotes and has never advanced, so every turn since `bench_028` answered
+    `bench_029`. Taking the max over both sets is what makes the mint a counter: it
+    moves on every note staged, promoted or not.
+    """
+    held = _live_bench_numbers() | _staged_bench_numbers()
+    n = (max(held) + 1) if held else 1
+    return f"bench_{n:0{BENCH_NUMBER_WIDTH}d}_{_candidate_slug(candidate_id, fallback_slug)}"
+
+
+def _rewrite_task_id(text: str, new_id: str) -> str:
+    """The turn's own text with the id it wrote replaced by the minted one.
+
+    Both copies have to move. `write_staging_note` puts `turn.text` into the note
+    verbatim, and the promote route names the landed file after the id the note's task
+    block DECLARES — so replacing the parsed front matter alone would leave a note
+    whose `id:` line, whose `calibration.task_id` and whose landed file name disagree,
+    which is the #1710 failure shape one layer up. A turn that wrote no `id:` at all
+    gets one inserted, because a candidate block with no id collects no calibration
+    traces (`_trial_task`) and its landed stem and declared id could not be made to
+    agree at all.
+    """
+    body = text if isinstance(text, str) else ""
+    if _TASK_ID_LINE_RE.search(body):
+        return _TASK_ID_LINE_RE.sub(f"id: {new_id}", body, count=1)
+    if _FM_OPEN_RE.search(body):
+        return _FM_OPEN_RE.sub(f"---\nid: {new_id}\n", body, count=1)
+    return f"---\nid: {new_id}\n---\n\n{body}"
+
+
 async def _stage_and_calibrate(item: QueueItem, turn, *, slug: str, rationale: str,
                                source_refs: list[str], source_label: str) -> dict[str, Any]:
     fm = _candidate_frontmatter(turn.text)
@@ -948,11 +1145,51 @@ async def _stage_and_calibrate(item: QueueItem, turn, *, slug: str, rationale: s
         return {"status": "skipped", "summary": f"bench-mine {source_label}: {reason}"[:500],
                 "meta": {"rejected": True, "reason": reason,
                          "stop_reason": turn.stop_reason, "num_turns": turn.num_turns}}
+    # The candidate is a task, so now — and only now, because a mint is a counter and
+    # a rejected turn must not burn a number (#3531) — the id is assigned. It moves
+    # TWO copies in one step: the text the note body is written verbatim from, and the
+    # dict handed to `calibrate_candidate` below. Order is the whole point —
+    # `_trial_task` and `_record_calibration` both read the id out of THAT dict, so a
+    # mint that rewrote the body alone would stamp `calibration.task_id` with a name
+    # the note no longer declares, which is #1710's defect re-opened one layer up.
+    # A scan failure aborts the staging, on the promote rail's own policy for this
+    # question (`_bench_ids_in` raises for the same reason): "no ids are in use" is
+    # precisely the reading that lets a duplicate land, and a mint working from what
+    # looks like an empty corpus would hand out `bench_001_…`, the number of a live
+    # graded task — which the promote route's stem check would NOT catch, since it only
+    # refuses a stem it can see. See the note below on why the exception is allowed to
+    # travel rather than being converted into a result.
+    # No try/except around the mint, and that is a decision rather than an omission. A
+    # raised exception is the ONE route here that reaches `WorkQueue.mark_failed`, which
+    # requeues the item under the queue's own attempts cap; an in-band
+    # `{"status": "failed"}` would be followed by `q.complete()` at the pool's call site
+    # and would silently retire the candidate, and an invented status would be recorded
+    # as SUCCESS with a warning (`workers/pool.py::_execute` recognises three). Nothing
+    # is staged and nothing is marked done before the raise, so a vault that hiccuped
+    # costs a GPU turn and not the idea.
+    numbered = _rewrite_task_id(turn.text, _mint_bench_id((fm or {}).get("id"), slug))
+    if (fm := _candidate_frontmatter(numbered)) is None:
+        # Unreachable by construction: the mint replaces one `id:` line inside a block
+        # that already parsed, and a YAML scalar cannot gain a newline. Stated as a
+        # refusal rather than trusted, because the alternative is a `fm["id"]`
+        # subscript on None inside the calibration call, and a candidate lost to a bug
+        # here is a candidate that is simply never mined again by the watermark.
+        return {"status": "skip",
+                "summary": f"{NAME}: minted id into {slug} left front matter that no "
+                           f"longer parses; staged nothing",
+                "meta": {"mint_defect": True, "source": source_label}}
 
     path = write_staging_note(
         source=NAME,
         slug=slug,
-        body=turn.text,
+        # The NUMBERED text, not the turn's own. `write_staging_note` writes this body
+        # verbatim, so the note's task block is the only place a reader of the file sees
+        # the candidate's id; leaving the turn's text here would mint a number, put it in
+        # the envelope and in the calibration, and leave the task block still declaring
+        # the turn's stale one — #1710's false attribution, one block further down the
+        # same file. `meta.response` below stays verbatim: that blob is the record of
+        # what the turn actually said, and nothing derives an id from it.
+        body=numbered,
         confidence=0.5,
         rationale=rationale,
         source_refs=source_refs,

@@ -346,3 +346,57 @@ def test_the_miner_cannot_reach_the_command_that_dirtied_it(tmp_path):
         assert _porcelain(where) == "", "refused, and the tree is still clean"
     finally:
         _remove_worktree(where)
+
+
+# ---------------------------------------------------------------------------
+# The prompt must stop asking the turn to number the task (#3531, clause 1)
+# ---------------------------------------------------------------------------
+
+def _assembled_prompt_text(loser: bool = False) -> str:
+    """The prompt a mining turn is actually sent, through the real builders.
+
+    Assembled by the two functions the clause names, not by re-reading
+    `_TASK_SCHEMA`: each appends the schema from its own f-string, so a slot that
+    survived in one branch and not the other is exactly what a schema-only check
+    would miss. The arguments are the shapes `_execute` passes at its two call sites.
+    """
+    if loser:
+        return bench_mine._ledger_loser_prompt(
+            "bench_004_replay_schedule_task", 0.2)
+    return bench_mine._run_failure_prompt(
+        {"run_path": "/tmp/lloyd-data/autonomy-runs/24/run_24_x.md",
+         "run_id": "run_24_x", "source": "knowledge-health-report",
+         "status": "failed", "summary": "connection refused"})
+
+
+def test_neither_mining_prompt_asks_the_turn_to_choose_a_bench_number():
+    """Clause 1: no id slot carries a number, and the schema says who assigns it.
+
+    2026-10-28: 324 of the 542 notes staged under `bench-mine/` declared
+    `bench_029_*`, against a live corpus whose highest id is `bench_028`. The turns
+    were not guessing wildly — `bench_029` is the correct answer to the question the
+    prompt asked, and the question was unanswerable: the number a turn can read off
+    `~/obsidian/lloyd/bench/` advances only on a human promotion, and
+    `grep -l 'review_status: promoted' ~/obsidian/lloyd/bench/*.md` returns no file,
+    so it has never advanced. `_TASK_SCHEMA` showed `id: bench_XXX_<slug>` and said
+    nothing about the number; `git log -S'bench_XXX'` on this module returns one
+    commit, `0edaab55` (2026-04-18) — the line had never been amended.
+    """
+    for label, text in (("run-failure", _assembled_prompt_text()),
+                        ("ledger-loser", _assembled_prompt_text(loser=True))):
+        assert "bench_XXX" not in text, (
+            f"the {label} prompt still offers `bench_XXX` as an id slot, so every "
+            f"turn it sends is instructed to number the task it is writing: "
+            f"{[ln for ln in text.splitlines() if 'bench_' in ln][:4]}")
+        assert "id: <short-slug>" in text, (
+            f"the {label} prompt's schema no longer shows an id line for the turn to "
+            f"copy, so it will invent one: "
+            f"{[ln for ln in text.splitlines() if 'id:' in ln][:4]}")
+    schema = bench_mine._TASK_SCHEMA
+    assert "the pipeline numbers the" in schema.lower(), (
+        "_TASK_SCHEMA shows an id line without saying the pipeline assigns the "
+        "number, which is the ambiguity that produced 324 notes claiming one id: "
+        f"{schema[-300:]}")
+    assert "do not put a task number" in schema.lower(), (
+        "the schema names the assignee but never tells the turn to leave the number "
+        f"alone, which is the half that stops the collision: {schema[-300:]}")

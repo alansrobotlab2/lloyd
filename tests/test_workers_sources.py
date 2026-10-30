@@ -1234,8 +1234,23 @@ def _bm_queue(monkeypatch, q) -> None:
     monkeypatch.setattr(WQ, "get_queue", lambda *a, **k: q)
 
 
+#: The number the pinned bench corpus tops out at. 28 is today's real top id, so a node
+#: that asserts a minted id can say `bench_029_…` the way the live corpus would produce
+#: it, without this file depending on how many tasks a human has promoted this week.
+BM_SEEDED_BENCH_TOP = 28
+
+
 def _bm_inputs(tmp_path, monkeypatch) -> Path:
-    """Point both inputs at tmp dirs; the ledger yields nothing by default."""
+    """Point every input at a tmp dir; the ledger yields nothing by default.
+
+    Three inputs, not the two this helper had. The third is the LIVE BENCH CORPUS, which
+    #3531 turned into an input of the staging path: `_mint_bench_id` reads
+    `~/obsidian/lloyd/bench/` to number a candidate, so a node that staged a note without
+    redirecting it would be reading the vault — and asserting a number that advances the
+    moment somebody promotes a task. The pinned corpus holds `BM_SEEDED_BENCH_TOP` tasks
+    with well-formed ids, which is what makes `bench_029_…` a deterministic expectation
+    instead of a snapshot of the vault.
+    """
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text("", encoding="utf-8")
     monkeypatch.setattr(BM, "LEDGER_PATH", ledger)
@@ -1243,6 +1258,13 @@ def _bm_inputs(tmp_path, monkeypatch) -> Path:
     runs_dir = tmp_path / "autonomy-runs"
     runs_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", runs_dir)
+    bench_dir = tmp_path / "bench"
+    bench_dir.mkdir(exist_ok=True)
+    for n in range(1, BM_SEEDED_BENCH_TOP + 1):
+        (bench_dir / f"bench_{n:03d}_seeded.md").write_text(
+            f"---\nid: bench_{n:03d}_seeded\n---\n\nseeded live task\n",
+            encoding="utf-8")
+    monkeypatch.setattr(BM, "_BENCH_DIR_OVERRIDE", bench_dir)
     return runs_dir
 
 
@@ -1694,7 +1716,12 @@ async def test_the_staged_note_records_which_task_the_mean_describes(tmp_path,
     assert len(notes) == 1
     fm = yaml.safe_load(notes[0].read_text(encoding="utf-8").split("---")[1])
     cal = fm["calibration"]
-    assert cal["task_id"] == "bench_200_mined_run_24_pipeline_timeout", (
+    # #3531 changed WHICH id is recorded, not why recording it matters: the number is
+    # minted by the pipeline, so the candidate's own `bench_200_…` is re-numbered to one
+    # past the pinned corpus's top (`_bm_inputs`), and the slug is what the turn wrote.
+    # The mean still belongs to the id this note declares — that is #1710, asserted two
+    # lines below against the trials that actually ran.
+    assert cal["task_id"] == "bench_029_mined_run_24_pipeline_timeout", (
         f"the note records a mean for {cal.get('task_id')!r}")
     assert cal["status"] == "ok" and cal["in_band"] is True
     assert trials.seen and trials.seen[0][0]["id"] == cal["task_id"], (
