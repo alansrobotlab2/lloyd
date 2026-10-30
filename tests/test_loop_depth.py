@@ -1089,6 +1089,159 @@ def test_the_decline_names_the_holder_and_is_not_the_no_candidate_skip(isolated,
         "the idle tick wrote no in-flight row: the two states stay distinct"
 
 
+# ── the two-claim decline: what `also_held` may put in a ledger row (#3487) ───
+#
+# `implement_held_confirmed` answers `(Item, holding slot)` pairs, and
+# `_decline_in_flight` puts whatever it is handed for `also_held` straight into a
+# row that `state.append_event` serialises with `json.dumps(payload,
+# ensure_ascii=False)` and no `default=` (`scripts/automod/state.py`). `Item` is a
+# plain dataclass, so handing it the Items raises `TypeError` inside
+# `append_event` — which `_decline_in_flight` calls from `execute` *outside* that
+# turn's `try/finally`, so it escapes `execute` — and the ledger keeps no row at
+# all. That is the collapse #3370 was written to prevent: *"skipped, already in
+# flight"* becoming *"nothing happened"*, indistinguishable from an idle tick.
+#
+# No node above reaches this. Both existing in-flight-decline nodes drive the
+# SINGLE-claim shape, where `held[1:]` is empty, the kwarg is falsy, and
+# `_decline_in_flight` drops the key — a green suite over an unexercised line.
+
+
+_HOLD_SLOTS = ("autocode:round", "autocode:round:1")
+
+
+def _items_held_on_slots(isolated, monkeypatch, ids):
+    """`ids` as ready items, each claimed by a DISTINCT slot key, with the turn stubbed.
+
+    The claims are seeded through the real `claim_for_implement` because that dict
+    is the only thing that empties the pool while the board still says `up_next`,
+    and it cannot be produced from a test by dispatching two turns: the third tick
+    only reaches the empty-pool branch once a reaped or settled queue row has
+    freed the in-flight budget (`max_inflight: 2` on the autocode source) that the
+    two holders' own rows still occupy. `_stub_the_turn` is what answers
+    `_loop_is_free` as free for that tick.
+    """
+    for item_id in ids:
+        _ready(isolated, item_id)
+    for key, item_id in zip(_HOLD_SLOTS, ids):
+        assert B.claim_for_implement(key, item_id) is None, \
+            f"slot {key} was refused item {item_id} before anything held it"
+    seen: dict = {}
+    _stub_the_turn(monkeypatch, seen)
+    return seen
+
+
+def test_a_two_claim_decline_returns_skipped_and_writes_one_row_without_raising(isolated,
+                                                                                monkeypatch):
+    """The two-slot steady state, entered by a third tick: a skip row, not a crash.
+
+    Items 100 and 101 are held by two distinct slot keys, so `select_confirmed`
+    answers `None` and the empty pool is asked who holds it — and gets TWO
+    answers. Calling `execute` here is the assertion for the exception clause:
+    before the fix the `TypeError` propagates out of `execute` and this node
+    errors with `Object of type Item is not JSON serializable`, writing nothing.
+    """
+    _items_held_on_slots(isolated, monkeypatch, (100, 101))
+    res = asyncio.run(I.execute(_slot("autocode:round:2")))
+
+    assert res["status"] == "skipped", res
+    assert "already in flight" in res["summary"], res
+    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    assert len(skipped) == 1, f"exactly one decline row, got: {skipped}"
+    assert skipped[0]["event"] == "backlog_implement", skipped[0]
+    assert skipped[0]["item_id"] == 100, \
+        f"the row names the lowest held item: {skipped[0]}"
+    assert skipped[0]["slot"] == "autocode:round:2", skipped[0]
+    assert not [r for r in _rows() if r.get("phase") == "started"], \
+        "a decline spends no attempt: no `started` row"
+
+
+def test_the_two_claim_decline_row_carries_also_held_as_item_ids_beside_held_by(isolated,
+                                                                               monkeypatch):
+    """One row says both things: who holds the named item, and who holds the other.
+
+    `held_by` is the FIRST holder's queue key — the same string that slot's later
+    `started` row will carry — and `also_held` is the second held item's ID. The
+    id, not the `Item`: a scheduler reading the row a day later has json, and
+    `append_event` has no encoder for a dataclass.
+    """
+    _items_held_on_slots(isolated, monkeypatch, (100, 101))
+    asyncio.run(I.execute(_slot("autocode:round:2")))
+
+    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    assert len(skipped) == 1, skipped
+    row = skipped[0]
+    assert row["held_by"] == "autocode:round", row
+    assert row["also_held"] == [101], \
+        f"also_held names the SECOND held item, not the row's own: {row}"
+    assert all(type(i) is int for i in row["also_held"]), \
+        f"the ledger holds ids, not Items: {row['also_held']!r}"
+    assert row["held_by"] in _HOLD_SLOTS and row["slot"] not in row["also_held"], row
+
+
+def test_a_single_claim_decline_writes_held_by_and_never_an_also_held_key(isolated, monkeypatch):
+    """One holder means one holder: the row must not grow an empty `also_held`.
+
+    Both single-claim shapes, because the key has two ways to go missing and only
+    one of them is the fix. (a) The pool is empty with exactly one item held, so
+    `held[1:]` is empty and the kwarg arrives falsy — the shape every pre-#3487
+    node drove, and the reason the serialisation bug stayed green. (b) The
+    candidate itself is already held by another slot, which passes no `also_held`
+    kwarg at all. An empty list would be written as `"also_held": []` by a
+    `if also_held is not None` guard, and a reader would not be able to tell a
+    one-holder decline from a two-holder one whose second id was lost.
+    """
+    # (a) pool empty, exactly one item (200) held by `autocode:round`.
+    _items_held_on_slots(isolated, monkeypatch, (200,))
+    res_a = asyncio.run(I.execute(_slot("autocode:round:1")))
+    assert res_a["status"] == "skipped", res_a
+    rows_a = [r for r in _rows() if r.get("phase") == "skipped"]
+    assert len(rows_a) == 1, rows_a
+    assert rows_a[0]["item_id"] == 200 and rows_a[0]["held_by"] == "autocode:round", rows_a[0]
+    assert "also_held" not in rows_a[0], \
+        f"a one-holder decline carries no also_held key: {rows_a[0]}"
+
+    # (b) the candidate is already claimed by the other slot.
+    for path in isolated.glob("*.md"):
+        path.unlink()
+    _ready(isolated, 210)
+    _stub_the_turn(monkeypatch, {})
+    _one_tick_two_slots()
+    rows_b = [r for r in _rows() if r.get("phase") == "skipped" and r.get("item_id") == 210]
+    assert len(rows_b) == 1, rows_b
+    assert rows_b[0]["item_id"] == 210 and rows_b[0]["held_by"] == "autocode:round", rows_b[0]
+    assert rows_b[0]["slot"] == "autocode:round:1", rows_b[0]
+    assert "also_held" not in rows_b[0], \
+        f"the claim-refused decline carries no also_held key: {rows_b[0]}"
+
+
+def test_the_two_claim_decline_consumes_nothing_from_the_ready_pool(isolated, monkeypatch):
+    """A decline that refuses two items must leave both of them takeable.
+
+    The declining slot wrote a row but claimed, spent and moved nothing: both
+    items are still `up_next` and confirmed with no `started` row, so with the
+    claims dropped `ready_confirmed` still offers both, and once the first
+    holder's turn is over `select_confirmed` names that item again. The selector
+    that answers at the moment of the decline answers `None` only because the two
+    in-memory claims are in the way — which is the whole point of #3370's
+    distinction, and the reason the decline must not be the thing that consumes.
+    """
+    _items_held_on_slots(isolated, monkeypatch, (100, 101))
+    res = asyncio.run(I.execute(_slot("autocode:round:2")))
+    assert res["status"] == "skipped", res
+    assert B.select_confirmed(S.LEDGER_PATH) is None, \
+        "while both claims stand the pool is empty: that is the state declined"
+
+    assert sorted(i.id for i, _ in B.ready_confirmed(
+            S.LEDGER_PATH, ignore_implement_claims=True)) == [100, 101], \
+        "both items are still ready: the decline consumed neither"
+    B.release_implement_claim("autocode:round")
+    after = B.select_confirmed(S.LEDGER_PATH)
+    assert after is not None and after[0].id == 100, \
+        f"the released item is takeable again: {after and after[0].id}"
+    assert sorted(r.get("phase") for r in _rows()) == ["skipped"], \
+        "no started row: nothing here made either item spent"
+
+
 def test_the_two_3367_rows_replayed_one_second_apart_answer_already_in_flight():
     """The real ledger rows, replayed through the predicate that would have refused them.
 

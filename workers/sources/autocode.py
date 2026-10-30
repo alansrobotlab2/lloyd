@@ -1733,9 +1733,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         held = B.implement_held_confirmed(S.LEDGER_PATH)
         if held:
             held_item, holder = held[0]
+            # `.id`, not the Item: `implement_held_confirmed` answers
+            # `(Item, holding slot)` pairs, and `append_event` serialises the row
+            # with `json.dumps(..., ensure_ascii=False)` and no `default=`, so an
+            # Item here raises TypeError inside this call — outside the `try`
+            # below, so it escapes `execute` — and the ledger keeps no skip row at
+            # all, which is the very collapse #3370 exists to prevent (#3487).
             return _decline_in_flight(held_item.id, name=held_item.name, slot=slot,
                                       held_by=holder,
-                                      also_held=[i for i, _ in held[1:]])
+                                      also_held=[i.id for i, _ in held[1:]])
         return {"status": "skipped", "slot": slot,
                 "summary": "no confirmed item with an acceptance check"}
     candidate, triage = pair
