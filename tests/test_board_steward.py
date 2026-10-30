@@ -2222,9 +2222,10 @@ def test_below_floor_needs_both_legs_of_the_flip_bar():
 def test_a_measured_below_floor_tick_files_one_item_naming_both_sides(board, tmp_path):
     """Clause 1. 127 judged at rate 0.7953 is a measured fail, and the artifact
     has to carry both sides: the status the steward proposed and the status
-    `desired_statuses` wants. The proposed move is stored nowhere else — every
-    board-steward `runs` row has an empty `response_json` (1142 of 1142, triage
-    2026-10-27) — so a reader holding only the item must be able to rule."""
+    `desired_statuses` wants, so a reader holding only the item can rule without
+    hand-running sqlite. The move is not nowhere — the tick's `board_steward` ledger
+    event carries it (#3602) — but that event is the worker's own write, and the item
+    is what a triage pass reads."""
     from workers.board_disagreement import file_or_update
 
     out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
@@ -2438,13 +2439,16 @@ def _promotion(led: Path, item_id: int, round_id: str, commit: str, *,
 
 def test_an_item_whose_round_is_unfinished_is_shown_the_round_and_the_state(
         board, tmp_path, monkeypatch):
-    """Clause 1. The four states that make a round unfinished, in the machine's
+    """Clause 1. The states that make a round unfinished, in the machine's
     own words ("a gate, landing, worktree or observation is still live",
     `items_with_unfinished_rounds`), have to be visible on the board line —
     #3518's worktree was open and #3524's promotion unsettled at the filing tick
-    and NEITHER was renderable from what the steward was given. A settled
-    promotion is a finished round and renders nothing: the same grounding that
-    holds a re-offer back must not park every item that ever landed."""
+    and NEITHER was renderable from what the steward was given. A promotion that
+    settled AND was recorded on the item is a finished round and renders nothing:
+    the same grounding that holds a re-offer back must not park every item that ever
+    landed. #3602 split that sentence in two — between the `settled` row and the
+    `item_landed` one the round is NOT over, and this test's #3600 case is exactly
+    that interval, which used to render nothing at all."""
     _write(board, 3524, "up_next")
     _write(board, 3518, "up_next")
     _write(board, 3610, "up_next")
@@ -2475,7 +2479,17 @@ def test_an_item_whose_round_is_unfinished_is_shown_the_round_and_the_state(
     assert st[3518] == (DIS_ROUND_3518, ("worktree",)), "its worktree is still open"
     assert st[3610] == ("SM_GATE", ("gate",)), "a gate process is running"
     assert st[3620] == ("SM_LAND", ("landing",)), "a landing is running"
-    assert 3600 not in st, "a promotion that SETTLED is a round that is over"
+    # #3600's promotion settled at base+3 and the sweep has written nothing on the
+    # item yet, which is the interval #3450's tick fell through — `promoted` is gone
+    # (the settlement withdrew it, correctly) and the round is still not over.
+    assert st[3600] == ("SM_SETTLED", ("closing",)), "settled, and no `item_landed` yet"
+    # Once the landing IS recorded the window shuts, and that is the half of the old
+    # assertion this one replaces: a landed item renders nothing, or every item that
+    # ever landed would read as unfinished.
+    _led(led, event="item_landed", item_id=3600, round_id="SM_SETTLED",
+         commit="a" * 40, ts=50)
+    assert 3600 not in W.unfinished_rounds(S.LEDGER_PATH, ids), \
+        "a promotion that SETTLED and was recorded on the item is a round that is over"
 
     line = next(l for l in W.build_prompt(
         events=[], items=[_item(3524, "up_next")], n_open=5, since_ts=0,
@@ -2536,7 +2550,7 @@ def test_the_prompt_says_a_finished_turn_is_not_the_end_of_a_round():
     while the machine's is round-level, and #3518's proposal note is the gap
     verbatim: a `finished` row read as the end of the round when its gate was
     retried 25 minutes later. The prompt must say the turn/round distinction and
-    define the four `round_state` tokens it now points at."""
+    define every `round_state` token it now points at."""
     text = W.PROMPT
     assert "`finished`" in text and "not the end of a round" in text
     assert "stays `in_progress`" in text
@@ -2544,7 +2558,10 @@ def test_the_prompt_says_a_finished_turn_is_not_the_end_of_a_round():
     assert "round_state=" in text, "the prompt must point at the marker on the board line"
     for state in W.ROUND_STATES:
         assert f"`{state}`" in text, f"`{state}` is not defined in the prompt"
-    assert W.ROUND_STATES == ("promoted", "worktree", "gate", "landing")
+    # Five since #3602: `closing` is the window the four above do not name, and the
+    # prompt defines it too — a state rendered on a line and undefined in the prompt
+    # is the inference the model has to guess at, which is what #3546 was for.
+    assert W.ROUND_STATES == ("promoted", "closing", "worktree", "gate", "landing")
 
 
 def test_the_disagreement_item_says_how_much_of_the_window_it_does_not_cover(board, tmp_path):
@@ -2581,3 +2598,218 @@ def test_the_disagreement_item_says_how_much_of_the_window_it_does_not_cover(boa
                    ledger=tmp_path / "small.jsonl")
     covered = _filed(small)[0].body
     assert "all 5 of the window's 5 disagreement rows are represented" in covered, covered
+
+
+# ---------------------------------------------------------------------------
+# #3602 — the window between a promotion's `settled` row and the item's
+# `item_landed` row, which #3546's grounding rendered as no state at all
+# ---------------------------------------------------------------------------
+
+def _closing_ledger(tmp_path, *, item=3450, round_id="SM_T_CLOSING", ts_landed=None,
+                    landed_names_round=True, settle=True, rolled_back=False):
+    """A ledger in #3450's exact shape, written to `tmp_path`, in its real order.
+
+    The live rows it replays (`~/.local/state/lloyd-automod/promotions.jsonl`,
+    2026-10-30): `backlog_implement` started 20:38:13Z → the worker's TURN killed by
+    the 3540s cap at 21:36:40 → `land_rescued` 21:36:41 ("gate passed at cdd105aa
+    and no landing; the loop started one") → `promoted` 21:38:06 → `settled` 21:43:07
+    → the steward's tick 21:51:37 → `item_landed` 21:56:27. Times here are relative
+    seconds on the same skeleton; the ts an assertion turns on is the settlement
+    sitting between the promotion and the landing.
+
+    `ts_landed=None` is the tick's own instant: everything up to the settlement and
+    no landing recorded on the item yet. `rolled_back` swaps the `settled` row for a
+    `rollback_succeeded`, which must NOT read as a closing window — the prompt sends
+    a rolled-back item to `up_next`, so holding it would contradict a rule that is
+    right.
+    """
+    rows = [{"ts": 1000.0, "event": "backlog_implement", "action": "started",
+             "item_id": item, "round_id": round_id},
+            {"ts": 3400.0, "event": "backlog_implement", "action": "finished",
+             "item_id": item, "round_id": round_id, "outcome": "aborted",
+             "note": "worker turn exceeded 3540s; backend cancel accepted"},
+            {"ts": 3401.0, "event": "land_rescued", "item_id": item,
+             "round_id": round_id, "commit": "cdd105aa" + "0" * 32,
+             "detail": "gate passed and no landing; the loop started one"},
+            {"ts": 3500.0, "event": "promoted", "round_id": round_id,
+             "commit": "9e5324b7" + "0" * 32}]
+    if rolled_back:
+        rows.append({"ts": 3800.0, "event": "rollback_succeeded", "round_id": round_id,
+                     "item_id": item, "commit": "9e5324b7" + "0" * 32})
+    elif settle:
+        rows.append({"ts": 3800.0, "event": "settled", "commit": "9e5324b7" + "0" * 32})
+    if ts_landed is not None:
+        row = {"ts": ts_landed, "event": "item_landed", "item_id": item,
+               "commit": "9e5324b7" + "0" * 32}
+        if landed_names_round:
+            row["round_id"] = round_id
+        rows.append(row)
+    p = tmp_path / "promotions.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return p
+
+
+def _shown_item(item_id: int = 3450, status: str = "in_progress"):
+    """A board line's worth of an item, for `_item_line` only."""
+    return SimpleNamespace(id=item_id, name="board-steward disagreed with the state "
+                           "machine and nobody has ruled which side is wrong",
+                           status=status, created="2026-10-30", body="# Serve",
+                           tags=["spawned-by-steward"], group=None, members=[],
+                           parent=None)
+
+
+def test_an_item_whose_settled_landing_has_no_item_landed_row_yet_shows_closing(tmp_path):
+    """Clause 1. #3450 at its 2026-10-30T21:51:37Z tick: promoted 21:38:06, settled
+    21:43:07, `item_landed` not until 21:56:27 — and the steward's move note for that
+    tick says the only thing the line could say, "Board line carries NO round_state=,
+    so the round is over". The window needs a state of its own, so `ROUND_STATES`
+    gains `closing` and the round keeps its id on the line.
+    """
+    ledger = _closing_ledger(tmp_path)
+
+    got = W.unfinished_rounds(ledger, {3450})
+    assert got == {3450: ("SM_T_CLOSING", ("closing",))}, (
+        f"the settled → item_landed window must name the round and the new state, got {got}")
+    assert "closing" in W.ROUND_STATES and W.ROUND_STATES.index("closing") == 1, W.ROUND_STATES
+
+    line = W._item_line(_shown_item(), round_state=got[3450])
+    assert "round=SM_T_CLOSING" in line, line
+    assert "round_state=closing" in line, line
+
+
+def test_a_promotion_that_settled_and_a_turn_that_aborted_is_not_read_as_a_finished_round(tmp_path):
+    """The premise the acceptance check measures, stated as the shape the steward
+    used to be shown: the SAME ledger, with the state arm removed, says nothing.
+
+    This is the replay of the live ledger at the tick's instant, kept as a red line:
+    the abort row is present in both, so the only thing that can tell the steward
+    "the outcome is the landing, not the abort" is the state on the line. If
+    `_item_line` were rendered without it the text would read exactly as #3450's did
+    — a `finished` row and no `round_state` — and the prompt's own rule sends that to
+    `up_next`.
+    """
+    ledger = _closing_ledger(tmp_path)
+    state = W.unfinished_rounds(ledger, {3450}).get(3450)
+
+    line = W._item_line(_shown_item(), round_state=state)
+    assert "round_state=" in line, (
+        "a board line with an aborted `finished` row and NO round_state is the text "
+        "that made #3450's tick propose up_next for an item already being landed")
+
+    # And the state is not `promoted`: re-adding the settled commit to
+    # `_unsettled_promotions` would "fix" this by rendering every item that ever
+    # landed as unfinished forever, which `_unsettled_promotions`' docstring rules
+    # out. The settlement is still visible as a separate fact.
+    assert state is not None and state[1] != ("promoted",), state
+    assert "SM_T_CLOSING" not in W._unsettled_promotions(ledger)
+
+
+def test_a_landing_the_sweep_recorded_on_the_item_leaves_no_round_state(tmp_path):
+    """Clause 2. Once `item_landed` exists the window is shut, and an item that
+    landed must never be shown as unfinished — the opposite failure
+    `_unsettled_promotions`' docstring calls "a worse one", because the line would
+    then be telling the steward never to offer the item again.
+
+    Both join arms are tested, because either alone leaves a hole: the `round_id`
+    arm is exact but a row without the field must still close the window, and the
+    per-item ts arm must not let an OLDER landing hide a NEWER round's window.
+    """
+    landed = _closing_ledger(tmp_path / "named", ts_landed=4100.0)
+    assert W.unfinished_rounds(landed, {3450}) == {}, "item_landed naming the round shuts it"
+
+    unnamed = _closing_ledger(tmp_path / "unnamed", ts_landed=4100.0,
+                              landed_names_round=False)
+    assert W.unfinished_rounds(unnamed, {3450}) == {}, \
+        "a landing row that lost round_id must still close the window by its ts"
+
+    # The ts arm's own negative control: a landing EARLIER than this promotion is a
+    # previous round's landing and closes nothing — so the window stays open.
+    older = _closing_ledger(tmp_path / "older", ts_landed=900.0,
+                            landed_names_round=False)
+    assert W.unfinished_rounds(older, {3450}) == {3450: ("SM_T_CLOSING", ("closing",))}, \
+        "an older landing must not hide a newer round's window"
+
+
+def test_a_rolled_back_landing_is_not_a_closing_window(tmp_path):
+    """`closing` keys on a settlement, and a `rollback_succeeded` is the other
+    verdict a commit gets. The prompt's rule for that verdict is `up_next`, so
+    rendering the item as closing would hold in place a change the guardian already
+    reverted — and `_unsettled_promotions` drops it for the same reason, so the two
+    readers must not disagree about what a revert is.
+    """
+    ledger = _closing_ledger(tmp_path, rolled_back=True)
+    assert W.unfinished_rounds(ledger, {3450}) == {}, \
+        "a rolled-back landing must leave the item offerable, not held"
+
+
+def test_an_older_rounds_closing_window_is_named_when_the_newest_round_is_over(tmp_path):
+    """The same re-run shape #3524 pinned, now on the settled side: #3538's
+    `SM_20261029_145233` landed and settled while `SM_20261029_161851` was abandoned,
+    and the newest row names only the re-run. Naming the newest round with no state
+    would hide the live window, so the older round is named instead.
+    """
+    ledger = _closing_ledger(tmp_path)
+    rows = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows.append({"ts": 3900.0, "event": "backlog_implement", "action": "started",
+                 "item_id": 3450, "round_id": "SM_T_RERUN"})
+    rows.append({"ts": 3910.0, "event": "backlog_implement", "action": "finished",
+                 "item_id": 3450, "round_id": "SM_T_RERUN", "outcome": "aborted",
+                 "note": "aborted for a rebase conflict"})
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    assert W.unfinished_rounds(ledger, {3450}) == {3450: ("SM_T_CLOSING", ("closing",))}, \
+        "the state must be named on the round that holds it"
+
+
+def test_the_prompt_governs_the_closing_window():
+    """Clause 3. The prompt already routes "a `finished` row and NO `round_state`" to
+    "read its outcome", and "a round that aborted for a reason outside its diff" to
+    `up_next` — two rules that are each right and that #3450's tick composed into the
+    wrong move, because the window it sat in rendered neither the settlement nor the
+    landing. The new rule has to say all three things the tick needed: the item stays
+    where it is, the abort row is not the round's outcome, and `up_next` is not
+    available while a promotion or a closing window is on the item's lines.
+    """
+    text = W.PROMPT
+    assert "round_state=closing" in text, "the prompt must define the state it now renders"
+
+    rule = text[text.index("- **`round_state=closing`"):]
+    rule = rule[:rule.index("- A round that aborted for a reason outside")]
+    for want in ("`settled`", "item_landed", "propose NO move", "not `up_next`",
+                 "not `draft`", "stays `in_progress`"):
+        assert want in rule, f"{want!r} missing from the closing rule: {rule}"
+    assert "turn-timeout/abort row is NOT the round's outcome" in rule, rule
+    assert "land_rescued" in rule, \
+        "the row that proves the landing belongs to the round must be named"
+    assert "#3450" in rule and "21:56:27" in rule, \
+        "the case the rule is for must be citable from the prompt itself"
+
+    # The aborted-outside-diff rule now carries the condition the tick lacked.
+    aborted = text[text.index("- A round that aborted for a reason outside"):]
+    aborted = aborted[:aborted.index("- **A review refusal")]
+    assert "NO line of this item names `promoted` or" in aborted, aborted
+
+
+def test_the_disagreement_body_names_the_ledger_event_as_where_the_move_lives(board,
+                                                                              tmp_path):
+    """Clause 4. The body claimed "the proposed move is stored nowhere else … so this
+    item is the record". That is false: the same tick's `board_steward` ledger event
+    carries `moves` with the `item_id`, the `status` and the `note` the steward wrote
+    (#3602's triage read the 2026-10-30T21:51:37Z row and found all three). What the
+    store really never kept is the model's raw reply, so the body must keep that claim
+    and drop the one a reader would falsify in one grep.
+    """
+    from workers.board_disagreement import file_or_update
+
+    file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                   backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    body = _filed(board)[0].body
+
+    assert "stored nowhere else" not in body, body
+    assert "this item is the record" not in body, body
+    assert "`board_steward` event" in body, body
+    for want in ("`moves`", "`item_id`", "`status`", "`note`"):
+        assert want in body, f"{want!r} missing: the ledger's own field names are the way back"
+    assert "`response_json` is empty in every board-steward `runs` row" in body, body
+    assert "`desired_statuses`" in body, "the machine's side must still be named"

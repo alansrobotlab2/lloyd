@@ -112,9 +112,13 @@ def disagreement_rows(ids: list[int], moves: list[dict],
     id), and the machine's side from `expected` — `desired_statuses`'
     `{id: (status, why[, needs_human])}`, the same object the tick already
     compared against at `board_steward.py:769`. Both halves are therefore in
-    scope at the trigger site, which is why this needs no new persistence: the
-    proposed move is what the store never kept (`response_json` is empty in all
-    1,142 board-steward rows).
+    scope at the trigger site, which is why this needs no new persistence.
+
+    "No new persistence" is not "none of this was kept": the same tick's
+    `board_steward` ledger event already carries `moves`, each with its `item_id`,
+    `status` and the `note` the steward wrote for it, which is where a later reader
+    goes for the proposal and its reason. What the store genuinely never kept is the
+    model's raw reply — `response_json` is empty in every board-steward `runs` row.
     """
     proposed: dict[int, str] = {}
     for m in moves or []:
@@ -226,9 +230,13 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"which is the case nothing used to read.\n\n"
         f"Each row names BOTH sides, from the same comparison the tick made: what the "
         f"steward proposed for that item, and what `desired_statuses` "
-        f"(`scripts/automod/backlog.py`) wants, with its reason. The proposed move is "
-        f"stored nowhere else — `response_json` is empty in every board-steward "
-        f"`runs` row — so this item is the record.\n\n"
+        f"(`scripts/automod/backlog.py`) wants, with its reason. Both sides outlive the "
+        f"tick elsewhere: the proposal itself is in the ledger's `board_steward` event "
+        f"for that tick, whose `moves` list carries the `item_id`, the `status` and the "
+        f"`note` the steward wrote for it, and the machine's side recomputes from "
+        f"`desired_statuses`. What is stored nowhere is the model's raw reply — "
+        f"`response_json` is empty in every board-steward `runs` row (`source` is "
+        f"hyphenated: `board_steward` matches no runs row at all).\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
         + _coverage(len(ids), window) +
         f"## What to decide\n\n"

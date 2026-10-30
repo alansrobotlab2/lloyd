@@ -199,7 +199,10 @@ running. A board line carrying `round_state=` is the machine telling you which \
 state holds, and it is read from the board and the process table, not inferred \
 from the events: `promoted` (its landing commit has neither a `settled` row nor \
 a `rollback_succeeded`, so the guardian has not ruled it landed or rolled it \
-back yet), `worktree` (the round's working tree under `~/lloyd-work/` is still \
+back yet), `closing` (its landing commit HAS settled and this item has no \
+`item_landed` row yet — the landing is done, its outcome is not yet recorded; see \
+the bullet on that state below), `worktree` (the round's working tree under \
+`~/lloyd-work/` is still \
 open — a gate or a review retry is running in it), `gate` (a gate process of \
 that round is alive), `landing` (a `land.running` marker with a live pid — the \
 `promoted` row has not been written yet). A line with a `finished` row and NO \
@@ -207,9 +210,25 @@ that round is alive), `landing` (a `land.running` marker with a live pid — the
 ended with a promotion that `settled` and an outcome of `met` closes by itself; \
 `not_met` / `deferred` leave it `up_next` for one more attempt on exactly the \
 unmet clauses.
+- **`round_state=closing`: the landing is over, its outcome is not yet on the \
+item, and the item stays `in_progress`.** The commit `settled`, the sweep has not \
+yet written this item's `item_landed` row, and `desired_statuses` is holding it \
+`in_progress` for exactly that interval — so propose NO move: not `up_next`, \
+not `draft`. You are not the one holding it; the machine is, until `item_landed`. \
+Within the window the round's outcome is still the `finished` row, and a \
+`backlog_implement` turn-timeout/abort row is NOT the round's outcome: the \
+worker's TURN died, which is why a `land_rescued` row exists ("gate passed at … \
+and no landing; the loop started one"). #3450 at 2026-10-30T21:51:37Z did exactly \
+this — its line carried no `round_state` at all (the settlement had already \
+withdrawn `promoted`), its note read "Board line carries NO round_state=, so the \
+round is over", and it proposed `up_next` for an item the sweep closed `done` at \
+21:56:27.
 - A round that aborted for a reason outside its diff (`external`, a grader \
 that was down, a pre-existing red test, a rebase conflict) has NOT spent the \
-item: `up_next`.
+item: `up_next` — but only while NO line of this item names `promoted` or \
+`closing`. Either one means a LATER promotion has already overwritten the abort \
+as the round's state, and then the bullet above is the rule that applies, not this \
+one.
 - **A review refusal on the contract spends nothing either.** A round sent \
 back because the grader marked a clause `unsatisfiable` (or `post_landing`) \
 was refused for a defect in the item's clauses, not in the diff; the item is \
@@ -477,16 +496,26 @@ def events_since(ledger: Path, since_ts: float, *, limit: int = DEFAULT_MAX_EVEN
     return out
 
 
-#: The four states that make a round unfinished, in the machine's own words: "a
-#: gate, landing, worktree or observation is still live"
-#: (`items_with_unfinished_rounds`, scripts/automod/backlog.py). A round in any of
-#: them is NOT over whatever its latest `backlog_implement` row says, and that
-#: distinction is what #3546 was filed on: at the 2026-10-29T17:27:13Z tick the
-#: steward read #3518's `finished` row at 17:11 as the end of its round while the
-#: round's `review kind=retry` fired at 17:36:16, and proposed `up_next` for #3524
-#: while its promotion (16:47:56Z, commit 752cca1a…) had not settled. Neither fact
-#: was renderable from what it was shown.
-ROUND_STATES = ("promoted", "worktree", "gate", "landing")
+#: The states that make a round unfinished: "a gate, landing, worktree or
+#: observation is still live" (`items_with_unfinished_rounds`,
+#: scripts/automod/backlog.py), plus `closing`, which that phrase does not name and
+#: which #3602 adds (see `_settled_promotions`). A round in any of them is NOT over
+#: whatever its latest `backlog_implement` row says, and that distinction is what
+#: #3546 was filed on: at the 2026-10-29T17:27:13Z tick the steward read #3518's
+#: `finished` row at 17:11 as the end of its round while the round's `review
+#: kind=retry` fired at 17:36:16, and proposed `up_next` for #3524 while its
+#: promotion (16:47:56Z, commit 752cca1a…) had not settled. Neither fact was
+#: renderable from what it was shown.
+#:
+#: `closing` is where that same class survived #3546, because it is the one window
+#: in which NONE of the four is live: the landing has already SETTLED, so no
+#: observation is "still live" and `_unsettled_promotions` drops the round, while
+#: the sweep has not yet recorded the landing on the item. #3450 at
+#: 2026-10-30T21:51:37Z is that window — `promoted` 21:38:06 (commit 9e5324b7…),
+#: `settled` 21:43:07, the steward's tick 21:51:37, `item_landed` 21:56:27 — and
+#: the move note that tick wrote says the only thing the line could say: "Board
+#: line carries NO round_state=, so the round is over".
+ROUND_STATES = ("promoted", "closing", "worktree", "gate", "landing")
 
 #: Ledger rows that are about a ROUND rather than an item, so they carry no
 #: `item_id` and `events_since` — which joins a row to an item through the row's
@@ -524,6 +553,71 @@ def _unsettled_promotions(ledger: Path) -> set[str]:
             if d.get("round_id") and str(d.get("commit") or "") not in gone}
 
 
+def _settled_promotions(ledger: Path) -> dict[str, float]:
+    """`{round_id: promoted_ts}` for rounds whose landing commit SETTLED and stayed.
+
+    The settled-side complement of `_unsettled_promotions`, and this is exactly
+    where #3450 fell through: at its 2026-10-30T21:51:37Z tick the promotion
+    (21:38:06, commit 9e5324b7…) had settled eight minutes earlier at 21:43:07, so
+    `_unsettled_promotions` had dropped the round and its `item_landed` row was
+    five minutes in the future at 21:56:27. The line the steward was shown named no
+    state, and its own note drew the only conclusion available.
+
+    A rolled-back commit is deliberately NOT a closing window: the prompt's own rule
+    sends a `rollback_succeeded` to `up_next`, and marking that item `closing`
+    would hold it in place against a rule that is right. The revert is subtracted
+    for the same reason `_unsettled_promotions` subtracts it, and the state is keyed
+    on the settlement rather than on the machine's `observing` set because
+    `_unsettled_promotions`' docstring rules out copying that arithmetic here.
+    """
+    from scripts.automod import backlog as B
+    reverted = set(B._reverted_commits(ledger))
+    settled = {str(d.get("commit") or "") for d in
+               B._ledger_events(ledger, "settled", require_item=False)}
+    out: dict[str, float] = {}
+    for d in B._ledger_events(ledger, "promoted", require_item=False):
+        rid, commit = str(d.get("round_id") or ""), str(d.get("commit") or "")
+        if not rid or commit in reverted or commit not in settled:
+            continue
+        out[rid] = max(float(d.get("ts") or 0.0), 0.0)
+    return out
+
+
+def _item_landed_rows(ledger: Path) -> tuple[set[str], dict[int, float]]:
+    """Every landing already recorded on an item, joined BOTH ways it can be found.
+
+    `(round_ids_named, {item_id: latest_landing_ts})`. Both arms are needed, and the
+    reason is the failure `_unsettled_promotions`' docstring rules out — an item
+    rendered as unfinished forever after it landed, which then reads as "never
+    offer this again":
+
+    * `round_id` is the exact join. The landing sweep builds its `item_landed` row
+      with `round_id` beside `item_id` and the commit (`item_landed` in
+      `scripts/automod/backlog.py`'s landing branch), so a row naming this round
+      settles the question for this round and no other.
+    * The per-item ts is the belt for a row that lost the field. An item's OLDER
+      landing must not hide a NEWER round's window — which is what a bare
+      "has any `item_landed` row" test would do — so it closes the window only when
+      that landing is not older than this round's promotion.
+
+    Either arm firing closes the window, so the state always decays: it cannot
+    outlive the sweep, and an item that landed is never shown as unfinished.
+    """
+    from scripts.automod import backlog as B
+    rounds: set[str] = set()
+    latest: dict[int, float] = {}
+    for d in B._ledger_events(ledger, "item_landed"):
+        rid = str(d.get("round_id") or "")
+        if rid:
+            rounds.add(rid)
+        try:
+            iid = int(d.get("item_id"))
+        except (TypeError, ValueError):
+            continue
+        latest[iid] = max(latest.get(iid, 0.0), max(float(d.get("ts") or 0.0), 0.0))
+    return rounds, latest
+
+
 def unfinished_rounds(ledger: Path, for_items: set[int]) -> dict[int, tuple]:
     """`{item_id: (round_id, states)}` for the shown items whose round is not over.
 
@@ -539,11 +633,33 @@ def unfinished_rounds(ledger: Path, for_items: set[int]) -> dict[int, tuple]:
     worktree with it (`abort` keeps the branch, not the tree). Naming the newest
     round with no state there would have hidden the live observation, so the
     older round is named instead.
+
+    `closing` is the arm #3546 could not see, because it is the window in which its
+    own grounding goes silent: `_unsettled_promotions` subtracts every `settled`
+    commit, so a landing that settled cleanly takes the round's state away while the
+    sweep that writes `item_landed` has still to run. For those minutes the item is
+    `in_progress` to the state machine and the round's outcome is the landing — NOT
+    the `backlog_implement` abort that ended the worker's TURN, which is what
+    `land_rescued` exists for ("gate passed at … and no landing; the loop started
+    one"). #3450 is that case exactly: abort 2026-10-30T21:36:40Z, `land_rescued`
+    21:36:41, `promoted` 21:38:06, `settled` 21:43:07, tick 21:51:37, `item_landed`
+    21:56:27.
     """
     from scripts.automod import backlog as B, state as ST
     from scripts.automod import worktree as WT
     history = B.implement_history(ledger)
     unsettled = _unsettled_promotions(ledger)
+    settled_promos = _settled_promotions(ledger)
+    landed_rounds, landed_ts = _item_landed_rows(ledger)
+
+    def closing(rid: str, iid: int) -> bool:
+        # Open from the settlement until the sweep records the landing on the item.
+        # Either arm of `_item_landed_rows` closes it, so the state cannot outlive
+        # the sweep and no landed item is ever rendered unfinished.
+        if not rid or rid not in settled_promos or rid in landed_rounds:
+            return False
+        return landed_ts.get(iid, 0.0) < settled_promos[rid]
+
     out: dict[int, tuple] = {}
     for iid in for_items:
         rids = [str(r["round_id"]) for r in (history.get(iid) or []) if r.get("round_id")]
@@ -555,15 +671,22 @@ def unfinished_rounds(ledger: Path, for_items: set[int]) -> dict[int, tuple]:
         except OSError:
             wt_open = False
         states = tuple(s for s, holds in (("promoted", latest in unsettled),
+                                          ("closing", closing(latest, iid)),
                                           ("worktree", wt_open),
                                           ("gate", bool(ST.gate_in_progress(latest))),
                                           ("landing", bool(ST.land_in_progress(latest))))
                        if holds)
         if not states:
+            # The newest round is over. An older one may still hold a promotion
+            # nobody settled, or a landing that settled and has yet to be recorded.
             older = [r for r in rids if r in unsettled]
             if not older:
-                continue
-            latest, states = older[-1], ("promoted",)
+                older = [r for r in rids if closing(r, iid)]
+                if not older:
+                    continue
+                latest, states = older[-1], ("closing",)
+            else:
+                latest, states = older[-1], ("promoted",)
         out[iid] = (latest, states)
     return out
 
