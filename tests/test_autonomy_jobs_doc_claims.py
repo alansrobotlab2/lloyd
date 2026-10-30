@@ -3935,6 +3935,124 @@ def test_the_3012_pair_is_listed_once_in_each_table_and_the_bound_reaches_it():
         f"the bound has to be held up to the fleet from somewhere other than itself")
 
 
+def test_the_3592_arrival_is_listed_once_in_each_table_and_bound_entropy_holds_its_row():
+    """#3592 clauses 1, 2 and 3, gradable without the vault.
+
+    `test_every_live_task_file_is_named_once_in_each_membership_table` is the real
+    reconciler and carries `@live_vault`, so the gate has never run it and #104
+    (`artcraft-repo-sync`, filed 2026-10-29) reached the fleet's directory with no entry
+    anywhere in this document — the same blindness #2630, #2813, #2881 and #3012 each
+    arrived through, and the reason the 2026-10-30 Pre-Flight was the discovery rather
+    than a person. Clause 4 and clause 5 are pinned by nodes already in this file, and
+    are cited below rather than restated: the two tables naming one and the same id set
+    and §Watch the machinery's row equal to `WATCH_JOBS`
+    (`test_the_2881_pair_is_listed_once_in_each_table_and_the_watch_row_agrees`, whose
+    own docstring is the argument for why that equality has to be typed here and not
+    derived), the per-job §Watch rows
+    (`test_the_watch_group_table_holds_one_row_per_live_job_and_no_others`) and each
+    tier row's count column (`test_every_tier_row_count_equals_the_ids_listed_beside_it`).
+    What this node adds is what nothing else reads: that #104 is in both tables once,
+    sits in the ONE tier this round assigned it, is declared by exactly one group
+    heading, and that the section holding it states its cadence, its reads, its artefact
+    and its prohibition. It also carries clause 5's spelled-count conjunct, which had no
+    pin before this round: §Bound entropy stated no member count at all, so the
+    assertion below derives one from the heading instead of typing it beside the prose —
+    the only form of it that reddens when the heading grows again.
+
+    §Bound entropy and not §Watch the machinery is the placement, and the assertion
+    says why: the Watch group is held by rosters typed inside this file, so admitting
+    #104 there would need a `WATCH_JOBS` entry plus four probe phrases in the same diff,
+    and the group's prose defines it as jobs that read the machinery and report — which
+    a job advancing branch pointers in `~/Projects/ArtCraft` is not.
+    """
+    text = _text()
+    funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
+    grouped, tiered = (ids for _, ids in _membership_tables())
+    absent = [name for name, ids in (("function", grouped),
+                                     ("write-authority", tiered))
+              if "#104" not in ids]
+    assert absent == [], (
+        f"#104 has no row in the {absent} membership table. Its task file is live "
+        "(`status: up_next`, `frequency: daily`) and dispatch reads the directory, so "
+        "the job runs while this document claims its membership is complete — #2630's "
+        "omission for #91\u2013#97, one id later")
+    assert grouped.count("#104") == 1, (
+        f"#104 appears {grouped.count('#104')} times in the function table; the bargain "
+        "is one row per live task file, and a repair that duplicated it to fill a cell "
+        "would not be a repair")
+    assert tiered.count("#104") == 1, (
+        f"#104 appears {tiered.count('#104')} times in the write-authority table, which "
+        "is the doc's answer to what that job may do unattended")
+
+    # Clause 2's tier named rather than inferred, the way #3012 names its two: a silent
+    # re-tier changes what the doc claims this job may do while every count column but
+    # that one row's stays correct.
+    home = [tier for tier, (ids, _) in tiers.items() if "#104" in ids]
+    assert home == ["Reports only"], (
+        f"#104 sits in {home} instead of exactly ['Reports only']. One `sync.sh` run "
+        "advances branch pointers in `~/Projects/ArtCraft`, files nothing and appends "
+        "nothing to any store the fleet or a human reads back as the system's record, "
+        "which is the unit these rows are built out of \u2014 #102's shape two rows up. "
+        "A move upward is a claim that it writes durable state.")
+
+    names = [label.split("]")[0].lstrip("[").strip() for label in funcs]
+    declared = []
+    for name in names:
+        m = re.search(rf"^## {re.escape(name)}: (.+)$", text, re.M)
+        assert m, f"the function table names a {name!r} group with no `## {name}:` heading"
+        if "#104" in _ids(m.group(1)):
+            declared.append(name)
+    assert declared == ["Bound entropy"], (
+        f"#104 is declared by {declared} of {len(names)} group headings; clause 3 is "
+        "exactly one, and \u00a7Bound entropy\u2019s stated purpose \u2014 stop the stores "
+        "rotting or growing without limit \u2014 is the one a clone falling behind upstream "
+        "falls inside")
+
+    rows = [ln for ln in text[text.index("## Bound entropy:"):].split("\n## ", 1)[0]
+            .splitlines() if ln.strip().startswith("| #104 |")]
+    assert len(rows) == 1, (
+        f"\u00a7Bound entropy holds {len(rows)} `| #104 |` rows; the heading\u2019s member list "
+        "and the section\u2019s rows are one claim stated twice, and two rows for one task "
+        "file is the drift in the other direction")
+    # The cadence goes through the same reader the cadence pin uses, so this node and
+    # that one cannot disagree about what the cell says.
+    assert _cadence_rows(text, "Bound entropy")["#104"] == "daily", (
+        "\u00a7Bound entropy\u2019s #104 row states a cadence other than the `frequency: "
+        "daily` its task file declares \u2014 the drift #3333 was filed for, arriving on the "
+        "day the row was written")
+    for token in ("sync.sh -j 6", "its upstream", "--ff-only", "artcraft sync:",
+                  "never merge, rebase, stash, reset or force"):
+        assert token in rows[0], (
+            f"the #104 row never says {token!r}, so it omits one of the four things a "
+            "group row owes its reader: the cadence, what it reads, what it leaves "
+            "behind, and one thing it must not do. A row that only names a job is how "
+            "the \u00a7Watch entries read before #2630 wrote them out")
+
+    # Clause 5's spelled-count half, derived from the heading and not from the prose.
+    # The count is the thing a person re-counts and forgets: this document said "#99
+    # \u2026 is the newest" in the present tense while the directory already held #100 and
+    # #101, and #104 is the third arrival since. A heading that gains a member has to
+    # take the section's spelled count with it in the same commit, or the section is
+    # wrong in the one way a reader cannot see.
+    heading = re.search(r"^## Bound entropy: (.+)$", text, re.M)
+    assert heading, (
+        "\u00a7Bound entropy no longer opens with a `## Bound entropy:` heading, so the "
+        "member count below is being read out of the wrong section")
+    declared_ids = _ids(heading.group(1))
+    section = text[heading.start():].split("\n## ", 1)[0]
+    spelled = re.findall(r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+                         r"twelve|thirteen|fourteen|fifteen|sixteen) members\b",
+                         section, re.I)
+    assert spelled, (
+        "\u00a7Bound entropy states no spelled-out member count, so clause 5\u2019s first "
+        "conjunct rests on prose no node reads \u2014 the count has to be in the section "
+        "and pinned here, not only in the heading")
+    assert {_WORDS[w.lower()] for w in spelled} == {len(declared_ids)}, (
+        f"\u00a7Bound entropy spells {sorted(set(spelled))} members while its heading "
+        f"declares {len(declared_ids)} ids {declared_ids}; a member admitted and a count "
+        "left stale is the move clause 5 exists to catch")
+
+
 def test_no_live_sentence_calls_a_superseded_id_the_newest():
     """#2881 clause 4's prose half. The numbering note said "#99 … is the newest",
     in the present tense, while the directory already held #100 and #101 — the
@@ -5926,7 +6044,15 @@ CADENCE_TABLES = ("Ingest", "Bound entropy")
 CADENCE_CELLS: dict[str, dict[str, str]] = {
     "Ingest": {"#68": "every 15 min", "#30": "daily", "#53": "daily"},
     "Bound entropy": {"#81": "daily", "#79": "daily", "#78": "weekly",
-                      "#80": "weekly", "#90": "daily"},
+                      "#80": "weekly", "#90": "daily",
+                      # #3592: `~/obsidian/autonomy/104-artcraft-repo-sync.md` declares
+                      # `frequency: daily` and no `runs_per_day`, so the row §Bound
+                      # entropy gained has a cadence this dict now pins. Typed here and
+                      # not read from the vault, for the standing reason: the row-set
+                      # half below is what stops an admitted row from carrying a cadence
+                      # no node will ever read, and it can only do that from a value in
+                      # the tracked tree.
+                      "#104": "daily"},
 }
 
 _CADENCE_CASES = [(g, j) for g in CADENCE_TABLES for j in CADENCE_CELLS[g]]

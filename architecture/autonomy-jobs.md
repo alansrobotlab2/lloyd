@@ -39,9 +39,11 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 103 or beyond, with gaps where tasks were retired
-(2026-10-19). #103, the code rules census weekly, is the newest and was filed
-2026-10-19; #102, the find-all arms run, was filed the day before it. #101, the
+ordered: ids run 24 through 104 or beyond, with gaps where tasks were retired
+(2026-10-30). #104, the ArtCraft repo sync, is the newest and was filed
+2026-10-29; #103, the code rules census weekly, was the id this note named
+before it, filed 2026-10-19, and #102, the find-all arms run, the day before
+that. #101, the
 gate-to-land lag daily record, was the newest when this note last moved, filed on
 2026-10-16 six hours after #100. Which ids are live is
 `GET /api/autonomy/tasks`'s business, not this document's. Typing a ceiling here
@@ -115,7 +117,7 @@ other direction, for three.
 | [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
 | [Canonicalize](#canonicalize-48-67-84-98) | #48 #67 #84 #98 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
-| [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
+| [Bound entropy](#bound-entropy-79-81-78-80-90-104) | #79 #81 #78 #80 · #90 · #104 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
 | [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules — and report what it looks like |
 
@@ -173,7 +175,7 @@ run reads what it wrote. The five rows, each with the count beside it:
 | Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 #103 | 27 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 | 15 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 | 16 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -253,12 +255,13 @@ grouping those three jobs sat in one list and the alternation was invisible.
 29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
 parent, one each, and those ten are exactly the arrows drawn above. None of
 #91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together. Neither #100, #101, #102 nor #103 declares a parent
-either, so naming #102 (filed 2026-10-18) and #103 (filed 2026-10-19) in the
-membership tables moves no arrow and no number in this paragraph — the 29 and the
+pair moved by seven together. Neither #100, #101, #102, #103 nor #104 declares a
+parent either, so naming #102 (filed 2026-10-18), #103 (filed 2026-10-19) and #104
+(filed 2026-10-29) in the membership tables moves no arrow and no number in this
+paragraph — the 29 and the
 39 are the fleet the route parsed on the day
 the sentence was written, and a job entering these tables is not a job entering
-that count. #103 is the newest file and #102 sits beside it; #101 was the newest
+that count. #104 is the newest file and #103 sits beside it; #101 was the newest
 when that sentence was written, and #99 before it, and #98 before that — and #98 is still the only one
 that declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
 so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
@@ -997,12 +1000,15 @@ replaced it.
 
 ---
 
-## Bound entropy: #79, #81, #78, #80, #90
+## Bound entropy: #79, #81, #78, #80, #90, #104
 
 Stop the stores rotting or growing without limit. The group splits on write
 authority: #79 and #81 delete and rebuild, #78 and #80 only report what they find,
 and #90 writes exactly one thing — the dated row its own next run reads back as its
-diff base — and touches no corpus. Read the `Writes?` column as "changes state
+diff base — and touches no corpus. #104 is the fourth shape and the only
+one that writes in none of the stores this document is about: it changes state in
+another project's git history, which is why its `Writes?` cell reads `yes` while the
+tier table still tiers it `Reports only`. Read the `Writes?` column as "changes state
 beyond its own output", or #90's row contradicts its own Role cell.
 
 | ID | Freq | Writes? | Role |
@@ -1012,6 +1018,7 @@ beyond its own output", or #90's row contradicts its own Role cell.
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
+| #104 | daily | yes | Keep `~/Projects/ArtCraft` current: one `sync.sh -j 6` call reads every repo there together with its upstream, advances each repo's current branch with `--ff-only`, and leaves behind those advanced pointers plus one closing `artcraft sync: updated=<N> current=<N> held=<N> failed=<N>` line — nothing in any store this fleet reads back. A repo the script held is the finding, not a flake: the run must never merge, rebase, stash, reset or force one, and never edit `sync.sh` or `sync.conf` to move it |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
@@ -1066,7 +1073,9 @@ corpora the write-authority table still tiers both `Reports only` — the one it
 run files is board bookkeeping, not a write into a corpus. Both are green as of 2026-10-27 — one weekly run each in
 the seven days to that date, no failure and no timeout, 0.06 GPU-h between them — and
 the group's other three ran seven times each over the same unclamped window, 0.53
-GPU-h for all five (`/api/autonomy/health?days=7`). The number in this group worth
+GPU-h across the group as it stood on that date. Six members today, five of them
+over that window: #104 joined the group on 2026-10-29, after these seven days
+closed, so it is in none of these numbers. The number in this group worth
 watching is not a failure rate: #78's run of 2026-10-14 took 1,055.6 s of its
 1,200 s budget, 88% of it and the only approach to a cap any member has made, on a
 job whose own skill says a run killed at that cap records nothing at all (#3447).
