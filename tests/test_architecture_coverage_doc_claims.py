@@ -4149,8 +4149,10 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
         "the command names no database to run against")
 
     # (c) the headline is not presented as size-controlled. The invariant is on the
-    # CLAIM, not on the word: the section also speaks of "the paired size-controlled
-    # ratio" as something owed, which is an honest sentence and must stay.
+    # CLAIM, not on the word: since #3574 published the pairing the section also says
+    # "no size-controlled ratio can be quoted from it", which is the same kind of honest
+    # sentence as the "the paired size-controlled ratio … is owed" line it replaced, and
+    # is the reason a word-count would be the wrong pin here.
     NEGATED = "That 51.8× is not size-controlled, and is stated as such."
     assert NEGATED in flat, (
         f"the section never states the headline as {NEGATED!r}:\n{flat[:400]}")
@@ -9268,3 +9270,207 @@ def test_authority_row_count_prose_counts_the_ladder_the_ceiling_row_made():
     assert _created_entry_count(tampered) != dated, (
         "rewriting the dated entry to today's row count is not detected, so the "
         "assertion above is not the thing keeping the record's wording intact")
+
+
+# --------------------------------------------------------------------------- #
+# context-window.md §What a rewrite costs — the within-session pairing and the
+# re-arm ruling were measured and ruled on 2026-10-02 and are published here,
+# not owed on a closed item (#3574, 2026-10-30)
+# --------------------------------------------------------------------------- #
+
+#: The four sentences-in-shape #3574 retires, in the two spellings the page carried.
+#: `cc45c4ae^`'s pair advertised the pairing as OWED outright ("is owed on #2027",
+#: "are owed on #2027"); the arch-review pass that filed this item's wording rewrote
+#: them into a deferral to a live item ("no live item owns publishing it — that is
+#: #3574", "the other half of #3574"), which is the same rotted ownership wearing a
+#: name that had not been closed yet. Both spellings are pinned out: an item that is
+#: `status: done` (backlog/2027-…md:2, closed 2026-10-02T00:07:20) cannot own work, and
+#: a page that says a finished measurement is still owed is what makes the next pass
+#: book an absence that already closed — the #2371 → #2379 → #2397 chain and #2933's
+#: sweep prose are the same failure twice.
+RETIRED_OWNERSHIP_CLAIMS = ("is owed on #2027",
+                            "are owed on #2027",
+                            "no live item owns publishing it",
+                            "the other half of #3574")
+
+#: The section, bounded at the next `## ` exactly as
+#: `test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command` bounds it: a
+#: deferral retired from the section but left standing in §Review log would be a record
+#: of what the page used to claim, which is a different thing and is allowed to stay.
+def _rewrite_cost_section() -> str:
+    return _section(_text("context-window.md"),
+                    "What a rewrite costs, priced per mechanism")
+
+
+def _ownership_claim_gaps(text: str) -> list[str]:
+    """Which retired ownership claims this text still makes.
+
+    One function reads the live section and the fixture below, so the two cannot
+    disagree about what the pattern is; the page is hand-wrapped, so a prose span never
+    meets raw bytes (see `_flat`).
+    """
+    flat = _flat(text)
+    return [phrase for phrase in RETIRED_OWNERSHIP_CLAIMS if phrase in flat]
+
+
+def test_the_rewrite_cost_page_no_longer_owes_a_measurement_it_published():
+    """Clause 1: neither retired claim survives in the section, and the pattern is
+    proven to fire on the sentences it retires.
+
+    The fixture is the four sentences as the page carried them — both the `owed on
+    #2027` pair and the `#3574` deferral pair — through the same reader. That is the
+    whole point of the node: an absence assertion whose pattern matches nothing anywhere
+    is a green light permanently fixed on, and this item was filed BECAUSE a previous
+    pass rewrote the two sentences without retiring the claim, so the spelling that
+    retired them once is exactly the spelling that has to keep firing.
+    """
+    body = _rewrite_cost_section()
+    assert not _ownership_claim_gaps(body), (
+        f"§What a rewrite costs still defers a finished measurement to an item that "
+        f"cannot own it: {_ownership_claim_gaps(body)}")
+
+    stale = (
+        "The within-session pairing that would settle it — a free turn's next turn "
+        "against a noop turn's next turn in the same session — is owed on #2027 and no "
+        "controlled ratio is quoted here. "
+        "That ruling, and the paired size-controlled ratio, are owed on #2027; nothing "
+        "here changes a threshold. "
+        "The ratio it produced never reached this page and #2027 has since closed, so no "
+        "live item owns publishing it — that is #3574 — and until it does no controlled "
+        "ratio is quoted here. "
+        "That ruling was made — `closed()` is `passes > 0 and used < rearm`, and `rearm` "
+        "is threshold × 0.72 = 151,303 — on 2026-10-02, by #2027's owed-check pass, in "
+        "the same pass as the paired ratio; both sit in that item's now-closed log "
+        "rather than in a measurement anyone can re-run, which is the other half of "
+        "#3574.")
+    assert _ownership_claim_gaps(stale) == list(RETIRED_OWNERSHIP_CLAIMS), (
+        "none of the retired phrases fired on the sentences they were taken out of, so "
+        "the absence asserted above is a pattern that could never have matched this page")
+
+
+#: What the 2026-10-02 owed-check pass returned and the section now publishes, quoted
+#: from `backlog/2027-price-compaction-s-prefix-break-per-mechanism-and-.md`'s
+#: `owed_settled` block (its `activity_log` lines are truncated mid-sentence, its
+#: front matter is not). Asserted as prose against the page and deliberately NOT
+#: recomputed from `usage.db`: `tests/conftest.py:241` refuses the suite against the
+#: production tree, a gate worktree's own data root is empty, and a rolling window moves
+#: the figures — which is the same reason #2933 pins its three window rows as text (see
+#: `MEASURED_PERSISTENCE_WINDOWS`). The re-run over a fresh window is owed-check work,
+#: recorded on #3574, not a node.
+SETTLED_PAIRING = {
+    "paired sessions in the window": "54 paired sessions",
+    "the window's own bounds, which the pairing is meaningless without":
+        "2026-09-25T01:32:11",
+    "sessions holding a free→next pair": "123 sessions hold a free→next pair",
+    "sessions holding a noop→next pair": "81 a noop→next pair",
+    "sessions holding both arms": "54 hold both",
+    "next-turn mean after a freeing turn": "mean 261,400",
+    "next-turn median after a freeing turn": "median 164,514",
+    "observations after a freeing turn": "55 obs",
+    "next-turn mean after a noop turn": "mean 188,094",
+    "next-turn median after a noop turn": "median 114,092",
+    "observations after a noop turn": "58 obs",
+    "within-session delta mean": "mean +61,009",
+    "within-session delta median — the number that decided the ruling":
+        "median of exactly 0",
+    "sign split of the deltas": "26 up / 21 down",
+}
+
+
+def test_the_rewrite_cost_page_publishes_the_measured_pairing_and_its_numbers():
+    """Clause 2: every figure the pass returned is on the page, and the page says what
+    the figures were measured over.
+
+    The median-zero is the figure that matters and is asserted with its words, not just
+    its digits: `median 0` alone would also be true of a section that reported the
+    unpaired median, which is not the result. A dropped figure fails the loop; the
+    control after it shows the loop reads the section rather than the constant.
+    """
+    flat = _flat(_rewrite_cost_section())
+    for what, figure in SETTLED_PAIRING.items():
+        assert _flat(figure) in flat, (
+            f"the section no longer states {what} as {figure!r} — the pass returned it "
+            "on 2026-10-02 and this page is the only live place it can be read")
+    tampered = flat.replace("median of exactly 0", "median of exactly 41,000", 1)
+    assert tampered != flat, (
+        "the seeded tamper did not take, so the figure loop above is untested")
+    still_present = [figure for figure in SETTLED_PAIRING.values()
+                     if _flat(figure) in tampered]
+    assert len(still_present) == len(SETTLED_PAIRING) - 1, (
+        "rewriting the delta median in a copy of the section did not drop exactly one "
+        f"figure from the loop above — {len(still_present)} of {len(SETTLED_PAIRING)} "
+        "still matched it, so the loop is not reading the numbers off the page")
+
+
+def test_the_rewrite_cost_page_says_the_pairing_did_not_control_for_size():
+    """Clause 3: the negative result is stated in words, and the headline's caveat
+    survives the edit that published it.
+
+    This is the sentence the measurement itself returned ("the pairing does not separate
+    the size effect from the edit cost: no controlled ratio is quotable"), and it is the
+    reason this item's title is wrong: there is no ratio to publish, so what the page
+    owed was the negative result. The pre-existing node above already refuses an
+    affirmative "is size-controlled"; it is re-asserted here because the edit that
+    removed the deferrals is the edit most likely to have removed the caveat with them.
+    """
+    sec = _rewrite_cost_section()
+    flat = _flat(sec)
+    NEGATED = "That 51.8× is not size-controlled, and is stated as such."
+    assert NEGATED in flat, (
+        "the headline's caveat was reworded or dropped while the paragraph around it "
+        "was rewritten")
+    for phrase in ("the pairing did not separate the size effect from the edit cost",
+                   "no size-controlled ratio can be quoted"):
+        assert phrase in flat, (
+            f"the section stopped saying in words that the pairing came back "
+            f"unseparated ({phrase!r}), which is the finding the numbers are there to "
+            "carry")
+    affirmative = re.compile(r"\bis\s+size-controlled")
+    hit = affirmative.search(sec)
+    assert hit is None, (
+        "the section states a ratio as size-controlled, which the measurement refused: "
+        f"…{sec[max(0, hit.start() - 80):hit.end() + 40]}…")
+    assert affirmative.search(NEGATED.replace("not ", "")), (
+        "the affirmative pattern matches even the doc's own caveat stripped of its "
+        "'not', so it was never going to catch a re-write")
+
+
+def test_the_rewrite_cost_page_records_the_rearm_ruling_as_ruled():
+    """Clause 4: the ladder's re-arm level is recorded as ruled on 2026-10-02, and the
+    number the ruling turned on is still the number `config.yaml` carries.
+
+    The doc's claim is that the pass ruled and left `microcompact.trigger_fraction` at
+    0.72, so half of this node reads the config the same worktree ships — the same
+    `yaml.safe_load(ROOT / "config.yaml")` route the egress-policy node uses. The trap
+    the ruling's own citation fell into is named there: `#2027`'s owed entry cites
+    `config.yaml:442`, and while the relief fraction did not move, that line number now
+    belongs to a different block, and `:481`'s 0.85 is `memory_flush`, not the relief
+    ladder. Keyed access is why this node does not read a line number at all.
+    """
+    flat = _flat(_rewrite_cost_section())
+    for what, mark in (("the latch whose release rule was ruled on",
+                        "_ReliefLatch.closed()"),
+                       ("the release rule itself", "passes > 0 and used < rearm"),
+                       ("the level the latch compares against", "_relief_rearm_level"),
+                       ("the config key the level is a fraction of",
+                        "microcompact.trigger_fraction"),
+                       ("the ruled fraction", "0.72"),
+                       ("the re-arm level it produces", "151,303"),
+                       ("the wall it sits under", "210,144"),
+                       ("how far under the wall", "58,841"),
+                       ("the date it was ruled", "2026-10-02")):
+        assert _flat(mark) in flat, (
+            f"the section no longer records {what} as {mark!r}")
+    assert "remaining open question" not in flat, (
+        "the re-arm paragraph is advertising its question as open again, which is the "
+        "framing #3574 exists to retire")
+
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    fraction = cfg["compaction"]["microcompact"]["trigger_fraction"]
+    assert fraction == 0.72, (
+        f"config.yaml compaction.microcompact.trigger_fraction is {fraction!r}, not the "
+        "0.72 the ruling left it at, so the re-arm level this section publishes "
+        "(151,303 under a 210,144 wall) is stale prose about a changed system — either "
+        "re-derive the ruling or update the section, but do not leave the two disagreeing")

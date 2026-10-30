@@ -359,10 +359,20 @@ request.
 larger rather than the edit costing more. The within-session pairing that would
 settle it — a free turn's next turn against a noop turn's next turn in the same
 session — was **run** on 2026-10-02, by the owed-check pass on #2027, and came back
-powered: 54 paired sessions in a fresh 168 h window (123 sessions hold a free→next pair,
-81 a noop→next pair), above the item's own ~30-session bar. The ratio it produced never
-reached this page and #2027 has since closed, so no live item owns publishing it — that
-is #3574 — and until it does no controlled ratio is quoted here.
+powered: 54 paired sessions in a fresh 168 h window — `2026-09-25T01:32:11` to
+`2026-10-02T01:32:11`, the pass's own absolute bounds, 123 sessions hold a free→next pair,
+81 a noop→next pair, 54 hold both — above the item's own ~30-session bar. Its numbers are
+on this page so the page is the record: same-session next-turn `reprefill_tokens` after a
+freeing turn runs mean 261,400 / median 164,514 (55 obs), after a noop turn mean 188,094 /
+median 114,092 (58 obs), and the within-session deltas over n=54 pairs come to mean +61,009
+against a **median of exactly 0** — the signs are 26 up / 21 down, with 7 pairs unchanged.
+That is the whole result of the pairing, and it is a negative one: the mean gap is carried
+by a few large sessions, so
+the pairing did not separate the size effect from the edit cost, and no size-controlled
+ratio can be quoted from it. Nothing is owed on it and no ratio is quoted; the 51.8× above
+stands as the un-controlled figure it is labelled as. Re-separating size from cost needs a
+different design than same-session pairing — refreshing these figures over a later window
+is a re-measurement, not a missing one.
 
 Per mechanism, `usage_store.reprefill_attribution(hours=168)` (its `["report"]` is
 the text to print; `python -m pytest tests/test_reprefill_attribution.py` runs it in
@@ -415,17 +425,21 @@ of `B`, on 95 turns), which together are 79.1% of the total re-prefill Lloyd
 generated in seven days. What that buys is the session: without the pass, those 361
 turns' prompts sit at or over the 210,144 threshold and the turn is either truncated
 or rejected, so the re-prefill is the price of a long session surviving rather than a
-tax on it. The remaining open question is the ladder's re-arm level, not whether to
-free: `closed()` releases the latch as soon as the prompt is back above `_relief_rearm_level`, and the
+tax on it. The ladder's re-arm level is settled too, and it was settled in favour of
+leaving it alone — the question was never whether to free: `closed()` releases the latch as
+soon as the prompt is back above `_relief_rearm_level`, and the
 window's worst turn — 2,580,081 tokens re-prefilled — records a re-arm level of
 151,303 against its own turn-start threshold of 210,144, with 137 relief passes whose
 `used_after` sits at or above ~155k on essentially every one, most of them freeing
 tens of tokens. So a session that frees three times in one turn is a session
-**parked above** the re-arm level, not one whose prompt regrew to it. That ruling was made —
-`closed()` is `passes > 0 and used < rearm`, and `rearm` is threshold × 0.72 = 151,303 — on
-2026-10-02, by #2027's owed-check pass, in the same pass as the paired ratio; both sit in that
-item's now-closed log rather than in a measurement anyone can re-run, which is the other half
-of #3574. Nothing here changes a threshold.
+**parked above** the re-arm level, not one whose prompt regrew to it. The ruling is recorded
+here rather than left in a closed item's log: `_ReliefLatch.closed()` is
+`passes > 0 and used < rearm`, and `rearm` is `_relief_rearm_level` = threshold ×
+`microcompact.trigger_fraction` = 210,144 × 0.72 = 151,303 (58,841 tokens under the wall),
+on 2026-10-02, by #2027's owed-check pass, in the same pass as the pairing above — and what
+it decided was to leave that fraction at **0.72**, which is still what `config.yaml`'s
+`compaction.microcompact` block carries. Nothing here changes a threshold, and no ruling is owed on
+this one.
 
 ## The prompt that goes out
 
