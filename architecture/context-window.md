@@ -396,6 +396,20 @@ hundreds of times behind an earlier rung:
 | `relief:arguments` | 0 | 0 | — | 0.0% | 516 |
 | `turn_start:summarized` / `:summary_folds` / `:truncated` / `:other`, `relief:images`, `relief:other` | 0 | 0 | — | 0.0% | — |
 
+**The regime this table prices, and so what it does not price.** The
+`turn_start:microcompact` row is microcompaction, and since #2168 a turn can instead
+have its previous turn's in-turn reduction re-applied at read time
+(`apply_reduction_sidecar`, behind the `RunOptions.microcompact_reduction_sidecar` knob)
+rather than clearing from disk again — the same repeat front break this row owns,
+reached by the other path. The window above holds no such turn: over its 3,868 rows the
+number of knob-on rows is 0, because the knob's shipped default is off. Re-derive that
+with `usage_store.reprefill_attribution(since=REPREFILL_WITNESS_SINCE,
+until=REPREFILL_WITNESS_UNTIL)` and read the `sidecar` block its report prints beside
+the table — rows per regime, a per-regime `turn_start:microcompact` share, and an
+explicit *unmeasured* line for a window holding no knob-on row. So **60.6% is what
+microcompaction costs with the read-time sidecar off**, not the price of the mechanism
+as built; the on-versus-off pair is owed once the knob runs on real traffic (#3576).
+
 The three freeing buckets account for 95,213,811 tokens exactly — all of arm `B` —
 and every bucket sums to the named total to the token (the function prints the gap,
 and `tests/test_reprefill_attribution.py` pins that it is 0.0%).

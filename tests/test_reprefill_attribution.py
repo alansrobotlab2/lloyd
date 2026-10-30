@@ -760,3 +760,171 @@ def test_the_extract_replays_to_its_own_published_split(tmp_path, monkeypatch):
         "no_freeing_evidence": (12, 317_625),
         "no_compaction_record": (1_446, 7_195_735),
     }, published
+
+
+# ------------------------------------------------- the sidecar regime split (#3576)
+
+def _ts(**over) -> dict:
+    """A turn-start record that freed via microcompaction, with the two #2168 keys
+    absent unless `over` names them — which is what a knob-off window looks like."""
+    ts = {"ran": True, "mechanisms": ["microcompact"], "microcompacted": 2,
+          "summarized": False, "summary_folds": 0, "truncated": False,
+          "restored_files": 0, "tokens_freed": 8_000}
+    ts.update(over)
+    return {"turn_start": ts}
+
+
+def _printed_regime_rows(report: str) -> dict[str, int]:
+    """Each regime's `rows=` off the printed report, not off the dict."""
+    out: dict[str, int] = {}
+    for line in report.splitlines():
+        for name in (usage_store.SIDECAR_ON, usage_store.SIDECAR_APPLIED,
+                     usage_store.SIDECAR_OFF):
+            if line.startswith(name + " "):
+                out[name] = int(line.split("rows=", 1)[1].split()[0].replace(",", ""))
+    return out
+
+
+def _printed_regime_shares(report: str) -> dict[str, str]:
+    """Each regime's printed `share=`, dash included."""
+    out: dict[str, str] = {}
+    for line in report.splitlines():
+        for name in (usage_store.SIDECAR_ON, usage_store.SIDECAR_APPLIED,
+                     usage_store.SIDECAR_OFF):
+            if line.startswith(name + " "):
+                out[name] = line.rsplit("share=", 1)[1].strip()
+    return out
+
+
+def _printed_disclosure(report: str) -> str | None:
+    """The unmeasured-regime line, or None when the report does not carry one."""
+    for line in report.splitlines():
+        if line.startswith("sidecar regime UNMEASURED"):
+            return line
+    return None
+
+
+def test_the_regime_block_counts_each_row_by_the_sidecar_record_it_left(store):
+    """#3576 clause 1: `sidecar` counts its rows by #2168's own two fields.
+
+    Four window rows, three readings: a knob-off turn-start pass, one turn that
+    consulted the read-time sidecar without re-applying anything, one that consulted
+    AND re-applied two rows, and one with no record at all — which is knob-off as
+    well, because a row that says nothing cannot have consulted a pass it does not
+    mention. `knob_on_and_applied` is a SUBSET read of `knob_on` (the shipped default
+    is off, so re-applying implies consulting), so the partition is on + off, and the
+    printed report has to carry all three counts rather than only the dict.
+    """
+    _write(store, compaction=_ts(), reprefill=10_000)
+    _write(store, compaction=_ts(microcompact_sidecar=True), reprefill=6_000)
+    _write(store, compaction=_ts(microcompact_sidecar=True, microcompact_reduced=2),
+           reprefill=4_000)
+    _write(store, compaction=None, reprefill=1_000)
+
+    attr = usage_store.reprefill_attribution(hours=168)
+    sc = attr["sidecar"]
+    reg = sc["regimes"]
+    assert sc["window_rows"] == attr["rows"] == 4, sc
+    assert reg[usage_store.SIDECAR_ON]["rows"] == 2, reg
+    assert reg[usage_store.SIDECAR_APPLIED]["rows"] == 1, reg
+    assert reg[usage_store.SIDECAR_OFF]["rows"] == 2, reg
+    assert sc["partition_rows"] == 4, (
+        "knob_on + knob_off stopped partitioning the window, so a row is in two "
+        "regimes or in none")
+    assert sc["unmeasured"] is False and sc["disclosure"] is None, sc
+    assert _printed_regime_rows(attr["report"]) == {
+        usage_store.SIDECAR_ON: 2, usage_store.SIDECAR_APPLIED: 1,
+        usage_store.SIDECAR_OFF: 2}, attr["report"]
+
+    # The path the two keys live at is the whole trap: #3576's own triage asked the
+    # store for `$.microcompact_sidecar` and got NULL on all 8,175 rows that carry
+    # it, which reads as "the knob never ran". Both directions, off one reader.
+    assert usage_store.sidecar_regime(
+        _ts(microcompact_sidecar=True, microcompact_reduced=1)) == (True, True)
+    assert usage_store.sidecar_regime(
+        {"microcompact_sidecar": True, "microcompact_reduced": 3,
+         "turn_start": {"ran": True, "microcompacted": 1, "tokens_freed": 100}}
+    ) == (False, False), (
+        "a sidecar key sitting at the TOP level of the record is read as knob-on, so "
+        "the reader is not reading `turn_start` and every figure it counts is wrong")
+
+
+def test_the_microcompact_share_is_priced_separately_in_each_regime(store):
+    """#3576 clause 2: the bucket's share per regime, Σ still exhaustive.
+
+    The regime shares are each regime's OWN denominator — that is the pair #3576
+    exists to print, since 2026-10-01's 60.6% is a knob-off figure. The bucket
+    accounting is untouched: `bucket_sum` still equals the window total, `gap_pct` is
+    still 0.0, and the two regimes' microcompact halves sum to the bucket row rather
+    than adding a second copy of any row's tokens.
+    """
+    _write(store, compaction=_ts(), reprefill=10_000)                       # off, mc
+    _write(store, compaction=_ts(microcompacted=0, tokens_freed=0),
+           reprefill=30_000)                                                # off, noop
+    _write(store, compaction=_ts(microcompact_sidecar=True), reprefill=6_000)  # on, mc
+    _write(store, compaction=_ts(microcompact_sidecar=True, microcompacted=0,
+                                 tokens_freed=0), reprefill=6_000)          # on, noop
+
+    attr = usage_store.reprefill_attribution(hours=168)
+    reg = attr["sidecar"]["regimes"]
+    on, off = reg[usage_store.SIDECAR_ON], reg[usage_store.SIDECAR_OFF]
+    assert (on["rows"], off["rows"]) == (2, 2), reg
+    assert on["microcompact_share_pct"] == 50.0, on      # 6,000 of its own 12,000
+    assert off["microcompact_share_pct"] == 25.0, off    # 10,000 of its own 40,000
+    window_share = _row(attr, "turn_start:microcompact")["share_pct"]
+    assert window_share == 30.8, window_share
+    assert on["microcompact_share_pct"] != off["microcompact_share_pct"] != window_share, (
+        "both regimes print the window's own share, so nothing is being split")
+
+    # Exhaustiveness, unchanged: the split is a second READ of the same rows.
+    assert attr["bucket_sum_reprefill_tokens"] == attr["window_total_reprefill_tokens"]
+    assert attr["gap_pct"] == 0.0, attr["gap_pct"]
+    assert (on["microcompact_reprefill_tokens"] + off["microcompact_reprefill_tokens"]
+            == _row(attr, "turn_start:microcompact")["reprefill_tokens"]), (
+        "the per-regime microcompact halves do not sum to the bucket row, so the split "
+        "either double-counts a row or drops one")
+    assert on["microcompact_rows"] + off["microcompact_rows"] == _row(
+        attr, "turn_start:microcompact")["n"]
+    assert attr["sidecar"]["partition_rows"] == attr["rows"] == 4
+
+    # The seeded collapse: with the key removed the same rows are one regime, so the
+    # shares above came from the record and not from the order rows were written in.
+    assert usage_store.sidecar_regime(_ts(microcompacted=0, tokens_freed=0)) == (
+        False, False)
+
+
+def test_a_window_holding_no_knob_on_row_says_the_regime_is_unmeasured(store):
+    """#3576 clause 3: an absent regime is disclosed, never priced at zero.
+
+    Every row here is knob-off, which is every window this box has ever produced
+    (the shipped default is False). Printing `knob_on ... share=0.0%` would read as
+    "the sidecar regime costs nothing", the exact opposite of an absent measurement,
+    so the share is a dash and the report carries a line saying the regime is
+    unmeasured. The removal control at the end is the clause: strip that line and the
+    reader below has nothing left to tell the two windows apart.
+    """
+    _write(store, compaction=_ts(), reprefill=10_000)
+    _write(store, compaction=None, reprefill=500)
+
+    attr = usage_store.reprefill_attribution(hours=168)
+    sc = attr["sidecar"]
+    assert sc["unmeasured"] is True and sc["regimes"][usage_store.SIDECAR_ON]["rows"] == 0
+    assert sc["regimes"][usage_store.SIDECAR_ON]["microcompact_share_pct"] is None, (
+        "an empty regime was given a share, which a reader reads as a price of zero")
+    assert _printed_regime_shares(attr["report"])[usage_store.SIDECAR_ON] == "-"
+    assert f"0 of {attr['rows']} rows" in sc["disclosure"], sc["disclosure"]
+    assert _printed_disclosure(attr["report"]) == sc["disclosure"]
+    assert "`turn_start.microcompact_sidecar`" in sc["disclosure"] and (
+        "`turn_start:microcompact`" in sc["disclosure"]), (
+        "the disclosure does not name the field the count is read from and the bucket "
+        "it prices, so it is a hedge rather than something a reader can act on")
+    assert _printed_disclosure(attr["report"].replace(sc["disclosure"], "")) is None, (
+        "the disclosure was found somewhere other than the printed line, so removing "
+        "that line would not have failed this node")
+
+    # The form the post-flip read will use (#2487's `since`-only window, fixed in
+    # aac4543f) answers, and carries the same disclosure while the knob is off.
+    opened = usage_store.reprefill_attribution(since="2000-01-01T00:00:00")
+    assert opened["window_until"] is None
+    assert opened["sidecar"]["unmeasured"] is True
+    assert _printed_disclosure(opened["report"]) is not None

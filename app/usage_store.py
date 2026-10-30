@@ -547,11 +547,16 @@ RAN_NOOP = "ran_noop"
 #: fold of the summary that sits at the front, a truncation that drops the oldest
 #: turns) all break at position ~0, so their relative order is a deterministic
 #: tie-break, not a claim about which of them is dearer.
+#: The bucket the turn-start microcompaction pass owns. Named once because two
+#: readers now ask for it by name: the bucket rules below, and the per-regime split
+#: that prices it separately for the knob-on and knob-off halves of a window (#3576).
+BUCKET_MICROCOMPACT = "turn_start:microcompact"
+
 ATTRIBUTION_BUCKETS: tuple[str, ...] = (
     "turn_start:summarized",
     "turn_start:summary_folds",
     "turn_start:truncated",
-    "turn_start:microcompact",
+    BUCKET_MICROCOMPACT,
     "turn_start:other",
     *(f"relief:{rung}" for rung in RELIEF_RUNGS_IN_LADDER_ORDER),
     RELIEF_OTHER,
@@ -592,7 +597,7 @@ def _freeing_evidence(compaction: Any) -> dict:
     """
     blank = {"no_record": False, "ran": False, "turn_start_freed": 0,
              "relief_freed": 0, "turn_start_flags": [], "relief_rungs": [],
-             "relief_rung_names": []}
+             "relief_rung_names": [], "turn_start": {}}
     if compaction is None:
         return dict(blank, no_record=True)
     if isinstance(compaction, str):
@@ -612,7 +617,7 @@ def _freeing_evidence(compaction: Any) -> dict:
     if ts.get("truncated"):
         flags.append("turn_start:truncated")
     if _as_int(ts.get("microcompacted")) > 0:
-        flags.append("turn_start:microcompact")
+        flags.append(BUCKET_MICROCOMPACT)
 
     relief_freed = _as_int(compaction.get("relief_tokens_freed"))
     rungs: list[str] = []
@@ -636,6 +641,12 @@ def _freeing_evidence(compaction: Any) -> dict:
         flags.append("turn_start:other")
     return {
         "no_record": False,
+        # The block itself, so a reader that wants a field this function's own rules
+        # do not consult — the #2168 sidecar's two keys, for one — gets it from the
+        # SAME parse instead of reaching back into the record and re-deciding what
+        # "no turn_start" means. `_sidecar_flags` reads it; nothing here changes a
+        # bucket on its account.
+        "turn_start": dict(ts),
         "ran": bool(ts.get("ran")),
         "turn_start_freed": _as_int(ts.get("tokens_freed")),
         "relief_freed": relief_freed,
@@ -682,6 +693,53 @@ def attribution_bucket(compaction: Any) -> str:
     return RAN_NOOP if ev.get("ran") else NO_FREEING_EVIDENCE
 
 
+#: The regimes the #2168 read-time sidecar leaves traces of, named by the two fields
+#: a turn's record carries: `microcompact_sidecar` says the read-time pass was
+#: CONSULTED at all (`app/compaction.py` writes the local `sidecar_consulted`) and
+#: `microcompact_reduced` says how many rows it re-applied (the local
+#: `sidecar_applied`). BOTH sit under `turn_start`, not at the top of the record:
+#: `json_extract(compaction,'$.microcompact_sidecar')` is NULL for every row, and a
+#: reader who stops there reports "the knob never ran" as a measurement — the false
+#: zero #3576's triage hit and corrected.
+SIDECAR_ON = "knob_on"
+SIDECAR_APPLIED = "knob_on_and_applied"
+SIDECAR_OFF = "knob_off"
+
+
+def _sidecar_flags(turn_start: Mapping[str, Any]) -> tuple[bool, bool]:
+    """`(consulted, applied)` off one already-parsed `turn_start` block.
+
+    An absent block, an absent key and a non-numeric `microcompact_reduced` all read
+    knob-off: a row whose record says nothing cannot have consulted a pass it does
+    not mention, which is the same rule `attribution_bucket` applies to a missing
+    record. `applied` is a SUBSET reading of `consulted`, not a third regime, because
+    the knob's default is off (`RunOptions.microcompact_reduction_sidecar`) — a row
+    that re-applied rows necessarily consulted the sidecar to do it.
+    """
+    return (bool(turn_start.get("microcompact_sidecar")),
+            _as_int(turn_start.get("microcompact_reduced")) > 0)
+
+
+def sidecar_regime(compaction: Any) -> tuple[bool, bool]:
+    """The same two flags, read through this module's one evidence parser.
+
+    `reprefill_attribution` counts its rows through `_sidecar_flags` on the evidence
+    it has already parsed, and the doc-claim node that grades the number
+    `architecture/context-window.md` publishes counts the committed witness rows
+    through THIS function. One reader, so the published count and the instrument's
+    count cannot drift apart by disagreeing about where the field lives (#3576
+    clause 4).
+    """
+    return _sidecar_flags(_freeing_evidence(compaction).get("turn_start") or {})
+
+
+def _sidecar_cell() -> dict[str, Any]:
+    """One regime's counters; see the `sidecar` block of `reprefill_attribution`."""
+    return {"rows": 0, "measured": 0, "reprefill_tokens": 0,
+            "microcompact_rows": 0, "microcompact_reprefill_tokens": 0,
+            "microcompact_share_pct": None}
+
+
 def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
                           until: Optional[str] = None) -> dict:
     """Price the window's re-prefill per mechanism, and show the split is exhaustive.
@@ -719,6 +777,20 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
     the table too, which is the only way the sum can be exhaustive rather than a
     selection of interesting rungs. Means are over measured rows only
     (`measured=`), since a NULL `reprefill_tokens` is unmeasured, not zero.
+
+    The `sidecar` block names WHICH REGIME the table priced. Since #2168 a turn can
+    have its previous turn's in-turn reduction re-applied at read time
+    (`apply_reduction_sidecar`) instead of clearing from disk again, which is the
+    repeat front break these buckets price — and the knob that does it,
+    `RunOptions.microcompact_reduction_sidecar`, ships off. So a window's
+    `turn_start:microcompact` share means different things depending on a field this
+    function used not to read. It now counts every window row by that record
+    (`sidecar["regimes"]`, keys `knob_on` / `knob_on_and_applied` / `knob_off`, the
+    first and last partitioning the rows and the middle one a subset read), prices
+    the microcompact bucket inside each, and sets `unmeasured` plus a printed
+    `disclosure` whenever the window holds no knob-on row at all — because 2026-10-01's
+    60.6% is a knob-off figure, and `architecture/context-window.md` has to say so
+    rather than let it read as the price of the mechanism as built (#3576).
 
     The `arms` block reproduces the three-arm table this item was filed with
     (`A_no_record` / `B_freed_something` / `D_ran_noop`) over measured rows, with
@@ -784,12 +856,35 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
             cell["sum"] += _as_int(reprefill)
 
     arms: dict[str, dict[str, int]] = {}
+    # Sidecar regimes, over EVERY window row — including the ones the arms table
+    # drops for a NULL `reprefill_tokens`, because which regime a turn was priced in
+    # is a property of its record, not of whether its price was measured.
+    regimes: dict[str, dict[str, Any]] = {
+        SIDECAR_ON: _sidecar_cell(),
+        SIDECAR_APPLIED: _sidecar_cell(),
+        SIDECAR_OFF: _sidecar_cell(),
+    }
     unknown_rungs: set[str] = set()
     for row in rows:
         raw = row["compaction"]
         ev = _freeing_evidence(raw)
         bucket = attribution_bucket(raw)
         bump(bucket, row["reprefill_tokens"], row["input_tokens"])
+        consulted, applied = _sidecar_flags(ev.get("turn_start") or {})
+        # Exactly one of ON/OFF takes every row, so the two partition the window;
+        # APPLIED is the subset read and is deliberately outside that sum.
+        members = [SIDECAR_ON if consulted else SIDECAR_OFF]
+        if applied:
+            members.append(SIDECAR_APPLIED)
+        for name in members:
+            cell = regimes[name]
+            cell["rows"] += 1
+            cell["reprefill_tokens"] += _as_int(row["reprefill_tokens"])
+            if row["reprefill_tokens"] is not None:
+                cell["measured"] += 1
+            if bucket == BUCKET_MICROCOMPACT:
+                cell["microcompact_rows"] += 1
+                cell["microcompact_reprefill_tokens"] += _as_int(row["reprefill_tokens"])
         for name in (ev.get("relief_rung_names") or []):
             bucket_name = f"relief:{name}"
             if bucket_name in ATTRIBUTION_BUCKETS:
@@ -836,6 +931,29 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
     # same tokens would double-count the Σ the header claims is exhaustive. The
     # name is reported instead, in `unknown_relief_rungs` and on the report's last
     # line, which is what tells a reader the ladder grew a rung.
+    for cell in regimes.values():
+        # A regime with nothing priced in it has NO share, not a zero one: printing
+        # 0.0% for the half of the window the tree does not hold would read as "the
+        # sidecar regime is free", which is the opposite of an absent measurement —
+        # the same rule the bucket table prints `mean=-` under.
+        if cell["measured"] and cell["reprefill_tokens"]:
+            cell["microcompact_share_pct"] = round(
+                100.0 * cell["microcompact_reprefill_tokens"] / cell["reprefill_tokens"], 1)
+    n_on = regimes[SIDECAR_ON]["rows"]
+    sidecar = {
+        "window_rows": len(rows),
+        "partition_rows": regimes[SIDECAR_ON]["rows"] + regimes[SIDECAR_OFF]["rows"],
+        "unmeasured": n_on == 0,
+        "regimes": regimes,
+        "disclosure": None if n_on else (
+            f"sidecar regime UNMEASURED in this window: 0 of {len(rows)} rows record "
+            "`turn_start.microcompact_sidecar` true, so every share printed here — "
+            f"`{BUCKET_MICROCOMPACT}` included — prices microcompaction WITHOUT the "
+            "#2168 read-time sidecar, not microcompaction as built. The on-versus-off "
+            "pair this block exists to print needs a window in which the knob runs on "
+            "real traffic; re-derive it with "
+            "`usage_store.reprefill_attribution(since=…, until=…)`."),
+    }
     bucket_sum = sum(b["reprefill_tokens"] for b in buckets)
     arm_out = {}
     for arm in ("A_no_record", "B_freed_something", "D_ran_noop"):
@@ -889,6 +1007,7 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
         "gap_pct": (round(100.0 * abs(bucket_sum - window_total) / window_total, 2)
                     if window_total else 0.0),
         "buckets": buckets,
+        "sidecar": sidecar,
         "arms": arm_out,
         "ratio_b_over_d_mean": ratio,
         "size_controlled": False,
@@ -1064,6 +1183,35 @@ def _format_attribution(attr: Mapping[str, Any]) -> str:
         if row.get("fired_rows") is not None:
             line += f" fired_={row['fired_rows']:,}"
         lines.append(line)
+    sidecar = attr["sidecar"]
+    lines += [
+        "",
+        "read-time sidecar regimes (#2168), over the SAME window rows: `knob_on` =",
+        "rows whose record says `turn_start.microcompact_sidecar` true;",
+        "`knob_on_and_applied` = the subset of those whose",
+        "`turn_start.microcompact_reduced` > 0, so it is never added to the partition;",
+        "`knob_off` = every other row, no record included. share= here is the",
+        f"`{BUCKET_MICROCOMPACT}` bucket's Σ over that regime's OWN priced rows — the",
+        "figure to set beside the knob-off share, not a share of the window total;",
+        "`share=-` means the regime holds no priced row, which is never 0.0%.",
+        "",
+    ]
+    for name in (SIDECAR_ON, SIDECAR_APPLIED, SIDECAR_OFF):
+        cell = sidecar["regimes"][name]
+        share = ("-" if cell["microcompact_share_pct"] is None
+                 else f"{cell['microcompact_share_pct']}%")
+        lines.append(f"{name:<22} rows={cell['rows']:>6,} "
+                     f"measured={cell['measured']:>6,} "
+                     f"Σ reprefill={cell['reprefill_tokens']:>11,} "
+                     f"microcompact rows={cell['microcompact_rows']:>5,} "
+                     f"Σ={cell['microcompact_reprefill_tokens']:>11,} share={share:>6}")
+    lines.append(
+        f"partition: {SIDECAR_ON}={sidecar['regimes'][SIDECAR_ON]['rows']:,} + "
+        f"{SIDECAR_OFF}={sidecar['regimes'][SIDECAR_OFF]['rows']:,} = "
+        f"{sidecar['partition_rows']:,} == window rows {sidecar['window_rows']:,}, "
+        "so no row is counted in two regimes")
+    if sidecar["disclosure"]:
+        lines += ["", sidecar["disclosure"]]
     lines += ["", "arms (measured rows only, both freeing paths in the predicate):"]
     for arm in ("A_no_record", "B_freed_something", "D_ran_noop"):
         cell = attr["arms"][arm]

@@ -4491,6 +4491,88 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     assert "| `turn_start:microcompact` | 236 | 68,444,409 |" in sec, flat[:400]
 
 
+def test_the_priced_microcompact_table_is_labelled_with_the_regime_it_measured_in(
+        monkeypatch):
+    """source: architecture/context-window.md § What a rewrite costs, priced per
+    mechanism, the paragraph headed "The regime this table prices".
+    claim: the `turn_start:microcompact` 60.6% row is labelled as measured with
+    `microcompact_reduction_sidecar` off, states how many of its window rows ran with
+    the read-time sidecar on, and names the call that re-derives that count.
+
+    #3576's premise is that one figure carried two regimes silently: since #2168 a turn
+    can have its previous turn's in-turn reduction re-applied at read time instead of
+    clearing from disk again, and that path is the same repeat front break this bucket
+    prices — while the knob is off by default. A label a reader cannot check is the same
+    claim in a nicer font, so the stated count is re-derived here over the committed
+    witness bytes (the same route `test_the_extract_replays_to_its_own_published_split`
+    takes) through the instrument's own `sidecar` block: if those bytes ever hold a
+    knob-on row the page has not noticed, this fails.
+    """
+    import tempfile
+    from app import usage_store
+
+    doc = _text("context-window.md")
+    sec = _flat(_section(doc, REWRITE_COST_HEADING))
+
+    assert "microcompact_reduction_sidecar" in sec, (
+        "the section prices microcompaction without naming the knob whose off-regime "
+        "this is, so a reader cannot find what to turn on for the other half")
+    assert "apply_reduction_sidecar" in sec, (
+        "the label names the option but not the mechanism #2168 added, which is the "
+        "thing whose absence the count is measuring")
+    assert "60.6%" in sec and "sidecar off" in sec, (
+        "the 60.6% row is no longer stated as one regime's price: "
+        f"{sec[:400]}")
+
+    m = re.search(r"number of knob-on rows is (\d+)", sec)
+    assert m, (
+        "the section states no knob-on row count for its own window, so the figure is "
+        "regime-less again — the exact shape #3576 was filed on")
+    stated = int(m.group(1))
+    assert "reprefill_attribution" in sec and "REPREFILL_WITNESS_SINCE" in sec \
+        and "REPREFILL_WITNESS_UNTIL" in sec, (
+        "the label states a count without naming the call and the window constants "
+        "that re-derive it")
+
+    # Derived, not transcribed: replay the extract the table was produced from and ask
+    # the instrument how many of ITS rows record the read-time sidecar being consulted.
+    from tests.board_presence import vault_root
+
+    extract = (vault_root() / "backlog" / "data"
+               / "2026-10-01.2027-reprefill-witness.jsonl")
+    assert extract.is_file(), extract
+    assert len(extract.read_text(encoding="utf-8").splitlines()) \
+        == usage_store.REPREFILL_WITNESS_ROWS, (
+        "the committed extract no longer holds the number of rows the window is "
+        "quoted as, so the count below measures a different sample than the doc's")
+    with tempfile.TemporaryDirectory() as td:
+        db = usage_store.replay_usage_extract(extract, db_path=Path(td) / "usage.db")
+        monkeypatch.setattr(usage_store, "DB_PATH", db)
+        attr = usage_store.reprefill_attribution(
+            since=usage_store.REPREFILL_WITNESS_SINCE,
+            until=usage_store.REPREFILL_WITNESS_UNTIL)
+    reg = attr["sidecar"]["regimes"]
+    assert attr["rows"] == usage_store.REPREFILL_WITNESS_ROWS, (
+        "the window this node asks about is not the window the table is pinned to, so "
+        "the comparison below is about some other window")
+    assert reg[usage_store.SIDECAR_ON]["rows"] == stated, (
+        f"the section says {stated} of its rows ran with the read-time sidecar on; the "
+        f"extract it was measured on holds "
+        f"{reg[usage_store.SIDECAR_ON]['rows']}, so the label is transcription")
+    assert reg[usage_store.SIDECAR_OFF]["rows"] == attr["rows"], (
+        "the extract is not a single-regime window, so the page's label and the "
+        "per-regime split it points at disagree")
+    assert attr["sidecar"]["unmeasured"] is True, (
+        "the instrument stopped disclosing an unmeasured regime inside the very window "
+        "the doc calls unmeasured")
+
+    # The seeded drift: a page stating one knob-on row more than the extract holds is
+    # refused by the equality above, so what is graded is the number, not its magnitude.
+    assert stated + 1 != reg[usage_store.SIDECAR_ON]["rows"], (
+        "one knob-on row more than the page states would still satisfy the assertion "
+        "above, so that assertion was never comparing the two counts")
+
+
 #: The offset the positive control below drifts a citation by. Fourteen is not arbitrary:
 #: it is the size of the drift #3573 found — the page fourteen lines behind the live
 #: statement it cites —
