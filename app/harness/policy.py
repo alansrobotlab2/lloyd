@@ -1714,3 +1714,134 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
                 task_id, row["id"], row["tool_pattern"], scope,
                 row["expires_at"], row["expires_at"])
     return minted
+
+
+# ─────────── the first arm: the one dispatch move a file lane may land (#3464) ───────────
+#
+# Everything above this line refuses a dispatch-field move, and for the file lanes that
+# meant NO dispatch move at all: a round could build a scheduled series end to end — write
+# the task file with its `skill_name`, its window and `status: draft` — and could never
+# start it. `vault_round.py`'s create branch still says so out loud ("create it `status:
+# draft` and let a human, or a granted call, arm it"), and that call never came: eight
+# items (#2219→#96, #2586→#97, #2897→#98, #2797→#99, #2865→#101, #3308, #3458, #3464)
+# existed to make a one-line status edit, and every arm that happened was an attended
+# commit — one of them (`~/obsidian` a01fa34f) landed as "unattributed dirty state".
+#
+# The exception is deliberately the narrowest thing that is still useful: the FIRST arm of
+# a task that has never run and has never been parked on purpose. It cannot start anything
+# twice (a task with a run record is refused), it cannot un-park anything (a file that
+# declares a park — including the OLD bytes, so the same write cannot delete the ruling and
+# arm over it — is refused), and it cannot re-arm or park anything (`up_next -> draft` and
+# every other status move are not this shape). Re-arm and downgrade keep going through a
+# human or a granted call exactly as they do today, and the CREATE branch is untouched on
+# purpose: on a create both guards below are vacuously true, which is why
+# `create_arms_a_task` exists (`vault` commit e66bc6e1 records it refusing 101's own create).
+#: The task files this rule can speak about: `autonomy/<numeric id>-<slug>.md`, written
+#: vault-relative (`autonomy/100-eval-instrument-index-daily.md`) or absolute. The `autonomy`
+#: segment is required, so a `backlog/<n>-*.md` item — whose basename has the same
+#: `<digits>-<slug>` shape and whose `status` is a different field read by different code —
+#: can never reach the True side from this pattern.
+_AUTONOMY_TASK_PATH = re.compile(r"(?:^|/)autonomy/(\d+)-[^/]+\.md$")
+
+
+def autonomy_runs_root() -> Path:
+    """`${LLOYD_DATA:-~/lloyd-data}/autonomy-runs`, resolved PER CALL.
+
+    The same rule the sweeper that deletes these records uses
+    (`scripts/groundskeeper/retention-sweep.py`) and the one
+    `scripts/skill_run_citation.autonomy_runs_dir` documents, restated here without an
+    import across a scripts/ boundary for the reason that module itself gives.
+
+    Per call is the whole point. `app.paths.AUTONOMY_RUNS_DIR` is a module constant frozen
+    at import, and `app.paths.DATA_ROOT` resolves a worktree's data root by TREE, not by
+    `LLOYD_DATA` — so a predicate reading either would answer about a directory no test can
+    build and no test could see it change. Honouring the variable is what makes both sides
+    of the runs-dir rule testable, which is what `autonomy_runs_dir`'s own docstring calls
+    "what makes the branch testable at all".
+    """
+    env = os.environ.get("LLOYD_DATA")
+    root = Path(env) if env else Path.home() / "lloyd-data"
+    return root / "autonomy-runs"
+
+
+def _run_record_ids() -> set[str] | None:
+    """Task ids that have a run-record directory, or None when that cannot be answered.
+
+    A run-record directory is the account of a dispatch that a vault sweep cannot undo
+    (`app/autonomy.py`'s own note on the gitignored `autonomy-runs/` tree, #1296), which is
+    why this measures "has it run" and the task's `last_run:` front matter does not: that
+    field is vault bytes, and a reverted commit can put it back or clear it. An id with no
+    directory has never dispatched.
+
+    A MISSING root is an empty set — a box where nothing has ever run has no runs, and
+    refusing there would deny the first arm forever. An UNREADABLE one is None, and None is
+    a refusal: a rail that cannot see whether a task has run before cannot call this the
+    FIRST arm. `FileNotFoundError` from `scandir` is the missing root; `NotADirectoryError`
+    and anything else the OS objects to are the unreadable case.
+    """
+    root = autonomy_runs_root()
+    try:
+        return {entry.name for entry in os.scandir(root) if entry.is_dir()}
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+
+
+def first_arm_allowed(path: Any, old_fm: dict | None, new_fm: dict | None,
+                      now: dt.datetime | None = None) -> bool:
+    """Whether a FILE LANE may land `status: draft` -> `up_next` as the task's first arm.
+
+    True only when all of these hold, and every lane asks this one helper rather than
+    restating any part of it:
+
+    * `path` is an `autonomy/<id>-*.md` task file (`_AUTONOMY_TASK_PATH`);
+    * both front-matter maps are readable — None on either side is a rail that cannot see
+      the values it protects, so it is False, exactly as the lanes already treat it;
+    * the ONLY dispatch-affecting move `schedule_value_moves` reports is `status`, and it
+      goes `draft` -> `up_next` by spelling. A file with no `status:` at all is not this
+      shape (absent -> `up_next` is arming something whose draft state nobody wrote), and a
+      move that also carries `frequency`/`preferred_hours`/`skill_name`/`depends_on`/
+      `auto_advance`/`scheduled_at` is refused as a cadence move, not split into the half
+      this helper would allow;
+    * neither side declares a park, judged by `app.autonomy.parked_declaration` — the rule
+      that already says a missing key and `parked: false` are NOT a park while a reason
+      string or `parked: true` IS. Reading the OLD bytes too is what stops one write from
+      deleting `parked: <#68's ruling>` and arming over it;
+    * no `<runs-root>/<id>/` directory exists (`_run_record_ids`), so this is the task's
+      first dispatch and not a restart of one that already has a history.
+
+    `now` is not part of any condition — no rule here reads the clock. It is accepted
+    because the arms this helper authorises were historically unattributed (`~/obsidian`
+    a01fa34f is one), so the True side stamps the event it is permitting, and a caller
+    holding a clock is believed rather than re-clocked.
+
+    False means "this lane refuses it as it always did": the caller keeps its own refusal
+    wording, which names the field, the values and the #724 rail.
+    """
+    match = _AUTONOMY_TASK_PATH.search(str(path or ""))
+    if match is None or old_fm is None or new_fm is None:
+        return False
+    if [field for field, _, _ in schedule_value_moves(old_fm, new_fm)] != ["status"]:
+        return False
+    if str(old_fm.get("status") or "").strip() != "draft":
+        return False
+    if str(new_fm.get("status") or "").strip() != DISPATCHING_STATUS:
+        return False
+    try:
+        from app.autonomy import parked_declaration
+    except Exception:  # noqa: BLE001 — a predicate that cannot ask is not a pass
+        return False
+    if parked_declaration(old_fm) or parked_declaration(new_fm):
+        return False
+    run_ids = _run_record_ids()
+    if run_ids is None:
+        return False
+    task_id = match.group(1)
+    if task_id in run_ids:
+        return False
+    logger.info(
+        "[schedule-rail] #3464 first arm of autonomy task %s allowed on %s at %s: never "
+        "run, no park declared, and the only dispatch move is status draft -> up_next",
+        task_id, path, (now or dt.datetime.now(dt.timezone.utc)).isoformat())
+    return True

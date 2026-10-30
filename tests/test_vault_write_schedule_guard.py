@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shutil
 import types
 from pathlib import Path
 
@@ -51,6 +53,50 @@ BASE_FM = {
 }
 
 TASK_PATH = "autonomy/96-djev-name-prior-probe.md"
+
+#: The numeric id `TASK_PATH`'s basename carries. `policy.first_arm_allowed` (#3464) keys
+#: its "has this task ever run" test on `<runs-root>/<id>/`, so this is the knob every
+#: fixture below turns the first-arm exception on and off with.
+TASK_ID = "96"
+
+
+def _runs_root() -> Path:
+    """The runs root the predicate under test reads: `${LLOYD_DATA}/autonomy-runs`.
+
+    Read per call, never imported: `app.paths.AUTONOMY_RUNS_DIR` is frozen at import and
+    `app.paths.DATA_ROOT` resolves a worktree's root by TREE rather than by `LLOYD_DATA`, so
+    a test that read either would be moving a directory the predicate is not looking at and
+    would pass for the wrong reason.
+    """
+    return Path(os.environ["LLOYD_DATA"]) / "autonomy-runs"
+
+
+def _mark_run(task_id: str = TASK_ID) -> Path:
+    """Say this task HAS run: create its run-record directory the way a dispatch does.
+
+    `_write_run_record` drops a `run_<id>_<stamp>.md` under `<runs-root>/<id>/` on every
+    real run, and that directory is the account a vault sweep cannot undo (#1296) — which is
+    why "has it run" is measured there and not off the `last_run:` front-matter field a
+    reverted commit can rewrite. An arm over a run record is a restart, and a restart stays
+    with a human or a granted call.
+
+    Both lane fixtures call this, so every node in this file that expects a `status` move to
+    be refused is testing a task that HAS run: a node that only wants to watch the rail
+    refuse must not become a node that quietly passes because the fixture left the file
+    looking never-run and #3464's exception is what let it through.
+    """
+    d = _runs_root() / task_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"run_{task_id}_20261030_080148.md").write_text("---\nstatus: success\n---\n",
+                                                         encoding="utf-8")
+    return d
+
+
+def _clear_runs(task_id: str = TASK_ID) -> None:
+    """Say this task has NEVER dispatched: remove its run-record directory."""
+    target = _runs_root() / task_id
+    shutil.rmtree(target, ignore_errors=True)
+    assert not target.exists(), "the run record survived, so this arm is not a FIRST arm"
 
 #: The genuine journal writer, captured at import time because the `scratch`
 #: fixture replaces `denial_journal.record` with a list-appending spy for every
@@ -91,6 +137,14 @@ def scratch(tmp_path, monkeypatch):
     # Plain append, no `or True`: a spy that returns a truthy value reads like an
     # assertion that cannot fail, and this one's whole job is to be believed.
     monkeypatch.setattr(denial_journal, "record", lambda **kw: journal.append(kw))
+    # #3464's predicate answers "has this task ever run?" from `${LLOYD_DATA}/autonomy-runs`,
+    # so the variable is aimed at THIS test's tree — never the suite's shared one, where one
+    # node's `_clear_runs()` would sweep the record out from under another — and the id this
+    # file's task carries gets a run record. Every refusal node below therefore tests a task
+    # that HAS run: an arm over a run record is a restart, which stays with a human or a
+    # grant. The nodes that want the never-run state call `_clear_runs()` and say why.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "data"))
+    _mark_run()
     return types.SimpleNamespace(root=tmp_path, mod=V, journal=journal)
 
 
@@ -844,6 +898,14 @@ def fs(tmp_path, monkeypatch):
     journal: list[dict] = []
     # Plain append, no `or True` — the same reason the `scratch` fixture gives.
     monkeypatch.setattr(denial_journal, "record", lambda **kw: journal.append(kw))
+    # #3464's predicate asks `${LLOYD_DATA}/autonomy-runs/<id>` whether the task has run, and
+    # without this line that question is answered from the SUITE's shared data root, where
+    # `96/` may or may not exist depending on what else ran first. So the variable is aimed at
+    # this test's tree and the id gets a run record: every refusal node below, the #2787 bypass
+    # hunt among them, then tests a task that HAS run — an arm over a run record is a restart,
+    # which stays refused — and `_clear_runs()` is what a node calls for the never-run state.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "data"))
+    _mark_run()
     return types.SimpleNamespace(root=tmp_path, mod=bfs, journal=journal)
 
 
@@ -1949,3 +2011,206 @@ def test_the_drift_pin_fires_on_the_sentence_that_started_it():
         "the set anyway, so a field that enters `SCHEDULE_STATE_FIELDS` without "
         "a line in the comment would pass the pin above. That is the drift "
         "clause 2 exists to catch.")
+
+
+# ──── #3464: the two MCP lanes land a first arm, and refuse everything else ────
+#
+# The fixtures in this file mark this task as HAVING RUN (`_mark_run`), which is the state
+# every refusal node above depends on: an arm over a run record is a restart, and a restart
+# is still the rail's. The nodes below call `_clear_runs()` to get the one state #3464 makes
+# an exception for, and every one of them also pins the refusal on the other side of that
+# line, so no node here can be satisfied by a predicate that simply always says yes.
+
+PARKED_DRAFT = _task(status="draft", parked="'Alan parked it 2026-09-17: stays dark'")
+PARKED_ARMED = _task(status="up_next", parked="'Alan parked it 2026-09-17: stays dark'")
+
+
+def test_a_never_run_unparked_task_may_be_armed_through_vault_write(scratch):
+    """Clause 4 on the `vault_write` lane: the first arm lands, and lands as bytes.
+
+    The whole point of #3464 is a file a round could write and could not start, so the
+    assertion that matters is not the absence of an `error` key but the file on disk reading
+    `up_next` — a refusal returned as `{}` would satisfy the weak version. It then refuses the
+    SAME file one state away, which is the pair that makes this a rule rather than a hole:
+    the node above and this one differ by one directory on disk.
+    """
+    _seed(scratch, _task(status="draft"))
+    _clear_runs()
+
+    out = _write(scratch, TASK_PATH, _task(status="up_next"))
+    assert "error" not in out, out
+    assert "status: up_next" in (scratch.root / TASK_PATH).read_text(encoding="utf-8")
+
+    _mark_run()
+    refused = _write(scratch, TASK_PATH, _task(status="draft"))
+    assert "error" in refused, "a downgrade was accepted where a run record exists"
+    assert "`status`" in refused["error"], refused["error"]
+
+
+def test_a_parked_task_is_never_armed_by_a_file_lane(scratch, fs):
+    """The #68 case on both MCP lanes: `parked:` means the move is refused, bytes unmoved.
+
+    Both lanes in one node because that is the clause: the same file, the same move, and the
+    answer cannot depend on which door a turn happened to use. The journal is read rather than
+    trusted — a refusal that writes no bytes and no row is a refusal nobody can audit.
+    """
+    before = _seed(scratch, PARKED_DRAFT)
+    _clear_runs()
+    refused = _write(scratch, TASK_PATH, PARKED_ARMED)
+    assert "error" in refused, "an arm over a parked declaration was accepted"
+    assert "`status`" in refused["error"] and "#724" in refused["error"], refused["error"]
+    assert (scratch.root / TASK_PATH).read_text(encoding="utf-8") == before, (
+        "a refused arm still replaced the file")
+
+    fs_before = _fs_seed(fs, PARKED_DRAFT)
+    fs_out = _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+    assert fs_out, "the open lane armed a task its own predicate says is parked"
+    assert "`status`" in fs_out["error"], fs_out["error"]
+    assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == fs_before
+
+
+def test_the_open_lane_lands_the_first_arm_the_vault_lane_lands(fs):
+    """Clause 4 across the process seam: `Edit` reaches the same answer as `vault_write`.
+
+    The node above refuses this spelling; this one allows it, and only the runs directory
+    differs — which is the pair that pins the ONE shared answer across the two handlers, and
+    across the boundary a round actually crosses (a round edits a file, it does not call the
+    MCP handler). The refusal path is re-asserted after the allow so a lane that simply
+    stopped checking would fail here rather than pass.
+    """
+    _fs_seed(fs, _task(status="draft"))
+    _clear_runs()
+
+    out = _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+    assert not out, f"the open lane refused a first arm it should land: {out}"
+    armed = (fs.root / TASK_PATH).read_text(encoding="utf-8")
+    assert "status: up_next" in armed, armed
+
+    _mark_run()
+    again = _fs_edit(fs, TASK_PATH, "status: up_next", "status: draft")
+    assert again, "a downgrade through the open lane was accepted where a run record exists"
+    assert "`status`" in again["error"], again["error"]
+    assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == armed, (
+        "a refused downgrade moved bytes anyway")
+
+
+@pytest.mark.parametrize("field,value", [
+    pytest.param("frequency", "daily", id="frequency"),
+    pytest.param("preferred_hours", "05:30", id="preferred_hours"),  # BASE_FM says 06:00
+    pytest.param("skill_name", "bar", id="skill_name"),
+    pytest.param("depends_on", 0, id="depends_on"),
+    pytest.param("auto_advance", "true", id="auto_advance"),
+    pytest.param("scheduled_at", "2026-11-02T05:30:00+00:00", id="scheduled_at"),
+])
+def test_a_cadence_move_is_refused_on_both_lanes_even_for_a_never_run_unparked_task(
+        scratch, fs, field, value):
+    """Clause 5: the rail is not wider than the first arm, on either door.
+
+    `_clear_runs()` is the load-bearing line — without it these nodes would be refusing a
+    restart and would stay green even if the lanes grew a second exception for cadence fields.
+    With it, each of these is the exact shape the exception *does not* cover: never run, no
+    park declared, and a cadence field moving. The armed create is the same test from the other
+    side, and it is the case the create rail was built for (`vault` commit e66bc6e1 records it
+    refusing 101's own create on purpose).
+    """
+    _seed(scratch, _task(status="draft"))
+    _clear_runs()
+    refused = _write(scratch, TASK_PATH, _task(status="up_next", **{field: value}))
+    assert "error" in refused, f"{field} moved through `vault_write` on a never-run task"
+    assert field in refused["error"], refused["error"]
+
+    _fs_seed(fs, _task(status="draft"))
+    _clear_runs()
+    fs_out = _fs_write(fs, TASK_PATH, _task(status="up_next", **{field: value}))
+    assert fs_out, f"{field} moved through the open lane on a never-run task"
+    assert field in fs_out["error"], fs_out["error"]
+
+
+def test_an_armed_create_is_refused_on_both_lanes_however_never_it_has_run(scratch, fs):
+    """Clause 5's create half: a file a lane invents cannot arm itself.
+
+    Both guards the first-arm exception rests on are vacuously true on a create — there is no
+    before-image to compare and no run record can exist yet — which is precisely why the create
+    branch keeps its own rail (`policy.create_arms_a_task`) and why `_clear_runs()` here changes
+    nothing. A draft create is still accepted, so the nightly chain's hand-down shape is intact.
+    """
+    _clear_runs()
+    refused = _write(scratch, "autonomy/104-never-run-and-unparked.md",
+                     _task(status="up_next"))
+    assert "error" in refused, "a create armed a task through `vault_write`"
+    assert "status" in refused["error"], refused["error"]
+
+    fs_out = _fs_write(fs, "autonomy/104-never-run-and-unparked.md", _task(status="up_next"))
+    assert fs_out, "a create armed a task through the open lane"
+    assert "status" in fs_out["error"], fs_out["error"]
+
+    drafted = _write(scratch, "autonomy/104-never-run-and-unparked.md", _task(status="draft"))
+    assert "error" not in drafted, drafted
+
+
+def test_both_mcp_lanes_ask_the_shared_predicate_and_hold_no_copy_of_it(scratch, fs,
+                                                                        monkeypatch):
+    """Clauses 3-4 together, on the code: two lanes, one decision, no second implementation.
+
+    A spy on `policy.first_arm_allowed` records the path each lane hands it — the vault lane a
+    vault-relative path, the open lane the `autonomy/<name>` spelling it computes from its own
+    realpath, which is the one translation either lane is allowed to do. Then each lane's
+    guard is read as a SYNTAX TREE: its body may call the helper and must not contain the
+    helper's vocabulary, because the way a shared rule breaks is a lane re-growing one of its
+    conditions a month from now and passing every behaviour test while doing it.
+    """
+    import ast
+    import inspect
+
+    import agent_mcp.vault as V
+
+    _seed(scratch, _task(status="draft"))
+    _clear_runs()
+    seen: list[str] = []
+    # Bound BEFORE the patch: a spy that looks the helper up on the module at call time
+    # re-enters itself until the stack gives out, and the lane under test then reports an
+    # INTERNAL error that reads like a refusal.
+    real = P.first_arm_allowed
+
+    def _spy(path, old_fm, new_fm, now=None):
+        seen.append(str(path))
+        return real(path, old_fm, new_fm, now)
+
+    monkeypatch.setattr(P, "first_arm_allowed", _spy)
+
+    assert "error" not in _write(scratch, TASK_PATH, _task(status="up_next"))
+    assert TASK_PATH in seen, f"vault_write decided without the predicate: {seen}"
+
+    _fs_seed(fs, _task(status="draft"))
+    _clear_runs()
+    assert not _fs_edit(fs, TASK_PATH, "status: draft", "status: up_next")
+    assert f"autonomy/{TASK_PATH.rsplit('/', 1)[-1]}" in seen, (
+        f"the open lane did not hand the predicate a task path: {seen}")
+
+    import agent_mcp.builtin_fs as B
+    for fn in (V._autonomy_schedule_move_refusal, B._autonomy_schedule_refusal):
+        tree = ast.parse(inspect.getsource(fn))
+        body = tree.body[0].body
+        called = {"first_arm_allowed" for node in ast.walk(tree)
+                  for n in _ast_names(node) if n == "first_arm_allowed"}
+        assert called, f"{fn.__name__} never calls the shared predicate"
+        words = " ".join(sorted({n for node in body for n in _ast_names(node)})).lower()
+        for stolen in ("parked", "autonomy_runs_root", "run_record", "lloyd-data"):
+            assert stolen not in words, (
+                f"{fn.__name__} names `{stolen}`: this lane has begun deciding the first "
+                "arm for itself instead of asking policy")
+
+
+def _ast_names(node) -> set[str]:
+    """Every name, attribute and string constant an AST node mentions — the probe's alphabet."""
+    import ast
+
+    out: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            out.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            out.add(sub.attr)
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            out.add(sub.value)
+    return out

@@ -2019,8 +2019,9 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
     if not _is_autonomy_task_path(path):
         return None
     try:
-        from app.harness.policy import (SCHEDULE_STATE_FIELDS, front_matter_map,
-                                       schedule_value_moves, shown_schedule_value)
+        from app.harness.policy import (SCHEDULE_STATE_FIELDS, first_arm_allowed,
+                                       front_matter_map, schedule_value_moves,
+                                       shown_schedule_value)
     except Exception as exc:  # noqa: BLE001 — see phase A
         _record_schedule_refusal(path, f"the rail itself could not run ({exc})")
         return _err("vault_write refused: the autonomy schedule rail could not run, "
@@ -2051,12 +2052,19 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
                     "be checked against it. Repair the front matter rather than "
                     "writing past it.", ErrorCode.PROTECTED_PATH)
     moves = schedule_value_moves(old_fm, new_fm)
-    if not moves:
+    if not moves or first_arm_allowed(path, old_fm, new_fm):
         # Nothing dispatch-affecting moved, but the body still came through this
         # branch, and #2589 is the write that rewrote a task's body with no dispatch
         # field in sight. The dispatch comparison stays first: a write that both moves
         # `status` and orders an undelivered tool is refused for the field, because
         # that is the half that could run.
+        #
+        # An allowed FIRST ARM (#3464) falls through here too, and only here: whether
+        # `draft -> up_next` on a never-run, unparked task is the one move this lane may
+        # land is `policy.first_arm_allowed`'s answer, not a condition restated in this
+        # file, and the body check still runs over it — so a write that both arms a task
+        # and orders a tool its prompt never names is refused for the body, the same
+        # dangerous-half-first order every other case on this lane keeps.
         return _autonomy_body_refusal(path, content)
     field, old, new = moves[0]
     _record_schedule_refusal(path, f"{field}: {old!r} -> {new!r}")

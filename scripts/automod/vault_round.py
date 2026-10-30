@@ -574,8 +574,8 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
     # (`same_schedule_value`, reached through it) and its renderer are the same
     # module's, shared with the `vault_write` lane so the two file-reading lanes
     # cannot drift apart one re-quote at a time.
-    from app.harness.policy import (DISPATCHING_STATUS, schedule_value_moves,
-                                    shown_schedule_value)
+    from app.harness.policy import (DISPATCHING_STATUS, first_arm_allowed,
+                                    schedule_value_moves, shown_schedule_value)
 
     errors: list[str] = []
     for p in sorted(set(paths)):
@@ -600,6 +600,12 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
                     f"create it `status: draft` and let a human, or a granted call, arm it")
             continue
         old_fm = _front_matter_map(shown.stdout)
+        if first_arm_allowed(p, old_fm, new_fm):
+            # The one dispatch move the #724 rail permits on a file lane (#3464): the FIRST
+            # arm of a task that has never run and declares no park. The predicate is
+            # policy's, not a copy — a lane that restated its conditions is a lane that can
+            # drift one condition at a time, which is what the three-lane tests check.
+            continue
         for field, old, new in schedule_value_moves(old_fm, new_fm):
             errors.append(
                 f"{p}: `{field}` moved {shown_schedule_value(old)} -> "

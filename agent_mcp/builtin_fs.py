@@ -659,8 +659,9 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
         # the rail and not from a tuple in this file: a lane that cannot load the
         # rule says WHICH fields it could not verify, spelled from the set.
         from app.harness.policy import (DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS,
-                                        create_arms_a_task, front_matter_map,
-                                        schedule_value_moves, shown_schedule_value)
+                                        create_arms_a_task, first_arm_allowed,
+                                        front_matter_map, schedule_value_moves,
+                                        shown_schedule_value)
     except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
         _record_schedule_denial(mut, tool, f"the rail itself could not run ({exc})")
         return json.dumps({
@@ -717,11 +718,22 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
                       f"than writing past it."),
             "code": ErrorCode.PROTECTED_PATH})
     moves = schedule_value_moves(old_fm, new_fm)
-    if not moves:
+    # This lane holds ABSOLUTE paths, and the predicate's path rule is the vault-relative
+    # shape the other two lanes pass it; `real` is already known to sit under `_autonomy_root()`
+    # (= `<vault>/autonomy`), so spelling it `autonomy/<name>` is one path computation, not a
+    # second copy of any condition.
+    if not moves or first_arm_allowed("autonomy/" + os.path.relpath(real, root),
+                                      old_fm, new_fm):
         # Nothing dispatch-affecting moved, but the post bytes still came through this
         # branch, and #2589's incident is exactly a body rewrite that moved none of them.
         # The dispatch comparison stays first: a write that both moves `status` and orders
         # an undelivered tool is refused for the field, the dangerous half.
+        #
+        # An allowed FIRST ARM (#3464) falls through here too: whether `draft -> up_next` on
+        # a never-run, unparked task may land is `policy.first_arm_allowed`'s answer and
+        # nothing in this file decides it, and the body check still runs over the arming
+        # write — so a file that both arms a task and orders a tool its prompt never names
+        # is still refused for the body.
         return _autonomy_body_denial(mut, post_text, tool)
     field, old, new = moves[0]
     _record_schedule_denial(mut, tool, f"{field}: {old!r} -> {new!r}")

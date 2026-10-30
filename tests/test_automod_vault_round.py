@@ -9282,3 +9282,178 @@ def test_the_run_citation_rung_asks_nothing_of_a_body_that_cites_no_run(vault, r
     assert V.run_citation_errors([skill]) == []
     errors, _buckets = V.validate([skill])
     assert not any("run record" in e for e in errors), errors
+
+
+# ───────── #3464: the round lane may land a task's FIRST arm, and nothing wider ─────────
+#
+# These nodes and the ones in tests/test_vault_write_schedule_guard.py and
+# tests/test_policy_first_arm_allowed.py are the same rule read from three lanes. What is
+# specific to THIS lane is the route: `land()` -> `validate()` -> `schedule_state_errors()`,
+# which runs `git show HEAD:<path>` for the before-bytes and then asks the ONE shared
+# predicate — the lane holds no copy of any condition, and the last node here is what pins
+# that. Everything above this section stayed green unchanged because every `status` refusal it
+# asserts is a DOWNGRADE or an armed CREATE, neither of which the new exception touches.
+
+import shutil  # noqa: E402  (module imports above do not include it)
+
+TASK_REL = "autonomy/1-task.md"
+ARMED_TASK_HEAD = "---\nid: 1\nstatus: up_next\n---\n"
+ARMED_TASK_BODY = ARMED_TASK_HEAD + "# task\n"
+PARKED_ARMED_BODY = (
+    "---\nid: 1\nstatus: up_next\nparked: \"Alan\'s ruling 2026-09-17: parked on "
+    'purpose\"\n---\n# task\n')
+CADENCE_ARMED_BODY = ("---\nid: 1\nstatus: up_next\nfrequency: weekly\n---\n# task\n")
+DRAFT_TASK_HEAD = "---\nid: 1\nstatus: draft\n---\n# task\n"
+
+
+def _never_armed_task_vault(tmp_path, monkeypatch):
+    """A scratch vault whose task sits at HEAD in `status: draft`, never dispatched.
+
+    The #3458/#3064/#3308 shape exactly: a round built the file, the rail held the last line,
+    and nothing armed it. `LLOYD_DATA` is aimed at THIS test's tree so the predicate's runs
+    check reads a directory this node controls, not the suite's shared one — the same reason
+    `autonomy_runs_dir` gives for resolving per call.
+    """
+    r = _scratch_vault(tmp_path, monkeypatch, mock_loaders=True)
+    (r / TASK_REL).write_text(DRAFT_TASK_HEAD, encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "task written with its skill and window, left draft")
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "data"))
+    return r
+
+
+def test_a_round_may_land_the_first_arm_of_a_never_run_unparked_task(tmp_path, monkeypatch):
+    """The line eight items could not write: `land()` accepts AND commits draft -> up_next.
+
+    Asserted through `land()`, not just `validate()`, because clause 3 is that the lane lets
+    the move through — a predicate returning True while the lane still appended its own error
+    would satisfy a `validate()`-only assertion and change nothing for the fleet. The bytes are
+    then read back out of the vault's own git history, the way the owed-check job verifies the
+    real arm of 100 and 103 (`git log -G\'^status:\' -- autonomy/100-*.md`).
+    """
+    r = _never_armed_task_vault(tmp_path, monkeypatch)
+    (r / TASK_REL).write_text(ARMED_TASK_BODY, encoding="utf-8")
+
+    errors, _ = V.validate([TASK_REL])
+    assert errors == [], errors
+
+    res = V.land([TASK_REL], "#3464: arm the task the round built", item_id=3464)
+    assert res["ok"] is True, res
+    assert (r / TASK_REL).read_text(encoding="utf-8").startswith(ARMED_TASK_HEAD)
+    shown = git(r, "show", f"{res['commit']}:autonomy/1-task.md")
+    assert "status: up_next" in shown.stdout, shown.stdout
+
+
+def test_the_first_arm_does_not_let_the_round_move_the_cadence_too(tmp_path, monkeypatch):
+    """The allowance is one field wide: an arm that also moves `frequency` is refused whole.
+
+    This is the regression the exception could have bought instead of the one it grants — a
+    lane that let "status moved, never run, unparked" through as a *category* would also let a
+    round re-time the series it just armed, and #2670's ruling is that the window and the
+    cadence are the half the fleet is measured on. The whole write is refused, its arm half
+    included, exactly as before this round existed.
+    """
+    r = _never_armed_task_vault(tmp_path, monkeypatch)
+    (r / TASK_REL).write_text(CADENCE_ARMED_BODY, encoding="utf-8")
+    errors, _ = V.validate([TASK_REL])
+    assert any("frequency" in e and "dispatch-affecting" in e for e in errors), errors
+    assert any("status" in e and "dispatch-affecting" in e for e in errors), errors
+
+
+def test_the_first_arm_is_refused_when_the_task_declares_a_park(tmp_path, monkeypatch):
+    """A `parked:` declaration in the NEW bytes keeps the refusal, worded as a field refusal.
+
+    This is the #68 case, and the wording still matters for the reason it always did: a round
+    told only "status moved" re-words the status line, while a round told which fields the
+    rail holds goes and reads the ruling instead of overriding it.
+    """
+    r = _never_armed_task_vault(tmp_path, monkeypatch)
+    (r / TASK_REL).write_text(PARKED_ARMED_BODY, encoding="utf-8")
+    errors, _ = V.validate([TASK_REL])
+    assert any("status" in e and "dispatch-affecting" in e for e in errors), errors
+
+
+def test_the_first_arm_is_refused_once_the_task_has_a_run_record(tmp_path, monkeypatch):
+    """The run record is the difference between a first arm and a restart.
+
+    A `<runs-root>/1/` directory exists, so this is not the task\'s first dispatch and the
+    exception does not apply. The node then removes it and the same write is accepted: either
+    half alone would pass on a predicate that ignored the runs root, and either half alone
+    would pass on one that always refused.
+    """
+    r = _never_armed_task_vault(tmp_path, monkeypatch)
+    (r / TASK_REL).write_text(ARMED_TASK_BODY, encoding="utf-8")
+    runs = Path(os.environ["LLOYD_DATA"]) / "autonomy-runs" / "1"
+    runs.mkdir(parents=True)
+    (runs / "run_1_20261030_080148.md").write_text("---\nstatus: success\n---\n",
+                                                   encoding="utf-8")
+    errors, _ = V.validate([TASK_REL])
+    assert any("status" in e and "dispatch-affecting" in e for e in errors), errors
+
+    shutil.rmtree(runs)
+    assert V.validate([TASK_REL])[0] == [], \
+        "the same write is now a FIRST arm and must be accepted"
+
+
+def test_the_round_lane_asks_the_shared_predicate_and_holds_no_copy_of_it(tmp_path, monkeypatch):
+    """All three lanes reach one answer because one function decides it (clauses 3 and 4).
+
+    A spy wraps the REAL `policy.first_arm_allowed` and records what the lane hands it, which
+    proves two things a behaviour test cannot: that the lane calls the shared helper on the
+    update path, and with the lane\'s own path plus the two front-matter maps it parsed out of
+    `git show` — not values recomputed per lane. The second half is the drift rail: the lane\'s
+    source must not name the predicate\'s conditions, because the way a three-lane rule breaks
+    is one lane quietly adding one of them back.
+    """
+    import inspect
+
+    from app.harness import policy as P
+
+    r = _never_armed_task_vault(tmp_path, monkeypatch)
+    (r / TASK_REL).write_text(ARMED_TASK_BODY, encoding="utf-8")
+
+    seen: list[tuple] = []
+    real = P.first_arm_allowed
+
+    def spy(path, old_fm, new_fm, now=None):
+        seen.append((path, old_fm, new_fm, now))
+        return real(path, old_fm, new_fm, now)
+
+    monkeypatch.setattr(P, "first_arm_allowed", spy)
+    errors, _ = V.validate([TASK_REL])
+    assert errors == [], errors
+    assert seen, "the round lane decided the first arm without asking the shared predicate"
+    assert seen[0][0] == TASK_REL, seen[0]
+    # The maps are what the lane parsed from `git show HEAD:` — YAML-typed, so `id` is the
+    # integer the file says, not a string this test decided on.
+    assert seen[0][1] == {"id": 1, "status": "draft"}, seen[0]
+    assert seen[0][2] == {"id": 1, "status": "up_next"}, seen[0]
+
+    # The drift rail, read off the CODE rather than the prose: the function's own docstring
+    # explains the rule in words and rightly mentions parks and run records. What must not
+    # appear anywhere in its body is the predicate's vocabulary, because the way a three-lane
+    # rule breaks is one lane quietly re-implementing one condition.
+    import ast as _ast
+
+    fn = _ast.parse(inspect.getsource(V.schedule_state_errors)).body[0]
+    body = fn.body[1:] if (fn.body and isinstance(fn.body[0], _ast.Expr)
+                           and isinstance(fn.body[0].value, _ast.Constant)
+                           and isinstance(fn.body[0].value.value, str)) else fn.body
+    names = set()
+    for node in body:
+        for sub in _ast.walk(node):
+            if isinstance(sub, _ast.Name):
+                names.add(sub.id)
+            elif isinstance(sub, _ast.Attribute):
+                names.add(sub.attr)
+            elif isinstance(sub, _ast.Constant) and isinstance(sub.value, str):
+                names.add(sub.value)
+    joined = " ".join(sorted(names)).lower()
+    # `first_arm_allowed` itself is the one name that MUST be there (asserted below); the
+    # rest are the predicate's internals, and a lane that names them is deciding for itself.
+    for stolen in ("parked_declaration", "parked", "autonomy_runs_root", "run_record"):
+        assert stolen not in joined, (
+            f"`schedule_state_errors` mentions `{stolen}` in its code, which means this lane "
+            "has begun deciding the first arm itself instead of asking policy")
+    assert "first_arm_allowed" in {n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name)}, (
+        "the lane never calls the shared predicate")
