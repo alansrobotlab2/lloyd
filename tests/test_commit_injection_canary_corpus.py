@@ -559,6 +559,15 @@ def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation()
     exits 0), and one present in `WINDOW_UNITS` but absent here is a unit that gained the
     right to commit the live checkout without this rail knowing. Either drift fails, so the
     units in the allowlist and the keys of the guard cannot come apart.
+
+    #3419 added one non-test name to the set: `eval/canary_rows_guard.py`, the write-side
+    rule for this same corpus, which IMPORTS the identity predicate (`WINDOW_UNITS`,
+    `PROC_CGROUP`, `invocation_refusal`) so that "did this fire come from a window" cannot
+    mean two different things to the append and to the commit. That is a reader of the
+    predicate, not a caller of the step, and the distinction is pinned rather than
+    intended: `tests/test_injection_canary_rows_guard.py::the_guard_imports_the_predicate_and_never_invokes_the_step`
+    reads the guard's syntax tree and refuses anything broader than those three names — so
+    an unattended process that grew into invoking `commit_corpus` would still fail here.
     """
     assert SCRIPT.is_file() and not (SCRIPT.parent / "__init__.py").exists(), \
         "`scripts/` is a package, so importing this module could run it — the whole design " \
@@ -573,6 +582,10 @@ def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation()
         "tests/test_persistence_window_unit.py",
         "tests/test_egress_window_unit.py",
         "tests/test_safety_gate_discrimination.py",
+        # The rows guard and its test, for the reason in the docstring: the guard reads the
+        # predicate, and the test names the module while pinning that it reads only that.
+        "eval/canary_rows_guard.py",
+        "tests/test_injection_canary_rows_guard.py",
     }
     assert set(importers) <= allowed, \
         f"something besides the window units and their tests names the committer: " \

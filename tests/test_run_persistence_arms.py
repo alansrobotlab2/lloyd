@@ -245,7 +245,12 @@ def run_main(tmp_path: Path, stub: Stub, db: Path, reps: int, *, fail_rep: int |
     tmp_path.joinpath("reps.log").write_text("")
     env = {PA.BACKEND_ENV: stub.url, PA.WORKERS_DB_ENV: str(db_override or db),
            PA.CLI_ENV: shlex.join(CANARY), PA.DRAIN_ENV: "2", PA.AUTOMOD_WAIT_ENV: "1",
-           "REP_MARKER": str(tmp_path / "reps.log")}
+           "REP_MARKER": str(tmp_path / "reps.log"),
+           # #3419: the driver now refuses a run aimed at the tracked corpus unless the
+           # caller is a window fire, so an in-process rehearsal of it names its scratch
+           # file the way `base_env` above already did. Without this line these nodes are
+           # refused for their destination before they reach the hold they are about.
+           "LLOYD_CANARY_ROWS": str(tmp_path / "win" / "rows.jsonl")}
     saved = {k: os.environ.get(k) for k in env}
     saved_run_cli = PA.run_cli
     err, out = io.StringIO(), io.StringIO()

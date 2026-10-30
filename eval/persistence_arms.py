@@ -66,6 +66,12 @@ for _p in (str(LLOYD_HOME), str(LLOYD_HOME / "eval")):
 #: version that has been running under real landings since #1550.
 from run_context_rot_eval import PoolPause  # noqa: E402
 
+#: #3419's rows guard: the one place that decides whether this caller may write the
+#: tracked corpus, shared with the bench and the egress window so all three mean the same
+#: thing by "a window fire". Stdlib plus the predicate it imports, so asking it costs a
+#: `/proc/self/cgroup` read and nothing else.
+import canary_rows_guard as GUARD  # noqa: E402
+
 BACKEND_ENV = "LLOYD_BACKEND_URL"
 DEFAULT_BACKEND = "http://127.0.0.1:8080"
 CLI_ENV = "LLOYD_CANARY_CMD"
@@ -437,6 +443,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.reps < 1:
         print(f"reps must be >= 1, got {args.reps}", file=sys.stderr)
+        return 2
+    # #3419: a rehearsal of this command with no `LLOYD_CANARY_ROWS` used to append its
+    # reps into the git-tracked corpus (18 rows left uncommitted by the 2026-10-26 one).
+    # Asked HERE rather than only in the bench's own `run`, and before `PersistenceHold`
+    # is built, for the reason `eval/run_egress_arms.sh` already gives for its aggregator
+    # pre-flight (#3169): a window that is going to be refused must be refused before it
+    # pauses dispatch, because a refused pause is wall clock spent on nothing. The two
+    # weekly fires carry their unit's cgroup identity and fall straight through this.
+    refused_rows = GUARD.preflight()
+    if refused_rows:
+        print(f"persistence-arms: {refused_rows}", file=sys.stderr)
         return 2
     backend = backend_url(args.backend)
     db = workers_db()

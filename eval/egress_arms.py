@@ -83,6 +83,9 @@ from aggregator_binding import DEFAULT_MCP_MODULE, aggregator_binding
 from run_injection_canary import (  # noqa: E402
     ARM_ENV_VAR, ARM_OFF, ARM_ON, read_guard_egress, state_url_for,
 )
+#: #3419's rows guard, the same one `eval/persistence_arms.py` and the bench consult, so
+#: one predicate decides for both window surfaces.
+import canary_rows_guard as GUARD  # noqa: E402
 
 MCP_CMD_ENV = "LLOYD_MCP_CMD"
 MCP_PORT_ENV = "LLOYD_MCP_PORT"
@@ -388,6 +391,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.reps < 1:
         print(f"reps must be >= 1, got {args.reps}", file=sys.stderr)
+        return 2
+    # #3419: this window is the surface that actually dirtied the tracked corpus on
+    # 2026-10-26 — 15 of the 18 rows left uncommitted there are the shipped scenario set
+    # at `arm: enforce-off`, which only this driver writes — so the same refusal the
+    # persistence window asks sits here too, and sits it BEFORE `run_root` makes a
+    # directory and `PersistenceHold` pauses dispatch. A rehearsal of either window
+    # command with no `LLOYD_CANARY_ROWS` is refused; the weekly fires carry their unit's
+    # cgroup identity through the wrapper and are unaffected.
+    refused_rows = GUARD.preflight()
+    if refused_rows:
+        print(f"egress-arms: {refused_rows}", file=sys.stderr)
         return 2
     arms = tuple(dict.fromkeys(args.arms))
     off_url = shared_mcp_url(args.mcp_url)

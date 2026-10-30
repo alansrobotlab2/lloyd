@@ -74,6 +74,14 @@ from typing import Any
 
 LLOYD_HOME = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LLOYD_HOME))
+# `eval/` goes on the path here rather than being relied on from `sys.path[0]`: the bench
+# runs as a script (where it is already there), as `import run_injection_canary` from the
+# window drivers and their tests (which put it there themselves), and as
+# `import eval.run_injection_canary` — and #3419's rows guard lives beside this file, so
+# the one line that keeps the three import styles agreeing is this one.
+sys.path.insert(0, str(LLOYD_HOME / "eval"))
+
+import canary_rows_guard as GUARD  # noqa: E402
 
 SCENARIOS_PATH = LLOYD_HOME / "eval" / "injection_canary" / "scenarios.yaml"
 CORPUS_DIR = LLOYD_HOME / "eval" / "injection_canary" / "corpus"
@@ -108,8 +116,56 @@ def _env_path(var: str) -> Path | None:
 
 
 def rows_path() -> Path:
-    """The JSONL this process appends: `LLOYD_CANARY_ROWS`, else the tracked default."""
+    """The JSONL this process READS: `LLOYD_CANARY_ROWS`, else the tracked default.
+
+    Read-side and deliberately ungarded: `grade`, the persistence report and
+    `eval/summary_length_attribution_probe.py` all have to read the tracked corpus from an
+    ordinary terminal, and refusing them would hide the history #3419 is about. The
+    write-side question is `rows_write_path()`.
+    """
     return _env_path(ROWS_ENV_VAR) or ROWS_PATH
+
+
+#: The tracked corpus as it was when this module was imported. Both #3419 checks compare
+#: against THIS and not against `ROWS_PATH`, because a test that monkeypatches `ROWS_PATH`
+#: to a scratch file and writes to it must not be refused by a guard that thinks the
+#: scratch file is the corpus — and because a guard that read `ROWS_PATH` live would stop
+#: meaning "the tracked file" the moment anything repointed it (#3419).
+_TRACKED_ROWS = ROWS_PATH
+
+
+def rows_write_path(cgroup_file: str = GUARD.PROC_CGROUP) -> Path:
+    """Where this process may APPEND: the redirect, or the tracked corpus if it is a window fire.
+
+    #3419. A rehearsal of the window command with no redirect used to land its rows in
+    `ROWS_PATH`, which is git-tracked and is what the deploy gate reads a leak rate out
+    of; the 2026-10-26 rehearsal left 18 rows there and the published window then read
+    30/66 against the committed 27/60. A caller that is not one of the two window units —
+    the identity predicate `eval/canary_rows_guard.py` imports from #2877's commit step —
+    is refused with a message naming `LLOYD_CANARY_ROWS`; a caller that named its own
+    destination is writing scratch and is never refused.
+
+    The question is asked of the DESTINATION, not of the caller's environment alone: a
+    caller whose resolved file is not the tracked corpus is already writing scratch by
+    some other means (an in-process test that repoints `ROWS_PATH`, which is what
+    `tests/test_injection_canary.py` does), and refusing it would be the guard inventing a
+    risk that the path it is about to write contradicts. Clause 1 is a claim about
+    `eval/measurements/injection-canary/rows.jsonl`, and this is the same rule
+    `append_rows` applies two statements later, so the pre-flight and the writer cannot
+    disagree about whether a given run is aimed at the corpus.
+
+    Raises `canary_rows_guard.CanaryRowsRefused`, which each entry point turns into exit
+    2. Call it ONCE per entry point, before anything expensive: the window drivers call it
+    before they pause the dispatch pool, and the bench calls it before it reads the
+    guard's state.
+    """
+    dest = rows_path()
+    if dest != _TRACKED_ROWS:
+        return dest
+    refused = GUARD.preflight(cgroup_file=cgroup_file)
+    if refused:
+        raise GUARD.CanaryRowsRefused(refused)
+    return dest
 
 
 def report_path(date: str | None = None) -> Path:
@@ -283,7 +339,8 @@ async def require_tool_sandbox(state_url: str | None = None):
 
 
 def append_rows(rows: list[dict], *, path: Path = ROWS_PATH,
-                arm: dict[str, Any] | None = None) -> list[dict]:
+                arm: dict[str, Any] | None = None,
+                cgroup_file: str = GUARD.PROC_CGROUP) -> list[dict]:
     """Stamp every row with the arm it ran under and append the lot to `path`.
 
     The one place a row is written, so "every row carries its arm" is a property
@@ -293,10 +350,22 @@ def append_rows(rows: list[dict], *, path: Path = ROWS_PATH,
     environment, so a caller that cannot forget the label is not required to
     remember it either.
 
+    It is also the one place #3419's rule can be enforced as an invariant rather than as
+    a courtesy: writing to the tracked corpus from a caller that is not one of the two
+    window units raises `canary_rows_guard.CanaryRowsRefused` here, so an entry point
+    added later cannot re-open the rehearsal hole by forgetting to call
+    `rows_write_path()` first. The window fires pass through it — they carry the cgroup
+    identity the guard reads — and every scratch destination is unchecked, since a
+    redirect is the thing the guard tells a rehearsal to do.
+
     A verified arm dict (#2338) brings `guard_egress_enforce` and `mcp_url` with it,
     and they land on every row through the same merge — the endpoint a row was
     measured against is part of the row, not of the terminal it was printed on.
     """
+    if path == _TRACKED_ROWS:
+        refused = GUARD.preflight(cgroup_file=cgroup_file)
+        if refused:
+            raise GUARD.CanaryRowsRefused(refused)
     fields = egress_arm() if arm is None else dict(arm)
     stamped = [{**row, **fields} for row in rows]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1450,6 +1519,17 @@ async def _run(args) -> int:
     scenarios = load_scenarios()
     only = select_keys(scenarios, args.only)
     mcp_url = getattr(args, "mcp_url", None) or None
+    # Where the rows would go, asked BEFORE the arm is read: the ordering rule two lines
+    # above is that a refusal about the command itself comes before a precondition that
+    # needs another process, and a rehearsal refused for its destination should not have
+    # spent a `/state` round trip and a sandbox pre-flight first. A rehearsal of THIS
+    # command with no `LLOYD_CANARY_ROWS` is what left 18 rows in the tracked corpus on
+    # 2026-10-26, so the refusal names the variable the operator has to set (#3419).
+    try:
+        rows_destination = rows_write_path()
+    except GUARD.CanaryRowsRefused as exc:
+        print(f"rows refused: {exc}", file=sys.stderr, flush=True)
+        return 2
     # The arm is VERIFIED, not assumed: `--mcp-url` or not, the label comes from the
     # `/state` of the aggregator the episode's tools are about to be dispatched to,
     # and a run whose request that endpoint will not honour is refused before a row
@@ -1474,9 +1554,10 @@ async def _run(args) -> int:
     await require_tool_sandbox(state_url=state_url_for(arm["mcp_url"]))
     from app.data_root import PRODUCTION_DATA_ROOT
     data_root = Path(args.data_root) if args.data_root else PRODUCTION_DATA_ROOT
-    # Resolved here, once, so the redirect is a property of the window and not of the
-    # line that happens to write the last row (#2397 clause 1).
-    rows_file = rows_path()
+    # Resolved up at the top of this function, once, so the redirect is a property of the
+    # window and not of the line that happens to write the last row (#2397 clause 1), and
+    # so that the destination's authorization is settled before an episode exists (#3419).
+    rows_file = rows_destination
     rows_file.parent.mkdir(parents=True, exist_ok=True)
     server, base = (serve_corpus() if any(sc.get("medium") == "http" for sc in scenarios)
                     else (None, "http://127.0.0.1:0"))
