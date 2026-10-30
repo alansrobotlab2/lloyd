@@ -15,6 +15,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1791,7 +1792,10 @@ async def test_the_scratch_dir_is_snapshot_before_the_command_for_the_same_reaso
     assert _bash_tree_strays._new_empty_dbs(home, post[1]) == [], (
         "measured against a snapshot taken after the command, the file the check exists "
         "to find is invisible")
-    assert _bash_tree_strays._new_empty_dbs(home, pre[1]) == ["workers.db"], (
+    # The hit is `(name, tables)` and `tables` is None for a 0-byte file: the size branch
+    # already decided that one is nothing to read, so no probe ran and there is no count to
+    # carry (#3567 extended this return from a bare name to that pair).
+    assert _bash_tree_strays._new_empty_dbs(home, pre[1]) == [("workers.db", None)], (
         "against the pre-call set it is found, on the same state on disk")
 
 
@@ -1847,3 +1851,340 @@ async def test_a_chat_session_laying_an_empty_database_is_not_measured(scratch,
     text = await _run("sqlite3 workers.db .tables")
     assert EMPTY_DB_MARK not in text
     assert _rows(journal) == []
+
+
+# ── the byte-bearing half of the same leg: a schema is pages, so measure (#3567) ──
+#
+# Every node above lays a file with `: >`, which produces 0 bytes, and the gate that
+# decides whether to say anything was `st_size != 0 -> continue`. The 81,920-byte
+# `kg.sqlite` that started this walked straight through that test suite: writing a schema
+# writes pages, so the store nobody put a row in had bytes, and the hourly shadow check was
+# the only thing that ever saw it. The fixtures below therefore build REAL databases with
+# the sqlite3 module — 1300 inserted rows create the pages, and the schema-only copy then
+# deletes them — because a file assembled out of bytes by hand is not something SQLite's
+# read-only open would answer for.
+
+LAY_SCHEMA = """
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA page_size=4096')
+c.execute('CREATE TABLE facts (id INTEGER PRIMARY KEY, body TEXT)')
+c.execute('CREATE TABLE links (src TEXT, dst TEXT)')
+c.executemany('INSERT INTO facts (body) VALUES (?)',
+              [(('x' * 60) + str(i),) for i in range(930)])
+if len(sys.argv) > 2:
+    c.execute("INSERT INTO links VALUES ('a', 'b')")
+else:
+    c.execute('DELETE FROM facts')
+c.commit(); c.close()
+"""
+
+
+def _stat3(p: Path) -> tuple[int, int, int]:
+    st = p.stat()
+    return (st.st_size, st.st_ino, st.st_mtime_ns)
+
+
+async def test_the_byte_bearing_leg_names_the_file_on_the_very_call_that_laid_it(
+        scratch, monkeypatch):
+    """Clause 1 end to end: one Bash call lays a schema-only database and is told on that call.
+
+    An 81,920-byte `.sqlite` with two tables and zero rows, built by the command itself. The
+    note arrives in the same result, and the journal gains one `empty-db-created` row naming
+    `kg.sqlite` — the same origin row the 0-byte leg writes, because a row that cannot
+    outlive its 24 hours is the only record that the shadow had an author.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+
+    text = await _run(f"cd {cwd} && python3 lay.py kg.sqlite && echo laid")
+    assert "laid" in text
+    path = cwd / "kg.sqlite"
+    assert path.stat().st_size == 81_920, "the fixture is the byte-bearing shape"
+
+    rows = _rows(journal)
+    assert [r["kind"] for r in rows] == ["empty-db-created"], rows
+    assert rows[0]["paths"] == ["kg.sqlite"], rows[0]
+    assert "kg.sqlite" in text and EMPTY_DB_MARK in text, (
+        "the call that laid it is the call that is told")
+
+
+async def test_an_otherwise_identical_database_holding_one_row_is_left_alone(
+        scratch, monkeypatch):
+    """Clause 2: the same file plus one row is a job that wrote something, and says nothing.
+
+    Same schema, same 930 inserted rows, same 81,920 bytes; one row is left standing in
+    `links`. No note, no journal row, no warning — a populated store in a watched root is
+    somebody's data, and the only difference the leg acts on is a measured empty one.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+
+    text = await _run(f"cd {cwd} && python3 lay.py kg.sqlite keep && echo laid")
+    path = cwd / "kg.sqlite"
+    assert path.stat().st_size == 81_920, (
+        "identical in size to the schema-only fixture: size was never the difference")
+    assert EMPTY_DB_MARK not in text, text
+    assert _rows(journal) == [], "a file with a row in it is nobody's finding"
+
+
+async def test_a_database_the_probe_declines_is_left_unnamed(scratch, monkeypatch):
+    """Clause 3: an unanswered question is not emptiness, so an unreadable file is silence.
+
+    Four shapes that all have bytes and all fail the read-only open for four different
+    reasons, and none of them may be called schema-only: 8 KiB of zeros wearing a `.sqlite`
+    suffix (not a database), the same bytes truncated to 12 (a header too torn to parse), a
+    write-ahead log standing beside the file with no `-shm` index (the open that would answer
+    0 rows for data sitting in the WAL, and the one `_read_open` refuses to make), and a file
+    with no read permission at all.
+    """
+    (_, journal), _, cwd = scratch
+    lays = cwd / "not_a_db.sqlite", cwd / "torn.sqlite", cwd / "wal_only.sqlite", cwd / "locked.sqlite"
+    lays[0].write_bytes(b"\x00" * 8192)
+    lays[1].write_bytes(b"SQLite format 3\x00" + b"\x11" * 4080)
+    lays[2].write_bytes(b"\x00" * 4096)
+    (cwd / "wal_only.sqlite-wal").write_bytes(b"\xee" * 4096)
+    lays[3].write_bytes(b"\x00" * 8192)
+    os.chmod(lays[3], 0o000)
+    try:
+        for p in lays:
+            assert _bash_tree_strays._schema_only_tables(str(p), p.stat().st_size) is None, \
+                f"{p.name} was reported schema-only on an unanswered read"
+        assert _bash_tree_strays._new_empty_dbs(cwd, frozenset()) == [], \
+            "a declined probe must not reach the note"
+    finally:
+        os.chmod(lays[3], 0o644)
+
+
+async def test_the_probe_reached_the_file_read_only_and_wrote_nothing(
+        scratch, monkeypatch, tmp_path):
+    """Clause 4: the measurement is an in-process `mode=ro` URI open, and it changes nothing.
+
+    Three pins, because the claim is three things at once:
+
+    * **Nothing was written.** size, inode and mtime_ns of the file are identical across the
+      whole check, and the directory holds no new siblings — a `-wal` or `-shm` beside the
+      file would be the probe's own litter in a person's tree. Only the schema-only fixture
+      is laid here, so the sibling claim is about the open that answers; the four shapes the
+      open refuses are pinned in `test_a_database_the_probe_declines_is_left_unnamed`.
+    * **The URI is the shipped one.** `sqlite3.connect` is wrapped to record what it is
+      asked for: every target this leg opens is a `file:` URI carrying `mode=ro`, and the
+      schema-only file with no log beside it is opened `immutable=1` as well. The recorded
+      paths are compared against the shipped rule's own answer, so a fork of the choice in
+      this repo fails here.
+    * **No subprocess, anywhere in this process.** `subprocess.run` and `Popen` are made to
+      raise for the duration. That covers a shell-out from either module, because
+      `subprocess` is one shared stdlib module object and the freshly exec'd `datawatch`
+      resolves the name against it too — so the CLI is not in this path and never could be.
+      What the guard does NOT cover is `os.posix_spawn`/`os.execv`; the positive URI pin
+      above is what shows the open actually happened in-process.
+    """
+    (_, journal), _, cwd = scratch
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+    await _run(f"cd {cwd} && python3 lay.py kg.sqlite && echo laid")
+    path = cwd / "kg.sqlite"
+    size = path.stat().st_size
+
+    import sqlite3 as _sqlite3
+    import subprocess as _subprocess
+    opened: list[str] = []
+    real_connect = _sqlite3.connect
+
+    def spy(target, *a, **kw):
+        opened.append(str(target))
+        return real_connect(target, *a, **kw)
+
+    class NoShellOut(BaseException):
+        """BaseException: `_schema_only_tables` swallows `Exception` as 'answered nothing',
+        which would turn a shell-out into an unrelated `tables == 2` failure and credit the
+        leg with a decline it did not make."""
+
+    def no_subprocess(*a, **kw):
+        raise NoShellOut("the content probe must not shell out")
+
+    monkeypatch.setattr(_sqlite3, "connect", spy)
+    monkeypatch.setattr(_subprocess, "run", no_subprocess)
+    monkeypatch.setattr(_subprocess, "Popen", no_subprocess)
+    before = _stat3(path)
+    siblings_before = sorted(p.name for p in cwd.iterdir())
+    tables = _bash_tree_strays._schema_only_tables(str(path), size)
+    after = _stat3(path)
+
+    assert tables == 2, tables
+    assert opened, "the leg never opened the file it was asked to measure"
+    for target in opened:
+        assert target.startswith("file:"), target
+        assert "mode=ro" in target, target
+    assert any("immutable=1" in t for t in opened), (
+        "a database with no log beside it is opened immutable=1, the no-lock no-write open")
+    assert after == before, "size/inode/mtime_ns moved: the probe wrote to the file"
+    assert sorted(p.name for p in cwd.iterdir()) == siblings_before, (
+        "the open left a sibling file behind")
+    # And it left the interpreter alone. `datawatch.py` runs `import policy` at module
+    # level, so an exec'd copy would strand the guardian's module in `sys.modules` and its
+    # directory on `sys.path` for the rest of the MCP process — the reason this leg rides
+    # an exec-from-file loader with cleanup instead of an import. `datawatch` is asserted
+    # rather than `policy` because a sibling test legitimately imports the guardian's
+    # `policy` at top level, and this node has no claim on that one.
+    assert "datawatch" not in sys.modules, "the content probe stranded the guardian module"
+    assert "/".join(_bash_tree_strays._GUARDIAN_SUBDIR) not in " ".join(
+        str(p) for p in sys.path), "the guardian directory is still on sys.path"
+
+
+async def test_the_note_for_a_byte_bearing_hit_says_schema_only_with_its_count(
+        scratch, monkeypatch):
+    """Clause 5: the extra line is a measurement, and the rest of the paragraph is the same one.
+
+    "empty database of 0 bytes" is false of an 81,920-byte file, and a reader told only
+    "empty" will look for a zero and decide the note is buggy. So the byte-bearing shape gets
+    one extra line — `0 rows in 2 tables`, the shipped probe's own count — and keeps every
+    word of the three things the 0-byte leg has always said: the path, that it holds no data,
+    and where the real stores live. The two shapes are counted separately in the head clause,
+    which is why the phrase is no longer a bare "of 0 bytes" for both.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+    text = await _run(f"cd {cwd} && python3 lay.py kg.sqlite && echo laid")
+    assert EMPTY_DB_MARK in text, text
+    path = cwd / "kg.sqlite"
+    assert "1 empty database holding a schema and no rows" in text, text
+    assert "0 rows in 2 tables" in text, text
+    assert "Schema-only, measured read-only" in text, text
+    assert f"`{path}`: 0 rows in 2 tables" in text, (
+        "the count is the shipped probe's own, not a word about emptiness")
+    assert "The real stores live in" in text, "the where-the-stores-are half is unchanged"
+    assert "which is not data" in text, "the what-it-is half is unchanged"
+    assert "of 0 bytes" not in text, (
+        "a file with 81,920 bytes in it is never called a 0-byte file")
+
+
+async def test_one_call_laying_both_shapes_names_both_in_one_paragraph(scratch, monkeypatch):
+    """A call that lays a 0-byte store and a schema-only one reports each on its own terms.
+
+    Two counts, two descriptions, one paragraph: the 0-byte file is still "of 0 bytes" and the
+    byte-bearing file still carries its own table count, because collapsing them would put a
+    false sentence in front of a person about one of the two files.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+    text = await _run(f"cd {cwd} && : > thin.sqlite && python3 lay.py fat.sqlite && echo laid")
+    assert EMPTY_DB_MARK in text
+    assert ("2 empty databases (1 of 0 bytes, 1 holding a schema and no rows)"
+            in text), text
+    assert f"`{cwd / 'fat.sqlite'}`: 0 rows in 2 tables" in text, text
+    rows = _rows(journal)
+    assert [r["kind"] for r in rows] == ["empty-db-created"], rows
+    assert rows[0]["paths"] == ["fat.sqlite", "thin.sqlite"], rows[0]
+
+
+async def test_the_byte_bearing_leg_costs_nothing_to_a_call_that_laid_no_database(
+        scratch, monkeypatch):
+    """The call that pays for the probe is the call that laid a DB-suffixed file with bytes.
+
+    `_new_empty_dbs` returns before any measurement when the sizes are all 0, and returns
+    `[]` outright when no new name carries a database suffix — so the ordinary background
+    call, which is every call today, neither loads `datawatch.py` nor opens a database. The
+    loader is the expensive half (it execs a module that imports the guardian's `policy`), so
+    this is the boundary worth pinning: a cost that only appears on the shape it measures.
+    """
+    import sqlite3 as _sqlite3
+    import subprocess as _subprocess
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+
+    opened: list[str] = []
+    real_connect = _sqlite3.connect
+
+    def spy(target, *a, **kw):
+        opened.append(str(target))
+        return real_connect(target, *a, **kw)
+
+    def no_exec(*a, **kw):
+        raise AssertionError("no subprocess here")
+
+    monkeypatch.setattr(_sqlite3, "connect", spy)
+    monkeypatch.setattr(_subprocess, "Popen", no_exec)
+
+    # A call that laid nothing DB-suffixed: the scan returns before any measurement.
+    before = frozenset(e.name for e in cwd.iterdir())
+    (cwd / "notes.txt").write_text("hi")
+    assert _bash_tree_strays._new_empty_dbs(cwd, before) == [], "nothing DB-suffixed is new"
+    assert opened == [], f"a call that laid no database opened {opened}"
+
+    # A call that laid a 0-byte one: decided by its size, still with no open and no child.
+    (cwd / "thin.db").write_bytes(b"")
+    assert _bash_tree_strays._new_empty_dbs(cwd, before) == [("thin.db", None)]
+    assert opened == [], "the 0-byte shape costs one stat, not an open"
+
+
+async def test_a_probe_that_wrote_to_the_file_disqualifies_its_own_answer(
+        scratch, monkeypatch):
+    """Clause 4's other half: a measurement that moved the file is thrown away, not reported.
+
+    `_schema_only_tables` compares size, inode and mtime_ns across the open precisely because
+    a read-only open is an intention, not a guarantee. So the probe is replaced with one that
+    appends four bytes to the file before answering `(ok=True, 2 tables, 0 rows)` — the exact
+    answer that would otherwise produce a note. It must produce NOTHING: a leg that accuses a
+    file of holding no data after it wrote data into that file would be the instrument the
+    incident was about, and the file's size after this node proves the write really happened.
+    """
+    (_, journal), _, cwd = scratch
+    (cwd / "lay.py").write_text(LAY_SCHEMA)
+    await _run(f"cd {cwd} && python3 lay.py kg.sqlite && echo laid")
+    path = cwd / "kg.sqlite"
+    size = path.stat().st_size
+
+    def writing_probe(target, _size):
+        with open(target, "ab") as fh:
+            fh.write(b"junk")
+        return (True, 2, 0)
+
+    monkeypatch.setattr(_bash_tree_strays, "_content_rows_rule", lambda: writing_probe)
+    assert _bash_tree_strays._schema_only_tables(str(path), size) is None, (
+        "a probe that wrote into the file still reported it schema-only")
+    # The scan probes it again, so the writing fixture has now appended twice.
+    assert _bash_tree_strays._new_empty_dbs(cwd, frozenset()) == [], \
+        "and the answer reached the note anyway"
+    assert path.stat().st_size == size + 8, (
+        "the fixture's write really happened: 4 bytes per probe, two probes")
+
+
+def test_the_module_docstring_splits_prevention_between_the_two_halves():
+    """Clause 5's second half: the prose says which half stops a file and which one names it.
+
+    #3555's step 6 was owed to two items that are both closed (#3501, #3481), which is how it
+    came back as a fresh one, so the split is stated where a reader lands: the creator refusal
+    is `kg_store._refuse_stray_create` (landed at 5348fadd, out of this file's scope) and this
+    file is the attribution half that reaches anything a Bash call lays. The two function
+    docstrings below used to state the 0-byte rule as the whole rule; a docstring still saying
+    the gate is emptiness is what the next pass reads as "still owed".
+    """
+    def flat(fn_or_str) -> str:
+        """One line per docstring, so a phrase pin cannot be broken by where a wrap fell."""
+        raw = fn_or_str if isinstance(fn_or_str, str) else (fn_or_str.__doc__ or "")
+        return " ".join(raw.split())
+
+    doc = flat(_bash_tree_strays)
+    assert "_refuse_stray_create" in doc, doc
+    assert "kg_store" in doc, doc
+    for phrase in ("PREVENTION IS TWO HALVES", "creator", "ATTRIBUTION"):
+        assert phrase in doc, f"{phrase!r} missing from the module docstring"
+
+    scan = flat(_bash_tree_strays._new_empty_dbs)
+    assert "that are 0 bytes and named like a database" not in scan, (
+        "the sentence that stated emptiness as the whole rule is how this gets re-filed")
+    for phrase in ("hold no data", "read-only probe", "no recursion"):
+        assert phrase in scan, f"{phrase!r} missing from _new_empty_dbs"
+
+    # The refusal to report an unanswered read lives in the function that does the reading.
+    measure = flat(_bash_tree_strays._schema_only_tables)
+    assert "the probe declined the file or could not answer it" in measure, measure
+    assert "the only claim this leg is allowed to make is a measured one" in measure, measure
+
+    check = flat(_bash_tree_strays._empty_db_check)
+    assert "read-only open per NEW DB-suffixed file" in check, (
+        "_empty_db_check must price the measurement it now pays")

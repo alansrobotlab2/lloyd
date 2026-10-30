@@ -25,6 +25,22 @@ Not a refusal and not a guard — the command has already run. Fail-open through
 tree that could not be read, a journal that could not be written, costs the note and
 nothing else.
 
+PREVENTION IS TWO HALVES IN TWO PLACES, and which is which is stated here so a later
+pass does not re-file the one that already landed. The CREATOR half is
+`app/kg_store.py::_refuse_stray_create` (5348fadd, reached from `KGStore.__init__`): a
+caller that asks the knowledge store for a path that is not the declared store and does
+not pass `create=True` is REFUSED, so that one library cannot lay a shadow at all — it
+stops the file before it exists. THIS file is the ATTRIBUTION half, and it is the wider
+one because it cannot know what the command meant: whatever a Bash call lays in a watched
+root with a database suffix is measured, on that call, and named if it holds no data —
+today a 0-byte file, and since #3567 also a file with bytes whose tables the read-only
+probe measured empty (a schema is pages, so 80 KiB of it is still nothing to read). This
+half never refuses and never removes: the command has already run, and a data-root file is
+a person's call to delete. The gap this half closes is the one the creator half cannot
+reach — `sqlite3`, `touch`, a redirect or a Python one-liner is not KGStore, and the only
+instrument standing between such a command and three days of an unattributed shadow is the
+bracket around the call itself.
+
 What it cannot do: `run_in_background` returns before the command has run, so a
 background command is not measured; and two sessions writing in the same second can
 each be shown the other's file, which is why the note says "appeared during this
@@ -56,7 +72,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("lloyd-bash-tree-strays")
 
@@ -333,6 +349,143 @@ def _actionable_by(root: Path, paths: list[str]) -> str:
             sys.path.remove(str(guard))
         for name in loaded:
             sys.modules.pop(name, None)
+
+
+#: Private module name for the second exec of `datawatch.py`. Separate from
+#: `_REACH_LOAD_NAME` because the two loads are separate calls in the same process and
+#: one name would have the second `spec_from_file_location` hand back a module the first
+#: one already populated.
+_CONTENT_LOAD_NAME = "lloyd_tree_stray_content_probe"
+
+
+def _guardian_dir() -> Path:
+    """The guardian directory INSIDE the checkout this module itself runs from.
+
+    `Path(__file__).parents[1]` and not a watched root: the two roots this leg watches are
+    the data root and a session's scratch dir, and neither holds an `agent-services/`
+    (the note in `_record` spells out what happens if the guardian's rule is looked for
+    under `DATA_ROOT` — it is not found, and the answer degrades). The guardian's RUNNING
+    copy is a staged snapshot executed by `/usr/bin/python3`, which is why the reach rule
+    above is read from the tree it is measuring; the content probe is read from this
+    checkout because this checkout is where this module's own copy of the shipped rule
+    lives, and `guardian-stage.sh` copies every `*.py` in the directory, so the two texts
+    cannot drift apart in a promotion.
+    """
+    return Path(__file__).resolve().parents[1].joinpath(*_GUARDIAN_SUBDIR)
+
+
+def _content_rows_rule() -> "Callable[[str, int], tuple[bool, int, int]]":
+    """The guardian's read-only content probe, exec'd from its file: `datawatch._content_rows`.
+
+    WHY THE PROBE IS NOT REIMPLEMENTED HERE. `datawatch._content_rows(path, size)` answers
+    `(ok, tables, rows)` with `rows` reported as 0-or-1 over the non-bookkeeping tables, and
+    it carries the measurement that the whole question turns on: `_read_open` picks exactly
+    one SQLite URI per candidate from what stands beside the file — `mode=ro&immutable=1`
+    when no write-ahead log holds bytes (that open takes no lock and, measured, creates
+    nothing), plain `mode=ro` when a log with bytes has its `-shm` index standing, and
+    NOTHING at all when the log has bytes and the index does not, because `immutable=1`
+    would answer 0 rows for a store with 3 committed un-checkpointed rows in it and
+    `mode=ro` would build the missing index and leave a 32 KiB `-shm` in a person's data
+    root. `ok=False` covers every unanswered question — declined open, not a database, a
+    header too torn to parse, `database is locked` — and the probe's own rule is that an
+    unanswered question is NOT emptiness (#2056). A hand-rolled copy in this file would
+    have to re-derive all of that and would get one of it wrong, in the direction that
+    tells a session to delete a populated store.
+
+    HOW IT IS READ: the same discipline `_actionable_by` documents above, for the same
+    reasons — the module is outside this process's import path and its body runs
+    `import policy`, so it is exec'd from its file under a private name with its own
+    directory on `sys.path` only for the duration, and the guardian's OWN modules that the
+    exec added are dropped again by the file they came from. Whether the two loads should
+    become one shared loader now that `datawatch.py` has two consumers in this file is a
+    ruling this round deliberately does not make; it is owed on #3567, and the duplication
+    is here rather than a refactor of the reach rule because this leg's scope is the new-file
+    scan and the reach label has its own pinned failure semantics.
+
+    Any failure raises and is the CALLER's to swallow, which for this caller means the
+    byte-bearing candidate goes unmeasured: no probe, no finding, no accusation.
+    """
+    guard = _guardian_dir()
+    source = guard / "datawatch.py"
+    if not source.is_file():
+        raise FileNotFoundError(f"{source} is not a file")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(_CONTENT_LOAD_NAME, source)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"no loader for {source}")
+    module = importlib.util.module_from_spec(spec)
+    prefix = str(guard) + os.sep
+    loaded: list[str] = []
+    sys.path.insert(0, str(guard))
+    try:
+        before = set(sys.modules)
+        spec.loader.exec_module(module)
+        # The guardian's OWN modules only, identified by the file they came from — the
+        # standard library the exec drags in stays, exactly as `_actionable_by`'s comment
+        # argues: popping `enum` would leave a later importer a second `enum` beside the
+        # first one's classes.
+        loaded = sorted(n for n in set(sys.modules) - before
+                        if str(getattr(sys.modules[n], "__file__", "") or "").startswith(prefix))
+        # The returned callable keeps its own `__globals__`, so dropping the guardian's
+        # modules below cannot unbind `_read_open`; `sqlite3` resolves to the shared
+        # stdlib module object, which this call does not own and does not drop.
+        return module._content_rows
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(str(guard))
+        for name in loaded:
+            sys.modules.pop(name, None)
+
+
+def _schema_only_tables(path: str, size: int) -> "int | None":
+    """How many data tables a byte-bearing database holds when it holds NOTHING, else None.
+
+    `None` is the leave-alone answer and it covers three different reasons, deliberately not
+    told apart: the probe could not be loaded, the probe declined the file or could not
+    answer it (`ok=False`: not a database, unreadable, locked, a WAL without its index), or
+    the file has a data row in it. All three keep today's silence, because the only claim
+    this leg is allowed to make is a measured one — and the two `os.stat` calls bracketing
+    the open are what make the claim about THIS file: `mode=ro&immutable=1` is asserted not
+    to write, so if size, inode or mtime_ns moved across the open, something did write, and
+    what is standing there is no longer the file this call laid. That answer is thrown away
+    rather than reported.
+
+    Returns the table count for a schema-only hit. A file with zero tables and bytes in it
+    (a header, or a store whose schema was dropped) still counts as nothing-to-read and is
+    named with 0 tables; `rows == 0` is the measurement either way.
+    """
+    try:
+        probe = _content_rows_rule()
+    except Exception as exc:  # noqa: BLE001 — no probe is not a finding
+        logger.warning("empty-database content probe unavailable (%s: %s); a new "
+                       "database with bytes in it goes unmeasured",
+                       type(exc).__name__, str(exc)[:160])
+        return None
+    try:
+        before = os.stat(path)
+    except OSError:
+        return None
+    try:
+        ok, tables, rows = probe(path, size)
+    except Exception as exc:  # noqa: BLE001 — a probe that raises has answered nothing
+        logger.warning("empty-database content probe raised (%s: %s) on %s",
+                       type(exc).__name__, str(exc)[:160], path)
+        return None
+    if not ok or rows:
+        return None
+    try:
+        after = os.stat(path)
+    except OSError:
+        return None
+    if (before.st_size, before.st_ino, before.st_mtime_ns) != (
+            after.st_size, after.st_ino, after.st_mtime_ns):
+        logger.warning("the read-only probe moved %s (size %d -> %d, inode %d -> %d, "
+                       "mtime_ns %d -> %d); nothing is reported about a file the "
+                       "measurement touched",
+                       path, before.st_size, after.st_size, before.st_ino, after.st_ino,
+                       before.st_mtime_ns, after.st_mtime_ns)
+        return None
+    return tables
 
 
 def _record(session_id: str | None, command: str, root: Path, paths: list[str],
@@ -649,15 +802,30 @@ def _top_level(root: Path) -> "tuple[Path, frozenset[str]] | None":
         return None
 
 
-def _new_empty_dbs(root: Path, before: frozenset[str]) -> list[str]:
-    """Top-level NEW files of `root` that are 0 bytes and named like a database.
+def _new_empty_dbs(root: Path, before: frozenset[str]) -> list[tuple[str, "int | None"]]:
+    """Top-level NEW files of `root` that are named like a database and hold no data.
+
+    Each hit is `(name, tables)`: `tables` is None for the 0-byte case, which needs no
+    measurement, and the number of data tables for a file that HAS bytes and whose tables the
+    read-only probe measured empty (#3567). The second shape is what an 81,920-byte
+    `kg.sqlite` shadow was: writing a schema writes pages, so a store nobody put a row in is
+    not 0 bytes, and gating the whole leg on `st_size != 0` left that file unnamed for three
+    days while only the guardian's hourly shadow check ever saw it.
 
     Shape, not a command pattern: `sqlite3 x.db`, `touch x.db`, `: > x.db` and a Python
     one-liner all produce the same artefact and the same cost, and matching the command
     would silently stop firing on the next one (#1267's argument, restated in this file's
-    header for the write side). A new file that has BYTES in it is a job that wrote
-    something, and a new 0-byte file that does not end in a database extension is a
-    placeholder; both are left alone.
+    header for the write side). Left alone, in every case, are: a new file with bytes that
+    HOLDS a data row (a job that wrote something is not this finding), a file the read-only
+    probe declines or cannot answer (not a database, unreadable, locked, a WAL without its
+    index — an unanswered question is not emptiness, #2056), a symlink, and a new file that
+    does not end in a database extension however empty it is (`notes.txt` at 0 bytes is a
+    person's placeholder; `workers.db` at 0 bytes is a store nobody wrote to, and the
+    extension is the difference).
+
+    Same watched roots, same `EMPTY_DB_SUFFIXES`, top level only, no recursion: a probe that
+    walked would be measuring the tree instead of this call, and the scratch and `_pipeline`
+    trees under the data root hold stores that were there before the call started.
     """
     try:
         with os.scandir(root) as it:
@@ -665,23 +833,33 @@ def _new_empty_dbs(root: Path, before: frozenset[str]) -> list[str]:
                              key=lambda e: e.name)
     except OSError:
         return []
-    out: list[str] = []
+    out: list[tuple[str, "int | None"]] = []
     for e in entries:
         try:
             if not e.is_file(follow_symlinks=False):
                 continue
             if not e.name.lower().endswith(EMPTY_DB_SUFFIXES):
                 continue
-            if e.is_symlink() or e.stat(follow_symlinks=False).st_size != 0:
+            if e.is_symlink():
                 continue
+            # One `stat` for the NEW name, as before: it is the size branch below that
+            # decides whether this file costs anything more than that.
+            size = e.stat(follow_symlinks=False).st_size
         except OSError:
             continue
-        out.append(e.name)
+        if size == 0:
+            out.append((e.name, None))
+            continue
+        # Bytes: measured, not guessed, and only now — the ordinary call has no new
+        # DB-suffixed file at all and so never loads the probe.
+        tables = _schema_only_tables(str(root / e.name), size)
+        if tables is not None:
+            out.append((e.name, tables))
     return out
 
 
-def _empty_db_note(found: "list[tuple[Path, list[str]]]") -> str:
-    """The paragraph for the call that opened an empty database into existence.
+def _empty_db_note(found: "list[tuple[Path, list[tuple[str, int | None]]]]") -> str:
+    """The paragraph for the call that laid a database holding no data.
 
     Three things, because those are the three each of the four shadows needed a human for:
     the path just created, what it is (an empty database, not a store with contents), and
@@ -695,17 +873,40 @@ def _empty_db_note(found: "list[tuple[Path, list[str]]]") -> str:
     does not change per root. Says nothing about removing the file: the data-root sweep is
     report-only by its own docstring ("a data-root file is a person's call"), and this
     module moved nothing out of the data root before this leg and moves nothing after it.
+
+    The byte-bearing shape (#3567) gets ONE EXTRA LINE naming its table count, because
+    "empty database of 0 bytes" is false of a file with 81,920 of them in it and a reader
+    who is told only "empty" will look for a zero and conclude the note is a bug. What the
+    extra line claims is the measurement: 0 ROWS in N tables, i.e. the schema is there and
+    nothing else is. The two shapes are counted separately in the head clause, so a call
+    that laid one of each says so rather than asserting both are 0 bytes.
     """
     from app import paths
-    names = [n for _, ns in found for n in ns]
-    listed = "`, `".join(str(root / n) for root, ns in found for n in ns)
+    zero = [n for _, ns in found for n, t in ns if t is None]
+    schema = [(root / n, t) for root, ns in found for n, t in ns if t is not None]
+    total = len(zero) + len(schema)
+    if schema and zero:
+        shape = (f" ({len(zero)} of 0 bytes, {len(schema)} holding a schema and no "
+                 f"rows)")
+    elif schema:
+        shape = " holding a schema and no rows"
+    else:
+        shape = " of 0 bytes"
+    listed = "`, `".join(str(root / n) for root, ns in found for n, _ in ns)
+    extra = ""
+    if schema:
+        detail = "; ".join(f"`{p}`: 0 rows in {t} table{'' if t == 1 else 's'}"
+                           for p, t in schema)
+        extra = (f" Schema-only, measured read-only: {detail}. Writing a schema writes "
+                 f"pages, so the file has bytes and still holds nothing to read.")
     return (
         f"\n\n{EMPTY_DB_MARK} this call created `{listed}` — "
-        f"{len(names)} empty database{'' if len(names) == 1 else 's'} of 0 bytes, which is "
+        f"{total} empty database{'' if total == 1 else 's'}{shape}, which is "
         f"not data: `sqlite3 <path>` writes the file before it reads it, so opening a store "
         f"that is not there leaves an empty one where the next reader will find it. The real "
-        f"stores live in `{paths.DATA_ROOT}`. Nothing was written to here and nothing is "
-        f"moved — removing what this call made is this session's own call to make.")
+        f"stores live in `{paths.DATA_ROOT}`.{extra} This check wrote nothing to these files "
+        f"and moves nothing — removing what this call made is this session's own call to "
+        f"make.")
 
 
 def _new_checkouts(root: Path, before: frozenset[str]) -> list[str]:
@@ -810,7 +1011,12 @@ def _empty_db_check(session_id: "str | None", command: str,
     and each bought an hourly guardian alert plus a human pass (#3109, #3117, #3118),
     because the only thing that found them was `datawatch.data_root_shadows`, which runs
     on the guardian's tick. An hour after the call that could have been told. This leg
-    spends one `stat` per NEW name and says it on that call instead.
+    spends one `stat` per NEW DB-suffixed name and says it on that call instead, plus ONE
+    read-only open per NEW DB-suffixed file that has bytes in it (#3567): the byte-bearing
+    shape is the one the `stat` cannot decide, and `_schema_only_tables` is what measures
+    it — an open that is `mode=ro&immutable=1` unless a write-ahead log says otherwise,
+    bracketed by `os.stat` so a probe that wrote anything disqualifies itself. A call with
+    no new DB-suffixed file — every call today — pays neither.
 
     One row for the call, however many watched directories it laid files in: this record
     is the origin of a COMMAND, and splitting it by directory would make the number of
@@ -820,22 +1026,22 @@ def _empty_db_check(session_id: "str | None", command: str,
     laid — `root` + `paths[0]` is the created file, and that composition is what a reader
     downstream resolves.
     """
-    found: list[tuple[Path, list[str]]] = []
+    found: list[tuple[Path, list[tuple[str, "int | None"]]]] = []
     for root, before in watched:
         fresh = _new_empty_dbs(root, before)
         if fresh:
             found.append((root, fresh))
     if not found:
         return ""
-    names = [n for _, ns in found for n in ns]
+    names = [n for _, ns in found for n, _ in ns]
     logger.warning("session %s: Bash call opened %d empty database(s): %s",
                    session_id, len(names),
-                   ", ".join(str(r / n) for r, ns in found for n in ns))
+                   ", ".join(str(r / n) for r, ns in found for n, _ in ns))
     # Logged BEFORE the row is written, so a `_record` that cannot reach the journal still
     # leaves the warning: a check that finds something and silently records nothing is the
     # #957 defect. `_record` swallows its own write failures, so this cannot raise out of a
     # disk problem — only a bug in here can, and `after()` catches that.
-    row_root, rels = _origin_row([r / n for r, ns in found for n in ns])
+    row_root, rels = _origin_row([r / n for r, ns in found for n, _ in ns])
     _record(session_id, command, row_root, rels, kind=EMPTY_DB_KIND,
             actionable=BRACKET_ONLY)
     return _empty_db_note(found)
