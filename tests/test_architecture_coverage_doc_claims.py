@@ -8775,8 +8775,9 @@ def test_authority_ladder_citations_resolve_after_the_row_was_inserted():
     """#3564 clause 4: the ladder is referenced by number in prose, and a new row in
     the middle moves every number below it.
 
-    Above `## Review log`, the doc says "asks layer 9 first", "a superset of layer 6",
-    "the protected-write escape in layer 3" and "fourteen rows above". Each has to
+    Above `## Review log`, the doc says "asks layer 10 first", "a superset of layer 6",
+    "the protected-write escape in layer 3" and "fifteen rows above" — the first two
+    moved again when #3560 inserted the capability-ceiling row at 7. Each has to
     resolve against the table the reader can see. Below that heading, `row 1` / `row 3`
     / `row 5` are dated records of the numbering of their time — the doc says so about
     its own entries — so they are excluded, and this node's exclusion is asserted to
@@ -8825,17 +8826,20 @@ def test_authority_ladder_citations_resolve_after_the_row_was_inserted():
         "counts mean the split excludes nothing, so the dated records are being graded "
         "as live claims")
 
-    # That the dangling check can fail is proved on the mutation the insertion
-    # actually risks: a citation left at the number it had BEFORE row 5 existed. Out of
-    # range now (the table runs 1-14), so it has to be caught rather than read as fine.
-    stale = _body(text).replace("asks layer 9 first", "asks layer 15 first", 1)
+    # That the dangling check can fail is proved on the mutation an insertion
+    # actually risks: a `layer N` citation left standing past the top of the table.
+    # Out of range now that the ladder runs 1-15, so it has to be caught rather than
+    # read as fine. (#3560 is the second row inserted mid-table, and the citation
+    # seeded here was `layer 8` before #3564 and `layer 9` before that — a row added
+    # above it is exactly what moves it.)
+    stale = _body(text).replace("asks layer 10 first", "asks layer 16 first", 1)
     assert stale != _body(text), (
         "the seeded stale citation did not take, so the assertion below proves nothing")
     caught = sorted({int(m.group(1) or m.group(2))
                      for m in re.finditer(r"\blayer[s]?\s+(\d+)\b|\brow[s]?\s+(\d+)\b",
                                           stale, re.I)} - set(nums))
     assert caught, (
-        "a citation to layer 15 of a fourteen-row table is not reported dangling, so "
+        "a citation to layer 16 of a fifteen-row table is not reported dangling, so "
         "the numbering check above is not the thing keeping the ladder honest")
 
 
@@ -8850,3 +8854,417 @@ def _word_to_int(token: str) -> int:
         return int(t)
     assert t in words, f"cannot read a row count out of {token!r}"
     return words[t]
+
+
+# --------------------------------------------------------------------------- #
+# #3560 — the capability ceiling as a row of the ladder.
+#
+# The doc's own thesis is that a guard living on one of two surfaces is not a
+# guard, and the defect #3560 files is that thesis turned on the ladder itself:
+# the `app/tool_bans.py` row is the table's only answer to "which tools may an
+# unattended turn call at all", and it describes deny lists. That stopped being
+# the deciding mechanism on 2026-10-06, when `app/harness/capabilities.py`
+# (#2269) began compiling `allowed = pool − declared` per worker source and
+# handing it to the pre-existing `RunOptions.allowed_tools` layer. A reviewer
+# auditing a new unattended write route against this ladder found one
+# tool-filtering mechanism and never learned that a second, stricter one refuses
+# calls whose names appear in no deny list — and the doc's closing instruction
+# sends that reviewer to "the N rows above", so a missing row is invisible
+# exactly where the doc claims a missing row would be visible.
+#
+# Every node below extracts from the doc and compares it against the module, the
+# file's standing rule, so what fails is drift and not a reworded sentence. The
+# declaring-source set is read out of `SOURCE_CAPABILITIES` by AST rather than
+# imported: importing the module drags in `app.harness.policy` and the tool
+# roster, and a doc node that dies on an import reads the same as one that dies
+# on the doc.
+# --------------------------------------------------------------------------- #
+
+_CEILING_MODULE = "app/harness/capabilities.py"
+_BANS_MODULE = "app/tool_bans.py"
+_SCHEDULED_CEILING_MODULE = "app/scheduled_ceiling.py"
+
+#: The three names the row must carry, cited as symbols. A line number copied
+#: into a new row is stale before the round lands — the rule
+#: `test_authority_surfaces_cites_the_denied_paths_by_symbol_not_line` exists
+#: for, and it is why the row is checked for `path:NNN` spans rather than trusted.
+_CEILING_SYMBOLS = ("SOURCE_CAPABILITIES", "envelope_for", "loop._allow_list_hidden")
+
+#: A `path:NNN` citation. Narrow on purpose: `#2269` and `P3` are issue ids, not
+#: citations, and a pattern that fired on those would grade prose instead of
+#: pointers.
+_ROW_LINE_CITATION = re.compile(r"[\w./-]+\.(?:py|md|jsonl|json|ts|js|yaml):\d+")
+
+_ROW_COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven",
+                12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+                16: "sixteen"}
+
+
+def _rows_naming(rows: list[tuple[int, str, str, str]], module: str) -> list:
+    """Ladder rows whose MODULE cell names `module`.
+
+    Module-cell only, for the reason `_substrate_rows` gives: a module named in
+    the Question cell says nothing about what enforces it. It also means the
+    ceiling row, which cites `app/tool_bans.py` in prose to point at its floor,
+    cannot be mistaken for the bans row or the other way round.
+    """
+    return [r for r in rows if module in r[2]]
+
+
+def _declared_sources() -> list[str]:
+    """The keys of `SOURCE_CAPABILITIES`, off the module's own AST.
+
+    `SOURCE_CAPABILITIES: dict[str, tuple[str, ...]] = {...}` is an
+    `ast.AnnAssign`, not an `ast.Assign` — a walker that matches only the latter
+    finds no node and a count taken from it is zero, which is how a check of this
+    shape passes on a module it never read.
+    """
+    src = (ROOT / _CEILING_MODULE).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and node.target.id == "SOURCE_CAPABILITIES"):
+            assert isinstance(node.value, ast.Dict), (
+                f"{_CEILING_MODULE}: SOURCE_CAPABILITIES is no longer a dict literal, "
+                "so the declaring-source set has to be re-read before the row quotes it")
+            return [k.value for k in node.value.keys]
+    raise AssertionError(
+        "SOURCE_CAPABILITIES has no module-level annotated assignment any more; the "
+        "ceiling row's source count has no referent to be checked against")
+
+
+def _sentences(text: str) -> list[str]:
+    """Sentence spans of one table cell.
+
+    The clauses of #3560 are each satisfied by ONE sentence in a specific row,
+    so the assertions are per sentence: a row that says "floor" in one cell and
+    "ceiling" in another, unconnected, has stated nothing.
+    """
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _states_the_floor_relation(sentence: str) -> bool:
+    """Does this sentence say the deny tuples are the floor AND who narrows further?"""
+    return bool(re.search(r"\bfloor\b", sentence, re.I)
+                and re.search(r"ceiling", sentence, re.I)
+                and re.search(r"narrow|stricter|further|more\s+than", sentence, re.I))
+
+
+def _states_the_ceiling_relation(sentence: str) -> bool:
+    """The reciprocal: a sentence naming the bans module and calling it the floor."""
+    return bool(_BANS_MODULE in sentence and re.search(r"\bfloor\b", sentence, re.I))
+
+
+def _asserts_enforcement(sentence: str) -> bool:
+    """Does this sentence claim enforcement has happened, rather than naming the
+    switch that would start it or negating it?
+
+    `enforce` is legitimate in exactly two spellings on this row: as the value in
+    `LLOYD_SCHEDULED_CEILING_MODE=enforce`, which is what an operator would set,
+    and inside an explicit negation ("rather than enforced"). Anything else is the
+    row claiming the flip already happened, which it has not (#2670 shipped shadow
+    and owed entry 1 is the flip).
+    """
+    residue = re.sub(r"`?LLOYD_SCHEDULED_CEILING_MODE=enforce`?", "", sentence)
+    residue = re.sub(r"(?i)\b(?:rather than|not|never)\s+enforce\w*", "", residue)
+    return "enforc" in residue.lower()
+
+
+def _qualifies_the_scheduled_posture(sentence: str) -> bool:
+    """A sentence about the scheduled compile that says `shadow`, conditionally."""
+    return bool(re.search(r"\bshadow\b", sentence)
+                and re.search(r"\bunless\b", sentence, re.I)
+                and not _asserts_enforcement(sentence))
+
+
+def _bump_count_word(token: str) -> str:
+    """`six` -> `seven`, `6` -> `7`. The seeded mutation the can-fail checks use."""
+    n = _word_to_int(token)
+    assert n + 1 in _ROW_COUNT_WORDS, f"no word for {n + 1}"
+    return str(n + 1) if token.strip().isdigit() else _ROW_COUNT_WORDS[n + 1]
+
+
+def _created_entry_count(normalised: str) -> int:
+    """The surface count stated by the doc's own 2026-09-28 created entry."""
+    m = re.search(r"All (\w+) surfaces read from this tree at", normalised)
+    assert m, (
+        "the 2026-09-28 created entry no longer states its surface count in its own "
+        "words, so this node cannot tell a preserved record from a rewritten one")
+    return _word_to_int(m.group(1))
+
+
+def test_authority_ladder_has_a_row_for_the_capability_ceiling():
+    """#3560 clause 1: the ceiling is a row, in the column that says what enforces
+    it, and it cites the mechanism by symbol instead of by line.
+
+    Row 5 of the doc's own thesis is that a reader of the ladder should be able
+    to find the guard from the ladder. Before this the only tool-availability row
+    named `app/tool_bans.py` and its two tuples, so a reviewer of a new unattended
+    write route concluded the deny union was the whole filter. The symbols are
+    re-checked against the modules on this tree so the row cannot cite a name that
+    has moved, and the whole row is scanned for `path:NNN` because a fresh line
+    number is born stale.
+    """
+    text = _text("authority-surfaces.md")
+    rows = _ladder_rows(text)
+    assert rows, "no ladder rows parsed — the table's shape changed"
+    hit = _rows_naming(rows, _CEILING_MODULE)
+    assert len(hit) == 1, (
+        f"{_CEILING_MODULE} appears in {len(hit)} Module cells; the ceiling is one "
+        "surface and a second row for it is a second definition of the same guard")
+    n, surf, mod, ques = hit[0]
+    row_text = " ".join((surf, mod, ques))
+
+    for sym in _CEILING_SYMBOLS:
+        assert sym in row_text, (
+            f"the ceiling row never names {sym}, so it names an outcome instead of the "
+            "mechanism a reviewer has to go read")
+    assert not _ROW_LINE_CITATION.search(row_text), (
+        f"the ceiling row carries a line citation "
+        f"({_ROW_LINE_CITATION.findall(row_text)[0]!r}); this doc cites symbols, because "
+        "a line number copied into a row is stale before the round lands")
+
+    # The derivation belongs in the Question cell: that is the cell that answers
+    # the question the row exists to answer, and a row that states it only in the
+    # Surface cell has labelled itself without saying what it decides.
+    assert "RESULT block" in ques, (
+        "the Question cell does not say the reachable set is what the source's own "
+        "RESULT block can consume, which is the derivation the item asked to record")
+    assert re.search(r"census|measured|call count", ques, re.I), (
+        "the Question cell states the derivation without saying it was MEASURED, so a "
+        "reader cannot tell it from a hand-kept list")
+    assert re.search(r"hand-kept|hand kept|not hand|instead of the list|rather than "
+                     r"hand", ques, re.I), (
+        "the Question cell never contrasts the derivation with hand-keeping, which is "
+        "the distinction the row was filed for")
+
+    caps = (ROOT / _CEILING_MODULE).read_text(encoding="utf-8")
+    assert re.search(r"^SOURCE_CAPABILITIES\b", caps, re.MULTILINE), (
+        "SOURCE_CAPABILITIES is no longer a module-level name in "
+        f"{_CEILING_MODULE}, so the row cites a symbol that has moved")
+    assert re.search(r"^def envelope_for\b", caps, re.MULTILINE), (
+        f"envelope_for is no longer defined in {_CEILING_MODULE}, so the row's single "
+        "compile point is a pointer into a module that no longer has it")
+    loop = (ROOT / "app/harness/loop.py").read_text(encoding="utf-8")
+    assert re.search(r"^def _allow_list_hidden\b", loop, re.MULTILINE), (
+        "loop._allow_list_hidden is gone from app/harness/loop.py; the row says the "
+        "envelope is what hides the catalog, and that claim needs re-deriving")
+
+    # That the Module column is load-bearing is shown, not claimed.
+    moved = text.replace(f"| `{_CEILING_MODULE}` |", f"| `{_BANS_MODULE}` |", 1)
+    assert moved != text, (
+        "the seeded move did not take, so the assertion below proves nothing")
+    assert not _rows_naming(_ladder_rows(moved), _CEILING_MODULE), (
+        "a row whose Module cell names a different module is still found as the "
+        "ceiling row, so the column being graded is not the one the clause names")
+
+
+def test_authority_ceiling_row_states_the_source_count_the_module_actually_has():
+    """#3560 clause 2: the declaring-source count is the module's, not the item's.
+
+    The item was written saying four sources declare a set; the module had six
+    keys the same day. A count quoted into prose from a report is the shape of
+    that error, so this node parses `SOURCE_CAPABILITIES` from the tree the round
+    is graded on and refuses a row whose number or names disagree with it.
+    """
+    declared = _declared_sources()
+    assert declared, "SOURCE_CAPABILITIES parsed to no keys, so the count is ungraded"
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    hit = _rows_naming(rows, _CEILING_MODULE)
+    assert hit, f"no ladder row names {_CEILING_MODULE}, so there is nothing to grade"
+    row_text = " ".join(hit[0][1:])
+
+    m = re.search(r"\b(\d+|[a-z]+) sources declare\b", row_text, re.I)
+    assert m, (
+        "the ceiling row states no declaring-source count, so a reader cannot check it "
+        "against the module — the item's own 'four' is what an unchecked count becomes")
+    assert _word_to_int(m.group(1)) == len(declared), (
+        f"the row says {m.group(1)!r} sources declare a set and {_CEILING_MODULE} has "
+        f"{len(declared)} keys in SOURCE_CAPABILITIES: the sentence ships already-wrong")
+
+    for name in declared:
+        assert f"`{name}`" in row_text, (
+            f"{name} declares a ceiling in the module but is not named by the row, so "
+            "the count is right and the sentence it counts is still wrong")
+
+    tok = m.group(1)
+    wrong = row_text.replace(f"{tok} sources declare",
+                             f"{_bump_count_word(tok)} sources declare", 1)
+    assert wrong != row_text, (
+        "the seeded off-by-one did not take, so the assertion below proves nothing")
+    assert _word_to_int(re.search(r"\b(\d+|[a-z]+) sources declare\b", wrong,
+                                  re.I).group(1)) != len(declared), (
+        "a declaring-source count one off the module's own dict reads as fine, so the "
+        "check above is not comparing the row to the tree")
+
+
+def test_authority_bans_row_and_ceiling_row_state_floor_and_ceiling():
+    """#3560 clause 3: the two rows say, in one sentence each, which is the floor.
+
+    The distinction is not rhetorical: `envelope_for` subtracts `extra_disallowed`
+    from the declared set precisely so the two layers cannot disagree about what a
+    turn is told it may call, and a reader who thinks the deny union is the whole
+    answer audits the wrong layer. Each half is graded as ONE sentence carrying
+    both halves of the relation, because two unrelated sentences in one cell say
+    nothing; the reciprocal pointer is to the bans module by name, so a future
+    insertion cannot leave it pointing at a neighbour by number alone.
+    """
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    bans = _rows_naming(rows, _BANS_MODULE)
+    ceiling = _rows_naming(rows, _CEILING_MODULE)
+    assert len(bans) == 1, (
+        f"expected exactly one ladder row whose Module cell is {_BANS_MODULE}, got "
+        f"{len(bans)} — the floor half of the relation has no single home")
+    assert len(ceiling) == 1, (
+        f"expected exactly one ladder row whose Module cell is {_CEILING_MODULE}, got "
+        f"{len(ceiling)}")
+
+    bans_text = " ".join(bans[0][1:])
+    ceil_text = " ".join(ceiling[0][1:])
+
+    assert [s for s in _sentences(bans_text) if _states_the_floor_relation(s)], (
+        "the bans row never says in one sentence that its tuples are the FLOOR and "
+        "that the ceiling row narrows an unattended turn further — the row's own text "
+        "already mentioned `_standing_bans`, so naming the module is not the relation")
+
+    assert [s for s in _sentences(ceil_text) if _states_the_ceiling_relation(s)], (
+        f"the ceiling row carries no reciprocal pointer to {_BANS_MODULE} as the floor, "
+        "so the pair reads as two unrelated filters instead of one compile")
+
+    stripped = bans_text.replace("capability-ceiling row", "row below", 1)
+    assert stripped != bans_text, (
+        "the seeded pointer-removal did not take, so the assertion below proves nothing")
+    assert not [s for s in _sentences(stripped) if _states_the_floor_relation(s)], (
+        "a bans row that no longer points at the ceiling row still passes, so the word "
+        "'floor' alone is doing all the work and the pointer is ungraded")
+
+
+def test_authority_ceiling_row_keeps_the_scheduled_task_compile_recorded():
+    """#3560 clause 4: two postures, and the row asserts nothing stronger.
+
+    A direct worker turn is dispatched under the compiled envelope today. The
+    scheduled-task compile is not: `app/scheduled_ceiling.py::mode` answers
+    `shadow` unless an operator sets `LLOYD_SCHEDULED_CEILING_MODE=enforce`, and a
+    shadow turn is dispatched with `allowed_tools=None`, byte-identical to the
+    pre-ceiling compile, with the would-refused names written to a ledger instead.
+    Every sentence in the row that mentions the scheduled path therefore has to
+    carry the qualification, and this node also re-reads the module to prove the
+    default is still shadow — a row that quietly says "enforced" is exactly the
+    fresh false claim this doc's own review log keeps catching.
+    """
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    hit = _rows_naming(rows, _CEILING_MODULE)
+    assert hit, f"no ladder row names {_CEILING_MODULE}, so there is nothing to grade"
+    row_text = " ".join(hit[0][1:])
+
+    worker = [s for s in _sentences(row_text)
+              if re.search(r"\bworker\b", s, re.I)
+              and re.search(r"dispatch(ed)? under|runs under|is what the turn", s, re.I)]
+    assert worker, (
+        "the row does not say the compiled envelope is what a direct worker turn is "
+        "dispatched under, which is the posture the ceiling actually has today")
+
+    assert "LLOYD_SCHEDULED_CEILING_MODE" in row_text, (
+        "the row never names the switch, so a reader cannot tell what would change "
+        "the scheduled-task posture or where to look")
+
+    # A sentence ABOUT THE SCHEDULED COMPILE must carry the qualification. A sentence
+    # that merely lists `scheduled-task` among the declaring sources states no
+    # posture and is not in scope — grading it would force the enumeration to carry
+    # a shadow clause it has nothing to do with, which is how a check like this one
+    # gets weakened out of existence later.
+    sched = [s for s in _sentences(row_text)
+             if re.search(r"scheduled", s, re.I)
+             and re.search(r"mode\(\)|LLOYD_SCHEDULED_CEILING_MODE|compile|dispatch|"
+                           r"allowed_tools|ledger", s)]
+    assert sched, (
+        "no sentence of the row states the scheduled-task compile's posture, so the "
+        "two postures are not distinguished and the row cannot be graded on clause 4")
+    for s in sched:
+        assert _qualifies_the_scheduled_posture(s), (
+            f"a sentence about the scheduled compile is not qualified as shadow-with-a-"
+            f"named-flip: {s[:220]!r}")
+
+    # "Asserts nothing stronger", graded over the WHOLE row rather than only the
+    # scheduled sentences: the overstatement this clause forbids is one sentence
+    # long and would as easily sit in the sentence about the compile point.
+    overstates = [s for s in _sentences(row_text) if _asserts_enforcement(s)]
+    assert not overstates, (
+        f"the row asserts enforcement ({overstates[0][:220]!r}); the only legitimate "
+        "uses of that word here are the env switch's value and an explicit negation")
+
+    sc = (ROOT / _SCHEDULED_CEILING_MODULE).read_text(encoding="utf-8")
+    assert re.search(r'^MODE_ENV = "LLOYD_SCHEDULED_CEILING_MODE"', sc, re.MULTILINE), (
+        f"{_SCHEDULED_CEILING_MODULE} no longer publishes the env switch the row names")
+    body = re.search(r"^def mode\(\).{0,400}?(?=^def |^LEDGER_ENV|\Z)", sc,
+                     re.MULTILINE | re.DOTALL)
+    assert body, "mode() is gone from the scheduled-ceiling module; re-read the posture"
+    assert "MODE_ENFORCE if" in body.group(0) and "MODE_SHADOW" in body.group(0), (
+        "mode() no longer defaults to shadow unless an operator says enforce, so the "
+        "row's two-posture sentence has to be rewritten before it is repeated")
+
+    merged = row_text.replace("is **shadow** rather than enforced", "is enforced", 1)
+    assert merged != row_text, (
+        "the seeded posture-flip did not take, so the assertions below prove nothing")
+    assert [s for s in _sentences(merged) if _asserts_enforcement(s)], (
+        "a ceiling row that states the scheduled-task compile as enforced is not "
+        "caught, so the 'nothing stronger' check above is decoration")
+    assert not [s for s in _sentences(merged)
+                if re.search(r"scheduled", s, re.I)
+                and re.search(r"mode\(\)|LLOYD_SCHEDULED_CEILING_MODE|compile|dispatch|"
+                              r"allowed_tools|ledger", s)
+                and _qualifies_the_scheduled_posture(s)], (
+        "the flipped row still satisfies the qualification check, so the shadow clause "
+        "is not what is making that check green")
+
+
+def test_authority_row_count_prose_counts_the_ladder_the_ceiling_row_made():
+    """#3560 clause 5: the live count sentence and the dated record are different
+    sentences, and only one of them is allowed to move.
+
+    `## What this doc does not cover` ends by sending a reviewer to "the N rows
+    above", which is the number that makes a missing row visible — so the node
+    derives N from the table rather than comparing it to another number, the way
+    the #3564 node does. The 2026-09-28 created entry says "All thirteen surfaces"
+    about the tree it read at `f7cf29f4`; the doc says of its own log entries that
+    a superseded record is still a record, so that wording is pinned too, and the
+    two numbers are asserted to DISAGREE — a log rewritten to today's count is the
+    failure this clause forbids.
+    """
+    text = _text("authority-surfaces.md")
+    body = _body(text)
+    rows = _ladder_rows(text)
+    assert rows, "no ladder rows parsed above the Review log"
+
+    stated = re.search(r"\b(\d+|[a-z]+) rows above\b", body, re.I)
+    assert stated, (
+        "the completeness paragraph no longer states a row count, so the sentence that "
+        "tells a reader to check every row has lost the number to verify")
+    live = _word_to_int(stated.group(1))
+    assert live == len(rows), (
+        f"the prose says {stated.group(1)!r} rows and the table parses to {len(rows)}: "
+        "a row was added and the instruction that makes a missing row visible did not "
+        "move with it")
+
+    log = text.split("## Review log", 1)[1]
+    created = re.search(r"^- \*\*2026-09-28 — created \(#1699\)\.\*\*"
+                        r".*?(?=^- \*\*|\Z)", log, re.MULTILINE | re.DOTALL)
+    assert created, (
+        "the 2026-09-28 created entry is gone or its heading changed, so this node "
+        "cannot tell a kept record from a deleted one")
+    created_norm = " ".join(created.group(0).split())
+    dated = _created_entry_count(created_norm)
+    assert dated == 13, (
+        f"the dated created entry now reads {dated} surfaces; it recorded the tree at "
+        "`f7cf29f4` and its wording is a record, not a live claim")
+    assert live != dated, (
+        f"the live instruction and the dated record both say {live}: one of them was "
+        "rewritten to the other, which is how a doc loses the ability to say what its "
+        "own numbers used to mean")
+
+    tampered = created_norm.replace("All thirteen surfaces", "All fifteen surfaces", 1)
+    assert tampered != created_norm, (
+        "the seeded re-point did not take, so the assertion below proves nothing")
+    assert _created_entry_count(tampered) != dated, (
+        "rewriting the dated entry to today's row count is not detected, so the "
+        "assertion above is not the thing keeping the record's wording intact")
