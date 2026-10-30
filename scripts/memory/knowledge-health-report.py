@@ -1731,6 +1731,11 @@ def generate_report(
     lines.append("")
     if pattern_staleness is None:
         lines.append("*Not measured: the pattern files were not checked for a stale archive.*")
+    elif getattr(pattern_staleness, "reason", ""):
+        # An empty list here would print "0 — every §2e archive is current", which is a
+        # claim about the corpus the check never got to make (#3596).
+        lines.append(f"*Not measured: {pattern_staleness.reason} — so no note on disk sets "
+                     "the day the pattern archives are compared against.*")
     elif not pattern_staleness:
         lines.append("Pattern files behind the newest report: 0 — every §2e archive is current.")
     else:
@@ -1752,6 +1757,9 @@ def generate_report(
     if pointer_lag is None:
         lines.append("*Not measured: the pattern pointers were not stat'ed, so nothing "
                      "here says whether they were advanced.*")
+    elif getattr(pointer_lag, "reason", ""):
+        lines.append(f"*Not measured: {pointer_lag.reason} — so no note on disk sets the day "
+                     "the pattern pointers are compared against.*")
     elif not pointer_lag:
         lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
                      "`*-patterns-latest.md` in the directory was written on or after "
@@ -1780,8 +1788,9 @@ def generate_report(
     lines.append("### §2e `mtime=` witness in the newest completion note")
     lines.append("")
     if mtime_witness is None or mtime_witness.note is None:
-        lines.append("*Not measured: no dated completion note was readable, so whether "
-                     "its §2e lines were written is unknown.*")
+        lines.append("*Not measured: no dated completion note was readable (one that "
+                     "clears 512 bytes with a `status:` other than `in-progress` counts "
+                     "as readable), so whether its §2e lines were written is unknown.*")
     else:
         lines.append(f"`mtime=` witness lines in `{mtime_witness.note}`: "
                      f"{mtime_witness.count} of {EXPECTED_MTIME_WITNESSES} expected"

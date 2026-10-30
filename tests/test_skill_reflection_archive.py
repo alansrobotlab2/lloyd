@@ -154,7 +154,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import reflection_archive as ra
-from scripts.reflection_archive import archive_problems, classify, classify_all
+from scripts.reflection_archive import (
+    _STAMPED_COPY, archive_problems, classify, classify_all)
 
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 
@@ -3286,3 +3287,110 @@ def test_prose_naming_the_retired_briefing_slug_carries_its_retirement_record():
         f"the predicate still marks a sentence stripped of every date and every #nn — "
         f"{real[:160]!r}: the record test is matching something it should not, so its "
         "verdict on the real prose is not the verdict this node is claiming")
+
+
+# ── #3596: the completion note's status vocabulary, and the shape §2e archives in ──
+#
+# Unmarked, against this file's usual `live_vault` habit and for the reason its own
+# comment at line 1857 gives: a claim about what the contract text says is gradable by
+# the hard `tests` rung, and a `live_vault` node is never graded at all — which is
+# exactly how this item's missing third status survived a whole nightly cycle. The
+# skills are the vault's, so the control fails LOUD on an unreadable file: `_kw_file`
+# raises FileNotFoundError rather than returning "".
+
+_KW = "nightly-reflection-knowledge-write"
+
+
+def _kw_file(name: str = "SKILL.md") -> str:
+    """The live skill text, or a raised FileNotFoundError — never an empty string.
+
+    A node reading "" would find no violation to flag and pass. `SKILLS_DIRS[0]` is the
+    vault's skills tree, the same root `_active_skills` walks above.
+    """
+    return (SKILLS_DIRS[0] / _KW / name).read_text(encoding="utf-8")
+
+
+def test_the_completion_note_status_vocabulary_is_the_same_in_both_places():
+    """Clause 3: three statuses, and writing `incomplete` is a thing a run must DO.
+
+    The skill prescribed only `in-progress` -> `complete`, said as the final action of
+    the run, so a run that ran out of turns had two states it could leave: a lie
+    (`complete`, when the sections did not land) or `in-progress`, which claims a writer
+    is still at the keyboard. `run_39_20261030_080034` stopped at `max_turns` and left
+    the second — 68 bytes of `status: in-progress` where the four prior nights are
+    8,291-13,494 bytes — and because `pattern_staleness` and `mtime_witness` resolved
+    "the newest report" by filename alone, that stub became the bar the next day's §2e
+    rows were graded against.
+
+    The passage is in two files deliberately: SKILL.md Phase 0, whose preamble says to
+    act on it alone because opening the sibling costs ~800 tokens, and §Phase 0, which
+    carries the detail. Two copies of a rule earn their drift risk only if something
+    compares them.
+    """
+    skill = _kw_file()
+    detail = _kw_file("step-1-and-commit-detail.md")
+    assert "## Phase 0" in detail, (
+        "§Phase 0 is gone, so the second copy is being read out of the wrong place")
+    phase0 = detail[detail.index("## Phase 0"):]
+
+    for label, text in (("SKILL.md Phase 0", skill), ("§Phase 0", phase0)):
+        assert "exactly three values" in text, f"{label} does not state the vocabulary"
+        for status in ("in-progress", "complete", "incomplete"):
+            assert "`" + status + "`" in text, f"{label} never names `{status}`"
+        assert "MUST write" in text, (
+            f"{label} lists `incomplete` as an option rather than an instruction")
+        assert "BEFORE the run stops" in text, (
+            f"{label} never says WHEN to write it, and the when is the whole rule: a run "
+            "stopped at its cap has no later turn in which to do it")
+
+    shared = "the third is the run's own"
+    assert shared in skill and shared in phase0, (
+        "the two copies no longer share that phrase, so one has drifted and a run reading "
+        "the other would not know it")
+    for marker in ("run_39_20261030_080034", "68-byte", "max_turns: 90"):
+        assert marker in phase0, f"§Phase 0 lost the incident marker {marker!r}"
+
+
+def test_2e_prints_the_archive_names_it_governs_and_states_the_pointer_rule():
+    """Clause 4: the copy's name is both printed and of a shape the checker can read.
+
+    Ask 3 of this item blamed a braced expansion, and triage refuted it: the shipped §2e
+    already spelled the destination unbraced, and the 2026-10-29 cycle DID archive both
+    stems — as `tool-patterns-20261028.md`, a shape `_STAMPED_COPY` cannot match, so the
+    checker saw zero copies and the report read the pointers as behind. The other half is
+    the pointer: both governed `-latest.md` files have been symlinks since 2026-10-28
+    08:09 UTC, §2e writes in place, and so that cycle's `Write` went through the link into
+    the dated archive meant to preserve the previous night — which is why the §2e lag row
+    can recur even on a cycle that archived correctly.
+    """
+    body = _kw_file("steps-2b-2f.md")
+    heads = re.findall(r"(?m)^### 2e\..*$", body)
+    assert len(heads) == 1, f"§2e heading is not unique any more: {heads}"
+    block = body[body.index("### 2e."):]
+    block = block[:block.index("\n### ")].replace("\\n", "\n")
+    assert "```" in block, "§2e has no fenced command block — nothing for the run to read"
+
+    assert block.count("cp -v ") == 2, (
+        "both archive copies must print the pair they wrote, so the copy's own name is in "
+        "the transcript instead of being reconstructed from a stamp variable afterwards")
+    fenced = "".join(re.findall(r"```.*?```", block, re.S))
+    for stem in ("tool-patterns", "conversation-patterns"):
+        assert fenced.count(stem + "-latest-$STAMP.md") == 1, (
+            f"{stem}: the command block no longer holds exactly one literal archive "
+            "destination of the governed shape — the copy the run writes has to be named "
+            "in the shape the checker reads, not assembled from a variable at runtime")
+
+    for must in ("<stem>-<YYYY-MM-DD>-<HHMM>.md", "_STAMPED_COPY",
+                 "-maxdepth 1 -name '*-patterns-latest.md' -type l",
+                 "regular file, never a symlink", "cp -L --remove-destination",
+                 "303bda013727c52a2886f8f01d24c15e", "tool-patterns-20261028.md",
+                 "ls -1t"):
+        assert must in block, f"§2e no longer states {must!r}"
+
+    # The shape the rule names has to be the shape the checker reads, or the instruction
+    # is describing a matcher that no longer exists.
+    assert _STAMPED_COPY.match("tool-patterns-latest-2026-10-28-0809.md")
+    assert _STAMPED_COPY.match("tool-patterns-latest-2026-10-28.md")
+    assert not _STAMPED_COPY.match("tool-patterns-20261028.md"), (
+        "_STAMPED_COPY now matches the shape §2e is told not to write, which would make "
+        "the naming rule above wrong in the direction that hides an archive")

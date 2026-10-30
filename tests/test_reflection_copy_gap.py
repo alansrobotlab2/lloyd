@@ -18,8 +18,25 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.reflection_archive import (  # noqa: E402
-    PATTERN_STEMS, CopyGap, PatternStaleness, copy_gaps, named_copies,
-    pattern_staleness, reports_in)
+    KNOWLEDGE_WRITE_REPORT, PATTERN_STEMS, REPORT_MIN_BYTES, CopyGap, PatternStaleness,
+    copy_gaps, named_copies, pattern_staleness, reports_in)
+
+def _note_body(name: str, body: str) -> str:
+    """Pad a dated completion note up to #3596's completeness floor.
+
+    `pattern_staleness` now reads only a note at least `REPORT_MIN_BYTES` as *the newest
+    report*, and every note these fixtures write is 6-20 bytes. Unpadded, the three
+    staleness nodes below would not have failed — they would have gone EMPTY, and the
+    `== []` ones would have held vacuously while the one that expects a finding turned
+    red for the wrong reason. That is the false green #2413's `>=` node was written to
+    prevent, arriving from the filter side instead of the comparison side.
+    """
+    if not KNOWLEDGE_WRITE_REPORT.match(name):
+        return body
+    need = REPORT_MIN_BYTES + 1 - len(body.encode())
+    return body if need <= 0 else body + "\n" + (
+        "Detailed §2d curation record for this cycle.\n" * (need // 42 + 2))
+
 
 POINTER = "Archive copied before this write: `signals-latest-2026-09-20-0517.md`\n"
 KW_BODY = ("Archived `_pipeline/reflection/tool-patterns-latest-2026-09-20-0938.md` and "
@@ -30,7 +47,7 @@ def _dir(tmp_path: Path, *names: str) -> Path:
     d = tmp_path / "reflection"
     d.mkdir(parents=True)
     for n in names:
-        (d / n).write_text("old report\n")
+        (d / n).write_text(_note_body(n, "old report\n"), encoding="utf-8")
     return d
 
 

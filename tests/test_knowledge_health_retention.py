@@ -26,6 +26,42 @@ from scripts.reflection_archive import copy_gaps, pattern_staleness, reports_in 
 ra = importlib.import_module("scripts.reflection_archive")
 
 
+def _complete_note(body: str) -> str:
+    """Bring a fixture completion note over the floor #3596 introduced.
+
+    `pattern_staleness`, `pointer_mtime_lag` and `mtime_witness` now read only a note
+    that is at least `ra.REPORT_MIN_BYTES` and does not say `status: in-progress`, and
+    every note these fixtures write is 13-40 bytes of the fields under test. Left
+    small, the fixtures would not fail — they would go EMPTY, `stale == [s for s in
+    stale if …]` would hold vacuously and the lag assertions would compare against a
+    check that declined to measure. Detail lines, so the padded body still reads like
+    the note a run writes, and `test_every_completion_note_this_file_writes_is_a_report`
+    below re-checks the floor rather than trusting it.
+    """
+    need = ra.REPORT_MIN_BYTES + 1 - len(body.encode())
+    return body if need <= 0 else body + "\n" + (
+        "Detailed §2d curation record for this cycle.\n" * (need // 42 + 2))
+
+
+def _stub_note(d: Path, name: str) -> Path:
+    """A dated completion note that is NOT a report: #3596's 68-byte shape.
+
+    `run_39_20261030_080034` stopped at `max_turns` (91 turns against the task file's
+    `max_turns: 90`) and left `knowledge-write-2026-10-30.md` at 68 bytes still reading
+    `status: in-progress`, where the four prior nights are 8,291-13,494 bytes. Written
+    directly rather than through `_complete_note`, because staying under the floor is
+    the point.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text("# Knowledge Write " + name[16:-3] + "\n\n"
+                 "status: in-progress\n\n## Files written\n", encoding="utf-8")
+    y, m, dd = (int(g) for g in re.search(r"(\d{4})-(\d{2})-(\d{2})", name).groups())
+    day_ts = datetime(y, m, dd, 1, 0, tzinfo=timezone.utc).timestamp()
+    os.utime(p, (day_ts, day_ts))
+    return p
+
+
 _UNSET = object()
 
 
@@ -60,6 +96,10 @@ def _stale_fixture(tmp_path: Path) -> Path:
                  "conversation-patterns-latest.md",
                  "conversation-patterns-latest-2026-10-07-0812.md"):
         (d / name).write_text("cycle content\n")
+    # The note has to clear the floor #3596 set or this fixture measures nothing;
+    # `_stale_fixture` is what the #2413 and #2996 nodes below build on.
+    (d / "knowledge-write-2026-10-07.md").write_text(_complete_note("cycle content\n"),
+                                                     encoding="utf-8")
     return d
 
 
@@ -195,7 +235,7 @@ def _mtime_tree(tmp_path: Path, *, pointer_day: datetime, report_day: datetime,
     d = tmp_path / "reflection"
     d.mkdir(parents=True)
     note = d / f"knowledge-write-{report_day:%Y-%m-%d}.md"
-    note.write_text(note_body, encoding="utf-8")
+    note.write_text(_complete_note(note_body), encoding="utf-8")
     os.utime(note, (_utc_day(report_day), _utc_day(report_day)))
     pointer = d / f"{stem}-latest.md"
     pointer.write_text("patterns\n", encoding="utf-8")
@@ -324,3 +364,134 @@ def test_the_mtime_witness_advisory_fires_at_zero_and_clears_at_two(tmp_path):
     assert "REPORTING GAP" not in cleared
     nowhere = _section(_report([], [], pointer_lag=[], witness=None))
     assert "*Not measured: no dated completion note was readable" in nowhere
+
+
+# ── #3596: only a COMPLETE completion note may set the §2e bar ─────────────────
+#
+# `run_39_20261030_080034` reached its 90-turn cap, landed neither of its declared
+# sections, and left a 68-byte note reading `status: in-progress`. That note was the
+# newest NAME in the directory, so it became the day the archives were compared
+# against: `knowledge-health-2026-10-30.md` printed "Pattern pointers behind their
+# newest report (by mtime): 3" against yesterday's 1, and "`mtime=` witness lines: 0
+# of 2 expected" against the stub — two halves of one cause, a run that wrote nothing
+# having stamped the directory with a fresh note.
+
+
+_STUB_NAME = "knowledge-write-2026-10-30.md"
+_COMPLETE_NAME = "knowledge-write-2026-10-28.md"
+
+
+def _two_current_copies(d: Path) -> None:
+    """Both governed stems archived on 10-28, the last complete note's day."""
+    for stem in ("tool-patterns", "conversation-patterns"):
+        p = d / f"{stem}-latest-2026-10-28-0809.md"
+        p.write_text("archive copy\n", encoding="utf-8")
+        os.utime(p, (_utc_day(datetime(2026, 10, 28, tzinfo=timezone.utc)),) * 2)
+
+
+def test_a_stub_completion_note_does_not_move_the_staleness_bar(tmp_path):
+    """Clause 2, the 2026-10-30 shape: current archives, a stub dropped on top."""
+    d = _stale_fixture(tmp_path)   # report 10-07; tool copy 10-06, conv copy 10-07
+    assert [s.stem for s in pattern_staleness(d)] == ["tool-patterns-latest"], (
+        "the control stopped measuring: the fixture report is not read as a report")
+    _stub_note(d, _STUB_NAME)
+    stale = pattern_staleness(d)
+    # Graded against the 10-30 stub BOTH stems fall behind, since no copy is dated
+    # 10-30 — that doubling is the bug. Against the last complete note the verdict is
+    # the control's, unchanged: a stub adds no finding and moves no day.
+    assert [s.stem for s in stale] == ["tool-patterns-latest"], (
+        f"a stub moved the staleness bar: {[s.stem for s in stale]}")
+    assert not getattr(stale, "reason", ""), (
+        "a complete note is present, so this is a measurement — not-measured here would "
+        "mean the filter threw the baby out with the stub")
+
+
+def test_a_stub_completion_note_does_not_rename_the_mtime_witness_note(tmp_path):
+    """The witness row grades a note's silence; a stub has nothing to be silent about."""
+    # The complete note is yesterday's; the stub is dated today, so it is the newer
+    # NAME — the exact relation the 10-30 stub had to the 10-29 report.
+    yesterday = _days(1)
+    d = _mtime_tree(tmp_path, pointer_day=yesterday, report_day=yesterday,
+                    note_body="cycle complete\nmtime=2026-10-19T08:00:01Z tool\n"
+                              "mtime=2026-10-19T08:00:04Z conversation\n")
+    full = ra.mtime_witness(d)
+    assert (full.note, full.count) == (f"knowledge-write-{yesterday:%Y-%m-%d}.md", 2), full
+    _stub_note(d, _STUB_NAME)
+    w = ra.mtime_witness(d)
+    assert w.note == full.note, f"the stub was named as the witness note: {w.note}"
+    assert w.count == 2, f"reading the stub rewrote the witness count: {w.count}"
+
+
+def test_a_directory_of_only_stubs_is_not_measured_as_clean(tmp_path):
+    """Empty-and-reasoned: still `== []` for every existing reader, and never a zero.
+
+    `test_a_pointer_written_on_the_newest_report_day_lags_nothing` and the report's own
+    `elif not …` branches compare against emptiness, so the fix must not turn a stub
+    into a finding. What it adds is the reason, carried on the empty list.
+    """
+    d = tmp_path / "stubs"
+    _stub_note(d, _STUB_NAME)
+    (d / "tool-patterns-latest.md").write_text("patterns\n", encoding="utf-8")
+    stale, lag = pattern_staleness(d), ra.pointer_mtime_lag(d)
+    assert stale == [] and lag == [], "a stub was measured as a finding"
+    assert getattr(stale, "reason", "") and getattr(lag, "reason", ""), (
+        "empty with no reason prints as \"0 — every §2e archive is current\" over a "
+        "directory that was never measured")
+    assert _STUB_NAME in stale.reason and "in-progress" in stale.reason, stale.reason
+    assert ra.mtime_witness(d).note is None, "a stub was named as a witness note"
+
+
+def test_the_report_says_why_a_stubbed_directory_was_not_measured(tmp_path):
+    """The generated section, not just the checks' return values.
+
+    #1227 already had the right instinct for the witness row — `note is None` says
+    *not measured* instead of reading a missing note as a silent one. This gives the
+    two rows that used to print a confident zero the same shape, and pins that the
+    reason is printed: a row that says only "not measured" cannot be acted on.
+    """
+    d = tmp_path / "rep"
+    _stub_note(d, _STUB_NAME)
+    section = _section(_report([], pattern_staleness(d),
+                               pointer_lag=ra.pointer_mtime_lag(d),
+                               witness=ra.mtime_witness(d)))
+    assert section.count("Not measured") == 3, section
+    assert "every §2e archive is current" not in section
+    assert "behind their newest report (by mtime): 0" not in section
+    assert _STUB_NAME in section and "in-progress" in section, (
+        "the row does not name the note it refused or why")
+
+
+def test_a_normal_night_still_prints_both_real_rows(tmp_path):
+    """The other side of the same rendering: the filter must not blind the report."""
+    today, yesterday = _days(0), _days(1)
+    d = _mtime_tree(tmp_path / "ok", pointer_day=yesterday, report_day=today,
+                    copy_day=today)
+    section = _section(_report([], pattern_staleness(d),
+                               pointer_lag=ra.pointer_mtime_lag(d),
+                               witness=ra.mtime_witness(d)))
+    assert "Not measured" not in section, section
+    assert "Pattern files behind the newest report: 0" in section
+    assert "Pattern pointers behind their newest report (by mtime): 1" in section
+    assert "0 of 2 expected" in section
+
+
+def test_every_completion_note_this_file_writes_is_a_report(tmp_path):
+    """The pad in `_complete_note` is load-bearing, so nothing may drift under it.
+
+    A constant no check reads is what the doc-claim rung exists to catch; this one
+    runs the real checks over the directories the file's own builders make, so a
+    fixture that quietly became a stub shows up as a red node here rather than as a
+    vacuously green staleness test.
+    """
+    d = _stale_fixture(tmp_path)
+    note = d / "knowledge-write-2026-10-07.md"
+    assert len(note.read_bytes()) >= ra.REPORT_MIN_BYTES, (
+        f"{note.name} is {len(note.read_bytes())} bytes, under the "
+        f"{ra.REPORT_MIN_BYTES}-byte floor the §2e checks now require")
+    assert [s.stem for s in pattern_staleness(d)] == ["tool-patterns-latest"], (
+        "the fixture report stopped being read as a report: staleness came back empty")
+    today = _days(0)
+    m = _mtime_tree(tmp_path / "pad", pointer_day=_days(1), report_day=today)
+    assert ra.mtime_witness(m).note == f"knowledge-write-{today:%Y-%m-%d}.md"
+    assert [r.stem for r in ra.pointer_mtime_lag(m)] == ["tool-patterns-latest"]
+    assert not getattr(pattern_staleness(m), "reason", "")

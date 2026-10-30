@@ -1141,7 +1141,7 @@ two incidents (#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
 worse than none.** #60 exits 2 (`EXIT_ALARM`,
-`scripts/memory/knowledge-health-report.py:1838`) and alerts when the store
+`scripts/memory/knowledge-health-report.py:1847`) and alerts when the store
 cannot be read, when active edges fall below half the
 baseline, when any directory holds facts about another entity, when fact records
 carry no `entity:` tag over the hygiene floor (#2474), or when any fact file

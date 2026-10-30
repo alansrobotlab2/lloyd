@@ -495,6 +495,93 @@ def _listing(d: Path) -> list[str]:
         return []
 
 
+#: The floor a completion note has to clear before either §2e check may read it as
+#: *the newest report*. Deliberately the same number as `app/autonomy.py`'s
+#: `_ARTIFACT_MIN_BYTES`: the two readers are looking at one file, and a note small
+#: enough to fail the engine's test of whether the run that wrote it produced anything
+#: must not also be big enough to become the bar the next cycle is graded against.
+REPORT_MIN_BYTES = 512
+
+#: A completion note's own claim about its state, written by §Phase 0 of the
+#: knowledge-write skill: `in-progress` while the run is live, then `complete` or
+#: `incomplete`. Only the first is a claim that a writer is still at the keyboard.
+_NOTE_STATUS = re.compile(r"(?m)^status:[ \t]*([A-Za-z-]+)[ \t]*$")
+_NOTE_IN_PROGRESS = "in-progress"
+
+
+class Unmeasured(list):
+    """An empty result that does not mean "clean" — and still compares equal to empty.
+
+    `pattern_staleness` and `pointer_mtime_lag` return findings, so an empty result is
+    printed as *"0 — every §2e archive is current"*. That sentence is right when the
+    check ran and found nothing, and wrong when the check had nothing to measure
+    against. This carries the reason without changing the emptiness every existing
+    reader and test compares against.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.reason = reason
+
+
+def _stub_reason(name: str, body: str) -> str | None:
+    """Why note `name` is not a report, or None when it is one.
+
+    Two tests, both taken from the note that motivated them: size, because the run of
+    2026-10-30 (`run_39_20261030_080034`, stopped at `max_turns` after 91 turns against
+    a cap of 90) left 68 bytes of heading where the four prior nights are
+    8,291-13,494 bytes; and `status: in-progress`, the word that stub was still
+    carrying, which claims a writer is still working here.
+    """
+    defects: list[str] = []
+    size = len(body.encode("utf-8", errors="replace"))
+    if size < REPORT_MIN_BYTES:
+        defects.append(f"it holds {size} bytes, under the {REPORT_MIN_BYTES}-byte floor a "
+                       "completion note has to clear to be read as a report")
+    m = _NOTE_STATUS.search(body)
+    if m and m.group(1).strip().lower() == _NOTE_IN_PROGRESS:
+        defects.append(f"it still reads `status: {_NOTE_IN_PROGRESS}`, which claims a run "
+                       "that has not finished")
+    if not defects:
+        return None
+    return f"{name} is not a report: " + "; and ".join(defects)
+
+
+def _newest_complete_note(names: list[str], reflection_dir: Path
+                          ) -> tuple[str | None, tuple[int, ...] | None, str, str]:
+    """The newest dated note that is a report: its (name, stamp key, body, why-not).
+
+    Walks the dated notes newest first and returns the first that is not a stub, so the
+    §2e bar is the last cycle that actually reported — which is what "the newest
+    report" has always been taken to mean by the person reading the row. The fourth
+    element is "" when a complete note was found, and otherwise the reason none was,
+    naming the newest stub and how many were set aside, so the report can print a
+    *not measured* line someone can act on instead of a row that reads clean. A
+    directory with no dated note at all returns four empties, which is a first run or a
+    swept tree, not a stub — those callers keep their existing silence.
+    """
+    dated = sorted(((_utc_key(*m.groups()), n)
+                    for n in names if (m := KNOWLEDGE_WRITE_REPORT.match(n))),
+                   key=lambda pair: pair[0], reverse=True)
+    newest_stub = ""
+    skipped = 0
+    for key, name in dated:
+        try:
+            body = (reflection_dir / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        reason = _stub_reason(name, body)
+        if reason is None:
+            return name, key, body, ""
+        skipped += 1
+        newest_stub = newest_stub or reason
+    if skipped:
+        return (None, None, "",
+                f"the {skipped} dated completion note(s) on disk are not reports: "
+                + newest_stub)
+    return None, None, "", ""
+
+
 def _newest_matching(names: list[str], rx: re.Pattern[str]) -> tuple[str | None, tuple[int, ...] | None]:
     """The name in `names` matching `rx` with the highest stamp, and that stamp.
 
@@ -528,12 +615,21 @@ def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
     with no dated copy and only one report is a first cycle: §2e's `test -f` gate
     exists precisely because there is nothing to archive the first time. With two
     or more reports behind it, zero copies is the #436 shape and does fire.
+    
+
+    The bar is the newest COMPLETE note (`_newest_complete_note`), not the newest name.
+    On 2026-10-30 the newest note was the 68-byte stub `run_39_20261030_080034` left
+    reading `status: in-progress`, and grading the copies against that day printed
+    "behind their newest report: 3" for archives that were in fact current — a run that
+    landed nothing had silently moved the bar forward a day. With no complete note at
+    all the result is an `Unmeasured`, which is empty to every existing reader and
+    carries the reason for the report to print instead of a zero.
     """
     reflection_dir = Path(reflection_dir)
     names = _listing(reflection_dir)
-    report, report_key = _newest_matching(names, KNOWLEDGE_WRITE_REPORT)
+    report, report_key, _body, unmeasured = _newest_complete_note(names, reflection_dir)
     if report is None or report_key is None:
-        return []
+        return Unmeasured(unmeasured) if unmeasured else []
     reports = sum(1 for n in names if KNOWLEDGE_WRITE_REPORT.match(n))
     out: list[PatternStaleness] = []
     for stem in PATTERN_STEMS:
@@ -610,13 +706,17 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
     Read-only — it lists and stats, and never writes or `utime`s anything, because it
     runs inside a nightly report over the live corpus. Like `pattern_staleness`, a
     directory with no dated `knowledge-write-*` note, or none at all, returns nothing:
-    no completed cycle means no pointer is behind anything.
+    no completed cycle means no pointer is behind anything. Also like
+    `pattern_staleness`, the day it compares against is the newest COMPLETE note: the
+    2026-10-30 stub made its own day the bar, so two pointers that were current against
+    the last real report read as lag because a run that wrote nothing had stamped the
+    directory with a new note.
     """
     reflection_dir = Path(reflection_dir)
     names = _listing(reflection_dir)
-    report, report_key = _newest_matching(names, KNOWLEDGE_WRITE_REPORT)
+    report, report_key, _body, unmeasured = _newest_complete_note(names, reflection_dir)
     if report is None or report_key is None:
-        return []
+        return Unmeasured(unmeasured) if unmeasured else []
     report_day = "%04d-%02d-%02d" % report_key[:3]
     out: list[PointerMtimeLag] = []
     for name in names:
@@ -639,16 +739,15 @@ def mtime_witness(reflection_dir: Path) -> MtimeWitness:
     The pointer mtimes above are the measurement; this counts how loudly the cycle that
     produced them said so. Zero means the note is silent about writes that may or may
     not have happened, which is a reporting gap and never a statement about the corpus.
-    A directory with no dated note — or one that cannot be read — returns `note=None`
-    so the report can say *not measured* instead of reading a missing note as a silent
-    one (#1227).
+    A directory with no COMPLETE dated note — none at all, one that cannot be read, or
+    only stubs — returns `note=None` so the report can say *not measured* instead of
+    reading a missing note as a silent one (#1227). Counting a stub's lines was the
+    third half of the 2026-10-30 shape: the row printed "0 of 2 expected" against a
+    68-byte note whose silence means only that the run stopped before writing anything,
+    which is not a statement about the note's author having a reporting gap.
     """
     reflection_dir = Path(reflection_dir)
-    report, _ = _newest_matching(_listing(reflection_dir), KNOWLEDGE_WRITE_REPORT)
+    report, _, body, _why = _newest_complete_note(_listing(reflection_dir), reflection_dir)
     if report is None:
-        return MtimeWitness(None, 0)
-    try:
-        body = (reflection_dir / report).read_text(encoding="utf-8", errors="replace")
-    except OSError:
         return MtimeWitness(None, 0)
     return MtimeWitness(report, body.count(MTIME_WITNESS_MARKER))

@@ -5118,6 +5118,47 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         if script_alarms:
             meta["script_alarm"] = dict(script_alarms)
 
+        # #3596: a run the harness stopped at its turn cap has, by definition, not
+        # decided it was finished. Until now `stop_reason` was stored and then only ever
+        # SUMMED (`max_turns_runs` in the health rollup), never consulted for the
+        # verdict, so the record written beside it said `status: success`. What is
+        # missing is this path's counterpart to the empty-terminal-text branch above:
+        # the 512-byte artifact floor is reached only from `_record_artifact_success`, so
+        # a run with plenty to say and nothing to show was never put near it. The
+        # 2026-10-30 shape is `run_39_20261030_080034` — 91 turns against the task
+        # file's `max_turns: 90`, 11 tool errors, neither declared section landed, a
+        # 68-byte completion note still reading `status: in-progress` — recorded
+        # `status: success` with `failure_count: 0`, `last_run` stamped and the task
+        # back to `up_next`, which is exactly the state in which nothing downstream
+        # alerts. So reaching the cap now has to produce the one claim the run can still
+        # make: a task that declares an `output_artifact` and left no qualifying file on
+        # disk did not succeed, and is recorded failed/task — `last_attempt` stamped,
+        # `last_run` NOT. A task declaring no artifact is untouched (nothing to weigh,
+        # and #623's rule that a verdict may not rest on the grade alone stands), and the
+        # evidence test below is the SAME `_declared_artifact_evidence` the empty-text
+        # path uses, so both sides read one ruler.
+        if (stop_reason == "max_turns"
+                and task.get("output_artifact")
+                and _declared_artifact_evidence(task, now) is None):
+            return await _record_failure(
+                task, task_id, run_id, started_at, now,
+                summary=(f"stopped at max_turns ({num_turns} turns) with no qualifying "
+                         f"output_artifact on disk"),
+                body=(f"## Prompt\n\n{prompt[:500]}...\n\n## Response\n\n"
+                      f"{final_response}\n\n"
+                      f"## Why this is recorded as a failure\n\n"
+                      f"`stop_reason: max_turns`, and the task's declared "
+                      f"`output_artifact` produced no file at or above "
+                      f"{_ARTIFACT_MIN_BYTES} bytes with an mtime at or after the run "
+                      f"start — the same evidence "
+                      f"`_declared_artifact_evidence` demands of a run whose terminal "
+                      f"text was empty. A run the harness stopped cannot call itself a "
+                      f"success without it."),
+                kind="task",
+                extra={**meta, "status_basis": "max_turns_without_declared_artifact",
+                       "declared_artifact": str(task["output_artifact"])},
+            )
+
         record = _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
             started_at=started_at, completed_at=completed_at,

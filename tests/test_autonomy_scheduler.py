@@ -6172,3 +6172,116 @@ def test_a_windowless_task_is_not_what_this_grant_is_for(aut, monkeypatch,
     assert aut.window_catch_up_row(_chain_task(aut, 42), now=_LOSS_NOW) is not None
     assert reached, (
         "no ledger read was ever attempted, so the assertion above is vacuous")
+
+
+# ── #3596: reaching the turn cap without the declared deliverable is not a success ──
+
+_MAX_TURNS_RESULT = {"type": "result", "stop_reason": "max_turns",
+                     "usage": {"input_tokens": 10, "output_tokens": 5},
+                     "num_turns": 91}
+
+
+def _cap_query(tmp_path, artifact, size: int = 0):
+    """A turn that hits the cap, optionally writing its deliverable DURING the run.
+
+    The write has to happen inside the stream: `_declared_artifact_evidence` only
+    accepts a file whose mtime is at or after the run's start, so an artifact the test
+    created beforehand would fail the mtime arm and the node would pass for the wrong
+    reason — which is exactly the shape of #42's vacuous `>=` test. `timeout_seconds`
+    is widened by the callers so a timeout can never be the thing that records the
+    failure here: that branch also writes `failure_kind: task`, and a node that passed
+    because of it would be measuring a different rule.
+    """
+    async def _rq(messages, options):
+        if artifact is not None:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("x" * size, encoding="utf-8")
+        yield {"type": "text_delta", "text": "**Step 2e skipped**; sections not landed"}
+        yield _MAX_TURNS_RESULT
+    return _rq
+
+
+async def test_max_turns_with_no_declared_artifact_on_disk_is_recorded_failed(
+        aut, tmp_path, monkeypatch):
+    """Clause 1, the 2026-10-30 shape at the engine.
+
+    `run_39_20261030_080034` reached 91 turns against the task file's `max_turns: 90`,
+    landed neither declared section, and was written as `status: success` with
+    `failure_count: 0`, `last_run` stamped and the task back to `up_next` — the state in
+    which nothing downstream alerts. `stop_reason` was already in the meta and only ever
+    SUMMED at the health rollup, never read for the verdict.
+    """
+    write_task(aut, 1, timeout_seconds=60,
+               output_artifact=str(tmp_path / "deliverable.md"))
+    monkeypatch.setattr("app.harness.run_query", _cap_query(tmp_path, None))
+    result = await aut.run_task(1)
+
+    assert result["success"] is False
+    assert result["failure_kind"] == "task"
+    t = read_task(aut, 1)
+    assert t["status"] == "up_next"
+    assert int(t["failure_count"]) == 1
+    assert t.get("last_attempt"), "the attempt has to be recorded or the cooldown is blind"
+    assert not t.get("last_run"), (
+        "a capped run cannot stamp a completion: `last_run` is what the fleet reads as "
+        "\"the deliverable landed\", and #42's rule is that that claim needs evidence")
+    runs = list((aut.AUTONOMY_RUNS_DIR / "1").glob("run_*.md"))
+    assert len(runs) == 1 and "status: failed" in runs[0].read_text()
+    assert "max_turns_without_declared_artifact" in runs[0].read_text()
+
+
+async def test_max_turns_with_a_stub_declared_artifact_is_recorded_failed(
+        aut, tmp_path, monkeypatch):
+    """The same rule at the floor: a 68-byte note is not a deliverable.
+
+    The artifact exists and is fresh, so the only thing between this run and a success
+    record is `_ARTIFACT_MIN_BYTES` — the same floor the empty-terminal-text path
+    applies, one ruler on both sides, so a run cannot earn a success by talking.
+    """
+    art = tmp_path / "reflection" / "knowledge-write.md"
+    write_task(aut, 1, timeout_seconds=60, output_artifact=str(art))
+    monkeypatch.setattr("app.harness.run_query", _cap_query(tmp_path, art, size=68))
+    result = await aut.run_task(1)
+
+    assert result["success"] is False and result["failure_kind"] == "task"
+    assert art.exists(), "the run did write the file; only its size says otherwise"
+    t = read_task(aut, 1)
+    assert not t.get("last_run") and t.get("last_attempt")
+
+
+async def test_max_turns_with_a_fresh_declared_artifact_still_succeeds(
+        aut, tmp_path, monkeypatch):
+    """The cap alone must not fail a run that produced its deliverable.
+
+    A long night that finished the work is a success; only the missing evidence is. If
+    this node ever goes red, the guard has become a turn budget and every long nightly
+    is a false failure.
+    """
+    art = tmp_path / "reflection" / "knowledge-write.md"
+    write_task(aut, 1, timeout_seconds=60, output_artifact=str(art))
+    monkeypatch.setattr("app.harness.run_query",
+                        _cap_query(tmp_path, art, size=aut._ARTIFACT_MIN_BYTES + 100))
+    result = await aut.run_task(1)
+
+    assert result["success"] is True, result
+    t = read_task(aut, 1)
+    assert t.get("last_run"), "a capped run that produced its deliverable completed"
+    assert int(t["failure_count"] or 0) == 0
+
+
+async def test_max_turns_on_a_task_declaring_no_artifact_still_succeeds(
+        aut, tmp_path, monkeypatch):
+    """Tasks with no declared deliverable are untouched — there is nothing to weigh.
+
+    Roughly a quarter of the fleet declares no `output_artifact` at all; failing them on
+    the cap alone would turn a `stop_reason` into a verdict with no evidence behind it,
+    which is #623's rule about not resting a status on one signal.
+    """
+    write_task(aut, 1, timeout_seconds=60)
+    monkeypatch.setattr("app.harness.run_query", _cap_query(tmp_path, None))
+    result = await aut.run_task(1)
+
+    assert result["success"] is True, result
+    t = read_task(aut, 1)
+    assert t.get("last_run"), "a task with nothing to weigh completed as before"
+    assert int(t["failure_count"] or 0) == 0
