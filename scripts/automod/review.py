@@ -2964,6 +2964,98 @@ def worktree_line_count(rel: str, worktree: Path) -> int | None:
         return None
 
 
+_LINE_SPEC_RE = re.compile(r":(\d+(?:\s*[-,]\s*\d+)*)$")
+# A range wider than this contributes only its endpoints. The bound exists so a
+# citation like `x.py:1-999999` cannot turn a fabricated number into an anchor;
+# no real citation names a span this long, and the length check in
+# `_line_anchor_target` is the guard that actually decides.
+_LINE_RANGE_MAX = 2000
+
+
+def _line_spec_numbers(spec: str) -> set[int]:
+    """The line numbers a citation's line spec names: `36`, `36,201`, `201-214`."""
+    nums: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            if "-" in part:
+                lo_s, _, hi_s = part.partition("-")
+                if lo_s.strip().isdigit() and hi_s.strip().isdigit():
+                    lo, hi = int(lo_s), int(hi_s)
+                    if 0 < lo <= hi and hi - lo <= _LINE_RANGE_MAX:
+                        nums.update(range(lo, hi + 1))
+                    else:
+                        nums.update({lo, hi})
+            continue
+        nums.add(int(part))
+    return nums
+
+
+def _line_anchor_target(raw_path: str, line: int, worktree: Path,
+                        touched: set[str]) -> tuple[str, int] | None:
+    """The (path, line count) a citation's OWN `:N` anchor binds `line` to, or None.
+
+    #3579. One `evidence_path` field carries as many locations as the grader
+    likes, and `evidence_line` is a single number: the rail assumed it describes
+    the FIRST path that resolves (`normalize_evidence_path` returns the first
+    resolvable token), so a finding citing
+    `devset.jsonl (30 rows), labels.py:36, baseline.py:789` with `evidence_line`
+    789 was bounded against the 30-line JSONL. The grader had anchored the
+    number itself — `:789` sits on `eval/refusal_detour_baseline.py`, which is
+    809 lines at that head — and the anchor was discarded, which downgraded a
+    correct `met`, voided the whole review as `unreliable`, and could not be
+    satisfied by any edit the author could make (#3565's round, twice on one
+    head). #2083 widened this for the file `test_node_id` names; this is the
+    THIRD path inside the same string, which that rescue cannot reach.
+
+    The honour is POSITIVE, in three parts, all required: the number must appear
+    in the token's own line spec (a positional guess about which path came first
+    is exactly what is being fixed, so only an explicit anchor binds), that token
+    must resolve in the worktree AND name a file this diff changed (a number into
+    an untouched file is a claim about a file nobody is grading), and the file
+    must positively contain the line (`worktree_line_count`'s None stays None, so
+    an unreadable file never rescues anything). A number no path in the string
+    anchors, like 9999, returns None and keeps the #1254 rail's teeth.
+    """
+    if line <= 0:
+        return None
+    for token in _citation_tokens(str(raw_path or "")):
+        tok = token.strip().strip("`'\"()[],;")
+        m = _LINE_SPEC_RE.search(tok)
+        if not m or line not in _line_spec_numbers(m.group(1)):
+            continue
+        cands = _path_candidates(tok)
+        if not cands:
+            continue
+        resolved = normalize_evidence_path(cands[0], worktree)
+        if not resolved or resolved not in touched:
+            continue
+        n_lines = worktree_line_count(resolved, worktree)
+        if n_lines is not None and 0 < line <= n_lines:
+            return resolved, n_lines
+    return None
+
+
+def _changed_paths_admitting(line: int, worktree: Path, touched: set[str],
+                             exclude: str) -> list[str]:
+    """Changed paths at the graded head long enough to hold `line`, `path` aside.
+
+    Only ever called on the failure path, where reading the changed files is
+    cheap against the ~300 s grading turn it replaces: with a mis-bound number
+    and no candidates named, the author cannot tell a fabricated line from one
+    that belongs to a file the same diff changed, and #3565's round spent three
+    gates finding out.
+    """
+    out: list[str] = []
+    for p in sorted(touched):
+        if not p or p == exclude:
+            continue
+        n_lines = worktree_line_count(p, worktree)
+        if n_lines is not None and n_lines >= line > 0:
+            out.append(f"{p} ({n_lines} lines)")
+    return out
+
+
 _ABSENCE_MARKERS = ("(absent)", "(deleted)", "(removed)")
 
 
@@ -3544,6 +3636,18 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         # the #1254 rail still refuses a number neither file can contain, and a
         # number inside a file this round never changed.
         line_accepted = ""
+        # #3579 first, ahead of the node-file rescue: an anchor the grader wrote
+        # itself (`baseline.py:789` inside the same field) is its own statement of
+        # which file the number describes, which is stronger evidence than any
+        # inference from which path happens to be listed first.
+        if eof is not None:
+            anchored = _line_anchor_target(raw_path, line, worktree, touched)
+            if anchored is not None:
+                a_path, a_lines = anchored
+                line_accepted = (f"evidence_line {line} read against {a_path} "
+                                 f"({a_lines} lines at the graded head), the path this "
+                                 f"citation anchors it to with `:{line}`")
+                eof = None
         if eof is not None and ghost and ghost in touched:
             node_lines = worktree_line_count(ghost, worktree)
             if node_lines is not None and 0 < line <= node_lines:
@@ -3551,9 +3655,25 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                                  f"({node_lines} lines at the graded head), the file "
                                  f"test_node_id names")
                 eof = None
+        # Naming the pair is the whole difference between this detail and a refusal:
+        # on SM_20261030_035050 three gate runs could not tell a fabricated number
+        # from one belonging to an 809-line file the same diff changed, because the
+        # resolved path alone survived into the artifact and the rest of the
+        # citation was already discarded. A SEPARATE entry, because #1750's wording
+        # is quoted verbatim by other tests and by the ledger: the two lists are
+        # joined into the rung detail, so a second entry reaches the reader without
+        # rewriting the sentence those pins hold.
+        misbound = ""
         if eof is not None:
+            admits = _changed_paths_admitting(line, worktree, touched, path)
+            if admits:
+                misbound = (f"evidence_line {line} is not in {path} ({eof} lines at the "
+                            f"graded head); {len(admits)} changed path(s) at the graded "
+                            f"head are long enough to hold it: {', '.join(admits)}")
             unresolved.append(f"evidence_line {line} is past EOF of {path} ({eof} lines at the "
                               f"graded head)")
+            if misbound:
+                unresolved.append(misbound)
         # The sha rail's verdict on THIS note, computed by the detector whether or
         # not this round has the standing to be refused on it — `unresolved_shas`
         # is never told about `changed_paths` (clause 4: the detector stays whole
@@ -3872,9 +3992,17 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 # and in that event's `clauses`, which is copied from the parsed verdict
                 # and holds the clause's own `downgraded` list. Pinned by
                 # `tests/test_automod_review.py::test_the_reread_still_loses_nothing_in_the_ledger`.
+                # #3579: the bare past-EOF sentence is what cost SM_20261030_035050
+                # three gate runs. `downgraded` keeps #1750's verbatim wording, so the
+                # pair — the file the number was bounded against with its length, and
+                # the changed files long enough to hold it — rides in from
+                # `citation_unresolved`, which is the list that already carries it.
+                pair = next((u for u in (c.get("citation_unresolved") or [])
+                             if "long enough to hold it" in u), "")
                 unreliable.append(
                     f"clause {c['clause']}: "
                     + "; ".join(c.get("downgraded") or [])
+                    + (f" ({pair})" if pair else "")
                     + " — a line past EOF of a file whose path resolved is the grader's"
                       " own citation, not a finding about the diff, so the clause is"
                       " re-asked and nothing on this diff was graded from it")

@@ -5946,3 +5946,159 @@ def test_a_retriage_mark_that_lives_only_in_a_rotation_still_voids_the_confirmat
     assert RV.item_contract(77, ledger=ledger)["clauses"] == [], "a voided contract came back"
     control = " | ".join(RV.item_contract(78, ledger=ledger)["clauses"])
     assert "ARCHIVED-CONTRACT-78" in control, control
+
+
+# ── #3579: a line the citation anchors to a LATER path belongs to THAT path ────
+#
+# One `evidence_path` field carries every location the grader wanted to cite, and
+# `evidence_line` is one number. The rail read that number against the FIRST path
+# that resolved, so #3565's clause 5 — `devset.jsonl (30 rows), labels.py:36,
+# baseline.py:789` with `evidence_line` 789, where the `:789` sits on the 809-line
+# file — was bounded against a 30-line file. That downgraded a correct `met`, made
+# the whole review `unreliable`, and could not be satisfied by any edit: no change
+# to a 30-line JSONL makes line 789 exist. #2083 widened the same rail for the
+# file `test_node_id` names, which here is 437 lines, so it could not reach 789
+# either. The five nodes below are the five clauses of #3579; the fixture's files
+# are #3565's head `961f2465` at the real lengths of those four paths.
+
+_MULTI_LINES = {
+    "eval/refusal_detour_devset_2026-10.jsonl": 30,
+    "eval/refusal_detour_labels.py": 201,
+    "eval/refusal_detour_baseline.py": 809,
+    "tests/test_refusal_detour_baseline.py": 437,
+    # Long enough to hold 789, and the one file here this diff never changed.
+    "app/untouched.py": 900,
+}
+_MULTI_CHANGED = [p for p in _MULTI_LINES if p != "app/untouched.py"]
+_MULTI_NODE = ("tests/test_refusal_detour_baseline.py"
+               "::test_the_emitted_summary_carries_the_agreement_with_those_labels")
+# The verbatim clause-5 finding of review session 20261029_213614_review_723c
+# (`messages[104].structured.clauses[4]`), copied out of that file.
+_MULTI_CITATION = ("eval/refusal_detour_devset_2026-10.jsonl (30 rows), "
+                   "eval/refusal_detour_labels.py:36, "
+                   "eval/refusal_detour_baseline.py:789")
+
+
+@pytest.fixture
+def multi_wt(tmp_path):
+    """#3565's head `961f2465` in miniature: the four changed paths at the line
+    counts `wc -l` gives at that head, plus one long file no diff touched."""
+    for rel, n in _MULTI_LINES.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(f"line {i + 1}" for i in range(n)) + "\n")
+    return tmp_path
+
+
+def _multi_grade(multi_wt, *, citation=_MULTI_CITATION, line=789, node=_MULTI_NODE,
+                 changed=_MULTI_CHANGED):
+    """Grade one `met` clause shaped like #3565's clause 5, everything else about
+    it holding, so the only variable left is where the number was bound."""
+    parsed = RV.parse_review(
+        {"premise": "sound", "summary": "fine", "test_honesty": [], "seams_unverified": [],
+         "clauses": [{"clause": 1, "verdict": "met", "evidence_path": citation,
+                      "evidence_line": line, "test_node_id": node,
+                      "how_verified": "ran", "note": "ok"}]},
+        worktree=multi_wt, changed_tests=["tests/test_refusal_detour_baseline.py"],
+        changed_paths=list(changed), n_clauses=1, tests_passed=True)
+    # Graded alone, as it was on the real item, whose other four clauses came back
+    # `met` with nothing blocking: `blocking` is what decides whether an
+    # unverified citation ends up in `unreliable`, so a filler clause standing in
+    # for an ungraded one would silence the very route these nodes read.
+    return parsed["clauses"][0], parsed
+
+
+def test_a_line_anchored_to_a_later_changed_path_is_read_against_it(multi_wt):
+    """Clause 1, and the #3565 repro: the verbatim finding comes back `met`."""
+    clause, parsed = _multi_grade(multi_wt)
+    assert clause["verdict"] == "met", clause
+    assert parsed["unreliable"] == [], parsed["unreliable"]
+    assert not clause.get("citation_only"), clause
+    assert not clause.get("downgraded"), clause
+    # The position of the anchored path inside the field decides nothing: second,
+    # or first, is the same finding, and so is the file that merely carries a
+    # parenthetical row count where the number cannot be.
+    for citation in ("eval/refusal_detour_labels.py:36, "
+                     "eval/refusal_detour_devset_2026-10.jsonl (30 rows), "
+                     "eval/refusal_detour_baseline.py:789",
+                     "eval/refusal_detour_baseline.py:789, "
+                     "eval/refusal_detour_devset_2026-10.jsonl (30 rows)"):
+        moved, _ = _multi_grade(multi_wt, citation=citation)
+        assert moved["verdict"] == "met", citation
+
+
+def test_the_path_a_line_was_read_against_is_recorded_under_accepted(multi_wt):
+    """Clause 2: a waived rail is a decision, so it is in the record and not only
+    in the verdict — this line says which file carried the number and how long that
+    file was at the graded head."""
+    clause, _ = _multi_grade(multi_wt)
+    assert any(a.startswith("evidence_line 789 read against eval/refusal_detour_baseline.py ")
+               and "809 lines at the graded head" in a
+               for a in clause.get("accepted") or []), clause.get("accepted")
+    # The record names the file the `:789` anchor sits on, never the 30-line file
+    # the number was wrongly bounded against.
+    assert not any("devset" in a for a in clause.get("accepted") or []), clause
+
+
+def test_a_number_no_cited_path_anchors_is_still_a_fabricated_line(multi_wt):
+    """Clause 3: the honour is anchored, not positional. 9999 is not the `:N` of
+    any path in the citation and no file named can contain it, so the #1254 rail
+    keeps its teeth: `partial`, `citation_only` set, and the review still unreliable
+    enough to re-ask. The mis-binding fix must not become a waiver."""
+    clause, parsed = _multi_grade(multi_wt, line=9999)
+    assert clause["verdict"] == "partial", clause
+    assert clause.get("citation_only") is True, clause
+    assert parsed["unreliable"], parsed["unreliable"]
+    assert not clause.get("accepted"), clause
+    # And the detail does not invent a rescuer: no changed file holds 9999, so the
+    # mis-bound hint stays empty rather than pointing at a file too short for it.
+    assert "admit 9999" not in " ".join(clause.get("downgraded") or []), clause
+
+
+def test_the_honour_never_fires_for_a_path_this_diff_never_changed(multi_wt):
+    """Clause 4: an anchor is only a binding if the file is in this diff. A number
+    into `app/untouched.py` — 900 lines, absent from `changed_paths` — is a claim
+    about a file nobody is grading, and stays the re-ask it was."""
+    clause, parsed = _multi_grade(
+        multi_wt, citation=("eval/refusal_detour_devset_2026-10.jsonl (30 rows), "
+                            "eval/refusal_detour_labels.py:36, app/untouched.py:789"))
+    assert clause["verdict"] == "partial", clause
+    assert clause.get("citation_only") is True, clause
+    assert parsed["unreliable"], parsed["unreliable"]
+    assert not clause.get("accepted"), clause
+
+
+def test_an_unhonoured_past_eof_line_names_the_mis_bound_pair(multi_wt):
+    """Clause 5: `past EOF (30 lines)` alone cost #3565 three gate runs, because a
+    reader could not tell a fabricated number from one belonging to an 809-line file
+    the same diff changed — the resolved path was all that survived into `gate.json`.
+    So an un-honoured line names the file it was bounded against WITH its length, and
+    every other changed path at the graded head long enough to hold the number."""
+    citation = ("eval/refusal_detour_devset_2026-10.jsonl (30 rows), "
+                "eval/refusal_detour_labels.py:36, app/untouched.py:789")
+    clause, parsed = _multi_grade(multi_wt, citation=citation)
+    # Two surfaces, because two readers need them: the clause's `citation_unresolved`
+    # entry is what lands in the ledger, and `unreliable` is what `gate.py` prints as
+    # the rung detail (`reasons = "; ".join(parsed["unreliable"])`). #1750's verbatim
+    # `downgraded` wording is unchanged, so the pair rides beside it rather than
+    # inside it — a second entry in `downgraded` would read as a second cause and
+    # cost the clause its `citation_only`, which is what keeps the attempt unspent.
+    record = " ".join(clause.get("citation_unresolved") or [])
+    detail = " ".join(parsed["unreliable"])
+    # Each surface keeps its own #1750 wording, so each is asserted with its own
+    # constant: the ledger record carries the `citation_unresolved` phrasing and the
+    # detail carries the `downgraded` one it was composed from.
+    assert PAST_EOF_UNRESOLVED.format(
+        line=789, eof=30,
+        path="eval/refusal_detour_devset_2026-10.jsonl") in record, record
+    assert PAST_EOF.format(
+        line=789, eof=30,
+        path="eval/refusal_detour_devset_2026-10.jsonl") in detail, detail
+    for name, where in (("citation_unresolved", record), ("the rung detail", detail)):
+        assert ("long enough to hold it: eval/refusal_detour_baseline.py (809 lines)"
+                in where), f"{name}: {where}"
+    # Naming stops at what actually admits the number: the 30-line file the rail
+    # bounded against and the 201-line one are not offered as candidates, so the
+    # hint cannot read as "it is in a file you changed" when it is in none of them.
+    assert "(201 lines)" not in detail and "(30 lines at" not in record.split(
+        "long enough to hold it")[1], detail
