@@ -102,12 +102,22 @@ from scripts.autonomy import jobs_membership as jm  # noqa: E402
 FUNCTIONS_HEADER = jm.FUNCTIONS_HEADER
 TIERS_HEADER = jm.TIERS_HEADER
 
-#: The Measure-group jobs whose report has no scheduled consumer. Three
-#: sentences in the doc count against this set — the "no consumer" heading, that
-#: paragraph's closing "they are two of six", and #78/#80's "same position as two
-#: of the six jobs in Measure" — so the set is stated once, here, and the
+#: The Measure-group jobs whose report has no scheduled consumer. Two sentences in
+#: the doc count against this set — the "no consumer" heading and that paragraph's
+#: closing "they are two of six" — so the set is stated once, here, and the
 #: paragraph is checked to name exactly it. A job gaining or losing a consumer has
-#: to move all three sentences together, which is the point.
+#: to move both sentences together, which is the point.
+#:
+#: #78 and #80 are not in this set and never were: they sit in §Bound entropy, and
+#: until #3449 (2026-10-30) the only thing connecting them to this set was that
+#: section's "the same position as two of the six jobs in Measure", a sentence that
+#: named no member of the group whose number it quoted. #3449 gave the pair a
+#: consumer of their own — a non-empty run of either files exactly one backlog item
+#: on board `lloyd` — and deleted the cross-reference, which is why
+#: `test_every_count_of_the_measure_group_matches_its_membership` now asserts that
+#: pattern absent and `test_bound_entropy_states_the_filing_route_for_both_reports`
+#: grades the route in its place, including a guard that no sentence anywhere in the
+#: doc may again call either report unconsumed.
 #:
 #: #85 left on 2026-09-27 with the retirement Alan ruled on backlog **#1577**: its
 #: slot was switched off on 2026-09-20, so it had no report to leave unconsumed.
@@ -212,8 +222,8 @@ def _text() -> str:
 def _flat(text: str) -> str:
     """Prose with hard wraps collapsed, so a sentence can be matched whole.
 
-    The doc wraps near 88 columns, so "three\nof the six jobs in Measure" is one
-    sentence across three lines; matching a sentence against raw lines would
+    The doc wraps near 88 columns, so "two\nof the six have no consumer" is one
+    sentence across two lines; matching a sentence against raw lines would
     match nothing and read as absence.
     """
     return re.sub(r"\s+", " ", text)
@@ -562,11 +572,24 @@ def test_the_functions_table_row_and_every_anchor_follow_the_group_heading():
 
 
 def test_every_count_of_the_measure_group_matches_its_membership():
-    """Clause 3, second half. Four sentences count this group: the "change
+    """Clause 3, second half. Three sentences count this group: the "change
     nothing" line under the heading, the no-consumer heading and its closing
-    clause, and #78/#80's cross-reference from Bound entropy. Each denominator
-    must equal the group's own id list and each numerator must be re-derivable
-    from the doc — a numerator copied from a previous membership is the bug.
+    clause. Each denominator must equal the group's own id list and each numerator
+    must be re-derivable from the doc — a numerator copied from a previous
+    membership is the bug.
+
+    A fourth count used to be matched here, and it never described this group:
+    #78/#80's "the same position as two of the six jobs in Measure" named no Measure
+    member, yet it was the doc's only match for the `jobs in Measure` pattern, so its
+    number-word was being asserted equal to `len(NO_CONSUMER)` — a sentence about two
+    jobs in another group held a Measure-group count in place, and rewriting it would
+    fail here naming nothing but itself. #3449 (2026-10-30) ruled the pair's reports
+    have a consumer — a non-empty run of either files exactly one backlog item — and
+    deleted the clause. The pattern is therefore asserted ABSENT below, not dropped:
+    re-adding a cross-reference would be asserting the pair is still unread, which is
+    the claim #3449 retires. What replaces it is graded by
+    `test_bound_entropy_states_the_filing_route_for_both_reports`, which also keeps a
+    "no consumer" claim about #78 or #80 from coming back anywhere in the doc.
     """
     ids = _measure_ids()
     flat = _flat(_text())
@@ -578,10 +601,12 @@ def test_every_count_of_the_measure_group_matches_its_membership():
     assert n == len([i for i in ids if i not in acting]), (
         f"'{said}': {len(ids) - len(acting)} of {ids} sit outside the acting tier {acting}")
 
-    n, d, said = _count(flat, r"(\w+) of the (\w+) jobs in Measure",
-                        "#78/#80's entry no longer relates them to the Measure group")
-    assert d == len(ids), f"'{said}': denominator {d}, group is {len(ids)} — {ids}"
-    assert n == len(NO_CONSUMER), f"'{said}' counts {n}; the consumerless set is {sorted(NO_CONSUMER)}"
+    cross = re.findall(r"\w+ of the \w+ jobs in Measure", flat)
+    assert not cross, (
+        f"{cross} relates another group's jobs to this one's consumer count again: "
+        f"the consumerless set is {sorted(NO_CONSUMER)}, and #78/#80's reports get "
+        "their consumer by filing a backlog item (#3449), so a cross-reference that "
+        "reads as a membership is a false claim, not a comparison")
 
     n, d, said = _count(flat, r"(\w+) of the (\w+) have no consumer",
                         "the no-consumer claim is no longer a count of the group")
@@ -606,7 +631,245 @@ def test_the_no_consumer_paragraph_names_exactly_the_jobs_its_counts_claim():
     named = {i for i in _ids(after) if i in ids}
     assert named == NO_CONSUMER, (
         f"the paragraph names {sorted(named)} as the jobs with no consumer, but "
-        f"the group's four counting sentences all say {sorted(NO_CONSUMER)}")
+        f"the group's three counting sentences all say {sorted(NO_CONSUMER)}")
+
+
+#: What §Bound entropy has to say about #78 and #80 now that their reports have a
+#: consumer, as `(pattern, the half of #3449 a reader loses without it)`. Matched
+#: against the section flattened. Each is a different part of the ruling, so a
+#: rewrite that keeps the words and drops the actor, the per-job trigger, the zero
+#: case or the dedupe owner is caught by the half it lost rather than passing on
+#: prose that merely mentions filing.
+FILING_ROUTE_CLAIMS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"filing exactly one backlog item on board `?lloyd`?", re.I),
+     "one item per run, onto which board it lands"),
+    (re.compile(r"#78 when any of its three counts is non-?zero", re.I),
+     "#78's trigger: any of its three counts non-zero"),
+    (re.compile(r"VIOLATIONS : N", re.I),
+     "#80's trigger, keyed to `validate_okf.py`'s own number and not to its warnings"),
+    (re.compile(r"okf_stranded_known\.txt", re.I),
+     "the standing allow-list regeneration #80 had been leaving in a run record"),
+    (re.compile(r"No item filed", re.I),
+     "the zero case, which is what tells a clean week from a run killed mid-scan"),
+    (re.compile(r"write-time dedupe", re.I),
+     "that a repeat week collapses in the backlog write path, not in a step the run runs"),
+    (re.compile(r"#3449", re.I),
+     "the ruling the route comes from, so a reader can find why the section changed"),
+    (re.compile(r"board is the consumer", re.I),
+     "what reads the report now — the very thing this section used to disclaim"),
+)
+
+#: A report routed to another *job* by prose alone: "its report goes to #NN", which
+#: names a destination and no rule for acting on it, and which is how both of these
+#: reports were described for months. #3449 routes to the board, so nothing in the
+#: section may route to a task.
+_REPORT_TO_A_JOB_RE = re.compile(
+    r"(?:report|census|index|log|snapshot)[^.]{0,80}\bgoes to\s+#\d+", re.I)
+
+#: The phrases that would put the pair back in the consumerless camp, searched
+#: doc-wide rather than only in §Bound entropy: the sentence #3449 deletes lived in
+#: one section, but the claim it made was quoted in others.
+_UNCONSUMED_PHRASES = ("no consumer", "no scheduled consumer", "unread", "no reader")
+
+
+def test_bound_entropy_states_the_filing_route_for_both_reports():
+    """#3449 clause 4: §Bound entropy records the filing route instead of
+    describing an absence.
+
+    The section used to end the pair's paragraph with "the reports have no scheduled
+    consumer, which puts them in the same position as two of the six jobs in
+    Measure", and the item that became #3449 is about that sentence: it restates an
+    unowned hole as a design choice every review, so someone had to rule. The ruling
+    is option A — give the reports a route — so the green state is not "the sentence
+    is gone" (deleting it would leave the section silent, which is the same
+    description with less evidence) but "the section states the route": the trigger
+    per job, the board the item lands on, the zero case, the dedupe owner and the
+    ruling's id, each in `FILING_ROUTE_CLAIMS`.
+
+    The absence is checked gone in both spellings, and no sentence anywhere in the
+    doc may call either report unconsumed: the same claim moved between sections
+    before (#1520's whole defect family), and a copy in §Measure or §What the fleet
+    actually costs would leave the pair's status contradicted by two sections while
+    this node stayed green on its own.
+    """
+    bound = _group_section("Bound entropy")
+    doc = _flat(_text())
+
+    for gone in ("no scheduled consumer", "have no consumer"):
+        assert gone not in bound, (
+            f"§Bound entropy again says {gone!r} of #78 and #80; #3449 gave the "
+            "pair's reports a consumer — a non-empty run files exactly one backlog "
+            "item — so the section has to state the route, not the absence")
+    cross = re.findall(r"\w+ of the \w+ jobs in Measure", bound)
+    assert not cross, (
+        f"{cross} relates the pair to §Measure's consumer count again, which is the "
+        "cross-reference #3449 deletes: those two jobs are not in `NO_CONSUMER`")
+
+    for claim, what in FILING_ROUTE_CLAIMS:
+        assert claim.search(bound), (
+            f"§Bound entropy no longer states {what} (/{claim.pattern}/); the "
+            "section is describing the route only in outline, and an outline is how "
+            "the previous sentence read as a design choice")
+
+    for job, key in (("#78", "counts"), ("#80", "VIOLATIONS")):
+        sents = [s for s in _sentences(bound) if job in s]
+        assert any(key.lower() in s.lower() and "file" in s.lower() for s in sents), (
+            f"no sentence about {job} in §Bound entropy joins its trigger "
+            f"({key!r}) to filing, so a reader cannot tell which run files and which "
+            f"stays silent (the sentences there are {[s[:70] for s in sents]})")
+
+    for skill in ("orphaned-reference-cleanup", "okf-conformance-check"):
+        assert skill in bound, (
+            f"§Bound entropy no longer names `{skill}` as the rule's carrier, so a "
+            "reader of the doc cannot go and check the instruction the run is "
+            "actually given — and the doc has no way to know the skill still says it")
+
+    assert not _REPORT_TO_A_JOB_RE.search(bound), (
+        "§Bound entropy routes one of these reports to another task by name; naming "
+        "a destination job is not a rule, and it is the shape that left both reports "
+        "with no actor for the finding (#3449 routes them to the board instead)")
+
+    for s in _sentences(doc):
+        if re.search(r"#78|#80", s) and any(p in s.lower() for p in _UNCONSUMED_PHRASES):
+            raise AssertionError(
+                f"a sentence elsewhere in the doc still calls #78/#80's report "
+                f"unconsumed: {s[:160]!r} — #3449 ruled the opposite, and two "
+                "sections disagreeing is the defect this file keeps re-learning")
+
+
+#: The two task files whose descriptions #3449 clause 5 moves, and the two skills
+#: whose steps the ruling rewrote. Paths, not ids: `_parse_task_file` takes a path,
+#: and a node that had to enumerate the vault to find them would pass on a renamed
+#: file.
+TASK_78_FILE = Path.home() / "obsidian" / "autonomy" / "78-orphaned-reference-cleanup.md"
+TASK_80_FILE = Path.home() / "obsidian" / "autonomy" / "80-okf-conformance-check.md"
+SKILL_78_FILE = (Path.home() / "obsidian" / "skills"
+                 / "orphaned-reference-cleanup" / "SKILL.md")
+SKILL_80_FILE = (Path.home() / "obsidian" / "skills"
+                 / "okf-conformance-check" / "SKILL.md")
+
+#: The half of the filing rule both skills must state, as `(pattern, what it pins)`.
+#: Same shape in both files on purpose: clause 3 is one rule, not two dialects.
+_FILING_RULE_CLAIMS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"file exactly one backlog item", re.I),
+     "exactly one item, not one per finding"),
+    (re.compile(r"board:?\s+`?lloyd`?", re.I), "which board it goes to"),
+    (re.compile(r"backlog_write_task", re.I), "the tool the run calls"),
+    (re.compile(r"no .?task_id.?", re.I), "a create, not an update of someone else's item"),
+    (re.compile(r"one run files at most one item", re.I),
+     "the one-item ceiling stated as a ceiling"),
+    (re.compile(r"no de-?duping of its own", re.I),
+     "that the run does not de-duplicate — clause 3's own words"),
+    (re.compile(r"merged_into", re.I),
+     "the write path's answer that settles a repeat week"),
+    (re.compile(r"similar", re.I), "the write path's near-miss report, named beside it"),
+)
+
+
+@live_vault
+def test_the_two_skills_state_the_filing_rule_the_doc_points_at():
+    """#3449 clauses 1, 2 and 3, against the live skills.
+
+    `@live_vault` because `~/obsidian/skills/` is not a tree this round controls; the
+    two skills landed as the vault sha before this diff, and the gate never executes
+    this node. Run it by hand from a worktree with
+
+        ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
+            tests/test_autonomy_jobs_doc_claims.py::test_the_two_skills_state_the_filing_rule_the_doc_points_at -q
+
+    Graded per skill, because the two rules differ on exactly one axis and that axis
+    is what clause 2 is about: #78 keys to the three counts IT computed, #80 to
+    `validate_okf.py`'s own `VIOLATIONS : N` line and never to its `warnings` count,
+    which `--strict` exits 2 on while the census only reports it. A check that read
+    only the shared shape would pass a #80 skill keyed to warnings — the mis-keying
+    that would make the weekly detector file on long-standing vocabulary noise.
+
+    The tags are the process boundary: an item is filed by the MCP backlog write
+    path, and that path only judges a create against the open board when the create
+    carries a `spawned-by-*` tag (`agent_mcp/backlog.py::_dedupe`, prefix from
+    `app/backlog_tags.py::SPAWN_TAG_PREFIX`). A skill that prescribed an untagged
+    item would mint a fresh twin every week while telling the run it had been
+    de-duplicated, so the tag each skill names is checked against the prefix the
+    write path reads, not against a copy of the string.
+    """
+    from app.backlog_tags import SPAWN_TAG_PREFIX
+
+    per_skill = (
+        (SKILL_78_FILE, re.compile(r"any of the three counts non-?zero", re.I),
+         re.compile(r"all three counts zero.{0,40}file nothing", re.I | re.S),
+         "spawned-by-orphaned-refs"),
+        (SKILL_80_FILE, re.compile(r"VIOLATIONS : N`? with N > 0", re.I),
+         re.compile(r"VIOLATIONS : 0.{0,40}file nothing", re.I | re.S),
+         "spawned-by-okf-census"),
+    )
+    for path, trigger, zero_case, tag in per_skill:
+        assert path.exists(), f"{path} is gone; the skill that carries the rule is not on disk"
+        text = _flat(path.read_text())
+        for claim, what in _FILING_RULE_CLAIMS:
+            assert claim.search(text), (
+                f"{path.parent.name}/SKILL.md no longer states {what} "
+                f"(/{claim.pattern}/)")
+        assert trigger.search(text), (
+            f"{path.parent.name}/SKILL.md does not state its own non-empty trigger, "
+            "so the shared shape is there and the keying clause is not")
+        assert zero_case.search(text), (
+            f"{path.parent.name}/SKILL.md does not say its zero case files nothing")
+        named = set(re.findall(r"spawned-by-[a-z0-9-]+", text))
+        assert named, (
+            f"{path.parent.name}/SKILL.md prescribes no `spawned-by-*` tag, and an "
+            "untagged create is never judged against the board — the run would be "
+            "told it de-duplicated while minting a twin each week")
+        for t in named:
+            assert t.startswith(SPAWN_TAG_PREFIX), (
+                f"{path.parent.name} names {t!r}, which the write path does not read "
+                f"as loop output (prefix {SPAWN_TAG_PREFIX!r})")
+        assert tag in named, (
+            f"{path.parent.name}/SKILL.md files under {sorted(named)}, not the "
+            f"{tag!r} the doc and this node expect")
+
+    # Clause 2's second half: #80's item has to carry the one action its 2026-10-21
+    # run left in a run record #79 deletes at 30 days.
+    okf = _flat(SKILL_80_FILE.read_text())
+    assert "okf_stranded_known.txt" in okf, (
+        "skills/okf-conformance-check/SKILL.md no longer names the allow-list "
+        "regeneration, the standing action that was written only into a record "
+        "scheduled for deletion")
+    assert re.search(r"file.{0,120}okf_stranded_known\.txt|okf_stranded_known\.txt.{0,160}file",
+                     okf, re.I | re.S), (
+        "the allow-list regeneration is named but not routed: clause 2 requires it "
+        "inside a filed item rather than only in the run record")
+    assert re.search(r"never to a .?warnings.?", okf, re.I), (
+        "the #80 rule no longer says the filing key excludes the warnings count, "
+        "which is the number a reader would otherwise reach for")
+
+
+@live_vault
+def test_the_two_task_descriptions_state_the_filing_rule_their_runs_follow():
+    """#3449 clause 5, against the live task files.
+
+    A reviewer reads the task, not the architecture doc: `description:` is what
+    `_build_task_prompt` (`app/autonomy.py`) hands the worker verbatim, so a filing
+    rule that reached only the skill would leave the prompt describing a job that
+    "produces a cleanup report" and stops. Parsed through the real loader
+    (`app.autonomy._parse_task_file`, the call the scheduler makes) — a description
+    the parser cannot reach never reaches a run, whatever the bytes on disk say.
+    """
+    from app import autonomy
+
+    for path, key in ((TASK_78_FILE, "non-zero"), (TASK_80_FILE, "violations")):
+        task = autonomy._parse_task_file(path)
+        assert task, f"{path} does not parse as an autonomy task"
+        desc = _flat(task.get("description") or "")
+        assert desc, f"{path.name} has no description to check"
+        assert "exactly one backlog item on board lloyd" in desc.lower(), (
+            f"{path.name}'s description still stops at the report, so the run is "
+            "handed a prompt that never mentions filing (#3449 clause 5)")
+        assert key in desc.lower(), (
+            f"{path.name}'s description states filing but not its own trigger "
+            f"({key!r}), which is the half a reader needs to know when it does not fire")
+        assert re.search(r"files nothing|file nothing", desc.lower()), (
+            f"{path.name}'s description does not say the empty run files nothing, "
+            "leaving a zero reading like a rule the run skipped")
 
 
 def test_the_measure_id_table_lists_the_heading_membership_and_nothing_else():

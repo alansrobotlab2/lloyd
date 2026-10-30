@@ -1040,9 +1040,30 @@ deleted with #1012 (§#36) on 2026-09-23.
 
 **#78 and #80 look like the fleet's worst jobs and are not** — see
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
-report-only by design: neither has ever been asked to fix what it names, and the
-reports have no scheduled consumer, which puts them in the same position as two
-of the six jobs in Measure. Both are green as of 2026-10-27 — one weekly run each in
+report-only by design: neither has ever been asked to fix what it names. What
+changed on 2026-10-30 is the reading of them (#3449): each report now has a
+consumer, because a non-empty run ends by **filing exactly one backlog item on
+board `lloyd`** — #78 when any of its three counts is non-zero, the item's body
+carrying the counts and the report's own path under
+`~/obsidian/memory/vault-maintenance/`, and #80 when
+`validate_okf.py` prints `VIOLATIONS : N` with N > 0, or when the stranded
+allow-list holds files that are no longer stranded, which is where #80's standing
+`scripts/vault/okf_stranded_known.txt` regeneration used to sit: inside a run
+record, which #79's sweep deletes at 30 days. A run that finds nothing files
+nothing and writes the line `No item filed`, so a zero is told apart from a run
+killed mid-scan. The board is the consumer — an item on it reaches the triage pass
+(`workers/sources/autotriage.py`, which prints a loop-spawned item's filing origin
+back onto it) and then the implement pool, which a run record under
+`~/lloyd-data/autonomy-runs/` never does — and repeat weeks are settled by the
+backlog write path's own write-time dedupe, not by a step the run performs. That
+is the difference this ruling closes: #80's violations were last closed by a person
+who went and looked (#2340), and a detector that files does not wait for that. The
+rule's carriers are the two skills — `orphaned-reference-cleanup`'s Step 5 and
+`okf-conformance-check`'s *Filing the result* — and the `description:` field of each
+task file, which is the half `_build_task_prompt` renders into the worker's prompt.
+Filing is routing, not repairing: neither job fixes what it names, and over the
+corpora the write-authority table still tiers both `Reports only` — the one item a
+run files is board bookkeeping, not a write into a corpus. Both are green as of 2026-10-27 — one weekly run each in
 the seven days to that date, no failure and no timeout, 0.06 GPU-h between them — and
 the group's other three ran seven times each over the same unclamped window, 0.53
 GPU-h for all five (`/api/autonomy/health?days=7`). The number in this group worth
