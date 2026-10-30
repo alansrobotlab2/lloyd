@@ -1360,3 +1360,22 @@ def test_the_two_opens_behave_identically_on_the_engine_the_guardian_runs(tmp_pa
     assert out["frames_no_index"]["mode_ro"]["rows"] == 3, who
     assert out["frames_no_index"]["immutable"]["rows"] == 0, (
         f"{who}: `{out['sqlite_version']}` read the log under immutable=1")
+
+
+def test_a_quarantined_empty_copy_is_not_a_shadow(tmp_path):
+    """A store moved into the quarantine has been ruled on, so it is not reported.
+
+    The 2026-10-26 `kg.sqlite` was moved to `quarantine/tree-strays/<stamp>/` by hand and
+    the next scan reported it again from there; `quarantine_inert` moves empty tree-stray
+    stores to the same directory, so every one of those would have alerted too.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    _store(data / "quarantine" / "tree-strays" / "2026-10-29-kg-sqlite" / "kg.sqlite", 0)
+    _store(data / SHIPPED_KG, 4096)
+
+    assert _shadows(data, repo) == []
+
+    # Positive control: the same empty copy outside the quarantine is still a finding.
+    _store(data / "kg.sqlite", 0)
+    assert _reported(_shadows(data, repo)) == [str(data / "kg.sqlite")]

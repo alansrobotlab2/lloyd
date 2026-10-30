@@ -11,7 +11,7 @@ Rules:
   * Nothing outside this module opens the database.
   * A reader that finds no database raises `StoreUnavailable` rather than
     being handed an empty one; `KGStore(path)` and `configure(path)` are the
-    named routes that provision a new file.
+    named routes that provision a new file (beside the declared store only).
   * Every write is a transaction; `transaction()` nests.
   * Every edge and alias says where it came from (`origin`) and when.
   * The markdown fact files stay the human-readable fact layer. `facts_idx`
@@ -46,7 +46,7 @@ from typing import Any, Iterable, Iterator, Optional
 
 import yaml
 
-from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
+from app.paths import DATA_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB, VAULT_KG_DB_DEFAULT
 
 try:  # ~10x faster than the pure-Python loader; all input is our own files
     from yaml import CSafeLoader as _YamlLoader  # type: ignore
@@ -205,8 +205,8 @@ class KGStore:
     one long-lived connection, so `PRAGMA data_version` means what the cache
     needs it to mean (see module docstring)."""
 
-    def __init__(self, path: Path | str):
-        self.path = Path(path)
+    def __init__(self, path: Path | str, *, create: bool = False):
+        self.path = Path(path) if create else _refuse_stray_create(Path(path))
         self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
         self._serial = 0           # bumps on our own commits
@@ -1556,7 +1556,8 @@ def _require_database(path: Path) -> Path:
     by hand for itself; the store owes it to every reader.
 
     A writer that means to CREATE a database says so by name: `KGStore(path)`
-    and `configure(path)` still provision an absent path.
+    and `configure(path)` still provision an absent path — inside the data root
+    only beside the declared store, unless `create=True` (`_refuse_stray_create`).
     """
     if not path.is_file():
         raise StoreUnavailable(
@@ -1565,6 +1566,44 @@ def _require_database(path: Path) -> Path:
             "with KGStore(path) or configure(path)."
         )
     return path
+
+
+def _refuse_stray_create(path: Path) -> Path:
+    """Refuse to provision a new database inside the data root away from the store.
+
+    `KGStore(path)` creates an absent file and fills it with the schema, so a
+    probe that guesses the store's path wrong does not fail — it lays a valid,
+    empty knowledge graph and reads `0` from it. On 2026-10-26 a worker's Bash
+    heredoc ran `KGStore('<data root>/kg.sqlite')`; the 81,920-byte copy it left
+    at the top of the root answered every count with 0 beside the populated
+    `_pipeline/vault-derived/kg.sqlite` for three days, until the guardian's
+    shadow check (#3481) alerted on it hourly.
+
+    Inside the data root a new KG database belongs beside the declared store —
+    the directory `VAULT_KG_DB_DEFAULT` sits in, where `kg_rebuild.py` builds
+    `kg-rebuild.sqlite` too — or at `VAULT_KG_DB` itself. Anywhere else under the
+    root is refused unless the caller says `create=True`. An existing file, and
+    every path outside the data root (tests' `tmp_path`, scratch rebuilds), is
+    untouched by this rule.
+    """
+    if path.exists():
+        return path
+    try:
+        target = path.resolve()
+        root = Path(DATA_ROOT).resolve()
+    except OSError:
+        return path
+    if not target.is_relative_to(root):
+        return path
+    allowed_dir = Path(VAULT_KG_DB_DEFAULT).resolve().parent
+    if target.parent == allowed_dir or target == Path(VAULT_KG_DB).resolve():
+        return path
+    raise StoreUnavailable(
+        f"no knowledge-graph database at {target}, and refusing to create one there: "
+        f"inside the data root a new store belongs in {allowed_dir}. The live store "
+        f"is {Path(VAULT_KG_DB).resolve()} — open it with app.kg_store.store(). Pass "
+        "create=True only to provision a new database at this path on purpose."
+    )
 
 
 def store() -> KGStore:
@@ -1595,7 +1634,7 @@ def configure(path: Path | str) -> KGStore:
         _default_path = Path(path)
         if _default is not None:
             _default.close()
-        _default = KGStore(_default_path)
+        _default = KGStore(_default_path, create=True)
         return _default
 
 

@@ -159,7 +159,7 @@ What the store changes:
 |---|---|
 | A write is all-or-nothing | `store.transaction()` — `BEGIN IMMEDIATE`, nestable. A sweep's alias writes and every edge rewrite commit together |
 | Two processes cannot lose a write | WAL + `busy_timeout=30000`; tested with two concurrent writer processes and a `kill -9` mid-write |
-| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. Since #1236 that covers an *absent* file too: `_open()` mkdirs and `sqlite3.connect`s, which CREATES a database whose every count answers 0, so the module-level reader `store()` calls `_require_database()` first and refuses a path holding no database, naming the resolved path. `KGStore(path)` and `configure(path)` remain the named routes that provision one |
+| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. Since #1236 that covers an *absent* file too: `_open()` mkdirs and `sqlite3.connect`s, which CREATES a database whose every count answers 0, so the module-level reader `store()` calls `_require_database()` first and refuses a path holding no database, naming the resolved path. `KGStore(path)` and `configure(path)` remain the named routes that provision one — inside the data root only beside the declared store, unless `create=True` (2026-10-29) |
 | Nothing is silently overwritten | A merge *expires* each edge and re-adds it, returning `(old_id, new_id)` so a revert is exact. `retype` sets `superseded_edge_id` |
 | Every row says where it came from | `kg_store.ORIGINS` — extractor, sweep, semantic, fact_add, fact_relate, seed, classifier, conversation, revert, migration, manual, legacy — are the *known* writers, not a constraint: the column is free-form, and `schema` (the identity gate) is a real origin that predates nothing in that tuple. `aliases.origin` and `aliases.kind` likewise |
 | Caches cannot go stale | Adjacency, degree and the alias map memoise on `PRAGMA data_version`, which moves when *any* process commits |
@@ -903,6 +903,23 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
   have to name the path they read: the live tree holds ~314k indexed rows and a
   worktree has no store at all, so the same query is now either a real number or
   a refusal, never a zero.
+- **2026-10-29 — a guessed path can no longer lay a store in the data root.**
+  #1236 closed the reader route; the provisioning route stayed open to a probe
+  that typed the wrong path. On 2026-10-26 a worker's Bash heredoc ran
+  `KGStore('<data root>/kg.sqlite')`, which laid an 81,920-byte schema-only
+  copy at the top of `~/lloyd-data` that answered every count with 0 beside the
+  populated `_pipeline/vault-derived/kg.sqlite`; it sat three days until the
+  guardian's row-measured shadow check (#3481) alerted on it hourly (#3551,
+  #3558, #3559, #3566). `KGStore(path)` now refuses an ABSENT path inside the
+  data root unless it is `VAULT_KG_DB` or sits in that store's directory (where
+  `kg-rebuild.sqlite` is built), naming the live store and `store()`;
+  `KGStore(path, create=True)` is the deliberate override and `configure()`
+  passes it, so tests and rebuilds are unchanged. An existing file and any path
+  outside the root are untouched. Pinned by `tests/test_kg_store.py::
+  test_a_new_store_at_the_data_root_top_is_refused_and_nothing_is_created` and
+  its two siblings. The stray itself was moved to
+  `quarantine/tree-strays/2026-10-29-kg-sqlite/`, which the shadow walk now
+  skips (`datawatch.data_root_shadows`).
 - **2026-09-18 — stale.** The mechanisms all still exist and the nine rules are
   all still enforced in code, but the document had stopped describing the live
   store: re-measured the Scale section (26,110 dirs / 71,868 files / 314,613

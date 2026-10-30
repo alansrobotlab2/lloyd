@@ -856,7 +856,8 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
     sidecar. Existence is what the 0-byte rule used, and it would have kept this finding
     unreported: the live `kg.sqlite` has a 0-byte `-wal` and a 32,768-byte `-shm` beside it
     from a WAL connection that died on 2026-10-27, with no descriptor on either. `CACHE_DIRS`
-    is not scanned (a rebuild in progress is not a shadow), and the scan does not follow a
+    is not scanned (a rebuild in progress is not a shadow), nor is the quarantine (a file
+    already set aside is not a store anyone opens), and the scan does not follow a
     symlink or descend past `SHADOW_MAX_DEPTH`.
 
     Reading content is why this check opens files it used to only `lstat`, so the four
@@ -897,6 +898,19 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
     if not os.path.isdir(root):
         raise OSError(f"data root is not a readable directory: {root}")
     declared = _declared_db_relatives(repo)
+    # The quarantine is where a stray goes once someone has ruled on it — the guardian's
+    # own `quarantine_inert` moves empty tree-stray stores there, and a person moving a
+    # data-root shadow aside puts it there too. A file in it is set aside, not a store a
+    # reader can open by mistake, so it is no shadow: scanning it re-reported the
+    # 2026-10-26 `kg.sqlite` from the quarantine the tick after it was moved.
+    # An unreadable layout (`quarantine_dir` None) skips nothing and keeps reporting.
+    skip_top = set(CACHE_DIRS)
+    qdir = P.quarantine_dir(repo=repo, data_root=root)
+    if qdir:
+        try:
+            skip_top.add(os.path.relpath(qdir, root).split(os.sep)[0])
+        except ValueError:
+            pass
 
     # One bounded walk: basename -> [(depth, size, path)]. Depth is levels below the
     # root, so a top-level file is 1 and `_pipeline/workers.db` is 2.
@@ -914,7 +928,7 @@ def data_root_shadows(data_root: str = DATA_ROOT, repo: str = TREE,
             for de in entries:
                 seen += 1
                 if de.is_dir(follow_symlinks=False):
-                    if depth == 0 and de.name in CACHE_DIRS:
+                    if depth == 0 and de.name in skip_top:
                         continue
                     if depth + 1 < SHADOW_MAX_DEPTH:
                         stack.append((de.path, depth + 1))

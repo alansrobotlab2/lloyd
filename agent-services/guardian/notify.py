@@ -226,10 +226,16 @@ BACKLOG_ITEM_BOARD = "lloyd"
 #: than a log line. It records what was skipped and never decides the next one —
 #: see `_open_duplicate_on_board`, which is the only suppression input.
 BACKLOG_SKIP_STATE_NAME = "backlog-skipped.json"
-#: Same loopback bound as the POST it precedes. `voiceloss.py` sets its own timeout
-#: off that same number, for the same reason: a loopback that is not answering is
-#: the failure mode shared by the alert and the read that precedes it.
-BACKLOG_READ_TIMEOUT_SECONDS = 5.0
+#: How long the duplicate read may take. It was the POST's 5 s until 2026-10-29, and
+#: that was too short for the read: `?q=` scans the whole board (3,500 files, 207 MB),
+#: and with the backend's parse cache cold — after every landing's restart, or a pass
+#: that rewrote many items — the same request measured 18.6 s against 0.3 s warm. The
+#: client gave up, uvicorn wrote no access line for a disconnected client, `None`
+#: meant file anyway, and one hourly shadow alert filed four copies (#3551, #3558,
+#: #3559, #3566) while an open one stood on the board. 30 s covers the cold parse with
+#: room and stays well inside the unit's `WatchdogSec=90`; the read runs only on a
+#: tick that is already filing.
+BACKLOG_READ_TIMEOUT_SECONDS = 30.0
 
 
 class Notifier:
@@ -241,6 +247,7 @@ class Notifier:
         self.state_dir = Path(state_dir)
         self.vault_root = Path(vault_root)
         self.backend_url = backend_url.rstrip("/")
+        self._board_read_error: str | None = None
         # When False, only the two channels scoped to this guardian's own state
         # dir fire (ledger, ALERT.md). The drill runs a real guardian against a
         # throwaway repo, and without this its test rollbacks land in the live
@@ -995,9 +1002,12 @@ class Notifier:
         instead of in the return.
         """
         item_name = f"[guardian] {title}"[:120]
+        self._board_read_error = None
         if self._open_duplicate_on_board(item_name):
             self._note_backlog_skip(item_name)
             return False
+        if self._board_read_error:
+            self._note_backlog_skip(item_name, unread=self._board_read_error)
         body = text
         if commit:
             body += (f"\n\nYour work is preserved. To re-apply and investigate:\n"
@@ -1099,14 +1109,22 @@ class Notifier:
         query = urllib.parse.urlencode({"board_id": BACKLOG_ITEM_BOARD, "q": name})
         req = urllib.request.Request(
             f"{self.backend_url}{BACKLOG_LIST_PATH}?{query}", method="GET")
+        # Why the read failed is kept on the instance for `_backlog_task` to record:
+        # an unreadable board and an empty one both end in a filing, and only this
+        # tells them apart afterwards (#3559).
         try:
             with urllib.request.urlopen(req, timeout=BACKLOG_READ_TIMEOUT_SECONDS) as resp:
                 if not (200 <= resp.status < 300):
+                    self._board_read_error = f"HTTP {resp.status}"
                     return None
                 rows = json.loads(resp.read().decode("utf-8", "replace") or "null")
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._board_read_error = f"{type(exc).__name__}: {exc}"[:200]
             return None
-        return rows if isinstance(rows, list) else None
+        if not isinstance(rows, list):
+            self._board_read_error = f"body is {type(rows).__name__}, not a list"
+            return None
+        return rows
 
     def _open_duplicate_on_board(self, name: str) -> bool:
         """True only when the board says an OPEN item already carries this name.
@@ -1146,8 +1164,13 @@ class Notifier:
                 return True
         return False
 
-    def _note_backlog_skip(self, name: str) -> None:
+    def _note_backlog_skip(self, name: str, *, unread: str | None = None) -> None:
         """Record that a filing for `name` was suppressed, in the guardian's state dir.
+
+        With `unread`, records the opposite: the board could not be read, so the
+        filing went ahead without the duplicate check. Kept under its own key
+        (`unread`, with the failure's text) in the same file, so a duplicate on the
+        board can be traced to a failed read rather than to an empty board.
 
         Keyed by the exact item name, so the record answers "how many times has this
         signature been silenced, and when last" without a log grep, and a second
@@ -1168,6 +1191,20 @@ class Notifier:
             import gstate
             path = self.state_dir / BACKLOG_SKIP_STATE_NAME
             data = gstate.read_json(path) or {}
+            if unread is not None:
+                misses = data.get("unread")
+                misses = misses if isinstance(misses, dict) else {}
+                prior = misses.get(name)
+                prior = prior if isinstance(prior, dict) else {}
+                try:
+                    count = int(prior.get("count") or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                misses[name] = {"count": count + 1, "last_seen": gstate.now_iso(),
+                                "last_reason": unread}
+                data.update({"schema": 1, "unread": misses})
+                gstate.write_json_atomic(path, data)
+                return
             entry = data.get("suppressed")
             entry = entry if isinstance(entry, dict) else {}
             prior = entry.get(name)

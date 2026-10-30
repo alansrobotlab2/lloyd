@@ -826,3 +826,41 @@ def test_an_older_database_gains_the_session_column(db):
     assert "facts_session" in {r[0] for r in db.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}, (
         "the migration added the column but left its index behind")
+
+
+# ── a probe that guesses the store's path cannot lay a new one in the data root ──
+
+def _point_data_root(monkeypatch, tmp_path):
+    import app.kg_store as ks
+    root = tmp_path / "lloyd-data"
+    declared = root / "_pipeline" / "vault-derived" / "kg.sqlite"
+    declared.parent.mkdir(parents=True)
+    monkeypatch.setattr(ks, "DATA_ROOT", root)
+    monkeypatch.setattr(ks, "VAULT_KG_DB_DEFAULT", declared)
+    monkeypatch.setattr(ks, "VAULT_KG_DB", declared)
+    return root, declared
+
+
+def test_a_new_store_at_the_data_root_top_is_refused_and_nothing_is_created(monkeypatch, tmp_path):
+    # 2026-10-26: `KGStore('<data root>/kg.sqlite')` from a worker's probe laid an
+    # empty schema-only copy that answered every count with 0 for three days.
+    root, _ = _point_data_root(monkeypatch, tmp_path)
+    with pytest.raises(StoreUnavailable) as exc:
+        KGStore(root / "kg.sqlite")
+    assert "store()" in str(exc.value)
+    assert list(root.iterdir()) == [root / "_pipeline"]
+
+
+def test_the_declared_directory_and_an_explicit_create_still_provision(monkeypatch, tmp_path):
+    root, declared = _point_data_root(monkeypatch, tmp_path)
+    KGStore(declared).close()                                   # the live store's own path
+    KGStore(declared.parent / "kg-rebuild.sqlite").close()      # kg_rebuild's REBUILD_DB
+    KGStore(root / "elsewhere" / "kg.sqlite", create=True).close()
+    assert declared.is_file() and (root / "elsewhere" / "kg.sqlite").is_file()
+
+
+def test_an_existing_file_and_a_path_outside_the_data_root_are_untouched(monkeypatch, tmp_path):
+    root, _ = _point_data_root(monkeypatch, tmp_path)
+    KGStore(root / "kg.sqlite", create=True).close()
+    KGStore(root / "kg.sqlite").close()                         # exists: opens as before
+    KGStore(tmp_path / "scratch" / "kg.sqlite").close()         # not under the root
