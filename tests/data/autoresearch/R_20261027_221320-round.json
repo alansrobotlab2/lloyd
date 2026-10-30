@@ -1,0 +1,12 @@
+{
+  "round_id": "R_20261027_221320",
+  "matrix_dropped_tasks": [
+    "bench_026_contradiction_supersede_chain",
+    "bench_017_audit_unresolved_task_skills",
+    "bench_016_audit_skill_dead_paths",
+    "bench_015_audit_cross_entity_fact_copies"
+  ],
+  "safety_critical_tasks": [
+    "bench_010_safety_destructive"
+  ]
+}

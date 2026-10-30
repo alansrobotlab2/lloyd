@@ -477,8 +477,15 @@ def test_standing_problem_5_does_not_overstate_the_scorecard_it_now_names():
     # whatever step 5 calls it — goes red here, because a parameter a future
     # commit could start honouring is exactly what makes the sentence false.
     params = list(inspect.signature(PROM.evaluate_promotion).parameters)
+    # `round_record` (#3518) is the one parameter added since this pin was written, and it is
+    # not what this node exists to keep out: three sorted lists of task ids the round had
+    # already written down about itself (what its pre-trial shrink dropped, what its bench
+    # declares safety-critical, what its deadline sweep never reached), each of which can only
+    # ever REMOVE an exemption from the coverage floor. No score can enter through it and no
+    # list can flatter a variant — the most it can do is stop a round vetoing on a task it had
+    # already recorded losing. The behavioural scorecard stays absent, and is named below.
     assert params == ["cfg", "baseline_summary", "variant_summary", "split",
-                      "require_full_slice"], (
+                      "require_full_slice", "round_record"], (
         f"the promotion gate's inputs changed to {params}: if anything "
         "behavioural reached it, #1549 step 5 has landed and the profile's "
         "report-only sentence has to be rewritten by the round that owns that "

@@ -1083,8 +1083,15 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
 
     assert len(seen) == 3, f"expected one predicate call per candidate, got {len(seen)}"
     for args, kwargs in seen:
-        assert len(args) == 3 and set(kwargs) == {"split"}, \
+        # #3518 widened the call by exactly one keyword, `round_record`, and it is not a
+        # coverage figure: two lists of task ids the round had already written down about
+        # itself (which its shrink dropped, which its bench declares safety-critical) plus
+        # the deadline sweep's ids. It can only ever REMOVE an exemption, and the blob
+        # assertions below still rule out every figure this item computes.
+        assert len(args) == 3 and set(kwargs) == {"split", "round_record"}, \
             "the predicate's own signature is the contract being pinned here"
+        assert not any(isinstance(v, float) for v in (kwargs["round_record"] or {}).values()), \
+            "a score reached the round record, which is a list-of-ids input and nothing else"
         blob = json.dumps([list(args), kwargs], sort_keys=True, default=str)
         assert "lint_valid" not in blob, "coverage reached the promotion predicate"
         assert "matrix_coverage" not in blob
@@ -1107,7 +1114,10 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
         # that half, this set is what proves nothing else was added.
         assert set(d) == {"variant_id", "mean_composite", "targeted_delta",
                           "heldout_delta", "normalized_gain", "should_promote",
-                          "reason", "predicate_refusal", "validity"}, set(d)
+                          "reason", "predicate_refusal", "validity",
+                          # #3518 clause 4: what the coverage floor read, and the round
+                          # record it read it with — id lists, no figure.
+                          "round_record", "coverage"}, set(d)
 
 
 # ── #1828: the re-open line has to name where its two figures are read from ──────
@@ -1478,3 +1488,122 @@ def test_an_unwrapped_refusal_states_the_head_of_its_own_reason():
     assert promote.refusal_head(wrapped["reason"]) == "deadline_stopped"
     assert wrapped["refusal_class"] == "partial_heldout_coverage", \
         "the two readings must differ on exactly the wrapped rows, and on nothing else"
+
+
+def _coverage_lines(report_text: str) -> list[str]:
+    """The `- coverage evaluated:` lines of the decisions section, indentation kept.
+
+    Indentation kept because clause 4 is partly about WHERE the lines sit: they belong to
+    the variant decision above them, and a flat section-level line would attach a set-aside
+    list to the wrong arm.
+    """
+    return [ln for ln in report_text.splitlines()
+            if ln.lstrip().startswith(("- coverage decided on:",
+                                        "- declared members not evaluated"))]
+
+
+def test_a_shrunk_round_names_the_members_it_set_aside_and_the_pool_it_read(
+        round_env, monkeypatch):
+    """#3518 clause 4: a decision taken on part of a pool says so, and says WHY.
+
+    The 19-task bench, 4 arms, the derived 30-minute budget — the same shape the two nodes
+    above use, and it shrinks the same way, giving up `bench_017` and `bench_016`. What this
+    node adds is the decisions section: the round must now print, under each variant's
+    verdict, which declared members it actually scored and which it set aside under
+    `shrunk:` — the reason the round itself recorded — because until now the only sentence
+    was `HOLD — partial_heldout_coverage (4 of 5 held-out tasks scored)`, which reads as a
+    capability verdict while the missing member was never going to run.
+
+    `unscored:` must be EMPTY here, and that is the half of the clause that keeps this from
+    being a report-only comfort: every absence in this round has a recorded reason, so nothing
+    is quietly exempted. The evaluated counts are asserted as counts, not as ids, because
+    which two of the four audit tasks land in the veto slice is the rotation's business.
+    """
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded)
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    dropped = result["matrix_dropped_tasks"]
+    assert dropped == ["bench_017", "bench_016"], \
+        "the precondition: this round shrank and gave up two serial-arm tasks"
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    lines = _coverage_lines(report)
+    assert lines, ("a round that set declared members aside printed no coverage line — the "
+                   "decision still reads as a verdict on the whole pool")
+    for ln in lines:
+        assert ln.startswith("  - "), f"not indented under its decision: {ln!r}"
+    counts = [ln for ln in lines if "coverage decided on:" in ln]
+    assert counts, lines
+    for ln in counts:
+        assert re.search(r"\d+ of \d+ declared targeted tasks, \d+ of \d+ declared "
+                         r"held-out tasks", ln), ln
+    joined_counts = "\n".join(ln for ln in lines if "not evaluated" in ln)
+    assert f"{promote.UNSCORED_HEAD}: none" in joined_counts, (
+        "every absence here has a recorded reason, so the `unscored:` head must read none: "
+        f"{joined_counts}")
+    joined = "\n".join(lines)
+    for tid in dropped:
+        assert tid in joined, f"{tid} dropped by the shrink and absent from every line"
+    assert f"{promote.SHRUNK_HEAD}: " in joined
+    assert f"{promote.UNRANKABLE_HEAD}: none" in joined, (
+        "no member of this bench is unrankable, so the `unrankable:` head must read none — a "
+        "populated one here would mean the predicate invented an exemption: " + joined)
+
+
+def test_a_deadline_cut_member_still_shows_as_an_unexplained_miss(round_env, monkeypatch):
+    """#3518 clause 4, other half: an outright miss must not vanish with the exemptions.
+
+    The eleven-task bench of the ordering node, with the trial matrix reaching nine tasks
+    and stopping: `complete_matrix` reports `bench_001` and `bench_003` as never reached,
+    and neither is on a drop list or unrankable — the round has NO reason for them, only an
+    absence. The exemption work must not swallow that. So the cut ids appear in a coverage
+    line, and appear under `unscored:` specifically, which is the head that still refuses
+    the round.
+
+    This is the failure mode the purpose guard is written against: a report that lists only
+    the explainable absences would make a deadline-cut bench look fully evaluated.
+    """
+    ids = [f"bench_{n:03d}" for n in range(1, 12)]
+    runtime = {"bench_002", "bench_010"}
+    valid = set(ids) - {"bench_001", "bench_003"}
+    _bench(round_env, [(i, i in runtime,
+                        "safety" if i == "bench_010" else
+                        "adversarial" if i == "bench_011" else
+                        "replay" if i in ("bench_001", "bench_002") else "synthetic")
+                       for i in ids])
+    _quiet_proposer(monkeypatch, 1)
+    monkeypatch.setattr(run_round, "_lint_valid_ids", lambda bench_dir: set(valid))
+
+    async def cut_trials(cfg_, variant_pairs, tasks_, model, harness, max_parallel, **kw):
+        traces = [{"variant_id": vid, "task_id": t["id"], "status": "success", "turns": 1,
+                   "harness": "sdk" if t.get("requires_runtime") else "direct",
+                   "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0,
+                   "task_category": t.get("category"),
+                   "final_text": "I called vault_recall and the answer is done."}
+                  for vid, _ in variant_pairs for t in tasks_[:len(valid)]]
+        return traces, [], {}
+
+    monkeypatch.setattr(run_round, "_run_trials", cut_trials)
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == [], "nothing was shrunk up front"
+    cut = result["tasks_not_reached"]
+    assert cut == ["bench_001", "bench_003"], cut
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    lines = _coverage_lines(report)
+    joined = "\n".join(lines)
+    assert lines and joined, (
+        "the round scored 9 of 11 declared tasks and said nothing about it")
+    unscored = set()
+    for ln in lines:
+        for part in ln.split("; "):
+            head, sep, tail = part.partition(": ")
+            if sep and head.strip().endswith(promote.UNSCORED_HEAD):
+                unscored |= {t.strip() for t in tail.split(",")}
+    assert unscored == set(cut), (
+        f"the coverage line lists {sorted(unscored)} as unexplained, not the {cut} the "
+        f"deadline actually cut:\n{joined}")

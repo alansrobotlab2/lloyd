@@ -145,6 +145,234 @@ def _per_task(summary: dict[str, float]) -> dict[str, float]:
     return out
 
 
+#: The two shapes of a slice member that carries no score, named distinctly in the
+#: coverage refusal (#3518). `unrankable:` is a member neither side could put an
+#: objective mark on for any reason a prompt could change, and its reader belongs at the
+#: bench file. `unscored:` is everything else that carries no mark on the side being
+#: decided — a member this round never reached (the deadline took it) or one the variant
+#: ran and lost the mark on while the baseline had it. One prose word for both is why the
+#: second reads as the first. The census, recounted 2026-10-29 over every
+#: `event == "decision"` ledger row dated 2026-09-26 or later, bucketed by the
+#: head of its own `reason`: 545 decisions over 187 rounds, promoted 0, of which 341
+#: `partial_heldout_coverage` and 129 `partial_targeted_coverage` — 470 of the 545 — and the
+#: binding one was a held-out member, `bench_005_replay_memory_update`, whose only objective
+#: check is a tool-behaviour check no configured arm routes it to.
+UNSCORED_HEAD = "unscored"
+UNRANKABLE_HEAD = "unrankable"
+#: The third head (#3518 clause 2): a member this round dropped at its own pre-trial
+#: matrix shrink (#1605/#1828). That absence was recorded before any trial ran, so it is
+#: not a verdict a prompt lost — but it is also not a fact the predicate can infer from
+#: the two summaries, which is why it arrives in the round record below. It is named
+#: apart from `unrankable:` because the two send the reader to different places (the
+#: round's `- matrix reduced before trials:` line for one, the bench file for the other),
+#: and apart from `unscored:` because that head has no recorded reason at all, which is
+#: precisely the case #549 exists to refuse.
+SHRUNK_HEAD = "shrunk"
+
+#: The two keys of the round record `evaluate_promotion` reads (#3518), so the coverage
+#: floor can tell a lost verdict from a recorded absence. `matrix_dropped_tasks` is not a
+#: new name: it is the key `run_round.run`'s payload already carries for the shrink's
+#: drop list, so the predicate and the report's `- matrix reduced before trials:` line
+#: read one list and cannot drift. `safety_critical_tasks` is the ids the round's bench
+#: frontmatter declares `safety_critical: true`, and it is a separate input rather than
+#: something read off the summaries because a task the shrink dropped has no `per_task`
+#: row to read a flag from: the declaration loaded before the shrink ran is the only
+#: place that fact still exists.
+MATRIX_DROPPED_KEY = "matrix_dropped_tasks"
+SAFETY_CRITICAL_KEY = "safety_critical_tasks"
+
+#: The third list, and the one that can only ever REMOVE an exemption: the ids this round's
+#: deadline sweep recorded in `tasks_not_reached`. An id there was never run by any arm, so
+#: from the two summaries alone it is indistinguishable from a task no arm could mark — and
+#: the summaries are exactly what `unrankable_on_both` reads. Without this list a deadline
+#: cut would be set aside as unrankable and a truncated slice would promote, which is the
+#: #549 case in its plainest form. `run_round` already computes the ids, so the round has
+#: always known them; this is the channel that lets the coverage floor know too.
+NOT_REACHED_KEY = "tasks_not_reached"
+
+
+def _no_objective_mark_ids(summary: dict[str, Any] | None) -> set[str]:
+    """Tasks this variant produced **no objective mark for on any arm** (#416's state).
+
+    Both halves are read, and each closes a hole the other leaves:
+
+    * named in `not_rankable` — a trial whose entire objective layer was excluded
+      because the trace had no evidence to grade it against;
+    * absent from `per_task` — no *other* arm scored it either. A task run on two arms
+      is one entry per arm in the aggregator's input, so a task the agent-loop arm
+      measured and the direct arm could not appears in BOTH lists; it was measured, so
+      it is not exempt from coverage.
+
+    A task that simply never ran (dropped by the shrink or the deadline) is in neither
+    list and so is never returned here — that absence is a real coverage gap, and it is
+    what #549 refuses on.
+    """
+    scored = {str(p.get("task_id")) for p in ((summary or {}).get("per_task") or [])
+              if p.get("task_id") is not None
+              and isinstance(p.get("composite_score"), (int, float))}
+    named = {str(e.get("task_id")) for e in ((summary or {}).get("not_rankable") or [])
+             if e.get("task_id") is not None}
+    return named - scored
+
+
+def unrankable_on_both(baseline_summary: dict[str, Any] | None,
+                       variant_summary: dict[str, Any] | None) -> set[str]:
+    """Tasks neither side of the comparison could objectively score on any arm.
+
+    The exemption the coverage floor needs (#3518), stated as the narrowest thing that
+    is true: `require_full_slice` (#549) exists so a variant cannot promote on a verdict
+    about *part* of a slice, and that purpose survives this set — a member the BASELINE
+    scored and the variant did not is not in it (the baseline's mark disqualifies it),
+    so a variant that destroys a task's rankability still refuses exactly as it did.
+    What the set removes is the veto of a task no prompt could ever move: one whose
+    whole objective layer is a tool-behaviour check that no arm routes it to, which
+    scores on no arm for the baseline and for every variant alike, and therefore vetoes
+    every round forever while nothing on either side of the comparison can change it.
+
+    Read-only over the two summaries: `evaluate_promotion`'s signature is unchanged,
+    because the fact is already carried by `judge.aggregate_variant`'s output.
+    """
+    return (_no_objective_mark_ids(baseline_summary)
+            & _no_objective_mark_ids(variant_summary))
+
+
+def coverage_record(baseline_summary: dict[str, Any],
+                    variant_summary: dict[str, Any],
+                    split: dict[str, Any],
+                    round_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """What the full-slice coverage floor actually reads, per declared pool (#3518).
+
+    One function, called by `evaluate_promotion` for its refusal and by
+    `coverage_report_lines` for the round report, because the two must not be able to
+    disagree about which members a decision was taken on: the acceptance fact this round
+    exists to make true is that a decision taken on 4 of 5 declared held-out tasks READS
+    as one, and that is only true if the number in the prose is the number the predicate
+    used.
+
+    Per pool (`targeted`, `heldout`) it returns four disjoint id lists that partition the
+    declared members:
+
+    * `declared` — every member of the pool the split wrote;
+    * `evaluated` — the members with an objective mark on BOTH arms of this comparison,
+      which is exactly what `slice_metrics` averages and so what any verdict here is a
+      verdict on;
+    * `unrankable` — set aside: no arm put an objective mark on it for the baseline or
+      for the variant, for no reason a prompt could change (`unrankable_on_both`);
+    * `shrunk` — set aside: the round's own pre-trial matrix shrink dropped it, an id on
+      `round_record["matrix_dropped_tasks"]`;
+    * `unscored` — everything else: no reason was recorded, so #549 refuses.
+
+    A member the BASELINE scored and the variant did not lands in `unscored`, never in an
+    exemption: the baseline's mark alone disqualifies it from `unrankable`, and the shrink
+    list cannot hold it, because a task that ran was not dropped. And no member the round
+    declares safety-critical is set aside under either reason — a veto the round could not
+    read is not a veto it may assume passed, which is the same reasoning that keeps
+    `judge`'s `safety_objective_unmeasured` distinct from a pass.
+    """
+    base_per = _per_task(baseline_summary)
+    var_per = _per_task(variant_summary)
+    unrankable_ids = unrankable_on_both(baseline_summary, variant_summary)
+    record = round_record or {}
+    dropped = {str(t) for t in (record.get(MATRIX_DROPPED_KEY) or [])}
+    safety = {str(t) for t in (record.get(SAFETY_CRITICAL_KEY) or [])}
+    never_ran = {str(t) for t in (record.get(NOT_REACHED_KEY) or [])}
+    out: dict[str, Any] = {}
+    for key in ("targeted", "heldout"):
+        declared = [str(t) for t in (split.get(key) or [])]
+        evaluated = [t for t in declared if t in base_per and t in var_per]
+        absent = [t for t in declared if t not in set(evaluated)]
+        # Every list sorted, because the report line and the refusal both print them and a
+        # reader greps for an id, not for a position; declared-pool order here would put the
+        # same round's two drop-list ids in whatever order the bench files sort.
+        # `t not in never_ran` under both heads: a member the round knows no arm reached is
+        # not a member no arm could mark, and it is #549's own case, so neither exemption
+        # may read it. The two heads are decided on evidence the round supplies; this list
+        # is evidence AGAINST both.
+        unrankable = sorted(t for t in absent if t in unrankable_ids and t not in safety
+                            and t not in never_ran)
+        # `t not in base_per` is the fail-closed arm of the second exemption (#3518
+        # clause 3): a shrink drop means NEITHER arm ran the task, so a member the
+        # baseline did mark and the variant lost cannot have been dropped — and if a
+        # round ever hands over a drop list that says otherwise, the claim loses to the
+        # evidence and the member stays unscored. That is #549's case exactly, and the
+        # reason it is checked here rather than assumed impossible is that the drop list
+        # is a list the round wrote about itself while the marks are the trials.
+        shrunk = [t for t in absent if t not in set(unrankable) and t in dropped
+                  and t not in base_per and t not in safety and t not in never_ran]
+        shelved = set(unrankable) | set(shrunk)
+        out[key] = {
+            "declared": declared,
+            "evaluated": evaluated,
+            UNRANKABLE_HEAD: unrankable,
+            SHRUNK_HEAD: shrunk,
+            UNSCORED_HEAD: [t for t in absent if t not in shelved],
+        }
+    return out
+
+
+def not_reached_for_record(tasks_not_reached: list[str]) -> list[str]:
+    """The deadline sweep's ids, as they go into a round record (#3518).
+
+    A helper because the list arrives from a loop that rewrites it per variant:
+    `run_round`'s sweep assigns `tasks_not_reached[:] = …` for whichever variant is being
+    run when the cut happens, and every variant is decided against the same declared split.
+    Sorting and de-duping here keeps the record's shape one thing (`coverage_record` reads it
+    as a set either way), so the ids a report names and the ids the floor refuses on are
+    produced by the same call.
+    """
+    return sorted({str(t) for t in (tasks_not_reached or [])})
+
+
+def _coverage_refusal(pool_label: str, pool_key: str, pool: dict[str, Any]) -> str:
+    """The `partial_*_coverage` refusal for one pool, naming each cause apart.
+
+    The class head is cut at the first `(` by `refusal_head`, so every list rides inside
+    the parenthesis and the ledger's census keys do not move.
+    """
+    cls = "heldout" if pool_key == "heldout" else "targeted"
+    parts = [f"{len(pool['evaluated'])} of {len(pool['declared'])} {pool_label} tasks "
+             f"scored",
+             f"{UNSCORED_HEAD}: {', '.join(pool[UNSCORED_HEAD])}"]
+
+    for head in (UNRANKABLE_HEAD, SHRUNK_HEAD):
+        if pool[head]:
+            parts.append(f"{head}: {', '.join(pool[head])}")
+    return f"partial_{cls}_coverage ({'; '.join(parts)})"
+
+
+def coverage_report_lines(baseline_summary: dict[str, Any],
+                          variant_summary: dict[str, Any],
+                          split: dict[str, Any],
+                          round_record: dict[str, Any] | None = None) -> list[str]:
+    """The report lines saying what one decision was actually measured on (#3518 clause 4).
+
+    Two lines, and only when they would say something: a round that scored every declared
+    member of both pools gets nothing, so the section cannot grow a line of noise per
+    decision. The first states the evaluated pool against the declared pool for each side
+    of the split; the second lists the declared members that are NOT in it under each
+    reason — `unrankable`, `shrunk`, and `unscored` last so an outright miss cannot
+    disappear from the report by being the only thing left unnamed.
+
+    Reads `coverage_record`, the same call `evaluate_promotion` makes, which is why the
+    counts here and the counts in a `partial_*_coverage` reason are one measurement.
+    """
+    cov = coverage_record(baseline_summary, variant_summary, split, round_record)
+    if all(not cov[k][reason] for k in ("targeted", "heldout")
+           for reason in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORED_HEAD)):
+        return []
+    lines = [f"- coverage decided on: "
+             f"{len(cov['targeted']['evaluated'])} of {len(cov['targeted']['declared'])} "
+             f"declared targeted tasks, "
+             f"{len(cov['heldout']['evaluated'])} of {len(cov['heldout']['declared'])} "
+             f"declared held-out tasks"]
+    parts = []
+    for head in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORED_HEAD):
+        ids = sorted({i for k in ("targeted", "heldout") for i in cov[k][head]})
+        parts.append(f"{head}: {', '.join(ids) if ids else 'none'}")
+    lines.append("- declared members not evaluated — " + "; ".join(parts))
+    return lines
+
+
 def _per_task_flags(summary: dict[str, Any]) -> dict[str, tuple[bool, Any]]:
     """task_id -> (safety_critical, safety_passed), read from the same rows the
     scores come from — `judge.aggregate_variant` stamps both onto every per-task row.
@@ -335,6 +563,7 @@ def evaluate_promotion(
     variant_summary: dict[str, Any],
     split: dict[str, Any] | None = None,
     require_full_slice: bool = True,
+    round_record: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Decide whether a variant should be promoted over baseline.
 
@@ -351,6 +580,15 @@ def evaluate_promotion(
     captured 33%. `targeted_delta > 0` asks only for a real gain on the pool the
     variant aimed at; the no-decline half is what stops a gain there from paying
     for a loss anywhere else.
+
+    `round_record` is what the round knows that the two summaries do not (#3518): the
+    tasks its pre-trial matrix shrink dropped, and the tasks its bench declares
+    safety-critical. It is an input and not a guess because both facts stop existing in
+    the summaries the moment they apply — a dropped task has no `per_task` row, and no
+    row is where a `safety_critical` flag lives. Omit it (the replay callers and every
+    caller predating #3518) and the coverage floor is exactly as strict as it was: with
+    no drop list to read, nothing is set aside for a shrink, which is the fail-closed
+    direction, and the only exemption left is the one the summaries themselves carry.
 
     Returns (should_promote, reason).
     """
@@ -384,15 +622,22 @@ def evaluate_promotion(
         # four — and then "the held-out mean did not decline" is a verdict on a
         # quarter of the veto, the same averaging defect the split exists to
         # remove, moved one layer down. Fail closed and name what went unread.
-        for label, pool, scored in (("held-out", split["heldout"], m["heldout_ids"]),
-                                    ("targeted", split["targeted"], m["targeted_ids"])):
-            missing = sorted(set(pool) - set(scored))
-            if missing:
-                return False, (
-                    f"partial_{'heldout' if label == 'held-out' else 'targeted'}_coverage "
-                    f"({len(scored)} of {len(pool)} {label} tasks scored; "
-                    f"unscored: {', '.join(missing)})"
-                )
+        #
+        # Two exemptions (#3518), and both are the smallest thing consistent with that
+        # purpose: a member neither arm could objectively score is not an unread part of
+        # the slice because no arm could have read it, and a member this round dropped at
+        # its own pre-trial matrix shrink is an absence the round recorded before a trial
+        # ran rather than a verdict it lost. Everything else about the floor stands: a
+        # member the baseline scored and the variant did not, a member the deadline never
+        # reached, and any member the round declares safety-critical all stay `unscored`
+        # and still refuse — see `coverage_record`. This cannot be a route around a dead
+        # judge: the safety leg and the judged-coverage floor (`judged_floor_refusal`,
+        # #698) are both returned above, before the split is read, so a round whose judge
+        # was down never reaches here.
+        cov = coverage_record(baseline_summary, variant_summary, split, round_record)
+        for label, pool_key in (("held-out", "heldout"), ("targeted", "targeted")):
+            if cov[pool_key][UNSCORED_HEAD]:
+                return False, _coverage_refusal(label, pool_key, cov[pool_key])
 
     if m["targeted_delta"] <= 0:
         return False, (
@@ -493,6 +738,7 @@ def validity_report(
     baseline_summary: dict[str, Any],
     variant_summary: dict[str, Any],
     split: dict[str, Any] | None = None,
+    round_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The all-task mean beside the lint-valid-task mean, and whether they agree.
 
@@ -540,7 +786,12 @@ def validity_report(
     pool = sorted(scored & valid)
     missing = sorted(scored - valid)
 
-    should_all, reason_all = evaluate_promotion(cfg, baseline_summary, variant_summary, split=split)
+    # `round_record` rides to the all-task leg so this section cannot contradict the
+    # decision beside it in the same report: a `reason_all` still naming a shrink-dropped
+    # member as unscored under a decision that set it aside would be the #646 block
+    # reporting a coverage hole the predicate had just been told to set aside.
+    should_all, reason_all = evaluate_promotion(cfg, baseline_summary, variant_summary,
+                                                split=split, round_record=round_record)
     report: dict[str, Any] = {
         "bench_dir": str(cfg.paths.bench_dir),
         "scored_tasks": len(scored),

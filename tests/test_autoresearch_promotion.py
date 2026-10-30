@@ -2212,8 +2212,14 @@ def test_the_promotion_gate_takes_no_behavioural_input_at_all(cfg):
     import inspect
 
     params = list(inspect.signature(promote.evaluate_promotion).parameters)
+    # `round_record` (#3518) is the one parameter added since this pin was written, and it
+    # is not the kind this node fears: it carries two lists of task ids the round already
+    # wrote about itself (what its shrink dropped, what its bench declares safety-critical),
+    # never a score, never a scorecard, and both only ever REMOVE an exemption. A score
+    # cannot enter through it, and neither list can make a variant look better — the worst
+    # it can do is stop a round from vetoing on a task it had already recorded losing.
     assert params == ["cfg", "baseline_summary", "variant_summary", "split",
-                      "require_full_slice"], params
+                      "require_full_slice", "round_record"], params
     assert not [p for p in params if "scorecard" in p or "behavioural" in p]
     # The accept path is reached here too: `dominates` and `win_fraction` are the
     # two numbers a behavioural leg would most plausibly be folded into, and the
@@ -2759,3 +2765,599 @@ def test_the_advisory_leg_excludes_the_address_fixtures_and_the_decision_still_r
     assert rep["valid_task_mean"]["delta"] != rep["all_task_mean"]["delta"], (
         "the two legs reporting the same delta means the pool is not the subset the "
         "exclusion describes")
+
+
+# ---------------------------------------------------------------------------
+# #3518 — a member neither arm could score is not an unread part of the slice
+# ---------------------------------------------------------------------------
+#
+# The frozen fixture below is this box's own trial ledger for round
+# R_20261027_221320, copied out of `cfg.paths.ledger_path` on 2026-10-29 (97 rows:
+# the `split` row plus that round's 96 trial rows, the score-bearing keys kept and
+# the token/cost keys dropped), beside the round's own pre-trial record. That second file
+# is a re-creation, not the original: written into the #3518 worktree, it matched the
+# repo-wide `*.json` ignore rule (`.gitignore:42`), was never added, and no copy survived
+# the worktree's removal. Its three values come from bytes still on this box — the four
+# dropped ids verbatim off this round's report line
+# (`_pipeline/research/rounds/R_20261027_221320.md`: "matrix reduced before trials: 4
+# task(s) dropped — … bench_026_…, bench_017_…, bench_016_…, bench_015_…") and the one
+# bench file under ~/obsidian/lloyd/bench/ declaring `safety_critical: true` — and
+# `test_the_committed_round_record_carries_the_round_the_trials_describe` fails if any of
+# them stops matching the trials. It exists so the veto this section pins is replayed
+# against the bytes that produced the incident rather than against a hand-built summary.
+#
+# The census, restated on 2026-10-29 over every `event == "decision"` row on this box's
+# ledger with `created_at >= "2026-09-26"`, bucketed by the head of its own `reason`: 545
+# decisions over 187 rounds, `promoted` 0, in four classes of 341
+# `partial_heldout_coverage`, 129 `partial_targeted_coverage`, 53 `safety_regression` and
+# 22 `deadline_stopped` — which sum to the 545. The two coverage classes are 470 of them,
+# and the largest valid-pool delta in that window — +0.1661 on R_20261025_100447, above
+# the 0.05 floor — never reached a delta leg.
+#
+# Fixing the six tasks themselves is NOT this section's business: each is either
+# given a text-observable objective check or routed to the arm that records tool
+# dispatch (`requires_runtime`), both of which are bench-file edits under
+# ~/obsidian/lloyd/bench/. What is pinned here is that while that ruling is pending,
+# a task no prompt can move cannot veto a round.
+
+FROZEN_ROUND = "R_20261027_221320"
+FROZEN_BASELINE = "BASELINE_1793124758"
+FROZEN_ROWS = Path(__file__).resolve().parent / "data" / "autoresearch" / \
+    f"{FROZEN_ROUND}-trials.jsonl"
+
+#: The round's six structurally-unrankable members: every one ran on the direct arm
+#: for all four runs and produced no objective mark, and the same six are the ones the
+#: round report lists as "Tasks this arm did not evaluate … not mechanically
+#: checkable". bench_005 is the held-out one — the veto — and its only objective check
+#: is `tool_called: mcp__lloyd-mcp__fact_add`, which the direct arm cannot evidence.
+FROZEN_UNRANKABLE = {
+    "bench_001_reply_greeting", "bench_003_vault_recall",
+    "bench_004_replay_schedule_task", "bench_005_replay_memory_update",
+    "bench_012_replay_schedule_verify_chain", "bench_013_replay_memory_update_novelty",
+}
+
+#: The four targeted members that round never ran at all — no trial row for any run,
+#: dropped by the matrix shrink (#1828). Distinct from the six above: these are a real
+#: coverage hole, the #549 case, and they keep refusing after #3518.
+FROZEN_NEVER_RAN = {
+    "bench_015_audit_cross_entity_fact_copies", "bench_016_audit_skill_dead_paths",
+    "bench_017_audit_unresolved_task_skills", "bench_026_contradiction_supersede_chain",
+}
+
+
+def _frozen_round() -> tuple[dict, dict[str, dict], dict]:
+    """(baseline summary, {variant_id: summary}, split) rehydrated from the fixture.
+
+    The rehydrator is `replay_frontier_selection._summary`, the private one, on purpose:
+    it flattens a ledger row back into the (task, score) pairs
+    `judge.aggregate_variant` consumed, so the `not_rankable` list and the per-task
+    scores this section depends on are built by the live code and not by a second
+    copy of its rankable-exclusion semantics here.
+    """
+    from scripts.autoresearch.replay_frontier_selection import _summary
+    rows = [json.loads(l) for l in FROZEN_ROWS.read_text().splitlines() if l.strip()]
+    # Read the way the live reader does: `run_round.record_trial` writes a trial row with
+    # NO `event` key, and `replay_frontier_selection.replay` counts a row as a trial only
+    # when `event` is absent. A fixture that invented `"event": "trial"` would read fine
+    # here and be invisible to that reader, so the key's absence is pinned, not assumed.
+    assert all("event" not in r or r["event"] != "trial" for r in rows), (
+        "a fixture trial row carries an `event` key that no live trial row has")
+    assert sum(1 for r in rows if "event" not in r) == 96, "not all 96 trial rows"
+    split = next(r for r in rows if (r.get("event") or "trial") == "split")
+    byv: dict[str, list[dict]] = {}
+    for r in rows:
+        if (r.get("event") or "trial") == "trial":
+            byv.setdefault(r["variant_id"], []).append(r)
+    assert FROZEN_BASELINE in byv, "the fixture lost the baseline run"
+    variants = {vid: _summary(rr, vid) for vid, rr in byv.items()
+                if not vid.startswith("BASELINE")}
+    return _summary(byv[FROZEN_BASELINE], FROZEN_BASELINE), variants, split
+
+
+def _summ(ids_scores: list[tuple[str, float | None]],
+          not_rankable: list[str] | None = None) -> dict:
+    """A summary in `aggregate_variant`'s shape, with the #416 field this needs.
+
+    An id with score `None` was run but carries no composite (it is dropped from
+    `per_task` exactly as the aggregator drops an excluded trial); an id listed
+    `not_rankable` additionally carries the exclusion the judge stamped it with.
+    """
+    per = [{"task_id": tid, "composite_score": sc, "category": "synthetic"}
+           for tid, sc in ids_scores if sc is not None]
+    return {"mean_composite": 0.0, "safety_passed": True,
+            "task_count": len(ids_scores), "per_task": per,
+            "not_rankable": [{"task_id": t, "objective_excluded":
+                              [{"type": "tool_called",
+                                "reason": "no tool dispatch record on this trace"}]}
+                             for t in (not_rankable or [])]}
+
+
+def _lists_in_the_refusal(reason: str) -> tuple[list[str], list[str]]:
+    """The two id lists out of a coverage refusal, keyed by name and not by position.
+
+    Keyed because the first segment of the parenthesis is the count ("4 of 6 targeted
+    tasks scored"), not a list, and because the `unscored:` ids are themselves
+    comma-joined — reading the halves by index silently returns the count line as one
+    of them, which is how a test of this distinction could pass on an empty list.
+    """
+    body = reason[reason.index("(") + 1:reason.rindex(")")]
+    found: dict[str, list[str]] = {}
+    for part in body.split("; "):
+        head, sep, tail = part.partition(": ")
+        if sep and head.strip() in (promote.UNSCORED_HEAD, promote.UNRANKABLE_HEAD):
+            found[head.strip()] = tail.split(", ")
+    return (found.get(promote.UNSCORED_HEAD, []),
+            found.get(promote.UNRANKABLE_HEAD, []))
+
+
+def _frozen_record() -> dict:
+    """The round record that round wrote, beside the trials above (#3518 clause 2).
+
+    `matrix_dropped_tasks` is that round's pre-trial shrink drop list and
+    `safety_critical_tasks` the ids its bench declares safety-critical — the two facts
+    `run_round` now hands the coverage floor, committed as a file beside the trials rather
+    than spelled out here, so the ids a node below asserts on are ids copied from what the
+    round recorded. The companion `-trials.jsonl` holds no trial row for any of the four
+    dropped ids on any of the four runs, which the first frozen node checks: a drop list
+    that drifted from the bytes it describes fails there rather than quietly un-vetoing a
+    round.
+    """
+    blob = json.loads((FROZEN_ROWS.parent / f"{FROZEN_ROUND}-round.json")
+                      .read_text(encoding="utf-8"))
+    assert blob["round_id"] == FROZEN_ROUND, blob["round_id"]
+    return {promote.MATRIX_DROPPED_KEY: list(blob[promote.MATRIX_DROPPED_KEY]),
+            promote.SAFETY_CRITICAL_KEY: list(blob[promote.SAFETY_CRITICAL_KEY])}
+
+
+def _rescored(summary: dict, lifted: dict[str, float], vid: str) -> dict:
+    """One summary with a few tasks' composites replaced, everything else untouched.
+
+    Built off a real summary rather than a hand-listed pool so the declared pools stay the
+    round's own: a test that rebuilt `per_task` from scratch could silently drop a member
+    and read the resulting narrower slice as the round's.
+    """
+    per = [dict(t) for t in summary["per_task"]]
+    for t in per:
+        if t["task_id"] in lifted:
+            t["composite_score"] = lifted[t["task_id"]]
+    out = {**summary, "per_task": per}
+    out["mean_composite"] = (sum(t["composite_score"] for t in per) / len(per) if per else 0.0)
+    out["variant_id"] = vid
+    return out
+
+
+def test_frozen_round_replay_no_variant_is_vetoed_before_any_delta_is_read(cfg, monkeypatch):
+    """The incident replayed over one declared split, with the round's record as the only change.
+
+    * BEFORE (no round record — the code as it stood through 187 rounds): held-out
+      `bench_005_replay_memory_update` and the four shrink-dropped targeted members are one
+      word, `unscored`, and every variant refuses on a coverage class before its delta is
+      read.
+    * AFTER (the committed round record passed): those five are accounted for, and all
+      three real variants are decided on `heldout_decline (held-out 0.7500 → 0.7083,
+      -0.0417 on 4 veto tasks)` — the held-out arm moving, which is a delta leg. That is the
+      item's own verification sentence run over frozen bytes instead of over a week of live
+      rounds, and it is the shape of the R_20261029_141819 (held-out `bench_026`) and
+      R_20261025_100447 (held-out `bench_015`) refusals the clause names. The veto leg reads
+      the held-out pool before the targeted gain check, so a round whose variants all
+      declined on targeted lands on the held-out verdict rather than `targeted_no_gain`; both
+      are delta legs and neither is a coverage class, which is the distinction the clause is
+      drawn on.
+
+    The drop list is checked against the trials in the same call: a dropped id with trial
+    rows in the frozen ledger means the two committed files no longer describe one round.
+    """
+    base, variants, split = _frozen_round()
+    record = _frozen_record()
+    rows = [json.loads(l) for l in FROZEN_ROWS.read_text().splitlines() if l.strip()]
+    ran = {r["task_id"] for r in rows if "event" not in r}
+    assert not (set(record[promote.MATRIX_DROPPED_KEY]) & ran), (
+        "a task the round says its shrink dropped has trial rows in the frozen ledger — the "
+        "drop list and the bytes no longer describe one round")
+    assert record[promote.SAFETY_CRITICAL_KEY], (
+        "a round record with no safety-critical id cannot pin that such a member is never "
+        "set aside")
+
+    monkeypatch.setattr(promote, "unrankable_on_both", lambda b, v: set())
+    for vid, vs in sorted(variants.items()):
+        should, reason = promote.evaluate_promotion(cfg, base, vs, split=split)
+        assert should is False, vid
+        assert reason.startswith(("partial_targeted_coverage", "partial_heldout_coverage")), (
+            f"{vid}: {reason}")
+    monkeypatch.undo()
+
+    for vid, vs in sorted(variants.items()):
+        should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                   round_record=record)
+        assert should is False, f"{vid}: {reason}"
+        assert reason.split(" ")[0] in ("targeted_no_gain", "heldout_decline",
+                                        "no_strict_win", "PROMOTE"), (
+            f"{vid}: refused on {reason!r} rather than on its delta — an exemption that "
+            f"still reaches a coverage class has not exempted anything")
+
+
+def test_frozen_round_positive_targeted_delta_reaches_a_delta_leg(cfg) -> None:
+    """Clause 5 in the direction the ledger never got to test: a variant that GAINS.
+
+    No real variant on this box's ledger has ever gained on targeted, so the positive case
+    has no real bytes to replay and one arm's marks are constructed: the baseline's own
+    summary with its three weakest scored targeted members raised to a full 1.0 — targeted
+    members BOTH arms scored, which is the only kind of mark `slice_metrics` can average into
+    a delta — and nothing else touched. The five members the round could account for stay exactly as the
+    round found them: unmarked, unrankable or dropped. What is NOT constructed is the pool
+    the decision is taken on: all 23 declared targeted members and all 5 declared held-out
+    ones, the declared pools in full, which is why the sub-pool trimming this node needed
+    before the exemption existed is gone from it.
+
+    Three things then hold, in this order: without the round record the same variant is
+    refused `partial_targeted_coverage` (the before); with it, the verdict is
+    `heldout_tie (held-out flat at 0.7083 across 4 veto tasks — strict no-decline refuses a
+    tie)` — the gain cleared the 0.05 floor and the veto arm did not move; and no
+    `partial_*_coverage` class appears anywhere in it. A tie is a delta verdict: the round
+    read the variant's numbers and found the veto arm level, which is one of the delta legs
+    the clause names, and it was read over the declared pools rather than a slice.
+    """
+    base, _variants, split = _frozen_round()
+    record = _frozen_record()
+    scored_targeted = sorted((t for t in base["per_task"] if t["task_id"] in split["targeted"]),
+                             key=lambda t: t["composite_score"])
+    lift = {t["task_id"]: 1.0 for t in scored_targeted[:3]}
+    assert len(lift) == 3 and max(lift.values()) <= 1.0, lift
+    var = _rescored(base, lift, "V_CONSTRUCTED_GAIN")
+
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and reason.startswith("partial_targeted_coverage"), reason
+
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split,
+                                                round_record=record)
+    assert should is False, reason
+    head = reason.split(" ")[0]
+    assert not head.startswith("partial_"), (
+        f"a variant with a positive targeted delta was refused on a coverage class ({reason!r}): "
+        "the exemptions did not reach the pool that decided it")
+    m = promote.slice_metrics(base, var, split)
+    assert m["targeted_delta"] > 0.05, m
+    assert head in ("no_strict_win", "heldout_tie", "heldout_decline",
+                    "targeted_no_gain"), reason
+
+
+def test_a_member_the_baseline_scored_still_refuses_when_the_variant_did_not(
+    cfg
+) -> None:
+    """Clause 2: #549's purpose survives the exemption, in both of its shapes.
+
+    (a) the targeted member is absent from the variant's trials entirely — the
+    deadline or the shrink took it; (b) the variant DID run it and its whole
+    objective layer was excluded, which is the case a prompt can cause: a variant that
+    destroys a task's rankability loses the mark the baseline had. Both refuse on
+    partial coverage, because in neither case is it true that neither side could
+    score — the baseline scored it.
+    """
+    split = _explicit_split()
+    held = [f"bench_{i:03d}" for i in range(N_TARGETED, 11)]
+
+    # (a) never ran
+    base = _summ([(t, 0.5) for t in split["targeted"] + held])
+    var = _summ([(t, 0.9) for t in split["targeted"] + held[1:]])
+    assert promote.unrankable_on_both(base, var) == set()
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and reason.startswith("partial_heldout_coverage"), reason
+    unscored, unrankable = _lists_in_the_refusal(reason)
+    assert unscored == [held[0]] and unrankable == [], reason
+
+    # (b) ran, no objective mark, and the baseline had one
+    var_b = _summ([(t, 0.9) for t in split["targeted"] + held[1:]], not_rankable=[held[0]])
+    assert promote.unrankable_on_both(base, var_b) == set(), (
+        "a task the baseline scored is exempt from nothing")
+    should, reason = promote.evaluate_promotion(cfg, base, var_b, split=split)
+    assert should is False and reason.startswith("partial_heldout_coverage"), reason
+    unscored, unrankable = _lists_in_the_refusal(reason)
+    assert unscored == [held[0]] and unrankable == [], (
+        f"a prompt-caused loss was reported as a bench defect: {reason}")
+
+
+def test_a_task_scored_on_one_arm_is_never_the_unrankable_case(cfg) -> None:
+    """The intersection is read as *no mark on any arm*, not *named on this arm*.
+
+    A task run on two arms lands in the aggregator's input twice, so a variant whose
+    agent-loop trial carried no dispatch record while its direct trial scored it is in
+    `not_rankable` AND in `per_task`. Treating the name alone as the exemption would
+    let a genuinely-measured task out of the coverage floor, and would then let a
+    variant that only lost one arm's evidence promote on the arm that still measured
+    it.
+    """
+    ids = [f"bench_{i:03d}" for i in range(11)]
+    split = _explicit_split()
+    both = _summ([(t, 0.5) for t in ids], not_rankable=[ids[7]])
+    var = _summ([(t, 0.9) for t in ids], not_rankable=[ids[7]])
+    assert promote.unrankable_on_both(both, var) == set(), (
+        "a task with a score on one arm is not unrankable on both")
+    # And the coverage floor sees it the same way: the pool is complete, so neither
+    # coverage class is reachable for this round at all.
+    should, reason = promote.evaluate_promotion(cfg, both, var, split=split)
+    assert not reason.startswith("partial_"), reason
+    assert should is True, reason
+    assert promote.unrankable_on_both(
+        _summ([(t, 0.5) for t in ids if t != ids[7]], not_rankable=[ids[7]]),
+        _summ([(t, 0.9) for t in ids if t != ids[7]], not_rankable=[ids[7]])) == \
+        {ids[7]}, "the same task with no score on any arm is the exemption"
+
+
+def test_the_coverage_refusal_names_which_case_it_is(cfg, monkeypatch) -> None:
+    """Clause 3: `unscored:` for a member the round never ran, `unrankable:` for one
+    neither arm could score. One prose word for both is what sent every reader of
+    those 356 held-out refusals to the budget, when the binding one was a bench file.
+
+    Same pool, both causes present: before the fix the two are indistinguishable in
+    one list, after it the reader is sent to the shrink line for one id and to the
+    bench file for the other, and the refusal CLASS — the ledger's census key — is
+    unchanged.
+    """
+    split = _explicit_split()
+    held = [f"bench_{i:03d}" for i in range(N_TARGETED, 11)]
+    tgt, miss_unrankable, miss_never = (split["targeted"][0], split["targeted"][1],
+                                        split["targeted"][2])
+    base = _summ([(t, 0.4) for t in [tgt, *split["targeted"][3:]] + held],
+                 not_rankable=[miss_unrankable])
+    var = _summ([(t, 0.8) for t in [tgt, *split["targeted"][3:]] + held],
+                not_rankable=[miss_unrankable])
+
+    monkeypatch.setattr(promote, "unrankable_on_both", lambda *a: set())
+    should, before = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and before.startswith("partial_targeted_coverage"), before
+    assert before == (f"partial_targeted_coverage (4 of 6 targeted tasks scored; "
+                      f"unscored: {miss_unrankable}, {miss_never})"), before
+    monkeypatch.undo()
+
+    should, after = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is False and after.startswith("partial_targeted_coverage"), after
+    unscored, unrankable = _lists_in_the_refusal(after)
+    assert unscored == [miss_never], after
+    assert unrankable == [miss_unrankable], after
+    assert promote.refusal_head(after) == promote.refusal_head(before) == \
+        "partial_targeted_coverage"
+
+
+# ---------------------------------------------------------------------------
+# #3518 clause 2 and 3 — the shrink's own drop list, and the two things it cannot excuse
+# ---------------------------------------------------------------------------
+
+def _heads_in_the_refusal(reason: str) -> dict[str, list[str]]:
+    """All three named id lists of a coverage refusal, keyed by head and not by position.
+
+    `_lists_in_the_refusal` above reads the two heads that existed before this change; a
+    node that parsed the third by position could read the count segment ("4 of 5 held-out
+    tasks scored") as an id list, or miss `shrunk:` entirely and still see a refusal that
+    names it — which is how a three-way distinction gets pinned by a test that only ever
+    looks at two of the three.
+    """
+    body = reason[reason.index("(") + 1:reason.rindex(")")]
+    found: dict[str, list[str]] = {}
+    for part in body.split("; "):
+        head, sep, tail = part.partition(": ")
+        if sep and head.strip() in (promote.UNSCORED_HEAD, promote.UNRANKABLE_HEAD,
+                                    promote.SHRUNK_HEAD):
+            found[head.strip()] = tail.split(", ")
+    return found
+
+
+def test_a_shrink_dropped_member_is_set_aside_from_either_pool(cfg, monkeypatch) -> None:
+    """Clause 2, both pools, over the frozen round's own pools.
+
+    The two shapes that refused before any delta was read — `R_20261029_141819` losing a
+    held-out member and `R_20261025_100447` losing a targeted one — are the two legs here.
+    The targeted leg is the round's own drop list. The held-out leg needs the member the
+    round dropped to be a held-out one, so `bench_005_replay_memory_update` is put on the
+    drop list with the unrankable exemption switched off by monkeypatch: what is being
+    pinned is that the SHRUNK reason reaches the held-out pool, and that it does so by the
+    round's record and not by the bench-file property that the other exemption reads.
+    """
+    base, variants, split = _frozen_round()
+    record = _frozen_record()
+    vid = sorted(variants)[0]
+    vs = variants[vid]
+
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split)
+    assert reason.startswith("partial_targeted_coverage"), reason
+    assert _heads_in_the_refusal(reason)[promote.UNSCORED_HEAD] == sorted(
+        record[promote.MATRIX_DROPPED_KEY]), reason
+
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                round_record=record)
+    assert not reason.startswith("partial_"), reason
+    assert "shrunk:" not in reason, (
+        "the refusal is gone, so it cannot carry a list — a reason that did would be "
+        "reading the exemption into a verdict it no longer makes")
+
+    monkeypatch.setattr(promote, "unrankable_on_both", lambda b, v: set())
+    heldout_dropped = {promote.MATRIX_DROPPED_KEY: ["bench_005_replay_memory_update"],
+                       promote.SAFETY_CRITICAL_KEY: record[promote.SAFETY_CRITICAL_KEY]}
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                round_record=heldout_dropped)
+    assert not reason.startswith("partial_heldout_coverage"), (
+        f"a held-out member the round recorded as dropped still vetoed the round: {reason}")
+
+
+def test_a_safety_critical_member_is_never_set_aside(cfg) -> None:
+    """Clause 3, first half: `safety_critical: true` outranks both exemptions.
+
+    The round record below claims `bench_015_audit_cross_entity_fact_copies` was dropped by
+    the shrink AND declares it safety-critical, which is a state a real round can reach — a
+    serial-arm task the projection cut, and the bench declares it safety-critical tomorrow.
+    The floor refuses: coverage a round could not read on a safety-critical task is not
+    coverage it may assume passed, which is the same reasoning that keeps `judge`'s
+    `safety_objective_unmeasured` from folding into a pass. The three siblings the round
+    dropped and did not declare are set aside in the same reason, so the guard is
+    per-member and not a switch.
+    """
+    base, variants, split = _frozen_round()
+    record = _frozen_record()
+    vs = variants[sorted(variants)[0]]
+    record[promote.SAFETY_CRITICAL_KEY] = sorted(
+        record[promote.SAFETY_CRITICAL_KEY] + ["bench_015_audit_cross_entity_fact_copies"])
+
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                round_record=record)
+    assert should is False and reason.startswith("partial_targeted_coverage"), reason
+    heads = _heads_in_the_refusal(reason)
+    assert heads[promote.UNSCORED_HEAD] == ["bench_015_audit_cross_entity_fact_copies"], reason
+    assert heads[promote.SHRUNK_HEAD] == [
+        "bench_016_audit_skill_dead_paths", "bench_017_audit_unresolved_task_skills",
+        "bench_026_contradiction_supersede_chain"], reason
+
+
+def test_a_member_the_baseline_scored_is_not_excused_by_the_drop_list(cfg) -> None:
+    """Clause 3, second half: #549's own case survives the new exemption.
+
+    `bench_022` is scored on both arms of the frozen round, so dropping it from the
+    variant's summary is the state #549 was written for — the baseline held an objective
+    mark and the variant does not, which is a capability lost and not a task never run.
+    Putting the same id on the shrink's drop list is the temptation this clause exists to
+    close: a round could excuse any lost verdict by claiming it never ran the task. The
+    marks are the evidence and the list is a claim about them, so the claim loses and the
+    refusal stands, with the id named under `unscored:` and never under `shrunk:`.
+    """
+    base, variants, split = _frozen_round()
+    record = _frozen_record()
+    lost = "bench_022_skill_invocation_never_ran_chain"
+    assert base["per_task"] and any(t["task_id"] == lost for t in base["per_task"])
+    vs = _rescored(variants[sorted(variants)[0]], {}, "V_LOST_A_MARK")
+    vs = {**vs, "per_task": [dict(t) for t in vs["per_task"] if t["task_id"] != lost]}
+    # The round's real four-id drop list plus the one task that demonstrably ran: the
+    # contrived half has to sit beside the four real ones, or the three the variant DID run
+    # would read as unexplained and this node would be pinning something else.
+    record[promote.MATRIX_DROPPED_KEY] = record[promote.MATRIX_DROPPED_KEY] + [lost]
+
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                round_record=record)
+    assert should is False and reason.startswith("partial_targeted_coverage"), reason
+    heads = _heads_in_the_refusal(reason)
+    assert heads[promote.UNSCORED_HEAD] == [lost], reason
+    assert lost not in heads.get(promote.SHRUNK_HEAD, []), reason
+
+
+def test_all_three_causes_are_named_apart_in_one_refusal(cfg, monkeypatch) -> None:
+    """Every cause a member can be absent for, in one reason, each under its own head.
+
+    One refusal carrying `unscored:` and `shrunk:` at once is the case the ledger could not
+    show: 470 of 545 decisions refuse on a coverage class whose parenthesis says only
+    "N of M tasks scored; unscored: …", so a reader cannot tell a task the round recorded as
+    dropped from one it cannot explain — which is why "never ran" sent readers to the budget
+    while the binding cause was a task that could never be scored. `bench_005` under
+    `unrankable:` needs the predicate's own eye, so that leg is taken with the monkeypatch
+    off and the other two with it on, in one reason: the point is the three heads
+    coexisting, and which arm read which member is the round's business.
+    """
+    base, variants, split = _frozen_round()
+    vs = variants[sorted(variants)[0]]
+    lost = "bench_022_skill_invocation_never_ran_chain"
+    vs = {**vs, "per_task": [dict(t) for t in vs["per_task"] if t["task_id"] != lost]}
+    all_dropped = _frozen_record()[promote.MATRIX_DROPPED_KEY]
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                               round_record={
+                                                   promote.MATRIX_DROPPED_KEY: all_dropped,
+                                                   promote.SAFETY_CRITICAL_KEY: []})
+    heads = _heads_in_the_refusal(reason)
+    assert heads[promote.UNSCORED_HEAD] == [lost], reason
+    assert heads[promote.SHRUNK_HEAD] == sorted(all_dropped), reason
+    assert heads[promote.UNRANKABLE_HEAD] == sorted(FROZEN_UNRANKABLE - {
+        "bench_005_replay_memory_update"}), reason
+    assert reason.startswith("partial_targeted_coverage"), reason
+
+    # The floor read with the predicate's own eye switched off: `bench_005` reappears under
+    # `unscored:` and vetoes the round again from the HELD-OUT pool, which is checked first.
+    # That is the incident reproduced on demand — same ids, same counts, and the one word
+    # `unscored` hiding a cause that had nothing to do with this round's budget.
+    monkeypatch.setattr(promote, "unrankable_on_both", lambda b, v: set())
+    should, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                round_record={
+                                                    promote.MATRIX_DROPPED_KEY: all_dropped,
+                                                    promote.SAFETY_CRITICAL_KEY: []})
+    assert reason.startswith("partial_heldout_coverage"), reason
+    heads = _heads_in_the_refusal(reason)
+    assert heads[promote.UNSCORED_HEAD] == ["bench_005_replay_memory_update"], reason
+    assert promote.UNRANKABLE_HEAD not in heads, reason
+
+
+# ── the committed round record itself: two files, one round, no fallback (#3552) ──
+
+FROZEN_RECORD = FROZEN_ROWS.parent / f"{FROZEN_ROUND}-round.json"
+
+#: The four tasks this box's matrix dropped before trials, as the round's own report line
+#: names them (`- matrix reduced before trials: 4 task(s) dropped — …`), and the one id its
+#: bench declares `safety_critical: true`. Spelled out HERE so the file they are committed
+#: in is what is being checked: every mechanism node above reads these lists out of the
+#: file through `_frozen_record()`, never from a literal, and the node below pins that.
+FROZEN_DROPPED_LITERALLY = [
+    "bench_026_contradiction_supersede_chain",
+    "bench_017_audit_unresolved_task_skills",
+    "bench_016_audit_skill_dead_paths",
+    "bench_015_audit_cross_entity_fact_copies",
+]
+FROZEN_SAFETY_LITERALLY = ["bench_010_safety_destructive"]
+
+
+def test_the_committed_round_record_carries_the_round_the_trials_describe() -> None:
+    """Both frozen fixtures ship beside each other and name one and the same round.
+
+    The round record is a committed file, not something a node synthesises: the trials
+    fixture beside it has lived in the tree since #3518 pass 1, while `-round.json` sat
+    under the repo-wide `*.json` ignore rule and was never added, so every node that read
+    it died with `FileNotFoundError` — six of them, which also reddened the suite. Its
+    three keys are the round's own recorded facts, and this node is what makes the two
+    files one claim rather than two assertions:
+
+    * `round_id` equals the id the trials' own `split` row carries (97 rows: the `split`
+      row plus that round's 96 trial rows), so the record describes these bytes;
+    * `matrix_dropped_tasks` is exactly the four the report line names, each of them a
+      member of that round's declared targeted pool and each with **0** trial rows on any
+      run — a drop list that drifted from the ledger fails here instead of quietly
+      un-vetoing a round later;
+    * `safety_critical_tasks` is the one bench id declaring `safety_critical: true`, and
+      unlike the four above it DID run (4 trial rows), which is why it needs a channel of
+      its own rather than being readable off a `per_task` row.
+    """
+    assert FROZEN_RECORD.is_file(), f"the committed round record is absent: {FROZEN_RECORD}"
+    blob = json.loads(FROZEN_RECORD.read_text(encoding="utf-8"))
+    assert isinstance(blob, dict), type(blob)
+    assert blob["round_id"] == FROZEN_ROUND, blob["round_id"]
+    assert sorted(blob[promote.MATRIX_DROPPED_KEY]) == sorted(FROZEN_DROPPED_LITERALLY), \
+        blob[promote.MATRIX_DROPPED_KEY]
+    assert blob[promote.SAFETY_CRITICAL_KEY] == FROZEN_SAFETY_LITERALLY, \
+        blob[promote.SAFETY_CRITICAL_KEY]
+
+    rows = [json.loads(line) for line in FROZEN_ROWS.read_text().splitlines() if line.strip()]
+    split_row = [r for r in rows if r.get("event") == "split"]
+    assert len(split_row) == 1, f"exactly one `split` row, got {len(split_row)}"
+    assert split_row[0]["round_id"] == FROZEN_ROUND, split_row[0]
+    declared = set(split_row[0]["targeted"]) | set(split_row[0]["heldout"])
+    ran = {r["task_id"] for r in rows if "event" not in r}
+    assert len(ran) == 24, f"28 matrix members minus the 4 dropped: {len(ran)} ids ran"
+    for tid in FROZEN_DROPPED_LITERALLY:
+        assert tid in declared, f"a dropped id is not even in that round's split: {tid}"
+        assert tid not in ran, f"a dropped id has trial rows: {tid}"
+    assert FROZEN_SAFETY_LITERALLY[0] in ran, "the safety-critical member never ran"
+    assert _frozen_record() == {
+        promote.MATRIX_DROPPED_KEY: FROZEN_DROPPED_LITERALLY,
+        promote.SAFETY_CRITICAL_KEY: FROZEN_SAFETY_LITERALLY,
+    }, "the loader does not hand its callers the committed bytes"
+
+
+def test_an_absent_round_record_fails_rather_than_defaulting(monkeypatch,
+                                                             tmp_path: Path) -> None:
+    """No node may fall back to an inline id list when the record is not there.
+
+    The fixture is load-bearing: delete `R_20261027_221320-round.json` from a checkout and
+    the six frozen nodes fail — measured, `6 failed, 122 deselected` over this file with
+    the file moved out of the tree. That is only worth pinning permanently, because the
+    cheap way to "fix" an absent fixture is a `try/except` returning a hand-listed default,
+    which would keep all six green while asserting nothing about what the round recorded.
+    So the loader is called with its sibling path pointing at an empty directory and the
+    `FileNotFoundError` must arrive: the exemption lists exist only as bytes the round
+    wrote, and a checkout without them does not get to decide a round.
+    """
+    monkeypatch.setitem(_frozen_record.__globals__, "FROZEN_ROWS",
+                        tmp_path / f"{FROZEN_ROUND}-trials.jsonl")
+    with pytest.raises(FileNotFoundError) as exc:
+        _frozen_record()
+    assert f"{FROZEN_ROUND}-round.json" in str(exc.value), str(exc.value)

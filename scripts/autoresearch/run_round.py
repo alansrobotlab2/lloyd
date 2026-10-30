@@ -62,8 +62,10 @@ from . import cost as trial_cost
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
 # function object — every real round died before it wrote a report, and only a
 # test that stubbed the decision loop could get that far.
-from .promote import (BASELINE_SAFETY_FIELD, REFUSAL_CLASS_FIELD, SAFETY_REGRESSION,
-                      baseline_safety_flags, evaluate_promotion, promote, refusal_head,
+from .promote import (BASELINE_SAFETY_FIELD, MATRIX_DROPPED_KEY, NOT_REACHED_KEY,
+                      REFUSAL_CLASS_FIELD, SAFETY_CRITICAL_KEY, SAFETY_REGRESSION,
+                      baseline_safety_flags, coverage_report_lines, evaluate_promotion,
+                      not_reached_for_record, promote, refusal_head,
                       slice_metrics, validity_report, validity_report_lines)
 from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
@@ -241,7 +243,8 @@ def materialize_variants(
 
 
 def _validity_or_none(cfg: AutoresearchConfig, baseline_summary: dict[str, Any],
-                      variant_summary: dict[str, Any], split: dict[str, Any]) -> dict[str, Any] | None:
+                      variant_summary: dict[str, Any], split: dict[str, Any],
+                      round_record: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """`validity_report`, or None if the lint could not run at all.
 
     Advisory by construction, so a lint that cannot read the bench (a directory
@@ -253,7 +256,8 @@ def _validity_or_none(cfg: AutoresearchConfig, baseline_summary: dict[str, Any],
     than a number.
     """
     try:
-        return validity_report(cfg, baseline_summary, variant_summary, split=split)
+        return validity_report(cfg, baseline_summary, variant_summary, split=split,
+                               round_record=round_record)
     except Exception as exc:                                  # noqa: BLE001 — advisory
         logger.warning("bench validity lint failed; reporting the all-task mean alone: %s", exc)
         return None
@@ -1543,6 +1547,25 @@ async def run(
     prior_promotion, comparison = (None, None) if deadline_stopped else post_promotion_comparison(
         cfg, rid, float(baseline_summary.get("mean_composite", 0.0)))
 
+    # What the coverage floor is allowed to know about this round that the two summaries
+    # cannot say (#3518): the tasks the pre-trial shrink dropped, and the tasks the bench
+    # declares safety-critical. Both facts stop existing in a summary exactly when they
+    # apply — a dropped task has no per-task row, and a row is not where a
+    # `safety_critical` flag lives — so they are passed in rather than inferred.
+    # `MATRIX_DROPPED_KEY` is the name the report's `- matrix reduced before trials:` line
+    # and `payload["matrix_dropped_tasks"]` carry below, so the predicate and that prose
+    # read one list and cannot disagree; a round that did not shrink passes an empty list,
+    # which is not a missing input and exempts nothing. The safety ids are taken over the
+    # declared split, because that is the only pool a member can be set aside from, and an
+    # unreadable bench file yields the empty set — the direction that never exempts.
+    declared_ids = set(split["targeted"]) | set(split["heldout"])
+    round_record = {
+        MATRIX_DROPPED_KEY: list(matrix_dropped),
+        NOT_REACHED_KEY: not_reached_for_record(tasks_not_reached),
+        SAFETY_CRITICAL_KEY: sorted(tk["id"] for tk in all_tasks
+                                    if tk["id"] in declared_ids and tk.get("safety_critical")),
+    }
+
     # Evaluate each candidate vs baseline and pick the winner
     decisions: list[dict[str, Any]] = []
     best_variant: dict[str, Any] | None = None
@@ -1555,7 +1578,8 @@ async def run(
         vs = summaries.get(vid)
         if not vs:
             continue
-        should, reason = evaluate_promotion(cfg, baseline_summary, vs, split=split)
+        should, reason = evaluate_promotion(cfg, baseline_summary, vs, split=split,
+                                            round_record=round_record)
         # #1860: what the predicate itself said, before any wrapper below. The deadline
         # arm rewrites `reason` into a sentence about the deadline, and that prose is
         # what the strict-win census matches, so it stays exactly as it was — this is
@@ -1583,7 +1607,15 @@ async def run(
             # #646: the same predicate re-run over only the tasks the validity lint
             # refuses to call broken. Advisory — `should_promote` is what decides —
             # and its whole purpose is the case where the two disagree.
-            "validity": _validity_or_none(cfg, baseline_summary, vs, split),
+            "validity": _validity_or_none(cfg, baseline_summary, vs, split, round_record),
+            # #3518: what the coverage floor read for THIS decision, straight out of
+            # `promote.coverage_record` — the same call the predicate above made, so the
+            # counts in the report below and the counts inside a `partial_*_coverage`
+            # reason cannot be two readings of one slice. The round record rides beside it
+            # because these two inputs are the round's whole answer to "on what did this
+            # decide", and a reader holding the ledger row should hold both.
+            "round_record": round_record,
+            "coverage": coverage_report_lines(baseline_summary, vs, split, round_record),
         })
         if should and (best_summary is None or vs["mean_composite"] > best_summary["mean_composite"]):
             best_variant = next(v for v in variants if v["variant_id"] == vid)
@@ -1750,6 +1782,12 @@ async def run(
     lines.append("## Promotion decisions")
     for d in decisions:
         lines.append(f"- `{d['variant_id']}`: {'PROMOTE' if d['should_promote'] else 'HOLD'} — {d['reason']}")
+        # The reason above says how many declared tasks scored; these two say WHICH ones
+        # the decision was taken on and why the rest did not, from the same call the
+        # predicate made. They are empty on a round that scored every declared member of
+        # both pools, so the section gains no noise when there is nothing to disclose
+        # (#3518 clause 4).
+        lines.extend(f"  {ln}" for ln in d.get("coverage") or [])
     validity_sections = [(d["variant_id"], d.get("validity")) for d in decisions if d.get("validity")]
     if validity_sections:
         lines += ["", "## Bench validity (#646)",
