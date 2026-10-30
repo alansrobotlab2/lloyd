@@ -5616,3 +5616,199 @@ def test_being_held_at_dispatch_writes_nothing_to_the_item_or_the_ledger(isolate
         f"the held carrier vanished from the hand_runs readout: {listed} — a "
         "debt nobody is offered a round for and nobody can see is how #3017's "
         "silent closure came back")
+
+
+# ── #3461: the reconciler's met-landing branch is the THIRD closer ───────────
+#
+# `owed.close_item` (#3017) and the landing sweep (`close_settled_items`,
+# "#3017: THE SECOND CLOSER") both read `owed.hand_run_pending`.
+# `desired_statuses`'s met-landing branch is a third route to `done` and read
+# neither, and the ledger shows the two disagreeing: on 2026-10-25 the sweep
+# refused #3320 at 19:05:27 (`item_landed` with `"closed": false` and a reason
+# opening "its hand_run is still unexecuted") and the reconcile closed it at
+# 19:05:30 with that same refusal as its reason. Closing also took it out of
+# `open_items`, which took it out of `owed.hand_runs()` — the one readout an
+# attended session reads — so the 314-row dedup restore lost its only executor.
+# A guard on one of two write surfaces is no guard; this is the third surface
+# reading the same predicate, and the fourth (the umbrella member-fold) beside it.
+
+def _met_landing_row(item_id, commit, *, closed, reason):
+    """Append the `item_landed` row the sweep writes, so the reconciler is read
+    against the row shape it actually reads rather than a summary of it."""
+    S.append_event({"event": "item_landed", "item_id": item_id, "closed": closed,
+                    "acceptance": "met", "round_id": f"SM_{item_id}", "commit": commit,
+                    "vault": False, "reason": reason, "acceptance_source": "round",
+                    "human_clauses": []}, path=S.LEDGER_PATH)
+
+
+def _landed_draft(isolated, item_id, commit, *, name="A thing"):
+    """An open (`draft`) item carrying a landing marker: the state the sweep
+    leaves when it refuses to close, and the legacy state #1210 closes."""
+    p = write_item(isolated, item_id, status="draft", name=name)
+    B.update_frontmatter(p, {"automod_landed": commit})
+    return p
+
+
+def test_a_met_landing_never_closes_a_carrier_whose_hand_run_receipt_fails(isolated):
+    """#3461 clause 1: the third closer reads the shared predicate.
+
+    Two shapes, because the branch must be held by the RECEIPT and not by the
+    row. The first is #3320's live sequence — the sweep runs, refuses, and the
+    reconcile that follows must agree. The second hands the branch a row that
+    says `closed: true` (the shape every sweep wrote before #3017's guard) with
+    the receipt still exiting 1: only `hand_run_pending` can stop it there, and
+    if that is the guard the fix installed, the first case would pass without it.
+    """
+    carrier = write_item(isolated, 3320, status="in_progress")
+    _hand_run_on(carrier, "exit 1")
+    _landed(3320, "SM_3320", SHA40, outcome=dict(MET_OUTCOME))
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 3320, "closed": False, "acceptance": "met"}], \
+        "the sweep holds it, as #3017 made it do"
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    status, why = want[3320][0], want[3320][1]
+    assert status == "draft", (
+        f"the reconcile proposed {status!r} for the item the sweep had just "
+        f"refused — that is the 19:05:30 row that false-closed #3320: {why!r}")
+    assert "hand_run" in why and "exit 1" in why and "exited 1" in why, (
+        f"the proposed reason must carry the failing receipt command and the "
+        f"reading running it produced, so a reader can tell held from untried: {why!r}")
+    B.reconcile_statuses(S.LEDGER_PATH, None)
+    fm = _fm(carrier)
+    assert fm["status"] != "done" and not fm.get("completed")
+    assert "hand_run" in fm, "the block survives the reconcile untouched"
+    listed = [r["item_id"] for r in O.hand_runs()]
+    assert 3320 in listed, (
+        f"a reconcile that holds the item still dropped it from hand_runs(): {listed}")
+
+    held = _landed_draft(isolated, 3321, SHA40)
+    _hand_run_on(held, "exit 1")
+    _met_landing_row(3321, SHA40, closed=True, reason="the round reported the acceptance check met")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[3321][0] == "draft", (
+        f"a row saying `closed: true` outran the failing receipt: {want[3321][1]!r}")
+
+
+def test_the_reconciler_never_proposes_done_when_the_landing_row_says_closed_false(isolated):
+    """#3461 clause 2: one landing, one verdict — the sweep's.
+
+    No `hand_run:` block on these items: the only evidence is the row, which is
+    exactly how a sweep refusal can be undone by a `closed` field the reconciler
+    never reads. `closed: false` must move the item to `draft` naming the sweep's
+    refusal; `closed: true` is the same landing that settled, and #1210 still
+    closes it — the guard keys on the flag, not on a met landing having once been
+    refused.
+    """
+    held = _landed_draft(isolated, 3322, SHA40)
+    sweep_reason = ("its hand_run is still unexecuted — receipt 'exit 1' exited 1 "
+                    "— so the item stays open as the standing carrier")
+    _met_landing_row(3322, SHA40, closed=False, reason=sweep_reason)
+    settled = _landed_draft(isolated, 3323, SHA40)
+    _met_landing_row(3323, SHA40, closed=True, reason="the round reported the acceptance check met")
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[3322][0] == "draft", (
+        f"the reconciler closed a landing the sweep wrote `closed: false` for: "
+        f"{want[3322][1]!r}")
+    assert "the landing sweep refused" in want[3322][1] \
+        and "still unexecuted" in want[3322][1], (
+        f"the move must say it came from the sweep and carry the sweep's own "
+        f"refusal, or the two closers read as independent: {want[3322][1]!r}")
+    assert want[3323][0] == "done" and SHA40 in want[3323][1], (
+        "the control: `closed: true` is a settled landing and still closes, naming "
+        f"the commit: {want[3323]!r}")
+    B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert _fm(held)["status"] == "draft" and not _fm(held).get("completed")
+    assert _fm(settled)["status"] == "done" and _fm(settled).get("completed")
+
+
+def test_a_met_landing_that_settled_still_closes_whether_or_not_a_receipt_passed(isolated):
+    """#3461 clause 3: the hold stops held carriers only.
+
+    #1210's rule — a met landing is CLOSED — is the purpose of the branch, so
+    every settled shape has to survive the guard: no `hand_run:` block at all
+    (the overwhelming majority of landings), and a block whose receipt exits 0
+    (the run was made). Neither may be parked in `draft`, or the fix trades one
+    silent board for a stall of every landing.
+    """
+    plain = _landed_draft(isolated, 3324, SHA40, name="Plain landing")
+    _met_landing_row(3324, SHA40, closed=True, reason="the round reported the acceptance check met")
+    run = _landed_draft(isolated, 3325, SHA40, name="Run landing")
+    _hand_run_on(run, "exit 0")
+    _met_landing_row(3325, SHA40, closed=True, reason="the round reported the acceptance check met")
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    for iid, path in ((3324, plain), (3325, run)):
+        status, why = want[iid][0], want[iid][1]
+        assert status == "done", f"{iid} stopped closing: {why!r}"
+        assert SHA40 in why, f"the move must name the landing commit: {why!r}"
+    B.reconcile_statuses(S.LEDGER_PATH, None)
+    for path in (plain, run):
+        fm = _fm(path)
+        assert fm["status"] == "done" and fm.get("completed"), \
+            f"{path.name} was not closed by the pass"
+
+
+def test_the_reconcile_shells_out_only_for_the_items_carrying_a_receipt(isolated, monkeypatch):
+    """The cost caveat, pinned: `desired_statuses` runs at every turn end.
+
+    `_receipt_passes` runs the receipt in a subprocess with a ~10 s bound, so a
+    guard evaluated per open item would put that cost on every board read. It is
+    evaluated inside the `acc == "met"` branch, on the front matter that loop
+    already read, and `hand_run_pending` returns before touching a subprocess
+    for an item with no block. This counts the calls: 100 open landings and one
+    carrier must cost exactly one receipt run.
+    """
+    calls = []
+
+    def fake(receipt):
+        calls.append(receipt)
+        return False, "exited 1: fake reading"
+
+    monkeypatch.setattr(O, "_receipt_passes", fake)
+    for iid in range(3400, 3410):
+        _landed_draft(isolated, iid, SHA40, name=f"Landing {iid}")
+        _met_landing_row(iid, SHA40, closed=True, reason="the round reported the acceptance check met")
+    carrier = _landed_draft(isolated, 3410, SHA40, name="Carrier landing")
+    _hand_run_on(carrier, "exit 1")
+    _met_landing_row(3410, SHA40, closed=True, reason="the round reported the acceptance check met")
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert len(calls) == 1, (
+        f"the receipt ran {len(calls)} times for 11 open landings, one of which "
+        "carries a hand_run block")
+    assert want[3410][0] == "draft"
+    for iid in range(3400, 3410):
+        assert want[iid][0] == "done"
+
+
+def test_an_umbrella_fold_holds_a_member_whose_hand_run_receipt_fails(isolated):
+    """#3461 claim 6's fourth closer: the member-fold inside the same sweep.
+
+    `close: True, acceptance: "met"` written from the UMBRELLA's landing, on a
+    member the sweep only read to skip already-landed members — and `ready_confirmed`
+    skips grouped items before its own #3289 hold, so a grouped carrier was held
+    by neither surface. One landing, one predicate: a member whose receipt exits
+    non-zero is not folded, keeps its block, and says why.
+    """
+    _umbrella(isolated, 50, [2, 5])
+    held = next(isolated.glob("2-*.md"))
+    _hand_run_on(held, "exit 1")
+    _landed(50, "SM_50", "feedfacefeed", outcome=dict(MET))
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert {r["item_id"]: r["closed"] for r in out} == {50: True, 2: False, 5: True}, (
+        f"the fold closed a member the sweep's own predicate holds: {out}")
+    fm = _fm(held)
+    assert fm["status"] != "done" and not fm.get("completed")
+    assert fm.get("group") == 50, "held, not unfolded"
+    assert "hand_run" in fm, "the member keeps the block that holds it"
+    acts = "\n".join(str(a) for a in (fm.get("activity_log") or []))
+    assert "hand_run" in acts and "exit 1" in acts and "exited 1" in acts, (
+        f"the hold must name the failing receipt on the item: {acts!r}")
+    assert not [e for e in S.read_events(path=S.LEDGER_PATH)
+                if e.get("event") == "item_closed" and e.get("item_id") == 2], \
+        "no close was recorded for the held member"
+    closed = _fm(next(isolated.glob("5-*.md")))
+    assert closed["status"] == "done" and closed["automod_landed"] == "feedfacefeed", \
+        "the member with nothing holding it folds as it always did"

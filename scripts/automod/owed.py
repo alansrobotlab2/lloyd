@@ -433,13 +433,34 @@ def _receipt_passes(receipt: str) -> tuple[bool, str]:
 
 
 def hand_run_pending(fm: dict) -> tuple[dict, str]:
-    """The one measurement both closers read: `({}, "")` when the item's
+    """The one measurement every closer reads: `({}, "")` when the item's
     hand-run is absent or its receipt passes, else `(block, why-still-open)`.
 
     Deliberately silent about the item's status — a closed item is `close_item`'s
-    and `hand_runs`' business, not this predicate's — so both of the loop's
-    closers (`close_item` here and the landing finalizer in `backlog.py`) ask the
+    and `hand_runs`' business, not this predicate's — so every reader asks the
     same question and cannot disagree about the answer.
+
+    FOUR write paths reach `done` / `"closed": true"` on a met landing, and all
+    four ask here (#3461). The "both closers" wording that stood in this
+    docstring from #3017 to #3461 is what hid the last two: a reader who believes
+    there are two stops looking at two. In `git grep -n hand_run_pending
+    scripts/automod/` order — that command, not this list, is the enumeration a
+    reader can check, and a closer absent from it is the bug #3461 is about:
+
+      * `owed.close_item` — the owed-check job's close (#3017);
+      * `backlog._close_settled_items`' `if close:` hold, the landing sweep
+        ("#3017: THE SECOND CLOSER");
+      * the umbrella member-fold inside that same sweep, which before #3461
+        closed a MEMBER on the UMBRELLA's landing and sha and read no guard at
+        all — while `ready_confirmed` skips grouped items before its own hold;
+      * `backlog.desired_statuses`' met-landing branch (#1210), which writes the
+        `status_moved … done` row straight onto the board — the route that
+        false-closed #3320 three seconds after the sweep refused it (#3461).
+
+    Three more readers hold or report something that is not a close:
+    `ready_confirmed` refuses the OFFER of a round (#3289), `apply_verdict`
+    refuses a settle-shaped answer, and `hand_runs` is the readout all of them
+    leave the debt visible in.
     """
     block = hand_run_of(fm)
     if not block:

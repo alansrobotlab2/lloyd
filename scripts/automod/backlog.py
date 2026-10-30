@@ -5487,6 +5487,14 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         # whether the by-hand run has happened. What the round owed in paths stays
         # on the item's `owed` list either way: the `add_owed` calls below are not
         # conditional on the close (#1910).
+        #
+        # #3461: "both" was still wrong, and being wrong is what hid the gap — a
+        # reader who believes there are two closers stops looking at two. Four
+        # routes reach `done` on a met landing: this one, `owed.close_item`, the
+        # member-fold just below (which tests the UMBRELLA's `fm`, never the
+        # member's), and `desired_statuses`' met-landing branch. All four ask
+        # `owed.hand_run_pending`; its docstring carries the enumeration, and
+        # `git grep -n hand_run_pending scripts/automod/` is the check.
         if close:
             from scripts.automod import owed as _O
             _held, _receipt_why = _O.hand_run_pending(fm)
@@ -5535,6 +5543,7 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         # `not_met`, `deferred` and no-outcome leave them folded: the
         # umbrella's own note says why, and a human can `unfold_umbrella`.
         if close and close_members and item.members:
+            from scripts.automod import owed as _O
             by_all = {i.id: i for i in open_items(None, backlog_dir=backlog_dir)}
             for mid in item.members:
                 member = by_all.get(int(mid))
@@ -5542,6 +5551,33 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
                     continue
                 mfm, _ = _split_frontmatter(member.path.read_text(encoding="utf-8"))
                 if mfm.get(LANDED_MARKER):
+                    continue
+                # #3461: the FOURTH CLOSER, and until now it read no guard at
+                # all. The fold closes a member on the UMBRELLA's landing, with
+                # the umbrella's sha, and read the member's front matter only to
+                # skip already-landed ones — so a grouped hand-run carrier was
+                # held by neither surface: this sweep's `if close:` hold below
+                # tests the UMBRELLA's `fm`, and `ready_confirmed`'s #3289 hold
+                # sits after its own `if is_grouped(item): continue`. One
+                # predicate, read here on the `mfm` already in hand.
+                _mheld, _mwhy = _O.hand_run_pending(mfm)
+                if _mheld:
+                    held_reason = (f"its hand_run is still unexecuted — receipt "
+                                   f"{_mheld['receipt']!r} {_mwhy} — so the umbrella's "
+                                   f"landing does not fold it closed")
+                    if dry_run:
+                        done.append({"item_id": member.id, "closed": False,
+                                     "acceptance": "met", "via": item.id, "written": False})
+                        continue
+                    # Held, and NOT marked landed: `close_landed` stamps the
+                    # marker either way, and the marker means "this landing was
+                    # processed", which would fence the member off from every
+                    # later fold as well as this one. An activity line is what
+                    # `owed.close_item` writes on its own refusal, so all four
+                    # refusals name the receipt the same way.
+                    update_frontmatter(member.path, {}, activity=held_reason)
+                    done.append({"item_id": member.id, "closed": False, "acceptance": "met",
+                                 "via": item.id})
                     continue
                 fold = {"item_id": member.id, "closed": True, "acceptance": "met",
                         "via": item.id, "round_id": landing["round_id"],
@@ -6073,11 +6109,44 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # it: `reconcile_statuses` stores this string through
                 # `[:200]`, so a fixed 160-char reason plus a 40-hex sha
                 # (275 chars) loses exactly the part that names who decided.
-                head = "landed with every clause met; closed, the rest owed to owed-check: "
-                sha = str(fm.get(LANDED_MARKER) or "")
-                tail = f" (landed as {sha})" if sha else ""
-                room = max(0, 200 - len(head) - len(tail))
-                out[iid] = ("done", head + (ev.get("reason") or "")[:room] + tail, True)
+                # #3461: THE THIRD CLOSER, and two holds come first. This branch
+                # wrote the `status_moved … done` row that false-closed #3320 at
+                # 19:05:30Z on 2026-10-25, three seconds after the landing sweep
+                # above had refused the very same landing (`item_landed …
+                # "closed": false`, reason opening "its hand_run is still
+                # unexecuted") — it quoted the sweep's refusal as its own reason
+                # for closing. Closing also took the carrier out of `open_items`,
+                # and so out of `owed.hand_runs()`, the one readout the attended
+                # session that has to run it reads: the debt survived, its
+                # executor did not. So this route reads the same predicate the
+                # other closers read, plus the sweep's own answer.
+                # Both are evaluated HERE, on the `fm` this loop read at the top
+                # of the pass, and never per open item: `owed._receipt_passes`
+                # runs the receipt in a subprocess with a ~10 s bound, and
+                # `desired_statuses` runs at every turn end.
+                from scripts.automod import owed as _O
+                _held, _receipt_why = _O.hand_run_pending(fm)
+                if _held:
+                    out[iid] = ("draft",
+                                f"its hand_run is still unexecuted — receipt {_held['receipt']!r} "
+                                f"{_receipt_why} — so the met landing leaves it open as the "
+                                f"standing carrier, which is what the landing sweep decided")
+                elif ev.get("closed") is False:
+                    # `closed` on the row IS the sweep's verdict on this landing,
+                    # and the reconciler may not overrule it — otherwise the two
+                    # closers disagree about one landing three seconds apart.
+                    # `is False` and not falsy: rows that predate the field carry
+                    # no `closed` at all, and a settled landing still closes
+                    # (#1210), which is the whole purpose of this branch.
+                    out[iid] = ("draft", "the landing sweep refused to close it — "
+                                         + (ev.get("reason") or "its row reads closed: false")[:150]
+                                         + " — so the reconciler holds it open too")
+                else:
+                    head = "landed with every clause met; closed, the rest owed to owed-check: "
+                    sha = str(fm.get(LANDED_MARKER) or "")
+                    tail = f" (landed as {sha})" if sha else ""
+                    room = max(0, 200 - len(head) - len(tail))
+                    out[iid] = ("done", head + (ev.get("reason") or "")[:room] + tail, True)
             elif acc == "deferred":
                 # The landing's reason already names the ids it waits on.
                 out[iid] = ("draft", "landed; not running, waiting on other items — "
@@ -7218,9 +7287,13 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
         # `reopen`, whose hand-block hold exempts `work` and `reopen` by design,
         # so a re-offered carrier comes straight back to `up_next`.
         #
-        # One predicate, three readers: `owed.hand_run_pending` is what both
-        # closers refuse over (#3017 ruled an absent receipt pending, never a
-        # clean zero), so dispatch cannot offer what they would not close. It
+        # One predicate, every closer plus this dispatcher (#3461: "three
+        # readers"/"both closers" understated it — four paths close on a met
+        # landing, and `owed.hand_run_pending`'s docstring is the enumeration):
+        # it is what each of them refuses over (#3017 ruled an absent receipt
+        # pending, never a clean zero), so dispatch cannot offer what they would
+        # not close. Grouped members matter HERE in particular: the skip below
+        # is what left a grouped carrier held by neither surface until #3461. It
         # keys on the receipt and never on the item's path — an item that only
         # NAMES runtime data is #3027's readable-heads case and is still offered
         # — and it runs last of the four skips so the subprocess is paid only by
