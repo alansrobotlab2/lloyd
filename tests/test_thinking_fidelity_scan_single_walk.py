@@ -36,9 +36,11 @@ what that cost on 2026-09-25), so only a fixture can pin an exact count.
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -426,3 +428,231 @@ def test_roll_up_by_day_since_window_bounds_days_and_never_the_reads(store):
         "the window quietly dropped the undated report too")
     assert tfs.roll_up_by_day(store, since="2030-01-01").days == {}, (
         "a window past the end of the store yielded rows anyway")
+
+
+# ---- #3590: one walk, both stored forms -----------------------------------------
+
+def _archive_in_place(path: Path) -> Path:
+    """Gzip `path` and unlink it, the way `sweep_sessions` does.
+
+    The same three statements as `scripts/groundskeeper/retention-sweep.py::
+    sweep_sessions`: write `<name>.json.gz` from the original's bytes, verify it
+    round-trips as JSON, then `unlink()` the original. Clause 3 is a claim about
+    what one night of the real producer does to a day row, so the fixture has to
+    be produced by that producer's own steps — the gzip, the round-trip guard and
+    the deletion of the plain file all matter, and leaving the plain file behind
+    would be a state the sweep never writes.
+    """
+    gz_path = path.with_suffix(".json.gz")
+    with path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+        json.load(fh)
+    path.unlink()
+    return gz_path
+
+
+@pytest.fixture
+def mixed_store(tmp_path):
+    """Four sessions over two days, in both stored forms, with one overlap.
+
+      20261005_090000_chat_aaaa   BOTH forms. The live file holds 1 block, its
+                                  archive 2 — the state a sweep interrupted
+                                  between `gzip.open` and `unlink` leaves, and
+                                  the only shape here that tells "read both"
+                                  apart from "read the live one".
+      20261005_100000_chat_bbbb   ARCHIVED ONLY: 2 blocks, 1 flagged. Two of its
+                                  day's three blocks are invisible to a `*.json`
+                                  walk — which is what #3590 measured on the live
+                                  store as 4 files read out of 729.
+      20261006_090000_chat_cccc   plain: 1 block, 0 flagged.
+      no-date-prefix              ARCHIVED ONLY: 1 block, 1 flagged. In the
+                                  whole-store row and in no day row.
+
+      whole store   4 files, 5 blocks, 2 flagged, 2 of them archived
+      2026-10-05    2 files, 3 blocks, 1 flagged, 1 archived
+      2026-10-06    1 file,  1 block, 0 flagged, 0 archived
+
+    The archived overlap is deliberately NOT in `files_archived`: that field
+    counts the form that was READ, and for that session the live file won.
+    """
+    root = tmp_path / "sessions"
+    root.mkdir()
+    live = root / "20261005_090000_chat_aaaa.json"
+    _write(live, user="what does stream_chat do", thinking=[HONEST])
+    (root / "20261005_090000_chat_aaaa.json.gz").write_bytes(gzip.compress(
+        json.dumps({"messages": [
+            {"role": "user", "content": "what does stream_chat do"},
+            {"role": "thinking", "reasoning": HONEST},
+            {"role": "thinking", "reasoning": HONEST},
+        ]}).encode()))
+    _archive_in_place(_write_return(
+        root / "20261005_100000_chat_bbbb.json", user="and the router?",
+        thinking=[FABRICATED, HONEST]))
+    _write(root / "20261006_090000_chat_cccc.json", user="nothing to add",
+           thinking=[HONEST])
+    _archive_in_place(_write_return(
+        root / "no-date-prefix.json",
+        user="an old file with no date in its name", thinking=[FABRICATED]))
+    return root
+
+
+def _write_return(path: Path, *, user: str, thinking: list[str]) -> Path:
+    """`_write`, but handing the path back so it can be archived in place."""
+    _write(path, user=user, thinking=thinking)
+    return path
+
+
+# ---------------------------------------------------------------- clause 2
+
+def test_the_single_walk_enumerates_plain_and_archived_sessions_exactly_once(
+        mixed_store, tmp_path, monkeypatch):
+    """Both suffixes are in the one enumeration, and each session is in it once.
+
+    #3590 clause 2. Three things have to hold together, and the fixture is shaped
+    so each one fails alone: `*.json` alone sees 2 of the 4 sessions (the last
+    assertion, and the reason the enumeration wrapper is not inert), reading both
+    forms naively makes 5 files and 7 blocks for a store whose live arithmetic is
+    4 and 5 (the `files`/`blocks` assertions, and why the overlap's two copies
+    hold DIFFERENT block counts), and `scan_store` has to enumerate through the
+    same function rather than glob its own way again — the drift of two
+    independent `*.json` globs is exactly how #3590 happened.
+    """
+    expected = ["20261005_090000_chat_aaaa.json",
+                "20261005_100000_chat_bbbb.json.gz",
+                "20261006_090000_chat_cccc.json",
+                "no-date-prefix.json.gz"]
+    paths = tf.session_paths(mixed_store)
+    assert [p.name for p in paths] == expected, (
+        "the walk is not one path per session with the live form winning an "
+        f"overlap, sorted by session id: {[p.name for p in paths]}")
+    ids = [tf.session_id(p.name) for p in paths]
+    assert len(ids) == len(set(ids)) == 4, (
+        f"a session id is enumerated more than once: {ids}")
+
+    enumerations: list[list[str]] = []
+    real_paths = tf.session_paths
+
+    def counting_paths(root):
+        got = real_paths(root)
+        enumerations.append([p.name for p in got])
+        return got
+
+    monkeypatch.setattr(tf, "session_paths", counting_paths)
+    seen: list[str] = []
+    _count_reads(monkeypatch, seen)
+
+    series = tmp_path / "series.jsonl"
+    assert tfs.main(["--root", str(mixed_store), "--record", "--per-day",
+                     "--series", str(series)]) == 0
+    assert len(enumerations) == 1, (
+        f"the per-day walk enumerated the store {len(enumerations)} times; one "
+        "walk is the whole shape of #2819 and #3590 clause 2")
+    run_reads = sorted(seen)
+    assert len(run_reads) == 4 and run_reads == expected, (
+        f"the run made {len(run_reads)} per-file reads over a 4-session store: "
+        f"{run_reads} — a session in both forms must cost ONE read")
+
+    seen.clear()
+    whole = tf.scan_store(mixed_store)
+    assert len(enumerations) == 2, (
+        "`scan_store` did not enumerate through `session_paths`, so it is globbing "
+        "the store its own way again — the two-glob drift #3590 was filed on")
+    assert enumerations[0] == enumerations[1], (
+        "the per-day walk and scan_store disagree about which files the store "
+        f"holds: {enumerations[0]} vs {enumerations[1]}")
+    assert sorted(seen) == expected, (
+        "`scan_store` reads a different set of files than the per-day walk: "
+        f"{sorted(seen)}")
+
+    rows = _rows(series)
+    store_row = rows[-1]
+    assert (store_row["files"], store_row["blocks"], store_row["flagged"],
+            store_row["files_archived"], store_row["unreadable"]) == (
+        4, 5, 2, 2, 0), (
+        "the whole-store row is not 4 sessions / 5 blocks / 2 flagged with 2 "
+        "archived and nothing unreadable: reading both forms of the overlap would "
+        "read 7 blocks, reading plain files alone would read 1 file and miss bbbb "
+        "entirely, and a non-zero `unreadable` means a fixture archive is not "
+        "really compressed")
+    day_0505 = [r for r in rows if r.get("day") == "2026-10-05"][0]
+    assert (day_0505["files"], day_0505["blocks"], day_0505["flagged"],
+            day_0505["files_archived"]) == (2, 3, 1, 1), (
+        "the mixed day is not 2 files / 3 blocks with its overlap resolved to the "
+        "live 1-block file")
+    assert whole.files_archived == 2, (
+        "files_archived counted the archived copy that was never read")
+
+    plain_only = sorted(p.name for p in mixed_store.glob("*.json"))
+    assert len(plain_only) == 2, (
+        "the fixture is not the mixed store the clause needs: a plain-only walk "
+        f"would see {len(plain_only)} of its 4 sessions, so this test could pass "
+        "on the old glob")
+
+
+# ---------------------------------------------------------------- clause 3
+
+def test_archiving_a_session_in_place_moves_no_day_rows_denominator(store,
+                                                                    tmp_path):
+    """The same bytes, renamed by the sweep: the day row must not notice.
+
+    #3590 clause 3, run twice for real rather than argued: a full
+    `--record --per-day` over the fixture store, then `sweep_sessions`' own
+    gzip-and-unlink on one 2026-09-26 session, then the same command again. Every
+    field of every row is compared except `recorded_at` (the run moved) and
+    `files_archived` (the one field the sweep is ALLOWED to move, and the number
+    that says so). The literals are the fixture's stated arithmetic, so a
+    denominator that dropped the archived file fails here even against a
+    self-consistent pair of runs.
+
+    The last two assertions are the counter-proof: the plain-only glob the walk
+    used to make does lose that file (5 → 4), so the unchanged row is the fix
+    working and not a fixture that never had an archive in it.
+    """
+    before = tmp_path / "before.jsonl"
+    after = tmp_path / "after.jsonl"
+    assert tfs.main(["--root", str(store), "--record", "--per-day",
+                     "--series", str(before)]) == 0
+    plain_count_before = len(list(store.glob("*.json")))
+
+    gz = _archive_in_place(store / "20260926_101010_chat_aaaa.json")
+    assert gz.name == "20260926_101010_chat_aaaa.json.gz"
+    assert not (store / "20260926_101010_chat_aaaa.json").exists(), (
+        "the fixture did not archive the way the sweep does: it unlinks the "
+        "original, and leaving it is a state production never reaches")
+    assert len(list(store.glob("*.json"))) == plain_count_before - 1, (
+        "the plain-only walk the script used to make still sees the same count, "
+        "so this fixture has not actually moved a session into the archive and "
+        "the parity below would prove nothing")
+
+    assert tfs.main(["--root", str(store), "--record", "--per-day",
+                     "--series", str(after)]) == 0
+
+    first = {r.get("day", r["scope"]): r for r in _rows(before)}
+    second = {r.get("day", r["scope"]): r for r in _rows(after)}
+    assert sorted(first) == sorted(second), (
+        "archiving one session changed WHICH rows exist, not just their numbers")
+    for key, old in first.items():
+        for field in sorted(old):
+            if field in ("recorded_at", "files_archived"):
+                continue
+            assert second[key][field] == old[field], (
+                f"{key}: field {field!r} moved from {old[field]} to "
+                f"{second[key][field]} when a session was archived in place — the "
+                "sweep is not allowed to change a day's denominator")
+
+    mixed = second[MIXED_DAY]
+    assert (mixed["files"], mixed["blocks"], mixed["flagged"]) == (2, 3, 1), (
+        "the mixed day is not the fixture's 2 files / 3 blocks / 1 flagged once "
+        "one of its sessions is an archive")
+    assert (first[MIXED_DAY]["files_archived"],
+            mixed["files_archived"]) == (0, 1), (
+        "the witness did not record the archive it was made to record")
+    whole_old, whole_new = first[tfs.SCOPE_WHOLE_STORE], second[tfs.SCOPE_WHOLE_STORE]
+    assert (whole_old["files"], whole_new["files"], whole_old["blocks"],
+            whole_new["blocks"]) == (5, 5, 5, 5), (
+        "the whole-store denominator moved when nothing was deleted, which is the "
+        "#3590 symptom measured on the live store as 280,864 → 260,014 blocks")
+    assert whole_new["files_archived"] == 1, (
+        "the whole-store row does not name the archived session in its own "
+        "denominator")

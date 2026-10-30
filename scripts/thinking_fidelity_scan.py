@@ -81,6 +81,20 @@ finished rather than after the walk is over, so a run that is killed or times ou
 partway keeps the days it already covered instead of losing all of them; the
 whole-store row, which needs every file, is still last.
 
+The walk enumerates BOTH stored forms of a session — `*.json` and the
+`*.json.gz` archives `scripts/groundskeeper/retention-sweep.py` produces on a
+gzip-and-never-delete policy — because reading plain files alone let the sweep
+shrink the denominator in silence (#3590). Measured on the live store: the
+whole-store row fell 280,864 → 260,014 blocks across the runs of
+2026-10-27…10-30 with no session deleted, and 2026-09-26 printed
+`files: 4, blocks: 120, flagged: 0, scanned: true` while that day held 4 plain
+files and 725 archives — a row that reads as a clean day and is a day that was
+never measured. `files_archived` on every row, day and whole-store alike, is the
+witness: it says how much of that row's own denominator came off the gzip route,
+so an archive can no longer move a denominator without saying so. It is a
+read-side change only — the sweep, `config.yaml` and `preserve_thinking_iterations`
+are untouched, which is the #1510 failure mode this job exists to avoid.
+
 The same walk is timed and reported as `scan_seconds` on the whole-store row.
 `workers.db`'s `duration_seconds` for task #91 is the whole agent turn and cannot
 say which part of it the scan was, which is why the 245.2 s peak of 2026-10-15
@@ -208,6 +222,7 @@ class DayRollup:
             lines.append(
                 f"per-day {day}: flagged {scan.flagged} of {scan.blocks} blocks "
                 f"(rate {rate}; {scan.files} session file(s), "
+                f"{scan.files_archived} archived, "
                 f"{scan.blocks_exempt_meta} exempt as meta-session)")
         if self.undated:
             lines.append(f"  {len(self.undated)} session file(s) have no "
@@ -240,6 +255,16 @@ def scan_store_by_day(root: Path, since: str = "", on_day=None
     `since` bounds the DAY tallies; every file still counts toward the whole-store
     tally, which is the point of doing one walk for both. Files whose names name no
     date go to `DayRollup.undated` and to the whole-store tally only.
+
+    The enumerated set is `app.thinking_fidelity.session_paths`, not a glob of its
+    own (#3590). It used to be `sorted(root.glob("*.json"))`, which made every
+    session the retention sweep had archived invisible to this walk: 2026-09-26's
+    row printed `files: 4, blocks: 120, flagged: 0, scanned: true` while that day
+    held 4 plain files and 725 archives, and the whole-store denominator fell
+    280,864 → 260,014 blocks across four runs with no session deleted. One
+    enumeration function for both this walk and `scan_store` is what keeps the two
+    from drifting apart again; sorting on the SESSION ID rather than the raw name
+    is what keeps one day's files contiguous across the two suffixes.
     """
     whole = StoreScan(root=root)
     out = DayRollup()
@@ -255,7 +280,13 @@ def scan_store_by_day(root: Path, since: str = "", on_day=None
                 on_day(open_day, open_scan)
         open_day, open_scan = "", None
 
-    for path in sorted(root.glob("*.json")):
+    # `thinking_fidelity.session_paths` and not an imported name, for the same
+    # reason the per-file read below is: resolved on the module namespace, one
+    # wrapper there counts every enumeration the process makes, which is the only
+    # way to show this walk and `scan_store` really share ONE list of files
+    # instead of each globbing the store their own way (#3590's two globs drifted
+    # apart precisely because nothing could see them as one enumeration).
+    for path in thinking_fidelity.session_paths(root):
         day = day_of(path.name)
         if not day:
             # Undated: in the store tally, in no day tally, and it does not close
@@ -314,10 +345,19 @@ def _measurements(scan: StoreScan) -> dict:
     `null` rate are the anti-confusion pair: a run over an empty store is
     `{scanned: false, blocks: 0, flagged_rate: null}` and a clean store is
     `{scanned: true, blocks: 40964, flagged: 0, flagged_rate: 0.0}`.
+
+    `files_archived` is the denominator's witness (#3590): how much of `files`
+    came off the gzip route. It exists because the retention sweep archives one
+    cohort of sessions a night and a day whose sessions were mostly archived used
+    to report `scanned: true, flagged: 0` — a row that read as a clean day and
+    was a day that had not been measured. With the archives read, the shrink it
+    records is no longer something the sweep can do silently: this field is the
+    number that says where the denominator came from, on the same row.
     """
     return {
         "files": scan.files,
         "files_with_flags": scan.files_with_flags,
+        "files_archived": scan.files_archived,
         "blocks": scan.blocks,
         "flagged": scan.flagged,
         "exempt_blocks": scan.blocks_exempt_meta,

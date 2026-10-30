@@ -23,12 +23,31 @@ window, the scope field that stops a day's rate and the store's rate meaning two
 different things inside one file, and the dispatchability of the autonomy task that
 runs it. The same zero-vs-nothing rule applies one level down: a day with no reasoning
 block is a row with `blocks: 0` and `scanned: false`, never an absent day.
+
+#3590 is the third way this series can lie with no error anywhere: the retention
+sweep gzips a session and unlinks the original, and the scan enumerated only
+`*.json`. Nothing was deleted and the denominator fell anyway — the live store's
+whole-store row went 280,864 → 260,014 blocks across the runs of
+2026-10-27…10-30 — while a day whose sessions had mostly been archived reported
+`scanned: true, flagged: 0`, which reads as a clean day and is a day that was
+never measured. The three nodes at the bottom of this file pin the row-level
+half of the fix: an archive scores exactly like the plain file it came from
+(`test_an_archived_session_scores_the_same_blocks_and_flags_as_the_plain_file`),
+every row and both printed lines name `files_archived`, so a denominator now
+carries a witness the sweep cannot move in silence
+(`test_every_row_and_both_printed_lines_name_the_archived_share`), and an archive
+that cannot be decoded is counted `unreadable` rather than dropped
+(`test_an_undecodable_archive_is_counted_unreadable_and_never_dropped`). The
+walk-level half — one enumeration of both forms, and archiving a session moving
+no denominator — is pinned in `tests/test_thinking_fidelity_scan_single_walk.py`.
 """
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +61,7 @@ _spec = importlib.util.spec_from_file_location(
 tfs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tfs)
 
+from app import thinking_fidelity as tf  # noqa: E402
 from app.thinking_fidelity import StoreScan  # noqa: E402
 
 FABRICATED = ("The user is asking me to reproduce my complete previous thinking "
@@ -214,12 +234,17 @@ def test_prevalence_row_carries_every_field_the_report_prints():
     """
     scan = StoreScan(root=Path("/fixture/sessions"), files=7, unreadable=1,
                      blocks=100, flagged=3, files_with_flags=2,
-                     blocks_exempt_meta=5, files_exempt_meta=1)
+                     blocks_exempt_meta=5, files_exempt_meta=1,
+                     files_archived=4)
 
     row = tfs.prevalence_row(scan)
 
     assert row["files"] == 7
     assert row["files_with_flags"] == 2
+    assert row["files_archived"] == 4, (
+        "#3590: the row stopped carrying the field the prose line prints beside "
+        "`files`, so a denominator that half of the sweep had archived would read "
+        "the same as one it had not touched")
     assert row["blocks"] == 100
     assert row["flagged"] == 3
     assert row["exempt_blocks"] == 5
@@ -228,9 +253,9 @@ def test_prevalence_row_carries_every_field_the_report_prints():
     assert row["flagged_rate"] == pytest.approx(0.03)
     assert row["root"] == "/fixture/sessions"
     assert set(row) >= {"date", "scope", "recorded_at", "root", "files",
-                        "files_with_flags", "blocks", "flagged",
-                        "exempt_blocks", "exempt_files", "unreadable",
-                        "scanned", "flagged_rate"}
+                        "files_with_flags", "files_archived", "blocks",
+                        "flagged", "exempt_blocks", "exempt_files",
+                        "unreadable", "scanned", "flagged_rate"}
     assert row["scope"] == tfs.SCOPE_WHOLE_STORE, (
         "day rows share this file from #1770 on, so the whole-store row has to "
         "say what its denominator covers")
@@ -597,3 +622,228 @@ def test_a_daily_autonomy_task_records_the_prevalence_series():
         "dispatch as 'Skill not found' rather than at authoring")
     assert autonomy.hold_reason(task, [task]) != "no skill", (
         "the one hold the authoring side cannot see from the file alone")
+
+
+# ---- #3590: an archived session is still in the denominator ---------------------
+
+#: The three ways an archive stops being a transcript, each raising a DIFFERENT
+#: exception out of the decompressor, measured on this box rather than assumed:
+#: a truncated member ends the stream early (EOFError), a valid 10-byte gzip
+#: header over bytes that are not a deflate stream fails inside zlib
+#: (zlib.error — the one shape that is NOT an OSError), and plain bytes under a
+#: `.json.gz` name are not a gzip file at all (BadGzipFile, an OSError). A gzip
+#: route that caught only OSError would survive the first and third and die on
+#: the second, taking the rest of the store's rows with it.
+def _archive_of(raw: bytes) -> bytes:
+    """The real archive of `raw`, so a parity test compares a document to itself."""
+    return gzip.compress(raw)
+
+
+def _archive_in_place(path: Path) -> Path:
+    """Gzip `path` and unlink it, the way `sweep_sessions` does.
+
+    Same three statements as `scripts/groundskeeper/retention-sweep.py::
+    sweep_sessions` — write the `.json.gz` from the original's bytes, verify it
+    round-trips as JSON, `unlink()` the original — because the property under
+    test is what one night of the real producer does to a day row, and a fixture
+    that archived some other way (leaving the plain file standing, say) would be
+    describing a state the sweep never writes.
+    """
+    gz_path = path.with_suffix(".json.gz")
+    with path.open("rb") as src, gzip.open(gz_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    with gzip.open(gz_path, "rt", encoding="utf-8") as fh:
+        json.load(fh)
+    path.unlink()
+    return gz_path
+
+
+def test_an_archived_session_scores_the_same_blocks_and_flags_as_the_plain_file(tmp_path):
+    """Clause 1: the stored form is not allowed to change the verdict.
+
+    Two documents, because "the same" has to hold for the exemption too: an
+    ordinary session whose block is FLAGGED, and a meta-session whose identical
+    blocks are counted and exempted. The plain-side literals are what stop the
+    comparison being 0 == 0 — an archive route that returned nothing at all would
+    still match a blank document to a blank document.
+
+    `gzip.decompress(gz) == raw` is asserted first so the test cannot pass on a
+    file that is plain bytes under a `.gz` name: that would score as unreadable,
+    not as equal, and the failure would name the wrong thing.
+    """
+    store = tmp_path / "sessions"
+    store.mkdir()
+
+    ordinary = store / "20260926_101010_chat_aaaa.json"
+    _write(ordinary, user="what does stream_chat do?",
+           thinking=[FABRICATED, HONEST])
+    meta = store / "20260926_111111_chat_bbbb.json"
+    _write(meta, user=META_USER, thinking=[FABRICATED, FABRICATED, HONEST])
+
+    for plain in (ordinary, meta):
+        raw = plain.read_bytes()
+        gz = plain.with_suffix(".json.gz")
+        gz.write_bytes(_archive_of(raw))
+        assert gz.read_bytes() != raw, (
+            f"{gz.name} is not compressed, so this is not the parity the clause "
+            "asks about")
+        assert gzip.decompress(gz.read_bytes()) == raw, (
+            f"{gz.name} does not hold the bytes of {plain.name}, so the two "
+            "scans below are not of the same document")
+
+        before, after = tf.scan_file(plain), tf.scan_file(gz)
+        assert (after.blocks, after.flagged, after.exempt,
+                after.unreadable) == (before.blocks, before.flagged,
+                                      before.exempt, before.unreadable), (
+            f"{gz.name} scored differently from the identical document stored as "
+            f"{plain.name}: archived "
+            f"{(after.blocks, after.flagged, after.exempt, after.unreadable)} vs "
+            f"plain "
+            f"{(before.blocks, before.flagged, before.exempt, before.unreadable)}")
+        assert (before.archived, after.archived) == (False, True), (
+            f"the form read is wrong for {gz.name}: `archived` is how "
+            "files_archived learns which file came off the gzip route, and a "
+            "readable archive that reports False would hide the archives the "
+            "denominator is actually made of")
+
+    assert (tf.scan_file(ordinary).blocks, tf.scan_file(ordinary).flagged,
+            tf.scan_file(ordinary).exempt) == (2, 1, 0), (
+        "the plain-side fixture is not the 2-block / 1-flagged session the "
+        "parity above is shaped for")
+    assert (tf.scan_file(meta).blocks, tf.scan_file(meta).flagged,
+            tf.scan_file(meta).exempt) == (3, 0, 2), (
+        "the meta-session fixture is not the 3-block / 0-flagged / 2-exempt "
+        "session the exemption parity above is shaped for")
+
+
+def test_every_row_and_both_printed_lines_name_the_archived_share(tmp_path,
+                                                                  capsys):
+    """Clause 4: the denominator says where it came from, in row and in prose.
+
+    The same four-file, nine-block store as
+    `test_per_day_reports_one_row_per_calendar_day`, with one session per day
+    archived in place by the real sweep
+    shape. `files` and `blocks` are therefore the numbers that test already
+    asserts, and the new field is the only thing allowed to move — which is what
+    makes this the witness rather than another counter: the sweep archived half
+    the store's sessions and every other number stayed where it was.
+
+    The printed lines are asserted as complete strings because the clause is
+    that prose and series cannot disagree, and a field present only in the JSONL
+    is the disagreement the #1656 docstring already calls out as the bug.
+    """
+    store = _day_store(tmp_path)
+    _archive_in_place(store / "20260926_101010_chat_aaaa.json")
+    _archive_in_place(store / "20260927_101010_chat_dddd.json")
+
+    series = tmp_path / "prevalence.jsonl"
+    assert tfs.main(["--root", str(store), "--record", "--per-day",
+                     "--series", str(series)]) == 0
+
+    rows = _rows(series)
+    days = _day_rows(series)
+    whole = rows[-1]
+    assert [r["files_archived"] for r in days] == [1, 1], (
+        "a day's rows do not name the one session of theirs that arrived as an "
+        f"archive: {[r['files_archived'] for r in days]}")
+    assert whole["files_archived"] == 2 == sum(
+        r["files_archived"] for r in days), (
+        "the whole-store witness and the day witnesses disagree, so the store row "
+        f"says {whole['files_archived']} archived while its own days say "
+        f"{sum(r['files_archived'] for r in days)}")
+    assert [(r["files"], r["blocks"], r["flagged"]) for r in days] == [
+        (2, 4, 1), (2, 5, 1)], (
+        "archiving two of four sessions moved a day's denominator, which is the "
+        "#3590 failure itself and not a witness problem")
+    assert (whole["files"], whole["blocks"], whole["files_archived"]) == (
+        4, 9, 2), (
+        "the whole-store row is not 4 files / 9 blocks with 2 of them archived")
+
+    out = capsys.readouterr().out
+    assert "4 session files, 2 with a flagged block, 2 archived" in out, (
+        "the printed whole-store line does not carry the same archived count as "
+        "the row, so a human quoting the prose and a job reading the JSONL are "
+        "quoting different denominators")
+    assert ("per-day 2026-09-26: flagged 1 of 4 blocks (rate 0.2500; "
+            "2 session file(s), 1 archived, 0 exempt as meta-session)") in out, (
+        "the printed per-day line does not carry the day's own archived count")
+
+    scan = StoreScan(root=Path("/fixture/sessions"), files=9, unreadable=1,
+                     blocks=100, flagged=3, files_with_flags=2,
+                     blocks_exempt_meta=5, files_exempt_meta=1,
+                     files_archived=4)
+    assert tfs.prevalence_row(scan)["files_archived"] == 4
+    assert tfs.day_row("2026-09-26", scan)["files_archived"] == 4, (
+        "the day row kind dropped the field the whole-store kind carries — two "
+        "row shapes sharing one file must carry the same denominator fields")
+    assert "4 archived" in scan.report(), (
+        "StoreScan.report() lost the number every reader of it quotes")
+
+
+def test_an_undecodable_archive_is_counted_unreadable_and_never_dropped(tmp_path):
+    """Clause 5: the gzip route inherits "unreadable is reported, never skipped".
+
+    Three damaged archives, one readable one. The damaged three are the three
+    distinct exception shapes listed above, and they sort BEFORE the good file —
+    so `blocks == 2` is also the proof that a rotten member did not end the walk
+    and cost every later file its blocks, which is the failure
+    `app/uptake.py::read_session` names for the same corpus.
+
+    The control at the end is what makes `unreadable` a finding rather than a
+    tautology: the same document, archived whole, scans with its two blocks. The
+    bytes are unreadable BECAUSE they are damaged, not because the gzip route is
+    dead — and a reader who got this wrong would go and "fix" the reader again.
+    """
+    store = tmp_path / "sessions"
+    store.mkdir()
+    good_doc = tmp_path / "intact.json"
+    _write(good_doc, user="what does stream_chat do?",
+           thinking=[FABRICATED, HONEST])
+    intact = good_doc.read_bytes()
+    whole_archive = _archive_of(intact)
+
+    (store / "a-trunc.json.gz").write_bytes(
+        whole_archive[:max(8, len(whole_archive) // 3)])
+    (store / "b-junkbody.json.gz").write_bytes(
+        b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03" + b"not-a-deflate-stream" * 4)
+    (store / "c-plainbytes.json.gz").write_bytes(intact)
+    (store / "z-good.json.gz").write_bytes(whole_archive)
+
+    for name in ("a-trunc.json.gz", "b-junkbody.json.gz",
+                 "c-plainbytes.json.gz"):
+        one = tf.scan_file(store / name)
+        assert one.unreadable and one.archived, (
+            f"{name}: unreadable={one.unreadable} archived={one.archived} — a "
+            "damaged archive has to be reported AND counted as an archive, or "
+            "files_archived under-reports on exactly the files whose readability "
+            "is in question")
+        assert (one.blocks, one.flagged) == (0, 0)
+    good = tf.scan_file(store / "z-good.json.gz")
+    assert (good.blocks, good.flagged, good.archived,
+            good.unreadable) == (2, 1, True, False), (
+        "the readable archive is not the 2-block / 1-flagged file the store "
+        "assertions below are shaped for")
+
+    scan = tfs.scan_store(store)
+    assert (scan.files, scan.files_archived, scan.unreadable) == (4, 4, 3), (
+        "damaged archives were dropped from, or not counted as, the denominator: "
+        f"files={scan.files} archived={scan.files_archived} "
+        f"unreadable={scan.unreadable}")
+    assert (scan.blocks, scan.flagged) == (2, 1), (
+        "the walk did not reach the good archive after three rotten ones, so a "
+        "damaged member cost every later file its blocks")
+
+    series = tmp_path / "prevalence.jsonl"
+    assert tfs.main(["--root", str(store), "--record",
+                     "--series", str(series)]) == 0
+    row = _rows(series)[0]
+    assert (row["files"], row["files_archived"], row["unreadable"],
+            row["blocks"]) == (4, 4, 3, 2), (
+        "the recorded row lost the damaged archives, or the survivor")
+    assert row["scanned"] is True, (
+        "a store whose archives mostly failed to decode reported nothing "
+        "scanned, which is the ambiguity the whole series exists to remove")
+
+    assert tf.scan_file(store / "z-good.json.gz").blocks == 2, (
+        "control broken: an intact archive of this very document does not scan, "
+        "so the three unreadables above are the reader failing, not the damage")

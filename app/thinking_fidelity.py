@@ -22,6 +22,21 @@ row, and onset is 2026-09-22 — a per-day scan shows zero on every earlier day 
 store holds, and its gap from 2026-09-12 to 2026-09-22 is the data-root migration
 of 2026-09-22 (``6426668b``), not an absence of sessions.
 
+A session's stored form is not stable, and this module reads both of them.
+``scripts/groundskeeper/retention-sweep.py::sweep_sessions`` gzips
+``<id>.json`` to ``<id>.json.gz`` and unlinks the original on a policy that is
+*gzip and never delete*, so an archive is the only copy a session will ever
+have. Reading only ``*.json`` therefore made the nightly sweep a silent
+denominator loss (#3590): the store's whole-store block count fell
+280,864 → 260,014 across four runs of 2026-10-27…10-30 with nothing deleted,
+and a day whose sessions had mostly been archived reported ``scanned: true,
+flagged: 0`` — a clean-looking day that had not been measured. So
+`session_paths` enumerates both forms, `scan_file` decodes an archive as
+transparently as a plain file, and every `StoreScan` carries
+`files_archived` naming how much of its own denominator came from one. That is
+the read-side half of what `app/uptake.py` (#1848) already does for its own
+transcripts; the retention sweep itself is deliberately untouched.
+
 What this module deliberately does NOT claim is the mechanism. The two
 candidates in the item are engine-side state (MTP speculative decoding) and
 decode-side prior. The evidence gathered in the item weighs against
@@ -57,8 +72,10 @@ rather than a grep in a test:
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -134,6 +151,63 @@ def names_the_defect(text: str) -> bool:
 
 # --------------------------------------------------------------- store scan --
 
+#: The archived form of a transcript, and the two forms a store may hold one in.
+#: `scripts/groundskeeper/retention-sweep.py::sweep_sessions` is what writes the
+#: first. Spelled here rather than imported from `app.uptake.py`, which defines
+#: the same literal for its own reads: the session store is `app/`'s layout, and
+#: an absence check on this module (`git grep -n gz app/thinking_fidelity.py`)
+#: has to resolve to the suffix it is asking about — a grep that only lands in
+#: another module is how a reader concludes "no gzip handling here" and is right.
+SESSION_ARCHIVE_SUFFIX = ".json.gz"
+SESSION_SUFFIXES: tuple[str, ...] = (".json", SESSION_ARCHIVE_SUFFIX)
+
+
+def session_id(name_or_path: str | Path) -> str:
+    """The session a transcript file names, with either suffix.
+
+    NOT `Path.stem`: for an archive that is ``<id>.json``, which is a different
+    identity than the plain file's and makes `session_paths` treat one session
+    as two.
+    """
+    name = (name_or_path.name if isinstance(name_or_path, Path)
+            else str(name_or_path))
+    for suffix in (SESSION_ARCHIVE_SUFFIX, ".json"):   # the longer one first
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def session_paths(root: Path) -> list[Path]:
+    """Every session transcript under `root`, live or archived, one per session.
+
+    The one walk, shared by `scan_store` and the per-day walk so neither can
+    drift back to plain files alone. Three properties, each of which was a bug
+    somewhere (#3590, and `app/uptake.py::_session_transcripts` for the same
+    store):
+
+      - both ``*.json`` and ``*.json.gz`` are enumerated, so archiving a session
+        moves no denominator;
+      - a session id appears EXACTLY ONCE, so no file is parsed twice. A store
+        holding both ``X.json`` and ``X.json.gz`` is the state a sweep
+        interrupted between its `gzip.open` and its `path.unlink` leaves behind;
+        the LIVE file wins, being the current prose. Ids differing in more than
+        the suffix stay separate files.
+      - the result sorts by the SESSION ID and not the raw name, so the two forms
+        of one session are adjacent and one day's ids stay contiguous — the
+        date prefix leads in both forms, and that contiguity is the fact
+        `scan_store_by_day` relies on to close a day when the day changes.
+    """
+    chosen: dict[str, Path] = {}
+    for suffix in SESSION_SUFFIXES:                     # ".json" first, and it wins
+        # `*.json` does not match a `.json.gz` name — fnmatch has no implicit
+        # "anything" after a dot — so the two globs are disjoint and the
+        # `setdefault` below only ever fires for the interrupted-sweep overlap.
+        for path in root.glob(f"*{suffix}"):
+            if path.is_file():
+                chosen.setdefault(session_id(path.name), path)
+    return sorted(chosen.values(), key=lambda p: session_id(p.name))
+
+
 def _text_of(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -163,17 +237,31 @@ def reasoning_blocks(messages: Iterable[dict]) -> Iterator[str]:
 
 @dataclass
 class FileScan:
-    """What one session file contributed to a `scan_store`."""
+    """What one session file contributed to a `scan_store`.
+
+    `archived` records the form the file was READ in, not the shape of its bytes:
+    a `.json.gz` that turns out to be undecodable is still an archived file, and
+    a `files_archived` that quietly excluded the rotten archives would make the
+    witness under-report exactly the files whose readability is in question.
+    """
     path: Path
     blocks: int = 0
     flagged: int = 0
     exempt: int = 0
     unreadable: bool = False
+    archived: bool = False
 
 
 @dataclass
 class StoreScan:
-    """The verdict `scan_store` reaches, with its own denominators."""
+    """The verdict `scan_store` reaches, with its own denominators.
+
+    `files_archived` is the denominator's witness (#3590): how much of `files`
+    arrived through the gzip route. The retention sweep moves sessions between
+    the two forms every night, and until this field existed a day could lose
+    most of its denominator to that move and still print `scanned: true` with
+    `flagged: 0`.
+    """
     root: Path
     files: int = 0
     unreadable: int = 0
@@ -182,16 +270,27 @@ class StoreScan:
     files_with_flags: int = 0
     blocks_exempt_meta: int = 0
     files_exempt_meta: int = 0
+    files_archived: int = 0
     flagged_files: list[str] = field(default_factory=list)
 
     def report(self) -> str:
-        """The report, denominator first. See this module's docstring, bullet 2."""
+        """The report, denominator first. See this module's docstring, bullet 2.
+
+        The headline carries `files_archived` (#3590 clause 4) because the
+        printed line and the JSONL row are read by different readers and have to
+        be one measurement: a run whose prose names one file count while its row
+        names another is two numbers, and the one in prose is the one a human
+        quotes. No figure for the live store belongs in here — the store is
+        growing and archiving while it is read, which is the whole reason the
+        count is a field on a row rather than a sentence in a docstring.
+        """
         pct = (100.0 * self.flagged / self.blocks) if self.blocks else 0.0
         lines = [
             f"thinking-trace fidelity: flagged {self.flagged} of "
             f"{self.blocks} reasoning blocks scanned "
             f"({pct:.2f}% of blocks; {self.files} session files, "
-            f"{self.files_with_flags} with a flagged block)",
+            f"{self.files_with_flags} with a flagged block, "
+            f"{self.files_archived} archived)",
             f"  exempt as meta-session (the session's own user turn names the "
             f"defect, so its reasoning is about the marker words): "
             f"{self.blocks_exempt_meta} blocks in {self.files_exempt_meta} "
@@ -227,18 +326,56 @@ def scan_messages(path: Path, messages: list) -> FileScan:
     return out
 
 
+def load_session_doc(path: Path):
+    """One parsed session document from a plain or gzipped transcript.
+
+    Raises whatever the read fails with — the caller turns that into an
+    `unreadable` `FileScan` — and is a function rather than inline because the
+    exception set is the interesting part and it is not the plain file's set.
+    `zlib.error` is the damaged-archive shape that is NOT an `OSError`: a valid
+    10-byte gzip header over bytes that are not a deflate stream raises it out of
+    the decompressor. `EOFError` is the truncated one. Both are named here for
+    the reason `app/uptake.py::read_session` names them: a walk reads every
+    transcript in one loop, and an escaping exception ends the walk, so one
+    rotten member would cost the whole corpus — which is the opposite of what a
+    denominator is for.
+    """
+    if path.name.endswith(SESSION_ARCHIVE_SUFFIX):
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            return json.load(fh)
+    return json.loads(path.read_text(errors="replace"))
+
+
 def scan_file(path: Path) -> FileScan:
-    """Scan one session file. A file that does not parse is reported, not skipped."""
+    """Scan one session file. A file that does not parse is reported, not skipped.
+
+    Reads either stored form (#3590): the retention sweep gzips a session and
+    unlinks the original, so a reader of plain files alone watches the
+    denominator shrink with nothing deleted. The same document yields the same
+    blocks, flags and exemptions whichever suffix it carries, and an archive that
+    cannot be decoded lands in `unreadable` exactly as an unparseable plain file
+    does — the gzip route inherits the never-dropped rule rather than getting a
+    second one.
+    """
     out = FileScan(path=path)
+    archived = path.name.endswith(SESSION_ARCHIVE_SUFFIX)
+    out.archived = archived
     try:
-        data = json.loads(path.read_text(errors="replace"))
-    except (OSError, ValueError):
+        data = load_session_doc(path)
+    except (OSError, ValueError, EOFError, zlib.error):
         out.unreadable = True
         return out
     messages = data.get("messages") if isinstance(data, dict) else None
     if not isinstance(messages, list):
         return out
-    return scan_messages(path, messages)
+    # `scan_messages` builds its own `FileScan`, so the form has to travel with the
+    # result and not with `out`: setting `archived` on the discarded one is how
+    # `files_archived` ends up blind to exactly the archives that DECODED — the
+    # three rotten ones still reported, the readable one not, which is the witness
+    # reporting worst on the files it was invented to count.
+    scanned = scan_messages(path, messages)
+    scanned.archived = archived
+    return scanned
 
 
 def accumulate_file(scan: StoreScan, one: FileScan) -> None:
@@ -257,6 +394,14 @@ def accumulate_file(scan: StoreScan, one: FileScan) -> None:
     read must not pay for it twice to change its mind about what to count.
     """
     scan.files += 1
+    if one.archived:
+        # BEFORE the unreadable return, on purpose: the witness is about which
+        # files came off the gzip route, and a rotten archive is one of them. A
+        # tally placed after it would report `files_archived: 0` on a store whose
+        # archives all failed to decode — the exact run the witness exists to
+        # make loud, and the same "unreadable is reported, never dropped" rule
+        # the `unreadable` counter above is.
+        scan.files_archived += 1
     if one.unreadable:
         scan.unreadable += 1
         return
@@ -290,7 +435,7 @@ def iter_file_scans(paths: Iterable[Path]) -> Iterator[FileScan]:
 def scan_files(root: Path, paths: Iterable[Path]) -> StoreScan:
     """Scan exactly the session files `paths` names, attributing them to `root`.
 
-    The slice seam. `scan_store` is this call over every ``*.json`` under a
+    The slice seam. `scan_store` is this call over `session_paths` of a
     directory, and a caller that wants a *slice* of a store — one calendar day of
     it, which is what `scripts/thinking_fidelity_scan.py --per-day` groups by
     (#1770) — has to get its numbers through here or through `accumulate_file`,
@@ -306,14 +451,17 @@ def scan_files(root: Path, paths: Iterable[Path]) -> StoreScan:
 
 
 def scan_store(root: Path) -> StoreScan:
-    """Scan every ``*.json`` session file under `root`.
+    """Scan every session file under `root`, live or archived.
 
     Read-only, and callers get it from `app.data_root.production_data_root()`
     rather than `app.paths.SESSIONS_DIR`: under the test suite `SESSIONS_DIR` is
     a scratch root with no sessions in it, which would make every live-store
     guard below report "0 of 0" and call it clean.
 
-    Exactly `scan_files` over the sorted glob, so a slice taken through
-    `scan_files` and a whole store taken through here are the same arithmetic.
+    Exactly `scan_files` over `session_paths`, so a slice taken through
+    `scan_files` and a whole store taken through here are the same arithmetic,
+    and so the walk every shape of run takes is `session_paths` and nothing else
+    — the two globs this replaced (`*.json` here, `*.json` again in the per-day
+    walk) could and did drift apart from each other and from the store (#3590).
     """
-    return scan_files(root, sorted(root.glob("*.json")))
+    return scan_files(root, session_paths(root))
