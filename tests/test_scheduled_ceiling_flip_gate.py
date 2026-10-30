@@ -135,7 +135,47 @@ def _run_at(path: Path, *, argv: list[str] | None = None,
 
 
 def _verdict_lines(out: str) -> list[str]:
-    return [ln for ln in out.splitlines() if ln.startswith(gate.VERDICT_PREFIX)]
+    """The PRE-FLIP verdict only, with its label stripped so the existing assertions read
+    as they always did.
+
+    The report now carries two verdicts (#3415): `verdict: PRE-FLIP <V>` is the four bars
+    over shadow rows and `verdict: POST-FLIP HEALTH <V>` is what enforcement has actually
+    refused. Both begin with `VERDICT_PREFIX`, so a helper that returned every one of them
+    would turn every single-verdict assertion below into a two-element list and fail tests
+    whose report is correct. The enforce half is pinned by name in `_post_flip_verdict`
+    below and end-to-end in
+    `tests/test_scheduled_ceiling_service_unit.py::test_the_bars_and_the_post_flip_verdict_read_their_own_sides_of_the_ledger`.
+    """
+    return [ln.replace(gate.PRE_FLIP_PREFIX, "", 1)
+            for ln in out.splitlines()
+            if ln.startswith(gate.VERDICT_PREFIX + gate.PRE_FLIP_PREFIX)]
+
+
+def _post_flip_verdict(out: str) -> str:
+    """The one POST-FLIP HEALTH line. Asserts it exists, so a report that lost the
+    enforce verdict cannot pass these tests by going back to a single verdict."""
+    lines = [ln for ln in out.splitlines()
+             if ln.startswith(gate.VERDICT_PREFIX + gate.POST_FLIP_PREFIX)]
+    assert len(lines) == 1, f"want exactly one post-flip verdict, got {lines}:\n{out}"
+    return lines[0]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_grant_store(tmp_path, monkeypatch):
+    """No reading in this file may consult the fleet's live grant store.
+
+    The post-flip half of the report asks `policy.default_store().live()` which refused name
+    was licensed, and `default_store()` resolves through `LLOYD_GRANT_DB`. Left unset, a
+    test here would grade enforcement against however many grants happen to exist on the box
+    that morning, and a grant minted for a nightly vault-landing job could flip a unit
+    test's verdict. One empty DB per test, at a fresh path each time so the store's own
+    per-path cache cannot bleed a row from one test into the next: nothing is licensed, which
+    is the state these fixtures describe.
+
+    It costs coverage rather than buys it — the licensed branch is exercised where a store is
+    built WITH rows, in tests/test_scheduled_ceiling_service_unit.py.
+    """
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(tmp_path / "grants-isolated.db"))
 
 
 def _table(out: str) -> list[str]:
@@ -170,14 +210,25 @@ def test_a_ledger_that_meets_every_bar_prints_one_pass_and_exits_zero(tmp_path):
     """The control arm: real bytes, seven dates, a name under the bar, verdict PASS.
 
     Every reading is asserted on its printed line — the shadow-date count, the name with
-    its count and its rate, the enforce-refusal count — and the report is asserted to
-    carry EXACTLY one `verdict:` line. A second one would let a later grep take the wrong
-    one, and a report with a table but no verdict would leave the owed-check job
-    re-deriving the decision this script exists to make.
+    its count and its rate, the enforce-refusal count — and the report is asserted to carry
+    EXACTLY ONE line of each verdict kind: `verdict: PRE-FLIP PASS` (the four bars) and
+    `verdict: POST-FLIP HEALTH PASS` (what enforcement has refused), one apiece, in that
+    order. A report with a table but no verdict would leave the owed-check job re-deriving
+    the decision this script exists to make; a report with two PRE-FLIP lines would let a
+    grep take the wrong one.
     """
     rc, out = _run(tmp_path, _passing_rows())        # 42 rows, 7 dates, 2 strips
     assert rc == 0, out
     assert _verdict_lines(out) == ["verdict: PASS"], out
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH PASS", out
+    # Order compared between the TWO VERDICT LINES, not between the first mention of each
+    # word: the word POST-FLIP also appears in the parenthetical that explains why a
+    # zero-enforce reading's post-flip pass is vacuous, which sits above both verdicts.
+    lines = out.splitlines()
+    assert lines.index("verdict: PRE-FLIP PASS") < lines.index(
+        "verdict: POST-FLIP HEALTH PASS"), \
+        "the pre-flip verdict must come first: it is the one the exit code and the " \
+        "stored reading's `verdict` field have always meant"
     assert "shadow dates: 7" in out
     assert "rows: 42" in out
     name_line = [ln for ln in out.splitlines() if "automod_vault_land" in ln]
@@ -186,6 +237,32 @@ def test_a_ledger_that_meets_every_bar_prints_one_pass_and_exits_zero(tmp_path):
     assert "OVER" not in out, "4.8% is under the bar"
     assert "rows refusing a name: 0" in out
     assert "  ! " not in out, f"a PASS must carry no failure lines:\n{out}"
+
+
+def test_an_enforce_refusal_left_the_pre_flip_bars_and_moves_the_post_flip_one(tmp_path):
+    """The fifth bar this file used to hold is now the post-flip verdict's first rule.
+
+    Before #3415 an enforce row that refused anything failed the PRE-FLIP verdict outright
+    ("1 enforce-mode row(s) refused a tool name"). That was right while the flip was not
+    taken — a stray enforce row meant something had gone wrong — and became wrong the day it
+    was: the first refusal of an unlicensed name would have reported FAIL on the ceiling
+    doing its job. So the same row now leaves `verdict: PRE-FLIP` alone and drives
+    `verdict: POST-FLIP HEALTH`, through the refusal rate (1 of 1 enforce rows = 100.0% >
+    5.0%), which is the bar #2670 set applied to the enforce side.
+
+    The two lines are asserted together on purpose: deleting either rule could satisfy one
+    assertion and break the other.
+    """
+    rows = _passing_rows() + [
+        _row(DATES[-1], mode="enforce", task_id=99, names=["djev_status"])]
+    m = gate.measure(rows, licensed_pairs=set())
+    out = gate.format_report(m)
+    assert _verdict_lines(out) == ["verdict: PASS"], \
+        f"the enforce refusal leaked back into the pre-flip bars:\n{out}"
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH FAIL", out
+    assert "enforce refusal rate 100.0% (1 of 1 enforce rows) > 5.0%" in out, out
+    assert "no live grant for that scope" in out, \
+        f"the refusal must be attributed to its scope and licensing:\n{out}"
 
 
 def test_the_rate_is_over_every_row_not_over_the_rows_that_stripped(tmp_path):
@@ -225,8 +302,6 @@ def test_each_bar_fails_alone_and_the_reason_names_the_number(tmp_path):
     exactly_under = _passing_rows(strip_dates=(DATES[1], DATES[2]))   # 2/42 = 4.8%
     over_bar = _passing_rows() + [
         _row("2026-10-18", task_id=97, names=["djev_status"])] * 3     # 3/45 = 6.7%
-    enforce_refused = _passing_rows() + [
-        _row(DATES[-1], mode="enforce", task_id=99, names=["djev_status"])]
     unmeasured = _passing_rows() + [
         _row(DATES[-1], task_id=98, compile_error="RuntimeError: boom")]
 
@@ -236,7 +311,6 @@ def test_each_bar_fails_alone_and_the_reason_names_the_number(tmp_path):
     for rows, expected in (
         (six_dates, "shadow dates 6 < 7 required"),
         (over_bar, "djev_status reached in 3 of 45 rows = 6.7% > 5.0%"),
-        (enforce_refused, "1 enforce-mode row(s) refused a tool name"),
         (unmeasured, "1 row(s) carry no would_strip measurement "
                      "(1 naming a compile_error)"),
     ):
@@ -316,7 +390,10 @@ def test_an_empty_or_absent_ledger_is_a_fail_and_never_a_clean_read(tmp_path):
     missing = tmp_path / "absent" / "scheduled-ceiling.jsonl"
     assert not missing.exists()
     rc2, out2 = _run_at(missing)
-    assert rc2 == 1 and "verdict: PASS" not in out2, out2
+    # Named, not just "no PASS": the report now also carries `verdict: POST-FLIP HEALTH
+    # PASS`, which is a VACUOUS pass on a ledger with no enforce rows and must not be
+    # mistaken for the bars passing.
+    assert rc2 == 1 and "verdict: PRE-FLIP PASS" not in out2, out2
 
     clean = [_row(d, task_id=i, names=[]) for i, d in enumerate(DATES)]
     rc3, out3 = _run(tmp_path / "clean", clean)
@@ -578,7 +655,11 @@ def test_the_command_line_form_honours_the_flags_the_report_names(tmp_path):
         f"--ledger was ignored, so the child read the 42-row store and passed:\n"
         f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
     assert f"ledger: {copy}" in proc.stdout, proc.stdout[-2000:]
-    assert "verdict: FAIL" in proc.stdout, proc.stdout[-2000:]
+    # Named with its label: since #3415 the report carries two verdicts, and the bare
+    # `verdict: FAIL` this asserted is no longer a substring of either line. The copy is a
+    # shadow-only ledger, so the half this node is about — the one the four bars decide — is
+    # the PRE-FLIP line.
+    assert "verdict: PRE-FLIP FAIL" in proc.stdout, proc.stdout[-2000:]
     # 2 strips from the passing fixture + 3 over-bar rows = 5 of the 45 the COPY holds.
     # A row-level predictor doubles as proof of which file was read: the env store would
     # have printed 2 of 42.
@@ -650,7 +731,8 @@ def test_the_report_prints_how_many_rows_would_refuse_under_enforce(tmp_path):
     assert "rows_with_strip" not in out2                   # the field name is not the line
     assert out2.splitlines().index([ln for ln in out2.splitlines()
                                     if "8 of 42" in ln][0]) < \
-        out2.splitlines().index("verdict: PASS"), "the predictor sits beside the table"
+        out2.splitlines().index("verdict: PRE-FLIP PASS"), \
+        "the predictor sits above the table but below the verdict it predicts"
 
 
 def test_the_predictor_counts_rows_not_names_and_survives_an_empty_ledger(tmp_path):
