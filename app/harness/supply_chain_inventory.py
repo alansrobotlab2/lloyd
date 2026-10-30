@@ -412,6 +412,30 @@ def scan_site(site: str, lockfile: Path, spec, *, repo_root: Path,
             "reason": ""}
 
 
+def database_freshness_for(spec: Any) -> str | None:
+    """Which offline OSV database `spec`'s numbers came from, or None for none.
+
+    #3544. A dated `inventory-<date>.json` used to carry `generated_at` and nothing
+    else about its inputs, so two dated reports were not comparable without going and
+    stat-ing `osv-db/*/all.zip`: on 2026-10-29 the headline went 150 -> 358 with the
+    observed set byte-identical (906 components, zero added, zero removed) because the
+    mirror refreshed on 2026-10-26 — pre-existing installations the frozen database
+    was blind to, not new exposure. The stamp is what lets a reader tell a refresh
+    from a regression from inside the artifact.
+
+    `None` where no database was read: no scanner resolved, or the mirrored root holds
+    no `all.zip`. `OsvScannerSpec.freshness` is the single source — the newest
+    `all.zip` mtime under the mirrored db root — and is not recomputed here, so the
+    report cannot claim an age the scanner's own prerequisite did not use. A spec
+    without the method (`PipAuditSpec` reads a loopback OSV API, not this zip) reports
+    no database rather than borrowing one it did not consult.
+    """
+    if spec is None:
+        return None
+    stamp = getattr(spec, "freshness", None)
+    return stamp() if callable(stamp) else None
+
+
 def observed_scan(repo_root: Path | str = LIVE_CHECKOUT,
                   out_dir: Path | str | None = None,
                   *, scanner_name: str | None = None,
@@ -542,6 +566,11 @@ def observed_scan(repo_root: Path | str = LIVE_CHECKOUT,
         "scanner": {"name": scanner_name or "osv-scanner",
                     "resolved_path": str(spec.binary) if spec else None,
                     "resolved": spec is not None, "reason": why},
+        # Present always, null when no database was read (#3544). Scalar and beside
+        # `scanner` on purpose: `scanner` says what ran, this says what it read, and a
+        # reader comparing two dated reports compares these two lines before they
+        # compare any advisory number.
+        "database_freshness": database_freshness_for(spec),
         "component_count": len(row_list),
         "distinct_component_versions": len({(r.name, r.version) for r in row_list}),
         "components": [r.as_row() for r in

@@ -746,6 +746,141 @@ def test_no_scanner_yields_a_coverage_gap_and_no_number(box):
     assert report["non_advisory_components"]
 
 
+# ── #3544: the report names the database that produced it ───────────────────
+
+#: The key the stamp travels under, named for `eval/supply-chain/baseline.yaml`'s
+#: declared `database.freshness` so one vocabulary answers "which mirror?" in both
+#: artifacts. A scalar, deliberately: clause 2's test is "that key is present and
+#: null", which a nested mapping can only answer by moving the question a level down.
+DB_KEY = "database_freshness"
+
+#: Whole seconds, and a date AFTER `NOW` (2026-10-11, this file's `generated_at`), so
+#: the assertion cannot be satisfied by the run's own clock. 2026-10-26T05:28:33Z is
+#: the live mirror's stamp on 2026-10-29 — the refresh that moved the headline 150 →
+#: 358 — planted here rather than read, because a test that reads the box reports a
+#: date and pins nothing.
+PLANTED_DB_MTIME = dt.datetime(2026, 10, 26, 5, 28, 33, tzinfo=dt.timezone.utc)
+
+
+def plant_osv_mirror(db_root: Path, *, mtime: dt.datetime = PLANTED_DB_MTIME) -> Path:
+    """A mirrored `*/all.zip` with a stated mtime — all `freshness()` reads.
+
+    The bytes are an empty zip's end-of-central-directory record.
+    `OsvScannerSpec.freshness` (`app/harness/supply_chain.py`) is a
+    `rglob("all.zip")` newest-mtime walk that opens nothing, so a stub pretending to
+    be an advisory database would be theatre: the mtime is the fact it carries.
+    """
+    zipped = db_root / "osv-scalibr" / "PyPI" / "all.zip"
+    zipped.parent.mkdir(parents=True, exist_ok=True)
+    zipped.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    os.utime(zipped, (mtime.timestamp(), mtime.timestamp()))
+    return zipped
+
+
+def test_a_completed_observed_report_names_the_database_that_produced_it(box, tmp_path):
+    """#3544 clause 1: a run says which mirror its numbers came from.
+
+    Before this, nothing inside `inventory-<date>.json` named the database: the
+    `scanner` sub-dict is name / resolved_path / resolved / reason, and
+    `OsvScannerSpec.freshness()` — which already computes exactly the stamp — was not
+    called from here. So on 2026-10-29 the headline went 150 → 358 with the box
+    byte-identical (906 components, 0 added, 0 removed) and only the 2026-10-26
+    mirror refresh to explain it, and telling that apart from a security regression
+    meant going and stat-ing the zip by hand. The stamp in the artifact is what stops
+    a database refresh reading as new exposure.
+
+    The zip is planted and `sc.OSV_DB_ENV` points at it, so the shipped
+    `freshness()` runs against a date this node set.
+    """
+    with_path(box, tmp_path)
+    fake_scanner(tmp_path / "osv-scanner")
+    plant_osv_mirror(tmp_path / "osvdb")
+    os.environ[sc.OSV_DB_ENV] = str(tmp_path / "osvdb")
+    report = run_observed(box, tmp_path)
+
+    assert DB_KEY in report, (
+        f"a completed report without {DB_KEY} is the artifact this item was filed about")
+    assert report[DB_KEY] == "2026-10-26T05:28:33Z", (
+        f"{DB_KEY} is not the planted mirror's own mtime: {report[DB_KEY]!r}")
+    assert report[DB_KEY] != report["generated_at"], (
+        "the stamp has become the run's clock, which says only when the scan ran — "
+        "the reader cannot tell a refreshed mirror from a frozen one from it")
+
+    # Can-fail, twice over. The first half proves the value is READ rather than a
+    # constant that happens to sit beside the key; the second that a frozen mirror is
+    # reported too — a frozen stamp is not the same defect as no stamp, and the 150 in
+    # the committed artifact was a floor precisely because the mirror was frozen.
+    re_planted = plant_osv_mirror(tmp_path / "osvdb",
+                                  mtime=dt.datetime(2026, 9, 30, 14, 27, 46,
+                                                    tzinfo=dt.timezone.utc))
+    again = run_observed(box, tmp_path)
+    assert again[DB_KEY] == "2026-09-30T14:27:46Z", (
+        f"{DB_KEY} did not follow the mirror's mtime: {again[DB_KEY]!r} — a reader of "
+        "the first report could not tell a refreshed database from a frozen one")
+    assert re_planted.stat().st_mtime < PLANTED_DB_MTIME.timestamp(), (
+        "the re-planted zip is not older, so the assertion above compared two equal "
+        "numbers and proved nothing")
+
+    assert report["scanner"]["resolved"] is True
+    assert report["advisories_in_observed_set_that_declared_lockfiles_missed"] == 6, (
+        "the paired counts must still be there: the item adds provenance, it does not "
+        "trade the headline number away")
+
+
+def test_no_mirror_and_no_scanner_leave_the_database_key_present_and_null(box, tmp_path):
+    """#3544 clause 2: no database is claimed where none was read.
+
+    Two ways to have read no mirror, and the key has to be honest in both.
+
+    (a) No scanner. Nothing scanned, so no advisory count and no stamp — the same
+    null-for-unknown rule #688 pins one node above, extended to provenance: a report
+    that printed a stamp here would name a database that produced nothing.
+    (b) Scanner present, mirror absent. The scan ran, so its counts are real and stay
+    (suppressing them would launder a reading into a coverage gap — the inverse of
+    this module's own "a coverage gap is not a zero"). What must NOT survive is the
+    attribution, and that is what separates (b) from a run against a frozen mirror:
+    (b) says "no database", a frozen one says which date it was frozen at.
+    """
+    os.environ[sc.OSV_DB_ENV] = str(tmp_path / "empty-db")
+    (tmp_path / "empty-db").mkdir()
+
+    os.environ.pop(sc.OSV_API_URL_ENV, None)
+    # Held before arm (a) overwrites it: the planted scanner's shebang is
+    # `#!/usr/bin/env python3`, so arm (b) needs the invoking shell's PATH back for
+    # `env` to find python3 at all. Reusing the clobbered one makes the fake binary
+    # un-runnable, and arm (b) would arrive as a coverage gap rather than an
+    # unattributed scan — which is #2872's lesson wearing this node's own clothes.
+    live_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = "/nonexistent-dir-for-this-test"
+    blind = inv.observed_scan(box["repo"], out_dir=tmp_path / "observed-a",
+                             scanner_name="osv-scanner", account_home=box["home"],
+                             roots=roots(box), now=NOW)
+    assert DB_KEY in blind and blind[DB_KEY] is None, (
+        f"{DB_KEY} missing or non-null ({blind.get(DB_KEY)!r}) for a run with no "
+        "scanner and no mirrored database")
+    assert blind["scanner"]["resolved"] is False
+    assert blind["advisories_in_observed_set_that_declared_lockfiles_missed"] is None
+    assert blind["advisories_in_observed_set_total"] is None
+    assert all(s["missed_advisories"] is None for s in blind["sites"]), (
+        "counts arrived on a run that scanned nothing, so the null stamp is now "
+        "attached to numbers nothing read")
+
+    fake_scanner(tmp_path / "osv-scanner")
+    os.environ["PATH"] = f"{tmp_path}:{os.environ['PATH']}"
+    os.environ["PATH"] = f"{tmp_path}:{live_path}"
+    unattributed = run_observed(box, tmp_path)
+    assert DB_KEY in unattributed and unattributed[DB_KEY] is None, (
+        f"a scan with no mirrored database claimed a stamp anyway: "
+        f"{unattributed.get(DB_KEY)!r}")
+    assert unattributed["scanner"]["resolved"] is True, (
+        "this arm is the scanner present and the mirror absent; without a resolved "
+        "scanner it is a second copy of the arm above")
+    assert (unattributed["advisories_in_observed_set_that_declared_lockfiles_missed"]
+            == 6), (
+        "the counts a real scan produced were suppressed to hide the missing stamp: "
+        "null the stamp, not the reading")
+
+
 def test_the_observed_scan_creates_the_directory_the_job_card_cites(box, tmp_path,
                                                                    monkeypatch):
     """#2831: the directory `architecture/autonomy-jobs.md`'s #99 row cites is the one the
