@@ -4066,3 +4066,184 @@ def test_the_retired_counts_are_dated_records_in_the_source_and_the_jobs_page():
         "the directory was never opened" in jobs_para, (
         "the jobs page's #522 paragraph was emptied rather than de-dated: the "
         "finding it records is worth keeping, only the number beside it was not")
+
+
+# ── #3527: a published failure RATE needs the span of the failures it counts ─
+#
+# #3287's `_BENCH_COUNTED` guard above asks one question of a published figure: was
+# it dated? It was written for a COUNT (`failed 40`), where the honest repair is one
+# clause with one number in it. A rate is a different object. `fail_rate` is a
+# quotient over a rolling window, so its numerator is a POPULATION — a set of rows
+# with a first day and a last day — and a date on the sentence quoting the quotient
+# dates the READING, not what was counted. That distinction is what #3287 cannot
+# see, and it cost a round its judgement: this page's §5 youtube-digest bullet read
+# "Measured 2026-10-28 over `/api/workers/health?days=7`, unclamped … 100 runs, 51
+# failed — **a 51 % fail rate**". Every word of it was true. The failures it counted
+# ran 2026-10-18 through 2026-10-23, and `2a5778b6` had reverted the two-stage pilot
+# that produced them five days before the read — so the sentence published a closed
+# burst as the source's standing rate. The reader it misled was the reviewer of
+# `group:workers-jobs:Intake`, which WROTE those lines and filed #3523 at `high`
+# against a source whose burst had already closed, because `git grep` over the
+# payload found no field that could have said otherwise. #3527 adds
+# `last_failure` and `consecutive_failures` to that payload; this is the prose side
+# of the same fix: a sentence on this page publishing a worker-source failure RATE
+# measured over a stated window must also end-date the failure population it counts.
+# "Measured 2026-10-28" does not qualify — that is the day of the reading.
+#
+# Scope is narrow on purpose, in the way #3134 taught. The trigger is a sentence
+# naming a `/api/workers/health` window or a `days=N` / N-day window AND carrying a
+# rate token beside a failure word. An unscoped "any percentage on this page" rule
+# would fire on the judge-flip's `agreement 50% of 2 judged` 500 lines up and on the
+# eval bar's 90 %, and a guard that cries wolf is a guard someone deletes.
+
+_FAIL_RATE_NEAR_A_FAILURE = re.compile(
+    r"\b(?:fail|failure|failures|failing|failed)\b[^.]{0,80}?"
+    r"(?:\d+(?:\.\d+)?\s?%|\bfail_rate\b)"
+    r"|(?:\d+(?:\.\d+)?\s?%|\bfail_rate\b)[^.]{0,80}?"
+    r"\b(?:fail|failure|failures|failing)\b", re.IGNORECASE)
+_MEASURED_WINDOW = re.compile(
+    r"/api/workers/health|\bdays=\d+\b|\b\d+-day\s+(?:rolling\s+)?window\b"
+    r"|\b\d+\s*days?\s+to\s+20\d{2}-\d{2}-\d{2}\b", re.IGNORECASE)
+_POPULATION_END = re.compile(
+    r"(?:through|up\s+to|until|ended|ends|stopped|to)\s*20\d{2}-\d{2}-\d{2}"
+    r"|\b(?:last_failure|consecutive_failures)\b", re.IGNORECASE)
+_JOBS_PAGE = ARCH / "workers-jobs.md"
+_RATE_LOOKAHEAD_CHARS = 400
+
+
+def _sentences(page: str) -> list[str]:
+    """Split on a sentence-ending period followed by whitespace.
+
+    This page writes the measurement across three sentences of one bullet — the
+    window claim, then "100 runs, 51 failed — a 51 % fail rate", then the count of
+    the rows — so a rule keyed to "the sentence holding the %" finds nothing to
+    check on the live page and reports that as a pass.
+    """
+    return re.split(r"(?<=[.!?])\s+", page)
+
+
+def _rate_guard_hits(page: str) -> list[tuple[int, str]]:
+    """(index, sentence) for every sentence this guard takes as publishing a rate.
+
+    A candidate must (a) name a `/api/workers/health` window or a `days=N` / N-day
+    window, and (b) have a rate token within eighty characters of a failure word, in
+    that sentence or the one before — before, because that is how the page writes it.
+    The failure word is what keeps the guard off the page's other rates (the judge
+    flip's agreement percentage, the eval bar), none of which has ever misled anyone.
+    """
+    parts = _sentences(page)
+    return [(i, s) for i, s in enumerate(parts)
+            if _MEASURED_WINDOW.search(s)
+            and _FAIL_RATE_NEAR_A_FAILURE.search(" ".join(parts[max(0, i - 1):i + 2]))]
+
+
+def _rate_guard_candidates(page: str) -> list[str]:
+    """The triggered sentences, unnamed — the guard's own witness of what it covers.
+
+    Exposed so a test can assert this list is non-empty and of a known size. A rule
+    that silently matches nothing is the failure this file has been caught by twice
+    (#3134's retired-name list, #3106's regex written against an absent `::`), and it
+    is invisible from a green check mark: `all(x for x in [])` is True forever.
+    """
+    return [s for _i, s in _rate_guard_hits(page)]
+
+
+def _rates_missing_a_population_end(page: str) -> list[str]:
+    """Triggered sentences that publish their rate with no end-date on the population.
+
+    Judged on a 3-sentence / 400-character lookahead rather than on the candidate
+    alone: the span is normally given just after the number (the live bullet names it
+    two sentences on), so reading only the candidate would pass the exact misreading
+    this exists to catch while failing honest prose that states the number last. The
+    400-character bound is the other half — long enough for those two sentences,
+    short enough that an end-date three bullets away cannot stand in for the one this
+    sentence's own population needs.
+    """
+    parts = _sentences(page)
+    return [s for i, s in _rate_guard_hits(page)
+            if not _POPULATION_END.search(
+                " ".join(parts[i:i + 3])[:_RATE_LOOKAHEAD_CHARS])]
+
+
+def test_every_workers_jobs_failure_rate_names_the_span_it_counts():
+    """No worker-source failure rate on this page is published as a standing property.
+
+    This node fails if a later round re-quotes a `/api/workers/health` rate without
+    saying when the failures behind it stopped — the sentence that opened #3523 — and
+    it also fails if the trigger stops matching anything, because at that point the
+    rule has quietly stopped existing while still passing.
+    """
+    page = _JOBS_PAGE.read_text(encoding="utf-8")
+    triggered = _rate_guard_candidates(page)
+    assert len(triggered) == 3, (
+        f"the rate guard's trigger matched {len(triggered)} sentences, not the "
+        f"three this node was written against: {[t[:110] for t in triggered]} — a "
+        "count rather than a name-list so that honest prose ADDED to the page moves "
+        "it in the open instead of letting the guard go quiet (#3134). Re-check each "
+        "one and adjust the number here, in the assertion, not by widening the "
+        "trigger.")
+    offenders = _rates_missing_a_population_end(page)
+    assert not offenders, (
+        "a worker-source failure rate is published here with no end-date on the "
+        "population it counts. A rate over a rolling window is not a property of the "
+        "source: #3523 was filed at `high` off 'a 51 % fail rate' whose failures all "
+        "sat behind a revert five days old, and the only way to see that was to open "
+        "workers.db by hand. Name the span the failures ran (`…through 2026-10-23`), "
+        "or read the payload's own `last_failure`. Offending sentences: "
+        f"{[o[:150] for o in offenders]}")
+
+
+_RETIRED_51_PERCENT_BULLET = (
+    "Measured 2026-10-28 over `/api/workers/health?days=7`, unclamped "
+    "(`window_clamped_to_hours: null`, `oldest_input: null`, so a real 7 days): "
+    "100 runs, 51 failed — **a 51 % fail rate**, 5.96 h GPU. Counting the 50 "
+    "`failed` rows in `runs`: 47 read `turn ended (stop, N iterations) without a "
+    "note at <path>` with N between 3 and 13, 2 read `turn produced nothing` (one "
+    "of them the backend answering `All connection attempts failed`), and **0** are "
+    "the `--fetch rc=2` argparse burst, last seen 2026-09-09, that this line called "
+    "the whole of its 92 failures. The retry design below is working exactly as "
+    "described and still loses about half the digests. Filed as #3523.")
+
+
+def test_the_retired_51_percent_bullet_is_gone_and_still_trips_the_guard():
+    """The corrected reading of the burst, plus the negative control for the guard.
+
+    Both halves of the misreading are asserted gone by string. `**a 51 % fail
+    rate**` published a quotient as a property. `still loses about half the digests`
+    was false about the outcome as well as the rate, and the corrected bullet now
+    carries the accounting instead: the retries landed, `uTrY8slys0w` reached its
+    note on the 8th attempt (vault commit `470a9aae`), the two rows that reached
+    `quarantined` were re-offered on fresh rows and digested, and `YvQ4BVTWfHI` — 12
+    failed / 0 success on 2026-10-21 and 2026-10-22, no note under
+    `~/obsidian/knowledge/youtube/` — is the one confirmed permanent loss of the
+    burst that ran 2026-10-18 through 2026-10-23.
+
+    Then the retired text is spliced back IN MEMORY and handed to the live guard.
+    Without that second half this node is an absence check that outlives its own
+    rule: the day the trigger regex rots, the string assertions still pass and the
+    guard is dead, which is #3287's lesson about a proving command that returns zero.
+    """
+    page = _JOBS_PAGE.read_text(encoding="utf-8")
+    assert "**a 51 % fail rate**" not in page, (
+        "the bolded standing rate is back: that phrasing is what read a closed burst "
+        "as a live defect and cost #3523 its `high` priority")
+    assert "still loses about half the digests" not in page, (
+        "the page again claims the retry design loses half the digests. It does not: "
+        "the failures were re-offered and landed, and one video is the loss")
+    assert "YvQ4BVTWfHI" in page, (
+        "the corrected bullet has to name the ONE real loss by id, or the next reader "
+        "re-derives 'about half' off a rolling fail_rate and reopens #3523")
+
+    anchor = "- Its failure population is a closed burst"
+    assert anchor in page, (
+        "the youtube-digest bullet's anchor moved, so the splice below splices "
+        "nothing and this node's negative control is ungraded")
+    start = page.index(anchor)
+    end = page.index("\n- ", start + len(anchor))
+    spliced = (page[:start] + "- " + _RETIRED_51_PERCENT_BULLET + "\n"
+               + page[end + 1:])
+    offenders = _rates_missing_a_population_end(spliced)
+    assert offenders, (
+        "the retired 51 % bullet was spliced back onto the page and the guard above "
+        "found nothing to complain about, so the rule is a no-op and everything in "
+        "this node is decoration")

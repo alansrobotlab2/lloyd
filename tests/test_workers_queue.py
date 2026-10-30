@@ -2249,3 +2249,190 @@ def test_the_claim_decode_touches_only_rows_sql_selected_as_bundled(q, monkeypat
     assert re.search(r"SUM\(\s*claims_json", src), (
         "the bundle split is no longer a SQL count, so the bounded decode has no "
         "selection to be bounded by and the window is walked in Python again")
+
+
+# ── #3527: the rollup dates a source's failure population ────────────────────
+
+def _seed_stamped_run(q, source: str, status: str, stamp: str,
+                      task_id: str | None = None) -> None:
+    """One run row at `2026-10-20T<stamp>+00:00`, so "newest" is decided by the test.
+
+    The two seeders above stamp `now`, which is right for a count and useless for
+    an age: every node below is about WHICH row is newest, and rows written in
+    one millisecond make that a coin toss. `task_id` is a parameter because the
+    parity node hands the same rows to `app.autonomy.compute_health`, which
+    aggregates by task rather than by source.
+    """
+    q.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                 status=status, started_at=f"2026-10-20T{stamp}+00:00",
+                 completed_at=f"2026-10-20T{stamp}+00:00",
+                 duration_seconds=60.0, task_id=task_id)
+
+
+def test_the_rollup_dates_the_newest_failure_beside_the_newest_run(q):
+    """#3527 clause 1: `last_failure` is the newest failed/interrupted stamp in the window.
+
+    This is the shape that filed #3523 at `high`: failures, then successes. The
+    block read `{total: 4, failed: 2, fail_rate: 0.5, last_completed: 16:00}` and
+    every one of those was true of a source that had not failed in four hours,
+    because `last_completed` is a MAX over ALL rows and so names a SUCCESS. One
+    more MAX, taken over the rows `failed` already counts, is what tells the two
+    sources of a 0.5 apart.
+    """
+    for stamp, status in (("01:00:00", "failed"), ("12:00:00", "failed"),
+                          ("14:00:00", "success"), ("16:00:00", "success")):
+        _seed_stamped_run(q, "youtube-digest", status, stamp)
+
+    r = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["youtube-digest"]
+
+    assert r["last_failure"] == "2026-10-20T12:00:00+00:00", (
+        f"the newest failure must be the 12:00 row, not the 01:00 one: {r}")
+    assert r["last_completed"] == "2026-10-20T16:00:00+00:00", r
+    assert r["last_failure"] < r["last_completed"], (
+        "a failure older than the newest success is the clean-tail reading this "
+        "key exists to make visible, and a string compare is exactly how a "
+        "reader ages the two against each other")
+    assert (r["total"], r["ok"], r["failed"], r["fail_rate"]) == (4, 2, 2, 0.5), r
+
+
+def test_an_interrupted_row_is_a_failure_to_date_and_a_clean_window_has_none(q):
+    """`last_failure`'s status pair is `failed`'s exactly; None is the empty case.
+
+    `interrupted` is billed as a failure by the `failed` count (#1137 — a run
+    whose process died did not complete the work), so it has to be able to BE the
+    newest failure as well. A source whose last runs were killed by a landing
+    restart would otherwise publish `failed: 2` beside a `last_failure` naming an
+    older, unrelated row, which is a fresh field stating something false.
+
+    The other half is the empty case, and it is the one a filler would get wrong:
+    a source that ran and never failed reports None, not `""`. An empty string is
+    lexically smaller than every real stamp, so `""` in a payload consumer that
+    sorts or compares would read as "failed at the dawn of time" — the exact
+    misreading this key is here to prevent.
+    """
+    _seed_stamped_run(q, "autocode", "failed", "01:00:00")
+    _seed_stamped_run(q, "autocode", "interrupted", "09:00:00")
+    _seed_stamped_run(q, "autocode", "success", "10:00:00")
+    _seed_stamped_run(q, "bench-mine", "success", "08:00:00")
+    _seed_stamped_run(q, "bench-mine", "success", "09:00:00")
+
+    r = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+
+    assert r["autocode"]["last_failure"] == "2026-10-20T09:00:00+00:00", r["autocode"]
+    assert r["autocode"]["failed"] == 2, r["autocode"]
+    assert r["bench-mine"]["last_failure"] is None, (
+        f"a window holding no failure reported {r['bench-mine']['last_failure']!r}")
+    assert "last_failure" in r["bench-mine"], (
+        "the key has to be present-and-None: a missing key is a gap, and a gap is "
+        "what a source with NO run in the window looks like (it gets no dict)")
+
+
+def test_the_tail_streak_closes_at_the_first_success_counted_newest_first(q):
+    """#3527 clause 1's second key: `consecutive_failures` is a tail, not a count.
+
+    Three sources, three shapes, all with a failure in the window so none of
+    them is the trivial zero:
+      * `arch-review` failed, was skipped, failed again, then succeeded — newest
+        first that is success, skipped, failed, failed, so the streak is 0. The
+        `skipped` row is invisible to the streak: `compute_health` drops those
+        rows with a `continue` before the streak is touched, so a skip neither
+        extends it nor breaks it, and a rollup that let one break the streak
+        would report a different number for the same runs than the fleet route.
+      * `youtube-digest` is the #3523 shape: fail_rate 0.5, streak 0.
+      * `autotriage` has no success in the window at all, so its streak is its
+        whole failure count. A window of nothing but failures has a streak of
+        its whole window of failures — that is the answer, not a fallback.
+    """
+    for stamp, status in (("01:00:00", "failed"), ("02:00:00", "skipped"),
+                          ("03:00:00", "failed"), ("04:00:00", "success")):
+        _seed_stamped_run(q, "arch-review", status, stamp)
+    for stamp, status in (("01:00:00", "failed"), ("02:00:00", "failed"),
+                          ("03:00:00", "success"), ("04:00:00", "success")):
+        _seed_stamped_run(q, "youtube-digest", status, stamp)
+    for stamp, status in (("01:00:00", "failed"), ("02:00:00", "failed"),
+                          ("03:00:00", "interrupted")):
+        _seed_stamped_run(q, "autotriage", status, stamp)
+
+    r = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+
+    assert r["arch-review"]["consecutive_failures"] == 0, r["arch-review"]
+    assert r["arch-review"]["failed"] == 2, (
+        "the streak is 0 while the window still holds 2 failures — that pair is "
+        "the whole point, and it is the pair `fail_rate` alone cannot carry")
+    assert r["youtube-digest"]["consecutive_failures"] == 0, r["youtube-digest"]
+    assert r["youtube-digest"]["fail_rate"] == 0.5, r["youtube-digest"]
+    assert r["autotriage"]["consecutive_failures"] == 3, r["autotriage"]
+    assert r["autotriage"]["failed"] == 3, r["autotriage"]
+
+
+def test_the_rollup_streak_is_the_same_measurement_the_autonomy_route_publishes(q):
+    """Two engines, one number: the SQL streak must equal `compute_health`'s walk.
+
+    `/api/autonomy/health` publishes `consecutive_failures` per task by walking
+    rows newest-first and closing an open streak at the first success
+    (`app/autonomy.py:5709-5721`). The workers rollup now publishes the same key
+    from one grouped SQL statement. Two implementations of one key name are the
+    divergence this node exists to refuse, so the same rows go into BOTH and the
+    three numbers have to agree with each other and with the literal expectation
+    in `shapes` — the literal is what stops the two from agreeing on a wrong one.
+
+    The three shapes: a failing tail sitting past a `skipped` row (1 — the skip is
+    invisible to the streak, so it neither extends the 1 nor breaks it, which is
+    the `compute_health` behaviour at `app/autonomy.py:5703` and the parity rule
+    this node is really about); a clean tail over two older failures (0, the #3523
+    shape); and a window with no success in it at all (3 — its whole failure
+    count, which is the answer rather than a fallback).
+    """
+    from app.autonomy import compute_health
+
+    shapes = {
+        "arch-review": ("1", 1, [("failed", "03:00:00"), ("skipped", "02:00:00"),
+                                 ("success", "01:00:00")]),
+        "youtube-digest": ("2", 0, [("success", "04:00:00"),
+                                    ("success", "03:00:00"),
+                                    ("failed", "02:00:00"),
+                                    ("failed", "01:00:00")]),
+        "autotriage": ("3", 3, [("interrupted", "03:00:00"),
+                                ("failed", "02:00:00"), ("failed", "01:00:00")]),
+    }
+    for src, (tid, _want, runs) in shapes.items():
+        for status, stamp in runs:
+            _seed_stamped_run(q, src, status, stamp, task_id=tid)
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    rows = [row for src in shapes
+            for row in q.list_runs_joined(src, "2000-01-01T00:00:00+00:00")]
+    by_task = {t["task_id"]: t for t in compute_health(rows, [], 7)["tasks"]}
+
+    for src, (tid, want, _runs) in shapes.items():
+        assert rollup[src]["consecutive_failures"] == want, (src, rollup[src])
+        assert by_task[tid]["consecutive_failures"] == want, (
+            f"{src}: the rollup says {rollup[src]['consecutive_failures']} and "
+            f"`/api/autonomy/health`'s engine says {by_task[tid]['consecutive_failures']} "
+            f"for the same rows — one key, two meanings")
+
+
+def test_the_failure_age_keys_move_no_existing_rollup_number(q):
+    """Additive, like `silent` before it: the five counters keep their exact values.
+
+    Every consumer that already divides `failed` by `total` — Mission Control's
+    Background panel, `skills/queue-health-check`, the watchdog — has to divide
+    the same two numbers after this change as before it, so the expected values
+    here are literals computed by hand from the seed, not derived from the
+    payload. The seed carries a `skipped` run and a silent success because those
+    are the two rows a careless `MAX(CASE …)` over a reinterpreted `status` could
+    move.
+    """
+    _seed_stamped_run(q, "youtube-digest", "failed", "01:00:00")
+    _seed_stamped_run(q, "youtube-digest", "success", "02:00:00")
+    _seed_stamped_run(q, "youtube-digest", "skipped", "03:00:00")
+    _seed_stamped_run(q, "youtube-digest", "success", "04:00:00")
+
+    r = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["youtube-digest"]
+
+    assert (r["total"], r["ok"], r["failed"], r["skipped"]) == (4, 2, 1, 1), r
+    assert r["fail_rate"] == 0.25, r
+    assert r["gpu_hours"] == round(4 * 60.0 / 3600.0, 2), r
+    assert r["last_completed"] == "2026-10-20T04:00:00+00:00", r
+    assert r["last_failure"] == "2026-10-20T01:00:00+00:00", r
+    assert r["consecutive_failures"] == 0, r

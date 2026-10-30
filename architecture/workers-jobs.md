@@ -972,20 +972,38 @@ judgement half.
 - The **eval rule is Alan's** and lives in the prompt: an open-source
   framework, tool or model may be proposed for direct adoption; a commercial
   product never is, only the aspects worth recreating locally are named.
-- Its failure population is not the one this line used to report. Measured
-  2026-10-28 over `/api/workers/health?days=7`, unclamped
-  (`window_clamped_to_hours: null`, `oldest_input: null`, so a real 7 days):
-  100 runs, 51 failed — **a 51 % fail rate**, 5.96 h GPU. Counting the 50
-  `failed` rows in `runs`: 47 read `turn ended (stop, N iterations) without a
-  note at <path>` with N between 3 and 13, 2 read `turn produced nothing` (one
-  of them the backend answering `All connection attempts failed`), and **0** are
-  the `--fetch rc=2` argparse burst, last seen 2026-09-09, that this line called
-  the whole of its 92 failures. That burst is gone; what replaced it is the
-  disk-decides check firing correctly on a turn that finishes talking without
-  ever calling a writer — 18 distinct items over the week, several re-offered
-  until the cap took them, and two rows sitting in `quarantined`. The retry
-  design below is working exactly as described and still loses about half the
-  digests. Filed as #3523.
+- Its failure population is a closed burst, and the sentence this line carried
+  before #3527 published it as a standing rate. Read 2026-10-28 over
+  `/api/workers/health?days=7`, unclamped (`window_clamped_to_hours: null`,
+  `oldest_input: null`, so a real 7 days): 100 runs, 51 failed (50 `failed` + 1
+  `interrupted`), 5.96 h GPU — 51 % of that window, but a rate whose failure
+  population ran 2026-10-18 to 2026-10-23 and had been empty for five days
+  by the read. The payload could not say that, so the number was read as a live
+  defect and #3523 was filed at `high`; the per-source block now carries
+  `last_failure` and `consecutive_failures` beside `last_completed` (#3527),
+  which is what dates a failure population without opening `workers.db`. Where
+  the 51 sit: 9 on 2026-10-21, 25 on 2026-10-22, 14 on 2026-10-23, 3 on
+  2026-10-26; 47 carry `meta_json.handoff_refusal` with a summary of
+  `turn ended (stop, N iterations) without a note at <path>`, N between 3 and
+  13, which is the two-stage `stage-a-reader`/`stage-b-writer` pilot's own
+  signature — 79 such rows lifetime, 2026-10-18 to 2026-10-23, and none
+  since `2a5778b6` reverted that path (committed 2026-10-23T18:13Z). The other
+  four are not the pilot: one `ConnectTimeout` on 2026-10-23, one `interrupted`
+  at pool start, and two `turn produced nothing` for `kRJjSOYqW0I` on
+  2026-10-26 whose detail is the backend answering `All connection attempts
+  failed`. What this line claimed before that is still refuted: **0** are the
+  `--fetch rc=2` argparse burst, last seen 2026-09-09, that it called the whole
+  of its 92 failures. And the retry design below is working as described — the
+  burst cost GPU and latency, not the digests. `uTrY8slys0w` needed 8 attempts
+  (7 failed, then a success) and its note is on disk from the successful
+  attempt (vault commit `470a9aae`, 2026-10-23T16:27:46Z); `laQ8wMysnkk` and
+  `STRtnhlf9CI` each have exactly one success run and a note; the two rows that
+  reached `quarantined` (`queue.id` 10883, 15975, both at `attempts=3`) were
+  re-offered on fresh rows and digested, `16031` succeeding at `attempts=1`.
+  Exactly one confirmed permanent loss over the burst that ran 2026-10-18
+  through 2026-10-23: `YvQ4BVTWfHI`, 12 failed / 0 success on 2026-10-21 and
+  2026-10-22, with no note naming that id anywhere under
+  `~/obsidian/knowledge/youtube/`.
 
 **A cited paper is a second kind of row** (`kind="paper"`, keyed
 `youtube-digest:paper:<arxiv_id>`), added 2026-10-09. Until then the script

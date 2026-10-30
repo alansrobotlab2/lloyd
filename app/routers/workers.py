@@ -182,9 +182,18 @@ async def workers_health(days: int = 7, runs: int = 10):
     The pair is a FLEET bound, not a per-source measurement: `oldest_input` is
     `MIN(completed_at)` over every source, so a young source whose own history
     starts days after it can be under-covered while the top-level field still
-    reads null. Per-source fields are an open scope call (#2127 owed item 2);
-    read a source's own `health.last_completed` beside its `total` before
-    treating one row's rate as a `days`-long one.
+    reads null. The per-source fields that half owed (#2127 owed item 2) are now
+    partly here: `health.last_completed` says how old the source's newest run is,
+    and #3527 added `health.last_failure` and `health.consecutive_failures` beside
+    it, which is the pair that says where inside the window a rate's failures sit.
+    Read `fail_rate` with those three and not alone — a 0.51 whose newest failure
+    is four days behind a fresh success and whose tail streak is 0 is a burst that
+    already ended, and #3523 was opened at `high` on exactly that payload, because
+    until #3527 the only way to date a source's failure population was a
+    hand-written aggregate over `workers.db`, which no reader in front of a
+    dashboard is going to run. How old the source's own history
+    is inside the window is still not published per source, so a young source can
+    still be under-covered while the top-level pair reads null.
     """
     import asyncio as _asyncio
     from datetime import timedelta, timezone

@@ -1459,6 +1459,21 @@ class WorkQueue:
         same two functions, and this route publishes no claim rate of its own —
         the rate with the unevaluable rule on it stays the autonomy route's.
 
+        The two failure-age keys (#3527) answer where inside the window a rate's
+        failures sit, which no count here could say. `last_failure` is the
+        `completed_at` of this source's newest `failed`/`interrupted` run in the
+        window and None when the window holds none; `consecutive_failures` is how
+        many of its newest runs are failures before the first success, the same
+        key `/api/autonomy/health` publishes per task and computed the same way —
+        newest-first, an open streak closed by the first success, `skipped` rows
+        outside it. They exist because `fail_rate` is a ratio over a window and a
+        window has no shape: `total: 100, failed: 51, last_completed: <a success
+        from an hour ago>` is exactly as consistent with "reverted four days ago"
+        as with "failing right now", and #3523 was filed at `high` off that
+        ambiguity over a burst the reader could only date by hand-running a
+        `SELECT max(completed_at)` this payload should have carried. Neither key
+        moves `total`, `ok`, `failed`, `skipped` or `fail_rate`.
+
         Aggregated in SQL rather than by walking rows in Python, because the
         Background tab polls this beside everything else and `runs` is the
         table that grows fastest. The one exception is deliberate and bounded:
@@ -1605,7 +1620,25 @@ class WorkQueue:
                       SUM(claims_json IS NOT NULL
                           AND claims_json <> '')                  AS bundle_rows,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
-                      MAX(completed_at)                           AS last_completed
+                      MAX(completed_at)                           AS last_completed,
+                      -- #3527: the newest FAILURE in the window, beside the newest
+                      -- run. `last_completed` alone is how a 51 % rate got filed as
+                      -- a live defect (#3523): a source whose burst ended four days
+                      -- ago and has succeeded since reports the same
+                      -- `last_completed` shape as one failing right now, because
+                      -- that field is a MAX over ALL rows and says nothing about
+                      -- which rows were the failures. This is the same MAX taken
+                      -- over the rows `failed` above counts -- the identical
+                      -- status pair, so `last_failure` can only be non-null when
+                      -- `failed` is non-zero -- and the same lexical-comparison
+                      -- property `last_completed` already relies on, so the two
+                      -- ages are comparable with each other. NULL, not 0 and not
+                      -- the empty string, when the window holds no failed or
+                      -- interrupted row: "no failures to date" is a fact about the
+                      -- window, and an empty-string stand-in would sort before
+                      -- every real stamp and read as an ancient failure.
+                      MAX(CASE WHEN status IN ('failed','interrupted')
+                               THEN completed_at END)             AS last_failure
                FROM runs WHERE completed_at >= ? GROUP BY source"""
         with self._connect() as conn:
             rows = [dict(r) for r in conn.execute(q, (since_iso,)).fetchall()]
@@ -1621,6 +1654,52 @@ class WorkQueue:
                 " WHERE completed_at >= ?"
                 "   AND claims_json IS NOT NULL AND claims_json <> ''",
                 (since_iso,)).fetchall()]
+            # #3527: the clean tail — how many of this source's newest runs are
+            # still failures. `app/autonomy.py:5709-5721` computes exactly this as
+            # `consecutive_failures` for the autonomy fleet by walking its rows
+            # newest-first (`list_runs_joined`'s `ORDER BY completed_at DESC`) and
+            # closing an open streak at the first success; this rollup is
+            # aggregated in SQL instead, and the equivalent of that walk is "the
+            # failed/interrupted rows that are NEWER than the source's newest
+            # success in the window". Same key, same meaning, one less thing for a
+            # reader to have to know differs between the two routes.
+            #
+            # It is one grouped statement, not a Python walk, for the reason this
+            # method's docstring gives: `runs` is the fastest-growing table and
+            # the Background tab polls this every few seconds. The window
+            # predicate is the same `since_iso`, bound twice, because a second
+            # window edge would be a second denominator — and the subquery shares
+            # it so a success that fell out of the window cannot hold the streak
+            # open: a source whose last success was 8 days ago and which has
+            # failed four times since then has a streak of 4 here, which is the
+            # reading `days=7` is asking for.
+            #
+            # `COALESCE(..., '')` is the no-success-in-window branch, and `''` is
+            # the deliberate floor: every ISO stamp is lexically greater than it,
+            # so when the window holds no success at all every failed row counts
+            # and the streak is the whole failure count. That is not a filler, it
+            # is the answer — a week of nothing but failures has a streak of its
+            # whole week of failures.
+            #
+            # Two honest limits, both inherited from the newest-first walk this
+            # mirrors rather than invented here: a row stamped at the exact
+            # instant of the newest success is not counted (the walk would order
+            # those two rows arbitrarily), and a `skipped` row neither extends nor
+            # breaks the streak, because `compute_health` drops those rows with a
+            # `continue` before the streak is touched at all.
+            streak_rows = [dict(r) for r in conn.execute(
+                "SELECT r.source                                              AS source,"
+                "       SUM(r.completed_at > COALESCE(("
+                "             SELECT MAX(s.completed_at) FROM runs s"
+                "              WHERE s.source = r.source"
+                "                AND s.status = 'success'"
+                "                AND s.completed_at >= ?), ''))                AS consec"
+                " FROM runs r"
+                " WHERE r.completed_at >= ?"
+                "   AND r.status IN ('failed','interrupted')"
+                " GROUP BY r.source",
+                (since_iso, since_iso)).fetchall()]
+            streak = {str(r["source"]): int(r["consec"] or 0) for r in streak_rows}
 
         def _tally_zero() -> dict:
             """The four claim counts at zero. Written once, used by both passes."""
@@ -1738,6 +1817,26 @@ class WorkQueue:
                 "fail_rate": (failed / total) if total else None,
                 "gpu_hours": round(float(r["seconds"] or 0) / 3600.0, 2),
                 "last_completed": r["last_completed"],
+                # #3527: the two fields that make a rate readable as a rate rather
+                # than as a property. `fail_rate` is a ratio over a window and says
+                # nothing about WHERE inside that window its numerator sits, which
+                # is how a burst that a landed commit had already reverted read as
+                # a standing 51 % defect: `last_completed` was a fresh SUCCESS and
+                # `total` was 100, so the block had no field that was not
+                # consistent with "still failing". Read these three together and
+                # the shape is unmistakable — `last_failure` older than
+                # `last_completed` with `consecutive_failures: 0` means the tail is
+                # clean and the rate is history; `consecutive_failures` equal to
+                # `failed` means the window has been nothing but failures.
+                #
+                # Both are additive on purpose, like `silent` and the evidence six
+                # above: neither moves `total`, `ok`, `failed`, `skipped` or
+                # `fail_rate`, so every reader that already divides `failed` by
+                # `total` divides the same two numbers. A source with no run in the
+                # window still gets no dict at all from this method, so `None` here
+                # means only "ran, and nothing failed".
+                "last_failure": r["last_failure"],
+                "consecutive_failures": streak.get(src, 0),
             }
         return out
 

@@ -2921,3 +2921,159 @@ def test_the_pile_figure_health_publishes_is_the_one_the_bound_reads(
     assert "staged_pending" not in rows["probe"], (
         "a source with no pile bound was given a pile field, which reads as an "
         "empty pile behind a gate that does not exist")
+
+
+# ── #3527: the health block dates its own failure population ─────────────────
+
+def _age_client(monkeypatch, tmp_path, in_window: dict[str, list[tuple[str, int]]]):
+    """A `/api/workers/health` over a REAL `WorkQueue` seeded with mixed statuses.
+
+    `_matrix_client` above seeds `status="success"` only, which is the right shape
+    for a matrix count and the wrong one for a failure age. `in_window` maps a
+    source to `(status, hours_ago)` pairs; stamps are an exact hour apart from one
+    reading of the clock so a test can name the newest failure by its stamp
+    instead of by "the latest write", and every stamp is inside the 7-day window
+    the assertions ask for. The queue is real, the rollup is real SQL and the body
+    is the real serialised response — the two keys this is about exist only in
+    that path, and a hand-written rollup dict would pass while shipping nothing.
+    """
+    from workers.queue import WorkQueue, new_run_id
+
+    queue = WorkQueue(tmp_path / "workers.db")
+    now = datetime.now(timezone.utc)
+    for name, runs in in_window.items():
+        for status, hours_ago in runs:
+            stamp = (now - timedelta(hours=hours_ago)).isoformat()
+            queue.record_run(run_id=new_run_id(name), queue_id=None, source=name,
+                             status=status, started_at=stamp, completed_at=stamp,
+                             duration_seconds=60.0)
+
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    monkeypatch.setattr(
+        router, "CONFIG",
+        {"workers": {"sources": {n: {"enabled": True, "interval_seconds": 14400}
+                                 for n in sorted(in_window)}}},
+        raising=False)
+    return client
+
+
+def test_the_health_block_names_its_newest_failure_beside_its_newest_run(monkeypatch, tmp_path):
+    """#3527 clause 2: `last_failure` travels inside every source's health block.
+
+    The seed is #3523's reading: two failures, then successes. Before this key the
+    block carried `total`, `failed`, `fail_rate` and `last_completed`, and
+    `last_completed` named a SUCCESS — so the payload was equally consistent with
+    "failing right now" and with "reverted two days ago", and the reviewer of
+    `group:workers-jobs:Intake` who read 51 % off it filed a fixed source at `high`
+    because dating the failures meant hand-running `SELECT max(completed_at)` over
+    `workers.db`. The stamp here is asserted exactly, not just present: a key that
+    carried the OLDEST failure would satisfy a presence assert and still be useless.
+    """
+    client = _age_client(monkeypatch, tmp_path, {
+        "youtube-digest": [("failed", 48), ("failed", 46),
+                           ("success", 5), ("success", 3)],
+    })
+
+    health = _health_of(client, "youtube-digest")
+    now = datetime.now(timezone.utc)
+    want_failure = (now - timedelta(hours=46)).isoformat()
+
+    assert health["last_failure"][:13] == want_failure[:13], (
+        f"newest failure should be the 46-hour-old row, got "
+        f"{health['last_failure']!r} vs {want_failure!r}")
+    assert health["last_completed"] > health["last_failure"], (
+        "the whole discriminating shape: a failure older than the newest success "
+        f"is a closed burst — {health['last_failure']!r} !< {health['last_completed']!r}")
+    assert (health["total"], health["failed"], health["fail_rate"]) == (4, 2, 0.5), health
+
+
+def test_the_health_block_refuses_the_real_instrument_that_filed_3523(monkeypatch, tmp_path):
+    """#3527 clause 2/3 over #3523's exact numbers: 100 runs, 51 failed, 3 clean later runs.
+
+    49 successes and 51 failures, with the source's newest THREE runs successes —
+    the literal payload that opened #3523 at `high`. `fail_rate` still reads 0.51
+    after this change, because the rate is not what was wrong; what was wrong is
+    that nothing in the block said the failures stop before the newest success.
+    `last_failure` and `consecutive_failures: 0` together say it without a reader
+    opening `workers.db`, which is the difference between a live defect and a
+    five-day-old one.
+    """
+    client = _age_client(monkeypatch, tmp_path, {
+        "youtube-digest": ([("failed", h) for h in range(120, 69, -1)]
+                           + [("success", h) for h in range(68, 19, -1)]),
+    })
+
+    health = _health_of(client, "youtube-digest")
+
+    assert health["total"] == 100 and health["failed"] == 51, health
+    assert health["fail_rate"] == 0.51, (
+        "the rate had better NOT change — the fix is a reader being able to date "
+        f"it, not a different number: {health['fail_rate']}")
+    assert health["consecutive_failures"] == 0, (
+        "three clean runs at the tail must read 0 even at a 0.51 rate, or the key "
+        "is just `failed` spelled differently")
+    assert health["last_failure"] < health["last_completed"], health
+
+
+def test_the_health_block_publishes_the_tail_streak_per_source(monkeypatch, tmp_path):
+    """#3527 clause 3: `consecutive_failures` is a per-source tail, newest-first.
+
+    Two sources with the SAME rate and opposite tails — that equality is the point,
+    since `fail_rate` alone cannot tell them apart and the two want opposite
+    actions. `youtube-digest` fails twice then succeeds twice (tail 0);
+    `arch-review` succeeds twice then fails twice (tail 2 — its newest run IS a
+    failure, the one shape where `last_failure` and `last_completed` are the same
+    row). A source that never failed in the window must carry the key too, at 0,
+    for the same reason `silent` does: a missing key renders as nothing where a 0
+    reads as an answer.
+    """
+    client = _age_client(monkeypatch, tmp_path, {
+        "youtube-digest": [("failed", 48), ("failed", 46),
+                           ("success", 5), ("success", 3)],
+        "arch-review": [("success", 48), ("success", 24), ("failed", 5),
+                        ("failed", 3)],
+        "bench-mine": [("success", 48), ("success", 3)],
+    })
+
+    aging = _health_of(client, "youtube-digest")
+    failing = _health_of(client, "arch-review")
+    clean = _health_of(client, "bench-mine")
+
+    assert aging["fail_rate"] == failing["fail_rate"] == 0.5, (aging, failing)
+    assert aging["consecutive_failures"] == 0, aging
+    assert failing["consecutive_failures"] == 2, failing
+    assert clean["consecutive_failures"] == 0, clean
+    assert clean["last_failure"] is None, (
+        "a source with no failure in the window reports None, not a missing key "
+        "and not an empty string, which would sort before every real stamp")
+    for h in (aging, failing, clean):
+        assert {"last_failure", "consecutive_failures"} <= set(h), sorted(h)
+
+
+def test_the_two_failure_age_keys_are_additive_for_every_existing_reader(monkeypatch, tmp_path):
+    """The existing pins hold: the block is still a superset, not a replacement.
+
+    `tests/test_workers_router.py` and `tests/test_api_contracts.py` both assert a
+    subset of these keys (`<= set(health)` / `>= {...}`), and
+    `test_the_fleet_health_endpoint_publishes_the_evidence_beside_the_totals` above
+    reads `fail_rate` off the same block. Two keys are appended here, so every one
+    of those still holds — this node is the pin that they hold, and the pin that
+    `fail_rate` is unchanged for a source that has no run in the window at all
+    (`None`, not 0.0, which is the `#3208` rule this block already lives by).
+    """
+    client = _age_client(monkeypatch, tmp_path, {
+        "youtube-digest": [("failed", 10)],
+        "deep-research": [("success", 10)],
+    })
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    blocks = {s["name"]: s["health"] for s in body["sources"] if s["health"]}
+
+    assert set(blocks) == {"youtube-digest", "deep-research"}, sorted(blocks)
+    for name, h in blocks.items():
+        assert {"total", "ok", "failed", "skipped", "fail_rate", "last_completed"} <= set(h)
+        assert {"last_failure", "consecutive_failures"} <= set(h), (name, sorted(h))
+    assert blocks["youtube-digest"]["fail_rate"] == 1.0, blocks["youtube-digest"]
+    assert blocks["deep-research"]["fail_rate"] == 0.0, blocks["deep-research"]
+    assert blocks["deep-research"]["last_failure"] is None
