@@ -11,15 +11,22 @@ and zero tool-name refusals.** Nothing computed that bar before now — the ledg
 no reader, so "are we ready" was answerable only by hand-counting JSONL. This is that
 reader.
 
-Five readings, then ONE verdict:
+Five readings, then TWO verdicts (#3415): `verdict: PRE-FLIP <V>`, the four bars over the
+SHADOW rows, and `verdict: POST-FLIP HEALTH <V>`, what enforcement has actually refused
+over the ENFORCE rows. They are separate lines because they answer separate questions, and
+after the flip they routinely disagree: the pre-flip bars can hold while enforcement
+refuses a licensed name, and the first unlicensed refusal of a night must not read as the
+pre-flip evidence having collapsed.
 
   * **shadow dates** — the count of distinct dates the shadow rows cover. Turns are
     the wrong denominator for this bar: #2670 asked for seven *days*, because the
     fleet's exposure is a function of which jobs ran, and one busy night of twenty
     turns is not seven days of whatever the schedule decides to run.
-  * **would-strip names** — each name any row recorded, with its count and its rate
-    over the TOTAL row count (every mode). Sorted by count, each marked `OVER` past
-    the bar.
+  * **would-strip names** — each name a SHADOW row recorded, with its count and its rate
+    over the SHADOW row count. Not over every row: an enforce row's `would_strip` is a
+    refusal that already happened and belongs to the post-flip verdict, and a denominator
+    that kept growing with enforce rows would make the pre-flip bars go greener the longer
+    enforcement ran. Sorted by count, each marked `OVER` past the bar.
   * **unmeasured rows** — rows carrying no `would_strip` list. These are NOT zeros:
     `TurnSurface.witness` deliberately omits the key when the ceiling could not
     compile (`compile_error`), because a metric that reads its own missing input as
@@ -41,15 +48,21 @@ Five readings, then ONE verdict:
     with cannot be derived from the table: it needs a count no line above prints. The live
     ledger measured 33 of 354 = 9.3% on 2026-10-23 with no single name above 6.5%.
 
-The verdict is PASS only when the first four hold: at least `MIN_SHADOW_DATES` shadow
-dates, every would-strip name at or under `NAME_RATE_CEILING` of the total rows, no
-unmeasured row, and no enforce-mode row refusing a name. Everything else is FAIL with
-one reason line per failed bar, naming the number and the bar it missed.
+PRE-FLIP is PASS only when the first four hold: at least `MIN_SHADOW_DATES` shadow dates,
+every shadow-side would-strip name at or under `NAME_RATE_CEILING` of the shadow rows, and
+no unmeasured row. There is deliberately NO pre-flip bar on an enforce row refusing a name:
+after the flip that is the ceiling doing what it was flipped to do, and a bar there would
+report FAIL at the moment the flip starts working. Enforcement is judged by `post_flip_health`
+below, which reads FAIL on two facts and only two — a refusal of a name its own grant_scope
+holds a live grant for, or the enforce refusal rate over `NAME_RATE_CEILING` — and reports an
+unlicensed refusal as the ceiling working. Each FAIL prints one reason line per failed bar,
+naming the number and the bar it missed. The exit code is 0 only when BOTH verdicts pass.
 
 What this deliberately does NOT decide:
 
-  * **Whether a name should be licensed instead of tolerated.** `automod_vault_land`
-    is the only name over the bar today, and the way it comes under is a `grants:`
+  * **Whether a name should be licensed instead of tolerated.** `automod_vault_land` is
+    the name that has sat nearest the bar (23 of 624 shadow rows = 3.7% on 2026-10-30), and
+    the way it comes under is a `grants:`
     frontmatter block on the eight nightly jobs that already hold the tool
     (`app/harness/policy.py::validate_task_grants` reads a frontmatter block as
     *the human wrote it, so the human is the issuer* — which makes each block a
@@ -106,7 +119,128 @@ NAME_RATE_CEILING = 0.05
 #: The line the verdict lives on. The whole report carries exactly one of these, so
 #: a later reader (or the owed-check job) can take the decision off one grep instead
 #: of re-deriving it from the table.
+#: The line the PRE-FLIP verdict lives on. Prefix-match readers use
+#: `tests/...::verdict_lines`, which matches `PRE-FLIP ` and `POST-FLIP ` first, so the two
+#: cannot be confused by a `startswith("verdict: ")` on a report that has two of them.
 VERDICT_PREFIX = "verdict: "
+PRE_FLIP_PREFIX = "PRE-FLIP "
+POST_FLIP_PREFIX = "POST-FLIP HEALTH "
+
+
+def live_licensed_pairs(*, store=None) -> tuple[set[tuple[str, str]], str]:
+    """Which (grant_scope, tool name) pairs a live grant licenses, and how it was found.
+
+    Returns `(pairs, note)`; `note` is "" on a clean read and names the failure otherwise,
+    with `pairs` empty in that case. Empty is NOT a clean read — it is the reason
+    `post_flip_health` distinguishes "no grant" from "no grant store", because the two have
+    opposite meanings about a refusal: one is the ceiling working, the other is this reader
+    unable to tell.
+
+    Matching is `(row["scope"], normalize_tool_name(row["tool_pattern"]))` against the
+    ledger row's `grant_scope` and name — the same exact-equality-after-normalisation the
+    store's own lookups do (`app/harness/policy.py:755`, `:1119`), so this reader cannot
+    license a name the live path would have refused. `tool_pattern` is a literal tool name
+    in every row today, and nothing here widens it to a glob: a grant minted as `B*` would
+    match nothing here and nothing there, which is the drift this avoids.
+
+    `store=` is the seam the tests use; the default calls `default_store()`, which opens
+    the live grant database — read-only, `live()` is a SELECT of unexpired, unrevoked rows.
+    """
+    try:
+        if store is None:
+            from app.harness.policy import default_store
+            store = default_store()
+        rows = store.live()
+    except Exception as exc:  # noqa: BLE001 — an unreadable store must be a NOTE, not a guess
+        return set(), f"{type(exc).__name__}: {exc}"
+    try:
+        from app.harness.policy import normalize_tool_name
+        pairs = {(str(r.get("scope") or ""), normalize_tool_name(r.get("tool_pattern")))
+                 for r in rows}
+    except Exception as exc:  # noqa: BLE001
+        return set(), f"{type(exc).__name__}: {exc}"
+    return pairs, ""
+
+
+def post_flip_health(rows: list[dict], *, enforce_rows: list[dict] | None = None,
+                     enforce_refusals: list[dict] | None = None,
+                     licensed_pairs: set[tuple[str, str]] | None = None,
+                     store=None) -> dict:
+    """What enforcement has actually done, judged on the ENFORCE rows alone.
+
+    Two ways this reads FAIL, and only two:
+
+      1. a refusal of a name whose scope holds a live grant. That is the ceiling taking
+         something away that a person licensed by hand — the ban exception #2670's whole
+         design turns on — and it is the only refusal on this ledger that is a bug.
+      2. the rate of refusals over enforce rows above NAME_RATE_CEILING. That bar is
+         deliberately the same number as the pre-flip per-name bar: enforcement refusing a
+         name more than 5% of the time is the same fact the pre-flip bar was a prediction
+         of, now measured instead of forecast.
+
+    A refusal of a name the scope holds NO live grant for is the ceiling working as
+    designed, and is reported that way rather than as a failure. That distinction is the
+    reason this verdict exists at all: a naive "any enforce refusal is red" would have the
+    first unlicensed night report a failure at the exact moment the flip starts succeeding,
+    and the reader's next move would be a rollback of a change that is doing its job.
+    Clause 6 of the item asks the same of a human: no revert until someone names the
+    refused name and says whether it was licensed, which is precisely the pair this
+    function prints.
+
+    An unreadable grant store with refusals on the ledger is FAIL: `licensed_pairs` empty
+    would otherwise read every refusal as unlicensed and print a clean POST-FLIP HEALTH
+    that rests on not having been able to look. With no refusals there is nothing for the
+    store to have decided, so an unreadable store is a note and the verdict stands.
+
+    Returns {verdict, failures, licensed, detail, rate}. `detail` is the
+    name/scope/licensed triples, so a red is actionable from stdout alone.
+    """
+    if enforce_rows is None:
+        enforce_rows = [r for r in rows if r.get("mode") == MODE_ENFORCE]
+    if enforce_refusals is None:
+        enforce_refusals = [r for r in enforce_rows if r.get("would_strip")]
+    rate = (len(enforce_refusals) / len(enforce_rows)) if enforce_rows else 0.0
+
+    store_note = ""
+    if licensed_pairs is None:
+        if enforce_refusals:
+            licensed_pairs, store_note = live_licensed_pairs(store=store)
+        else:
+            licensed_pairs, store_note = set(), ""
+
+    failures: list[str] = []
+    licensed: list[str] = []
+    detail: list[dict] = []
+    for r in enforce_refusals:
+        scope = str(r.get("grant_scope") or "")
+        for name in sorted(set(r.get("would_strip") or ())):
+            is_licensed = (scope, str(name)) in licensed_pairs
+            detail.append({"name": str(name), "scope": scope, "licensed": is_licensed})
+            if is_licensed:
+                licensed.append(f"{name} ({scope})")
+
+    licensed = sorted(set(licensed))
+    if licensed:
+        failures.append(
+            f"{len(licensed)} name(s) refused under enforce while their scope holds a "
+            f"live grant: {', '.join(licensed)}")
+    if rate > NAME_RATE_CEILING:
+        failures.append(
+            f"enforce refusal rate {rate * 100:.1f}% ({len(enforce_refusals)} of "
+            f"{len(enforce_rows)} enforce rows) > "
+            f"{NAME_RATE_CEILING * 100:.1f}%")
+    if store_note:
+        failures.append(
+            f"the grant store could not be read ({store_note}) while "
+            f"{len(enforce_refusals)} enforce row(s) refused a name, so no refusal could "
+            "be judged licensed or unlicensed — this is a red to go and look at, not a "
+            "clean read")
+
+    return {"verdict": "FAIL" if failures else "PASS",
+            "failures": failures,
+            "licensed": licensed,
+            "detail": detail,
+            "rate": rate}
 
 
 def readings_path() -> Path:
@@ -146,6 +280,10 @@ def record_reading(m: dict, *, source: str, path: Path) -> None:
         "rows_with_strip": m["rows_with_strip"],
         "enforce_rows": m["enforce_rows"],
         "enforce_refusals": m["enforce_refusals"],
+        "enforce_refusal_rate": m.get("enforce_refusal_rate"),
+        "licensed_refusals": m.get("licensed_refusals"),
+        "post_flip": m.get("post_flip"),
+        "post_flip_failures": m.get("post_flip_failures") or [],
         "failures": m["failures"],
         "verdict": m["verdict"],
     }
@@ -154,7 +292,7 @@ def record_reading(m: dict, *, source: str, path: Path) -> None:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def measure(rows: list[dict]) -> dict:
+def measure(rows: list[dict], *, licensed_pairs: set[tuple[str, str]] | None = None) -> dict:
     """The four readings and the verdict, from the rows `read_rows` returned.
 
     Pure: no file access, no env, no clock. The date is read from the row, because
@@ -166,11 +304,19 @@ def measure(rows: list[dict]) -> dict:
     modes = Counter(str(r.get("mode") or "") for r in rows)
     shadow_dates = sorted({str(r["date"]) for r in rows
                            if r.get("mode") == MODE_SHADOW and r.get("date")})
+    # The per-name bars ask "how often did a turn reach for a name outside its envelope",
+    # and only a SHADOW turn is a measurement of that: an enforce row's `would_strip` is a
+    # refusal that already happened, counted by `post_flip_health` on its own side. Once
+    # the flip is taken every new row is enforce, so a rate kept over `rows` would divide
+    # the last week's shadow reaches by a total that keeps growing with enforce rows and
+    # read as improvement — the bar would go green on a ledger where enforcement is
+    # refusing more every day. Hence the denominator is named in the line it prints.
+    shadow = [r for r in rows if r.get("mode") != MODE_ENFORCE]
     counts: Counter = Counter()
-    for row in rows:
+    for row in shadow:
         for name in row.get("would_strip") or ():
             counts[str(name)] += 1
-    names = [{"name": n, "count": c, "rate": (c / total) if total else 0.0}
+    names = [{"name": n, "count": c, "rate": (c / len(shadow)) if shadow else 0.0}
              # Count desc, then name asc: the order must not move when two names
              # tie, or a daily diff shows a re-shuffle where nothing changed.
              for n, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
@@ -182,7 +328,10 @@ def measure(rows: list[dict]) -> dict:
     # ROWS, not name-instances: a turn that reached for three excluded tools is one turn
     # that would have lost tools, and enforcement is judged on how many jobs it hurts.
     # A row with no `would_strip` key measured nothing, so it is not counted here either.
-    rows_with_strip = sum(1 for r in rows if r.get("would_strip"))
+    # Also shadow-only, because this is the PREDICTOR of what enforcement would do: an
+    # enforce row's refusal is not a prediction, it is the thing itself and is reported as
+    # a rate over enforce rows below.
+    rows_with_strip = sum(1 for r in shadow if r.get("would_strip"))
     enforce_rows = [r for r in rows if r.get("mode") == MODE_ENFORCE]
     enforce_refusals = [r for r in enforce_rows if r.get("would_strip")]
 
@@ -197,19 +346,29 @@ def measure(rows: list[dict]) -> dict:
                         f"required")
     over = [n for n in names if n["rate"] > NAME_RATE_CEILING]
     for entry in over:
-        failures.append(f"{entry['name']} reached in {entry['count']} of {total} "
+        failures.append(f"{entry['name']} reached in {entry['count']} of {len(shadow)} "
                         f"rows = {entry['rate'] * 100:.1f}% > "
                         f"{NAME_RATE_CEILING * 100:.1f}%")
     if unmeasured:
         failures.append(f"{len(unmeasured)} row(s) carry no would_strip measurement "
                         f"({compile_errors} naming a compile_error) — they sit in "
                         "the denominator above and measured nothing")
-    if enforce_refusals:
-        failures.append(f"{len(enforce_refusals)} enforce-mode row(s) refused a tool "
-                        "name")
+    # There is deliberately no bar here on `enforce_refusals`. Before the flip it could
+    # only ever fire on a stray enforce row, and after the flip it would fire on the FIRST
+    # refusal of an unlicensed name — which is the ceiling doing the job it was flipped to
+    # do. What enforcement must be judged on is whether it refused something the scope was
+    # licensed for, and how much of the enforce traffic that is: `post_flip_health`.
+    # `licensed_pairs=None` means "ask the store", which `post_flip_health` does ONCE for
+    # the whole reading — never per row, because `live()` is a query against the same
+    # workers.db the scheduler is writing and a per-row read would let one report mix two
+    # moments of a store that changes during a fleet night.
+    post = post_flip_health(rows, enforce_rows=enforce_rows,
+                            enforce_refusals=enforce_refusals,
+                            licensed_pairs=licensed_pairs)
 
     return {
         "total_rows": total,
+        "shadow_rows": len(shadow),
         "modes": dict(modes),
         "shadow_dates": shadow_dates,
         "names": names,
@@ -218,7 +377,16 @@ def measure(rows: list[dict]) -> dict:
         "rows_with_strip": rows_with_strip,
         "enforce_rows": len(enforce_rows),
         "enforce_refusals": len(enforce_refusals),
+        "enforce_refusal_rate": post["rate"],
+        "licensed_refusals": post["licensed"],
+        "post_flip": post["verdict"],
+        "post_flip_failures": post["failures"],
+        "licensed_refusal_detail": post["detail"],
         "failures": failures,
+        # `verdict` stays the PRE-FLIP verdict: the four bars' exit code is what the
+        # recorder and every existing reader of a stored reading already consumes, and
+        # clause 3 of this item is precisely that removing the flip variable restores that
+        # reading. The enforce side gets its own key and its own line.
         "verdict": "FAIL" if failures else "PASS",
     }
 
@@ -227,6 +395,11 @@ def format_report(m: dict, *, source: str = "") -> str:
     """The report the owed-check job reads. One `verdict:` line, at the end."""
     lines = ["scheduled-ceiling flip gate (#2670)",
              f"ledger: {source}" if source else "ledger: (rows handed in)"]
+    # Every rate on the shadow side is over the SHADOW rows, and the line says so. The
+    # total is still printed above it, so nothing is hidden — but a bar that asks "how
+    # often does a shadow turn reach outside its envelope" must not answer with a
+    # denominator that enforcement is busy growing.
+    strip_denom = m.get("shadow_rows", m["total_rows"])
     modes = m["modes"]
     line = (f"rows: {m['total_rows']}   shadow {modes.get(MODE_SHADOW, 0)}   "
             f"enforce {modes.get(MODE_ENFORCE, 0)}   "
@@ -237,7 +410,7 @@ def format_report(m: dict, *, source: str = "") -> str:
     dates = m["shadow_dates"]
     lines.append(f"shadow dates: {len(dates)}"
                  + (f"   ({', '.join(dates)})" if dates else ""))
-    lines.append(f"would-strip names (count / rate over all {m['total_rows']} rows; "
+    lines.append(f"would-strip names (count / rate over the {strip_denom} shadow rows; "
                  f"bar: every name <= {NAME_RATE_CEILING * 100:.1f}%):")
     if not m["names"]:
         lines.append("  (none — no row recorded a name outside the ceiling)")
@@ -245,18 +418,35 @@ def format_report(m: dict, *, source: str = "") -> str:
         flag = "  OVER" if entry["rate"] > NAME_RATE_CEILING else ""
         lines.append(f"  {entry['name']:<26} {entry['count']:>4}   "
                      f"{entry['rate'] * 100:>5.1f}%{flag}")
-    strip_rate = (m["rows_with_strip"] / m["total_rows"]) if m["total_rows"] else 0.0
+    # The rate is over the shadow rows, so the printed denominator has to BE the shadow
+    # rows: `2 of 45 = 4.8%` is arithmetic the reader cannot do (2/45 is 4.4%), and after
+    # the flip the total grows with enforce rows while this predictor's denominator does
+    # not. The total is on the line above, so naming 42 here hides nothing.
+    strip_rate = (m["rows_with_strip"] / strip_denom) if strip_denom else 0.0
     lines.append(f"rows carrying a would-strip name: {m['rows_with_strip']} of "
-                 f"{m['total_rows']} = {strip_rate * 100:.1f}%   (under enforce, each "
+                 f"{strip_denom} shadow rows = {strip_rate * 100:.1f}%   (under enforce, each "
                  "of these is a turn refused a tool name — the per-name table above "
                  "cannot show this: four names at 4.8% each are four PASS lines and "
                  "eight refused turns)")
+    rate = m.get("enforce_refusal_rate",
+                 (m["enforce_refusals"] / m["enforce_rows"]) if m["enforce_rows"] else 0.0)
     lines.append(f"enforce rows: {m['enforce_rows']}   rows refusing a name: "
-                 f"{m['enforce_refusals']}   (shadow dispatches nothing away, so "
-                 "this is 0 by construction until a flip is taken)")
+                 f"{m['enforce_refusals']}   enforce refusal rate: {rate * 100:.1f}%")
+    if not m["enforce_rows"]:
+        lines.append("  (shadow dispatches nothing away, so the enforce numbers are 0 by "
+                     "construction until a flip is taken; the POST-FLIP verdict below is "
+                     "then vacuously PASS and says nothing about enforcement)")
+    for entry in m.get("licensed_refusal_detail") or []:
+        verdict_word = ("LICENSED BY A LIVE GRANT" if entry["licensed"]
+                        else "no live grant for that scope — the ceiling working")
+        scope = entry["scope"] or "(no scope)"
+        lines.append(f"    refused {entry['name']} in {scope}: {verdict_word}")
     for reason in m["failures"]:
         lines.append(f"  ! {reason}")
-    lines.append(VERDICT_PREFIX + m["verdict"])
+    lines.append(VERDICT_PREFIX + PRE_FLIP_PREFIX + m["verdict"])
+    for reason in m.get("post_flip_failures") or []:
+        lines.append(f"  !! {reason}")
+    lines.append(VERDICT_PREFIX + POST_FLIP_PREFIX + m.get("post_flip", "PASS"))
     return "\n".join(lines)
 
 
@@ -309,7 +499,10 @@ def main(argv: list[str] | None = None) -> int:
     print(format_report(measured, source=str(source)))
     if args.record:
         _record_or_warn(measured, source=str(source), path=readings_path())
-    return 0 if measured["verdict"] == "PASS" else 1
+    # The exit code is "is anything wrong", which after the flip is EITHER verdict; which
+    # half failed is readable from the two `verdict:` lines, not from the code.
+    return 0 if (measured["verdict"] == "PASS"
+                 and measured.get("post_flip", "PASS") == "PASS") else 1
 
 
 if __name__ == "__main__":

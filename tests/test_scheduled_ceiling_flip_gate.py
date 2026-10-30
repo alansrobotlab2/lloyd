@@ -135,7 +135,78 @@ def _run_at(path: Path, *, argv: list[str] | None = None,
 
 
 def _verdict_lines(out: str) -> list[str]:
-    return [ln for ln in out.splitlines() if ln.startswith(gate.VERDICT_PREFIX)]
+    """The PRE-FLIP verdict only, with its label stripped so the existing assertions read
+    as they always did.
+
+    The report now carries two verdicts (#3415): `verdict: PRE-FLIP <V>` is the four bars
+    over shadow rows and `verdict: POST-FLIP HEALTH <V>` is what enforcement has actually
+    refused. Both begin with `VERDICT_PREFIX`, so a helper that returned every one of them
+    would turn every single-verdict assertion below into a two-element list and fail tests
+    whose report is correct. The enforce half is pinned by name in `_post_flip_verdict`
+    below, and the two lines are pinned as unable-to-collapse in
+    `tests/test_scheduled_ceiling_service_unit.py::test_a_pre_flip_failure_decides_the_exit_code_even_after_the_flip_is_taken`
+    (a ledger whose PRE-FLIP half is red on the date bar and whose POST-FLIP half is red on
+    the refusal rate, so both labels must appear in one report).
+    """
+    return [ln.replace(gate.PRE_FLIP_PREFIX, "", 1)
+            for ln in out.splitlines()
+            if ln.startswith(gate.VERDICT_PREFIX + gate.PRE_FLIP_PREFIX)]
+
+
+def _post_flip_verdict(out: str) -> str:
+    """The one POST-FLIP HEALTH line. Asserts it exists, so a report that lost the
+    enforce verdict cannot pass these tests by going back to a single verdict."""
+    lines = [ln for ln in out.splitlines()
+             if ln.startswith(gate.VERDICT_PREFIX + gate.POST_FLIP_PREFIX)]
+    assert len(lines) == 1, f"want exactly one post-flip verdict, got {lines}:\n{out}"
+    return lines[0]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_grant_store(tmp_path, monkeypatch):
+    """No reading in this file may consult the fleet's live grant store.
+
+    The post-flip half of the report asks `policy.default_store().live()` which refused name
+    was licensed, and `default_store()` resolves through `LLOYD_GRANT_DB`. Left unset, a
+    test here would grade enforcement against however many grants happen to exist on the box
+    that morning, and a grant minted for a nightly vault-landing job could flip a unit
+    test's verdict. One empty DB per test, at a fresh path each time so the store's own
+    per-path cache cannot bleed a row from one test into the next: nothing is licensed, which
+    is the state these fixtures describe.
+
+    So the default here is the UNLICENSED side of the post-flip rule, and it is deliberate:
+    the pre-flip fixtures and most enforce fixtures in this file are read as though nothing
+    were licensed, which is what they model. The LICENSED side — a refusal of a name its own
+    scope holds a live grant for — is exercised by the two nodes below that build a store
+    WITH rows through the real mint path (`_mint_grants`) and hand it in as
+    `licensed_pairs=`, and by `test_the_gate_reads_a_populated_grant_store_through_the_real_path`,
+    which points `LLOYD_GRANT_DB` at those bytes and runs the script as a subprocess.
+    """
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(tmp_path / "grants-isolated.db"))
+
+
+def _mint_grants(db_path: Path, grants: list[tuple[str, str]]) -> Path:
+    """Write real grant rows with the ONLY writer that creates authority, and return the path.
+
+    `GrantStore.mint` rather than an INSERT, so a fixture cannot drift from what the live
+    store will actually hold: `mint` normalises `tool_pattern` exactly the way
+    `live_licensed_pairs` normalises a ledger name, refuses an expiry-less grant, and refuses
+    a worker as issuer — three properties a hand-written row would silently not have, and a
+    licensed-pair built from a row `mint` would have rejected is a pair the live gate would
+    never produce.
+
+    `grants` is `[(scope, tool_pattern), ...]`. Every row is issued by a human and expires in
+    2027, so `live()` returns it: a pair set built from a REVOKED or EXPIRED row is a
+    different fact (`candidates`, not `live`), and this helper is only for the live case.
+    """
+    from app.harness.policy import GrantStore
+
+    store = GrantStore(db_path)
+    for scope, tool in grants:
+        store.mint(scope=scope, tool_pattern=tool, issued_by="alan",
+                   expires_at="2027-01-31", note="#3415 post-flip fixture",
+                   minted_by="human")
+    return db_path
 
 
 def _table(out: str) -> list[str]:
@@ -170,14 +241,25 @@ def test_a_ledger_that_meets_every_bar_prints_one_pass_and_exits_zero(tmp_path):
     """The control arm: real bytes, seven dates, a name under the bar, verdict PASS.
 
     Every reading is asserted on its printed line — the shadow-date count, the name with
-    its count and its rate, the enforce-refusal count — and the report is asserted to
-    carry EXACTLY one `verdict:` line. A second one would let a later grep take the wrong
-    one, and a report with a table but no verdict would leave the owed-check job
-    re-deriving the decision this script exists to make.
+    its count and its rate, the enforce-refusal count — and the report is asserted to carry
+    EXACTLY ONE line of each verdict kind: `verdict: PRE-FLIP PASS` (the four bars) and
+    `verdict: POST-FLIP HEALTH PASS` (what enforcement has refused), one apiece, in that
+    order. A report with a table but no verdict would leave the owed-check job re-deriving
+    the decision this script exists to make; a report with two PRE-FLIP lines would let a
+    grep take the wrong one.
     """
     rc, out = _run(tmp_path, _passing_rows())        # 42 rows, 7 dates, 2 strips
     assert rc == 0, out
     assert _verdict_lines(out) == ["verdict: PASS"], out
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH PASS", out
+    # Order compared between the TWO VERDICT LINES, not between the first mention of each
+    # word: the word POST-FLIP also appears in the parenthetical that explains why a
+    # zero-enforce reading's post-flip pass is vacuous, which sits above both verdicts.
+    lines = out.splitlines()
+    assert lines.index("verdict: PRE-FLIP PASS") < lines.index(
+        "verdict: POST-FLIP HEALTH PASS"), \
+        "the pre-flip verdict must come first: it is the one the exit code and the " \
+        "stored reading's `verdict` field have always meant"
     assert "shadow dates: 7" in out
     assert "rows: 42" in out
     name_line = [ln for ln in out.splitlines() if "automod_vault_land" in ln]
@@ -186,6 +268,46 @@ def test_a_ledger_that_meets_every_bar_prints_one_pass_and_exits_zero(tmp_path):
     assert "OVER" not in out, "4.8% is under the bar"
     assert "rows refusing a name: 0" in out
     assert "  ! " not in out, f"a PASS must carry no failure lines:\n{out}"
+
+
+def test_an_enforce_refusal_left_the_pre_flip_bars_and_moves_the_post_flip_one(tmp_path):
+    """The fifth bar this file used to hold is now the post-flip verdict's second rule.
+
+    Before #3415 an enforce row that refused anything failed the PRE-FLIP verdict outright
+    ("1 enforce-mode row(s) refused a tool name"). That was right while the flip was not
+    taken — a stray enforce row meant something had gone wrong — and became wrong the day it
+    was: the first refusal of an unlicensed name would have reported FAIL on the ceiling
+    doing its job. So the same rows now leave `verdict: PRE-FLIP` alone and drive
+    `verdict: POST-FLIP HEALTH`, through the refusal rate (3 of 8 enforce rows = 37.5% >
+    5.0%), which is the bar #2670 set applied to the enforce side.
+
+    The fixture is sized so a leak into the shadow denominator is CAUGHT rather than merely
+    absent. The 8 enforce rows carry 3 refusals of `djev_status`, a name NO shadow row
+    reaches: read correctly it never enters the shadow table, and the pre-flip bars see only
+    the fixture's own 2 `automod_vault_land` rows (2 of 42 = 4.8%, under the bar). Fold the
+    enforce rows into the pre-flip denominator and the same bytes give 3 of 50 = 6.0%, over
+    `NAME_RATE_CEILING`, so the `PRE-FLIP PASS` assertion reddens on its own — the
+    denominator assertions below only name the leak's shape. A one-refusal fixture could
+    never have done this: 1 of 43 is 2.3% under either denominator, which is why this node
+    used to leave the shadow-only rule unpinned.
+
+    The two verdict lines are asserted together on purpose: deleting either rule could
+    satisfy one assertion and break the other.
+    """
+    rows = _passing_rows() + _enforce_traffic(n=8, refusals=3, name="djev_status")
+    m = gate.measure(rows, licensed_pairs=set())
+    out = gate.format_report(m)
+    assert _verdict_lines(out) == ["verdict: PASS"], \
+        f"the enforce refusal leaked back into the pre-flip bars:\n{out}"
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH FAIL", out
+    assert "enforce refusal rate 37.5% (3 of 8 enforce rows) > 5.0%" in out, out
+    assert "no live grant for that scope" in out, \
+        f"the refusal must be attributed to its scope and licensing:\n{out}"
+    assert [n["name"] for n in m["names"]] == ["automod_vault_land"], m["names"]
+    assert "over the 42 shadow rows" in out, out
+    assert "reached in 3 of" not in out, \
+        "the enforce refusals entered the shadow-side per-name reading"
+    assert "3 of 50" not in out, "the pre-flip denominator grew with enforce rows"
 
 
 def test_the_rate_is_over_every_row_not_over_the_rows_that_stripped(tmp_path):
@@ -225,8 +347,6 @@ def test_each_bar_fails_alone_and_the_reason_names_the_number(tmp_path):
     exactly_under = _passing_rows(strip_dates=(DATES[1], DATES[2]))   # 2/42 = 4.8%
     over_bar = _passing_rows() + [
         _row("2026-10-18", task_id=97, names=["djev_status"])] * 3     # 3/45 = 6.7%
-    enforce_refused = _passing_rows() + [
-        _row(DATES[-1], mode="enforce", task_id=99, names=["djev_status"])]
     unmeasured = _passing_rows() + [
         _row(DATES[-1], task_id=98, compile_error="RuntimeError: boom")]
 
@@ -236,7 +356,6 @@ def test_each_bar_fails_alone_and_the_reason_names_the_number(tmp_path):
     for rows, expected in (
         (six_dates, "shadow dates 6 < 7 required"),
         (over_bar, "djev_status reached in 3 of 45 rows = 6.7% > 5.0%"),
-        (enforce_refused, "1 enforce-mode row(s) refused a tool name"),
         (unmeasured, "1 row(s) carry no would_strip measurement "
                      "(1 naming a compile_error)"),
     ):
@@ -316,7 +435,10 @@ def test_an_empty_or_absent_ledger_is_a_fail_and_never_a_clean_read(tmp_path):
     missing = tmp_path / "absent" / "scheduled-ceiling.jsonl"
     assert not missing.exists()
     rc2, out2 = _run_at(missing)
-    assert rc2 == 1 and "verdict: PASS" not in out2, out2
+    # Named, not just "no PASS": the report now also carries `verdict: POST-FLIP HEALTH
+    # PASS`, which is a VACUOUS pass on a ledger with no enforce rows and must not be
+    # mistaken for the bars passing.
+    assert rc2 == 1 and "verdict: PRE-FLIP PASS" not in out2, out2
 
     clean = [_row(d, task_id=i, names=[]) for i, d in enumerate(DATES)]
     rc3, out3 = _run(tmp_path / "clean", clean)
@@ -345,6 +467,186 @@ def test_an_enforce_row_that_stripped_nothing_is_not_a_refusal(tmp_path):
         "wolf on every healthy turn")
     assert "shadow dates: 7" in out, (
         "an enforce-only date must not count toward the seven-day shadow bar")
+
+
+# ───────── the licensed-name rule: the one refusal that IS a bug ─────────
+#
+# Clause 4 of #3415 gives POST-FLIP HEALTH two FAIL rules, and the first is the rare one:
+# enforcement refused a name that the refusing turn's OWN grant_scope holds a live grant
+# for. That is the ceiling taking away something a person licensed by hand — the ban
+# exception #2670's design turns on — while every other refusal is the ceiling working.
+# Both arms below run against a store built by `GrantStore.mint`, the only write path that
+# creates authority, so the pair set is what `default_store().live()` will actually hand the
+# gate in production: a fixture that passed `licensed_pairs=set()` everywhere would leave
+# that rule reachable only from its empty side, which is how a deleted `if licensed:` guard
+# would ship green. The two nodes are the pair: the SAME ledger and the SAME refusal goes
+# FAIL when a live grant covers it and PASS when a populated store covers only other
+# (scope, name) pairs, so neither the guard nor the membership test can be removed silently.
+
+#: The enforcing turn's scope in this section's fixture.
+ENFORCING_SCOPE_TASK = 99
+
+
+def _enforce_traffic(*, n: int = 40, refusals: int = 1,
+                     name: str = "djev_status") -> list[dict]:
+    """`n` enforce rows over the fixture dates, `refusals` of them refusing `name`.
+
+    Sized so the REFUSAL RATE cannot be what fails: 1 refusal in 40 enforce rows is 2.5%,
+    under `NAME_RATE_CEILING`. Only the licensed-name rule can turn this ledger red, which
+    is the whole point of the two nodes below.
+    """
+    dates = [DATES[i % len(DATES)] for i in range(n)]
+    rows = [_row(d, mode="enforce", task_id=ENFORCING_SCOPE_TASK, names=[])
+            for d in dates]
+    for r in rows[:refusals]:
+        r["would_strip"] = [name]
+        r["n_would_strip"] = 1
+    return rows
+
+
+def _live_pairs(db_path: Path) -> set[tuple[str, str]]:
+    """The (scope, name) pairs a real store reports live — read back, never assumed.
+
+    The first assertion inside is load-bearing: a `mint` call that wrote a row the store
+    then refuses to report (expired, revoked, or normalised to a different tool name) would
+    otherwise leave `licensed_pairs` empty and every licensed-node below passing for the
+    wrong reason.
+    """
+    from app.harness.policy import GrantStore
+
+    store = GrantStore(db_path)
+    rows = store.live()
+    assert rows, f"the minted store at {db_path} reports no live grant"
+    pairs, note = gate.live_licensed_pairs(store=store)
+    assert note == "", f"live_licensed_pairs could not read the store: {note}"
+    return pairs
+
+
+def test_a_refusal_of_a_name_its_own_scope_holds_a_live_grant_for_fails_the_verdict(
+        tmp_path):
+    """Clause 4's first rule, read from the NON-empty side: a minted grant makes the red.
+
+    One refusal in 40 enforce rows is a 2.5% refusal rate — under the bar — so the only
+    rule that can fail here is the licensed-name rule, and the only thing that can make it
+    fire is the grant row `_mint_grants` wrote. Delete the `if is_licensed:` collection or
+    the `if licensed:` failure block and this node goes green-to-red: it asserts the FAIL
+    verdict, the failure line naming `djev_status (autonomy-task:99)`, and the report's
+    per-refusal attribution `LICENSED BY A LIVE GRANT`. The PRE-FLIP line is asserted to
+    stay PASS over the same rows, because a licensed refusal is an enforce-side fact and
+    must not reach back into the shadow bars.
+    """
+    db = _mint_grants(tmp_path / "grants-licensed.db",
+                      [(f"autonomy-task:{ENFORCING_SCOPE_TASK}", "djev_status")])
+    pairs = _live_pairs(db)
+    assert pairs == {(f"autonomy-task:{ENFORCING_SCOPE_TASK}", "djev_status")}, pairs
+
+    rows = _passing_rows() + _enforce_traffic()
+    m = gate.measure(rows, licensed_pairs=pairs)
+    out = gate.format_report(m)
+
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH FAIL", out
+    assert "refused under enforce while their scope holds a live grant: " \
+           "djev_status (autonomy-task:99)" in out, out
+    assert "refused djev_status in autonomy-task:99: LICENSED BY A LIVE GRANT" in out, out
+    # Exactly one post-flip failure, and it is the licensed-name one: the refusal rate is
+    # printed (2.5%, clause 5) but is NOT a bar that this ledger crosses.
+    assert m["post_flip_failures"] == [
+        "1 name(s) refused under enforce while their scope holds a live grant: "
+        "djev_status (autonomy-task:99)"], m["post_flip_failures"]
+    assert "enforce refusal rate 2.5% (1 of 40 enforce rows) > 5.0%" not in out, out
+    assert _verdict_lines(out) == ["verdict: PASS"], (
+        f"an enforce-side refusal leaked into the pre-flip bars:\n{out}")
+    assert m["licensed_refusals"] == ["djev_status (autonomy-task:99)"], m
+
+
+def test_the_same_refusal_with_no_live_grant_for_its_scope_is_the_ceiling_working(
+        tmp_path):
+    """The paired control, with a POPULATED store: coverage is per (scope, name), not global.
+
+    Identical ledger to the node above, identical refusal; only the store's bytes differ —
+    here it licenses `djev_status` for a DIFFERENT scope and `automod_status` for THIS one.
+    Neither row covers (autonomy-task:99, djev_status), so POST-FLIP HEALTH must read PASS
+    and print the refusal as the ceiling working. This is the node a deleted `if licensed:`
+    guard reddens: with the guard gone every refusal appends a licensed failure, so a report
+    that cannot tell the two cases apart stops being able to say which refusal is a bug —
+    the exact confusion clause 4 exists to prevent, and the reason an ungranted scope
+    (:78/:54/:47 in the item's filed case) must not read as a regression.
+    """
+    db = _mint_grants(tmp_path / "grants-other.db",
+                      [("autonomy-task:77", "djev_status"),
+                       (f"autonomy-task:{ENFORCING_SCOPE_TASK}", "automod_status")])
+    pairs = _live_pairs(db)
+    assert (f"autonomy-task:{ENFORCING_SCOPE_TASK}", "djev_status") not in pairs, pairs
+    assert len(pairs) == 2, pairs
+
+    out = gate.format_report(gate.measure(_passing_rows() + _enforce_traffic(),
+                                         licensed_pairs=pairs))
+    assert _post_flip_verdict(out) == "verdict: POST-FLIP HEALTH PASS", out
+    assert "no live grant for that scope — the ceiling working" in out, out
+    assert "LICENSED BY A LIVE GRANT" not in out, out
+    assert _verdict_lines(out) == ["verdict: PASS"], out
+
+
+def test_the_gate_reads_a_populated_grant_store_through_the_real_path(tmp_path):
+    """The seam the in-process nodes cannot cross: `main()` → `default_store()` → the DB.
+
+    `post_flip_health` asks the store itself only when `licensed_pairs` is None, which is
+    the route `main()` takes and no in-process node above walks. So this runs the shipped
+    command as a child process pointed at a store WITH a live grant row by `LLOYD_GRANT_DB`
+    — the same knob `default_store()` reads — and then at an EMPTY store, over the same
+    ledger bytes. The two children must disagree by exactly one verdict: a red naming the
+    licensed pair, and a green printing the same refusal as the ceiling working. If the
+    store were never opened, both children print the PASS, and the FAIL arm is unreachable
+    in production too — which is the failure mode this node, and not the pair above,
+    detects.
+
+    Clause 5 is pinned in the red child: the enforce row count and the refusal rate over
+    ENFORCE rows print beside the per-name table and above both verdict lines, no fragment of
+    the report reaches stderr, and the exit code is the verdict (1 for a red POST-FLIP, 0 for
+    the green one).
+    """
+    ledger = _write_ledger(tmp_path / "store-seam", _passing_rows() + _enforce_traffic())
+    licensed = _mint_grants(tmp_path / "seam-licensed.db",
+                            [(f"autonomy-task:{ENFORCING_SCOPE_TASK}", "djev_status")])
+    empty = tmp_path / "seam-empty.db"
+
+    def _child(grant_db: Path):
+        env = {**os.environ, "LLOYD_DATA": str(tmp_path),
+               "LLOYD_GRANT_DB": str(grant_db)}
+        proc = subprocess.run(
+            [sys.executable, "-m", "scripts.maintenance.scheduled_ceiling_flip_gate",
+             "--ledger", str(ledger)],
+            cwd=REPO, env=env, capture_output=True, text=True, timeout=180)
+        # Clause 5's "writes only to stdout". Not `stderr == ""`: importing `app` from a
+        # worktree legitimately logs the #2213 anchor warning here, and a node that read
+        # that as a leak would be red in every round and green only on main. What must not
+        # appear on stderr is any part of the REPORT — that is what a reader parses.
+        for fragment in ("verdict:", "enforce rows:", "would-strip names", "refused "):
+            assert fragment not in proc.stderr, \
+                f"the report leaked to stderr ({fragment!r}):\n{proc.stderr[-800:]}"
+        return proc
+
+    red = _child(licensed)
+    assert red.returncode == 1, red.stdout[-1500:]
+    assert "verdict: POST-FLIP HEALTH FAIL" in red.stdout, red.stdout[-1500:]
+    assert "LICENSED BY A LIVE GRANT" in red.stdout, red.stdout[-1500:]
+    assert "verdict: PRE-FLIP PASS" in red.stdout, red.stdout[-1500:]
+    # Clause 5: the enforce count and the enforce-side rate, beside the 5% table.
+    enforce_line = [ln for ln in red.stdout.splitlines() if ln.startswith("enforce rows:")]
+    assert enforce_line == ["enforce rows: 40   rows refusing a name: 1   "
+                            "enforce refusal rate: 2.5%"], enforce_line
+    table_at = red.stdout.index("would-strip names (count / rate")
+    enforce_at = red.stdout.index(enforce_line[0])
+    verdict_at = red.stdout.index("verdict: PRE-FLIP PASS")
+    assert table_at < enforce_at < verdict_at, (
+        "the enforce readings sit between the per-name table and the verdicts, per clause 5")
+
+    green = _child(empty)
+    assert green.returncode == 0, green.stdout[-1500:]
+    assert "verdict: POST-FLIP HEALTH PASS" in green.stdout, green.stdout[-1500:]
+    assert "no live grant for that scope — the ceiling working" in green.stdout, \
+        green.stdout[-1500:]
+    assert "LICENSED BY A LIVE GRANT" not in green.stdout, green.stdout[-1500:]
 
 
 @pytest.mark.parametrize("drop", [
@@ -578,11 +880,17 @@ def test_the_command_line_form_honours_the_flags_the_report_names(tmp_path):
         f"--ledger was ignored, so the child read the 42-row store and passed:\n"
         f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
     assert f"ledger: {copy}" in proc.stdout, proc.stdout[-2000:]
-    assert "verdict: FAIL" in proc.stdout, proc.stdout[-2000:]
+    # Named with its label: since #3415 the report carries two verdicts, and the bare
+    # `verdict: FAIL` this asserted is no longer a substring of either line. The copy is a
+    # shadow-only ledger, so the half this node is about — the one the four bars decide — is
+    # the PRE-FLIP line.
+    assert "verdict: PRE-FLIP FAIL" in proc.stdout, proc.stdout[-2000:]
     # 2 strips from the passing fixture + 3 over-bar rows = 5 of the 45 the COPY holds.
     # A row-level predictor doubles as proof of which file was read: the env store would
-    # have printed 2 of 42.
-    assert "rows carrying a would-strip name: 5 of 45 = 11.1%" in proc.stdout, \
+    # have printed 2 of 42. The denominator is labelled "shadow rows" because #3415 made
+    # every pre-flip rate divide by the shadow rows only; this copy is all-shadow, so 45 is
+    # both counts here, and the label is what the node now has to spell out.
+    assert "rows carrying a would-strip name: 5 of 45 shadow rows = 11.1%" in proc.stdout, \
         proc.stdout[-2000:]
 
     readings = tmp_path / "env" / gate.READINGS_FILENAME
@@ -650,7 +958,8 @@ def test_the_report_prints_how_many_rows_would_refuse_under_enforce(tmp_path):
     assert "rows_with_strip" not in out2                   # the field name is not the line
     assert out2.splitlines().index([ln for ln in out2.splitlines()
                                     if "8 of 42" in ln][0]) < \
-        out2.splitlines().index("verdict: PASS"), "the predictor sits beside the table"
+        out2.splitlines().index("verdict: PRE-FLIP PASS"), \
+        "the predictor sits above the table but below the verdict it predicts"
 
 
 def test_the_predictor_counts_rows_not_names_and_survives_an_empty_ledger(tmp_path):
