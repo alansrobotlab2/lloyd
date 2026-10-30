@@ -474,6 +474,66 @@ def test_the_marker_survives_the_adapter_into_the_runs_row(real_run, tmp_path,
         f"`runs.meta_json`; meta was {norm['meta']}")
 
 
+def test_the_producer_s_real_key_list_is_the_one_the_adapter_test_pins(real_run, aut,
+                                                                       monkeypatch):
+    """#3515 clause 4: the list `scheduled_task`'s contract test checks against is
+    checked back against the producer that emits it, in both directions.
+
+    The whitelist rotted three times (#945, #623, #2619) because nothing asked
+    `run_task` what it actually returns. So this drives the REAL success path and
+    the REAL `_record_failure`, and the two results' keys together must equal
+    `WS.PRODUCER_KEYS` exactly — a key the producer adds fails with "not on the
+    list", and a name the list keeps after the producer stopped sending it fails
+    too, because a stale exclusion entry is a hole waiting for the next rename.
+
+    `_evidence_pilot` and `_acceptance_grade` are forced because both keys are
+    conditional on the success path (pilot task ids; a grade that exists), and the
+    check below is exact — leaving them out would put two names on the list that no
+    real run ever produced.
+    """
+    import asyncio
+    import datetime
+
+    import test_workers_sources as WS  # tests/ is on sys.path, as in board_presence
+
+    monkeypatch.setattr(autonomy, "_evidence_pilot", lambda _tid: True, raising=False)
+    monkeypatch.setattr(autonomy, "_acceptance_grade",
+                        lambda *_a, **_k: {"grade": "pass", "checked": ["record"]},
+                        raising=False)
+    real_run(_task(), _stream(CLEAN_TAIL, "Report written, nothing above the floor.\n"))
+    ok = asyncio.run(autonomy.run_task(60))
+    assert ok["success"] is True, f"the scripted run did not succeed: {ok.get('error')}"
+
+    failed = asyncio.run(autonomy._record_failure(
+        _task(), 60, "run_60_20261030_000000", "",
+        datetime.datetime.now(datetime.timezone.utc),
+        summary="probe failure", body="", kind="task", extra=None, alert=False))
+
+    emitted = set(ok) | set(failed)
+    assert emitted - WS.PRODUCER_KEYS == set(), (
+        f"run_task now returns {sorted(emitted - WS.PRODUCER_KEYS)}, which is on "
+        f"neither the carried list nor the exclusion list in "
+        f"tests/test_workers_sources.py — the adapter drops an unnamed key silently, "
+        f"which is exactly how #945, #623 and #2619 each happened")
+    assert WS.PRODUCER_KEYS - emitted == set(), (
+        f"the named list still carries {sorted(WS.PRODUCER_KEYS - emitted)} that "
+        f"neither producer exit emits: a name nothing sends is how an exclusion "
+        f"list hides a rename")
+    assert set(WS.PRODUCER_KEYS) - set(ok) == {"error", "failure_kind", "disabled"}, (
+        f"the keys a SUCCESS run does not send changed from the three the "
+        f"`_record_failure` dict adds ({sorted(set(WS.PRODUCER_KEYS) - set(ok))}); "
+        f"the failure exit is the only thing guarding them")
+
+    # The three keys this whole seam has been about are on the PRODUCER side too,
+    # and on the side of the list that says they must cross.
+    for name in ("claims", "acceptance_grade", "script_alarm"):
+        assert name in ok, f"the producer stopped sending {name!r} at all"
+        assert name in WS.PRODUCER_KEYS_CARRIED, (
+            f"{name!r} moved to the exclusion list — that is a severance signed off "
+            f"by the test instead of caught by it")
+    assert set(ok) | set(failed) == WS.PRODUCER_KEYS
+
+
 # ── #2619: the script side of the seam ───────────────────────────────────────
 #
 # Everything above fixes the shape of the string; none of it fails if

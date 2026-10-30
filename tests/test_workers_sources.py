@@ -3192,3 +3192,296 @@ async def test_max_staged_pending_is_the_key_and_the_code_defaults_still_bound(
         "in only one direction")
     assert q2.list_items(source=BM.NAME), (
         "the raised cap returned DECLINED-adjacent nothing without saying so")
+
+
+# ---------------------------------------------------------------------------
+# #3515 — the adapter's pass-through is a contract, not a memory
+#
+# `scheduled_task.execute` ends (`workers/sources/scheduled_task.py:448-503`) in a
+# hand-written whitelist of the keys `autonomy.run_task` returned, with exactly
+# three keys lifted by name below the dict: `claims` (:483, severed for the whole
+# life of the pilot until #945 — 4,922 rows reached the pool with an empty bundle),
+# `acceptance_grade` (:490, #623) and `script_alarm` (:501, #2619 — three knowledge-
+# health alarm nights recorded `status: success` with nothing saying otherwise).
+# The mechanism never changed: `f2e4a52e` (#2619) ADDED a fourth `if` instead of a
+# check, and any key the producer adds or a monitoring pass starts reading is
+# dropped silently, because the pool cannot tell "the producer sent nothing" from
+# "the adapter dropped it".
+#
+# The two collections below are that check. Everything not named in one of them is
+# a name the contract has never considered, and the coverage test fails on it.
+# ---------------------------------------------------------------------------
+
+#: Every producer key whose value must be FINDABLE in the dict `execute` hands
+#: `pool.normalize_result`, mapped to where: `"key:NAME"` is that key of the dict,
+#: `"meta:NAME"` is that key of its `meta` (the pool writes `meta` to
+#: `runs.meta_json`, which is why the two lifts below the dict exist at all).
+#:
+#: `failure_kind` and `disabled` are carried by the wholesale `meta` copy rather
+#: than by a lift: `_record_failure` nests them inside its own `meta`
+#: (`app/autonomy.py:4260`), so they arrive under their own name without the
+#: adapter naming them. `claims` is here for its value AND guarded for its
+#: presence — see `claims_presence_is_the_copy...`.
+PRODUCER_KEYS_CARRIED: dict[str, str] = {
+    "status": "key:status",
+    "task_id": "key:task_id",
+    "meta": "key:meta",
+    "claims": "key:claims",
+    "acceptance_grade": "meta:acceptance_grade",
+    "script_alarm": "meta:script_alarm",
+    "failure_kind": "meta:failure_kind",
+    "disabled": "meta:disabled",
+}
+
+#: The producer keys that deliberately do NOT cross under their own name, each with
+#: where it goes instead or why it is dropped. This is the only place a key may be
+#: written off, so a name belongs here only with a sentence that says where its
+#: value actually lands — and `claims`, `acceptance_grade` and `script_alarm` can
+#: never belong here, because their whole history is what "written off by an
+#: adapter that did not name it" costs.
+PRODUCER_KEYS_WITHHELD: dict[str, str] = {
+    "success": "folded into the derived `status` at :445, which prefers the "
+               "producer's explicit `status` over the boolean; the pool's contract "
+               "has no `success` key",
+    "run_id": "folded into `artifact_path` at :446-447, which `normalize_result` "
+              "copies verbatim into `runs.artifact_path` — the join other readers "
+              "use (#1567 made that path a claim-only string, and the `meta` "
+              "verdict beside it is the part that looks at disk)",
+    "response_preview": "renamed, twice: `summary` at :450 (truncated to 500) and "
+                        "`response` at :459",
+    "error": "the failure path's fallback for `summary` at :450, consulted only "
+             "when there is no `response_preview`",
+    "duration_seconds": "dropped by design: `pool.py` measures the run's own wall "
+                        "clock into `runs.duration_seconds`, so lifting this would "
+                        "put two durations in one row and disagree",
+}
+
+#: The whole surface: the producer's key list, both exits of `run_task` included
+#: (success at `app/autonomy.py:5209-5231`, failure via `_record_failure` at
+#: :4256-4268). A key the producer starts returning that is in neither half is a
+#: key nobody decided anything about, and that is the exact shape of #945/#623/#2619.
+PRODUCER_KEYS = frozenset(PRODUCER_KEYS_CARRIED) | frozenset(PRODUCER_KEYS_WITHHELD)
+
+
+def _carrying_result(**over) -> dict:
+    """A success-path result carrying a distinct sentinel for every key :5209-5231 can put on it.
+
+    Each value is chosen to say something, not just to be unique: `success=False`
+    beside `status="success"` proves the derivation at :445 prefers the explicit
+    status, so the `success` boolean cannot silently decide the verdict; the
+    `run_id` sentinel has to show up inside `artifact_path` and nowhere else.
+    """
+    result = {
+        "success": False,
+        "status": "success",
+        "task_id": 77,
+        "run_id": "run_PROBE_3515",
+        "duration_seconds": 4224.0,
+        "response_preview": "carry-probe-preview",
+        "meta": {"carry-probe-meta": "meta-crosses-whole"},
+        "acceptance_grade": {"carry-probe-grade": "must-reach-meta"},
+        "script_alarm": {"knowledge-health-report.py": 1},
+        "claims": [{"claim": "carry-probe-claim", "check": "grep"}],
+    }
+    result.update(over)
+    return result
+
+
+def _failing_result(**over) -> dict:
+    """The `_record_failure` shape (`app/autonomy.py:4256-4268`) with sentinels.
+
+    Verified against the real function rather than transcribed: calling it with a
+    stubbed record writer returns exactly these keys — `success, status, task_id,
+    run_id, error, duration_seconds, failure_kind, disabled, meta`, plus `claims`
+    for a pilot task — and nests `failure_kind`/`disabled` inside `meta` itself.
+    """
+    result = {
+        "success": False,
+        "status": "failed",
+        "task_id": 77,
+        "run_id": "run_PROBE_3515",
+        "error": "carry-probe-error",
+        "duration_seconds": 4224.0,
+        "failure_kind": "carry-probe-kind",
+        "disabled": False,
+        "meta": {"failure_kind": "carry-probe-kind", "disabled": False},
+        "claims": [],   # a FAILED pilot run still gets an empty bundle (:4266-4267)
+    }
+    result.update(over)
+    return result
+
+
+@pytest.fixture
+def sched_carrying(monkeypatch, tmp_path):
+    """`scheduled_task.execute` over a result I choose, with the fs check real.
+
+    Same production seams the `sched` fixture above stubs (health gate, `run_task`,
+    task-file lookup, Discord), and `_artifact_on_disk` keeps reading `tmp_path`
+    for real — the artifact file is created for the probe `run_id` so `meta` is
+    exactly what the producer sent plus the lifts, with no `artifact_absent` key
+    mixing into the equality assertions below.
+    """
+    from workers.sources import scheduled_task as ST
+    from app import paths
+
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(ST, "_model_health_url", lambda m: "http://stub/health")
+    monkeypatch.setattr("app.autonomy._find_task_file", lambda tid: None)
+    monkeypatch.setattr("app.discord_notify._discord_notify_task_complete",
+                        lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path)
+    (tmp_path / "autonomy-runs" / "77" / "run_PROBE_3515.md").parent.mkdir(parents=True)
+    (tmp_path / "autonomy-runs" / "77" / "run_PROBE_3515.md").write_text(
+        "---\nstatus: success\n---\n\nprobe\n", encoding="utf-8")
+
+    def drive(result: dict) -> dict:
+        async def fake_run_task(*a, **k):
+            await asyncio.sleep(0)
+            return result
+        monkeypatch.setattr("app.autonomy.run_task", fake_run_task)
+        return asyncio.run(ST.execute(_item({"task_id": 77})))
+
+    return drive
+
+
+def _landed(out: dict, spec: str):
+    """Read a `PRODUCER_KEYS_CARRIED` destination out of the adapter's dict."""
+    where, _, name = spec.partition(":")
+    return out[name] if where == "key" else out["meta"][name]
+
+
+def _assert_carried_reaches(result: dict, out: dict, exit_name: str) -> None:
+    """Every carried key this exit sent must arrive at its named destination.
+
+    Two documented coercions, both of them the adapter's own behaviour rather than
+    a tolerance invented here: `task_id` is recorded as the STRING of the queue
+    item's id (`:451`), and `meta` crosses wholesale and then gains the lifts, so
+    the producer's own meta entries must survive inside it as a superset.
+    """
+    for name, spec in PRODUCER_KEYS_CARRIED.items():
+        if name not in result:      # `claims` is pilot-only; presence is pinned below
+            continue
+        try:
+            landed = _landed(out, spec)
+        except KeyError:
+            raise AssertionError(
+                f"[{exit_name}] producer key {name!r} never reached {spec!r} of what "
+                f"scheduled_task.execute hands pool.normalize_result — that is the "
+                f"#945 severance, and meta was {out.get('meta')}") from None
+        if name == "meta":
+            assert landed.items() >= result["meta"].items(), (
+                f"[{exit_name}] the producer's own meta entries did not cross "
+                f"wholesale: sent {result['meta']}, arrived {landed}")
+            continue
+        expected = str(result[name]) if name == "task_id" else result[name]
+        assert landed == expected, (
+            f"[{exit_name}] producer key {name!r} arrived at {spec!r} as {landed!r}, "
+            f"not the producer's {expected!r} — a lift that renames or truncates is "
+            f"a severance with extra steps")
+
+
+def test_every_producer_key_the_adapter_carries_reaches_normalize_result(sched_carrying):
+    """The one test the three losses (#945, #623, #2619) would each have failed.
+
+    Delete any of the three lifts at `scheduled_task.py:483`, `:490` or `:501` and
+    the matching assertion below dies naming the key — which is the whole point:
+    today deleting one is silent until a signal has been dark for weeks.
+    """
+    from workers import pool
+
+    result = _carrying_result()
+    out = sched_carrying(result)
+
+    assert frozenset(PRODUCER_KEYS_CARRIED) <= (set(result) | set(_failing_result())), (
+        "the carried list names a key NEITHER probe sends, so this test would "
+        "silently stop covering it")
+    _assert_carried_reaches(result, out, "success")
+
+    # The withheld names are checked too, so the exclusion list cannot quietly rot
+    # into a description of something that stopped being true.
+    assert "run_id" not in out and out["artifact_path"] == (
+        "autonomy-runs/77/run_PROBE_3515.md"), (
+        "`run_id` no longer folds into artifact_path, so its exclusion reason lies")
+    assert "success" not in out and out["status"] == "success", (
+        "the probe deliberately sent `success=False` beside `status=\"success\"`, so a "
+        "row that came out anything else means the boolean, not the producer's "
+        "explicit status, decided the verdict at :445")
+    assert out["summary"] == out["response"] == "carry-probe-preview", (
+        "`response_preview` no longer lands as both summary and response")
+    assert 4224.0 not in out.values(), (
+        "`duration_seconds` was lifted, so the row now carries the pool's wall "
+        "clock AND the task's own duration as two disagreeing numbers")
+
+    # And it survives the real normalizer, which is the reader that matters.
+    norm = pool.normalize_result(_item({"task_id": 77}), out)
+    assert norm["status"] == "success"
+    assert norm["meta"]["script_alarm"] == {"knowledge-health-report.py": 1}
+    assert norm["meta"]["acceptance_grade"] == {"carry-probe-grade": "must-reach-meta"}
+    assert norm["claims"] == [{"claim": "carry-probe-claim", "check": "grep"}]
+
+
+def test_the_keys_written_off_are_named_with_a_reason_and_not_the_three_lifts(sched_carrying):
+    """#3515 clause 2: the exclusion list is a decision, so it has to carry one
+    sentence per name, and it may never include the three keys whose severance is
+    this adapter's documented history."""
+    assert set(PRODUCER_KEYS_WITHHELD).isdisjoint(
+        {"claims", "acceptance_grade", "script_alarm"}), (
+        f"a key that must cross is in the exclusion list: "
+        f"{set(PRODUCER_KEYS_WITHHELD) & {'claims', 'acceptance_grade', 'script_alarm'}} "
+        f"— #945, #623 and #2619 are each one of these keys being written off")
+    for name, reason in PRODUCER_KEYS_WITHHELD.items():
+        assert len(reason) > 40, (
+            f"{name!r} is written off with a shrug ({reason!r}); a reason that names "
+            f"where the value lands is what makes the exclusion checkable")
+    out = sched_carrying(_carrying_result())
+    assert set(out) == {"status", "summary", "task_id", "artifact_path", "response",
+                        "meta", "claims"}, (
+        f"the adapter's output gained or lost a key, so the two collections above "
+        f"need re-reading against it: {sorted(out)}")
+    assert set(PRODUCER_KEYS_CARRIED) | set(PRODUCER_KEYS_WITHHELD) == PRODUCER_KEYS
+    assert set(PRODUCER_KEYS_CARRIED).isdisjoint(PRODUCER_KEYS_WITHHELD), (
+        "one key is in both collections, so a test can pass either way on it")
+
+
+def test_the_failure_exit_through_the_same_out_is_guarded_too(sched_carrying):
+    """Both exits funnel through the one `out`, so the failure path is covered by
+    the same list — a key that exists only on a failed run (the `error` a monitoring
+    pass reads as `summary`) would otherwise be checked by nothing."""
+    from workers import pool
+
+    result = _failing_result()
+    assert frozenset(result) <= PRODUCER_KEYS, (
+        f"the failure path carries {set(result) - PRODUCER_KEYS}, which is on "
+        f"neither the carried list nor the exclusion list — the exact shape of the "
+        f"#945 severance, on the exit nobody looks at")
+
+    out = sched_carrying(result)
+    _assert_carried_reaches(result, out, "failure")
+    assert out["summary"] == "carry-probe-error", (
+        "the error text is the only thing a failed run's summary can be — :450 keeps "
+        "it only while there is no response_preview")
+    assert out["status"] == "failed"
+    norm = pool.normalize_result(_item({"task_id": 77}), out)
+    assert norm["status"] == "failed" and norm["meta"]["failure_kind"] == "carry-probe-kind"
+
+
+def test_claims_presence_is_the_copy_so_the_adapter_never_decides_the_pilot(sched_carrying):
+    """Presence, not `out["claims"] = result.get("claims")`: the key being there is
+    the pool's pilot-scope switch (`scheduled_task.py:477-482`), so an absent key
+    must stay absent and an empty list must stay an empty list — the two mean
+    "not in the pilot" and "in the pilot, the model emitted nothing"."""
+    from workers import pool
+
+    without_key = _carrying_result()
+    del without_key["claims"]          # an un-piloted task: the producer never sends it
+    no_claims = sched_carrying(without_key)
+    assert "claims" not in no_claims, (
+        "the adapter invented a claims key for a producer that sent none, which "
+        "makes this adapter — not the model's output — decide who is in the pilot")
+    assert pool.normalize_result(_item({"task_id": 77}), no_claims)["claims"] is None
+
+    empty = sched_carrying(_carrying_result(claims=[]))
+    assert "claims" in empty and empty["claims"] == [], (
+        "an empty bundle was dropped, so the pilot's 'the model emitted nothing' gap "
+        "is now indistinguishable from an un-piloted run")
+    assert pool.normalize_result(_item({"task_id": 77}), empty)["claims"] == []

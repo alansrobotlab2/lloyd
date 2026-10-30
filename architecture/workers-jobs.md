@@ -220,6 +220,18 @@ per task through `autonomy.get_due_tasks`, and enqueues each due task under
 `scheduled-task:<id>`. **Executes** by delegating to `autonomy.run_task`, which
 writes the per-task run record to `autonomy-runs/<id>/<run_id>.md`.
 
+What of that result reaches the pool is a hand-written whitelist
+(`workers/sources/scheduled_task.py:448`, `out` through to `return out`): a
+literal dict, then three
+keys lifted by name below it — `claims`, `acceptance_grade` and `script_alarm`,
+in that order, one severance each (#945, #623, #2619). The mechanism is deliberate
+for `claims`, whose *presence* is the pilot-scope switch, and inherited for the
+other two; it is also why the key list lives as two named collections in
+`tests/test_workers_sources.py` (`PRODUCER_KEYS_CARRIED`, `PRODUCER_KEYS_WITHHELD`)
+that `tests/test_autonomy_run_record.py` checks back against the real
+`run_task` in both directions, so a key the fleet starts reading cannot go dark
+the way those three did.
+
 Priority is the task's own frontmatter mapped through `_PRIORITY_MAP` —
 critical/high/medium/low/background to 10/20/30/50/70 — which is why this one
 source can both preempt everything and sit behind everything in the same tick.
