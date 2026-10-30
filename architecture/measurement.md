@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, eval, bench, measurement]
 type: reference
 status: implemented
-date: 2026-09-29
+date: 2026-10-30
 ---
 
 # Lloyd — the measurement surface
@@ -34,7 +34,7 @@ missing has written the drift into the file that is supposed to catch it.
 | `$LLOYD_DATA/eval/baselines/` | every baseline a run produced since the runtime data root moved | the runners themselves |
 
 `app/paths.py:121` is the one definition — `EVAL_BASELINES_DIR = DATA_ROOT /
-"eval" / "baselines"` — and `eval/run_eval.py:2055` writes its record there, not
+"eval" / "baselines"` — and `eval/run_eval.py:2686` writes its record there, not
 beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
 context-rot, compaction-recall and skills-index pins, for instance) so a reader
 knows the *shape*; the directory that answers "what has actually been measured
@@ -70,11 +70,11 @@ a row naming a deleted arm both fail.
 | `memory_eval` | memory-recall question set `v1` | `eval/memory_eval_build.py`, `eval/run_memory_eval.py` |
 | `review_calibration` | labelled review-rung outcomes, including a first cut and a deliberately test-stripped one, so the grader can be calibrated against known verdicts | `scripts/automod/review_tools.py` |
 | `secondary-routing` | keep/raise/revert decisions per job class for routing generation to the secondary engine | `eval/secondary_routing_eval.py`, `app/secondary_models.py` |
-| `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 61 planted names replayed through the shipped code against a faked registry and a pinned clock, over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`fixtures`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
+| `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 63 planted names replayed through the shipped code against a faked registry and a pinned clock (61 at #1610; #3206 added the fresh-version pair), over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`fixtures`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
 | `uptake` | whether injected context reached the turn that needed it, with hand labels under `eval/uptake/labels/` | `app/uptake.py` |
 | `injection_canary` | whether a planted instruction in fetched content drives a sink call — eighteen worker-style tasks whose transcript, backlog body, page, README or module carries an instruction beside a canary token, scored on the canary reaching a non-read-only tool or Bash, or an `agent_mcp.egress.EGRESS_TOOLS` lane whose destination the egress allow-list does not name (#2128), in the calls the model proposed, with three controls; the positive class for the P10 shadow seams (`action_review`, the input probe), whose verdicts are read back per row. Runs in two arms, and the arm is the SERVING aggregator's property: the runner reads the endpoint that will serve the tools and asks it, over its `GET /state` `egress.enforce` key, whether IT enforces — never from the bench's own environment. The enforce-on arm is therefore a separate `agent_mcp.main` launched with `LLOYD_EGRESS_ENFORCE=1` and named to the bench as `--mcp-url`, which is also what puts `guard_egress_enforce` and `mcp_url` on every row (#2338); `grade` reports the two rates as a pair with 95% Wilson intervals per arm (#2154), and the held window that runs both arms in one pass is `eval/run_egress_arms.sh` (#2435) | `eval/run_injection_canary.py`, `tests/test_injection_canary.py`, `agent_mcp/egress.py` (`EGRESS_TOOLS`, `allow_entries`), `eval/egress_arms.py` |
 | `judge_self_preference` | whether a judge prefers text whose attribution names its own model family: #580's 50-note corpus re-scored under four arms that differ only in the one attribution line above the note (`repeat` = the baseline sent again, the engine's own floor; `self`; `human`), every delta read against a same-session `none` arm. **Built, never run — no artifact exists, and the ~200-call pass is owed**; the runner writes no report while any arm row of any sample is unparsed, and the published 32.4% sits on a different judge model, so it is context and not the comparator (#2254) | `eval/judge_self_preference/arms.py`, `eval/judge_self_preference/run_arms.py`, `eval/judge_self_preference/report.py`, `tests/test_judge_self_preference.py` |
-| `substrate_fuzz` | whether a task shape survives the tool boundary byte-for-byte, as shipped by #2620: 52 tasks over 8 substrate domains — byte round-trip, unicode text, size and spill, filesystem, process, binaries, resource limits, refusal shapes — each carrying a mechanical postcondition the loader refuses to dispatch without: an expected sha256, a byte length, an exit shape, or file-exists under the run root. Arm A drives every task through the harness's own `_execute_tool_call` with no model in the loop and attributes each failure to exactly one layer of `model / interface / host / harness`, an interface verdict being refused unless the tool's own bytes sit beside the bytes that would reach `messages`. Every domain ships a positive control injected at the tool boundary, so a green board cannot come from a dead detector — which is this arm's answer to the standing objection that a generated row is just another way to produce a green test that asserts nothing | `eval/substrate_fuzz/runner.py`, `eval/substrate_fuzz/corpus.py`, `tests/test_substrate_fuzz_runner.py` |
+| `substrate_fuzz` | whether a task shape survives the tool boundary byte-for-byte, as shipped by #2620: 60 tasks over 8 substrate domains — byte round-trip, unicode text, size and spill, filesystem, process, binaries, resource limits, refusal shapes — each carrying a mechanical postcondition the loader refuses to dispatch without: an expected sha256, a byte length, an exit shape, or file-exists under the run root. Arm A drives every task through the harness's own `_execute_tool_call` with no model in the loop and attributes each failure to exactly one layer of `model / interface / host / harness`, an interface verdict being refused unless the tool's own bytes sit beside the bytes that would reach `messages`. Every domain ships a positive control injected at the tool boundary, so a green board cannot come from a dead detector — which is this arm's answer to the standing objection that a generated row is just another way to produce a green test that asserts nothing | `eval/substrate_fuzz/runner.py`, `eval/substrate_fuzz/corpus.py`, `tests/test_substrate_fuzz_runner.py` |
 | `cross_engine_disagreement_arm1` | arm 1 of the cross-engine error-localization measure (#2824): 120 gold rows drawn read-only, under a fixed seed, from the shadow store `app/djev_shadow.py` appends — 70 `action_review` rows at recorded `min_label_mass` at or above 0.9, 30 below it, 20 `entity`, and 0 dedupe, because not one of the 40 dedupe rows in that window records the field its rubric line reads. Every label comes from a rubric line plus the artifact that line was read against, so a label is re-derivable rather than a preference; the quantity scored is cross-engine agreement, which is why a Lloyd-authored label is admissible here at all and why it is **not a human label**. `eval/cross_engine_disagreement.py` scores it as the `shadow-gold-sample` surface under the same 5-repeat, Wilson-interval and 30-non-abstaining rules as the other two surfaces, and prints UNMEASURABLE in place of a thin rate. The arm holds the corpus and the sampler; its measured outputs are published outside the repo, and the first live two-engine pass over it is owed | `eval/cross_engine_disagreement_arm1/sample_gold.py`, `eval/cross_engine_disagreement_arm1/rubric.py`, `eval/cross_engine_disagreement.py`, `tests/test_cross_engine_arm1_gold.py` |
 
 The corpora are the point of the arms; the scripts that read them mostly live one
@@ -96,8 +96,12 @@ an annotation, but such a pair is never an admissible verdict.
 ## Arms that are flag values: the compaction-recall runner
 
 §The arms inventories **directories**. The same word carries a second, unrelated
-sense in this tree: `--arms` is a flag six runner scripts under `eval/` and
-`scripts/` declare, and its values are configuration presets inside one script.
+sense in this tree: `--arms` is a flag nine runner scripts under `eval/` and
+`scripts/` declare (six when this section was written), and its values are
+configuration presets inside one script. The preset table below is graded against
+`eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the nine — so the
+other eight's values (`off`/`enforce` in `eval/egress_arms.py`, surface names in
+`eval/cross_engine_disagreement.py`) are outside the guard (#3582).
 `memory_eval` is the collision spelled out — it is a directory arm *and* a
 runner whose `--arms` values (`closed_book`, `history`, `prefetch`) are not
 directories. Nothing separates the two senses but this paragraph: **an `--arms`
@@ -162,8 +166,8 @@ here.
 ## The bench corpus
 
 The bench tasks are markdown, not Python, and they are not in this repo: they sit
-under `~/obsidian/lloyd/bench`, which is what `paths.bench_dir` in `config.yaml`
-names. A bench task is an instruction plus what a correct run looks like; the
+under `~/obsidian/lloyd/bench`, which is what `autoresearch.bench_dir` in
+`config.yaml` names (the runner reaches it as `cfg.paths.bench_dir`, which is a dataclass attribute of `scripts/autoresearch/common.py`, not a key in the file). A bench task is an instruction plus what a correct run looks like; the
 runner is `scripts/autoresearch/bench_runner_sdk.py`, which drives the real
 harness with real tools.
 
@@ -209,8 +213,14 @@ artifact that predates the key additionally puts a `menu_builder` entry into
 `ceiling_notes`, under a non-metric key, naming the command that would retire the
 state (#2485). Measured on the tree this was written: the single artifact on disk,
 labelled by djev on 2026-09-29, predates the key, and the nightly that consumed it
-ran 10 days later — so the divisor every `*_normalized` value divides by has a
-builder nobody can name and an age nobody was printing.
+ran 10 days later — so the divisor every `*_normalized` value divides by had a
+builder nobody could name and an age nobody was printing. That state has since been
+retired by the command the note names: `$LLOYD_DATA/eval/baselines/label-agreement/`
+now holds two artifacts, the newer labelled by djev on 2026-10-14 and carrying
+`menu_builder: query-token-overlap/v1`, and the 2026-10-29 nightly prints it beside
+`artifact_age_days: 15`. The veto did not go with the attribution — every
+`*_normalized` in that artifact is still null, `entity_hit_rate` among a
+`population mismatch` of 66 scored against 52, which is what #2014 is about.
 
 The ceiling itself is a function of the candidate menu the second labeler was
 shown, so the artifact names its menu builder (`menu_builder`, beside `caps`) and
@@ -282,7 +292,7 @@ rung of `scripts/automod/gate.py` and nothing else.
   only when the two runs recorded an identical `config` block, and
   `eval/compare_tool_choice.py --measure-floor` is what measures the spread from
   them. No automated label can ever produce a pair: the rung above labels the
-  run `item<id>` or `gate-<round_id>` (`scripts/automod/gate.py:1590`), so its
+  run `item<id>` or `gate-<round_id>` (`scripts/automod/gate.py:3043`), so its
   arm residue is never `-a`/`-b`, and nothing calls `--measure-floor` on a
   schedule either. A person does it, or the record ages. Since #1888 that
   command refuses to write when no pair survived into the record — no pair on
@@ -325,6 +335,26 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   reinstated by this one.
 
 ## Review log
+
+- **2026-10-30 — stale.** Re-checked against `af268b481770`. Two `path:NNN` anchors had
+  been overtaken by the code they cite (`eval/run_eval.py:2055` → `:2686`;
+  `scripts/automod/gate.py:1590` → `:3043`, that line now sitting inside the #3143
+  skip-ceiling block), and three quantities in the arms table's cells had moved: the
+  supply-chain fixture set is 63 planted names since #3206, `substrate_fuzz` ships 60
+  corpus tasks over its 8 domains, and `--arms` is declared by nine scripts rather
+  than six. One path was named by its in-code attribute instead of its file's key: the
+  bench corpus is `autoresearch.bench_dir`. The ceiling paragraph's "single artifact …
+  a builder nobody can name" had been retired by the 2026-10-14 re-baseline, so it now
+  reads as the dated measurement it was; the population veto itself is still standing
+  (66 vs 52 on the 2026-10-29 nightly). Re-read and unchanged: all seventeen arm names
+  against the seventeen `eval/*` arm directories, the sixteen presets and their kept-row
+  counts against the runner's `ARMS` dict and the five tracked `compaction*.json`, the
+  120-row arm-1 split (70/30/20, 0 dedupe), the eighteen canary scenarios and three
+  controls, the 180 controls against 181 declared dependencies, the four tool-choice
+  exit codes, and that no gate rung runs an eval but this one. Filed #3580 (a drifted
+  anchor passes the doc-claims node), #3581 (the counts inside the arm cells are graded
+  by nothing), #3582 (the flag-value guard covers one of nine declarers) and #3583 (the
+  noise floor's `measured_at` is 2026-10-01 and is surfaced nowhere it is consumed).
 
 - **2026-10-05 — row added (#2254).** `judge_self_preference` joined the table on the
   day its code landed, not the day it measured anything: the four-arm generator, the
