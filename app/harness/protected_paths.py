@@ -42,13 +42,10 @@ sandboxed ones.
 
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import logging
 import os
 import re
 import shlex
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 logger = logging.getLogger("lloyd-protected-paths")
@@ -146,8 +143,9 @@ def protected_roots() -> list[Root]:
 # `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
 # (`scripts/automod/promote.py:97`) — the broader entry would have put the
 # parachute inside the deny-set. The legitimate writer, `uv python install`, is
-# a human command (`SETUP.md:166`); an agent that needs it owes a grant, which is
-# the point rather than an inconvenience to route around.
+# a human command (`SETUP.md:166`); nothing running inside this process is
+# entitled to write any of these paths, because #3563 found that the lift which
+# used to claim otherwise had never been taken by anyone.
 PROTECTED_WRITE_ROOTS: tuple[tuple[str, str], ...] = (
     ("~/.openclaw", "the OpenClaw credential tree"),
     ("~/lloyd/agent-services", "the supervisor, guardian and service units"),
@@ -157,15 +155,17 @@ PROTECTED_WRITE_ROOTS: tuple[tuple[str, str], ...] = (
     ("~/obsidian/lloyd/SOUL.md", "the identity file loaded into every system prompt"),
 )
 
-#: Lifted in code or not at all. A `ContextVar`, not an argument: the model
-#: controls the tool-arguments dict, and it controls `_meta` and the session id
-#: that arrive beside them, so an authorisation readable from any of those is a
-#: key the model can turn. A contextvar is settable only by Python already
-#: running in this process — a job runner wrapping its own dispatch — and
-#: `asyncio.to_thread` copies the context, so a grant taken on the event loop
-#: is still in force on the worker thread that performs the write.
-_write_grant: "contextvars.ContextVar[tuple[str, ...] | None]" = contextvars.ContextVar(
-    "lloyd_protected_write_grant", default=None)
+# NO IN-PROCESS EXEMPTION EXISTS (#3563). What used to sit here was a ContextVar
+# the deny-set consulted before answering — a grant, its scoped `with` wrapper, a
+# release, and a reader of the live value, five names in all — and the eight
+# commits that ever touched those names contain no caller: the pickaxe over the
+# lift's own name returns only commits that wrote prose about it. The sanctioned
+# in-process writer that prose justified it with does not exist either, and the
+# prose is what is wrong here, not the code that never ran. See
+# `write_deny_reason` for the measurement, the one route that does land a deny-set
+# file, and the reason an unlogged exception beside a journalled refusal had to go.
+# `PROTECTED_SHELL_RO_ROOTS` below is cited by line number from
+# `lloyd/reviews/2026-09-14-user-md-audit.md`, so this header's length is its own.
 
 
 def protected_write_roots() -> list[tuple[str, str]]:
@@ -270,62 +270,21 @@ def write_deny_reason(target: str) -> str | None:
 
     Resolves `target` itself, so a caller that has no realpath to hand cannot
     skip the check by forgetting to resolve one.
+
+    No second argument, no contextvar, no `allow_*` wrapper: an answer of None
+    here comes only from the path being outside the set. The route that lands
+    the one deny-set file a sanctioned job does write — `~/obsidian/lloyd/SOUL.md`
+    through `automod_vault_land` — commits bytes a validator already accepted
+    with a `git` subprocess and never asks this function (#3563 deleted the lift
+    that used to sit beside it, and its header says why).
     """
     if not target:
         return None
     real = os.path.realpath(target)
-    granted = _write_grant.get()
     for root, label in protected_write_roots():
-        if not _covers(root, real):
-            continue
-        if granted is not None and (
-                # An empty grant list means the whole set; a narrowed one means
-                # only those locations, so a job handed two loaded-memory files
-                # does not also get the service units.
-                not granted
-                or any(_covers(os.path.realpath(os.path.expanduser(g)), real)
-                       for g in granted)):
-            return None
-        return label
+        if _covers(root, real):
+            return label
     return None
-
-
-def grant_protected_writes(reason: str,
-                           paths: Sequence[str] | None = None) -> contextvars.Token:
-    """Lift the write deny-set for this context; return the token that undoes it.
-
-    `reason` is required and logged, because an authorisation nobody can name
-    is an authorisation nobody revokes. `paths` narrows the lift to those
-    locations (an empty sequence lifts the whole set).
-
-    Callers are job runners inside this process. Nothing here reads the
-    tool-arguments dict, `_meta`, or the session id, so a turn cannot lift its
-    own denial — which is the entire property this function exists to provide.
-    """
-    granted = tuple(os.path.realpath(os.path.expanduser(p)) for p in paths) if paths else ()
-    token = _write_grant.set(granted)
-    logger.info("protected writes granted (%s): %s", reason,
-                list(granted) or "the whole deny-set")
-    return token
-
-
-def release_protected_writes(token: contextvars.Token) -> None:
-    _write_grant.reset(token)
-
-
-def protected_writes_granted() -> "tuple[str, ...] | None":
-    """The active lift, or None while the deny-set is in force. Tests and /state."""
-    return _write_grant.get()
-
-
-@contextlib.contextmanager
-def allow_protected_writes(reason: str, paths: Sequence[str] | None = None):
-    """Scoped `grant_protected_writes`, so a grant cannot outlive its `with`."""
-    token = grant_protected_writes(reason, paths)
-    try:
-        yield
-    finally:
-        release_protected_writes(token)
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +381,12 @@ def read_deny_reason(target: str) -> str | None:
     check. A sibling named `.env.example` is therefore outside the `~/lloyd/.env`
     entry, and `~/.ssh_backups` outside `~/.ssh`.
 
-    No grant lifts it. `_write_grant` exists because the nightly reflection has
-    a sanctioned writer for files inside the write set; there is no sanctioned
-    *reader* of a private key by an untrusted-input turn, and a second lift
-    mechanism readable from the same context would just be a second way to lose
-    the property.
+    No grant lifts it, and since #3563 there is no write-side lift either for it
+    to be confused with — the write deny-set's one exemption is a git commit
+    (`automod_vault_land`), which never reaches this module. There is no
+    sanctioned *reader* of a private key by an untrusted-input turn, and a second
+    lift mechanism readable from the same context would just be a second way to
+    lose the property.
     """
     if not target:
         return None
@@ -902,8 +862,9 @@ def referenced_paths(command: str, cwd: str | None = None, _depth: int = 0) -> l
 # One deny-set, one predicate, every lane that can land a write: `write_deny_reason`
 # is called on the resolved target exactly as the file lane calls it — Bash since
 # #1620, and `vault_write` since #1757, which was the last MCP lane that asked
-# nothing and so could land `lloyd/SOUL.md` from an ordinary turn. That is what makes
-# an `allow_protected_writes` lift cover all three as one, and it also means
+# nothing and so could land `lloyd/SOUL.md` from an ordinary turn. That is what
+# makes the one refusal answer all three at once — since #3563 there is no
+# in-process lift for it to be raised on any lane or on none — and it also means
 # realpath semantics carry over — a symlink out of the set, like
 # `.venvs/lloyd/bin/python` → the uv-managed interpreter, is outside the set
 # here as it is on the file lane. Widening that is a membership decision (left

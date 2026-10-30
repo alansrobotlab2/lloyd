@@ -1721,10 +1721,13 @@ def _protected_write_refusal(path: str) -> dict | None:
     Runs ahead of every other check here, including the OKF guards: this is a rule
     about *where* a write may land, not about what is in it, and the file it refuses
     is not a `knowledge/` note. It calls `write_deny_reason` rather than restating
-    the set — one module decides, everyone else calls it — so the grant
-    (`allow_protected_writes`, a `ContextVar` no tool argument can set) is honoured
-    identically on all three lanes, which is what keeps the sanctioned in-process
-    writer working while an ordinary turn cannot lift its own denial.
+    the set — one module decides, everyone else calls it — so this lane refuses
+    exactly what the `Write`/`Edit` lane and the Bash lane refuse, with no answer
+    short of that predicate able to differ between them. Nothing lifts it: the
+    lift that used to sit behind the predicate had no caller and is gone (#3563),
+    and the only route that writes a deny-set file is `automod_vault_land`, which
+    validates the path against the prompt-surface contract and commits it with a
+    `git` subprocess instead of asking this function.
 
     Fails closed, like the fs lane: a deny-set that cannot load is not a deny-set
     that passed, and "every write silently proceeded while the checker was broken"

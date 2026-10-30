@@ -260,9 +260,18 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    lane: `builtin_fs` refuses `Write`/`Edit` under `PROTECTED_WRITE_ROOTS` —
    the credential tree, the uv-managed Python tree, `~/lloyd/agent-services`,
    `~/lloyd/.venvs`, and `~/obsidian/lloyd/SOUL.md`
-   (`app/harness/protected_paths.py:151`, landed
-   2026-09-20) — lifted only by the `allow_protected_writes()` contextvar,
-   which is settable in code and by no production caller today. It is not
+   (`app/harness/protected_paths.py`, landed
+   2026-09-20) — and **lifted by nothing in process**. `write_deny_reason` takes
+   the target alone and answers from set membership, so an answer of None means
+   the path is outside the set; #3563 deleted the contextvar lift the earlier
+   text here described, after the eight commits that ever touched it were read
+   and found to contain no caller and no writer. The deny-set's one exemption is
+   not a lane at all: `automod_vault_land` validates a named vault path against
+   the prompt-surface contract (`CONTRACT_PATHS`,
+   `scripts/automod/vault_round.py`) and commits bytes already on disk with a
+   `git` subprocess, so it never reaches this predicate — which is why deleting
+   the lift lands nothing. Cited by file, not by line: a pointer to a line rots
+   on the next edit above it, and the doc that copied it rotted with it. It is not
    `protected_roots()`: those are `$HOME`, the vault and the code tree, and
    refusing writes under them would refuse every note and every round.
 4. **Invoke.** `MCPPool._invoke` opens one short-lived HTTP session per call
@@ -677,7 +686,7 @@ re-implements the caps.
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `vault_read` | RO | `path` | Read a vault file by vault-relative path |
-| `vault_write` | ID | `path`, `content` | Create or overwrite a vault file (audit-logged). Refuses a write deny-set path — `lloyd/SOUL.md` today — without an `allow_protected_writes` grant, like `Write`/`Edit` (#1757) |
+| `vault_write` | ID | `path`, `content` | Create or overwrite a vault file (audit-logged). Refuses a write deny-set path — `lloyd/SOUL.md` today — unconditionally, exactly like `Write`/`Edit` and the Bash lane (#1757): all three ask `write_deny_reason` and nothing in process can raise it, since #3563 deleted the lift that used to be consulted there. The only route that writes such a file is `automod_vault_land`, which validates the path against the prompt-surface contract and commits it with `git` instead of calling any of those lanes |
 | `vault_overview` | RO | — | File counts per segment: `total_files` and one count per top-level segment. No parameter — no second mode is implemented |
 | `vault_search` | RO | `query` | BM25 + vector search over the vault |
 | `vault_recall` | RO | `query` | Vault search plus entity facts in parallel; carries the djev rerank arm and shadow seam. Its seven eval knobs (`RECALL_EVAL_KNOBS`: graph expansion and rerank, djev rerank) are read from params in process only; `call_tool` strips them, and the schema no longer lists them |

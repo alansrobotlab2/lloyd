@@ -214,53 +214,71 @@ async def test_the_deny_set_holds_when_the_clobber_gate_is_disabled(home, monkey
                                           "content": "OVERWRITTEN"}), target)
 
 
-# ── clause 4: only code can lift it ─────────────────────────────────────────
+# ── clause 4: nothing can lift it, in-process or from the turn ──────────────
+#
+# #3563 inverts the two allow-half proofs this file was written with, and the
+# inversion is the whole of clause 2:
+#   `test_the_same_arguments_are_refused_until_code_lifts_them`
+#     -> `test_the_identity_file_is_refused_and_there_is_no_call_that_changes_it`
+#   `test_the_vault_write_lane_lands_that_file_under_a_grant`
+#     -> `test_the_vault_write_lane_refuses_that_file_for_want_of_a_grant`
+# Both kept their fixture, their path and their byte assertions, so the diff shows
+# the expected outcome flipping rather than a node disappearing. The nodes that
+# exercised the `paths=[…]` narrowing are rewritten the same way — for the Bash
+# lane they live in `tests/test_bash_write_guard.py`.
 
-async def test_the_same_arguments_are_refused_until_code_lifts_them(home):
-    """The one pair the clause asks for: identical arguments, different
-    outcome, and the difference is a call to `allow_protected_writes`."""
+async def test_the_identity_file_is_refused_and_there_is_no_call_that_changes_it(home):
+    """#3563 inverts this node. It used to read: identical arguments, different
+    outcome, the difference being one in-process lift call — which is how a test
+    suite can hold an allow-half proof while the mechanism it proves is dead code:
+    the only caller of that call was the test itself.
+
+    Now the identical-arguments pair is across the two things that exist: the
+    turn's own call, and the same call again after asking whether the module has
+    any way to change the answer. Both refuse, the bytes never move, and the
+    module exposes no name ending in `protected_writes` — asked as a suffix
+    because a renamed re-add would satisfy a check written against the four names
+    this item deleted and would not satisfy this one."""
     target = home / DENIED["identity file"]
     args = {"file_path": str(target), "content": "GRANTED WRITE"}
-    # Read first: the lift is of the deny-set only, so a granted Write still
-    # owes the Read-before-overwrite clobber gate like any other write.
-    assert not (await FS.call_tool("Read", {"file_path": str(target)})).is_error
     _refused(await FS.call_tool("Write", args), target)
-    with PP.allow_protected_writes("test: the nightly knowledge-write lane"):
-        assert (await FS.call_tool("Write", args)).is_error is False
-    assert target.read_text() == "GRANTED WRITE"
-    # And it cannot outlive its scope: the same call is refused again outside.
-    target.write_text(ORIGINAL)
+    lifts = sorted(n for n in dir(PP) if n.endswith("protected_writes"))
+    assert not lifts, f"an in-process write lift came back on the module: {lifts}"
     _refused(await FS.call_tool("Write", args), target)
+    assert target.read_text() == ORIGINAL, "the bytes moved on a refused call"
 
 
-async def test_a_grant_taken_on_the_event_loop_reaches_the_worker_thread(home):
-    """The seam: `call_tool` hands the handler to `asyncio.to_thread`, so the
-    write happens on another thread while the grant lives in this task's
-    context. `to_thread` copies the context, which is what makes that work —
-    a plain module global read on the loop and written on the executor would
-    not have."""
-    target = home / DENIED["credential tree"]
-    await FS.call_tool("Read", {"file_path": str(target)})
-    token = PP.grant_protected_writes("test: crossing into to_thread")
-    try:
+async def test_the_refusal_survives_the_thread_boundary_the_handler_runs_on(home):
+    """The seam this node used to prove in the other direction.
+
+    `call_tool` hands the handler to `asyncio.to_thread`, so the write decision is
+    made on a worker thread while the caller's context lives on the loop — which
+    is exactly why the deleted mechanism was a `ContextVar` and not a module
+    global: `to_thread` copies the context, so a lift taken on the loop reached the
+    executor and the write went through there. That boundary is now the thing worth
+    pinning on its own: the answer cannot depend on which thread asks, because
+    `write_deny_reason` takes one argument and there is no ambient state for the
+    copy to carry. Both deny-set locations are refused on the worker thread and the
+    bytes are untouched on the loop."""
+    for key in ("credential tree", "identity file"):
+        target = home / DENIED[key]
         res = await FS.call_tool("Write", {"file_path": str(target), "content": "ok"})
-        assert res.is_error is False, _text(res)
-        assert target.read_text() == "ok"
-    finally:
-        PP.release_protected_writes(token)
-    assert PP.protected_writes_granted() is None
+        assert res.is_error is True, f"{key} was written on the worker thread"
+        assert target.read_text() == ORIGINAL, f"{key}'s bytes changed anyway"
 
 
-async def test_a_narrowed_grant_lifts_only_what_it_names(home):
-    """A job handed one location must not also get the rest of the set."""
+async def test_two_deny_set_locations_are_refused_in_the_same_call_sequence(home):
+    """What the removed `paths=[…]` argument used to be tested against: one
+    location granted and its sibling refused, so a job handed one location could
+    not also get the rest of the set. With no location-grantable state, the same
+    sequence refuses both — which is the narrowing's property with its useful half
+    kept: no request, in any order, ever opens one entry and not another."""
     soul = home / DENIED["identity file"]
     venv = home / DENIED["interpreter"]
-    await FS.call_tool("Read", {"file_path": str(venv)})
-    with PP.allow_protected_writes("test: one location only", paths=["~/lloyd/.venvs"]):
-        _refused(await FS.call_tool("Write", {"file_path": str(soul),
-                                              "content": "OVERWRITTEN"}), soul)
-        assert (await FS.call_tool("Write", {"file_path": str(venv),
-                                             "content": "ok"})).is_error is False
+    for path in (soul, venv):
+        _refused(await FS.call_tool("Write", {"file_path": str(path),
+                                              "content": "OVERWRITTEN"}), path)
+    assert soul.read_text() == ORIGINAL and venv.read_text() == ORIGINAL
 
 
 # ── #1741: the fifth entry, on the lane where it is not a file ──────────────
@@ -292,63 +310,51 @@ def linked_home(tmp_path, monkeypatch):
     return h
 
 
-async def test_a_grant_naming_the_store_lifts_the_interpreter_write_and_nothing_else(
-        linked_home):
-    """#1741 clause 4: the new entry behaves like the four it joined, including
-    being liftable — a deny-set only code can lift, and only into the one location
-    a grant names.
+async def test_the_store_link_stays_refused_on_both_lanes_with_nothing_to_narrow(linked_home):
+    """#3563: the fifth entry's own refusal, where only the store covers it.
 
-    Both lanes, one grant: the `Write` of the interpreter link (which lands on the
-    store binary, so that is the file whose bytes are checked) and, on the Bash lane
-    beside it, the `> ~/.openclaw/x` redirect the same call must still refuse. The
-    grant names `~/.local/share/uv/python` and nothing else, so if the lift were
-    implemented as a global switch — the shape a `bool` contextvar would have given
-    — the second half goes red; and if the store entry were missing, the first half
-    goes red at the base commit."""
+    The distinction #1741 set up still decides this node. As a link,
+    `.venvs/lloyd/bin/python` is outside `~/lloyd/.venvs` and inside
+    `~/.local/share/uv/python` by realpath alone — so the fifth entry is the only
+    thing refusing it, and the grant that used to be able to open it by naming the
+    store is gone. Both lanes, and the Bash lane's credential write beside it,
+    stay refused, which is what the narrowing used to be differentiated against."""
     link = linked_home / DENIED["interpreter"]
     binary = linked_home / UV_STORE_BIN / "python3.12"
     assert link.is_symlink() and link.resolve() == binary.resolve()
     redirect = "echo x > ~/.openclaw/x"
-    assert not (await FS.call_tool("Read", {"file_path": str(link)})).is_error
     args = {"file_path": str(link), "content": "GRANTED WRITE"}
     _refused(await FS.call_tool("Write", args), binary)
     assert "uv-managed" in _json(await FS.call_tool("Write", args))["error"]
     assert check_bash_command(redirect, str(linked_home / "lloyd"),
                               at_dispatch=True, session_id=SID) is not None, redirect
-    with PP.allow_protected_writes("test: the uv store lane",
-                                   paths=["~/.local/share/uv/python"]):
-        assert (await FS.call_tool("Write", args)).is_error is False, \
-            "a grant naming the store must open the write into the store"
-        assert binary.read_text() == "GRANTED WRITE"
-        assert check_bash_command(redirect, str(linked_home / "lloyd"),
-                                  at_dispatch=True, session_id=SID) is not None, \
-            "the same grant may not open the credential tree"
-    assert not (linked_home / ".openclaw" / "x").exists()
-    # And the lift does not outlive its scope.
-    binary.write_text(ORIGINAL)
     _refused(await FS.call_tool("Write", args), binary)
+    assert binary.read_text() == ORIGINAL, "a refused write into the store changed the interpreter"
+    assert not (linked_home / ".openclaw" / "x").exists()
+def test_the_bash_lane_and_the_file_lane_refuse_the_same_two_writes(home):
+    """One predicate, two lanes, and now only one state to be in (#1620, #3563).
 
-
-# Acceptance clause 5 of #1620: the grant pair, on the Bash lane beside the lane
-# whose fixture it uses. Node id: test_the_same_lift_covers_the_bash_write_the_file_write_waits_for
-def test_the_same_lift_covers_the_bash_write_the_file_write_waits_for(home):
-    """One predicate, two lanes (#1620): the fifth check asks the same
-    `write_deny_reason` `_protected_path_refusal` asks, so with no lift both
-    spellings are refused and a narrowed grant opens only the `tee` it names."""
+    This node proved that a lift naming `~/lloyd/agent-services` opened the `tee`
+    and left `> ~/.openclaw/x` refused — the lanes agreeing because they shared a
+    switch. With the switch deleted the agreement is stronger and cheaper to
+    state: both spellings are refused here and on `Write`, so there is no pair of
+    commands on which the two lanes could report differently."""
     tee = ("echo unit | tee -a ~/lloyd/agent-services/supervisor/conf.d"
            "/agent-backend.conf")
     redirect = "echo x > ~/.openclaw/credentials.json"
     for cmd in (tee, redirect):
-        assert check_bash_command(cmd, str(home / "lloyd"), at_dispatch=True,
-                                  session_id=SID) is not None, cmd
-    with PP.allow_protected_writes("test: service units only",
-                                   paths=["~/lloyd/agent-services"]):
-        assert check_bash_command(tee, str(home / "lloyd"), at_dispatch=True,
-                                 session_id=SID) is None, tee
-        assert check_bash_command(redirect, str(home / "lloyd"), at_dispatch=True,
-                                 session_id=SID) is not None, redirect
+        match = check_bash_command(cmd, str(home / "lloyd"), at_dispatch=True,
+                                   session_id=SID)
+        assert match is not None, cmd
+        assert match[0].startswith("protected write: "), match
 
 
+# The sixth case is spelled after the mechanism #3563 deleted, on purpose and not
+# as residue: a turn that reads the old doc text and sends the old name as an
+# argument must get the same refusal as one that invents a name. It is the only
+# remaining mention of that name anywhere outside the sweep that keeps it out of
+# the shipped tree, and `tests/test_protected_write_exemption_docs.py` is what
+# stops the name returning to `app/`, `agent_mcp/` or `architecture/`.
 @pytest.mark.parametrize("extra", [
     {"_protected": False},
     {"protected": False},
@@ -471,22 +477,24 @@ async def test_the_vault_write_lane_refuses_the_file_the_fs_lane_refuses(
         "the refusal must leave the identity file's bytes exactly as they were")
 
 
-async def test_the_vault_write_lane_lands_that_file_under_a_grant(
+async def test_the_vault_write_lane_refuses_that_file_for_want_of_a_grant(
         home, monkeypatch, tmp_path):
-    """#1757, clause 2: the lane stays, the exemption narrows to a grant.
+    """#1757's clause-2 allow half, inverted by #3563: the lane refuses, always.
 
-    Same call, same path, one in-process `allow_protected_writes` around it
-    narrowed to that path — the mechanism the Bash and fs lanes already agree
-    on, and a `ContextVar` no tool argument can set. This is the allow half: a
-    denial with no route through it is an outage, not a guard.
-    """
+    Same call, same path. What used to make it land was an in-process grant
+    narrowed to that path — the mechanism this item deleted after reading all
+    eight commits that ever named it and finding the test itself to be its only
+    caller. So the lane is now a pure denial, and the route the refusal text
+    offers (`automod_vault_land`) is exempt by never coming through here:
+    `scripts/automod/vault_round.py::land` validates the named path and commits it
+    with a `git` subprocess. The node keeps its shape so the inversion is visible
+    in the diff rather than resting on an absent function."""
     V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
     target = vault_root / "lloyd" / "SOUL.md"
-    with PP.allow_protected_writes("test: the vault lane's sanctioned write",
-                                   paths=[str(target)]):
-        res = V._vault_write({"path": "lloyd/SOUL.md", "content": "SANCTIONED WRITE"})
-    assert res.get("success") is True, res
-    assert target.read_text() == "SANCTIONED WRITE"
+    res = V._vault_write({"path": "lloyd/SOUL.md", "content": "SANCTIONED WRITE"})
+    assert res.get("code") == "PROTECTED_PATH", res
+    assert "automod_vault_land" in res["error"], res
+    assert target.read_text() == ORIGINAL, "the identity file was written by a refusal"
 
 
 async def test_the_vault_write_denial_survives_the_aggregator_trip(
@@ -504,17 +512,24 @@ async def test_the_vault_write_denial_survives_the_aggregator_trip(
     assert (vault_root / "lloyd" / "SOUL.md").read_text() == ORIGINAL
 
 
-async def test_a_grant_narrowed_elsewhere_still_refuses_on_the_vault_lane(
+async def test_the_vault_lane_refuses_the_identity_file_and_lands_its_sibling(
         home, monkeypatch, tmp_path):
-    """A grant lifted for one location is not a grant for the identity file."""
+    """The pair the deleted narrowing used to be tested with, now in one node.
+
+    A grant lifted for `~/lloyd/agent-services` was the old way to show that a
+    permission on one location is not a permission on the identity file. Nothing
+    is grantable now, so the pair that matters is the one a real round sees: the
+    deny-set path in the same `lloyd/` folder is refused while `lloyd/MEMORY.md`,
+    outside the set, lands. The second half is the item's own measurement — the
+    loaded-memory writers never needed the lift, which is why deleting it broke
+    nothing."""
     V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
-    target = vault_root / "lloyd" / "SOUL.md"
-    elsewhere = home / "lloyd" / "agent-services" / "supervisor" / "conf.d" / "agent-backend.conf"
-    with PP.allow_protected_writes("test: granted the service unit only",
-                                   paths=[str(elsewhere)]):
-        res = V._vault_write({"path": "lloyd/SOUL.md", "content": "WRONG GRANT"})
+    res = V._vault_write({"path": "lloyd/SOUL.md", "content": "WRONG ROUTE"})
     assert res.get("code") == "PROTECTED_PATH", res
-    assert target.read_text() == ORIGINAL
+    assert (vault_root / "lloyd" / "SOUL.md").read_text() == ORIGINAL
+    ok = V._vault_write({"path": "lloyd/MEMORY.md", "content": "# memory\n"})
+    assert ok.get("success") is True, ok
+    assert (vault_root / "lloyd" / "MEMORY.md").read_text() == "# memory\n"
 
 
 async def test_the_vault_lane_allow_half_lands_the_file_beside_the_denied_one(
@@ -576,18 +591,24 @@ async def test_the_refusal_comes_back_over_the_aggregator_with_is_error(home):
     assert target.read_text() == ORIGINAL
 
 
-async def test_the_write_still_lands_over_the_aggregator_once_the_grant_is_given(home):
-    """The other side of the seam: a grant taken by in-process code around a
-    real `main.call_tool` trip applies, so the property is a permission model
-    and not just a hard refusal."""
+async def test_the_refusal_arrives_over_the_aggregator_with_no_grant_to_wait_for(home):
+    """The seam, deny half — and the allow half it used to be paired with is gone.
+
+    `main.call_tool` is the boundary every real tool call crosses. The node here
+    before #3563 proved that a grant taken by in-process code around the trip
+    applied, "so the property is a permission model and not just a hard refusal";
+    the honest statement now is that on this lane the property *is* a hard
+    refusal, and the only thing that can vary across the boundary is whether the
+    refusal text routes the caller somewhere. It does, and the bytes do not
+    move."""
     target = home / DENIED["service unit"]
     await M.list_tools()
-    await M.call_tool("Read", {"file_path": str(target)}, {"lloyd/session_id": SID})
-    with PP.allow_protected_writes("test: aggregator lane"):
-        res = await M.call_tool("Write", {"file_path": str(target), "content": "unit\n"},
-                                {"lloyd/session_id": SID})
-    assert res.is_error is False, _text(res)
-    assert target.read_text() == "unit\n"
+    res = await M.call_tool("Write", {"file_path": str(target), "content": "unit\n"},
+                            {"lloyd/session_id": SID})
+    assert res.is_error is True, _text(res)
+    assert _code(res) == "PROTECTED_PATH", _text(res)
+    assert "automod_vault_land" in _text(res), _text(res)
+    assert target.read_text() == ORIGINAL
 
 
 def test_the_probe_from_the_triage_record_reproduces_only_the_refusal(home):

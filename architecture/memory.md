@@ -335,7 +335,7 @@ expired 8 more — 18 of those 30 refused outright as god-nodes — including
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
-1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:2829`,
+1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:2832`,
    nested in `_vault_recall_base` at `:2419`, over the pool `_collect` builds at
    `:2655`) caps the returned fact list at `FACT_RANK_CAP_SEED=10`
    (`agent_mcp/retrieval.py:118`; graph-expanded neighbours get their own

@@ -15,6 +15,7 @@ nothing here depends on the live vault.
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import re
 from pathlib import Path
@@ -336,36 +337,63 @@ def test_the_uv_store_entry_covers_the_interpreter_and_no_more(linked_home):
         str(linked_home / "lloyd/.venvs/pyvenv.cfg")) == THE_SHIPPED_FOUR["~/lloyd/.venvs"]
 
 
-def test_granting_lifts_the_set_and_expiring_relifts_it(wtree):
-    target = str(wtree / ".openclaw" / "config.json")
-    assert PP.write_deny_reason(target) is not None
-    token = PP.grant_protected_writes("test: the whole set")
-    try:
-        assert PP.write_deny_reason(target) is None
-    finally:
-        PP.release_protected_writes(token)
-    assert PP.write_deny_reason(target) is not None
-    assert PP.protected_writes_granted() is None
-    with PP.allow_protected_writes("test: scoped"):
-        assert PP.write_deny_reason(target) is None
-    assert PP.write_deny_reason(target) is not None
+def test_the_deny_set_has_no_in_process_lift_at_all(wtree):
+    """#3563 clause 1: the answer is membership, and nothing can turn it.
+
+    Every one of the five entries refuses, and the module exposes no name that
+    could answer differently — asked as a suffix (`*protected_writes`) rather than
+    as the four deleted names, because a re-add under a new name would satisfy a
+    check written against the old ones and would restore exactly the property this
+    node is about. The identity file's label is asserted verbatim: a refusal whose
+    reason string rotted is a refusal no reader can act on.
+    """
+    for root, label in PP.PROTECTED_WRITE_ROOTS:
+        target = str((wtree / root[2:] if root.startswith("~/") else Path(root)))
+        assert PP.write_deny_reason(target) == label, root
+    soul = str(wtree / "obsidian" / "lloyd" / "SOUL.md")
+    assert PP.write_deny_reason(soul) == \
+        "the identity file loaded into every system prompt"
+    lifts = sorted(n for n in dir(PP) if n.endswith("protected_writes"))
+    assert not lifts, f"an in-process lift came back on the module: {lifts}"
+    assert not hasattr(PP, "_write_grant"), \
+        "the contextvar the lift read came back, so membership is conditional again"
 
 
-def test_a_narrowed_grant_lifts_only_what_it_names(wtree):
+def test_the_predicate_has_no_second_input_to_authorise():
+    """The signature is the security property, so it is what gets pinned.
+
+    `write_deny_reason` used to take a `paths=` narrowing, and the grant that fed
+    it named a reason so a writer could be identified. Both are gone: one
+    positional parameter, no defaults, and a call that tries to supply the old
+    narrowing is a `TypeError` rather than a pass. An authorisation nobody can name
+    is an authorisation nobody revokes — and the answer is stronger now, because
+    there is nothing left to authorise.
+    """
+    params = list(inspect.signature(PP.write_deny_reason).parameters)
+    assert params == ["target"], params
+    venv = str(Path.home() / "lloyd/.venvs/pyvenv.cfg")
+    assert PP.write_deny_reason(venv) is not None
+    with pytest.raises(TypeError):
+        PP.write_deny_reason(venv, paths=["~/lloyd/.venvs"])
+
+
+def test_a_narrowed_write_cannot_be_opened_and_a_prefix_sibling_stays_outside(wtree):
+    """The half of the deleted narrowing that was never about the lift.
+
+    `paths=[…]` could open one location, which is what this node's first two
+    assertions tested. That state no longer exists, so both deny-set locations
+    simply refuse. What the node also pinned is `_covers`' whole-path-component
+    rule — a location sharing `~/lloyd/.venvs` as a mere string prefix
+    (`.venvs-extra`) is outside the entry — and that rule is why the deleted
+    narrowing could never have been widened by a sloppy path either, so it stays
+    pinned here where the set's edge is read."""
     soul = str(wtree / "obsidian" / "lloyd" / "SOUL.md")
     venv = str(wtree / "lloyd" / ".venvs" / "lloyd" / "bin" / "python")
-    with PP.allow_protected_writes("test: one entry", paths=["~/lloyd/.venvs"]):
-        assert PP.write_deny_reason(venv) is None
-        assert PP.write_deny_reason(soul) is not None
-    # Lifting `~/lloyd/.venvs` must not lift a sibling that shares its prefix.
-    with PP.allow_protected_writes("test: prefix sibling", paths=["~/lloyd/.venvs"]):
-        assert PP.write_deny_reason(str(wtree / "lloyd" / ".venvs-extra" / "f")) is None
-
-
-def test_grant_requires_a_reason():
-    """An authorisation nobody can name is an authorisation nobody revokes."""
-    with pytest.raises(TypeError):
-        PP.grant_protected_writes()  # type: ignore[call-arg]
+    assert PP.write_deny_reason(venv) is not None
+    assert PP.write_deny_reason(soul) is not None
+    assert PP.write_deny_reason(str(wtree / "lloyd" / ".venvs-extra" / "f")) is None, (
+        "`.venvs-extra` shares the entry only as a string prefix, and the set is "
+        "anchored on whole path components")
 
 
 def test_the_fs_lane_holds_no_path_literal_of_its_own():
@@ -1060,23 +1088,23 @@ def test_the_read_deny_set_is_not_the_write_set(credential_home):
     assert PP.write_deny_reason(str(credential_home / ".ssh" / "id_ed25519")) is None
 
 
-def test_no_write_grant_lifts_the_read_deny(credential_home):
-    """The lift is a write-lane mechanism and stays one.
+def test_the_read_deny_and_the_write_deny_answer_the_same_path_differently(
+        credential_home):
+    """#3563 removes the mechanism this node was written to fence, and keeps the
+    ruling it established: the two tables are separate, and each answers for its
+    own lane with no shared state between them.
 
-    `_write_grant` exists because the nightly reflection has a sanctioned writer
-    inside the write set. Handing the same contextvar to the read rule would mean
-    any job runner that grants a memory write also un-shields the SSH keys, and
-    the read deny has no sanctioned reader to make that trade for.
+    `~/lloyd/.env` is read-denied and outside the write set, so the pair below is
+    the disjointness read as behaviour. It used to be proven by taking a lift over
+    the whole write set and showing the read answer did not move — which is also
+    how the two could have been silently coupled by a future "let me reuse that
+    contextvar" edit. There is no contextvar to reuse now, so what is pinned is
+    that neither answer depends on anything but the path.
     """
     target = str(credential_home / "lloyd" / ".env")
-    before = PP.read_deny_reason(target)
-    with PP.allow_protected_writes("test: every path", paths=()):
-        assert PP.protected_writes_granted() == ()
-        assert PP.read_deny_reason(target) == before
-        assert PP.write_deny_reason(target) is None, (
-            "control: the grant DID lift the write set, so the read set's answer "
-            "below is a ruling and not a no-op")
-    assert PP.read_deny_reason(target) == before
+    assert PP.read_deny_reason(target) is not None
+    assert PP.write_deny_reason(target) is None
+    assert PP.read_deny_reason(target) == PP.read_deny_reason(target)
 
 
 def _code_string_literals(path: Path) -> list[str]:

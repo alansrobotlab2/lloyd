@@ -5240,7 +5240,7 @@ _INTERPRETER = re.compile(r"(?:^|/)python\d*(?:\.\d+)?\Z")
 # purpose: the only subcommand strings in the repo carrying one are private
 # helpers (`add_parser("_child")`), while every snake_case span a doc brackets
 # after a module is a *symbol* citation — `check_bash_command`,
-# `allow_protected_writes`, `check_deployed_copies`.
+# `protected_write_roots`, `check_deployed_copies`.
 _COMMAND_WORD = re.compile(r"\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 # A git commit id, which prose cites in a provenance parenthetical right where a
 # command list goes: `agent_mcp/_path_sandbox.py` (#2109, landed `b3b652b6`).

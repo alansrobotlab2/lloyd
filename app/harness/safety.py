@@ -505,9 +505,10 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     # check answers each true positive, so a new refusal placed earlier would
     # re-label commands the other lanes already refuse. Nothing here is reached by
     # a command the others already deny, and the checker below is the Bash half of
-    # the one predicate `agent_mcp/builtin_fs.py` consults for `Write` and `Edit`,
-    # grant contextvar included, so `allow_protected_writes` lifts both lanes or
-    # neither.
+    # the same predicate `agent_mcp/builtin_fs.py` consults for `Write` and `Edit`,
+    # with nothing raised over either of them: #3563 deleted the in-process lift
+    # those callers used to share, so a deny-set path meets this refusal whichever
+    # tool asks, and no state exists in which the answers could differ.
     from app.harness.protected_paths import check_bash_write_denied
     why = check_bash_write_denied(command, cwd)
     if why:

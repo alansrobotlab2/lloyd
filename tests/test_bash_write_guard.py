@@ -213,24 +213,28 @@ def test_the_store_entry_covers_the_link_only_because_the_link_is_a_link(linked_
         == "the interpreter the lloyd services run on", "a real file inside the venv"
 
 
-def test_a_grant_naming_the_store_lifts_the_bash_write_and_nothing_else(linked_home):
-    """The pair on the Bash lane: a lift naming the store opens the interpreter
-    write, and leaves `> ~/.openclaw/x` refused, because a narrowed grant is a
-    permission on a location and not on the concept of protected paths."""
+def test_every_write_shape_here_is_refused_and_nothing_can_narrow_the_set(linked_home):
+    """#3563: the narrowing this node used to pin is gone, so the refusal it
+    pinned is what has to hold for all five locations instead.
+
+    Before the delete, a lift naming ONE location opened the interpreter write
+    and left `> ~/.openclaw/x` refused — a permission on a location, not on the
+    concept. Both halves are now the same half: each of the five deny-set
+    locations is refused, and there is no second input to `write_deny_reason`
+    that could answer one location and not another. The interpreter symlink is
+    the sharpest of the five, because the path named on the command line is
+    outside the set and only its realpath is inside it."""
     interpreter = "cp /tmp/evil ~/lloyd/.venvs/lloyd/bin/python"
     redirect = "echo x > ~/.openclaw/credentials.json"
     for cmd in (interpreter, redirect):
         assert check_bash_command(cmd, str(linked_home / "lloyd"), at_dispatch=True,
                                   session_id=SID) is not None, cmd
-    with PP.allow_protected_writes("test: the uv store lane",
-                                   paths=["~/.local/share/uv/python"]):
-        assert check_bash_command(interpreter, str(linked_home / "lloyd"),
-                                  at_dispatch=True, session_id=SID) is None, interpreter
-        assert check_bash_command(redirect, str(linked_home / "lloyd"),
-                                  at_dispatch=True, session_id=SID) is not None, redirect
-    assert check_bash_command(interpreter, str(linked_home / "lloyd"),
-                              at_dispatch=True, session_id=SID) is not None, \
-        "the lift cannot outlive its scope"
+    assert PP.write_deny_reason(str((linked_home / ".local/share/uv/python").resolve())) \
+        == "the uv-managed CPython installs the lloyd venvs link to", \
+        "the store the removed narrowing used to name is still in the set"
+    lifts = sorted(n for n in dir(PP) if n.endswith("protected_writes"))
+    assert not lifts, \
+        f"an in-process write lift came back on the module: {lifts}"
 
 
 def _cmd(template: str, home: Path) -> str:
@@ -406,22 +410,43 @@ async def test_the_refusal_comes_back_over_the_aggregator_with_is_error(home):
     assert target.read_text() == ORIGINAL
 
 
-def test_the_grant_that_lifts_the_file_lane_lifts_this_lane_too(home):
-    """One predicate, both lanes: the Bash check calls the same
-    `write_deny_reason` `builtin_fs` calls, so `allow_protected_writes` is a
-    permission on the deny-set and not on one tool. The clause's own pair —
-    `tee` into `agent-services` passes under a lift naming it, `> ~/.openclaw/x`
-    stays refused — is in `tests/test_builtin_fs_protected_write.py`, next to the
-    lane that fixture belongs to."""
+def test_the_service_unit_write_is_refused_on_the_bash_lane_with_no_lift_behind_it(home):
+    """#3563: `tee` into `agent-services` is refused here and on `Write`, and the
+    two lanes cannot diverge because they read the same one-input predicate.
+
+    This node used to prove the lanes could be opened *together* by one grant,
+    which was the same property read from the wrong side: a shared lift proves
+    agreement only while the lift exists. With it deleted, agreement is the only
+    state either lane can be in — so the pair this node's docstring pointed at in
+    `tests/test_builtin_fs_protected_write.py` is now the pair of refusals there,
+    and the `paths=[…]` narrowing this node exercised has no argument left to
+    take it."""
     command = "echo x | tee -a ~/lloyd/agent-services/supervisord.conf"
-    assert check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
-                             session_id=SID) is not None
-    with PP.allow_protected_writes("test: the nightly service-unit lane",
-                                  paths=["~/lloyd/agent-services"]):
-        assert check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
-                                 session_id=SID) is None
-    assert check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
-                             session_id=SID) is not None, "the lift cannot outlive its scope"
+    match = check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
+                               session_id=SID)
+    assert match is not None, "the service-unit write went through"
+    assert match[0].startswith("protected write: "), match
+    assert PP.write_deny_reason(str(home / "lloyd/agent-services/supervisord.conf")) \
+        == "the supervisor, guardian and service units", \
+        "the location the removed narrowing used to name is still in the set"
+
+
+@pytest.mark.parametrize("root,label", sorted(PP.PROTECTED_WRITE_ROOTS))
+def test_a_write_shape_naming_each_of_the_five_roots_is_refused(home, root, label):
+    """#3563 clause 3, one root per node: the guard's purpose did not widen with
+    the lift removed, because the same five locations are what it covered before.
+
+    The three roots the deleted `paths=[…]` arguments named — `~/lloyd/.venvs`,
+    the uv store and `~/lloyd/agent-services` — are the ones this matters for: a
+    narrowing used to be able to open exactly one of them, so a refusal here is
+    the whole of what that argument used to be tested against. A redirect is
+    enough to reach the check; no path has to exist, because the deny-set is
+    prefix matching on a resolved path."""
+    target = root.replace("~", str(home), 1) + "/x"
+    match = check_bash_command(f"echo x > {target}", str(home / "lloyd"),
+                               at_dispatch=True, session_id=SID)
+    assert match is not None, f"{root} was writable on the Bash lane"
+    assert label in match[0], f"the refusal does not name the label for {root}: {match}"
 
 
 # ── #1740: a payload's write calls are read; its data is not ────────────────

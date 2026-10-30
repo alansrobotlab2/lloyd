@@ -138,9 +138,9 @@ is watching, not what some lane allows it to touch, and no row here is a grant o
 the lack of one. `FILE_NOTE` = `{Write, vault_write}`
 (`app/harness/capabilities.py:91`) is in every scheduled task's base set beside
 `Bash` and `Edit` (`app/harness/capabilities.py:346`), and
-`PROTECTED_WRITE_ROOTS` (`app/harness/protected_paths.py:151`) holds one vault
+`PROTECTED_WRITE_ROOTS` (`app/harness/protected_paths.py::PROTECTED_WRITE_ROOTS`) holds one vault
 path, `lloyd/SOUL.md`, while `PROTECTED_SHELL_RO_ROOTS`
-(`app/harness/protected_paths.py:222`) adds `lloyd/USER.md` and
+(`app/harness/protected_paths.py::PROTECTED_SHELL_RO_ROOTS`) adds `lloyd/USER.md` and
 `lloyd/MEMORY.md` on the Bash lane — so every other vault path is
 reachable by every job in this table, and a tier is something to read off a run,
 not something a tool enforces. A write **is durable state** when it lands in a

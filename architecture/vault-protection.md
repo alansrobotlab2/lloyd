@@ -183,7 +183,12 @@ interpreter itself protected; `b8322052`), and `~/obsidian/lloyd/SOUL.md` — an
 it runs ahead of
 `_gate_check`'s create early-return and outside the `harness.edit_gates.enabled`
 switch, so "delete it then Write it back" and "no session bound" are neither a
-route; it fails closed, and the lift is a `ContextVar` no tool argument can set.
+route; it fails closed, and nothing lifts it in process — the `ContextVar` this
+sentence described was deleted by #3563 after the eight commits that ever named it
+were read and found to contain no caller, and the one route that writes a deny-set
+file, `automod_vault_land`, validates the named path against the prompt-surface
+contract and commits it with a `git` subprocess without calling `write_deny_reason`
+at all.
 It is deliberately *not* `protected_roots()`: those roots are the vault, the
 lloyd tree and `$HOME`, and refusing writes under them refuses every ordinary
 note. **The asymmetry is shut**: `write_deny_reason` is now asked by every lane

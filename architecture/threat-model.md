@@ -88,7 +88,7 @@ prompt cannot be access control — is for.
 | B4 | skill body → instruction | a `SKILL.md` delivered as a dispatch marker | the skill's own name and its front matter | `app/harness/skill_dispatch.py:276` |
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
 | B6 | model output → shell | an argv string | the deny table, twice | `app/harness/safety.py:417`, `agent_mcp/main.py:531` |
-| B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes | `app/harness/protected_paths.py:259` |
+| B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes | `app/harness/protected_paths.py::write_deny_reason` |
 | B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:712`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
 | B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1374` |
@@ -120,7 +120,7 @@ appears in this table: those threats are in the next one.
 | T-01 | B6 | T | A turn destroys a protected tree with one shell command | `app/harness/safety.py:417` |
 | T-02 | B6 | T | A turn truncates or overwrites a sacred file without deleting it | `app/harness/safety.py:417` |
 | T-03 | B6 | T | A turn runs a denied shape on a path that never installed the hook | `agent_mcp/main.py:531` |
-| T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py:171` |
+| T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py::protected_write_roots` |
 | T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:238` |
 | T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1715` |
 | T-07 | B7 | E | The one exempt write lane commits bytes no loader validated | `scripts/automod/vault_round.py` |
