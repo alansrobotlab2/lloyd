@@ -41,11 +41,13 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1379,3 +1381,137 @@ def test_a_quarantined_empty_copy_is_not_a_shadow(tmp_path):
     # Positive control: the same empty copy outside the quarantine is still a finding.
     _store(data / "kg.sqlite", 0)
     assert _reported(_shadows(data, repo)) == [str(data / "kg.sqlite")]
+
+
+# ── #3577: the read the shadow paragraph names must not be able to touch the store ──
+
+#: A writer that checkpoints its log away and then holds the file open, so the
+#: store is left in the shape `_read_open` picks the immutable branch for: WAL mode,
+#: a `-wal` of NO bytes, and a `-shm` index. `WRITER` above never checkpoints, so it
+#: leaves bytes in the log — the other branch, where an immutable read is refused.
+CHECKPOINTED_WRITER = r"""
+import os, sqlite3, sys, time
+path, schema, ready = sys.argv[1], sys.argv[2], sys.argv[3]
+con = sqlite3.connect(path)
+con.executescript(schema)
+con.execute("PRAGMA journal_mode=WAL")
+con.execute("PRAGMA wal_autocheckpoint=0")
+con.execute("INSERT INTO meta(key,value) VALUES ('schema_version','1')")
+con.commit()
+con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+con.commit()
+open(ready, "w").write("written")
+time.sleep(60)
+"""
+
+
+def _checkpointed_store(path: Path, schema: str, ready: Path) -> subprocess.Popen:
+    """Start `CHECKPOINTED_WRITER`, wait for its commit, SIGKILL it mid-hold.
+
+    Killed rather than closed for the same reason `run_writer` kills: a clean close
+    checkpoints and unlinks the sidecars, and the shape under test is the one left
+    behind by a process that did not — which is how the live `kg.sqlite` was found.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", CHECKPOINTED_WRITER, str(path), schema, str(ready)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 30
+    while time.time() < deadline and not ready.exists():
+        time.sleep(0.05)
+    proc.kill()
+    proc.wait()
+    if proc.returncode >= 0:
+        raise AssertionError("the checkpointing writer exited on its own before the kill")
+    return proc
+
+
+def test_the_immutable_read_the_paragraph_names_answers_zero_and_touches_nothing(
+        tmp_path):
+    """The instruction #3577 ships, executed against the bytes it would be run on.
+
+    Clause 4, both halves, over a real WAL store with a `-wal` of no bytes and a
+    `-shm` index — the live `kg.sqlite` shape, and the one case
+    `datawatch._read_open` answers with the immutable URI
+    (`agent-services/guardian/datawatch.py:719-721`, read at them).
+
+    1. the query string is taken OUT OF THE RENDERED PARAGRAPH, not retyped here, so
+       the node fails if the paragraph ever names a query that does not work; and
+    2. it answers 0 for every data table while leaving BOTH sidecar mtimes and sizes
+       exactly where they were. The mutating form is run beside it on the same
+       shape as the control: `mode=ro` — what `sqlite3 -readonly` is implemented
+       with — re-stamps the `-shm` and does not the `-wal`, which is the #3559
+       signature the quarantined witness carries.
+    """
+    import guardian as gmod
+
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    repo = _repo_declaring(tmp_path, SHIPPED_KG.rsplit("/", 1)[0])
+    schema = _kg_schema()
+    shadow = data / "kg.sqlite"
+    _provisioned(data / SHIPPED_KG, facts_rows=5)      # the trusted half
+    _checkpointed_store(shadow, schema, data / "ready")
+
+    wal = shadow.with_name(shadow.name + "-wal")
+    shm = shadow.with_name(shadow.name + "-shm")
+    assert wal.exists() and wal.stat().st_size == 0 and shm.exists(), (
+        "the fixture is not the zero-byte-log WAL shape the immutable branch is "
+        f"chosen for: wal={'absent' if not wal.exists() else wal.stat().st_size} "
+        f"shm={'absent' if not shm.exists() else 'present'}")
+    # Age the store and both sidecars past the check's `age_min`: a young empty
+    # file is indistinguishable from one being provisioned right now, so the age
+    # is what makes this a finding at all rather than a skip.
+    for p in (shadow, wal, shm):
+        os.utime(p, (OLD, OLD))
+
+    finding, = datawatch.data_root_shadows(str(data), repo=str(repo), now=NOW)
+    body = gmod._shadow_alert_body(str(data), [finding], NOW)
+
+    found = re.findall(r"`(mode=[A-Za-z0-9&;=_]+)`", body)
+    assert len(found) == 1, (
+        f"the paragraph must name exactly one query string for a reader to paste, "
+        f"and this node has to know which one to run; found {found} in:\n{body}")
+    query = found[0]
+    assert query == "mode=ro&immutable=1", (
+        f"the read the paragraph names drifted from the one `_read_open` picks "
+        f"({datawatch._read_open}): {query}")
+
+    def answer(q: str):
+        before = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in (wal, shm)}
+        con = sqlite3.connect(f"file:{shadow}?{q}", uri=True)
+        try:
+            tables = [r[0] for r in con.execute(
+                "select name from main.sqlite_master where type='table' "
+                "and name not like 'sqlite_%'")]
+            rows = {t: con.execute(f'select count(*) from main."{t}"').fetchone()[0]
+                    for t in tables}
+        finally:
+            con.close()
+        after = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in (wal, shm)}
+        return rows, before, after
+
+    rows, before, after = answer(query)
+    assert rows["meta"] == 1 and all(
+        rows[t] == 0 for t in KG_DATA_TABLES if t in rows), (
+        f"the immutable read did not reproduce what the check measured "
+        f"(0 rows over the data tables, `meta`'s version row past it): {rows}")
+    assert before == after, (
+        "the read the paragraph NAMES moved a sidecar, so the paragraph is the "
+        f"#3559 bug again: {(before[wal], after[wal])} {(before[shm], after[shm])}")
+
+    # The control, on the same bytes: the ordinary read-only open — which is what
+    # `sqlite3 -readonly` opens with — re-stamps the -shm and leaves the -wal alone.
+    _, c_before, c_after = answer("mode=ro")
+    assert c_before[shm] != c_after[shm], (
+        "the CONTROL did not re-stamp the -shm, so this node can no longer tell an "
+        "immutable open from a mutating one and the assertion above proves nothing")
+    assert c_before[wal] == c_after[wal], (
+        "the control moved the -wal too, which is a different mutation than the one "
+        "this item is about and the paragraph's `why` would need re-deriving")
+    # "Re-stamped", not "grew": the fixture is aged to a stamp AHEAD of this box's
+    # clock (`NOW` is a fixed future epoch), so the new stamp is numerically lower
+    # and the only honest claim is that the bytes are identical and the mtime is not.
+    assert c_after[shm][1] == c_before[shm][1] and c_after[shm][0] != c_before[shm][0], (
+        f"the -shm changed in SIZE rather than being re-stamped, so this is not the "
+        f"#3559 signature (same 32,768 bytes, a new mtime): "
+        f"{c_before[shm]} -> {c_after[shm]}")

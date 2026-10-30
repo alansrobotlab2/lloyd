@@ -410,20 +410,20 @@ def _shadow_alert_body(data_root: str, shadows, now: float) -> str:
             line += (" — the store `app/data_root.py` declares for that name through its "
                      "*_DB_RELATIVE constant")
         paras.append(line)
-    # #3481: the check now names files that DO print tables, so the verification step has
-    # to ask the question the finding was measured on. The old words ("`.tables` must print
-    # nothing, and no `-wal` or `-shm` may sit beside it") would have told a person the
-    # 81,920-byte `kg.sqlite` was not removable, when the measurement that produced the
-    # finding is that every one of its four data tables holds zero rows — and an unheld
-    # `-wal`/`-shm` pair is ordinary residue beside such a file, not a writer.
+    # #3481: the check names files that DO print tables, so the step asks the question the
+    # finding was measured on — rows, not the table list. #3577 took the command line out:
+    # every store this leg meets is WAL-mode, and any open but the immutable one re-stamps
+    # its `-shm` index, the evidence `datawatch.py:647-653` reasons from (#3559, #3481).
     paras.append(
-        "Before removing one, confirm the rows, not the table list: "
-        "`sqlite3 -readonly <path> 'select count(*) from <table>'` must answer 0 for every "
-        "table `.tables` prints (`meta` holding only a `schema_version` row is part of "
-        "creating a database, not content in one). Then find the writer that opened the "
-        "wrong path — each of these was a command run with the data root as its cwd "
-        "against a bare database name, or a store opened by absolute path at the wrong "
-        "one, which is how `kg.sqlite` came to exist at the root at all (#3109, #3481).")
+        "Before removing one, confirm the rows, not the table list: open the file with the query"
+        " `mode=ro&immutable=1` — what `datawatch._read_open` picks when its `-wal` holds no"
+        " bytes, because it takes no lock and writes nothing — and `select count(*) from <table>`"
+        " must answer 0 for every data table (`meta`'s lone `schema_version` row is creation, not"
+        " content). No other open, and no shell step either: any other one re-stamps the store's"
+        " `-shm` index, which is the writer evidence this check reasons from (#3559). If the"
+        " `-wal` holds bytes an immutable read calls a populated store empty — treat the file as"
+        " live and do not verify it by hand. Then find the writer: each of these was a command run"
+        " with the data root as its cwd against a bare database name (#3109, #3481).")
     return "\n\n".join(paras)
 
 

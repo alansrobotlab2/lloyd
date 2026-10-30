@@ -2925,6 +2925,10 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # shows those four hunks and nothing else, and `grep -n
     # '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py` prints 923
     # with 2990 below it.
+    # #3577 rewrote the shadow-alert paragraph in place, and the heads stayed at 923
+    # and 2990 because the rewrite was written line-count neutral on purpose: the new
+    # node below now checks the DOC's number against the file directly, so a future
+    # round that nets lines here is caught by that node instead of by this chain.
     assert heads[guardian]["main"] == 2990, (
         f"`main` moved off :2990 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
@@ -2947,6 +2951,53 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
         f"the span rule is now reporting anchors that land on a real `def` "
         f"({bad}) — the named-symbol half shipped in #3047, and neither cell "
         "names an identifier, so only a move of these two lines can explain it")
+
+
+def test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has():
+    """#3577: the T-26 row's line cite, checked against the file rather than remembered.
+
+    `architecture/threat-model.md`'s T-26 cell points at a LINE NUMBER, not at a
+    symbol - `agent-services/guardian/guardian.py:923`, the head of
+    `def evaluate_liveness` - so any net line added above that definition moves the
+    row with nothing in the diff touching the doc. That is how it has drifted before:
+    #3019, #3109, #3106 and #2846 each moved it, and that re-point chain is the
+    comment block inside
+    `test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition`.
+
+    That node pins the head against a literal in the test. This one closes the half
+    nothing pinned before: it reads the number the DOC prints and asserts it equals
+    the head measured from the file by the same rule the item names -
+    a line-anchored grep of the two `def` prefixes, which prints 923 today with 2990
+    below it. A round that nets lines above the head is exactly what #3577 risked,
+    because the paragraph it rewrites sits in `_shadow_alert_body`, above both heads;
+    such a round fails HERE, on the row a human reads, instead of shipping a stale
+    number in a threat table.
+    """
+    rel = "agent-services/guardian/guardian.py"
+    live: dict[str, int] = {}
+    for n, line in enumerate((ROOT / rel).read_text(encoding="utf-8").split("\n"), 1):
+        if line.startswith("    def evaluate_liveness"):
+            live.setdefault("evaluate_liveness", n)
+        elif line.startswith("def main"):
+            live.setdefault("main", n)
+    assert set(live) == {"evaluate_liveness", "main"}, (
+        f"one of the two heads the T-26 row can cite is gone from {rel} ({live}); "
+        "that row needs a different anchor, not a different number")
+
+    row = next((ln for ln in (ARCH / "threat-model.md")
+                .read_text(encoding="utf-8").split("\n")
+                if ln.startswith("| T-26 |")), "")
+    cited = re.findall(r"`" + re.escape(rel) + r":(\d+)`", row)
+    assert len(cited) == 1, (
+        f"the T-26 row must cite this file exactly once for the anchor to mean "
+        f"anything; the row is: {row!r}")
+    assert int(cited[0]) == live["evaluate_liveness"], (
+        f"threat-model.md's T-26 cites {rel}:{cited[0]} but the live head of "
+        f"`def evaluate_liveness` is :{live['evaluate_liveness']} — re-point the "
+        "row in the same commit that moved it")
+    assert live["evaluate_liveness"] < live["main"], (
+        f"`evaluate_liveness` now sits at or below `main` ({live}); the pair this "
+        "row and #2583 were built on has been reordered")
 
 
 def test_a_drifted_anchor_is_reported_though_it_lands_inside_a_definition():

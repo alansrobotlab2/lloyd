@@ -1583,6 +1583,112 @@ def test_the_shadow_line_states_measured_rows_beside_measured_bytes():
     assert "moves and deletes NOTHING" in body
 
 
+def test_the_guardian_source_never_tells_anyone_to_open_a_store_with_the_cli():
+    """Clause 1, on the text of the module rather than on one rendered paragraph.
+
+    `git grep -n 'sqlite3 -readonly' -- agent-services/guardian/` is the check the
+    item filed with, and it printed `guardian.py:421` for the whole life of #3559.
+    Pinning the source string rather than only the rendered body is what keeps the
+    wording from returning in a NEW paragraph one refactor away: this node reads the
+    file as bytes, so a second renderer added later is caught by it too.
+
+    Scoped to this module on purpose. `sqlite3 -readonly` is the correct re-derive
+    command for a rollback-journal store, and other tests here REQUIRE it
+    (`tests/test_vllm_doc_claims.py` asserts it for `usage.db`,
+    `tests/test_sync_registration_guard.py` cites it). This is a rule about what the
+    guardian tells a person to do to the store under inspection, not a rule about
+    the shell.
+    """
+    text = (Path(__file__).resolve().parent.parent
+            / "agent-services" / "guardian" / "guardian.py").read_text(encoding="utf-8")
+
+    assert "sqlite3 -readonly" not in text, (
+        "the guardian ships a mutating open again: an `sqlite3 -readonly` of a "
+        "WAL-mode store re-stamps its -shm index, which is the writer evidence "
+        "datawatch reasons from (#3559, #3481)")
+    assert "sqlite3 ." not in text and "sqlite3 <path>" not in text, (
+        "a bare `sqlite3 <path>` CLI step appeared, and it opens the file "
+        "write-capable, which is the same mutation with the flag dropped")
+
+
+def test_the_confirmation_step_names_the_immutable_read_and_no_cli_open():
+    """#3577: the step that CONFIRMS a shadow is empty must not be able to touch it.
+
+    The paragraph is a function of the finding's measured fields, so this node hands
+    it the fields of the live incident - the 81,920-byte `kg.sqlite` of 2026-10-29,
+    WAL-mode with both sidecars - the same finding
+    `test_the_shadow_line_states_measured_rows_beside_measured_bytes` renders one
+    paragraph above. That those fields are what `data_root_shadows` answers for a WAL
+    store is pinned over real bytes by `tests/test_guardian_data_root_shadow.py`; what
+    is pinned HERE is the instruction the renderer builds out of them, which no
+    fixture can grade.
+
+    The mutation the paragraph replaced (#3559) was not a write to the store: an
+    `sqlite3 -readonly` open of a WAL-mode database re-stamps the store's `-shm`
+    index, and that index's mtime is the writer evidence the alert reasons from. The
+    step written to check a shadow safe to remove was destroying the evidence of who
+    made it, and did - the quarantined witness under
+    `~/lloyd-data/quarantine/tree-strays/2026-10-29-kg-sqlite/` carries a `-shm`
+    stamp 2 days after its `-wal`.
+
+    The ban covers the `sqlite3` shell WHOLE, not just its `-readonly` flag: a
+    `.tables` metacommand opens the same file the same way, so a rewrite that swapped
+    the flag and kept the shell step would have changed nothing observable. Scope
+    note, because this is NOT a repo-wide rule: `-readonly` is genuinely inert on a
+    rollback-journal store and is the required re-derive command elsewhere in this
+    tree (`tests/test_vllm_doc_claims.py` asserts it for `usage.db`).
+    """
+    import guardian as G
+
+    finding = {
+        "shadow": "/home/alansrobotlab/lloyd-data/kg.sqlite",
+        "name": "kg.sqlite", "depth": 1,
+        "trusted": ("/home/alansrobotlab/lloyd-data/_pipeline/vault-derived/kg.sqlite"),
+        "trusted_depth": 3, "trusted_size": 172_789_760,
+        "declared": True, "declared_relative": "_pipeline/vault-derived/kg.sqlite",
+        "shadow_size": 81_920, "data_tables": 4, "data_rows": 0,
+        # The two fields this clause is about, and the reason the finding is the
+        # WAL case: `KGStore` runs `PRAGMA journal_mode=WAL` on every connection it
+        # hands out (`app/kg_store.py:230`, read at it rather than remembered), so a
+        # shadow this leg names is WAL by construction.
+        "journal_mode": "wal", "sidecars": ["-shm", "-wal"],
+    }
+    body = G._shadow_alert_body("/home/alansrobotlab/lloyd-data", [finding], _NOW)
+
+    # Clause 2: the read the body names is the one `datawatch._read_open` already
+    # picks, spelled as the URI form a person can paste.
+    assert "mode=ro&immutable=1" in body, (
+        "the paragraph names no immutable read, so there is nothing here that a "
+        "reader can run without re-stamping the store: " + body)
+    assert "_read_open" in body, (
+        "the body does not point at the shipped function that makes this choice, so "
+        "the instruction and the code that measures can drift apart: " + body)
+
+    # Clause 3: no CLI open of any shape is offered as the verification step.
+    assert "sqlite3" not in body, (
+        "the body offers an `sqlite3` CLI step again; any such open of a WAL-mode "
+        "store re-stamps its -shm, which is the evidence this check reasons from: "
+        + body)
+    assert ".tables" not in body, (
+        "the shell metacommand stayed, and it opens the file exactly as the flag did: "
+        + body)
+
+    # The `why` has to be on the line, or the next person "simplifies" it back.
+    assert "-shm" in body and "immutable" in body, (
+        "the paragraph names the read but not the reason, and a reason-less "
+        "restriction is one that gets relaxed: " + body)
+    # The edge case the rewrite must not lose: `immutable=1` ignores an
+    # un-checkpointed log, so with bytes in the -wal it reads a POPULATED store as
+    # empty. That answer is a lie, and worse than the mutation it replaces
+    # (`datawatch.py:699`, pinned by test_a_wal_log_without_its_index_is_declined...).
+    assert "-wal" in body and "holds bytes" in body, (
+        "the paragraph tells a reader to use an immutable read unconditionally, and "
+        "over a populated -wal that reads content as 0 rows: " + body)
+    # The rows-not-tables half (#3481) still has to survive the rewrite.
+    assert "select count(*) from <table>" in body and "answer 0" in body, (
+        "the rewrite dropped the question the finding was measured on: " + body)
+
+
 def test_the_hourly_leg_alerts_a_zero_row_copy_under_a_heading_that_says_duplicate(
         tmp_path, monkeypatch):
     """Clause 4 end to end: the measured line, the shape-true heading, and the all-clear.
