@@ -10,7 +10,7 @@ made: '2026-10-23'
 params:
   temperature: 0
   tool_choice: auto
-  max_tokens: 64
+  max_tokens: 256
 note:
 - 'The decision corpus for the canary fold''s tool-call leg (#3188, owed from #2843).'
 - 'The prose corpus `eval/engine_output/corpus.yaml` cannot carry this: its probes post to'

@@ -38,10 +38,13 @@ Two subcommands, one per leg the fold needs:
   row per prompt to the arm's capture file. Nothing is compared and nothing is judged: it is
   a recording, written by the arm that made the calls.
 * `report --label ARM` reads the capture files of every arm that recorded inside the SAME
-  window, forms same-prompt cross-arm pairs, runs `action_equivalence.classify` over each,
-  and appends one line of per-tier counts naming every `args_differ` and `different_tool`
-  pair by prompt id and tool name. A single arm in the window is not a comparison, so it
-  says so instead of inventing a verdict.
+  window, forms same-prompt pairs of TWO kinds (#3597) — one per pair of arms, which is the
+  dtype answer, and one per pair of consecutive captures of the SAME arm, which is the floor
+  a dtype answer has to clear — runs `action_equivalence.classify` over each, and appends one
+  line of per-tier counts naming every `args_differ` and `different_tool` pair by prompt id
+  and tool name, followed by the same-arm tiers and the number of prompts they were measured
+  over. A single arm in the window is not a comparison, so it says so instead of inventing a
+  verdict.
 
 The corpus is four prompts, each carrying the `tools` array that call needs — two `Read`
 signatures, one `Bash`, two key-value lookups, one `Bash`-only decliner — and the
@@ -126,6 +129,21 @@ KIND_REPORT = "tool_equivalence"
 SCHEMA = 1
 REQUEST_TIMEOUT_S = 120.0
 REACHABILITY_TIMEOUT_S = 3.0
+
+#: What a pair compares. `cross_arm` is the dtype question the window exists to answer.
+#: `same_arm` is the SAME arm asked the same prompt twice inside one window, which is the
+#: only measurement of how far this engine disagrees with itself at `temperature: 0` — the
+#: floor a cross-arm split has to clear before it counts as a finding (#3597). The prose leg
+#: has read against a floor like this since #1743; this leg never had one, and the 2026-10-30
+#: window is what comparing two arms without one produces: `protocol_invalid=4` with every
+#: other tier 0, a line that cannot distinguish a dtype regression from the budget.
+CROSS_ARM = "cross_arm"
+SAME_ARM = "same_arm"
+
+#: What the report line says when the window holds no second capture of any arm. Not the
+#: same thing as a floor of zero: an unmeasured floor absorbs NOTHING (clause 4 of #3597),
+#: so a split is never written off against a measurement nobody took.
+FLOOR_UNMEASURED = "unmeasured"
 
 #: Flags that make a capture a finding ABOUT THE ENGINE, and the ones that do not.
 #: `no_tool_call` is on this list's other side on purpose: it records that an arm declined,
@@ -423,7 +441,8 @@ def action_of(row: dict) -> dict:
     """The capture row's decision in the one shape `coerce` reads: `{name, arguments}`.
 
     The FIRST call is the arm's decision, because the corpus is built one-call-per-prompt
-    (`max_tokens` 64, every prompt a single request): a row with two calls is itself the
+    (every prompt a single request; `max_tokens` 256 since #3597, which is enough for one
+    whole call where 64 was not): a row with two calls is itself the
     anomaly, so `count_mismatch` names it instead of this module inventing a tier the
     comparator never defined — the tiers at `action_equivalence.py:96-100` are about one call
     against one call.
@@ -471,26 +490,115 @@ def call_rows_by_arm(capture_dir: Path | None = None, *, window: str | None = No
 
 
 def same_prompt_pairs(rows_by_arm: dict[str, list[dict]]) -> list[dict]:
-    """Every cross-arm pair that was asked the SAME prompt id, oldest arm label first.
+    """Every pair one window can honestly make, each tagged with the kind of pair it is.
 
-    Two rows per arm per prompt would be two windows' worth of the same question and are not
-    silently averaged: the LAST row for a prompt is that arm's answer, the same way
-    `compare_records` reads one record per side (engine_output_probe.py:571)."""
-    latest = {arm: {str(r.get("prompt")): r for r in rows} for arm, rows in rows_by_arm.items()}
-    arms = sorted(latest)
-    pairs = []
+    Two kinds come out, and they answer different questions:
+
+    * `cross_arm` — arm A's answer against arm B's, the dtype question. Per prompt an arm
+      contributes its LAST row, the way `compare_records` reads one record per side
+      (engine_output_probe.py:571): the arm's latest answer IS its answer.
+    * `same_arm` — the SAME arm's consecutive answers to the same prompt, which is the only
+      measurement in the window of how far the engine disagrees with itself at
+      `temperature: 0` (#3597).
+
+    #3597 clause 2 is why the collapse to `latest` is gone. The dict comprehension that
+    built it keyed an arm's rows by prompt id, so a second `capture` under the same
+    `--label` — which is exactly what a window does when it re-runs the shipped arm to get a
+    floor — OVERWROTE the first row and was never paired with anything: the repeat was
+    silently thrown away, in a module whose whole job is to compare recordings. Rows are
+    read off disk in file order (`call_rows_by_arm`), so consecutive rows for one prompt are
+    consecutive captures, and pairing them that way costs nothing for an arm captured once.
+
+    Both kinds carry the corpus-sha guard: two corpora are two questions (#2683)."""
+    by_arm: dict[str, dict[str, list[dict]]] = {
+        arm: {} for arm in rows_by_arm}
+    for arm, rows in rows_by_arm.items():
+        for row in rows:
+            by_arm[arm].setdefault(str(row.get("prompt") or ""), []).append(row)
+
+    def _pair(arm_a: str, arm_b: str, pid: str,
+              row_a: dict, row_b: dict, kind: str) -> dict | None:
+        if str(row_a.get("corpus_sha256") or "") != str(row_b.get("corpus_sha256") or ""):
+            return None
+        return {"prompt": pid, "arms": [arm_a, arm_b], "kind": kind,
+                "corpus_sha256": str(row_a.get("corpus_sha256") or ""),
+                "rows": (row_a, row_b)}
+
+    arms = sorted(by_arm)
+    pairs: list[dict] = []
     for i, arm_a in enumerate(arms):
         for arm_b in arms[i + 1:]:
-            for pid in sorted(set(latest[arm_a]) & set(latest[arm_b])):
-                row_a, row_b = latest[arm_a][pid], latest[arm_b][pid]
-                if str(row_a.get("corpus_sha256") or "") != str(row_b.get("corpus_sha256") or ""):
-                    # #2683's law, quoted at the head of the module: two corpora are two
-                    # questions, and agreement of 1.0 across them is meaningless.
-                    continue
-                pairs.append({"prompt": pid, "arms": [arm_a, arm_b],
-                              "corpus_sha256": str(row_a.get("corpus_sha256") or ""),
-                              "rows": (row_a, row_b)})
+            for pid in sorted(set(by_arm[arm_a]) & set(by_arm[arm_b])):
+                made = _pair(arm_a, arm_b, pid, by_arm[arm_a][pid][-1],
+                             by_arm[arm_b][pid][-1], CROSS_ARM)
+                if made is not None:
+                    pairs.append(made)
+    for arm in arms:
+        for pid in sorted(by_arm[arm]):
+            seen = by_arm[arm][pid]
+            for first, second in zip(seen, seen[1:]):
+                made = _pair(arm, arm, pid, first, second, SAME_ARM)
+                if made is not None:
+                    pairs.append(made)
     return pairs
+
+
+def _tally(pairs: list[dict]) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """`explain` over a list of pairs: the tier counts and the three naming lists."""
+    tiers = {tier: 0 for tier in TIERS}
+    args_differ: list[dict] = []
+    different_tool: list[dict] = []
+    count_mismatch: list[dict] = []
+    for pair in pairs:
+        row_a, row_b = pair["rows"]
+        decided = explain(action_of(row_a), action_of(row_b))
+        tiers[decided["tier"]] += 1
+        naming = {"prompt": pair["prompt"], "arms": pair["arms"], "why": decided["why"],
+                  "tier": decided["tier"]}
+        counts = (int(row_a.get("n_tool_calls") or 0), int(row_b.get("n_tool_calls") or 0))
+        if counts[0] != counts[1]:
+            count_mismatch.append({**naming, "n_tool_calls": list(counts)})
+        if decided["tier"] == ARGS_DIFFER:
+            args_differ.append({**naming, "tool": _tool_name(row_a) or _tool_name(row_b)})
+        elif decided["tier"] == DIFFERENT_TOOL:
+            different_tool.append({**naming, "tools": [_tool_name(row_a), _tool_name(row_b)]})
+    return tiers, args_differ, different_tool, count_mismatch
+
+
+def _floor_of(same_arm: list[dict]) -> dict:
+    """The shipped arm's own run-to-run disagreement, with the denominator it needs.
+
+    `prompts` is how many prompts the floor was measured over, and it is not decoration: the
+    corpus is four prompts, one of them (`tc_no_call_expected`) a nameless decline on both
+    arms that `explain` maps to `protocol_invalid` by design, so exactly ONE of those four is
+    structural and the decision-bearing tiers divide by the other three. Without the
+    denominator a reader takes the floor's `protocol_invalid=1` as a disagreement — or takes
+    `args_differ=0` as "this engine is repeatable" when all it says is "not one of the three
+    prompts that can disagree did".
+    """
+    tiers, _, _, _ = _tally(same_arm)
+    return {
+        "measured": bool(same_arm),
+        "arms": sorted({arm for pair in same_arm for arm in pair["arms"]}),
+        "prompts": len({pair["prompt"] for pair in same_arm}),
+        "pairs": len(same_arm),
+        "tiers": tiers,
+    }
+
+
+def split_counts_as_finding(item: dict, floor: dict) -> bool:
+    """Does a named cross-arm split count, given what the same arm did to itself?
+
+    The rule is one sentence: a tier the shipped arm ALSO produced against itself is not
+    evidence about a dtype, because that is what the engine does anyway. And the
+    no-floor case is the loud one — an unmeasured floor absorbs nothing, so with a single
+    capture per arm every split still counts exactly as it did before #3597. A report that
+    treated "no floor" as "floor of zero" would quietly decide that any disagreement is
+    significant one window and none the next, depending on whether somebody re-ran a capture.
+    """
+    if not floor.get("measured"):
+        return True
+    return int(floor.get("tiers", {}).get(item.get("tier"), 0)) == 0
 
 
 def build_report(pairs: list[dict], *, arm: str, window: str) -> dict:
@@ -500,37 +608,46 @@ def build_report(pairs: list[dict], *, arm: str, window: str) -> dict:
     so the `why` costs nothing and a report that can quote why two argument strings part —
     `at byte 34: '...state.py' != '...worktree.py'` — is the difference between a line an
     operator can act on and a count they have to go and reproduce.
+
+    A pair list may hold both kinds `same_prompt_pairs` emits. The cross-arm tally below is
+    the dtype answer and stays exactly the count it was before #3597; the same-arm pairs are
+    tallied separately into `floor` and never mixed into `pairs`, because a number that
+    averages "the arm disagrees with itself" into "arm A disagrees with arm B" answers neither.
     """
-    tiers = {tier: 0 for tier in TIERS}
-    args_differ: list[dict] = []
-    different_tool: list[dict] = []
-    count_mismatch: list[dict] = []
-    for pair in pairs:
-        row_a, row_b = pair["rows"]
-        decided = explain(action_of(row_a), action_of(row_b))
-        tiers[decided["tier"]] += 1
-        naming = {"prompt": pair["prompt"], "arms": pair["arms"], "why": decided["why"]}
-        counts = (int(row_a.get("n_tool_calls") or 0), int(row_b.get("n_tool_calls") or 0))
-        if counts[0] != counts[1]:
-            count_mismatch.append({**naming, "n_tool_calls": list(counts)})
-        if decided["tier"] == ARGS_DIFFER:
-            args_differ.append({**naming, "tool": _tool_name(row_a) or _tool_name(row_b)})
-        elif decided["tier"] == DIFFERENT_TOOL:
-            different_tool.append({**naming, "tools": [_tool_name(row_a), _tool_name(row_b)]})
+    cross = [p for p in pairs if p.get("kind", CROSS_ARM) == CROSS_ARM]
+    same_arm = [p for p in pairs if p.get("kind") == SAME_ARM]
+    tiers, args_differ, different_tool, count_mismatch = _tally(cross)
     return {
         "kind": KIND_REPORT,
         "schema": SCHEMA,
         "ts": _utc_stamp(),
         "arm": arm,
         "window": window,
-        "pair_arms": sorted({arm for pair in pairs for arm in pair["arms"]}),
-        "corpus_sha256": pairs[0]["corpus_sha256"] if pairs else "",
-        "pairs": len(pairs),
+        "pair_arms": sorted({arm for pair in cross for arm in pair["arms"]}),
+        "corpus_sha256": (cross or same_arm)[0]["corpus_sha256"] if pairs else "",
+        "pairs": len(cross),
         "tiers": tiers,
         "args_differ": args_differ,
         "different_tool": different_tool,
         "count_mismatch": count_mismatch,
+        "floor": _floor_of(same_arm),
     }
+
+
+def render_floor(floor: dict) -> str:
+    """The `floor=` segment: the same-arm tiers AND how many prompts they divide by.
+
+    `prompts=N` is not decoration. One of the corpus's four prompts (`tc_no_call_expected`)
+    is a nameless decline on every arm and lands in `protocol_invalid` by design, so exactly
+    one of the four is structural and the decision-bearing tiers divide by the rest. Without
+    the denominator a reader takes the floor's `protocol_invalid=1` as a disagreement, or
+    takes `args_differ=0` as proof the engine is repeatable when all it says is that the
+    prompts which CAN disagree did not."""
+    if not floor.get("measured"):
+        return f"floor={FLOOR_UNMEASURED}(no second capture: every split counts)"
+    tiers = " ".join(f"{tier}={floor['tiers'][tier]}" for tier in TIERS)
+    return (f"floor={'+'.join(floor['arms']) or '-'} prompts={floor['prompts']} "
+            f"pairs={floor['pairs']} {tiers}")
 
 
 def render_report(report: dict) -> str:
@@ -540,8 +657,11 @@ def render_report(report: dict) -> str:
     row useless for 11 days."""
     counts = " ".join(f"{tier}={report['tiers'][tier]}" for tier in TIERS)
     arms = "+".join(report["pair_arms"])
+    # `floor=` sits before ` split=` on purpose: the fold and its tests locate the split list
+    # by cutting the line at ` split=`, and moving that anchor to order nothing is a break
+    # bought for nothing.
     head = (f"tool-equivalence: window={report['window'] or '-'} arms={arms or '-'} "
-            f"pairs={report['pairs']} {counts}")
+            f"pairs={report['pairs']} {counts} {render_floor(report['floor'])}")
     named = [f"{item['prompt']}:{item['tool']}" for item in report["args_differ"]]
     named += [f"{item['prompt']}:{'>'.join(t or 'declined' for t in item['tools'])}"
               for item in report["different_tool"]]
@@ -638,7 +758,14 @@ def main(argv: list[str] | None = None, *,
     line = render_report(report)
     append_rows(out_path, [report])
     print(line)
-    return EXIT_FINDING if (report["args_differ"] or report["different_tool"]) else EXIT_OK
+    # A split counts only past the floor (#3597 clause 4). The fold reads this exit code as
+    # "engine regression, do not promote" (`flash-next-canary-step.sh:222-231`), so a tier the
+    # shipped arm ALSO produced against itself must stop being a veto — while an unmeasured
+    # floor, which is what every window until now has had, keeps counting every split exactly
+    # as it did before this change.
+    split = [item for item in report["args_differ"] + report["different_tool"]
+             if split_counts_as_finding(item, report["floor"])]
+    return EXIT_FINDING if split else EXIT_OK
 
 
 if __name__ == "__main__":

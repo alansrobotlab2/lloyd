@@ -1501,6 +1501,9 @@ def test_the_fp8_refusal_points_at_the_conf_not_a_dated_directory(tmp_path):
 CANARY_TOOL_LINE = (
     "tool-equivalence: window=W-TEST arms=fp8kv+nvfp4 pairs=6 "
     "protocol_invalid=0 different_tool=0 args_differ=1 canonically_equal=5 "
+    # The floor segment is what #3597 added, and the fold as it runs today captures each arm
+    # once, so the honest shape is the unmeasured one: no split is written off against it.
+    "floor=unmeasured(no second capture: every split counts) "
     "split=[tc_read_named_path:Read]")
 
 CANARY_TOOL_CAPTURE_LINE = (
@@ -1801,9 +1804,13 @@ def test_the_fold_drives_the_real_probe_end_to_end_through_the_seam(tmp_path):
     pair = _canary_verdicts(tmp_path)[1]
     head, _, split = pair["tool_line"].partition(" split=")
     n_declined = len([s for s in specs if not s.get("expect_tool_call", True)])
+    # The `floor=unmeasured(...)` tail is #3597's, and this is the shape the fold produces
+    # TODAY: it captures each arm once (`flash-next-canary-step.sh:195`, `:204`), so there is
+    # no same-arm floor and the one real split still counts — as `tool_report_rc` below pins.
     assert head == (f"tool-equivalence: window=W-FOLD arms=fp8kv+nvfp4 pairs={len(ids)} "
                     f"protocol_invalid={n_declined} different_tool=0 args_differ=1 "
-                    f"canonically_equal={len(ids) - n_declined - 1}"), pair["tool_line"]
+                    f"canonically_equal={len(ids) - n_declined - 1} "
+                    "floor=unmeasured(no second capture: every split counts)"), pair["tool_line"]
     assert split == f"[{split_spec['id']}:{tool}]", (
         "the one pair differing only in its path must be named by prompt id and tool name: "
         + pair["tool_line"])

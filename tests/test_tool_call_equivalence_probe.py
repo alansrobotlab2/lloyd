@@ -380,3 +380,220 @@ def test_two_arms_in_different_windows_are_never_paired(services, monkeypatch):
     assert rc == tcp.EXIT_INSTRUMENT, "two windows share no pair to decide on"
     kinds = [r["kind"] for r in _captured(services, "kv-bfloat16")]
     assert kinds == ["tool_call"] * 4, kinds
+
+
+# ── #3597: a budget a whole call fits inside, and the floor a split is read against ──
+
+#: Every prompt's `text` and `tools` array as `{id: {text, tools}}`, sorted keys — the part of
+#: the corpus that decides WHAT is asked, which clause 1 forbids this round to touch.
+#: Re-derive it with:
+#:   .venvs/lloyd/bin/python -c "import hashlib,json,yaml; \
+#:   c=yaml.safe_load(open('eval/tool_call_corpus.yaml')); \
+#:   b={p['id']:{'text':p['text'],'tools':p['tools']} for p in c['prompts']}; \
+#:   print(hashlib.sha256(json.dumps(b,sort_keys=True).encode()).hexdigest())"
+TEXT_AND_TOOLS_SHA = "c8db8afa09d16867d9bc38b2c214a79a3e01c45990c48cf098ae88948437a864"
+
+#: The corpus that PRODUCED the noise line: `max_tokens: 64`. This is the `corpus_sha256` both
+#: arms' captures of window kv-3188-20261030T041939Z carry, and that window's one report row
+#: reads `pairs=4 tiers={'protocol_invalid': 4, 'different_tool': 0, 'args_differ': 0,
+#: 'canonically_equal': 0}` — read out of
+#: `~/lloyd-data/logs/services/flash-next-canary-toolcalls-kv-bfloat16.jsonl` on 2026-10-30.
+NOISE_LINE_CORPUS_SHA = "3d6709b0ee91b74dbafdbf77f93be9bde623668b5fc020a3e609862ffd0fd421"
+
+#: The shipped arm asked the same four questions a SECOND time in the same window. It parts
+#: with itself on one prompt — `tc_read_named_path` comes back naming the `state.py` path this
+#: time instead of `worktree.py` — and that single self-disagreement is the whole point of a
+#: floor: it is what `temperature: 0` still does at `max_tokens: 256`, and the 2026-10-30
+#: window had no way of knowing it because nothing ever asked the arm twice.
+FP8_REPEAT = {
+    "tc_read_named_path": [
+        ("Read", '{"file_path": "/home/alansrobotlab/lloyd/app/harness/state.py"}')],
+    "tc_bash_test_command": ARM_FP8["tc_bash_test_command"],
+    "tc_structured_key": ARM_FP8["tc_structured_key"],
+    "tc_no_call_expected": [],
+}
+
+
+def _report_of(services, label):
+    """`report --label` over whatever captures sit in this node's tmp services dir."""
+    return tcp.main(["report", "--label", label],
+                    client_factory=lambda url: StubEngine(ARM_FP8))
+
+
+def _last_report(services, arm):
+    rows = [r for r in _captured(services, arm) if r["kind"] == "tool_equivalence"]
+    assert rows, "the report row is what the fold appends and what the floor rides on"
+    return rows[-1]
+
+
+def test_the_corpus_budget_holds_a_whole_call_and_asks_the_same_questions():
+    """Clause 1: the delta to the corpus is the BUDGET and nothing else.
+
+    64 tokens does not hold a call from this model. Every prompt the 2026-10-30 window lost
+    ended `finish_reason: length`, and WHICH of the three it lost was per-arm luck (bfloat16
+    lost `tc_read_named_path` and `tc_structured_key`, fp8 lost `tc_bash_test_command`), so
+    the window's line was a coin flip on truncation wearing a dtype's clothes. 256 held a
+    whole call on all three calling prompts when #3597 measured it against live fp8.
+
+    The `tools` arrays and prompt texts are the QUESTION, and a floor is only comparable
+    across windows while the question is fixed, so the question's own digest is pinned here: a
+    raise that quietly reworded a prompt would move this sha while `max_tokens` looked right.
+    """
+    corpus = tcp.load_corpus(CORPUS)
+    budget = int(corpus["params"]["max_tokens"])
+    assert budget >= 256, f"a call did not fit below 256; the file says {budget}"
+
+    bodies = {p["id"]: {"text": p["text"], "tools": p["tools"]} for p in corpus["prompts"]}
+    digest = hashlib.sha256(json.dumps(bodies, sort_keys=True).encode()).hexdigest()
+    assert digest == TEXT_AND_TOOLS_SHA, (
+        "a prompt's text or its tools array moved: the corpus delta is not the budget alone")
+    assert [p["id"] for p in corpus["prompts"]] == [
+        "tc_read_named_path", "tc_bash_test_command", "tc_structured_key",
+        "tc_no_call_expected"], "the corpus is still the same four questions, in order"
+
+    # Clause 1's other half: the shipped corpus is NOT the file that made the noise line. The
+    # captures carry the whole file's digest, so a changed sha is precisely what refuses to
+    # pair a future arm against those 2026-10-30 rows rather than comparing two questions.
+    assert tcp.corpus_sha256(CORPUS) != NOISE_LINE_CORPUS_SHA, (
+        "the file still hashes to the 64-token corpus that produced `protocol_invalid=4`")
+
+
+def test_the_raised_budget_reaches_the_request_body_and_not_just_the_file(services):
+    """The same budget read off the wire the engine is sent — the process boundary here is
+    corpus bytes on disk versus the HTTP body `capture` posts.
+
+    `capture` lifts `max_tokens` out of the corpus `params` and puts it in the body verbatim,
+    so an edit that only moved the number to a key the loader does not read would leave every
+    future window starved exactly as before while the YAML looked fixed.
+    """
+    rc, stub = _run_capture(services, "fp8-kv", ARM_FP8)
+    assert rc == tcp.EXIT_OK, rc
+    budget = int(tcp.load_corpus(CORPUS)["params"]["max_tokens"])
+    assert [body["max_tokens"] for body in stub.chat_bodies] == [budget] * 4, (
+        "the corpus budget did not reach all four request bodies")
+    assert budget >= 256, budget
+
+
+def test_a_second_capture_of_one_arm_in_one_window_survives_and_pairs(services):
+    """Clause 2: the repeat is no longer thrown away on its way into the pairing.
+
+    The load-bearing fact #3597's triage found is that `same_prompt_pairs` built
+    `latest = {arm: {prompt: row}}`, so a second capture under the SAME `--label` inside one
+    window overwrote the first and was never paired — capturing the shipped arm twice was a
+    no-op before any floor code could exist. Appending always worked, which is why this counts
+    the rows in the file AND asks the pairer what it makes of them.
+    """
+    rc, _ = _run_capture(services, "fp8-kv", ARM_FP8)
+    assert rc == tcp.EXIT_OK
+    rc, _ = _run_capture(services, "fp8-kv", FP8_REPEAT)
+    assert rc == tcp.EXIT_OK, "a second capture of one arm is a recording like any other"
+    rc, _ = _run_capture(services, "kv-bfloat16", ARM_BF16)
+    assert rc == tcp.EXIT_OK
+
+    fp8_rows = _captured(services, "fp8-kv")
+    assert len(fp8_rows) == 8, f"two captures of four prompts is eight rows, not {len(fp8_rows)}"
+    assert all(len([r for r in fp8_rows if r["prompt"] == pid]) == 2 for pid in ARM_FP8), \
+        "an arm's rows were reduced to one per prompt again"
+
+    pairs = tcp.same_prompt_pairs({"fp8-kv": fp8_rows,
+                                   "kv-bfloat16": _captured(services, "kv-bfloat16")})
+    same = [p for p in pairs if p["kind"] == tcp.SAME_ARM]
+    cross = [p for p in pairs if p["kind"] == tcp.CROSS_ARM]
+
+    assert len(same) == 4, (
+        f"every prompt both captures of the arm answered owes a same-arm pair, got {len(same)}")
+    assert {p["prompt"] for p in same} == set(ARM_FP8), "the floor must cover every prompt"
+    assert all(p["arms"] == ["fp8-kv", "fp8-kv"] for p in same), same[0]
+    assert len(cross) == 4, f"the dtype answer is unchanged: four pairs expected, got {len(cross)}"
+    assert len(pairs) == 8, f"four dtype pairs plus four floor pairs, not {len(pairs)}"
+
+    # Only the arm that was repeated has a floor: an arm with one capture contributes zero
+    # same-arm pairs, and the other arm's repeat is never credited to it.
+    lone = tcp.same_prompt_pairs({"fp8-kv": fp8_rows[:4], "kv-bfloat16": fp8_rows})
+    floed = {tuple(p["arms"]) for p in lone if p["kind"] == tcp.SAME_ARM}
+    assert floed == {("kv-bfloat16", "kv-bfloat16")}, (
+        f"the repeat belongs to the arm that was repeated, not both: {sorted(floed)}")
+    assert len([p for p in lone if p["kind"] == tcp.SAME_ARM]) == 4
+
+
+def test_the_report_carries_the_floor_tiers_and_the_prompts_they_measure(services):
+    """Clause 3: the shipped arm's self-disagreement is IN the report and ON the printed line.
+
+    The line has to carry the denominator beside the tiers. One of the four prompts is the
+    corpus's decline, which `explain` maps to `protocol_invalid` by design, so a reader who
+    sees `protocol_invalid=1` with no `prompts=4` reads a structural fact as a measurement of
+    engine noise — and sees `args_differ=0` as repeatability when three prompts was the whole
+    sample it could have come from.
+    """
+    _run_capture(services, "fp8-kv", ARM_FP8)
+    _run_capture(services, "fp8-kv", FP8_REPEAT)
+    _run_capture(services, "kv-bfloat16", ARM_BF16)
+    assert _report_of(services, "kv-bfloat16") == tcp.EXIT_OK
+    report = _last_report(services, "kv-bfloat16")
+
+    floor = report["floor"]
+    assert floor["measured"] is True, floor
+    assert floor["arms"] == ["fp8-kv"], "only the arm captured twice has a floor"
+    assert floor["prompts"] == 4 and floor["pairs"] == 4, floor
+    assert floor["tiers"] == {"protocol_invalid": 1, "different_tool": 0, "args_differ": 1,
+                              "canonically_equal": 2}, floor
+    assert report["pairs"] == 4 and report["tiers"]["args_differ"] == 2, (
+        "the dtype tally must not absorb the same-arm pairs into the number the fold cuts on")
+
+    line = tcp.render_report(report)
+    assert ("floor=fp8-kv prompts=4 pairs=4 protocol_invalid=1 different_tool=0 "
+            "args_differ=1 canonically_equal=2") in line, line
+
+
+def test_a_split_the_floor_already_shows_stops_being_a_finding(services):
+    """Clause 4, the absorbing half: a tier the shipped arm ALSO produced against itself is
+    not a dtype finding, and the exit code the fold reads as "do not promote" has to know it.
+
+    Both arms name different `Read` paths and different `cwd`s, so cross-arm `args_differ` is
+    2; the shipped arm, asked twice, parts with itself on `tc_read_named_path` in the same
+    tier. The floor's resolution is per-TIER and per-ARM rather than per-prompt because that
+    is all a three-prompt sample can resolve — #3597's own finding — which is why the report
+    prints the tiers and the denominator rather than a bare verdict.
+
+    This is the case the prose canary has handled since #1743 and this leg never could: the
+    disagreement is the engine, not the KV cache, and a veto here blocks a promotion.
+    """
+    _run_capture(services, "fp8-kv", ARM_FP8)
+    _run_capture(services, "fp8-kv", FP8_REPEAT)
+    _run_capture(services, "kv-bfloat16", ARM_BF16)
+    rc = _report_of(services, "kv-bfloat16")
+    assert rc == tcp.EXIT_OK, f"both splits are tiers the floor also shows: rc={rc}"
+
+    report = _last_report(services, "kv-bfloat16")
+    assert [item["prompt"] for item in report["args_differ"]] == [
+        "tc_bash_test_command", "tc_read_named_path"], report["args_differ"]
+    assert tcp.render_report(report).endswith(
+        "split=[tc_bash_test_command:Bash, tc_read_named_path:Read]"), tcp.render_report(report)
+    for item in report["args_differ"]:
+        assert tcp.split_counts_as_finding(item, report["floor"]) is False, item
+
+
+def test_an_unmeasured_floor_writes_off_no_cross_arm_split(services):
+    """Clause 4, the loud half: no second capture means no floor, and a floor nobody took
+    absorbs NOTHING.
+
+    This is the shape every window has had until today — the fold captures each arm once
+    (`flash-next-canary-step.sh:195`, `:204`) — so it is the half that must not regress: same
+    exit code, same named split, plus the line SAYING the floor is unmeasured instead of
+    printing four zeros that would read as a floor of zero. Treating "nobody measured" as "the
+    engine is perfectly repeatable" would decide a dtype arm on whether someone happened to
+    re-run a capture.
+    """
+    _run_capture(services, "fp8-kv", ARM_FP8)
+    _run_capture(services, "kv-bfloat16", ARM_BF16)
+    rc = _report_of(services, "kv-bfloat16")
+    assert rc == tcp.EXIT_FINDING, f"an unmeasured floor counts every split: rc={rc}"
+
+    report = _last_report(services, "kv-bfloat16")
+    floor = report["floor"]
+    assert floor["measured"] is False and floor["pairs"] == 0 and floor["prompts"] == 0, floor
+    assert tcp.render_floor(floor) == \
+        "floor=unmeasured(no second capture: every split counts)", tcp.render_floor(floor)
+    assert tcp.split_counts_as_finding({"tier": "args_differ"}, floor) is True
+    line = tcp.render_report(report)
+    assert "floor=unmeasured" in line and "split=[tc_bash_test_command:Bash" in line, line
