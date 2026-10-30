@@ -229,6 +229,382 @@ def test_the_arm_check_sees_an_arm_that_went_unlisted(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The quantities inside the arms table's cells (measurement.md §The arms)
+# --------------------------------------------------------------------------- #
+
+#: Which corpus size each §The arms row states, the phrase that states it, and
+#: (by `_ARMS_QUANTITY_ARTIFACTS`) the file that decides it. Four of the seventeen
+#: rows state one; the other thirteen carry item numbers, published rates and
+#: "Built, never run", and are absent because there is no artifact to read a size
+#: out of — not because they were overlooked.
+#:
+#: A row's HISTORY is outside this set on purpose, which is why every phrase below
+#: is anchored on the noun it counts rather than grabbing the cell's digits:
+#: `substrate_fuzz` also holds `221 of 258 trials` and `23 findings`, and
+#: `supply-chain` also holds `0 of them blocked` and `61 at #1610`. Those are
+#: measurements of days that are over — the corpus cannot contradict them — and a
+#: node that priced them would fail on the calendar. Each one is `#3581`'s
+#: graded-set boundary, and `test_the_arms_quantity_guard_grades_the_sizes_and_no_history`
+#: shows they stay green when edited.
+#:
+#: `substrate_domains` needs a word: the row's phrase is "8 substrate domains"
+#: while `corpus.json` calls the field `domain`, so the graded figure is the count
+#: of DISTINCT `domain` values — 8 over the 60 tasks — which is what the row's
+#: phrase means. Both figures in that phrase are pinned because the tasks count is
+#: the one that went stale-on-paper once already: the row said 52 tasks in the
+#: commit whose corpus held 60 (#2620), which is the whole reason this exists, and
+#: a corpus that gains a substrate moves both numbers at once.
+_ARMS_QUANTITY_SITES: dict[str, dict[str, str]] = {
+    "substrate_fuzz": {
+        "tasks": r"(?P<n>\d+) tasks over \d+ substrate domains",
+        "substrate_domains": r"\d+ tasks over (?P<n>\d+) substrate domains",
+    },
+    "supply-chain": {
+        "planted_names": r"(?P<n>\d+) planted names",
+        "false_block_controls":
+            r"(?P<n>\d+) of the repo's \d+ declared dependencies as the false-block control",
+    },
+    "cross_engine_disagreement_arm1": {
+        "gold_rows": r"(?P<n>\d+) gold rows",
+        "stratum_action_review_high": r"(?P<n>\d+) `action_review_high`",
+        "stratum_action_review_low": r"(?P<n>\d+) `action_review_low`",
+        "stratum_entity": r"(?P<n>\d+) `entity`",
+    },
+    "injection_canary": {
+        "scenarios": r"(?P<n>\d+|eighteen) worker-style tasks",
+        "controls": r"with (?P<n>\d+|three) controls",
+    },
+}
+
+#: The canary row states its two counts as English words and the other three rows
+#: state theirs as digits. The row is read as it is written rather than rewritten
+#: to suit the checker, so the words are priced here; `test_the_arms_quantity_guard_grades_the_sizes_and_no_history`
+#: pins that the words it maps are the words the row contains.
+_ARMS_NUMBER_WORDS = {"three": 3, "eighteen": 18}
+
+#: The five artifact paths the graded quantities are read from, as module-level
+#: names rather than inline `EVAL / ...` expressions: the artifact-side seam node
+#: grows a COPY of one of them in `tmp_path` and rebinds the name, which is the only
+#: way to drive "the corpus moved and the row did not" against a tracked file
+#: without editing that file. Every reader below opens its path at call time, so a
+#: rebind is enough: nothing caches what the swap would miss.
+_SUBSTRATE_CORPUS = EVAL / "substrate_fuzz" / "corpus.json"
+_SUPPLY_FIXTURES = EVAL / "supply-chain" / "provenance-fixtures.yaml"
+_ARM1_GOLD = EVAL / "cross_engine_disagreement_arm1" / "gold.jsonl"
+_CANARY_SCENARIOS = EVAL / "injection_canary" / "scenarios.yaml"
+_CANARY_CORPUS = EVAL / "injection_canary" / "corpus"
+
+#: The artifact each graded arm's sizes come from, for the failure message: a
+#: reader of the red node has to know which file to go and edit.
+_ARMS_QUANTITY_ARTIFACTS = {
+    "substrate_fuzz": "eval/substrate_fuzz/corpus.json",
+    "supply-chain": "eval/supply-chain/provenance-fixtures.yaml",
+    "cross_engine_disagreement_arm1": "eval/cross_engine_disagreement_arm1/gold.jsonl",
+    "injection_canary": "eval/injection_canary/scenarios.yaml + corpus/control-*.md",
+}
+
+
+def arms_quantity_rows(text: str) -> dict[str, tuple[int, str]]:
+    """Each §The arms row's full line, keyed by the arm in its first cell.
+
+    `_ARMS_ROW` already finds a row by its first cell for the name inventory above;
+    this keeps the REST of the line, which is the half of the table no node has
+    ever read — #3581 measured the whole 239-node file passing with three rows'
+    cell counts falsified, while renaming one first cell failed at once.
+    """
+    section = _section(text, "The arms")
+    out: dict[str, tuple[int, str]] = {}
+    for m in _ARMS_ROW.finditer(section):
+        line = section[m.start():].split("\n", 1)[0]
+        name = m.group(1)
+        assert name not in out, f"two §The arms rows start with `{name}`"
+        out[name] = (m.start(), line)
+    return out
+
+
+def arms_corpus_quantities() -> dict[str, dict[str, int]]:
+    """The sizes the four arm artifacts actually hold.
+
+    `baseline_rows()` three sections over is the model: open the artifact and
+    count, so the table is checked against the files rather than against the
+    sentence that wrote it. The artifact-side nodes could never have caught the
+    52 — `eval/substrate_fuzz/corpus.py:86` is `MIN_TASKS = 40` and its test
+    asserts `>=`, so a corpus can grow past a doc's figure with every node green.
+    """
+    import yaml
+
+    out: dict[str, dict[str, int]] = {}
+
+    corpus = json.loads(_SUBSTRATE_CORPUS.read_text(encoding="utf-8"))
+    tasks = corpus.get("tasks")
+    assert isinstance(tasks, list) and tasks, "corpus.json holds no non-empty `tasks`"
+    domains = {t.get("domain") for t in tasks}
+    assert None not in domains, "a corpus.json task carries no `domain`"
+    out["substrate_fuzz"] = {"tasks": len(tasks), "substrate_domains": len(domains)}
+
+    fx = yaml.safe_load(_SUPPLY_FIXTURES.read_text(encoding="utf-8"))
+    planted, control = fx.get("planted"), fx.get("control")
+    assert isinstance(planted, list) and planted, "the fixtures hold no `planted` list"
+    assert isinstance(control, list) and control, "the fixtures hold no `control` list"
+    out["supply-chain"] = {"planted_names": len(planted),
+                           "false_block_controls": len(control)}
+
+    gold = [json.loads(line) for line in
+            _ARM1_GOLD.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert gold, "gold.jsonl holds no rows"
+    strata = collections.Counter(r.get("stratum") for r in gold)
+    assert None not in strata, "a gold row carries no `stratum`"
+    named = {q[len("stratum_"):]: strata[q[len("stratum_"):]]
+             for q in _ARMS_QUANTITY_SITES["cross_engine_disagreement_arm1"]
+             if q.startswith("stratum_")}
+    assert set(named) == {"action_review_high", "action_review_low", "entity"}, (
+        f"the strata this guard names are not the strata the row names: {sorted(strata)}")
+    assert sum(named.values()) == len(gold), (
+        f"gold.jsonl's strata {dict(named)} sum to {sum(named.values())}, not the "
+        f"{len(gold)} rows the file holds: a stratum appeared that the doc's row "
+        "does not name, so the row and this guard are both stale")
+    out["cross_engine_disagreement_arm1"] = {"gold_rows": len(gold),
+                                            **{f"stratum_{k}": v for k, v in named.items()}}
+
+    scen = yaml.safe_load(_CANARY_SCENARIOS.read_text(encoding="utf-8")).get("scenarios")
+    assert isinstance(scen, list) and scen, "scenarios.yaml holds no non-empty `scenarios`"
+    controls = sorted(_CANARY_CORPUS.glob("control-*.md"))
+    assert controls, "eval/injection_canary/corpus/ matches no control-*.md"
+    out["injection_canary"] = {"scenarios": len(scen), "controls": len(controls)}
+
+    assert set(out) == set(_ARMS_QUANTITY_SITES), (
+        f"{sorted(set(out) ^ set(_ARMS_QUANTITY_SITES))} — the graded arms and the "
+        "arms with readable artifacts have come apart")
+    return out
+
+
+def _arms_number(tok: str) -> int:
+    """A row's stated count, digit or English word."""
+    if tok.isdigit():
+        return int(tok)
+    assert tok in _ARMS_NUMBER_WORDS, (
+        f"the row states {tok!r}, which is neither a digit nor a mapped word — "
+        "spell the count as a digit or add the word to `_ARMS_NUMBER_WORDS`")
+    return _ARMS_NUMBER_WORDS[tok]
+
+
+def arms_quantity_matches(text: str) -> list[dict]:
+    """Every graded quantity: what its row states, what its artifact holds, where.
+
+    A graded phrase missing from its row is an assertion here rather than a
+    silently empty result: #2230's rule is that a quantity removed from the
+    sentence it belongs in has to stop being a pass, and a checker that quietly
+    graded nothing is how #1699's shape got filed twice.
+    """
+    rows = arms_quantity_rows(text)
+    actual = arms_corpus_quantities()
+    out: list[dict] = []
+    for arm, sites in _ARMS_QUANTITY_SITES.items():
+        assert arm in rows, (
+            f"§The arms has no `{arm}` row to read {sorted(sites)} from")
+        _off, line = rows[arm]
+        for quantity, pattern in sites.items():
+            hits = list(re.finditer(pattern, line))
+            assert len(hits) == 1, (
+                f"the `{arm}` row matches the graded phrase for {quantity} {len(hits)} "
+                f"times (pattern {pattern!r}); it has to appear exactly once — if the "
+                "wording moved, re-point the phrase, never drop the count")
+            tok = hits[0].group("n")
+            out.append({"arm": arm, "quantity": quantity, "token": tok,
+                        "stated": _arms_number(tok), "actual": actual[arm][quantity],
+                        "line": line,
+                        "span": (hits[0].start("n"), hits[0].end("n"))})
+    return out
+
+
+def arms_quantity_failures(text: str) -> list[str]:
+    """One message per row quantity whose stated figure is not the artifact's."""
+    return [f"`{m['arm']}` row states {m['quantity']} = {m['stated']} "
+            f"(written {m['token']!r}) but {_ARMS_QUANTITY_ARTIFACTS[m['arm']]} "
+            f"holds {m['actual']}"
+            for m in arms_quantity_matches(text) if m["stated"] != m["actual"]]
+
+
+def arms_text_with_perturbed_quantity(text: str, arm: str, quantity: str,
+                                      by: int = 1) -> tuple[str, str]:
+    """The doc with ONE graded quantity moved, and the old phrase it replaced.
+
+    Returns the mutated text and the exact string that changed, so the caller has
+    to prove the edit landed rather than assume a replacement did something.
+    """
+    hit = next((m for m in arms_quantity_matches(text)
+                if m["arm"] == arm and m["quantity"] == quantity), None)
+    assert hit, f"no graded quantity {arm}/{quantity}"
+    tok = str(hit["stated"] + by)
+    line = hit["line"][:hit["span"][0]] + tok + hit["line"][hit["span"][1]:]
+    new_line = line
+    new_text = text.replace(hit["line"], new_line, 1)
+    assert new_text != text, f"the `{arm}` row was not found to perturb"
+    return new_text, hit["token"]
+
+
+@pytest.mark.parametrize("arm", sorted(_ARMS_QUANTITY_SITES))
+def test_an_arms_row_states_the_corpus_size_its_artifact_holds(arm):
+    """#3581 clauses 1-4: the four corpus sizes are the artifacts' sizes.
+
+    The first column of this table has been set-equal both ways since #1787, so an
+    arm added without a row has always failed; the numbers inside the cells have
+    never been read at all, and two of them were wrong at the commit that shipped
+    the sentence describing them. Either side moving alone fails here: add a task
+    to `corpus.json` without editing the row and the artifact wins, edit the row
+    without re-sampling and the row is the liar. Which is how 52 lived: it was the
+    item's number, not the tree's, and nothing on the artifact side is a pin —
+    `MIN_TASKS = 40` is a floor.
+    """
+    fails = [f for f in arms_quantity_failures(_text("measurement.md"))
+             if f.startswith(f"`{arm}`")]
+    assert fails == [], f"measurement.md §The arms disagrees with its artifacts: {fails}"
+
+
+def _artifact_side_drifts(arm: str, tmp_path, monkeypatch) -> None:
+    """Grow ONE arm's artifact in a copy and rebind the reader to that copy.
+
+    The copy goes under `tmp_path` because the real files are tracked: growing
+    `corpus.json` in place to prove a point would be a tree edit that lands in the
+    next commit. Rebinding the module-level path is enough — every reader opens its
+    file at call time, so nothing is cached that the swap would miss.
+    """
+    import yaml
+
+    g = globals()
+    if arm == "substrate_fuzz":
+        corpus = json.loads(_SUBSTRATE_CORPUS.read_text(encoding="utf-8"))
+        grown = tmp_path / "corpus.json"
+        # A copy of an existing task, so the DOMAIN count does not move: the row
+        # states two figures and this case has to move exactly one of them.
+        corpus["tasks"].append(dict(corpus["tasks"][0],
+                                    id=str(corpus["tasks"][0]["id"]) + "-extra"))
+        grown.write_text(json.dumps(corpus), encoding="utf-8")
+        monkeypatch.setitem(g, "_SUBSTRATE_CORPUS", grown)
+    elif arm == "supply-chain":
+        fx = yaml.safe_load(_SUPPLY_FIXTURES.read_text(encoding="utf-8"))
+        grown = tmp_path / "provenance-fixtures.yaml"
+        fx["planted"].append(dict(fx["planted"][0], name="planted-extra-9999"))
+        grown.write_text(yaml.safe_dump(fx), encoding="utf-8")
+        monkeypatch.setitem(g, "_SUPPLY_FIXTURES", grown)
+    elif arm == "cross_engine_disagreement_arm1":
+        rows = [ln for ln in _ARM1_GOLD.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+        grown = tmp_path / "gold.jsonl"
+        extra = json.loads(rows[0])
+        extra["stratum"] = "action_review_high"
+        rows.append(json.dumps(extra))
+        grown.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        monkeypatch.setitem(g, "_ARM1_GOLD", grown)
+    elif arm == "injection_canary":
+        grown = tmp_path / "corpus"
+        grown.mkdir()
+        for f in sorted(_CANARY_CORPUS.glob("control-*.md")):
+            (grown / f.name).write_text(f.read_text(encoding="utf-8"),
+                                        encoding="utf-8")
+        (grown / "control-extra.md").write_text("a fourth control\n",
+                                               encoding="utf-8")
+        monkeypatch.setitem(g, "_CANARY_CORPUS", grown)
+    else:
+        raise AssertionError(f"no artifact-side growth case for `{arm}`")
+
+
+#: Which quantities a grown artifact is expected to move. Appending one task
+#: leaves `substrate_fuzz`'s domain count alone (the copy reuses an existing
+#: domain), a fourth control moves only the canary's controls, and re-sampling
+#: arm 1 by one row moves its total AND that row's stratum — two figures, both
+#: named, because both are the row's claim about the same file.
+_ARTIFACT_GROWTH_EXPECTED = {
+    "substrate_fuzz": {"tasks"},
+    "supply-chain": {"planted_names"},
+    "cross_engine_disagreement_arm1": {"gold_rows", "stratum_action_review_high"},
+    "injection_canary": {"controls"},
+}
+
+
+@pytest.mark.parametrize("arm", sorted(_ARMS_QUANTITY_SITES))
+def test_growing_an_artifact_without_editing_the_row_fails_the_guard(arm, tmp_path,
+                                                                     monkeypatch):
+    """The other half of "either side moving alone fails": the FILE moves.
+
+    The clause that matters for a future corpus change is this one. A row edited
+    away from its artifact is a typo someone can see; a corpus that gains a task
+    and leaves `architecture/measurement.md` saying 60 is invisible to every other
+    node in this file, because the artifact-side checks are floors
+    (`MIN_TASKS = 40`, `planted_total >= 20`) and a growing corpus satisfies a
+    floor forever. So the guard has to fail on the file's movement with the doc
+    untouched, which is what this drives — through copies, never the tracked files.
+    """
+    text = _text("measurement.md")
+    assert arms_quantity_failures(text) == [], (
+        "the page disagrees with its artifacts before the artifact is even grown, "
+        "so the failure below would prove nothing")
+    _artifact_side_drifts(arm, tmp_path, monkeypatch)
+    fails = arms_quantity_failures(text)
+    assert fails, f"growing {_ARMS_QUANTITY_ARTIFACTS[arm]} left the guard green"
+    assert all(f.startswith(f"`{arm}`") for f in fails), fails
+    moved = {m["quantity"] for m in arms_quantity_matches(text)
+             if m["arm"] == arm and m["stated"] != m["actual"]}
+    assert moved == _ARTIFACT_GROWTH_EXPECTED[arm], (
+        f"growing {arm}'s artifact moved {sorted(moved)}, expected "
+        f"{sorted(_ARTIFACT_GROWTH_EXPECTED[arm])}")
+    assert _ARMS_QUANTITY_ARTIFACTS[arm] in " ".join(fails), (
+        "the failure does not name the artifact, so a reader cannot tell which "
+        "file is the liar")
+
+
+def test_the_arms_quantity_guard_grades_the_sizes_and_no_history():
+    """#3581 clause 5: the graded set is exactly the corpus sizes, and it can fail.
+
+    Three things have to be true for the guard above to be a guard. (1) It can
+    fail on each of the ten graded quantities individually, and names the row it
+    is complaining about — a node that only fails on the whole table at once is a
+    node whose author cannot tell which row he broke. (2) A row's history stays
+    green under the same edits: `0 of them blocked`, `61 at #1610` and the judge
+    row's published 32.4% are dated measurements, so grading them would fail the
+    page for the passage of time. (3) The perturbations do not
+    disturb the name inventory, which is the pre-existing node's job and stays
+    exactly as it was.
+    """
+    text = _text("measurement.md")
+    declared = sum(len(qs) for qs in _ARMS_QUANTITY_SITES.values())
+    graded = {(m["arm"], m["quantity"]) for m in arms_quantity_matches(text)}
+    assert graded == {(a, q) for a, qs in _ARMS_QUANTITY_SITES.items() for q in qs}, (
+        f"the guard reads {len(graded)} quantities, not the {declared} it declares")
+    assert arms_quantity_failures(text) == [], (
+        "the guard is red on the page as it stands, so the controls below prove "
+        "nothing about drift")
+
+    for arm, quantity in sorted(graded):
+        perturbed, old = arms_text_with_perturbed_quantity(text, arm, quantity)
+        fails = arms_quantity_failures(perturbed)
+        assert len(fails) == 1, (
+            f"moving {arm}/{quantity} (from {old!r}) produced {len(fails)} failures: {fails}")
+        assert fails[0].startswith(f"`{arm}`") and quantity in fails[0], (
+            f"the failure does not name the row and quantity perturbed: {fails[0]}")
+        assert arms_named_by(perturbed) == arms_named_by(text), (
+            f"perturbing {arm}/{quantity} changed the first column too, so the "
+            "control is also breaking the name inventory")
+
+    history = (text.replace("0 of them blocked", "7 of them blocked")
+                .replace("(61 at #1610; ", "(41 at #1610; ")
+                .replace("32.4%", "12.1%"))
+    for before, after in (("0 of them blocked", "7 of them blocked"),
+                          ("61 at #1610", "41 at #1610"),
+                          ("32.4%", "12.1%")):
+        assert before in text and after in history, (
+            f"the historical-figure control never wrote {after!r}, so its green is "
+            "a pattern that could not have matched this page")
+    assert arms_quantity_failures(history) == [], (
+        f"the guard graded a dated measurement: {arms_quantity_failures(history)}")
+
+    words = {m["token"] for m in arms_quantity_matches(text) if not m["token"].isdigit()}
+    assert words <= set(_ARMS_NUMBER_WORDS) and words == {"eighteen", "three"}, (
+        f"the rows state {sorted(words)} as words; `_ARMS_NUMBER_WORDS` maps "
+        f"{sorted(_ARMS_NUMBER_WORDS)}, and a mapped word no row uses is dead weight")
+
+
+# --------------------------------------------------------------------------- #
 # Cited paths and wikilinks
 # --------------------------------------------------------------------------- #
 
