@@ -955,9 +955,113 @@ def _reap_round(rid: str, item_id, why: str, reaped: list[dict]) -> None:
                       + (f"they were copied to `{saved}`." if saved else
                          f"they were NOT copied ({closed.get('live_dirty_error') or 'no reason recorded'})."))
         B.note_item(int(item_id), f"automod round {rid} abandoned: {rec['reason']}. {where}")
-        B.set_status(int(item_id), "up_next", "its round was abandoned; back in the pool")
+        # #3600: the note above is true whatever happens next, so it is written first;
+        # the move back into the pool is the one thing here that can be wrong. `abort`
+        # took THIS round's worktree with it (`round.abort` → `W.remove(keep_branch=True)`),
+        # so an item the shared predicate still counts mid-round is mid-ANOTHER round, and
+        # `up_next` hands the pool a fresh round of an item whose earlier change is sitting
+        # on `main` under observation. Measured over the ledger: 2 of 291 item-bearing
+        # abandons did exactly that — #3112 at 2026-10-21T18:03:41Z, and #3524 at
+        # 2026-10-29T17:27:05Z while `SM_20261029_150548`'s 16:47:56Z promotion had not
+        # settled (it did, at 17:30:07Z). `desired_statuses` walks a wrong status back on
+        # its next pass, so the harm is not the end state but the window: readiness holds
+        # an item only while a gate or landing is RUNNING (`items_being_gated_or_landed`,
+        # narrow by design), so inside it the item is offerable.
+        held = _unfinished_round_note(rid, int(item_id))
+        if held is not None:
+            B.note_item(int(item_id), held)
+        else:
+            B.set_status(int(item_id), "up_next", "its round was abandoned; back in the pool")
     logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
     reaped.append(rec)
+
+
+#: How `board_steward.unfinished_rounds` names a round that is not over, and what a
+#: person reading an item note needs instead. Rendered here rather than passed through
+#: because the note is prose about a board, and `promoted` alone reads like success.
+#: The keys are that function's `ROUND_STATES`, in that order; nothing is computed from
+#: them, only worded.
+_ROUND_STATE_WORDS = {
+    "promoted": "its landing is promoted and has not settled (still under observation)",
+    "worktree": "its worktree is still open",
+    "gate": "a gate is running in it",
+    "landing": "a landing is running in it",
+}
+
+
+def _unfinished_round_note(reaped_rid: str, item_id: int) -> str | None:
+    """A note saying the item stays where it is because another round of it is unfinished — or None.
+
+    Returning None means "move it, as the reaper always has": the item is not in
+    `scripts.automod.backlog.items_with_unfinished_rounds`, so nothing about it is
+    mid-round and the common case is untouched.
+
+    The decision is that ONE shared predicate's, called with the ledger and nothing else
+    — it returns item ids, which is all a reaper of a closed round can ask. No round
+    exclusion is passed to it, and none is needed: `R.abort(reaped_rid)` ran before this,
+    so the reaped round carries no worktree, and `_reapable` refused to reap a round that
+    is `current.json`'s or has a gate or landing running, so what is left that can hold an
+    item is another round — which is precisely the case worth holding for. Restating the
+    liveness test here instead (promoted rows, worktrees, gate markers) would put a second
+    copy of a rule with four signals next to the one that already has them, and the two
+    would drift the way the board steward's prompt-grounding and this machine writer
+    drifted apart when `75b221c3` fixed only the prompt: the steward was shown a round
+    state this reaper was free to ignore.
+
+    The round the note NAMES comes from `board_steward.unfinished_rounds`, the same public
+    helper that grounds the steward's prompt, so a person and the steward read one round
+    id for one item. It names the OLDER round when the state belongs to there — #3524's
+    shape — which is the difference between a note that says where to look and one that
+    points at the round that was just closed.
+    """
+    from scripts.automod import backlog as B, state as S
+    try:
+        unfinished = B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    except Exception as exc:  # noqa: BLE001
+        # Hold, and say so. The predicate's own convention is that unsure means unfinished
+        # (`backlog.py`, "fails closed"), and this file already refuses to act on a signal
+        # it could not read rather than reading silence as all-clear — the reaper reaps
+        # nothing when the session snapshot fails. The direction matters too: a skipped
+        # move leaves the item `in_progress`, which `desired_statuses` re-decides on its
+        # next pass, while a wrong `up_next` is offerable until then.
+        logger.warning("round %s: item %s left in its status: the unfinished-round "
+                       "predicate could not be read (%s: %s)", reaped_rid, item_id,
+                       type(exc).__name__, exc)
+        return (f"automod round {reaped_rid} was reaped, but this item's status was LEFT "
+                f"UNCHANGED — not moved to `up_next` — because its round state could not "
+                f"be read ({type(exc).__name__}: {exc}) and an item whose state is unknown "
+                f"is not handed back to the pool.")
+    if item_id not in unfinished:
+        return None
+    from workers.sources.board_steward import unfinished_rounds
+    try:
+        live = unfinished_rounds(S.LEDGER_PATH, {item_id}).get(item_id)
+    except Exception:  # noqa: BLE001 — the name is prose; the decision is already made
+        live = None
+    if live is not None:
+        rid, states = live
+        # Joined with `+` because that is how the board steward's own line renders the
+        # same tuple (`round_state=promoted+not settled`), so the note on the item and the
+        # steward's line about it are one vocabulary.
+        why_round = " + ".join(_ROUND_STATE_WORDS.get(s, s) for s in states) or \
+            "its state is unfinished"
+        source = f"round `{rid}` is unfinished — {why_round}"
+    else:
+        # No state rendered for it: the predicate fired on a signal that names no live
+        # round (a `started` row with nothing after it, say). Say which rounds the item's
+        # history holds rather than naming the closed one as if it were the live one.
+        others = [str(r.get("round_id")) for r in
+                  (B.implement_history(S.LEDGER_PATH).get(item_id) or [])
+                  if r.get("round_id") and str(r["round_id"]) != reaped_rid]
+        source = (f"another of this item's rounds is unfinished"
+                  f"{': ' + ', '.join(f'`{r}`' for r in others) if others else ''}")
+    logger.warning("round %s: item %s left in its status: %s", reaped_rid, item_id,
+                   source.replace("`", ""))
+    return (f"automod round {reaped_rid} was reaped, but this item's status was LEFT "
+            f"UNCHANGED — it was NOT moved to `up_next` — because {source}. "
+            f"`items_with_unfinished_rounds` still counts this item mid-round, so a fresh "
+            f"round of it would be started while that one is not over; the item goes back "
+            f"to the pool when it finishes.")
 
 
 def _backend_boot_ts() -> float | None:

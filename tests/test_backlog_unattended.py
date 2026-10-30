@@ -1562,22 +1562,57 @@ def test_a_human_can_grant_a_second_attempt_and_only_one(isolated):
 # A round left open by a turn that died at its budget
 # ===========================================================================
 
-def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None, observed=True):
+def _reaper_env(monkeypatch, tmp_path, *, worktree=True, busy=(), current=None, observed=True,
+                closes_worktree=False, rounds=()):
     """`observed` is `autocode.inner_voice`: the grace exists only while an
-    observer could still rescue the round."""
+    observer could still rescue the round.
+
+    `closes_worktree` (with `rounds=`, the ids whose worktrees exist) makes the map
+    PER ROUND and the stubbed close take that round's tree with it, which is what the real
+    close does — `round.abort` is `W.remove(round_id, keep_branch=True)` followed by the
+    event, so a round that was just closed has no tree. Nodes that assert what the BOARD
+    does after a reap need it: #3600's unfinished-round predicate reads worktree existence,
+    and one directory standing in for every round models a close that never happened, which
+    would make every reaped item look mid-round. A round named by the test but absent from
+    `rounds` has no tree, which is the real shape of a promoted-and-landed one. Nodes that
+    read the tree after the reap to check something the close preserved take the default,
+    which leaves one shared directory standing.
+    """
     from scripts.automod import round as R, worktree as W
     import app.sessions_io as sio
     monkeypatch.setattr(C, "source_inner_voice", lambda source, default=True: observed)
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
     aborted: list[str] = []
-    monkeypatch.setattr(R, "abort", lambda rid, reason="": aborted.append(rid) or {"aborted": rid})
     import shutil
-    wt = tmp_path / "wt"
-    if worktree:
-        wt.mkdir(exist_ok=True)
+    if closes_worktree:
+        root = tmp_path / "wts"
+        if worktree:
+            for _rid in rounds:
+                (root / _rid).mkdir(parents=True, exist_ok=True)
+
+        def _wt(rid):
+            return root / rid
+
+        def _abort(rid, reason=""):
+            aborted.append(rid)
+            shutil.rmtree(root / rid, ignore_errors=True)   # `W.remove`'s half of a close
+            return {"aborted": rid}
     else:
-        shutil.rmtree(wt, ignore_errors=True)
-    monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
+        wt = tmp_path / "wt"
+        if worktree:
+            wt.mkdir(exist_ok=True)
+        else:
+            shutil.rmtree(wt, ignore_errors=True)
+
+        def _wt(rid):
+            return wt
+
+        def _abort(rid, reason=""):
+            aborted.append(rid)
+            return {"aborted": rid}
+
+    monkeypatch.setattr(R, "abort", _abort)
+    monkeypatch.setattr(W, "worktree_path", _wt)
     monkeypatch.setattr(sio, "active_sessions_snapshot", lambda: [{"session_id": s} for s in busy])
     monkeypatch.setattr(S, "read_current", lambda: current)
     return aborted
@@ -3620,8 +3655,14 @@ def test_an_abandoned_round_returns_the_item_to_the_pool(isolated, monkeypatch):
                     "round_id": "SM_725", "stop_reason": "turn_timeout", "session_id": "gone"}, path=S.LEDGER_PATH)
     S.append_event({"event": "round_start", "round_id": "SM_725"}, path=S.LEDGER_PATH)
     from scripts.automod import round as R, worktree as W
-    monkeypatch.setattr(W, "worktree_path", lambda rid: isolated)   # "exists"
-    monkeypatch.setattr(R, "abort", lambda rid, reason="": None)
+    # The close takes the worktree with it, as the real `round.abort` → `W.remove` does.
+    # Not decoration: #3600's guard asks `items_with_unfinished_rounds`, which reads
+    # worktree existence, so a tree left standing after the close would make the item look
+    # mid-round and the guard would (correctly, for that world) hold it.
+    wt = isolated / "wt-SM_725"
+    wt.mkdir()
+    monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
+    monkeypatch.setattr(R, "abort", lambda rid, reason="": wt.rmdir())
     monkeypatch.setattr(S, "read_current", lambda: {})
     out = I.reap_abandoned_rounds(now=9e12)
     assert out and out[0]["round_id"] == "SM_725"
@@ -4387,7 +4428,13 @@ def test_the_reaper_closes_a_tool_opened_round_no_implement_row_names(isolated, 
     read the loop as busy until a human aborted it."""
     import time as _t
     write_item(isolated, 1199, status="in_progress")
-    aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
+    # `closes_worktree` because this node's last line is the BOARD's state after both
+    # reaps, and the unfinished-round guard the reaper now consults reads worktree
+    # existence: with a shared tree left standing, the second close would correctly read
+    # the item as still mid-round (of the first round, whose tree the fixture never took
+    # away) and hold the status. Per-round trees is the world the guard reasons about.
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_PREV", "SM_ORPHAN"))
     _finished("SM_PREV", session="s1", item=1199)
     now = _t.time() + 1
     _orphan_round("SM_ORPHAN", now - I.ORPHAN_ROUND_MIN_AGE_SECONDS - 5, tmp_path, item=1199)
@@ -5812,3 +5859,227 @@ def test_an_umbrella_fold_holds_a_member_whose_hand_run_receipt_fails(isolated):
     closed = _fm(next(isolated.glob("5-*.md")))
     assert closed["status"] == "done" and closed["automod_landed"] == "feedfacefeed", \
         "the member with nothing holding it folds as it always did"
+
+
+# ===========================================================================
+# #3600 — a reap must not hand back an item another of its rounds is mid
+# ===========================================================================
+
+REAP_REASON = "its round was abandoned; back in the pool"
+
+
+def _board_notes(item_id, isolated) -> list[str]:
+    """The item's `board` activity journal, as the reaper writes it: `note_item` appends
+    activity-log lines under the `board` where, and there is no `Item.notes` — a node that
+    read a field that does not exist would pass by never finding the note it asserts."""
+    fm = B._split_frontmatter(next(isolated.glob(f"{item_id}-*.md")).read_text(encoding="utf-8"))[0]
+    log = fm.get("activity_log") or {}
+    return log.get("board") if isinstance(log, dict) else log
+
+
+def _live_promoted_round(item, live, *, commit="f" * 40):
+    """Ledger rows for `live`: an implement round of `item` that was promoted and has NOT
+    settled — #3524's `SM_20261029_150548`, promoted 16:47:56Z and settled 17:30:07Z, with
+    the reaper putting the item back in the pool at 17:27:05Z in between. No `settled` row
+    and no `rollback_succeeded` row, because the absence of both is exactly what
+    `_live_promoted_rounds` counts as unsettled. The turn is over and its worktree is gone
+    (the fixture gives a round only the trees it is told about), which is the real shape of
+    a change sitting on `main` awaiting its observation window."""
+    _started(item, 1_000.0)
+    _finished(live, session="s-live", item=item)
+    S.append_event({"event": "promoted", "round_id": live, "commit": commit,
+                    "item_id": item, "target": "main"}, path=S.LEDGER_PATH)
+
+
+def test_a_reap_holds_the_item_while_another_round_of_it_is_unsettled(isolated, monkeypatch,
+                                                                    tmp_path):
+    """The #3524 shape. The reaper closed one round of the item and, in the same breath,
+    put the item back in the pool while a second round of it sat promoted-and-unsettled on
+    `main`. The wrong status is walked back by the next reconciler pass (its unfinished-round
+    branch at `backlog.py:6200`), so what is pinned here is that the move never happens:
+    readiness holds an item only while a gate or landing is RUNNING, so through that window
+    the item was offerable and could be given a fresh round while its earlier change was
+    still under observation.
+
+    The status is set to `in_progress` AFTER `_confirm` on purpose — `_confirm` itself ends
+    by moving the item to `up_next`, so reading `up_next` after a reap without doing that
+    would prove nothing about who wrote it."""
+    import time as _t
+    from workers.sources import autocode as I
+    write_item(isolated, 3524, status="in_progress")
+    _confirm(3524)
+    B.set_status(3524, "in_progress", "running SM_REAPED")
+    _live_promoted_round(3524, "SM_LIVE")
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_REAPED",))
+    _started(3524, 2_000.0)
+    _finished("SM_REAPED", session="s-gone", item=3524)
+    assert B.select_confirmed(S.LEDGER_PATH) is None, "poolable, but the status kept it out"
+
+    out = I.reap_abandoned_rounds(now=_t.time() + 1)
+    assert aborted == ["SM_REAPED"] and {r["round_id"] for r in out} == {"SM_REAPED"}, \
+        "the dead round is still closed — only the board move is withheld"
+    assert B.item_by_id(3524).status == "in_progress", \
+        "the reap moved an item whose other round is promoted and unsettled"
+    assert B.select_confirmed(S.LEDGER_PATH) is None, \
+        "the item is offerable while SM_LIVE's landing is under observation"
+
+    board = _board_notes(3524, isolated)
+    assert any("automod round SM_REAPED abandoned" in n for n in board), \
+        "the reaper's own note went missing with the move: a closed round must still be " \
+        "findable from its item"
+    skip = [n for n in board if "was LEFT UNCHANGED" in n]
+    assert len(skip) == 1, f"expected one note holding the move, got {skip}"
+    for want in ("SM_LIVE", "SM_REAPED", "up_next", "unfinished"):
+        assert want in skip[0], f"{want!r} missing from the hold note: {skip[0]}"
+
+
+def test_the_guard_names_the_older_round_the_unfinished_state_belongs_to(
+        isolated, monkeypatch, tmp_path):
+    """The note is read by a person opening the item, and `unfinished_rounds` reports the
+    OLDER round when that is where the state lives — which is #3524's case exactly: the
+    reaped round had nothing running in it, the promoted-and-unsettled landing sat in the
+    earlier one. Naming `SM_REAPED` would send the reader to the round that was just closed.
+    The wording is the shared `ROUND_STATES` vocabulary the board steward renders from, so
+    the note and the steward's line for the same item cannot describe two different states."""
+    import time as _t
+    from workers.sources import autocode as I
+    write_item(isolated, 3525, status="in_progress")
+    _confirm(3525)
+    B.set_status(3525, "in_progress", "running SM_REAPED")
+    _live_promoted_round(3525, "SM_LIVE")
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_REAPED",))
+    _started(3525, 2_000.0)
+    _finished("SM_REAPED", session="s-gone", item=3525)
+    assert I.reap_abandoned_rounds(now=_t.time() + 1)
+    assert aborted == ["SM_REAPED"]
+    skip = [n for n in _board_notes(3525, isolated) if "was LEFT UNCHANGED" in n]
+    assert len(skip) == 1, skip
+    assert "round `SM_LIVE` is unfinished" in skip[0], skip[0]
+    assert "promoted" in skip[0] and "not settled" in skip[0], skip[0]
+
+
+def test_the_reaper_asks_the_shared_predicate_and_keeps_no_round_rule_of_its_own(
+        isolated, monkeypatch, tmp_path):
+    """The decision is `items_with_unfinished_rounds'`, not a copy of it: reporting the item
+    from a stub of that ONE function is enough to hold the move, with no promoted row, no
+    second round and no gate anywhere in the fixture. That is what makes the file-scanned
+    assertion below worth having — a local re-derivation over promoted rows, worktree
+    existence and the gate/landing markers would keep passing this node while the two
+    answers disagreed, which is how the board steward's prompt and this machine writer came
+    apart before `75b221c3` fixed only the prompt's half.
+
+    The positive control is the pair to it: with the predicate reporting nothing, the same
+    call moves the item, so the stub is not holding it by accident."""
+    import time as _t
+    from scripts.automod import backlog as BL
+    from workers.sources import autocode as I
+    write_item(isolated, 3600, status="in_progress")
+    _confirm(3600)
+    B.set_status(3600, "in_progress", "running SM_REAPED")
+    # Both rounds need a tree of their own: `_reapable` refuses a round with no worktree,
+    # so a control that reused the first node's map would silently reap nothing and the
+    # "the guard moved it anyway" half would be reading an untouched board.
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_REAPED", "SM_REAPED2"))
+    _started(3600, 2_000.0)
+    _finished("SM_REAPED", session="s-gone", item=3600)
+    monkeypatch.setattr(BL, "items_with_unfinished_rounds", lambda ledger: {3600})
+    assert I.reap_abandoned_rounds(now=_t.time() + 1), "the round was not reaped at all"
+    assert aborted == ["SM_REAPED"]
+    assert B.item_by_id(3600).status == "in_progress", \
+        "the reaper moved the item although the shared predicate said it was mid-round"
+
+    write_item(isolated, 3601, status="in_progress")
+    _confirm(3601)
+    B.set_status(3601, "in_progress", "running SM_REAPED2")
+    _started(3601, 2_000.0)
+    _finished("SM_REAPED2", session="s-gone2", item=3601)
+    monkeypatch.setattr(BL, "items_with_unfinished_rounds", lambda ledger: set())
+    assert I.reap_abandoned_rounds(now=_t.time() + 1)
+    assert B.item_by_id(3601).status == "up_next", \
+        "the guard holds even when the predicate reports nothing"
+
+    # The scan is of the two functions this change owns, not of the whole module. The file
+    # already reads worktree existence and the gate/landing markers in `_reapable` and
+    # `_loop_is_free`, written before this item existed, and rewriting those is not what
+    # clause 3 asks; what it asks is that the DECISION added here be the predicate's. A
+    # file-wide ban would have to fail on pre-existing code, and a test that fails on
+    # someone else's line is a test someone will delete.
+    import ast
+    src = (_REPO_ROOT / "workers" / "sources" / "autocode.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    bodies = {n.name: ast.get_source_segment(src, n) or "" for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef)
+              and n.name in ("_reap_round", "_unfinished_round_note")}
+    assert set(bodies) == {"_reap_round", "_unfinished_round_note"}, \
+        "the reaper's decision moved somewhere this scan does not look"
+    assert "items_with_unfinished_rounds" in bodies["_unfinished_round_note"], \
+        "the reaper stopped consulting #3546's predicate"
+    for mine in ("_live_promoted_rounds", "_reverted_commits", "_landing_records",
+                 "land_in_progress", "gate_in_progress", "worktree_path", "gate_passed_at",
+                 "_unsettled_promotions"):
+        for fname, body in bodies.items():
+            assert mine not in body, (
+                f"`{mine}` appears in `{fname}`: liveness arithmetic restated there is a "
+                "second answer to `is this item mid-round`, and the two drifting apart is "
+                "the incident this guard closes")
+
+
+def test_a_reaped_round_with_no_other_live_round_still_returns_its_item(isolated, monkeypatch,
+                                                                       tmp_path):
+    """The common case, unchanged: nothing else is mid-round, so the item goes back to the
+    pool carrying the reason text it always has — the half a person reads to tell a reap
+    from a close. This is the paired control for the guard nodes above: each of them
+    monkeypatches the predicate or seeds a promoted row, so none of them proves what the
+    reaper does on an ordinary dead round."""
+    import time as _t
+    from workers.sources import autocode as I
+    write_item(isolated, 1201, status="in_progress")
+    _confirm(1201)
+    B.set_status(1201, "in_progress", "running SM_ONLY")
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_ONLY",))
+    _started(1201, 2_000.0)
+    _finished("SM_ONLY", session="s-gone", item=1201)
+    assert I.reap_abandoned_rounds(now=_t.time() + 1)
+    assert aborted == ["SM_ONLY"]
+    assert B.item_by_id(1201).status == "up_next"
+    fm = B._split_frontmatter(next(isolated.glob("1201-*.md")).read_text(encoding="utf-8"))[0]
+    moved = [e for e in fm.get("activity_log") or []
+             if e.endswith("→ up_next: " + REAP_REASON)]
+    assert moved, f"no status move carrying the reaper's reason: {fm.get('activity_log')}"
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 1201, \
+        "moved on the board but still not offerable"
+    board = _board_notes(1201, isolated)
+    assert not any("was LEFT UNCHANGED" in n for n in board), \
+        f"the guard wrote a hold note on a clean reap: {board}"
+
+
+def test_the_orphan_reap_loop_moves_an_item_with_no_other_live_round(isolated, monkeypatch,
+                                                                    tmp_path):
+    """Clause 4's second call site. The guard sits inside `_reap_round`, which the
+    finished-turn loop (autocode.py:629) and the tool-opened-orphan loop (:646) both reach,
+    so the common case has to be alive at both — a guard written in the first loop instead
+    would have left the orphan path moving items unguarded, and that path is the one that
+    closes the rounds no implement row names."""
+    import time as _t
+    from workers.sources import autocode as I
+    write_item(isolated, 1202, status="in_progress")
+    _confirm(1202)
+    B.set_status(1202, "in_progress", "running SM_ORPHAN")
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=False,
+                          closes_worktree=True, rounds=("SM_ORPHAN",))
+    now = _t.time() + 1
+    _orphan_round("SM_ORPHAN", now - I.ORPHAN_ROUND_MIN_AGE_SECONDS - 5, tmp_path, item=1202)
+    assert I.reap_abandoned_rounds(now=now), "the orphan loop reaped nothing"
+    assert aborted == ["SM_ORPHAN"]
+    assert B.item_by_id(1202).status == "up_next"
+    fm = B._split_frontmatter(next(isolated.glob("1202-*.md")).read_text(encoding="utf-8"))[0]
+    moved = [e for e in fm.get("activity_log") or []
+             if e.endswith("→ up_next: " + REAP_REASON)]
+    assert moved, f"no status move carrying the reaper's reason: {fm.get('activity_log')}"
+    board = _board_notes(1202, isolated)
+    assert not any("was LEFT UNCHANGED" in n for n in board), \
+        f"the guard wrote a hold note on a clean reap: {board}"
