@@ -8594,3 +8594,259 @@ def test_vllm_section_2_1_sends_the_reader_to_the_report_and_names_no_forward():
     assert "#3138" in XID79_STALE_PARAGRAPH, (
         "the fixture no longer carries the forward the section is required to drop, "
         "so the check on the live page would pass on a paragraph that kept it")
+
+
+# --------------------------------------------------------------------------- #
+# authority-surfaces.md's decision ladder: the Bash-substrate row (#3564)
+#
+# The ladder's only sandbox row was row 4, `agent_mcp/_tool_sandbox.py`, whose
+# Sessions-answered column says "Bench and eval sessions". There is a second
+# sandbox over the same verb — `agent_mcp/_path_sandbox.py`, which bwrap-binds the
+# protected trees read-only into every Bash child of every session that is NOT
+# bench/eval — and no row named it, while the doc's own completeness rule says a
+# guard with no row is the doc being wrong. The row is the whole fix: the alarm
+# half shipped earlier in `431ef5d2` (#2320), so the nodes below grade the row and
+# the numbering it disturbed, and assert against the tree that the symbols it cites
+# are still there.
+# --------------------------------------------------------------------------- #
+
+#: One ladder row: `| N | Surface | Module | Question |`. The header (`| # |`) and
+#: the separator (`|---|`) cannot match, since the first cell has to be a number.
+_LADDER_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*([^|]*)\|\s*([^|]*)\|([^|]*)\|",
+                         re.MULTILINE)
+
+_SUBSTRATE_MODULE = "agent_mcp/_path_sandbox.py"
+
+
+def _ladder_rows(text: str) -> list[tuple[int, str, str, str]]:
+    """`(N, Surface, Module, Question)` for every row of the ladder table.
+
+    Extracted from the section rather than grepped from the file, so a table copied
+    anywhere else in the doc cannot satisfy these nodes — and so the row count the
+    prose quotes can be compared against a parse instead of against another number.
+    """
+    parts = text.split("## The ladder", 1)
+    assert len(parts) == 2, (
+        "authority-surfaces.md lost its `## The ladder` heading, so every node here "
+        "would be reading a table that is not the one the doc points at")
+    table = parts[1].split("\n## ", 1)[0]
+    return [(int(n), surf.strip(), mod.strip(), ques.strip())
+            for n, surf, mod, ques in _LADDER_ROW.findall(table)]
+
+
+def _substrate_rows(rows: list[tuple[int, str, str, str]]) -> list:
+    """Ladder rows whose MODULE cell names the Bash substrate.
+
+    Module-cell-only, deliberately: the row's whole claim is which sessions the
+    substrate covers, and a module named in the Question cell instead says nothing
+    about what enforces it.
+    """
+    return [r for r in rows if _SUBSTRATE_MODULE in r[2]]
+
+
+def _body(text: str) -> str:
+    """Everything above `## Review log`, where dated numbering claims live."""
+    body = text.split("## Review log", 1)[0]
+    assert len(text.split("## Review log", 1)) == 2, (
+        "authority-surfaces.md lost its `## Review log` heading; without it the "
+        "citation node cannot scope itself and starts policing records it must not")
+    return body
+
+
+def test_authority_ladder_has_a_row_for_the_bash_substrate():
+    """#3564 clause 1: the substrate that covers every non-bench session is in the
+    table, in the column that says what enforces it.
+
+    The doc's reason for demanding rows is that "a guard's position in the ladder is
+    only real if every caller passes it". Row 4 passes that test for bench and eval
+    sessions; the surface covering every OTHER session was the one missing, so a
+    reader of the ladder concluded the interactive turn's shell had no kernel-level
+    write guard at all.
+    """
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    assert rows, "no ladder rows parsed — the table's shape changed, not its content"
+    hit = _substrate_rows(rows)
+    assert len(hit) == 1, (
+        f"{_SUBSTRATE_MODULE} appears in {len(hit)} Module cells; the substrate is one "
+        "surface and a second row for it is a second definition of the same guard")
+    _, surf, mod, ques = hit[0]
+    row_text = " ".join((surf, mod, ques))
+    assert re.search(r"not\*\* bench/eval|not bench/eval", row_text), (
+        f"the substrate row does not say it covers sessions that are NOT bench/eval "
+        f"(which is the whole distinction from row 4): {row_text[:260]!r}")
+    assert re.search(r"[Bb]ash", row_text), (
+        "the substrate row never says Bash, so a reader cannot tell which verb it "
+        "sits on — the row exists to answer 'can a shell child write here'")
+    assert (ROOT / _SUBSTRATE_MODULE).is_file(), (
+        f"{_SUBSTRATE_MODULE} is cited by the ladder but is not a file on this tree")
+
+    # That the Module column is load-bearing is shown, not claimed: moving the path
+    # into the Question cell and leaving a plausible module in the column must leave
+    # the row undiscoverable by the check above.
+    moved = _text("authority-surfaces.md").replace(
+        f"| `{_SUBSTRATE_MODULE}` |", "| `app/harness/safety.py` |", 1)
+    assert moved != _text("authority-surfaces.md"), (
+        "the seeded move did not take, so the assertion below proves nothing")
+    assert not _substrate_rows(_ladder_rows(moved)), (
+        "a row whose Module cell names a different module is still found by "
+        "_substrate_rows, so the column being checked is not the one this node grades")
+
+
+def test_authority_substrate_row_names_the_bind_list_derivation():
+    """#3564 clause 2: the row states WHERE the shell's read-only set comes from, by
+    symbol, and the symbols are checked against the module.
+
+    Two separately defined sets is the failure this doc names over and over. The
+    substrate's bind list is derived from the write deny set in one expression, and
+    the row has to carry that relationship — a reader deciding whether a new
+    protected tree is protected from the shell should not have to open the module to
+    find out, and a rename should rot the row rather than leave it smoothly wrong.
+    """
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    hit = _substrate_rows(rows)
+    assert hit, f"no ladder row names {_SUBSTRATE_MODULE}, so there is nothing to grade"
+    row_text = " ".join(hit[0][1:])
+    for sym in ("PROTECTED_SHELL_RO_ROOTS", "PROTECTED_WRITE_ROOTS"):
+        assert sym in row_text, (
+            f"the substrate row does not name {sym}, so it states an outcome instead of "
+            "the derivation the row exists to record")
+    assert re.search(r"derived|derivation", row_text, re.I), (
+        "both symbols are present but the row never says one is DERIVED from the "
+        "other, which is the property that keeps the two sets from drifting")
+
+    src = (ROOT / "app/harness/protected_paths.py").read_text(encoding="utf-8")
+    for sym in ("PROTECTED_SHELL_RO_ROOTS", "PROTECTED_WRITE_ROOTS"):
+        assert re.search(rf"^{sym}\b", src, re.MULTILINE), (
+            f"{sym} is no longer a module-level name in app/harness/protected_paths.py, "
+            f"so the ladder row cites a symbol that has moved — re-point the row")
+    assign = re.search(r"^PROTECTED_SHELL_RO_ROOTS.*?\n\)", src, re.MULTILINE | re.DOTALL)
+    assert assign, (
+        "PROTECTED_SHELL_RO_ROOTS is no longer a single module-level tuple literal, so "
+        "the derivation the row states has to be re-read before the row is trusted")
+    assert "PROTECTED_WRITE_ROOTS" in assign.group(0), (
+        "PROTECTED_SHELL_RO_ROOTS no longer mentions PROTECTED_WRITE_ROOTS in its own "
+        "definition: the sets are separately defined now, and the row's claim that one "
+        "is derived from the other is false")
+
+
+def test_authority_substrate_row_names_the_witness_for_its_off_state():
+    """#3564 clause 3: the row says what `fallback: true` IS, and who grades it.
+
+    The substrate's degraded state is total and silent — bwrap missing or the profile
+    failing means the shell child runs unsandboxed, and a green `/health` says nothing
+    either way. #3564 asked whether anything alarms on the field; it does since
+    `431ef5d2` (#2320), so the row carries the name of that check rather than
+    re-describing it, and this node checks the check is still the one that reads it.
+    """
+    rows = _ladder_rows(_text("authority-surfaces.md"))
+    hit = _substrate_rows(rows)
+    assert hit, f"no ladder row names {_SUBSTRATE_MODULE}, so there is nothing to grade"
+    row_text = " ".join(hit[0][1:])
+    assert "fallback" in row_text, (
+        "the row never uses the word `fallback`, so a reader who sees the field on "
+        "/state cannot connect it to the ladder")
+    assert re.search(r"unsandbox|un-sandbox", row_text, re.I), (
+        "`fallback` is named without saying in words that the command then runs "
+        "UNSANDBOXED — the field is only meaningful as that consequence")
+    assert "scripts/service_health_check.py" in row_text, (
+        "the row names no witness for the off-state; a status key nobody alarms on is "
+        "the silent-total-off failure the item was written about")
+
+    chk = (ROOT / "scripts/service_health_check.py").read_text(encoding="utf-8")
+    assert re.search(r'^PATH_SANDBOX_KEY\s*=\s*"protected_path_sandbox"', chk,
+                     re.MULTILINE), (
+        "scripts/service_health_check.py no longer publishes the "
+        "protected_path_sandbox key, so the row points its off-state at a check that "
+        "does not read it")
+    body = re.search(r"^def check_path_sandbox\b.*?(?=^def |\Z)", chk,
+                     re.MULTILINE | re.DOTALL)
+    assert body, (
+        "check_path_sandbox is gone from scripts/service_health_check.py; the row's "
+        "claim that a nameable alarm exists needs re-deriving before it is repeated")
+    assert '"fallback"' in body.group(0) or "'fallback'" in body.group(0), (
+        "check_path_sandbox no longer reads the `fallback` field, so the ladder's "
+        "witness for the off-state is a pointer to a check that ignores it")
+    assert re.search(r"\bred\b", body.group(0)), (
+        "check_path_sandbox no longer grades anything red, so the row's off-state has a "
+        "reader but no alarm — which is the state #3564 asked to be made nameable")
+
+
+def test_authority_ladder_citations_resolve_after_the_row_was_inserted():
+    """#3564 clause 4: the ladder is referenced by number in prose, and a new row in
+    the middle moves every number below it.
+
+    Above `## Review log`, the doc says "asks layer 9 first", "a superset of layer 6",
+    "the protected-write escape in layer 3" and "fourteen rows above". Each has to
+    resolve against the table the reader can see. Below that heading, `row 1` / `row 3`
+    / `row 5` are dated records of the numbering of their time — the doc says so about
+    its own entries — so they are excluded, and this node's exclusion is asserted to
+    be doing work rather than being a no-op slice.
+    """
+    text = _text("authority-surfaces.md")
+    rows = _ladder_rows(_body(text))
+    assert rows, "no ladder rows parsed above the Review log"
+    nums = [n for n, *_ in rows]
+    assert nums == list(range(1, len(nums) + 1)), (
+        f"the ladder's first cells are {nums}; a gap or a repeat means the numbers "
+        "prose cites no longer identify rows, which is the hazard of inserting a row")
+
+    cited = [int(m) for m in re.findall(r"\blayer[s]?\s+(\d+)\b|\brow[s]?\s+(\d+)\b",
+                                        _body(text), re.I) for m in m if m]
+    assert cited, (
+        "no layer/row citation found above the Review log — either the prose stopped "
+        "citing the ladder or the extraction broke; a check over an empty set reports "
+        "clean on any numbering")
+    dangling = sorted({c for c in cited if c not in nums})
+    assert not dangling, (
+        f"prose cites {dangling}, which is not a row of the ladder (rows {min(nums)}"
+        f"-{max(nums)}): a row was inserted or removed and the citations did not move "
+        "with it")
+
+    stated = re.search(r"(\d+|\w+[- ]\w+|\w+) rows above", _body(text))
+    assert stated, (
+        "the completeness paragraph no longer states the row count, so the sentence "
+        "that tells a reader to check every row has lost its number to verify")
+    assert _word_to_int(stated.group(1)) == len(nums), (
+        f"the prose says {stated.group(1)!r} rows and the table parses to {len(nums)}: "
+        "the count sentence is the thing a reader trusts when a row is missing")
+
+    # The Review-log exclusion must be load-bearing, and both directions of the
+    # numbering rule must be able to fail.
+    log = text.split("## Review log", 1)[1]
+    log_cites = [int(m) for m in re.findall(r"\brow[s]?\s+(\d+)\b", log, re.I)
+                 for m in m if m]
+    assert log_cites, (
+        "the Review log holds no `row N` mention, so scoping the check above to the "
+        "body is untested and would silently start rewriting dated records")
+    whole = [int(m) for m in re.findall(r"\blayer[s]?\s+(\d+)\b|\brow[s]?\s+(\d+)\b",
+                                        text, re.I) for m in m if m]
+    assert len(whole) > len(cited), (
+        f"the body sees {len(cited)} citations and the whole file {len(whole)} — equal "
+        "counts mean the split excludes nothing, so the dated records are being graded "
+        "as live claims")
+
+    # That the dangling check can fail is proved on the mutation the insertion
+    # actually risks: a citation left at the number it had BEFORE row 5 existed. Out of
+    # range now (the table runs 1-14), so it has to be caught rather than read as fine.
+    stale = _body(text).replace("asks layer 9 first", "asks layer 15 first", 1)
+    assert stale != _body(text), (
+        "the seeded stale citation did not take, so the assertion below proves nothing")
+    caught = sorted({int(m.group(1) or m.group(2))
+                     for m in re.finditer(r"\blayer[s]?\s+(\d+)\b|\brow[s]?\s+(\d+)\b",
+                                          stale, re.I)} - set(nums))
+    assert caught, (
+        "a citation to layer 15 of a fourteen-row table is not reported dangling, so "
+        "the numbering check above is not the thing keeping the ladder honest")
+
+
+def _word_to_int(token: str) -> int:
+    """`fourteen` -> 14, `14` -> 14. Spelled out because the doc spells it out."""
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+             "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+             "sixteen": 16}
+    t = token.strip().lower().strip("-")
+    if t.isdigit():
+        return int(t)
+    assert t in words, f"cannot read a row count out of {token!r}"
+    return words[t]
