@@ -1,6 +1,7 @@
 """Memory (Obsidian vault) browse/search/read/save endpoints."""
 
 import asyncio
+import logging
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
+
+logger = logging.getLogger(__name__)
 
 # The searchable segment set is the recall's own, imported and not restated.
 # #3160: this file and `mc_ui.py` each carried a hand-maintained copy of seven
@@ -108,56 +111,106 @@ def _split_frontmatter(text: str) -> "tuple[dict, str]":
 
 _VAULT = Path.home() / "obsidian"
 
-# Cached stats payload. Keyed by a mtime signature over the segment dirs.
-# Warm is the signature walk, not the parse: ~0.06s over the eleven segments on
-# 2026-10-22. The cold cost is reading every .md in full and parsing its YAML,
-# and #3160 moved it by widening the walk from the six directories the router's
-# own seven-name list actually found (2.4s, 4,753 notes, 40.3 MB) to the eleven
-# the search searches (17.0s, 8,157 notes, 107.6 MB) — both measured on the live
-# vault the same day, which is why `_build_stats_payload` runs in a thread. An
-# earlier note here sized this cache against ~1.9s for the 4,135-file / ~30MB
-# vault of 2026-09-22, and the widened walk is not sized for that any more:
-# whether 17.0s on a cold cache is itself acceptable is the ruling #3160 owes,
-# and it needs a post-restart measurement, not a diff.
-_STATS_CACHE: dict = {"sig": None, "payload": None}
+# What is cached here is now ONLY the tag tally. `docCount` and `types` — the two
+# numbers the Memory tab actually renders — are answered straight from
+# `_stats_signature()`'s per-segment counts, so they cost the stat walk and open no
+# note file (#3503). This dict holds the one figure that genuinely needs the note
+# contents, plus the two fields that keep its rebuild single and unreaped.
+#
+# Measured 2026-10-27 over the live vault: a cold `/api/memory/stats` on the
+# running backend was 21.7s, the same build out of process 17.6s, of which 17.1s is
+# `yaml.safe_load` over 8,528 front-matter blocks and `backlog/` alone is 15.3s —
+# against 0.036s for the stat-only signature walk over the same 11 segments and
+# 8,608 notes. So 99.8% of what the request used to pay bought nothing but
+# `tagCount`. An earlier note here sized this cache against a much smaller vault
+# (4,135 files / ~30MB, 2026-09-22) and left the widened walk's cold cost as an
+# open question; #3503 closes it by not paying the parse for the counts at all.
+#
+# And cold is the NORMAL state, not the exception: the signature keys on each
+# segment's recursive max mtime, and 11 vault notes were written in the 60 minutes
+# before those readings. Hence the hand-off below — a stale signature serves the
+# LAST completed tally and queues the rebuild behind the response, rather than
+# making whoever happened to open the tab wait 17.6s for it.
+_STATS_CACHE: dict = {
+    "sig": None,          # signature last built, or last attempted and not retried until the vault moves
+    "tally": None,        # {"tagCount", "topTags", "lastRefresh"}; None before the first build lands
+    "in_flight": False,   # one rebuild at a time; cleared in a `finally` — see `_rebuild_tag_tally`
+    "task": None,         # strong ref: the loop may garbage-collect a task nothing holds
+}
 
 
 def _stats_signature() -> tuple:
-    """Cheap signature: per-segment (recursive max mtime, file count). Recomputed
-    each call by walking the tree and stat()ing each .md — still much cheaper
-    than re-reading each file and parsing its YAML."""
+    """Per-segment `(count, recursive max mtime, directory exists)`, and the served
+    counts themselves.
+
+    Recomputed each call by walking the tree and stat()ing each `.md`: 0.036s over
+    the eleven segments and 8,608 notes on 2026-10-27, against 17.6s to read and
+    parse the same set. It began as only an invalidation key, which is why the shape
+    is a tuple of tuples rather than a dict; since #3503 it also answers `docCount`
+    and `types`, which is why each part carries `exists` as well as the count. A
+    count of 0 cannot tell "no such segment" from "segment, no notes in it", and
+    `_build_stats_payload` has always treated those as different answers — so the
+    flag is what lets `_counts_from_signature` reproduce its map exactly instead of
+    inventing a `0` entry (#3503 clause 2).
+    """
     parts: list = []
     for seg in _VAULT_SEGMENTS:
         seg_dir = _VAULT / seg
         if not seg_dir.is_dir():
-            parts.append((seg, 0, 0.0))
+            parts.append((seg, 0, 0.0, False))
             continue
         max_mtime = 0.0
         count = 0
         for f in seg_dir.rglob("*.md"):
+            # Counted before the stat, not after: a note deleted between the listing
+            # and the stat is still one more `.md` than the segment had a moment ago,
+            # and `_build_stats_payload` counts it too. The count has to survive the
+            # OSError here or the two walks answer differently about the same vault.
+            count += 1
             try:
                 m = f.stat().st_mtime
             except OSError:
                 continue
-            count += 1
             if m > max_mtime:
                 max_mtime = m
-        parts.append((seg, count, max_mtime))
+        parts.append((seg, count, max_mtime, True))
     return tuple(parts)
 
 
-def _build_stats_payload() -> dict:
-    """Every searchable segment's note count and tag tally, by reading each note.
+def _counts_from_signature(sig: tuple) -> "tuple[int, dict[str, int]]":
+    """`(docCount, types)` taken off the signature — no note is read to make them.
 
-    Blocking and expensive, which is why the route below hands it to a thread:
-    measured over the live vault on 2026-10-22, 17.0s cold across the eleven
-    segments — 8,157 notes, 107.6 MB read whole and YAML-parsed — against 2.4s
-    for the six directories the seven-name copy this replaced actually found
-    (4,753 notes, 40.3 MB). An `async def` that walked the vault inline held the
-    event loop for the whole walk, so at 2.4s that was already a chat-stream
-    stall and at 17s it is one every cold cache would cause; whether 17s on a
-    cold cache is itself acceptable is the ruling #3160 owes, and it is not a
-    reason to block the loop either way.
+    A segment whose directory does not exist is ABSENT from `types`, which is the
+    shape `_build_stats_payload` has always served (it `continue`s before
+    `types[seg] = count`), so the signature-derived map and the walked map are
+    identical and nothing new appears in the response. Serving `0` for a missing
+    directory was the other candidate and is the one this pins down as wrong: it
+    would make a renamed or unmounted segment indistinguishable from an empty one,
+    which is exactly the silent-zero failure #3160 is about.
+    """
+    types = {seg: count for seg, count, _mtime, exists in sig if exists}
+    return sum(types.values()), types
+
+
+def _build_stats_payload() -> dict:
+    """The tag tally over every searchable segment, by reading and parsing each note.
+
+    The expensive half of the stats route, and now the ONLY thing it still costs a
+    requester: measured over the live vault on 2026-10-27, 17.6s out of process here
+    (21.7s cold through the running backend) across the eleven segments — 8,608
+    notes read whole and YAML-parsed, 17.1s of it `yaml.safe_load`, `backlog/` alone
+    15.3s — against 0.036s for `_stats_signature()`, which answers `docCount` and
+    `types` without opening a single note (#3503).
+
+    Two properties survive from before that change and both are pinned in
+    `tests/test_memory_router_stats.py`. It stays off the event loop: it is `async
+    def`-adjacent CPU work, and an inline walk held the loop for its whole duration,
+    which at 17.6s is a chat-stream stall per rebuild — so it goes to
+    `asyncio.to_thread`. And it stays off the REQUEST path: `memory_stats` hands it
+    to a worker thread and serves the previous tally meanwhile, so no request's
+    latency is this parse. Its `docCount`/`types` keys are still computed and
+    returned — the tests below compare the served map against this walked one — but
+    the route no longer reads them.
     """
     types: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
@@ -189,20 +242,90 @@ def _build_stats_payload() -> dict:
     }
 
 
+def _empty_tally() -> dict:
+    """The tally shape before any build has ever finished: zeros, not a missing key.
+
+    A fresh backend answers its first `/api/memory/stats` with `tagCount: 0` while
+    the first build runs. `web/src/components/pages/MemoryPage.tsx` renders
+    `stats.tagCount` unguarded, so the key has to be present and numeric on that
+    first response — `undefined` would print as an empty span.
+    """
+    return {"tagCount": 0, "topTags": [], "lastRefresh": ""}
+
+
+def _kick_tag_tally_rebuild(sig: tuple) -> None:
+    """Queue the tag build on a worker thread and return to the requester.
+
+    Not awaited — that is the whole of #3503 clause 3. The alternative that was in
+    place, `await asyncio.to_thread(...)` inside the handler, made the first request
+    after any vault write pay the 17.6s parse, and any vault write is the normal
+    state (see the cache note above). The rebuild still leaves the loop:
+    `_rebuild_tag_tally` awaits it through `asyncio.to_thread`, exactly as the
+    handler used to.
+
+    `in_flight` is what keeps a 17.6s parse to one at a time no matter how many
+    requests find a stale signature; `_STATS_CACHE["task"]` is the strong reference
+    that keeps the loop from garbage-collecting the fire-and-forget task while it is
+    still running.
+    """
+    if _STATS_CACHE["in_flight"]:
+        return
+    _STATS_CACHE["in_flight"] = True
+    _STATS_CACHE["task"] = asyncio.create_task(_rebuild_tag_tally(sig))
+
+
+async def _rebuild_tag_tally(sig: tuple) -> None:
+    """Build the tally in a thread, publish it, and always release the flag.
+
+    The `finally` is the difference between a vault that is briefly unreadable and a
+    Memory tab that never recovers (#3503 clause 4): a raising build that left
+    `in_flight` set would make every later request skip the rebuild, wedging the
+    tally at whatever it last was — or at zeros, forever, if that was the first
+    attempt.
+
+    Recording `sig` on the failure path too is deliberate and is what keeps this a
+    retry rather than a hammer: without it, every later request re-queues a parse
+    that is known to fail, and a 17.6s YAML walk burning CPU in the background of a
+    live chat stream is not something to repeat per tab-open. So a failed signature
+    is retried when the vault moves next, which is when it may well succeed.
+    """
+    try:
+        payload = await asyncio.to_thread(_build_stats_payload)
+        _STATS_CACHE["tally"] = {
+            "tagCount": payload["tagCount"],
+            "topTags": payload["topTags"],
+            "lastRefresh": payload["lastRefresh"],
+        }
+        _STATS_CACHE["sig"] = sig
+    except Exception:
+        _STATS_CACHE["sig"] = sig
+        # Best-effort by construction: the served counts are already correct without
+        # this, so a failed tally keeps the previous one rather than failing the
+        # route. Say so, because otherwise a wedged tag count looks like a vault
+        # that has no tags.
+        logger.warning("memory stats: tag tally rebuild failed; serving the previous tally", exc_info=True)
+    finally:
+        _STATS_CACHE["in_flight"] = False
+        _STATS_CACHE["task"] = None
+
+
 @router.get("/api/memory/stats")
 async def memory_stats():
     if not _VAULT.exists():
-        return JSONResponse({"docCount": 0, "tagCount": 0, "types": {}, "topTags": [], "lastRefresh": ""})
+        return JSONResponse({"docCount": 0, "types": {}, **_empty_tally()})
+    # stat() only — 0.036s over the eleven segments, and the whole of what this
+    # route now does synchronously. Both numbers the Memory tab renders come off it.
     sig = _stats_signature()
-    if _STATS_CACHE["sig"] == sig and _STATS_CACHE["payload"] is not None:
-        return JSONResponse(_STATS_CACHE["payload"])
-    # Off the event loop, for the reason `_build_stats_payload` gives — the same
-    # reason the search below threads its blocking HTTP call. The signature walk
-    # above stays here: ~0.06s over the eleven segments, stat() only.
-    payload = await asyncio.to_thread(_build_stats_payload)
-    _STATS_CACHE["sig"] = sig
-    _STATS_CACHE["payload"] = payload
-    return JSONResponse(payload)
+    doc_count, types = _counts_from_signature(sig)
+    tally = _STATS_CACHE["tally"]
+    if tally is None or _STATS_CACHE["sig"] != sig:
+        # Deliberately not awaited: the counts above are already this vault's truth,
+        # and the tag tally the parse produces is served from the last completed
+        # build while the new one runs behind the response.
+        _kick_tag_tally_rebuild(sig)
+        if tally is None:
+            tally = _empty_tally()
+    return JSONResponse({"docCount": doc_count, "types": types, **tally})
 
 
 def _search_collections(scope: str) -> list[str]:

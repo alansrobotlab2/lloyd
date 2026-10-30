@@ -24,6 +24,7 @@ prove the JSON a browser receives.
 """
 
 import re
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -103,18 +104,26 @@ TABLE_ROW_NOTE = (
 )
 
 
+def _fresh_stats_cache() -> dict:
+    """An untouched `_STATS_CACHE`, shaped by #3503 and by nothing else.
+
+    `_STATS_CACHE` is module state: without the reset a tally cached by an earlier
+    test answers the assertion instead of the file just written. Since #3503 the
+    cache holds the last completed tag TALLY rather than a whole payload — the
+    counts are recomputed per request — so the reset names `tally`, the `in_flight`
+    rebuild flag and the task reference.
+    """
+    return {"sig": None, "tally": None, "in_flight": False, "task": None}
+
+
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
-    """A tmp vault with every stats segment present, and no cached payload.
-
-    `_STATS_CACHE` is module state: without the reset a payload cached by an
-    earlier call answers the assertion instead of the file just written.
-    """
+    """A tmp vault with every stats segment present, and no cached tally."""
     root = tmp_path / "obsidian"
     for segment in MR._VAULT_SEGMENTS:
         (root / segment).mkdir(parents=True)
     monkeypatch.setattr(MR, "_VAULT", root)
-    monkeypatch.setattr(MR, "_STATS_CACHE", {"sig": None, "payload": None})
+    monkeypatch.setattr(MR, "_STATS_CACHE", _fresh_stats_cache())
     return root
 
 
@@ -130,7 +139,22 @@ def stats_tags(client, vault) -> dict:
     """`{tag: count}` from GET /api/memory/stats over the tmp `vault`.
 
     The `vault` fixture is a dependency for its monkeypatches, not this body.
+
+    Two requests, not one, since #3503 took the tag build off the request path: the
+    first answer carries `tagCount: 0` because nothing has been tallied yet, and the
+    tags appear once the worker thread has published. Waiting on the cache rather
+    than sleeping a fixed while keeps this a deadline — and if the tally never
+    lands, `TimeoutError` names the wait instead of an assertion about an empty tag
+    list reading as "the fence matcher is broken".
     """
+    client.get("/api/memory/stats")
+    deadline = time.monotonic() + 10
+    while MR._STATS_CACHE["tally"] is None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                "the background tag build published nothing within 10s; "
+                f"in_flight={MR._STATS_CACHE['in_flight']}")
+        time.sleep(0.02)
     body = client.get("/api/memory/stats").json()
     counts = {t["tag"]: t["count"] for t in body["topTags"]}
     assert body["tagCount"] == len(counts), "topTags truncated below tagCount"
