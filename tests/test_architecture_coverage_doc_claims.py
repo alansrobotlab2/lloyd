@@ -4077,6 +4077,78 @@ def test_context_window_delegates_to_the_section_and_says_nothing_unmeasured():
 #: write-up is not the place to change what the sweep grades.
 REWRITE_COST_HEADING = "What a rewrite costs, priced per mechanism"
 
+#: The line citations §What a rewrite costs makes for the two layers it prices as front
+#: breaks, as (the source file, the statement that fixes the line, the citation the page
+#: must carry with `{n}` standing for the derived line, and the slice it must appear in).
+#:
+#: #3573 converted these from frozen coordinates. The page used to cite the summary site
+#: at line 505, which was true at `86aef7e5` when the review that wrote it was filed, and
+#: had been fourteen lines stale ever since the commits that grew that module from 890
+#: lines to 998 — while the node that pinned it stayed green, because a frozen number
+#: grades the string, not the code. The corpus guards miss that shape too:
+#: `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree` only checks the
+#: file exists and is long enough, and
+#: `test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition`'s span rule
+#: passes a drift that small, because the stale line and the true one sit inside the same
+#: `def`. What is left is the
+#: statement's TEXT, so that is what the number is derived from here.
+FRONT_BREAK_SITES = (
+    ("app/compaction.py",
+     "new_convo: list[dict] = [CS.summary_message(record)]",
+     "`app/compaction.py:{n}` is `new_convo: list[dict] = "
+     "[CS.summary_message(record)]`",
+     "section"),
+    # `microcompact()` since #2583: the anchor used to be `:11`, a line of that module's
+    # docstring, and a docstring is what a file says rather than what it does. The site is
+    # the def, which is what the section prices as a front break.
+    ("app/harness/microcompact.py",
+     "def microcompact(",
+     "app/harness/microcompact.py:{n}",
+     "section"),
+    # The same summary site as it is cited a second time, in the priced section's own
+    # verdict paragraph (no heading of its own — §What a rewrite costs runs from `## ` to
+    # `## `), and the reason that second citation is graded too: re-pointing only the first
+    # would leave the page contradicting itself, and under the old literal it was free to.
+    ("app/compaction.py",
+     "new_convo: list[dict] = [CS.summary_message(record)]",
+     "`app/compaction.py:{n}`, the front-most edit",
+     "doc"),
+)
+
+
+def _statement_line(rel: str, needle: str) -> int:
+    """The one line of a source file holding `needle`, read at test time.
+
+    Refuses an ambiguous needle on purpose: a number derived from a statement that
+    appears twice is a coin flip, which is the same unreliability the frozen number had
+    with the extra property of looking computed.
+    """
+    lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+    hits = [i for i, line in enumerate(lines, start=1) if needle in line]
+    assert len(hits) == 1, (
+        f"{rel} holds {len(hits)} lines containing {needle!r}, so the citation this "
+        "node derives from it would be ambiguous — narrow the needle to one statement")
+    return hits[0]
+
+
+def _front_break_site_gaps(doc: str) -> list[str]:
+    """Which front-break citations this page does not make at the line the code holds.
+
+    Takes the page as `_text`/a fixture hands it and flattens inside, because the section
+    slice is cut from raw bytes by `_section` while the citation itself is prose. One
+    reader for the live doc and for the fixture in
+    `test_a_wrong_line_for_a_front_break_site_turns_the_citation_check_red`, so the two
+    cannot disagree about what the pattern is (the shape #2933 set and #3574 copied).
+    """
+    sec = _flat(_section(doc, REWRITE_COST_HEADING))
+    flat = _flat(doc)
+    gaps: list[str] = []
+    for rel, stmt, template, scope in FRONT_BREAK_SITES:
+        want = template.format(n=_statement_line(rel, stmt))
+        if want not in (sec if scope == "section" else flat):
+            gaps.append(f"{rel} -> {want}")
+    return gaps
+
 
 def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     """Clause 4: the verdict is prose in the doc, and every number in it resolves.
@@ -4084,9 +4156,12 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     Four halves, all graded on the one slice `_section` cuts, so nothing here can
     pass on text the reader never meets:
 
-    * both front-break sites, each with the code it quotes — `app/compaction.py:505`
-      building the compacted conversation with the summary at position 0, and the
-      oldest-first clearing rule that puts microcompaction's break near the front;
+    * both front-break sites, each with the code it quotes and at the line that code
+      occupies when the test runs — the `new_convo` statement that builds the compacted
+      conversation with the summary at position 0, and `microcompact()`'s def line, the
+      oldest-first clearing rule that puts microcompaction's break near the front. Both
+      numbers come from FRONT_BREAK_SITES/_statement_line, never from a literal, so the
+      doc can be corrected without editing this node (#3573);
     * the command that reproduces the arm table, as a `sql` fence answering BOTH
       freeing paths — a predicate reading only `turn_start.*` is what made this
       item's first draft report 235 turns instead of 360, and it fails silently;
@@ -4104,14 +4179,14 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     # headline ratio is inside it.
     assert "51.8" in flat, f"the section slice holds no measured ratio:\n{sec[:200]}"
 
-    # (a) the front-break sites, named as sites rather than described.
-    assert "`app/compaction.py:505` is `new_convo: list[dict] = " \
-        "[CS.summary_message(record)]`" in flat, flat[:400]
-    # `:620` since #2583: the anchor used to be `:11`, a line of that module's
-    # docstring, and a docstring is what a file says rather than what it does —
-    # the same edit that made the new span rule green over this corpus. The site
-    # is `microcompact()`, which is what the section prices as a front break.
-    assert "app/harness/microcompact.py:620" in sec, flat[:400]
+    # (a) the front-break sites, named as sites rather than described, each at the line
+    # its statement is on TODAY — #3573, see FRONT_BREAK_SITES. The line number is derived
+    # from the source here rather than frozen, so a move inside the module costs the doc a
+    # re-point instead of costing it its truth.
+    page_text = _text("context-window.md")
+    assert not _front_break_site_gaps(page_text), (
+        "the page cites a front-break site at a line the code does not hold: "
+        f"{_front_break_site_gaps(page_text)}")
     assert "Clearing is oldest-first by design" in flat, (
         "the microcompact site is cited without the rule that makes it a "
         "front break, so the citation prices nothing")
@@ -4184,6 +4259,54 @@ def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
     # `test_the_extract_replays_to_its_own_published_split` re-derives from the
     # committed witness bytes, kept here as the sentence a reader quotes.
     assert "| `turn_start:microcompact` | 236 | 68,444,409 |" in sec, flat[:400]
+
+
+#: The offset the positive control below drifts a citation by. Fourteen is not arbitrary:
+#: it is the size of the drift #3573 found — the page fourteen lines behind the live
+#: statement it cites —
+#: which is what made it invisible to
+#: `test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition` — that rule sees
+#: a citation inside the right `def` and passes it. The claim is exact only for the summary
+#: site: the microcompact arm's -14 lands above `def microcompact(` and so outside its span.
+#: The asymmetry grades nothing, because only the compaction arm is the case the span rule
+#: cannot see. A control that moved a number a thousand lines would prove the reader works and
+#: prove nothing about the guard that matters.
+STALE_SITE_OFFSET = 14
+
+
+def test_a_wrong_line_for_a_front_break_site_turns_the_citation_check_red():
+    """The converted halves grade the number, not just recompute it.
+
+    #3573's defect was a citation that was fourteen lines wrong and green, so the control
+    that proves the conversion is not decorative is one that reproduces exactly that: a
+    page whose citation is inside the right definition but not on the right line. The
+    wrong number is produced by moving the derived one, never by naming a literal, so this
+    node cannot go red for the reason the doc it seeds went stale.
+    """
+    text = _text("context-window.md")
+
+    def _recited(rel: str, stmt: str, step: int) -> str:
+        """The page with every citation of `rel`'s site moved `step` lines off the derived
+        line. Seeded on raw bytes, not on `_flat` output: `_section` cuts the priced slice
+        by a line-anchored `^## ` regex, and flattened text has no line anchors left."""
+        live = _statement_line(rel, stmt)
+        hits = _flat(text).count(_flat(f"`{rel}:{live}`"))
+        assert hits, (
+            f"the page holds no `{rel}:{live}` citation for the loop to move, so every arm "
+            "below — the zero-drift one included — is iterating nothing")
+        return text.replace(f"`{rel}:{live}`", f"`{rel}:{live + step}`")
+
+    for rel, stmt, _template, _scope in FRONT_BREAK_SITES:
+        for step in (STALE_SITE_OFFSET, -STALE_SITE_OFFSET):
+            gaps = _front_break_site_gaps(_recited(rel, stmt, step))
+            assert any(rel in g for g in gaps), (
+                f"drifting {rel}'s citation by {step:+d} lines left "
+                f"_front_break_site_gaps() clean ({gaps}), so the converted check grades "
+                "the shape of a citation, not the line the statement is on — which is "
+                "the defect #3573 was filed about")
+        assert not _front_break_site_gaps(_recited(rel, stmt, 0)), (
+            f"zero drift on {rel} is not clean, so the assertion above cannot "
+            "distinguish a wrong number from the reader's own seeding")
 
 
 # ────────────────────────────────────────────────────────── command spellings
@@ -9474,3 +9597,58 @@ def test_the_rewrite_cost_page_records_the_rearm_ruling_as_ruled():
         "0.72 the ruling left it at, so the re-arm level this section publishes "
         "(151,303 under a 210,144 wall) is stale prose about a changed system — either "
         "re-derive the ruling or update the section, but do not leave the two disagreeing")
+
+# --------------------------------------------------------------------------- #
+# The instruction the frozen pin used to force: that a stale citation "cannot be
+# corrected without editing the test" (#3573 clause 5, 2026-10-30)
+# --------------------------------------------------------------------------- #
+
+#: What the page used to tell a reader who noticed the stale coordinate. The coordinate
+#: itself is deliberately NOT reproduced here, and neither is the search string that proves
+#: it gone: this item's acceptance is that grepping the corpus for the stale
+#: citation-at-number returns nothing, so a fixture that re-spelled it to prove a pattern
+#: retired would re-create the very hit the check is asserting away. The sentence is carried
+#: with its citation elided, in the page's own hand-wrapped shape, so the pattern below still
+#: has to fire on the text it retires.
+RETIRED_CORRECTION_INSTRUCTIONS = ("corrected without editing the test",)
+
+
+def _correction_claim_gaps(text: str) -> list[str]:
+    """Which instruct-the-reader-to-edit-the-test claims this text still carries."""
+    flat = _flat(text)
+    return [phrase for phrase in RETIRED_CORRECTION_INSTRUCTIONS if phrase in flat]
+
+
+def test_the_page_no_longer_tells_a_reader_to_edit_the_test_to_fix_a_citation():
+    """Clause 5: the live page stops instructing a reader to edit the test, and the pattern
+    is proven to fire on the sentence that did.
+
+    That instruction was not editorial. While #3540's arch-review pass was correcting this
+    page it hit `ANCHOR_CITATIONS`' literal-string leg, restored the stale number to get the
+    suite green, and recorded the obstacle in §Review log — the failure mode #3573 is about,
+    demonstrated on this corpus rather than predicted by it. Scoped to the live prose: the
+    §Review log entry may still say the pin used to force it, because that entry is a dated
+    record of what that pass believed, the same distinction
+    `test_the_paired_ratio_ruling_is_not_represented_as_a_live_claim` draws for loop.md.
+    """
+    page = _text("context-window.md")
+    body = page[:page.index("## Review log")]
+    assert not _correction_claim_gaps(body), (
+        f"the live page still tells a reader the citation is unfixable: "
+        f"{_correction_claim_gaps(body)} — with the pins converted that sentence is false, "
+        "and a false instruction is worse than no instruction")
+
+    # A REAL newline plus the page's two-space continuation indent, exactly as the file
+    # wraps it. A literal backslash-n here would flatten to text the page never carried,
+    # and the control below would be grading its own typo instead of the retired sentence.
+    stale = ("#3573 (a doc-claim node pins the summary site as prose, so the citation "
+             "cannot be\n  corrected without editing the test), #3574 (the paired "
+             "ratio and the re-arm ruling have no live owner now that #2027 is closed)")
+    assert _flat(stale).startswith(
+        "#3573 (a doc-claim node pins the summary site as prose, so the citation cannot "
+        "be corrected without editing the test)"), (
+        "the fixture does not flatten to the sentence the page carried, so the control "
+        "below is not the text this check retires")
+    assert _correction_claim_gaps(stale) == list(RETIRED_CORRECTION_INSTRUCTIONS), (
+        "the retired instruction did not fire on the sentence it was taken out of, so the "
+        "absence asserted above is a pattern that could never have matched this page")

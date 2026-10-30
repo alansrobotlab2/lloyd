@@ -299,7 +299,7 @@ A rewrite of the history is not free at the engine: `vllm.md` §2.2 prices a pre
 break as the re-prefill of the suffix past it, and arXiv:2609.37725v1 §4.3 puts the
 same rule the other way round — an edit is priced by everything **after** its break
 point, so an edit near the **front** is the expensive kind. Both of Lloyd's
-destructive layers break at the front. `app/compaction.py:505` is
+destructive layers break at the front. `app/compaction.py:519` is
 `new_convo: list[dict] = [CS.summary_message(record)]`: the compacted conversation
 begins with the summary, so position 0 changed and the longest common prefix of the
 old and new prompt is about zero — the whole compacted conversation re-prefills.
@@ -417,7 +417,7 @@ headline from 51.8 to 52.3. Check the bucket names, not just the total.
 **The verdict.** Keep paying the break, and stop describing it as one number. The
 week's price is not the summary rewrite: `turn_start:summarized`,
 `:summary_folds` and `:truncated` are each `n=0` in this window — `persist_summary`
-is off and the 210,144 threshold was not crossed — so `app/compaction.py:505`, the
+is off and the 210,144 threshold was not crossed — so `app/compaction.py:519`, the
 front-most edit of the three, cost nothing in the week measured. Two mechanisms own
 it: oldest-first microcompaction at the turn-start pass (60.6% of the window, 71.9%
 of arm `B`, on 236 turns) and the intra-turn ladder's `tool_results` rung (18.5%, 22.0%
@@ -548,8 +548,10 @@ happen.
   control stayed above the bound, and the two `owed on #2027` sentences name what that
   item's 2026-10-02 owed-check actually returned (54 paired sessions, powered; the re-arm
   ruling) while keeping both numbers out of the verdict until #3574 publishes them. Filed:
-  #3573 (a doc-claim node pins `app/compaction.py:505` as prose, so the citation cannot be
-  corrected without editing the test), #3574 (the paired ratio and the re-arm ruling have no
-  live owner now that #2027 is closed), #3576 (the 60.6% microcompaction price is measured
+  #3573 (a doc-claim node pinned the summary site's line number as prose, so the citation
+  stood stale by fourteen lines and could not be corrected without editing the test; that
+  pin now derives the number from the source, and both citations here name the live
+  line), #3574 (the paired ratio and the re-arm ruling have no live owner now that #2027
+  is closed), #3576 (the 60.6% microcompaction price is measured
   only in the knob-off regime); the control-bound diagnosis was appended to #3419, which
   already owns it, and the two new measurements are not this page's to run.

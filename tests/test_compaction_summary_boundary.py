@@ -25,6 +25,7 @@ instruction reproduced in the summary.
 """
 import ast
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -315,7 +316,19 @@ ANCHOR_CITATIONS = [
      "manual_compact", "_split_for_summary(convo[start:]"),
     ("architecture/context-window.md", "app/compaction_state.py:562", 562,
      "fold", "compaction_llm.summarize_incremental"),
-    ("architecture/context-window.md", "compaction_state.py:241", 241,
+    # #3573: the one row whose citation STRING is not frozen (its `citation` names the file
+    # and the node reads the number out of the page). Its first leg used to be
+    # `assert "compaction_state.py:241" in text`, which made the frozen number the
+    # requirement and the code an afterthought: the number could not be corrected without
+    # editing this file, and a reviewer who did correct it read the red as their own error.
+    # What the row asserts now is the pairing — SOME `app/compaction_state.py:<N>` in this
+    # sentence, whose N falls inside `render_summary` and holds `record.get("summary")`.
+    # 241 satisfies those legs today (`body = str(record.get("summary") or "").strip()`)
+    # while the page's sentence attaches the anchor to the hand-compaction branch: the legs
+    # pin the line's content, not which branch the prose is standing on. A pass that
+    # re-points this citation to `is_manual` has to change this row's definition and
+    # substring in the same commit, or the row claims a render_summary line that is not one.
+    ("architecture/context-window.md", "app/compaction_state.py", None,
      "render_summary", 'record.get("summary")'),
 ]
 
@@ -328,6 +341,12 @@ def test_every_citation_into_this_module_names_a_line_holding_its_symbol():
     sentence names, and the named thing is actually on that line. The third leg is what
     catches a re-point that "fixed" the number by moving it to a neighbouring line that
     is merely nearby rather than the line being described.
+
+    A row whose `number` is None skips only the FIRST leg — it reads every
+    `<citation>:<N>` the page carries and requires one of them to satisfy the other two.
+    Those two legs are what make dropping the first safe: the number has to land inside the
+    named definition AND hold the named substring, so no arbitrary number in the page can
+    satisfy the row, which is the whole difference between a flexible anchor and no anchor.
     """
     root = Path(__file__).resolve().parent.parent
     module_lines = (root / "app" / "compaction_state.py").read_text(
@@ -340,8 +359,26 @@ def test_every_citation_into_this_module_names_a_line_holding_its_symbol():
 
     for source, citation, number, definition, on_line in ANCHOR_CITATIONS:
         text = (root / source).read_text(encoding="utf-8")
-        assert citation in text, f"{source} no longer carries the citation {citation!r}"
         low, high = spans[definition]
+        if number is None:
+            cited = [int(m.group(1)) for m in
+                     re.finditer(re.escape(citation) + r":(\d+)", text)]
+            assert cited, (
+                f"{source} carries no `{citation}:<N>` citation at all, so the sentence "
+                "this row pins has lost its anchor entirely")
+            ok = [n for n in cited if low <= n <= high and on_line in module_lines[n - 1]]
+            assert ok, (
+                f"{source} cites {citation}:{{{', '.join(str(n) for n in sorted(set(cited)))}}} "
+                f"and none of those lines is inside `{definition}` ({low}-{high}) holding "
+                f"{on_line!r} (" + "; ".join(
+                    f"{n} is " + (f"outside {definition}" if not low <= n <= high
+                                  else f"{module_lines[n - 1].strip()!r}")
+                    for n in sorted(set(cited))) +
+                f"). Either `{definition}` moved and the page needs re-pointing, or the "
+                f"page points somewhere else — in which case this row's definition is the "
+                "thing that is wrong, and change it in the same commit.")
+            continue
+        assert citation in text, f"{source} no longer carries the citation {citation!r}"
         assert low <= number <= high, (
             f"{source} cites {citation} for `{definition}`, but that definition is "
             f"{low}-{high} now")
