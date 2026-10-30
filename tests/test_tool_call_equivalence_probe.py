@@ -131,6 +131,8 @@ class StubEngine:
         raise AssertionError(f"stub engine got an unexpected path {path}")
 
     def get_text(self, path: str) -> str:
+        if path == "/v1/models":
+            return json.dumps({"object": "list", "data": [{"id": "stub-engine-1"}]})
         return ""
 
     def _pid_for(self, prompt_text: str) -> str:
@@ -264,6 +266,37 @@ def test_an_unreachable_engine_exits_2_and_records_nothing(services):
     rc = tcp.main(["capture", "--label", "fp8-kv"], client_factory=lambda url: Unreachable())
     assert rc == tcp.EXIT_INSTRUMENT == 2, rc
     assert not (services / "flash-next-canary-toolcalls-fp8-kv.jsonl").exists()
+
+
+def test_the_default_model_auto_resolves_to_the_served_name_and_is_never_sent(services):
+    """`--model auto` (the default the canary step uses) is the name the engine reports on
+    `/v1/models`. Sent verbatim it is a 404 on vLLM, which is how the 2026-10-30 bf16 arm
+    (#3188) recorded no decisions."""
+    rc, stub = _run_capture(services, "fp8-kv", ARM_FP8)
+    assert rc == tcp.EXIT_OK, rc
+    assert stub.chat_bodies, "the capture asked nothing"
+    assert {b["model"] for b in stub.chat_bodies} == {"stub-engine-1"}
+
+
+def test_auto_against_an_engine_that_names_no_model_exits_2_and_records_nothing(services):
+    """No served name is the instrument failing: refuse before the first prompt."""
+    class Nameless(StubEngine):
+        def get_text(self, path):
+            return json.dumps({"object": "list", "data": []})
+
+    stub = Nameless(ARM_FP8)
+    rc = tcp.main(["capture", "--label", "fp8-kv"], client_factory=lambda url: stub)
+    assert rc == tcp.EXIT_INSTRUMENT == 2, rc
+    assert stub.chat_bodies == []
+    assert not (services / "flash-next-canary-toolcalls-fp8-kv.jsonl").exists()
+
+
+def test_an_explicit_model_passes_through_without_asking_the_engine(services):
+    stub = StubEngine(ARM_FP8)
+    rc = tcp.main(["capture", "--label", "fp8-kv", "--model", "primary"],
+                  client_factory=lambda url: stub)
+    assert rc == tcp.EXIT_OK, rc
+    assert {b["model"] for b in stub.chat_bodies} == {"primary"}
 
 
 def test_a_report_with_one_arm_in_the_window_refuses_to_decide_and_appends_nothing(services):

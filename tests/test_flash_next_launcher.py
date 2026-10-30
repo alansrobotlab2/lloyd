@@ -1661,6 +1661,21 @@ class StubChatEngine:
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def do_GET(self):
+                # The served name, as vLLM answers it: `--model auto` resolves here (#3188).
+                if self.path != "/v1/models":
+                    self.send_response(404)
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return
+                payload = json.dumps({"object": "list",
+                                      "data": [{"id": "stub-engine-1"}]}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
             def do_POST(self):
                 length = int(self.headers.get("content-length") or 0)
                 body = json.loads(self.rfile.read(length))

@@ -322,6 +322,25 @@ class EngineClient:
             return ""
 
 
+def resolve_model(client: Any, model: str) -> str:
+    """`auto` is the model the engine names back on `/v1/models`; any other name passes through.
+
+    `auto` used to be sent to the engine verbatim, and vLLM answers an unknown model name
+    with a 404, so every capture the canary step ran with the default refused before its
+    first prompt — the bf16 arm of 2026-10-30 (#3188) cost two engine boots and recorded no
+    decisions. An engine that names no model is the instrument failing, not a guess."""
+    if model != "auto":
+        return model
+    try:
+        data = json.loads(client.get_text("/v1/models") or "{}").get("data") or []
+    except (json.JSONDecodeError, AttributeError):
+        data = []
+    name = data[0].get("id") if data and isinstance(data[0], dict) else None
+    if not name:
+        raise ProbeRefused("--model auto: GET /v1/models named no served model; pass --model")
+    return str(name)
+
+
 def chat_call(client: Any, spec: dict, *, arm: str, window: str, corpus_sha: str,
               model: str, params: dict) -> dict:
     """Ask one prompt with its own `tools` array, and record the ANSWER, not the question.
@@ -562,11 +581,16 @@ def main(argv: list[str] | None = None, *,
             print(f"tool-call capture: cannot-decide: {exc}", file=sys.stderr)
             return EXIT_INSTRUMENT           # nothing written: a recording is not a guess
         client = client_factory(args.base_url)
+        try:
+            model = resolve_model(client, args.model)
+        except ProbeRefused as exc:
+            print(f"tool-call capture: cannot-decide: {exc}", file=sys.stderr)
+            return EXIT_INSTRUMENT
         rows, broken = [], []
         for spec in corpus["prompts"]:
             try:
                 rows.append(chat_call(client, spec, arm=arm, window=window,
-                                      corpus_sha=corpus["_sha256"], model=args.model,
+                                      corpus_sha=corpus["_sha256"], model=model,
                                       params=corpus["params"]))
             except ProbeRefused as exc:
                 print(f"tool-call capture: cannot-decide: {spec['id']}: {exc}",
