@@ -295,14 +295,14 @@ def normalize_tool_name(name: Any) -> str:
 # moves no dispatch-affecting field back to 1, and the gate asks one question of
 # the calls that do: may this turn change what runs?
 #
-# `model`, `preferred_hours`, `next_run`/`last_run`, `max_retries`,
-# `failure_count` and `runs_per_day` are deliberately NOT in the set. The first
-# two change how a run behaves once dispatched, not whether it dispatches — a
-# parked task stays parked with a new model, and a narrowed hour window cannot
-# start a run its status has not authorised. The rest are scheduler OUTPUT; the
-# scheduler writes them itself, and gating them would deny every completion
-# stamp. There is no interactive fallback on the worker path, so an over-broad
-# predicate here ends every nightly parked behind a human.
+# Which fields answer it is exactly the set below, and the two lines marked
+# `IN the set:` and `NOT in the set:` above it enumerate its membership in both
+# directions. `tests/test_vault_write_schedule_guard.py` parses those two lines
+# against `SCHEDULE_STATE_FIELDS` and fails on a disagreement either way, so
+# this prose can no longer drift from the set it introduces. It is worth a
+# machine: the sentence here is the one every future turn reads and trusts
+# about which writes are refused, and until #3578 it contradicted the set
+# twelve lines below it.
 SCHEDULE_STATE_TOOL = "autonomy_write_task"
 
 # The six fields the acceptance names, plus `preferred_hours`: the nightly
@@ -310,6 +310,17 @@ SCHEDULE_STATE_TOOL = "autonomy_write_task"
 # `pipeline:` key is read by display code and by no gate), so editing one
 # window silently re-sequences #38 -> #42 -> #39 -> #40. Leaving it out would
 # keep the hazard this item was filed about standing.
+#
+# IN the set: `status`, `scheduled_at`, `depends_on`, `auto_advance`,
+# `frequency`, `skill_name`, `preferred_hours`.
+#
+# NOT in the set: `model` changes how a run behaves once dispatched, not
+# whether it dispatches — a parked task stays parked with a new model.
+# `next_run`/`last_run`, `max_retries`, `failure_count` and `runs_per_day` are
+# scheduler OUTPUT; the scheduler writes them itself, and gating them would
+# deny every completion stamp. There is no interactive fallback on the worker
+# path, so an over-broad predicate here ends every nightly parked behind a
+# human.
 SCHEDULE_STATE_FIELDS = frozenset({
     "status", "scheduled_at", "depends_on", "auto_advance", "frequency",
     "skill_name", "preferred_hours",

@@ -688,7 +688,7 @@ was never in the list at all, and neither were the fields added later.
 
 Seven front-matter fields decide whether a task runs: `SCHEDULE_STATE_FIELDS` =
 `status`, `scheduled_at`, `depends_on`, `auto_advance`, `frequency`, `skill_name`,
-`preferred_hours` (`app/harness/policy.py:313`). **#724's rail holds `vault_write`
+`preferred_hours` (`app/harness/policy.py:324`). **#724's rail holds `vault_write`
 too, the third of the three surfaces that can write them** — with
 `autonomy_write_task` and the vault-round landing route — **and the page names the
 lanes it does not reach.** The first is the tool: `effective_tier` demotes an

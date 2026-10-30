@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import types
 from pathlib import Path
 
@@ -1748,3 +1749,203 @@ def test_a_benign_body_still_lands_and_is_ledgered_on_both_lanes(scratch, fs):
                                     f"- 2026-10-12T09:00:00Z: used `{BODY_OFFENDER}`"})
     assert not _refusal(e), f"Edit refused a dated log bullet: {e}"
     assert not _body_rows(fs.journal), f"the fs lane denied a benign body: {_body_rows(fs.journal)}"
+
+
+# ---------------------------------------------------------------------------
+# The rail's prose, held to the set it introduces (#3578)
+# ---------------------------------------------------------------------------
+# Every node above this line drives a lane that REFUSES a write, and each of
+# them reads `policy.SCHEDULE_STATE_FIELDS` at call time — so the enforcement
+# was right about `preferred_hours` while the comment describing it was wrong.
+# `app/harness/policy.py` used to say, eight lines above the constant and twelve
+# above the frozenset: "`model`, `preferred_hours`, `next_run`/`last_run`,
+# `max_retries`, `failure_count` and `runs_per_day` are deliberately NOT in the
+# set", while the frozenset below contained `preferred_hours` and the comment
+# attached to it said the field was added on purpose, because the nightly
+# chain's order lives nowhere else. Two opposite rules inside one block, and the
+# false one was the sentence telling a future agent the window is writable — the
+# write that #3359 had to carry through a human authorisation, and whose absence
+# from the rail #3578's triage measured as a clean grep for the bound field and
+# a refusal for this one.
+#
+# Rewriting the sentence alone leaves the drift one edit away, and no runtime
+# test can see a comment. So these three nodes parse it. `_membership_claims`
+# and `_set_exclusion_offenders` take TEXT rather than the module, which is what
+# lets `test_the_drift_pin_fires_on_the_sentence_that_started_it` feed the
+# detector the exact sentence quoted above and show it bites — the failure this
+# file was written to prevent, reproduced rather than asserted.
+_POLICY_PY = Path(__file__).resolve().parents[1] / "app" / "harness" / "policy.py"
+
+#: The two markers `policy.py` uses to enumerate its own membership, and the
+#: only spelling of a field name these parsers accept: backticks, lowercase,
+#: underscores — how every field is written in that file.
+_IN_CLAIM = "IN the set:"
+_OUT_CLAIM = "NOT in the set"
+_BACKTICKED = re.compile(r"`([a-z_]+)`")
+
+#: Phrases that deny membership of the set. Deliberately phrases about THE SET,
+#: not any negation: `policy.py` also says of `preferred_hours` "Leaving it out
+#: would keep the hazard this item was filed about standing", which is a reason
+#: it is in, and an exclusion detector with a looser pattern would report the
+#: file's best rationale as its bug.
+_SET_EXCLUSION_PHRASES = (
+    "not in the set",
+    "not in that set",
+    "not in `schedule_state_fields`",
+    "outside `schedule_state_fields`",
+    "outside the set",
+    "are not members",
+    "left out of the set",
+    "removed from the set",
+)
+
+
+def _comment_paragraphs(src: str) -> list[tuple[int, str]]:
+    """Contiguous runs of `#` lines, each one broken at a blank comment line.
+
+    Returns `(1-based first row, joined text)`. Breaking at a bare `#` is what
+    keeps the exclusion scan honest: `policy.py` separates a block's paragraphs
+    that way, so a member named in one paragraph cannot be indicted by an
+    exclusion phrase belonging to its neighbour.
+    """
+    out: list[tuple[int, str]] = []
+    start: int | None = None
+    buf: list[str] = []
+    for row, line in enumerate(src.splitlines(), start=1):
+        stripped = line.strip()
+        text = stripped[1:].strip() if stripped.startswith("#") else ""
+        if text:
+            if start is None:
+                start, buf = row, [text]
+            else:
+                buf.append(text)
+        elif start is not None:
+            out.append((start, " ".join(buf)))
+            start, buf = None, []
+    if start is not None:
+        out.append((start, " ".join(buf)))
+    return out
+
+
+def _membership_claims(src: str) -> dict[str, set[str]]:
+    """Field names the comment claims IN and OUT, keyed "in"/"out".
+
+    A claim is one paragraph opening with its marker and continuing to the next
+    blank comment line, so a wrapped list still reads as one claim.
+    """
+    claims = {"in": set(), "out": set()}
+    for _, para in _comment_paragraphs(src):
+        if para.startswith(_IN_CLAIM):
+            claims["in"].update(_BACKTICKED.findall(para))
+        elif para.startswith(_OUT_CLAIM):
+            claims["out"].update(_BACKTICKED.findall(para))
+    return claims
+
+
+def _set_exclusion_offenders(src: str, members: set[str]) -> list[tuple[int, list[str]]]:
+    """Paragraphs that name a member of `members` while denying it is one.
+
+    Each hit is the paragraph's first row and the members it indicts, so the
+    report points at a line rather than at a file.
+    """
+    hits: list[tuple[int, list[str]]] = []
+    for row, para in _comment_paragraphs(src):
+        low = para.lower()
+        if not any(p in low for p in _SET_EXCLUSION_PHRASES):
+            continue
+        named = sorted({t for t in _BACKTICKED.findall(para)} & members)
+        if named:
+            hits.append((row, named))
+    return hits
+
+
+#: The sentence as it stood at `bb333b3b`, kept verbatim as the thing the
+#: detectors must catch. `git -C ~/lloyd show bb333b3b:app/harness/policy.py`
+#: lines 298-306; the trailing constant is here so the paragraph reads as it did
+#: in context.
+_PRE_3578_SENTENCE = (
+    "# `model`, `preferred_hours`, `next_run`/`last_run`, `max_retries`,\n"
+    "# `failure_count` and `runs_per_day` are deliberately NOT in the set. The first\n"
+    "# two change how a run behaves once dispatched, not whether it dispatches — a\n"
+    "# parked task stays parked with a new model, and a narrowed hour window cannot\n"
+    "# start a run its status has not authorised. The rest are scheduler OUTPUT; the\n"
+    "# scheduler writes them itself, and gating them would deny every completion\n"
+    "# stamp. There is no interactive fallback on the worker path, so an over-broad\n"
+    "# predicate here ends every nightly parked behind a human.\n"
+    'SCHEDULE_STATE_TOOL = "autonomy_write_task"\n'
+)
+
+
+def test_no_comment_in_the_rail_puts_a_member_outside_the_set():
+    """Clause 1 of #3578: no comment denies a field the set contains.
+
+    The whole file is scanned, not just the block beside the constant, because
+    the claim was never scoped to one place — a sentence in the middle of the
+    module is what an agent skimming for the rule actually reads.
+    """
+    members = set(P.SCHEDULE_STATE_FIELDS)
+    offenders = _set_exclusion_offenders(
+        _POLICY_PY.read_text(encoding="utf-8"), members)
+    assert not offenders, (
+        "app/harness/policy.py comments deny these fields are members of "
+        "`SCHEDULE_STATE_FIELDS` while the set contains them "
+        f"(line, fields): {offenders}. The prose is what tells a turn which "
+        "writes are refused; a denial here is a false statement that the "
+        "scheduler's ordering field — or any other member — is free to edit.")
+
+
+def test_the_rail_comment_and_the_set_cannot_drift_apart():
+    """Clause 2 of #3578: the enumerated lists and the set are the same facts.
+
+    Both directions are pinned. `IN` must equal the frozenset, so a field added
+    to the set with no line written about it fails here instead of quietly
+    becoming undocumented; `OUT` must contain no member at all, which is the
+    #3578 defect itself.
+    """
+    members = set(P.SCHEDULE_STATE_FIELDS)
+    claims = _membership_claims(_POLICY_PY.read_text(encoding="utf-8"))
+    assert claims["in"] and claims["out"], (
+        "`policy.py` no longer carries a paragraph opening "
+        f"{_IN_CLAIM!r} and one opening {_OUT_CLAIM!r}, so this pin has nothing "
+        f"to read (in={sorted(claims['in'])}, out={sorted(claims['out'])}). "
+        "Deleting the enumeration is a decision to unpin the prose from the "
+        "set; say so in the commit and update this node with it.")
+    assert claims["in"] == members, (
+        f"the comment and the set disagree: enumerated {_IN_CLAIM[:-1]} "
+        f"{sorted(claims['in'])} but `SCHEDULE_STATE_FIELDS` is "
+        f"{sorted(members)} — in the comment only "
+        f"{sorted(claims['in'] - members)}, in the set only "
+        f"{sorted(members - claims['in'])}. One of them is wrong about which "
+        "writes the rail refuses.")
+    assert not (claims["out"] & members), (
+        f"`{_OUT_CLAIM}` names {sorted(claims['out'] & members)}, which the set "
+        "does contain — the #3578 contradiction, back again.")
+
+
+def test_the_drift_pin_fires_on_the_sentence_that_started_it():
+    """The two detectors fail on the defect they were written for.
+
+    Not a restatement of the nodes above: each feeds a detector text that is
+    wrong and requires a finding. Without this node a parser that silently
+    returned empty sets would pass both pins forever — an empty `claims` and an
+    empty `offenders` are exactly what a broken detector produces.
+    """
+    members = set(P.SCHEDULE_STATE_FIELDS)
+    hits = _set_exclusion_offenders(_PRE_3578_SENTENCE, members)
+    assert hits and hits[0][1] == ["preferred_hours"], (
+        "the pre-#3578 sentence, which denies membership to a field the set "
+        f"contains, produced {hits}. The exclusion scan no longer sees the "
+        "sentence that filed this item, so clause 1 is unpinned.")
+
+    src = _POLICY_PY.read_text(encoding="utf-8")
+    trimmed = src.replace("# `frequency`, `skill_name`, `preferred_hours`.",
+                          "# `frequency`, `preferred_hours`.")
+    assert trimmed != src, (
+        "the IN line no longer wraps through `skill_name`, so this mutation has "
+        "nothing to trim and the equality pin below is untested — re-point it at "
+        "whatever the line says now.")
+    assert _membership_claims(trimmed)["in"] != members, (
+        "dropping `skill_name` from the enumeration left the IN line equal to "
+        "the set anyway, so a field that enters `SCHEDULE_STATE_FIELDS` without "
+        "a line in the comment would pass the pin above. That is the drift "
+        "clause 2 exists to catch.")
