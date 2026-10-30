@@ -208,6 +208,14 @@ class ArmHold(PersistenceHold):
             status = await self.full_status()
             if status is not None:
                 busy = in_flight(status)
+                pool = status.get("pool") or {}
+                if not busy and pool.get("paused"):
+                    # Somebody else's hold is not a clear fleet. A landing pauses the pool
+                    # and drains it, so its pause is exactly when the fleet first LOOKS
+                    # clear — and `take()` then refuses the held pool outright. On
+                    # 2026-10-30 that ended the third #3188 window in one tick of a 6 h
+                    # wait; waiting the hold out is what the wait is for.
+                    busy = {f"held_by:{'+'.join(pool.get('paused_by') or ['unknown'])}": 1}
                 if not busy:
                     self.log.append("fleet clear before the take: nothing in flight")
                     return True

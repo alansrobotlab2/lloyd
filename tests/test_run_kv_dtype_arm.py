@@ -896,3 +896,28 @@ def test_an_observation_window_that_does_not_settle_refuses_before_staging(tree)
     assert not staged.exists()
     assert tree["stub"].restarts.read_text() == "", "a leg ran into a refusal it could see"
     assert tree["stub"].resumed(), "the hold was left set"
+
+
+def test_a_promoter_hold_that_lifts_is_waited_out_rather_than_refused(tree):
+    """A landing pauses and drains the pool, so its hold is when the fleet first looks clear.
+    The third #3188 window (2026-10-30) read that as clear, reached for the hold, and was
+    refused on `+automod` in one tick of a 6 h wait. A hold that lifts is waited out."""
+    import threading
+    stub = tree["stub"]
+    stub.holders = ["automod"]
+    WorkQueue(stub.db).wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1")
+
+    def lift():
+        stub.holders = []
+        WorkQueue(stub.db).wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "0")
+
+    timer = threading.Timer(1.0, lift)
+    timer.start()
+    try:
+        proc, out, env = _win(tree, KV_ARM_FLEET_WAIT_S="20")
+    finally:
+        timer.cancel()
+    assert proc.returncode == 0, _fail(proc, out)
+    assert "held_by:automod" in out, "the wait never saw the promoter's hold"
+    assert stub.restarts.read_text().count("\n") == 2, stub.restarts.read_text()
+    assert stub.resumed()
