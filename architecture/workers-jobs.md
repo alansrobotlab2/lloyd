@@ -1435,11 +1435,21 @@ touching it are both about not lying to the reader.
   test_failure_ledger_dispatch.py` carries the silent one through `enqueue_if_due`.
 - **`last_enqueued` is the last sweep, not the last enqueued row.** The source stamps
   it unconditionally after `sweep_and_dispatch` returns, whether or not a dispatch
-  happened, so it is the interval gate's clock and answers only "has this source been
-  asked today". A day with findings and a day with none move it identically, so nothing
-  about the day's outcome can be read out of it. The stamp that says a pass actually
-  completed is the pool's `last_enqueue_ok` (`workers/dispatch_watch.py`), written only
-  on a clean return.
+  happened, so it is the interval gate's clock and answers exactly one question — has
+  this source swept — and nothing about the day's outcome: a day with findings and a
+  day with none move it identically. The pool's own pair answers a different question
+  and neither one is "a pass completed": `last_enqueue_check` is stamped on every ask
+  whether or not the call returned (`workers/pool.py:1636`) and `last_enqueue_ok` only
+  on a clean return (`workers/pool.py:1647`, read by `workers/dispatch_watch.py`), so
+  both advance once per pool ask, per source. A fresh `last_enqueue_ok` therefore says
+  the pool is still asking, not that this source swept: `enqueue_if_due` returns early
+  inside its own `min_interval_seconds` of the last sweep
+  (`workers/sources/failure_ledger.py:243`), and that early clean return stamps the
+  pair like any other. The only stamp saying this source swept recently is its own
+  `last_enqueued`, and it says no more than that: 0 `failure_dispatches` rows sit
+  against a stamp that moves daily (measured 2026-10-30T00:28Z). Stamping a separate
+  enqueue key on a real dispatch, or renaming this one `last_sweep`, is #3532's owed
+  scope call.
 
 The prompt names at most `DISPATCH_MAX_RECORDS` finding ids plus a window of
 `DISPATCH_WINDOW_DAYS` around `first_seen`, and `execute` pastes the ledger's own
@@ -1491,18 +1501,46 @@ one poisoned at `attempts = 0`, which is terminal.
 against named, dated open issues: owed-check's ruling, read on the daily note and the
 `[guardian]` board rather than the parked morning brief, and the #543 four-week
 delete-or-keep clock for the ledger starts at that first real run, not at this block's
-landing. **Measured 2026-10-28 that first real run has still not happened: 0 `runs`
-rows for `source='failure-ledger'` in `workers.db` all-time, and 0 queue rows.** The
-schedule is not the blocker — the pool asks hourly (`last_enqueue_check`
-2026-10-28T04:12Z), a pass completes daily (`last_enqueued` 2026-10-27T04:59Z), and
-`failure_findings` is still empty because neither detector can reach this store:
-`detect_new_onset` wants ≥3 occurrences of a signature within 24 h of its
-`first_seen` and the two newest families hold 2 and 1, while growth counts only the
-day before the pass, so every burst the store has ever produced (`04f90c87b03a`
-09-25 n=23 and 10-21 n=8, `a1afbe2e3b04` 09-06 n=6) closed before #3281's
-burst-from-silence arm landed on 2026-10-25 and no pass can review it now. The
-seven-day criterion and #543's clock are therefore not early: they wait on a burst
-with no arrival condition. What kept the loop from scheduling the source was never a fence around
+landing. **Measured 2026-10-30T00:28Z that first real run has still not
+happened: 0 runs and 0 queue rows for `source='failure-ledger'`, both
+all-time** — and the reason is quieter than the one this paragraph carried
+until #3532: the store has produced no qualifying burst since the detector that
+looks for one landed. The schedule is not the blocker either, and its stamps
+are not the same fact: the pool's ask pair (`last_enqueue_check`,
+`last_enqueue_ok` — each stamped once per pool ask, not once per sweep) read
+2026-10-29T23:34Z, and the source's own sweep stamp `last_enqueued` read
+2026-10-29T05:22Z, all three from one read, where the ask pair sits 53 min and
+the sweep stamp 19 h before the `runs` count above. The pool has asked within the
+hour and the sweep last ran 19 h ago; neither is a completed diagnosis — the ask
+pair says nothing about whether this source swept, and the sweep stamp says
+nothing about whether it dispatched. **An arrival is not missing.** A reviewed
+day holding ≥3 events of one signature — `app/failure_ledger.py:482`
+`GROWTH_MIN_COUNT = 3` — whose trailing-7-day window is empty fires the
+silent-baseline arm in `detect_growth` (`:576`, in main since 2026-10-25), so
+the store's next quiet burst of that shape arrives at the pool on the pass the
+day after it. The rate is a fact about the store and not a hope: counted
+2026-10-30T00:28Z, 9 signature-days reach the floor across the store's 27
+event days (2026-09-06 → 2026-10-27: 27 days carrying events inside a 52-day
+calendar span), roughly one a week. What has not arrived is that day *since
+the arm*: the last qualifying day is 2026-10-21 (`04f90c87b03a`, n=8 counted
+2026-10-30T00:28Z), four days ahead of #3281's settling (2026-10-25), and the
+only event days after it — n=1 (2026-10-22), n=2 (2026-10-24), n=1
+(2026-10-27) — all sit under the floor. Two facts about that 2026-10-21 burst
+are the whole of the confusion, and both are in #3281's round record: the
+scheduled pass DID review it, on 2026-10-22, and the pre-#3281 guard
+`if median is None: continue` then discarded its empty window — the arm's
+measured flip is `[]` at base `752f5ade` versus `[1]` after, replayed on a
+copy of the store because `detect_growth` commits. What is permanently
+unreviewable is bounded, and it is about days rather than about reach: because
+the pass reviews only D-1 (`GROWTH_REVIEW_LAG_DAYS` = 1, `:503`) with no
+catch-up, a burst that closed before 2026-10-25 can never be re-reviewed —
+`04f90c87b03a` 2026-09-25 n=23 and `a1afbe2e3b04` 2026-09-06 n=6 among them —
+so those went unreported and stay that way. The seven-day criterion and #543's
+clock are therefore not early, and they are not stuck either: the live
+authority on the residual zero is #3281's owed entry, which owed-check ruled
+on 2026-10-27T03:03Z ("the source is live, not stalled … the zero is 'shape
+not seen', not a defect") with its recheck owed 2026-11-03. What kept the loop
+from scheduling the source was never a fence around
 `config.yaml`: that claim was retired on 2026-10-05 by the
 `scripts/automod/spec.py::config_value_change` lane, whose denied set
 (`spec.py::CONFIG_DENIED_KEYS`)
