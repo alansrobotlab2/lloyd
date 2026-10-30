@@ -373,6 +373,57 @@ else
     fi
 fi
 
+# #3589: a commit that removes a loaded index line and leaves its ledger row live.
+# `lloyd/MEMORY.md` and `lloyd/USER.md` are the prompt's own index, and
+# `lloyd/memory/memory-md-ledger.md` / `user-md-ledger.md` carry one row per line —
+# the row is the record, the line is the hook that reaches it. Dream #47's fold (vault
+# `085f714b`, 2026-10-29) deduped seven loaded lines, named NEITHER ledger in its
+# `--stat`, and stranded seven rows; `memory_ledger.py retire`, the ledger's only
+# deleter, has refused that whole file ever since, against a ledger at 86,023 B of its
+# derived 102,400 B bound.
+#
+# HARD-REFUSED, unlike every other rung in this file, and the difference is a stray
+# file versus a stranded row. `git reset -q --` is the right repair for a WAL because a
+# WAL is never what a commit was for; unstaging a ledger row here would be quietly
+# rewriting what another caller decided to commit, and the repair is to stage the
+# ledger too. Warning alone is the state that produced the seven: `status` prints
+# `orphan rows: 7`, and `validate_memory_index.py` has said since `d13514fa`
+# (2026-10-08) that its counts are report-only BY DECISION (#2415 owed ruling 2) —
+# three weeks before the fold. Printing is proved insufficient, so what refuses is a
+# call site on the diff.
+#
+# The matcher is `ledger_strand_findings.py` beside this script — the same module the
+# OTHER door imports (`scripts/automod/vault_round.py::land()`, which has its own `git
+# add` and its own `git commit` and never calls this wrapper; #2468 again), and it
+# reads the INDEX and only this commit's diff, never the whole-tree orphan count. So
+# the seven rows already sitting undispositioned cannot redden a commit that did not
+# create them, which is what keeps this rung from becoming the nightly-wide red that
+# owed ruling 2 withheld. Exit 1 is the refusal; anything past 1 is the rung failing,
+# said out loud rather than read as clean, because a check that goes blind looks
+# exactly like a tree with no orphans.
+STRAND_RUNG="$SCRIPT_DIR/ledger_strand_findings.py"
+if [ ! -f "$STRAND_RUNG" ]; then
+    echo "vault-commit.sh: ledger strand CHECK SKIPPED (missing $STRAND_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: ledger strand CHECK SKIPPED (no python interpreter)" >&2
+else
+    set +e
+    "$PY" "$STRAND_RUNG" --vault "$VAULT"
+    STRAND_RC=$?
+    set -e
+    if [ "$STRAND_RC" -eq 1 ]; then
+        # Column 0 and before the index readback below, for the #1070 reason that
+        # governs the no-change block: an indented leading token does not survive
+        # reaching a caller as the first thing they read. The per-line refusal naming
+        # the removed index line and the ledger that owes the disposition came out of
+        # the rung, on this same stderr.
+        echo "vault-commit.sh: LEDGER STRAND CHECK REFUSED the commit above: nothing is committed and nothing is unstaged. Disposition each row in the same commit — delete it, or move it to lloyd/reviews/<ledger>-archive.md with a reason naming the removed line (#2415) — and commit the index and its ledger together (#3589)." >&2
+        exit 1
+    elif [ "$STRAND_RC" -gt 1 ]; then
+        echo "vault-commit.sh: ledger strand CHECK FAILED (exit $STRAND_RC); committing whatever the index holds" >&2
+    fi
+fi
+
 # Read the answer back off the index rather than trusting the list above: `git
 # commit` commits the index, so anything another writer left staged is in this
 # commit whether this invocation named it or not, and the message has to account

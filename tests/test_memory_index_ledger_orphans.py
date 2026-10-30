@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -808,3 +809,143 @@ def test_the_fold_skills_name_this_validator_by_path():
             f"{skill} no longer names validate_memory_index.py, which is the only reason "
             "this script — rather than a louder check nobody invokes — is where an orphan "
             "count reaches a fold")
+
+
+# ─────────────────────────── #3589 clause 3: report-only stays report-only ─────
+#
+# The round that added a refusing call site for a stranded ledger row (vault
+# `085f714b`, dream #47, stranded 7 rows) landed three weeks after this script
+# started printing the count, which is the evidence that printing was not enough.
+# The refusal it added lives in the two commit doors and reads the staged DIFF; it
+# deliberately does not read this script's whole-tree count, because making that
+# count fatal would have failed every nightly from the strand until the
+# disposition — #2415 owed ruling 2 withheld exactly that. What the two nodes below
+# pin is the seam between the two: the same tree, at the same moment, is refused by
+# the door and reported green by this check.
+
+STRAND_GUARD = REPO / "scripts" / "util" / "ledger_strand_findings.py"
+
+#: A line in the `one-orphan` fixture ledger whose anchor matches nothing in any index
+#: this fixture writes — the pre-existing orphan, already detached before any commit.
+#: `LEDGER_FIXTURES["one-orphan"]` holds 2 rows and 1 such orphan, which is the shape
+#: today's live ledger has (91 rows, 7 orphans) at fixture scale.
+PREEXISTING_ORPHAN_ANCHOR = ANCHOR_DEAD_ONE
+
+
+def _git_cwd(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+
+
+def make_vault(tmp_path: Path, fixture: str = "one-orphan") -> Path:
+    """The fixture as a git vault: every file under `lloyd/`, one commit, nothing staged.
+
+    The doors check a staged index, so the tree has to be a repository, and the paths
+    have to carry the `lloyd/` prefix the guard matches on — the same directory name
+    `make_root`'s `memory/` children sit under. `make_root`'s output is copied rather
+    than re-derived so the fixture's ledger rows, index lines and the topic file that
+    keeps the link checks green are this file's, not a second fixture with different
+    numbers in it.
+    """
+    memories = make_root(tmp_path, fixture)
+    vault = tmp_path / "obsidian"
+    (vault / "lloyd").mkdir(parents=True)
+    shutil.copytree(memories, vault / "lloyd", dirs_exist_ok=True)
+    for setup in (["init", "-q", "-b", "main"],
+                  ["config", "user.email", "t@e"], ["config", "user.name", "t"]):
+        assert _git_cwd(vault, *setup).returncode == 0, setup
+    assert _git_cwd(vault, "add", "-A").returncode == 0
+    assert _git_cwd(vault, "commit", "-q", "-m", "base state").returncode == 0
+    return vault
+
+
+def strand_guard(vault: Path) -> subprocess.CompletedProcess:
+    """One run of the door's matcher against `vault`'s staged index, as a subprocess.
+
+    Subprocess for the same reason `validate` is one: the exit code is what the bash
+    door branches on (`vault-commit.sh` reads 1 as a refusal), so an in-process call
+    would be asserting on a return value no door ever sees.
+    """
+    return subprocess.run([sys.executable, str(STRAND_GUARD), "--vault", str(vault)],
+                          capture_output=True, text=True)
+
+
+def test_a_commit_touching_no_loaded_line_is_passable_with_orphans_already_present(tmp_path):
+    """#3589 clause 3: yesterday's strand may not veto today's unrelated commit.
+
+    The fixture starts with one row whose anchor matches nothing — the fixture-scale
+    version of the 7 rows `memory_ledger.py status` prints for `MEMORY.md` today. With
+    that state committed and an unrelated change staged (a topic file, no loaded index
+    line touched), the guard must exit 0 and say nothing. It is the property that keeps
+    #2415 owed ruling 2 unexercised: a guard that read the whole-tree count would have
+    been red on every nightly from `085f714b` onward, which is the outcome that ruling
+    withheld, and red-on-everything is how a guard gets disabled rather than obeyed.
+    """
+    vault = make_vault(tmp_path, "one-orphan")
+    assert counts_of(block_line(output_of(validate(vault / "lloyd")), "MEMORY.md")) == (2, 1), (
+        "the fixture no longer carries one live row and one pre-existing orphan, so "
+        "'unrelated commits pass while orphans exist' describes a state that does not "
+        "occur here and asserts nothing")
+
+    topic = vault / "lloyd" / EXTRA_TOPIC
+    topic.write_text("---\ntype: note\n---\n\n# note\n\none more line of detail.\n",
+                     encoding="utf-8")
+    assert _git_cwd(vault, "add", "-A").returncode == 0
+
+    r = strand_guard(vault)
+    assert r.returncode == 0, (
+        f"a commit that removes no loaded index line was refused while an orphan row "
+        f"from an earlier commit sits undispositioned: {r.stderr!r}")
+    assert (r.stdout + r.stderr).strip() == "", (
+        f"the guard spoke about a commit it passed: {(r.stdout + r.stderr)!r}")
+
+
+def test_the_same_staged_strand_is_refused_by_the_door_and_reported_by_this_check(tmp_path):
+    """One tree, two verdicts: the door refuses the diff, this check reports the state.
+
+    Deleting a loaded line whose row stays live, staged, is what the door exists to
+    stop: exit 1, naming the removed line and the ledger that owes the disposition, and
+    exactly one line named — the one this diff removed, not the pre-existing orphan, so
+    the count cannot silently become the whole-tree number. The same staged state run
+    through `validate_memory_index.py` must still exit 0 while reporting both orphans:
+    the stranded row is now visible twice, once as a bookkeeping debt in a file the run
+    may not be editing and once as a refused commit, and only the second is fatal. If
+    the owed ruling ever makes this check fatal too, this node is the one that says so
+    rather than the nightly that notices.
+    """
+    vault = make_vault(tmp_path, "one-orphan")
+    index = vault / "lloyd" / "MEMORY.md"
+    before = index.read_text(encoding="utf-8")
+    assert ENTRY_ORIG in before, "the fixture index lost the line this node deletes"
+    # `ENTRY_ORIG` is the fixture's only hook to `EXTRA_TOPIC`, so deleting it bare would
+    # send `check()` red on its UNLINKED-TOPIC error and the exit status below would say
+    # nothing about ledgers — the fixture's own trap, spelled out in
+    # `test_the_fixture_anchor_is_the_writers_own`. Carrying the hook on a replacement
+    # line, the way a fold that rewords rather than removes does, leaves the stranded row
+    # as the only thing the two tools can disagree about.
+    hook = ENTRY_ORIG[ENTRY_ORIG.rindex("-> "):].strip()
+    replacement = (f"- [project] (2026-01-05) **A fold replacement** — the line that "
+                   f"took the deleted one's place, same hook {hook}\n")
+    index.write_text(before.replace(ENTRY_ORIG, replacement, 1), encoding="utf-8")
+    assert _git_cwd(vault, "add", "-A").returncode == 0
+
+    r = strand_guard(vault)
+    assert r.returncode == 1, f"a staged strand was not refused: {r.stderr!r}"
+    err = r.stdout + r.stderr
+    assert ENTRY_ORIG.strip() in err, f"the removed line is not quoted: {err}"
+    assert "memory-md-ledger.md" in err, f"the owed ledger is not named: {err}"
+    assert ANCHOR_DEAD_ONE[:50] not in err, (
+        f"the refusal named the pre-existing orphan as well, so the guard read the "
+        f"whole tree rather than the diff: {err}"
+    )
+    assert "1 loaded index line" in err, (
+        f"the refusal did not count exactly the line this diff removed: {err}"
+    )
+
+    res = validate(vault / "lloyd")
+    assert res.returncode == 0, (
+        f"the whole-tree check stopped being report-only at the moment a door refused — "
+        f"that is #2415 owed ruling 2, not this clause: {output_of(res)}")
+    assert counts_of(block_line(output_of(res), "MEMORY.md")) == (2, 2), (
+        "with the line deleted and the row live, this check should report both the "
+        f"pre-existing orphan and the new one: {output_of(res)}")

@@ -680,6 +680,24 @@ except ImportError:  # pragma: no cover - only if the namespace portion fails
     SCF = _ilu.module_from_spec(_scf_spec)
     _scf_spec.loader.exec_module(SCF)  # type: ignore[union-attr]
 
+# #3589: the ledger-strand matcher, read by BOTH doors exactly as #3236's sidecar
+# matcher above is — here and `scripts/util/vault-commit.sh`. `085f714b` (dream #47)
+# is the proof this door is the one a bash-only rung misses: its own subject line says
+# "merge the vault-land pair", it rewrote `lloyd/MEMORY.md` and `lloyd/USER.md`, named
+# neither ledger in its `--stat`, and stranded seven rows, which is what
+# `memory_ledger.py retire` — the ledger's only deleter — has refused this file for
+# since. Same placement and same by-path fallback as `SCF` above, for the same reason:
+# an ImportError escaping `land()` would be a land that cannot land rather than a rung
+# that declined.
+try:
+    from scripts.util import ledger_strand_findings as LSF
+except ImportError:  # pragma: no cover - only if the namespace portion fails
+    import importlib.util as _ilu2
+    _lsf_path = Path(__file__).resolve().parents[1] / "util" / "ledger_strand_findings.py"
+    _lsf_spec = _ilu2.spec_from_file_location("ledger_strand_findings", _lsf_path)
+    LSF = _ilu2.module_from_spec(_lsf_spec)
+    _lsf_spec.loader.exec_module(LSF)  # type: ignore[union-attr]
+
 #: #2437/#3146: the four front-matter fields a run writes into its own task file —
 #: `app/autonomy.py` stamps `last_run`/`last_attempt`/`updated` at every completion
 #: and `next_run` from `_next_run_after`. None is in `SCHEDULE_STATE_FIELDS`: that
@@ -1985,6 +2003,48 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                                             "listed in sidecar_refusals)" if refused else ""),
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(text)
+    # #3589: a loaded memory line this landing removes with its ledger row still live.
+    # The matcher is `scripts/util/ledger_strand_findings.py`, the same module
+    # `scripts/util/vault-commit.sh` runs at its own pre-flight — one rule, two doors,
+    # because this door has its own `git add` and its own `git commit` and never calls
+    # the wrapper, and `085f714b` (dream #47, the commit that stranded seven rows) is
+    # the landing-shaped commit a bash-only rung would have waved through.
+    #
+    # Here, and not further down: the witness block below prints "landed <sha>" text
+    # before the commit exists (#2381), so refusing after it would leave a witness
+    # claiming a landing this function then refused.
+    #
+    # NOTHING is reverted, which is the one place this door's refusal shape departs
+    # from the validation and code-agreement refusals above. Those refuse a change that
+    # is wrong; this refuses an INCOMPLETE one — the index edit is what the caller
+    # wants, the ledger disposition is what it is missing — and `revert_paths` would
+    # check HEAD out over the caller's own work to make a point it cannot repair. The
+    # tree is left exactly as found so adding the row's disposition to the same batch
+    # is the whole fix.
+    strand_lines, strand_unread = LSF.findings(VAULT)
+    if strand_unread:
+        # Said out loud rather than read as clean: a strand check that could not run is
+        # the same blindness `status()`'s printed count already was, and this door
+        # commits anyway only because the alternative is a landing that cannot land
+        # because its own instrument is missing.
+        print(f"vault_round.py: {strand_unread} — landing without it", file=sys.stderr,
+              flush=True)
+    if strand_lines:
+        for line in strand_lines:
+            print(line, file=sys.stderr, flush=True)
+        S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                        "paths": norm, "errors": strand_lines[:10],
+                        # Distinct from `sidecar_refusals` above, which names PATHS
+                        # this function pulled out of the index. These are anchors this
+                        # landing would strand, and no path was touched.
+                        "strand_refusals": strand_lines[:10],
+                        "reverted": [],
+                        "review": "skipped",
+                        "review_reason": "ledger strand: a loaded memory line is "
+                                         "removed with its ledger row still live "
+                                         "(#3589, disposition per #2415)",
+                        **({"session_id": session_id} if session_id else {})})
+        raise VaultRoundError(" | ".join(strand_lines))
     # The #2381 witness rung, on the door #2381 did not rung it on (#2520). Exactly
     # here, and not a line later: `index_blobs` reads `git diff --cached`, and the
     # index still holds these bytes only until the commit moves HEAD under it. The
