@@ -3371,7 +3371,14 @@ _H2 = re.compile(r"^## (.+)$", re.M)
 
 #: A row of the preset table: first cell a preset in backticks, second cell the
 #: compared marker plus the kept-row count the doc claims for it.
-_PRESET_ROW = re.compile(r"^\|\s*`([a-z0-9_]+)`\s*\|\s*(yes|no)"
+#:
+#: The first-cell charset is `_ARMS_ROW`'s (`[a-z0-9._-]`) and not a narrower one.
+#: A name this pattern cannot parse does not fail: it yields no row at all, and both
+#: preset nodes reach the table only through `preset_rows()`, so an unparsed row is
+#: invisible to the set-equality that exists to refuse it. The tree's real `--arms`
+#: values carry hyphens (`enforce-off`, `shadow-gold-sample`), so the spelling that
+#: went unseen was the ordinary one, not an edge case (#3587).
+_PRESET_ROW = re.compile(r"^\|\s*`([a-z0-9._-]+)`\s*\|\s*(yes|no)"
                          r"(?:\s*\((\d+)(?: of (\d+))? kept\))?\s*\|", re.M)
 
 #: `[[measurement]] §Section`, as the two delegates spell it. The capture stops at
@@ -3449,6 +3456,64 @@ def preset_rows(body: str) -> dict[str, tuple[str, int | None, int | None]]:
     """The preset table as `name -> (yes|no, kept count, row count)`."""
     return {name: (mark, int(kept) if kept else None, int(total) if total else None)
             for name, mark, kept, total in _PRESET_ROW.findall(body)}
+
+
+#: The two roots §Arms that are flag values says the `--arms` flag is declared
+#: across: "a flag nine runner scripts under `eval/` and `scripts/` declare".
+ARMS_FLAG_ROOTS = ("eval", "scripts")
+
+#: The runner whose `ARM_ON`/`ARM_OFF` pair the section's egress example quotes.
+CANARY_REL = "eval/run_injection_canary.py"
+
+
+def arms_flag_declarers() -> set[str]:
+    """Repo-relative paths of the scripts that declare an `--arms` flag.
+
+    AST over `eval/*.py` and `scripts/**/*.py`, for two reasons. A grep counts the
+    flag's name inside a help string or a comment as a declaration, and a doc node
+    that dies on an unrelated import reads the same as one that dies on the doc
+    (the standing rule behind `_declared_sources`). Files, not `add_argument` sites:
+    `eval/run_memory_eval.py` declares the flag twice for two parser builds, and the
+    sentence counts runner scripts, so a site count would push the prose to a number
+    that is not what the sentence is about.
+    """
+    found: set[str] = set()
+    for root in ARMS_FLAG_ROOTS:
+        base = ROOT / root
+        files = base.glob("*.py") if root == "eval" else base.rglob("*.py")
+        for py in sorted(files):
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "add_argument"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "--arms"):
+                    found.add(str(py.relative_to(ROOT)))
+                    break
+    return found
+
+
+def module_string_constants(rel: str, *names: str) -> dict[str, str]:
+    """Module-level `NAME = "value"` assignments, read by AST rather than imported."""
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in names
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            out[node.targets[0].id] = node.value.value
+    missing = [n for n in names if n not in out]
+    assert not missing, f"{rel} declares no string constant named {missing}"
+    return out
+
+
+def _names_backticked(text: str, values: set[str]) -> bool:
+    """Every value present as a backtick-quoted token, not as a loose substring."""
+    return all(f"`{v}`" in text for v in values)
 
 
 def _heading_for(ref: str, headings: set[str]) -> str:
@@ -3618,6 +3683,171 @@ def test_the_compared_column_is_the_baselines_and_the_quoted_numbers_are_theirs(
     assert any(mark == "yes" and kept != measured.get(name, (0, 0))[1]
                for name, (mark, kept, _t) in false_rows.items()), (
         "the kept-count comparison cannot see an inflated count")
+
+
+def test_both_row_patterns_read_the_names_both_tables_actually_carry():
+    """#3587 clause 1: one row shape, one accepted spelling of a name.
+
+    `measurement.md` carries two tables whose first cell is a name in backticks, and
+    they were parsed by two different charsets: `_ARMS_ROW` took `[a-z0-9._-]`,
+    `_PRESET_ROW` took `[a-z0-9_]`. The narrower pattern did not reject a hyphenated
+    row — it returned no row at all, and since both preset nodes reach the table only
+    through `preset_rows()`, the row a reader wrote was invisible to the set-equality
+    that exists to refuse it. Widening it changed nothing on the live doc: the window
+    parsed sixteen rows before and parses the same sixteen now, none of which reads as
+    a directory arm, which is why this node grades the patterns rather than counting
+    rows — the row/dict equality is
+    `test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict`'s.
+
+    Every name below comes out of one of the two live tables, not out of this file, so
+    what fails is a narrowed pattern and not a reworded sentence. The hyphenated arm
+    names are the point of the control: without one of them in the denominator a
+    `[a-z0-9_]` pattern would satisfy the loop.
+    """
+    text = _text("measurement.md")
+    arms = set(_ARMS_ROW.findall(_section(text, "The arms")))
+    presets = set(preset_rows(recall_section(text)[1]))
+    assert arms and presets, (
+        f"the two tables parsed to {sorted(arms)} / {sorted(presets)} — one of them "
+        "stopped parsing, so the parity below would be vacuous")
+    assert [n for n in arms if "-" in n], (
+        f"§The arms carries no hyphenated arm name ({sorted(arms)}), so re-grading "
+        "the preset pattern against it says nothing about hyphens")
+
+    for name in sorted(arms | presets):
+        row = f"| `{name}` | yes (3 kept) | a row shaped like the preset table's |\n"
+        assert _ARMS_ROW.findall(row) == [name], f"`_ARMS_ROW` cannot parse {name!r}"
+        assert name in {m[0] for m in _PRESET_ROW.findall(row)}, (
+            f"`_PRESET_ROW` cannot parse {name!r}, which `_ARMS_ROW` parses: rows of "
+            "that shape are dropped in silence rather than refused, and "
+            "`preset_rows()` is the only route either preset node has to the table")
+    assert not (presets & arms), (
+        f"a preset name now reads as a directory arm too: {sorted(presets & arms)}")
+
+
+def test_the_preset_check_names_a_hyphenated_row_that_matches_no_preset():
+    """#3587 clause 2: the control the mis-spelling needed — a hyphenated row naming
+    no preset has to come out of the set-equality as doc-only.
+
+    Measured against this file before the widened charset: appending
+    ``| `shadow-gold-sample` | no | fabricated |`` to the section left BOTH preset
+    nodes green, because `preset_rows()` returned no key for it and a name that is
+    not a key cannot be named by a set difference. The value is one the tree ships —
+    a surface name `eval/cross_engine_disagreement.py` accepts for `--arms` — so it is
+    exactly what a reader transcribing a real flag value writes, and it is asserted
+    absent from `ARMS` first, so the control cannot quietly stop testing anything the
+    day that preset is added.
+    """
+    _, body = recall_section(_text("measurement.md"))
+    presets = set(runner_presets())
+    extra = "shadow-gold-sample"
+    assert extra not in presets, (
+        f"{extra} is now an `ARMS` key of {RUNNER_REL}, so injecting it no longer "
+        "tests the doc-only direction of the comparison")
+    assert extra not in preset_rows(body), (
+        "the live section already carries a row for the value this control injects, "
+        "so the injection below changes nothing")
+
+    rows = preset_rows(body + f"\n| `{extra}` | no | fabricated row |\n")
+    assert extra in rows, (
+        f"`preset_rows()` dropped the injected `{extra}` row unparsed, so it cannot be "
+        "named doc-only — an unparsed row is invisible to both preset nodes, which is "
+        "the hole #3587 files")
+    assert set(rows) - presets == {extra}, (
+        "the comparison reports something other than the injected row as doc-only: "
+        f"{sorted(set(rows) - presets)}")
+    assert not (presets - set(rows)), (
+        "the injection lost real preset rows, so the doc-only set above is an "
+        "artefact of a table that no longer parses at all")
+
+
+def test_the_flag_value_section_states_the_declarer_count_the_tree_has():
+    """#3587 clause 3: how many scripts declare `--arms` is a fact about the tree, so
+    the section's number is derived here.
+
+    The transcribed figure has already drifted once, and the stale "six" is what
+    produced #3582's false premise — an item claiming the flag was declared by six
+    scripts and the guard covered only one of them. Nothing re-derived it: `git grep
+    'egress_arms|cross_engine_disagreement'` over this file was empty, and
+    `_word_to_int` was wired to other docs only. The count is over the two roots the
+    sentence itself names, and it counts files, not `add_argument` sites, because
+    `eval/run_memory_eval.py` declares the flag twice.
+
+    The parenthetical "(six when this section was written)" is checked as WRITTEN, not
+    as current: it is the dated record of the drift — the reason a later reader can
+    tell a stale sentence from a wrong one — and a pass that overwrites it with today's
+    number destroys the evidence. The §Review log line "declared by nine scripts rather
+    than six" sits outside this window and is a dated record for the same reason.
+    """
+    declared = arms_flag_declarers()
+    assert "eval/egress_arms.py" in declared and any(d.startswith("scripts/")
+                                                    for d in declared), (
+        f"the scan reached {sorted(declared)}; it has to see both roots the sentence "
+        "names, or a count of zero from a dead walk reads as agreement")
+
+    flat = _flat(recall_section(_text("measurement.md"))[1])
+    m = re.search(r"\b(\d+|[a-z]+) runner scripts\b", flat)
+    assert m, (
+        "the section states no declarer count in the form '<count> runner scripts', so "
+        "a reader has nothing to check the tree against")
+    assert _word_to_int(m.group(1)) == len(declared), (
+        f"the section says {m.group(1)!r} scripts declare `--arms`; the tree has "
+        f"{len(declared)}: {sorted(declared)}")
+    assert "(six when this section was written)" in flat, (
+        "the section dropped the dated parenthetical that records the drift; it is "
+        "history, not a stale figure to update")
+
+    bumped = flat.replace(f"{m.group(1)} runner scripts",
+                          f"{_bump_count_word(m.group(1))} runner scripts", 1)
+    assert bumped != flat, (
+        "the seeded off-by-one did not take, so the comparison below proves nothing")
+    assert _word_to_int(re.search(r"\b(\d+|[a-z]+) runner scripts\b",
+                                  bumped).group(1)) != len(declared), (
+        "a declarer count one off the tree's own count still reads as agreement, so "
+        "the assertion above is not comparing the sentence to the tree")
+
+
+def test_the_flag_value_section_names_the_egress_pair_by_its_declared_values():
+    """#3587 clause 4: the section's one spelled-out off-table example is the values
+    the tree declares, read off the tree.
+
+    §Arms that are flag values discloses that the preset table grades one runner's
+    `ARMS` dict and that the other eight declarers' values sit outside that guard —
+    true, and unchanged here — and it illustrated the point with the egress pair
+    written as `off`/`enforce`. Those are not the declared values: `ARM_OFF =
+    "enforce-off"` and `ARM_ON = "enforce-on"` in `eval/run_injection_canary.py` are,
+    and that pair is what the `choices=` of `--arms` in `eval/egress_arms.py` accepts.
+    A reader who copied the doc's spelling into a command got an argparse refusal; a
+    reader who copied it into the preset table got a green test, until clause 1. Same
+    blind spot, one of them in sentence form.
+
+    The pair comes from `ARM_ON`/`ARM_OFF` themselves rather than from a literal in
+    this file, so re-labelling an arm turns the sentence red and this node stays silent
+    about the spelling it enforces.
+    """
+    consts = module_string_constants(CANARY_REL, "ARM_ON", "ARM_OFF")
+    pair = {consts["ARM_ON"], consts["ARM_OFF"]}
+    assert len(pair) == 2, f"ARM_ON and ARM_OFF hold the same value: {pair}"
+
+    flat = _flat(recall_section(_text("measurement.md"))[1])
+    hits = [s for s in _sentences(flat) if "egress_arms.py" in s]
+    assert len(hits) == 1, (
+        f"{len(hits)} sentences of the section name eval/egress_arms.py; the pair has "
+        "to have exactly one home for this to grade a sentence")
+    assert _names_backticked(hits[0], pair), (
+        f"the egress sentence carries neither declared arm value as a backtick-quoted "
+        f"token (the pair is {sorted(pair)}, from ARM_OFF and ARM_ON); it reads "
+        f"{hits[0][:120]!r} — a paraphrase is how `off`/`enforce` got here")
+
+    # The control: the wording this section carried until #3587, through the same
+    # predicate. If it passed, the assertion above would be grading prose shape and
+    # not the two constants.
+    stale = ("The preset table below is graded against one runner's `ARMS` dict, so "
+             "the other eight's values (`off`/`enforce` in `eval/egress_arms.py`) are "
+             "outside the guard (#3582).")
+    assert not _names_backticked(stale, pair), (
+        "the mis-spelled pair satisfies the check, so the check is not reading "
+        "ARM_ON and ARM_OFF")
 
 
 #: The #2168 `tool_clear`/`sidecar` pair (#2682), run 2026-10-14 the way the

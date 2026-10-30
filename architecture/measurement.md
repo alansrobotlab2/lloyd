@@ -100,8 +100,9 @@ sense in this tree: `--arms` is a flag nine runner scripts under `eval/` and
 `scripts/` declare (six when this section was written), and its values are
 configuration presets inside one script. The preset table below is graded against
 `eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the nine — so the
-other eight's values (`off`/`enforce` in `eval/egress_arms.py`, surface names in
-`eval/cross_engine_disagreement.py`) are outside the guard (#3582).
+other eight's values (`enforce-off`/`enforce-on`, the `choices=` of `--arms` in
+`eval/egress_arms.py`, surface names in `eval/cross_engine_disagreement.py`) are
+outside the guard (#3582).
 `memory_eval` is the collision spelled out — it is a directory arm *and* a
 runner whose `--arms` values (`closed_book`, `history`, `prefetch`) are not
 directories. Nothing separates the two senses but this paragraph: **an `--arms`
