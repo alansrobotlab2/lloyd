@@ -892,6 +892,223 @@ def test_ingest_names_68s_state_write_and_says_it_is_not_durable_state():
         "is how a row read as write-free produced the second mirror-image filing")
 
 
+# ── #3445 — the own-series ruling: the dated-series clause needs a second reader ─
+#
+# §Write authority's positive clause counted "an appended row of a dated series
+# under `~/lloyd-data/`" as durable state with no further test, and its negative
+# clause excluded only skills-scripts scratch. #90's
+# `_pipeline/metrics/corpus-shape-<date>.json` satisfies both clauses at once — it
+# is an appended dated row, and it is read back solely by the next night's own #90
+# run — so the definition decided nothing for the fleet's trend recorders while the
+# tier table filed them `Reports only`. #3445 rules the case in the definition: the
+# dated-series clause holds only where a lane other than the writer reads the row
+# back, and a job's `own series` (the term `edf693f3` had already put in §Bound
+# entropy's #90 row) is not durable state. The four nodes below are that ruling's
+# four clauses.
+
+#: The two roots outside `~/lloyd-data/` the paragraph has to be seen deciding.
+#: Both were undecided by *either* clause before #3445 — the positive clause named
+#: only the data root — which is the item's mirror defect: a path list that is
+#: quiet about a root settles nothing about it, so a ruling written as a longer
+#: list would just move the gap. #101 appends its gate-to-land lag row under the
+#: automod state dir (`scripts/maintenance/gate_to_land_lag.py:48`), and #102's
+#: driver publishes one dated report per run into the checkout's
+#: `eval/measurements/` (`scripts/find_all_arms_run.py`).
+_OWN_SERIES_ROOTS_OUTSIDE_DATA = (
+    "~/.local/state/lloyd-automod/",
+    "eval/measurements/",
+)
+
+#: The seven jobs the `Reports only` row must keep. #82 and #86 are the trend
+#: recorders §Measure describes, #90 is this ruling's named exemplar, #91 appends
+#: the thinking-fidelity prevalence row, and #100 #101 #102 are the three
+#: 2026-10-16 arrivals `WATCH_TIER` already places there.
+_OWN_SERIES_JOBS_KEPT_IN_REPORTS = ("#82", "#86", "#90", "#91", "#100", "#101", "#102")
+
+
+def _rule_prose(text: str) -> str:
+    """The unit-of-account paragraph with markdown emphasis and code fences gone.
+
+    The ruling is matched on stripped prose because the doc bolds its verbs and
+    backticks every path: a matcher that required the markers would be testing the
+    styling, and one stray `*` would read as an absent ruling.
+    """
+    raw = _unit_of_account_paragraph(text)
+    assert raw is not None, (
+        "§Write authority has no unit-of-account paragraph to rule in, so #3445's "
+        "own-series clause has nowhere to live")
+    return _flat(raw).replace("*", "").replace("`", "")
+
+
+def _tiers_from(text: str) -> dict[str, list[str]]:
+    """The tier table's `{row label: job ids}` read from arbitrary doc text.
+
+    `_table` reads the file on disk, which is the right thing for every other node
+    here and the wrong thing for the seeded movement one of the nodes below has to
+    demonstrate — it needs to grade a mutated copy of the same table, not a second
+    copy of the same file. The parse is `_table`'s, minus the count column.
+    """
+    lines = text.splitlines()
+    i = lines.index(TIERS_HEADER)
+    out: dict[str, list[str]] = {}
+    for line in lines[i + 2:]:                        # header, then the |---|---| rule
+        if not line.startswith("|"):
+            break
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        out[cells[0]] = _ids(cells[1])
+    return out
+
+
+def test_a_dated_series_is_durable_state_only_when_another_lane_reads_it_back():
+    """#3445 clause 1. The positive clause's dated-series case and the negative
+    clause's own-scratch case both fitted #90's corpus-shape row, with opposite
+    verdicts, and the row still sat in `Reports only` under a sentence that said its
+    write was durable state. So the clause is now conditional — durable state only
+    when a lane other than the row's own writer reads it back — and the exclusion it
+    implies gets a name, `own series`, the same term §Bound entropy's #90 row has
+    carried since `edf693f3`.
+
+    The literals #3335 pinned (`~/lloyd-data/`, `#68`, the 24 h state.json) have to
+    survive: #3445 narrows the dated-series case, it does not retire the
+    skills-scripts exclusion that settled #1505 and #3334.
+    """
+    flat = _rule_prose(_text())
+    dated = [s for s in _sentences(flat) if "dated series" in s]
+    assert dated, "the unit-of-account paragraph no longer rules on a dated series"
+    assert any("only when a lane other than its own writer reads it back" in s
+               for s in dated), (
+        f"the dated-series clause is unconditional again ({dated[0][:160]!r}); with no "
+        "second reader required, #90's corpus-shape row satisfies this clause and the "
+        "own-scratch clause at once, which is the contradiction #3445 was confirmed on")
+
+    own = [s for s in _sentences(flat) if "own series" in s]
+    assert own, (
+        "the paragraph states no `own series` exclusion, so a series only its writer "
+        "reads back is durable state by the positive clause and the trend recorders' "
+        "`Reports only` placement is again contested prose")
+    assert any("not durable state" in s for s in own), (
+        f"the sentence naming an `own series` carries no verdict ({own[0][:160]!r}); "
+        "naming the case without ruling on it is how the definition ended up deciding "
+        "nothing for the fleet's trend recorders")
+
+    assert "~/lloyd-data/" in flat and "#68" in flat, (
+        "the ruling dropped one of the literals #3335 pinned into this paragraph "
+        f"({'~/lloyd-data/' in flat=}, {'#68' in flat=}); #3445 narrows the "
+        "dated-series clause and leaves the skills-scripts exclusion standing")
+
+    # The failure this node exists to catch, demonstrated rather than asserted: the
+    # pre-#3445 definition is what is left once the two new sentences go, and the
+    # same read of the same file then finds no second-reader requirement at all.
+    unruled = flat
+    for s in own:
+        unruled = unruled.replace(s, " ", 1)
+    unruled = unruled.replace("only when a lane other than its own writer "
+                              "reads it back", " ", 1)
+    assert not any("reads it back" in s for s in _sentences(unruled)
+                   if "dated series" in s), (
+        "deleting the second-reader qualifier and the own-series exclusion still "
+        "leaves a dated-series sentence that requires a second reader, so the "
+        "assertion above matches a phrase carrying no verdict — that is not a check")
+
+
+def test_the_own_series_ruling_is_a_durable_state_property_beyond_the_data_root():
+    """#3445 clause 2. The positive clause named exactly one root, so three real
+    reporter roots — #101's journal under `~/.local/state/lloyd-automod/`, #102's
+    dated report inside the checkout, and the dated ledger pairs #94/#99 write under
+    `~/obsidian/` — were decided by neither clause. The item is explicit that the
+    ruling therefore has to be a property (which lanes read the artefact back),
+    because a longer path list just relocates the gap.
+
+    So this pins both halves: the paragraph says the test is a property of the
+    artefact rather than of the root, and it names at least one root outside
+    `~/lloyd-data/` as decided by that same property.
+    """
+    flat = _rule_prose(_text())
+    named = [r for r in _OWN_SERIES_ROOTS_OUTSIDE_DATA if r in flat]
+    assert named, (
+        f"the paragraph names none of {_OWN_SERIES_ROOTS_OUTSIDE_DATA}, so the ruling "
+        "still reaches only the root the old clause already listed and a reporter "
+        "writing elsewhere is decided by neither clause — the mirror defect #3445's "
+        "triage calls the reason a path list cannot be the fix")
+    deciding = [s for s in _sentences(flat)
+                if any(r in s for r in named) and "property" in s]
+    assert deciding, (
+        f"the sentence naming {named[0]!r} does not rest on the property "
+        "(no sentence names it alongside 'property'), so the extra root reads as one "
+        "more path enumerated rather than as one question applied past the data root")
+
+
+def test_the_own_series_ruling_lands_in_the_definition_and_not_in_the_tier_table():
+    """#3445 clause 3. The Reports-only placements are test-pinned — `:718` for #86,
+    `WATCH_TIER` for #91/#95/#96/#97/#100/#101/#102 — and the item's landable branch
+    is the one that rules in the definition instead of re-tiering, so the table has
+    to come out of this untouched.
+
+    The five counts are not re-typed as literals here:
+    `test_every_tier_row_count_equals_the_ids_listed_beside_it` re-derives every cell
+    from the ids beside it, and hard-typing 27/1/2/15/1 would be the hand-copied
+    ceiling this module's own docstring forbids ("a ceiling is false the moment the
+    fleet grows"). What this node adds is the movement the clause forbids: the seven
+    trend recorders and late arrivals stay in `Reports only`, and the ruling stays in
+    the prose instead of being smuggled into a table cell.
+    """
+    tiers = _tiers_from(_text())
+    assert len(tiers) == 5, f"expected the five documented tiers, parsed {list(tiers)}"
+    for job in _OWN_SERIES_JOBS_KEPT_IN_REPORTS:
+        hits = [t for t, ids in tiers.items() if job in ids]
+        assert hits == ["Reports only"], (
+            f"{job} is in {hits or 'no tier'}; #3445 rules the own-series case in the "
+            "definition precisely so no job moves between tiers, and these seven are "
+            "the writes the ruling is about")
+
+    rule_words = ("own series", "reads it back")
+    moved = [f"{t}:{w}" for t, ids in tiers.items()
+             for cell in [t] for w in rule_words if w in cell]
+    assert not moved, (
+        f"the tier table itself now carries the ruling's vocabulary ({moved}); the "
+        "definition is where #3445 puts it, because a table cell would re-tier by "
+        "phrasing and every placement in it is pinned elsewhere in this file")
+
+    # That the seven-job check can fail is shown, not claimed: the same read of a
+    # table with #90 moved up one row reports it moved.
+    seeded = _text().replace("#78 #80 #36 #86 #90 · ", "#78 #80 #36 #86 · ", 1)
+    seeded = seeded.replace("#92 #93 #94 #99 #103 | 27 |",
+                            "#90 #92 #93 #94 #99 #103 | 27 |", 1)
+    assert seeded != _text(), (
+        "the seeded movement did not take, so the check below would prove nothing")
+    seeded_hits = [t for t, ids in _tiers_from(seeded).items() if "#90" in ids]
+    assert seeded_hits == ["Writes durable state unattended"], (
+        f"moving #90 out of `Reports only` in the table still reads as {seeded_hits}, "
+        "so the seven-job assertion above is matching something other than the row")
+
+
+def test_bound_entropy_states_the_durable_state_ruling_in_the_own_series_term():
+    """#3445 clause 4. §Bound entropy's #90 paragraph ended by advertising the
+    contradiction: #90 sits in `Reports only`, it said, over "a placement the tier
+    *table* makes and its own definition contests". Once the definition rules on the
+    own-series case there is nothing left to advertise, and a note that keeps
+    pointing at a settled dispute is a live sentence readers have to re-adjudicate.
+
+    Scoped through `arch_review.find_section` rather than the whole doc, because the
+    ruling's wording also sits in §Write authority and this file's recurring defect
+    (#1524) is one section's correct wording excusing another's stale one.
+    """
+    bound = _group_section("Bound entropy")
+    assert "definition contests" not in bound, (
+        "§Bound entropy still describes the tier table's placement as contested by the "
+        "definition; #3445 settles that dispute and a note advertising it keeps the "
+        "contradiction in circulation")
+    ruling = [s for s in _sentences(bound)
+              if "own series" in s and "durable state" in s and "lane other than" in s]
+    assert ruling, (
+        "§Bound entropy does not restate the ruling in the `own series` term its #90 "
+        "row already uses — no sentence there joins 'own series', 'durable state' and "
+        f"a second-reader phrase ({[s[:60] for s in _sentences(bound) if 'own series' in s]})")
+    assert any("(#3445)" in s for s in ruling), (
+        "the settling sentence dropped its (#3445) citation, so a reader of §Bound "
+        "entropy cannot find the ruling this section defers to")
+
+
 def test_every_tier_row_count_equals_the_ids_listed_beside_it():
     """Clause 4, second half. The `| N |` column is a hand-typed count of the cell
     beside it — exactly the shape this item exists to stop: a number true when it
@@ -1588,10 +1805,14 @@ WATCH_TIER = {
     # #2881, the same question asked of the two 2026-10-16 arrivals. Neither may file
     # anything: each task file's `acceptance.objective_checks` names `Write` and `Edit`
     # in its `tool_not_called` list and its prohibition sentence forbids filing a
-    # backlog item or opening a round, so the only durable thing either leaves is one
-    # dated row in its own journal — `~/lloyd-data/eval/instrument-index/` for #100,
+    # backlog item or opening a round, so the only thing either leaves is one dated
+    # row in its own journal — `~/lloyd-data/eval/instrument-index/` for #100,
     # `~/.local/state/lloyd-automod/` for #101, both outside the repo, the vault and
-    # the queue. That is #97's position exactly, which is why #2881's contract places
+    # the queue. #3445's ruling makes that row an `own series`, which the unit of
+    # account expressly does not count as durable state, so the phrase "the only
+    # durable thing" here is corrected in this round; whether the placement still
+    # stands once either job has really written a row is what #3445 leaves owed.
+    # That is #97's position exactly, which is why #2881's contract places
     # them here rather than beside #92–#94.
     "#100": "Reports only",
     "#101": "Reports only",
