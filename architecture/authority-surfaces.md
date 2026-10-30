@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, safety, authority, guards]
 type: reference
 status: implemented
-date: 2026-09-28
+date: 2026-10-29
 ---
 
 # Lloyd — write authority, across every surface
@@ -32,13 +32,13 @@ ask.
 |---|---|---|---|
 | 1 | L0 classes and the block signal | `~/obsidian/lloyd/SOUL.md`, pinned by `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. The prose is the vault identity file; the module holds what a trim may not drop (`GATE_HEADS`, `LOAD_BEARING`, the ceilings). Prompt, therefore the weakest layer — and it **is** a trigger for the tool-choice eval: `Gate.PROMPT_SURFACE_PATHS` (`scripts/automod/gate.py`) keys on `app/prompt_builder.py`, `app/prefetch.py`, this module and the three loaded vault files, so a diff that loosens a ceiling here gets scored by the `prompt_surface` rung (#1758, after a round that raised `GATE_STACK_CEILING` or dropped a `LOAD_BEARING` entry used to clear the whole ladder unobserved). Which modules qualify is not hand-kept either: `tests/test_prompt_surface_coverage.py` derives every module that assigns one of those invariant names at module level and refuses a round whose definition site is unlisted |
 | 2 | Deterministic Bash denies | `app/harness/safety.py` | Is this command catastrophic (`check_bash_command` at `app/harness/safety.py:417`)? Installed as a default `PreToolUse` hook on every primary turn, Inner Voice on or off — it replaced the LLM-judgment lever that only ran when IV ran |
-| 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set every MCP write lane now consults — `Write`/`Edit` through `agent_mcp/builtin_fs.py:238`, Bash through `check_bash_command`, and `vault_write` through `agent_mcp/vault.py:_protected_write_refusal` since #1757; `PROTECTED_WRITE_ROOTS` and `write_deny_reason`, both defined in `app/harness/protected_paths.py`). `automod_vault_land` is the one exempt lane, by design: it validates the diff before it commits, which is what the refusal text offers a writer. One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
+| 3 | Protected trees, three policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete), what may be **written** (the deny-set every MCP write lane now consults — `Write`/`Edit` through `_protected_path_refusal` (`agent_mcp/builtin_fs.py:222`), Bash through `check_bash_command`, and `vault_write` through `_protected_write_refusal` (`agent_mcp/vault.py:1708`) since #1757; `PROTECTED_WRITE_ROOTS` and `write_deny_reason`, both defined in `app/harness/protected_paths.py`), and — since #3524, the module's third policy — what an untrusted-input turn may **read** (`PROTECTED_READ_ROOTS` and `read_deny_reason`, armed per source by `app/harness/secret_read_deny.py`, and lifted by no grant, because no turn reading a transcript has a sanctioned reason to read a private key). `automod_vault_land` is the one exempt lane, by design: it validates the diff before it commits, which is what the refusal text offers a writer. One module, three questions, deliberately co-located so they cannot disagree about what is sacred |
 | 4 | The read-only sandbox | `agent_mcp/_tool_sandbox.py` | Is this session one that must never change the machine? Bench and eval sessions, enforced in `agent_mcp/main.py::call_tool` — the one function every tool call from every caller passes through, not in a runner, because runner copies live in worktrees |
-| 5 | Unattended tool bans | `app/tool_bans.py` | Which tools may an unattended turn call at all? Two tuples (`WORKER_AUTOMOD_BAN`, `WORKER_GRANT_MINT_BAN`), four readers: the shared worker turn path bakes both in (`workers/sources/_common.py:427`, `:433`), the chat router arms them off the session's own platform (`app/routers/turn_options.py:222`) — the automod ban for every non-user session except the one source whose job IS the loop (`AUTOMOD_DRIVER_SOURCES`, `app/routers/messages.py:590`), the grant ban wherever an authority scope is in force (`app/routers/messages.py`) — the review grader's deny list spreads the automod ban (`workers/sources/arch_review.py`), and a `Task` child has to inherit it (`agent_mcp/builtin_task.py:378`) |
+| 5 | Unattended tool bans | `app/tool_bans.py` | Which tools may an unattended turn call at all? Two tuples (`WORKER_AUTOMOD_BAN`, `WORKER_GRANT_MINT_BAN`), and too many readers for one row to count: the shared worker turn path bakes both in (`workers/sources/_common.py`'s `_worker_run_options`, `:666` and `:672`), the capability pool folds them in as standing bans whatever a source declares (`_standing_bans`, `app/harness/capabilities.py:155`), the chat router arms them off the session's own platform (`build_turn_options`, `app/routers/turn_options.py:222`) — the automod ban for every non-user session except the one source whose job IS the loop (`AUTOMOD_DRIVER_SOURCES`, `app/routers/messages.py:590`), the grant ban wherever an authority scope is in force (`app/routers/messages.py`) — the review grader's deny list spreads the automod ban (`workers/sources/arch_review.py`) and so do three sibling sources' own lists (`autotriage`, `deep_research`, `youtube_digest`), and a `Task` child has to inherit it (`agent_mcp/builtin_task.py:378`) |
 | 6 | Scope-bound grants | `agent_mcp/builtin_grants.py` | Did a human mint authority for this specific scope, with an expiry? The interactive half is `grant_create`/`grant_list`/`grant_revoke`; the other half is `grants:` front matter on an autonomy task file, where editing the file *is* the grant — with one exception the code says out loud: a declared grant is never re-minted over a row that still covers its pair, a spent one included, so a used-up `quota:` is restored by `grant_revoke` plus a later `expires_at:` in the file, not by the edit alone (#2021; the sync warning and the denial both name that route). The protected-write escape in layer 3 (`allow_protected_writes`) is the same idea scoped to one call |
 | 7 | Effect authority | `agent_mcp/_tool_effects.py` | Has this *effect* already happened (#544)? A timeout means unknown, not failure, so a retry is the dangerous path — which makes this an authority question, not a reliability one |
 | 8 | Egress | `agent_mcp/egress.py` | Is this destination allowed at all (#628)? Telemetry first, then a default-deny policy. Before this the outbound path had no destination concept: `http_fetch`/`http_request` checked only whether a host was private, `browser.py` mirrored that check, and nothing recorded where a call went |
-| 9 | The browser's own SSRF guard | `agent_mcp/browser.py` | May the browser be pointed at a private or loopback address? A second, narrower question than layer 8, on a different surface — the reason #628 had to touch both |
+| 9 | The browser's own SSRF guard | `agent_mcp/browser.py` | May the browser be pointed at a private or loopback address? `browser_navigate` asks layer 8 first (`egress.aguard`), and then this floor, which is what the row is for: it re-checks where the navigation *landed* (`_enforce_landing` blanks the page when a redirect, a meta-refresh or a script put a private host in front of the model), and its loopback rule is stricter than the policy's — every resolved address must be loopback, and `browser_navigate` is given no loopback allowance at all. The two are why #628 had to touch both surfaces: the policy sees the destination that was asked for, this floor sees where the browser actually ended up |
 | 10 | RPC policy | `app/harness/rpc_policy.py` | Which tools may `lloyd_rpc` call from inside a `Bash` command (P9)? Programmatic tool calling bypasses the model's turn loop, so it needs its own allow-list rather than inheriting the loop's |
 | 11 | The desktop lease | `app/desktop_lease.py`, `app/routers/desktop.py` | Did Alan grant the lease, from Mission Control's Desktop tab? Capture stays read-only; acting requires the lease, and moving the mouse revokes it. The one surface where the human is in the loop physically ([[desktop]]) |
 | 12 | The review session's deny list | `workers/sources/arch_review.py` | What may the doc reviewer edit, and what may it never touch — a deny list that must stay a superset of layer 5 |
@@ -59,12 +59,12 @@ the useful part of the doc.
   that followed the code would protect the copy while leaving the live tree open.
   `app.paths.VAULT_ROOT` is the constant the vault entry agrees with — a symbol, not a
   line pointer, because the pointer that sat here was stale and this doc copied it on.
-  What the constant does *not* cover is the vault lane's own answer to "is this path
-  allowed" —
-  `agent_mcp/vault.py:1614` decides by containment under `VAULT` alone and never
-  asks `write_deny_reason`, so membership in the set does not mean the file is
-  closed. The prompt's copy of the same rule is still prose, and prose is checked by
-  `tests/test_prompt_surface_guard.py`, not by the code.
+  The vault lane is now *on* the set rather than outside it: `_protected_write_refusal`
+  (`agent_mcp/vault.py:1708`) asks `write_deny_reason` ahead of every other gate in
+  that lane since #1757, so all three lanes ask one predicate and membership in the
+  constant is the whole answer. What is still spelled twice is the prompt's copy of
+  the same rule: prose, checked by `tests/test_prompt_surface_guard.py`, not by the
+  code.
 - **Loopback.** mTLS was dropped on 2026-06-14 (`server.py`,
   [[mission-control]]), so no origin presents a certificate: the control is
   `ApiPeerGate`, which decides on the peer address and nothing else
@@ -73,8 +73,14 @@ the useful part of the doc.
   per-device allowlist only when a `x-client-fingerprint` arrives anyway.
   `chrome-extension`'s service worker reaches `http://127.0.0.1:8080` because it
   is loopback, not because a cert was waived for it ([[browser-side-panel]]). The
-  egress policy and the browser guard both reason about private ranges, from
-  separate code.
+  egress policy and the browser guard are the pair that *was* spelled twice and no
+  longer is: #2584 moved the resolving private-host answer into `agent_mcp/egress.py`
+  and `browser.py` calls it, so what the browser still owns is its stricter loopback
+  rule and its own `block_private_hosts` knob. What the split cost is on record in
+  that file's own comment: while `agent_mcp/egress.py` resolved addresses and
+  `agent_mcp/http_tools.py` prefix-matched the hostname *text*, `localhost.localdomain`
+  was refused by `browser_navigate` and fetched by `http_fetch` — one rule, two
+  answers, which is the drift this list is for.
 - **Compaction thresholds.** The values live in `config.yaml`; `app/compaction.py`
   carries `setdefault` fallbacks, and the two already differ
   (`context-window.md` names the pair). Same shape, different subject.
@@ -132,16 +138,17 @@ spends an unattended round discovering that.
   [[inner-voice]]. Layer 1 above is prompt-level by nature; nothing here claims
   the model's own refusal is load-bearing, which is why everything under it is
   code.
-- **The protected-path list itself.** `protected_roots()` and
-  `protected_write_roots()` are the list, generated from the live tree. This doc
-  does not copy it, for the reason `index.md` gives for not copying a fleet
-  count: a second definition of a set is wrong within a week.
+- **The protected-path list itself.** `protected_roots()`, `protected_write_roots()`
+  and `protected_read_roots()` are the lists, generated from the live tree (the
+  shell's bind list, `protected_shell_ro_paths()`, is a projection of the write set).
+  This doc does not copy them, for the reason `index.md` gives for not copying a
+  fleet count: a second definition of a set is wrong within a week.
 - **Whether the coverage is complete.** It is not provable from here, and an
   inventory that reads like a proof is the failure mode
   `architecture/arch-review.md` opens with. The honest test is a property, not a
   list: enumerate the write endpoints and ask which ones a guard sits on — that
-  is how the unprotected surface was found in every instance on the record, most
-  recently the `vault_write` lane this pass filed.
+  is how the unprotected surface was found in every instance on the record, the
+  `vault_write` lane row 3 now names among them (#1757).
   A new tool, a new runner or a new write route should be checked against the
   thirteen rows above, and a row missing means this doc is the thing that is
   stale, not that the surface is safe.
@@ -187,3 +194,19 @@ spends an unattended round discovering that.
   refuses a definition site left off that list. Read the two entries together — a
   correction that is later superseded is still a dated record of the tree it
   measured.
+- **2026-10-29 — `stale` (arch-review, whole-doc unit).** Row 3 was one policy short of
+  the module it names: `app/harness/protected_paths.py` has carried a third since
+  #3524 (`PROTECTED_READ_ROOTS` and `read_deny_reason`, armed per source by
+  `app/harness/secret_read_deny.py`, lifted by no grant), so "two policies" and "two
+  questions" became three. Two sentences disagreed with row 3 of the same doc and with
+  the tree: the "Protected." bullet's claim that the vault lane never asks
+  `write_deny_reason` (it has since #1757 — `_protected_write_refusal`), and the
+  Loopback bullet's "both reason about private ranges, from separate code" (#2584 made
+  that one definition, so the pair left this section's list rather than staying in it).
+  Row 5's `:427`/`:433` were lines of `reconcile_fact_writes`, not of the ban loops
+  (which are `_worker_run_options`' `:666`/`:672`), and its "four readers" had been
+  outgrown by `_standing_bans` and three more sources' deny lists. Filed: the ladder
+  has no row for the capability ceiling (#3560), the write deny-set's grant lift has no
+  caller anywhere (#3563), and the Bash substrate sandbox — the one every non-bench
+  session gets, with a `fallback: true` off-state — is not in the ladder either
+  (#3564).
