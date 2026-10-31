@@ -283,9 +283,9 @@ Four behaviours are load-bearing:
     #2956) counts the UTC day's failed runs across every source and posts at most
     once a day on its own `throughput_day` watermark. `fleet_watchdog.tick` runs it
     last, reading `runs` rather than task files — so §2's table is its subject, not
-    this group's due-ness, and a roster copied from `WorkerPool._watch_fleet`'s
-    docstring misses it: that docstring still names only the two stall alarms, the
-    starving clause and the scan.
+    this group's due-ness. The seat's roster of record is
+    `workers/fleet_watchdog.py`'s module header, which #3516 made a derived list,
+    and this group describes it rather than standing as a second authority.
   - **The invariant across the two stall alarms** (#938): an outage of the model server pauses
     dispatch, never the watching. The vLLM gate stays here because it is dispatch,
     and its own threshold is 45 min of failed `/health` before `logger.error`

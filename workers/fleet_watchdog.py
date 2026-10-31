@@ -1,15 +1,34 @@
 """Fleet surveillance for the autonomy scheduler — the alarms, not the dispatch.
 
-Three alarms and one scan live here, and none of them is about enqueuing:
+Six steps live here, and none of them is about enqueuing:
 
-- the grossly-overdue / starving-queue stall alarm (#24/#48/#75, #1550), with the
+- the grossly-overdue stall alarm (#24/#48/#75, #1550), `_grossly_overdue`, with the
   operator-pause clause that says when a held pool, not a stuck scheduler, owns a
-  backlog, and the queue clause that names which source is waiting and says priority
-  starvation when the pool is demonstrably claiming other work (#2692);
-- the second stall assertion (#421), keyed on each task's own `next_run`, on its own
-  streak and its own 24 h cooldown;
-- the unparseable-task-file scan (#939), on its own 30 min cadence, which is the only
-  thing that notices a task file the scheduler silently drops.
+  backlog (#1744);
+- the starving-queue clause of that same alarm (#2692), `_queue_starving`, which
+  names which source is waiting and says priority starvation when the pool is
+  demonstrably claiming other work;
+- the lost-cycle ledger (#2552), `_window_losses`, which records a windowed task
+  whose `preferred_hours` occurrence closed while the pool's claims were held — the
+  one reader that can see the hold at all — and carries the instant the current
+  outage's first alert went out;
+- the second stall assertion (#421), `_next_run_stalled`, keyed on each task's own
+  `next_run`, on its own streak and its own 24 h cooldown;
+- the failure-throughput census (#2890, extended by #2899 and #2956),
+  `_census_failure_throughput`, last in the tick because it counts all of it, and on
+  a cadence of its own because a job that fails every ten minutes is working, not
+  failing;
+- the unparseable-task-file scan (#939), `_scan_unparseable_task_files`, on its own
+  30 min cadence, which is the only thing that notices a task file the scheduler
+  silently drops.
+
+This is the fleet-watch seat's roster of record (#3516). The steps are decided in one
+place, `tick()`, and `tests/test_fleet_watchdog.py` derives them from its source and
+holds this list — and the copy in `WorkerPool._watch_fleet`'s docstring — to that
+derivation, so a step that arrives in the tick has to be named here in the same
+change. The headline count is checked against the list beneath it for the reason it
+rotted: #2552 and #2890 both landed under a headline that still counted three alarms
+and a scan, and a reader of `pool.py` never learned the seat had grown.
 
 They used to sit inside `workers/sources/scheduled_task.py:enqueue_if_due`, and that
 cost more than length: `workers/pool.py` skips that call outright for a source whose

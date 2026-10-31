@@ -469,6 +469,68 @@ def test_workers_jobs_dropped_the_pointer_at_the_docstring_it_fixed():
         "is the part that has to stay")
 
 
+#: §Dispatch's census bullet, from the clause #3516 removed, verbatim. Carried for
+#: the reason this file carries `RETIRED_SENTENCE` and
+#: `DISPATCH_INVARIANT_BEFORE_1744`: a ban on a phrase the retired text does not
+#: contain is a ban on nothing.
+DISPATCH_DOCSTRING_POINTER_BEFORE_3516 = (
+    "and a roster copied from `WorkerPool._watch_fleet`'s docstring misses it: that "
+    "docstring still names only the two stall alarms, the starving clause and the "
+    "scan.")
+
+
+def test_workers_jobs_stopped_saying_what_watch_fleets_docstring_contains():
+    """Clause 4: §Dispatch described another file's docstring, and that docstring
+    was edited underneath it.
+
+    The precedent is `test_workers_jobs_dropped_the_pointer_at_the_docstring_it_fixed`
+    one section over, and the mechanism is identical — the sentence was true the
+    morning it was written and became false in the commit that fixed the thing it
+    described, because a section that reports what a docstring in `workers/` says is
+    maintained by whoever last edited that docstring, and nobody editing `pool.py` is
+    told §3 exists. So the ban here is on the WORD, not on the phrasing: §Dispatch
+    may say what the seat runs and which module owns the list, and may not say what
+    any file's prose says, because every sentence of that shape is a claim about a
+    file this doc does not own. What §Dispatch keeps is its own attribution — the
+    census is #2890, added 2026-10-17, with #2899's absolute floor and #2956's
+    since-boot rate floor — which is a claim about the seat and rots only if the seat
+    changes.
+    """
+    sec3 = _section(SEC3)
+    assert sec3, f"§3 {SEC3!r} not found — the heading moved and this test is blind"
+    flat = " ".join(sec3.split())
+
+    retired = " ".join(DISPATCH_DOCSTRING_POINTER_BEFORE_3516.split())
+    # Control before the ban: the constant has to be the sentence the ban is for.
+    assert "docstring" in retired and "WorkerPool._watch_fleet" in retired, (
+        "the retired pointer no longer names another file's docstring, so the check "
+        "below is vacuous and would pass on any text")
+    assert retired not in flat, (
+        "§Dispatch states what `WorkerPool._watch_fleet`'s docstring contains again — "
+        "readable as current right up to the commit that edits that docstring, which "
+        "is the rot #1689's precedent ends (#3516)")
+    assert "docstring" not in flat, (
+        "§Dispatch talks about a docstring again. The word is the ban: a sentence "
+        "about what another file's prose says is falsified by every later edit to "
+        "that file, and §3 has no way to know it happened")
+
+    census = [b for b in sec3.split("\n  - ") if "failure-throughput census" in b]
+    assert census, (
+        "§Dispatch no longer carries the census bullet, so the attribution below has "
+        "no window to be graded in and the seat's fourth step is undocumented here")
+    bullet = " ".join(census[0].split())
+    assert "#2890" in bullet and "#2899" in bullet and "#2956" in bullet, (
+        f"the census bullet lost its issues — #2890 added it, #2899 and #2956 are the "
+        f"two floors, and the copy that drops them cannot be checked against either: "
+        f"{bullet[:200]}")
+    assert "2026-10-17" in bullet, (
+        "the census bullet lost the date it was added, which is what tells a reader "
+        "whether the account predates a later change")
+    assert "fleet_watchdog" in bullet, (
+        "the census bullet no longer names the module that owns the step, which is "
+        "where a reader of this section goes to find the list that is authoritative")
+
+
 # ------------------------------------------------------- `bench-mine`'s cap
 # (#1712).
 #

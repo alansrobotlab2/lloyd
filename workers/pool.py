@@ -1780,16 +1780,29 @@ class WorkerPool:
             logger.warning("dispatch watch failed: %s", e, exc_info=True)
 
     async def _watch_fleet(self) -> None:
-        """Run the fleet's stall alarms and the task-file scan (#1682).
+        """Run the fleet watchdog's steps, whatever the fleet is doing (#1682).
 
         Third reader on this seat, and the one with the sharpest reason for it:
-        the two stall alarms, the starving clause and the unparseable-task-file
-        scan all read only task files and the queue, but until #1682 they ran only
-        when the `scheduled-task` source was enabled AND its `enqueue_if_due`
-        returned — so a dispatch-side switch (`enabled: false`, or the raise #1681
-        is about) disarmed the fleet's own alarms and produced no alert about the
-        disarmament. `workers/fleet_watchdog.tick` is that surveillance with the
-        dispatch half taken out.
+        every step `workers.fleet_watchdog.tick()` runs reads only task files and
+        the queue, but until #1682 they ran only when the `scheduled-task` source
+        was enabled AND its `enqueue_if_due` returned — so a dispatch-side switch
+        (`enabled: false`, or the raise #1681 is about) disarmed the fleet's own
+        alarms and produced no alert about the disarmament.
+        `workers/fleet_watchdog.tick` is that surveillance with the dispatch half
+        taken out, and this call site cannot reach into it: the seat has to run
+        even when the queue is empty and no source is enabled.
+
+        What it runs is that module's roster, and its header is the roster of
+        record — the stall alarms `_grossly_overdue` and `_queue_starving`, the
+        lost-cycle ledger `_window_losses` (#2552), the `next_run` stall assertion
+        `_next_run_stalled`, the failure-throughput census
+        `_census_failure_throughput` (#2890) and the unparseable-task-file scan
+        `_scan_unparseable_task_files`. The names are repeated here so a reader of
+        this file sees what the seat is running, and
+        `tests/test_fleet_watchdog.py` derives them from `tick()`'s own source and
+        fails if either list is missing one (#3516): the first time this
+        enumeration stood alone, two steps had already arrived without a word here,
+        and a closed list at a call site is precisely what that read as complete.
 
         Never raises, for the same reason as the two calls above it: the alarms
         that survive a broken dispatch are worthless if a fault in one of them

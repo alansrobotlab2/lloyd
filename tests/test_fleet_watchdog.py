@@ -19,6 +19,7 @@ import asyncio
 import datetime as dt
 import inspect
 import json
+import re
 import sqlite3
 import sys
 import threading
@@ -3725,3 +3726,377 @@ def test_the_relation_helper_states_all_three_positions_and_needs_both_sides():
         "a boot the machine would not name produced a relation anyway")
     assert fw._boot_cluster_relation(start, None) is None, (
         "a relation to a cluster that does not exist produced text")
+
+
+# ── #3516: the seat's roster is derived from `tick()`, never copied by hand ───
+#
+# Three places say what `fleet_watchdog.tick()` runs and exactly one of them
+# implements it: this module's own header is the roster of record;
+# `WorkerPool._watch_fleet`'s docstring and §Dispatch of
+# `architecture/workers-jobs.md` are copies. The copies rot every time a step
+# arrives, which has now happened twice. #1682 moved the alarms onto this seat
+# with the list living in `scheduled_task.enqueue_if_due`; #2552 then added the
+# lost-cycle ledger (2026-10-11) and #2890 the failure-throughput census
+# (2026-10-17), and no copy said so — on 2026-10-27 the seat's own docstring
+# still named three steps, and the module header a reader could have pointed at
+# named the same three under a headline counting four. A hand-maintained list of
+# "what this seat runs", kept in a file that does not run it, is not a thing
+# review can hold, so the steps are DERIVED below from `tick()`'s own source and
+# every copy is held to that derivation. The reverse direction — a roster that
+# keeps a step `tick()` no longer calls — is out of scope: derivation runs one
+# way, and `test_workers_doc_claims.py`'s retired-sentence controls cover the
+# other half of the same class.
+
+#: The roster this module shipped from #1682 until #3516 — its headline and the list
+#: beneath it, verbatim, as `git show HEAD:workers/fleet_watchdog.py` had them. It is
+#: carried so the checks below can be shown to bite: a derivation no shorter list
+#: ever failed is a description of today, not a guard (#1689's `RETIRED_SENTENCE`,
+#: same reason).
+RETIRED_ROSTER = """Three alarms and one scan live here, and none of them is about enqueuing:
+
+- the grossly-overdue / starving-queue stall alarm (#24/#48/#75, #1550);
+- the second stall assertion (#421);
+- the unparseable-task-file scan (#939).
+"""
+
+#: The two steps that roster left out even in prose, each with the phrase a later
+#: roster has to use for it. Both keys are steps `tick()` awaits unconditionally, so
+#: a walker that stopped seeing them fails this constant's own check below rather
+#: than letting the omission read as healed prose.
+RETIRED_ROSTER_OMITS = {"_window_losses": "lost-cycle",
+                        "_census_failure_throughput": "census"}
+
+#: Both closed enumerations `WorkerPool._watch_fleet`'s docstring carried until
+#: #3516 — the summary line and the body sentence, verbatim, whitespace as it stood.
+#: Carried for the same reason as `RETIRED_ROSTER`: a ban on a phrase the banned text
+#: does not contain is a ban on nothing (#1689's `RETIRED_SENTENCE`).
+RETIRED_WATCH_FLEET_ROSTERS = (
+    "Run the fleet's stall alarms and the task-file scan (#1682).",
+    "the two stall alarms, the starving clause and the unparseable-task-file scan")
+
+#: A step with no name yet, for the mutation in the control below. `tick()` gaining
+#: a call is the event this section exists to catch, and waiting for one to happen
+#: is not a test of the catch.
+SYNTHETIC_STEP = "_a_step_added_to_the_tick"
+
+#: Branch kinds, whose guard decides whether the body runs at all. Whether that
+#: guard is worth descending through is the whole judgement below, so it is made
+#: per statement rather than by a blanket skip. Matched by class name to stay
+#: version-proof (`TryStar` on 3.11+, `Match` on 3.10+).
+_BRANCH_STMT = {"If", "For", "AsyncFor", "While", "Match"}
+
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                 "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+                 "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+                 "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+                 "twenty": 20}
+
+#: The headline count, spelled as a word or a digit and anchored on the noun it
+#: counts. Anchored on purpose: "Three alarms and one scan" is a count sentence too,
+#: and the one a check cannot read is the one that stops agreeing with its list.
+_ROSTER_COUNT_RE = re.compile(
+    r"\b(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve"
+    r"|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty)"
+    r"\s+steps?\b")
+
+
+def _module_functions() -> set[str]:
+    """Every function `workers/fleet_watchdog.py` defines at its top level.
+
+    The filter that keeps the derivation to THIS module's steps: `tick()` also
+    awaits `loop.run_in_executor` and calls `autonomy._utcnow()`, and neither is
+    a step of the seat.
+    """
+    return {n.name for n in ast.parse(inspect.getsource(fw)).body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _awaited_name(call: ast.Call) -> str:
+    """The function an awaited call runs: its own callable, or the one handed to
+    `run_in_executor`, which is how this seat runs its sync detectors."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if (isinstance(call.func, ast.Attribute) and call.func.attr == "run_in_executor"
+            and len(call.args) >= 2 and isinstance(call.args[1], ast.Name)):
+        return call.args[1].id
+    return ""
+
+
+def _decision_names(body: list[ast.stmt]) -> set[str]:
+    """Names `tick()` binds FROM a step's own answer — `overdue`, `starving`,
+    `stalled`, `dropped`.
+
+    They are what separates the seat's steps from a step's consequences. A branch
+    tested on one of them is what the seat does WITH a finding — the alert, its
+    streak, the source it names — and is not a step of its own; a branch tested on
+    nothing but `_state` and the clock (`if scan_at is None or ...`) is a cadence
+    guard the seat holds before it has learned anything, so what it admits is a
+    step. Derived from the bindings rather than from a list of branch variables, so
+    the next cadence guard is descended without anyone editing this.
+    """
+    bound: list[tuple[list[ast.expr], ast.expr]] = []
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.Assign):
+            bound.append((node.targets, node.value))
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            bound.append(([node.target], node.value))
+    out: set[str] = set()
+    for targets, value in bound:
+        if not any(isinstance(s, ast.Await) for s in ast.walk(value)):
+            continue
+        for tgt in targets:
+            if isinstance(tgt, ast.Name):
+                out.add(tgt.id)
+            elif isinstance(tgt, (ast.Tuple, ast.List)):
+                out.update(e.id for e in tgt.elts if isinstance(e, ast.Name))
+    return out
+
+
+def _tick_steps() -> list[str]:
+    """The steps `tick()` runs, discovered from `tick()`'s own source.
+
+    The rule is stated at length because the clauses this serves are only as good
+    as it. A STEP is a function this module defines that `tick()` awaits — either
+    directly (`await _census_failure_throughput(loop, queue)`) or as the callable
+    handed to `run_in_executor` (`await loop.run_in_executor(None, _grossly_overdue,
+    queue)`) — reached without crossing a branch whose guard depends on a step's
+    answer. That is the one judgement the derivation makes, it is made by
+    `_decision_names` from the bindings rather than by naming variables here, and it
+    is what keeps `_alert` and `_oldest_wait` out of the roster: both sit under
+    `if overdue or starving:` / `if stalled and ...`, so they are how an alarm reports
+    and not what the seat runs. No name is excluded by hand, which is the habit
+    #3516 is filed against. Two omissions come with the rule and are accepted with
+    it: a step whose only call site sits under a step's own finding would be missed,
+    and a step whose work lives entirely inside a helper `tick()` never names is
+    invisible to any derivation of call sites. Both are louder in review than a
+    hardcoded list ever was.
+    """
+    body = ast.parse(inspect.getsource(fw.tick)).body[0].body
+    defined = _module_functions()
+    decisions = _decision_names(body)
+    steps: list[str] = []
+
+    def guarded_by_a_finding(node: ast.expr) -> bool:
+        return any(n.id in decisions for n in ast.walk(node) if isinstance(n, ast.Name))
+
+    def note(expr: object) -> None:
+        for node in ast.walk(expr):
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+                name = _awaited_name(node.value)
+                if name in defined and name not in steps:
+                    steps.append(name)
+
+    def visit(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                if guarded_by_a_finding(stmt.test):
+                    continue
+                note(stmt.test)
+                visit(stmt.body)
+                visit(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                if guarded_by_a_finding(stmt.iter):
+                    continue
+                note(stmt.iter)
+                visit(stmt.body)
+            elif isinstance(stmt, ast.While):
+                if guarded_by_a_finding(stmt.test):
+                    continue
+                visit(stmt.body)
+            elif isinstance(stmt, (ast.Try, ast.TryStar)):
+                # An `except` body is a fault route, not a pass of the seat.
+                visit(stmt.body)
+                visit(stmt.orelse)
+                visit(stmt.finalbody)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                visit(stmt.body)
+            elif isinstance(stmt, (ast.Match,)):
+                continue
+            else:
+                note(stmt)
+
+    visit(body)
+    return steps
+
+
+def _roster(doc: str) -> tuple[str, int]:
+    """`doc`'s first bullet list with the count line above it, and how many items.
+
+    Scoped to the FIRST list because `fleet_watchdog`'s header has a second one —
+    "What stayed on the dispatch side, and why" — and a check that read the whole
+    header could be satisfied by a bullet about what does NOT run here.
+    """
+    lines = doc.splitlines()
+    if not any(ln.startswith("- ") for ln in lines):
+        raise AssertionError("no bullet list in this docstring, so there is no "
+                             "roster here to hold to the code")
+    first = next(i for i, ln in enumerate(lines) if ln.startswith("- "))
+    head = first - 1
+    while head > 0 and not lines[head].strip():
+        head -= 1
+    end = first
+    while end < len(lines) and lines[end].strip():
+        end += 1
+    items = sum(1 for ln in lines[first:end] if ln.startswith("- "))
+    return "\n".join(lines[head:end]), items
+
+
+def _roster_count(roster: str) -> int | None:
+    """The count a roster's headline states, or None where it states none."""
+    m = _ROSTER_COUNT_RE.search(roster.splitlines()[0])
+    if not m:
+        return None
+    token = m.group(1)
+    return int(token) if token.isdigit() else _NUMBER_WORDS[token.lower()]
+
+
+def _steps_missing_from(steps: list[str], roster: str) -> list[str]:
+    """The derived steps whose name is absent from `roster`, in tick order."""
+    return [name for name in steps if name not in roster]
+
+
+def test_the_roster_derivation_bites_on_the_text_it_was_written_for():
+    """Control before any claim about today: the derivation and the roster check
+    both have to FAIL on the roster this module shipped until #3516.
+
+    Two things are proven here, and the rest of the section assumes both. First,
+    the walker genuinely reads the code: the two steps the old prose omitted are
+    exactly the two it finds and the old text lacks, so an omission is evidence
+    about the prose and not a symptom of a broken parse. Second, the count check
+    can fail: the retired headline counted four steps over a list naming three,
+    and states its number in a form the check refuses to read — which is the
+    disagreement clause 1 exists to end. Third, the mutation: `tick()` gaining a
+    step it does not name is conjured, since the alternative is to wait for the
+    rot to happen again and call the passing test a guard.
+    """
+    steps = _tick_steps()
+    assert steps, "the walker found no step in `tick()`; every node below is blind"
+    assert steps == list(dict.fromkeys(steps)), (
+        f"the derivation returned duplicates: {steps}")
+    assert set(steps) <= _module_functions(), steps
+
+    retired, retired_items = _roster(RETIRED_ROSTER)
+    assert retired_items == 3, (
+        f"the retired roster no longer names three steps, so the disagreement this "
+        f"node is built on is not the one being controlled for: {retired!r}")
+    assert "Three alarms and one scan" in retired, (
+        "the retired headline no longer counts four steps over a list of three, so "
+        "clause 1's defect has moved and this control is stale")
+    assert _roster_count(retired) is None, (
+        "the retired headline states its count in the form the check reads, so the "
+        "count requirement below would pass on the text it was written to reject")
+
+    # The two steps the roster lost, checked twice over: the walker still has to see
+    # them in `tick()`, and the prose still has to lack the words for them. One
+    # assertion without the other would pass on a broken parse.
+    for name, phrase in RETIRED_ROSTER_OMITS.items():
+        assert name in steps, (
+            f"`tick()` no longer runs {name} unconditionally, so this control proves "
+            "nothing about the roster that omitted it")
+        assert phrase not in retired.lower(), (
+            f"the retired roster turns out to mention the {phrase} after all, so it is "
+            "not the omission this section is built on")
+    assert _steps_missing_from(steps, retired) == steps, (
+        "the retired roster turns out to name a step by function name, which the "
+        "derivation would then have accepted — the rot it stands for was naming its "
+        f"steps only in prose: {_steps_missing_from(steps, retired)}")
+
+    assert _steps_missing_from(steps + [SYNTHETIC_STEP],
+                               _roster(fw.__doc__ or "")[0]) == [SYNTHETIC_STEP], (
+        "a step added to `tick()` without joining the roster is not being caught — "
+        "either the roster is no longer the first bullet list, or the node below it "
+        "is checking something other than the derivation")
+
+
+def test_the_module_roster_names_every_step_the_tick_runs():
+    """Clause 2: this module's header is the roster of record, so every step
+    `tick()` runs has to be named in it — by the derivation above, not by a list
+    of names repeated here.
+
+    That is what makes the roster of record earn the name: `tick()` is the only
+    place the steps are decided, a step added there has to arrive here in the same
+    change, and the failure names the step that did not.
+    """
+    steps = _tick_steps()
+    roster, _items = _roster(fw.__doc__ or "")
+    assert _steps_missing_from(steps, roster) == [], (
+        f"`tick()` runs {steps} but the roster in "
+        "`workers/fleet_watchdog.py`'s module header does not name all of them; the "
+        "seat's own file is the roster of record, so the step joins it here and in "
+        "`WorkerPool._watch_fleet`'s docstring, not anywhere else")
+
+
+def test_the_module_roster_headline_counts_the_steps_it_lists():
+    """Clause 1: the headline count agrees with the list beneath it.
+
+    "#2890 and #2552 both arrived under a headline that still said `Three alarms
+    and one scan`" is the sentence a reader trusts and a maintainer never
+    re-counts, which is why the number is compared with the list rather than
+    admired. The count is read from the headline's own words; the list is counted
+    from its own bullets; only their agreement is the claim.
+    """
+    roster, items = _roster(fw.__doc__ or "")
+    assert items >= 2, (
+        f"the roster lists {items} step(s), so a headline cannot disagree with it and "
+        "this node has nothing to compare")
+    stated = _roster_count(roster)
+    assert stated is not None, (
+        "the roster's headline no longer states its count as `N steps`, so nothing "
+        f"here can notice it drifting from the list beneath it: {roster!r}")
+    assert stated == items, (
+        f"the roster's headline counts {stated} step(s) and the list beneath it names "
+        f"{items} — #1682's `Three alarms and one scan` stood over a list of three for "
+        "two steps' worth of arrivals (#2552, #2890), and a reader has no way to tell "
+        "which of the two is the stale one")
+
+    # ...and the census, the step whose arrival nobody counted, is named WITH its
+    # issue and its own name in that list, not merely alluded to.
+    assert "_census_failure_throughput" in roster, (
+        "the failure-throughput census is not in the roster list itself")
+    assert "#2890" in roster, (
+        "the census is named in the roster without the issue that added it")
+
+
+def test_watch_fleet_names_every_step_and_no_longer_closes_the_roster():
+    """Clause 3: the caller's docstring keeps its convenience enumeration, and that
+    enumeration is now held to the same derivation — with the closed list it used to
+    be banned from the file.
+
+    `workers/pool.py` is not where the steps are implemented, so its list can
+    never be authoritative; it survives only as a pointer a reader lands on from
+    the call site, which is exactly why the sentence below was true for two weeks
+    and read as complete. The ban is on the CLOSED form, phrased as the whole
+    roster: an enumeration that names every step cannot be closed, and this node
+    is what keeps it that way.
+    """
+    steps = _tick_steps()
+    doc = " ".join((WorkerPool._watch_fleet.__doc__ or "").split())
+    assert doc, "`WorkerPool._watch_fleet` has no docstring to check"
+    pool_src = " ".join((Path(__file__).resolve().parent.parent / "workers" /
+                         "pool.py").read_text(encoding="utf-8").split())
+
+    for retired in RETIRED_WATCH_FLEET_ROSTERS:
+        # Control before each ban: the constant has to be a closed enumeration of
+        # THIS seat, or the `not in` below is a ban on a phrase the scan could
+        # never have matched (#1689's vacuity control, applied per form).
+        assert ("stall alarm" in retired and "scan" in retired), (
+            f"{retired!r} is no longer a closed enumeration of the fleet's seat, so "
+            "banning it proves nothing about the one this node retires")
+        assert not any(name in retired for name in steps), (
+            f"the retired form {retired!r} turns out to name a step by function name, "
+            "so it was not the prose the derivation was missing after all")
+        assert retired not in doc, (
+            "the seat's docstring is back to presenting the stall alarms, the starving "
+            "clause and the scan as its whole roster — the state that stood for two "
+            "weeks while #2552's ledger and #2890's census ran unnamed (#3516)")
+        assert retired not in pool_src, (
+            f"{retired!r} moved elsewhere in `workers/pool.py` rather than leaving it")
+
+    missing = _steps_missing_from(steps, doc)
+    assert missing == [], (
+        f"`_watch_fleet`'s docstring does not name {missing}, which `tick()` runs; "
+        "the pointer here has to be beside the steps, because a reader who comes "
+        "from the call site reads THIS file and stops")
+    assert "fleet_watchdog" in doc, (
+        "the seat's docstring no longer says whose roster it is calling, which is the "
+        "half that tells a reader where the authoritative list is")
