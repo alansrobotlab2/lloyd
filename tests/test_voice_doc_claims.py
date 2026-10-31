@@ -51,6 +51,7 @@ command alive was this file's own assertion, which is why these read structure
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -651,3 +652,332 @@ def test_config_yaml_voice_comment_names_the_engine_behind_each_voices_route():
     # Comment-only by construction: the value line is byte-identical, indentation and
     # all, so the node cannot be satisfied by moving the voice to dodge the comment.
     assert voice_line == "    voice: clone:dave_cullen", repr(voice_line)
+
+
+# ── #3435: the built-in-refusal SPEECH check has to name the engine voice runs on ──
+#
+# #3254 re-pointed the *voices-list* check and left the *speech* check two screens
+# below it posting the vendored fallback, with a comment that admitted it: "the same
+# request on the room's :8093 engine is not on the record, so do not read this line as
+# an omni result". That disclaimer is now superseded. Measured on this box 2026-10-31,
+# built-in voice `Ryan`, `-w '%{http_code} %{size_download}'`:
+#
+#   :8093 (livekit.tts.api_url)      -> 400  206 bytes  typed `BadRequestError`
+#   :8093 with "stream":true         -> 400  206 bytes  byte-identical body
+#   :8093 with model `tts-1`         -> 404  107 bytes  typed `NotFoundError`
+#   :8090 (vendored agent-tts)       -> 400  361 bytes  `invalid_voice` /
+#                                                       `invalid_request_error`
+#
+# So the section's headline holds on the room's engine — a built-in name is refused
+# before synthesis, non-stream *and* on `stream:true`, with a reason naming the loaded
+# model type — but the two servers do not share a refusal token. `invalid_voice` comes
+# out of `agent-services/services/tts/qwen3-tts-local.patch`, which is the vendored
+# server's own code and is not in the omni image; vLLM-Omni answers `BadRequestError`
+# and never says `invalid_voice`. A reader who pastes the fallback's command and greps
+# its token at the room's engine reads a miss, and records that as "the refusal is
+# missing". Hence the nodes below: the runnable command names the engine
+# `livekit.tts.api_url` selects, the comment under it carries that engine's measured
+# shape, and the fallback's own measurement stays — as labelled prose, never as a
+# second command.
+#
+# The live measurement itself is the one thing these nodes cannot cross: the omni
+# server is not in this repo, so nothing here can POST to it (and the suite must not).
+# What is pinned instead is the whole chain a test can reach — config key → documented
+# engine → quoted body → the patch that raises the fallback's token — and the quoted
+# byte counts are what the documented command prints, so restating them means
+# re-measuring. Re-running the live POST is booked on #3435 as post-landing owed work.
+
+SPEECH_ROUTE = "/v1/audio/speech"
+
+#: What the section may never say again, matched on the flat view (`_flat`). Both are
+#: false on the engine voice runs on: the disclaimer was written before it was measured,
+#: and `tts-1` 404s there, so it never reaches the voice check to be refused "alike".
+_STALE_SPEECH_CLAIMS = (
+    "an omni result",
+    "`tts-1` and `qwen3-tts` alike",
+)
+
+#: The comment #2300 shipped under the speech check, verbatim and flat as it sat in
+#: SETUP.md at `b7c0fc19`. This is the negative control for the nodes below: it is the
+#: regression they exist to refuse, and the control node asserts it still trips them.
+RETIRED_SPEECH_CHECK_COMMENT = (
+    "400, typed `invalid_request_error` — on `tts-1` and `qwen3-tts` alike, and never a "
+    "200 with an empty body. Measured on the vendored :8090 fallback, which is the server "
+    "#2300 was filed against; the same request on the room's :8093 engine is not on the "
+    "record, so do not read this line as an omni result.")
+
+#: How far the fallback's `invalid_voice` may sit from the words that say it is the
+#: fallback, in characters of the flat comment. Measured, not guessed: the landed
+#: comment runs a gap of 37, so the margin is 23, and the control node re-measures it.
+_FALLBACK_TOKEN_LABEL_WINDOW = 60
+
+
+def _livekit_tts_api_port() -> str:
+    """The port behind `livekit.tts.api_url` — the engine voice actually runs on.
+
+    Read from the loaded config rather than hard-coded, so "the room's engine" is one
+    fact in one place: that key is what the running worker connects to, and it is the
+    thing #3254's whole lesson was about.
+    """
+    lines = CONFIG.read_text(encoding="utf-8").splitlines()
+    try:
+        tts = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  tts:")
+    except StopIteration:
+        raise AssertionError("config.yaml has no `  tts:` block, so nothing names the "
+                            "room's engine any more") from None
+    for ln in lines[tts + 1:]:
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if not ln.startswith("    "):          # dedented: out of the tts block
+            break
+        m = re.match(r"    api_url:\s*https?://[^/:\s]+:(\d+)", ln)
+        if m:
+            return m.group(1)
+    raise AssertionError("`livekit.tts.api_url` is gone from config.yaml, so the "
+                         "documented engine cannot be checked against it")
+
+
+def _speech_check_commands(text: str) -> list[tuple[int, str]]:
+    """Each runnable speech-POST command in a SETUP.md text, as (line number, port).
+
+    Comment lines are skipped deliberately: naming the fallback inside a comment that
+    explains the fallback is the point of the comment. What may not come back is a line
+    a reader pastes.
+    """
+    out = []
+    for n, ln in enumerate(text.splitlines()):
+        if ln.strip().startswith("#"):
+            continue
+        m = re.search(r"POST\s+\S*?localhost:(\d{4})" + re.escape(SPEECH_ROUTE), ln)
+        if m:
+            out.append((n + 1, m.group(1)))
+    return out
+
+
+def _speech_check_comment(text: str) -> str:
+    """The comment lines sitting directly under the section's built-in-refusal command.
+
+    That block, not the whole section, is the measurement a reader sees together with
+    the line they copy, so it is what has to carry the engine's own token. The command
+    is followed through its backslash continuations first, because the comment sits
+    under the whole command rather than under its first line.
+    """
+    lines = text.splitlines()
+    at = next((n for n, ln in enumerate(lines)
+               if not ln.strip().startswith("#")
+               and re.search(r"POST\s+\S*?localhost:(\d{4})" + re.escape(SPEECH_ROUTE), ln)),
+              None)
+    assert at is not None, (
+        f"SETUP.md documents no runnable POST to {SPEECH_ROUTE}, so nothing carries the "
+        "#2300 built-in-refusal measurement any more (#3435)")
+    body_end = at
+    while body_end < len(lines) - 1 and lines[body_end].rstrip().endswith("\\"):
+        body_end += 1
+    end = body_end + 1
+    while end < len(lines) and lines[end].strip().startswith("#"):
+        end += 1
+    assert end > body_end + 1, (
+        f"SETUP.md:{at + 1} posts {SPEECH_ROUTE} with no measurement comment under it: "
+        "the status, the byte count and the refusal body are the result of #2300, and a "
+        "bare command teaches nothing (#3435)")
+    return "\n".join(lines[body_end + 1:end])
+
+
+def _quoted_speech_error_body(comment: str) -> dict:
+    """The refusal body the comment quotes, parsed as the JSON the server actually sent.
+
+    "Verbatim" is only checkable if the quote still parses: a body that has been
+    re-flowed, truncated at a comma, or had a field renamed is not the measured shape
+    whatever the prose around it claims.
+    """
+    for ln in comment.splitlines():
+        s = ln.lstrip("#").strip()
+        if not s.startswith('{"error"'):
+            continue
+        try:
+            body = json.loads(s)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"the quoted refusal body is not the JSON the server sent any more "
+                f"({exc}): {s}") from None
+        assert isinstance(body, dict) and "error" in body, f"not an error body: {s}"
+        return body["error"]
+    raise AssertionError(
+        f"the comment under the {SPEECH_ROUTE} check quotes no `{{\"error\": …}}` body, "
+        "so a reader has nothing to grep for and nothing to compare a new server against "
+        "(#3435)")
+
+
+def _fallback_token_label_gap(flat: str) -> int:
+    """Chars between `invalid_voice` and the nearest word labelling it the fallback.
+
+    `len(flat) + 1` when the token is missing or nothing before it says fallback,
+    vendored or `:8090` — so the caller can compare in one direction.
+    """
+    at = flat.find("invalid_voice")
+    if at < 0:
+        return len(flat) + 1
+    labels = [m.start() for m in re.finditer(r"(?i)vendored|fallback|:8090", flat[:at])]
+    return len(flat) + 1 if not labels else at - max(labels)
+
+
+def _assert_speech_check_names_the_room_engine(text: str) -> None:
+    """Clause 1: the runnable refusal command posts the engine the config selects."""
+    commands = _speech_check_commands(text)
+    assert commands, (
+        f"SETUP.md has no runnable POST command to {SPEECH_ROUTE}: the #2300 "
+        "built-in-refusal check has to stay a command a reader can run. The fallback's "
+        "measurement belongs in the comment under it, not as a second command (#3435)")
+    port = _livekit_tts_api_port()
+    for line, named in commands:
+        assert named == port, (
+            f"SETUP.md:{line} posts {SPEECH_ROUTE} to localhost:{named}, but voice runs "
+            f"on the engine livekit.tts.api_url selects — :{port}. The two engines "
+            "refuse a built-in voice with different tokens, so documenting the fallback "
+            "teaches a server the room is not speaking through (#3254, #3435)")
+
+
+def _assert_omni_shape_in_comment(comment: str) -> None:
+    """Clause 2: the comment types the refusal with the token THIS engine emits."""
+    flat = _flat(comment)
+    for required in ("BadRequestError", "does not support task_type='CustomVoice'"):
+        assert required in flat, (
+            f"the comment under the {SPEECH_ROUTE} check lost {required!r}: that is the "
+            "token the engine voice runs on emits, and grepping for the fallback's "
+            f"`invalid_voice` there finds nothing (#3435). Comment read: {flat[:160]}…")
+    error = _quoted_speech_error_body(comment)
+    assert error.get("type") == "BadRequestError", f"quoted body is typed {error.get('type')!r}"
+    assert error.get("code") == 400, f"quoted body carries code {error.get('code')!r}"
+    assert "does not support task_type='CustomVoice'" in str(error.get("message")), \
+        f"quoted message is not the Base refusal: {error.get('message')!r}"
+    # Both arms of the check the section promises: non-stream and `stream:true`, with
+    # the status and byte count the documented `-w` format prints. Restating these means
+    # re-measuring, which is the point.
+    assert '"stream":true' in flat, "the `stream:true` arm is no longer stated (#3435)"
+    assert "400 206" in flat, (
+        "the comment no longer states what the documented command prints "
+        "(`400 206` on both arms as measured 2026-10-31) — re-measure and restate it "
+        "rather than dropping the number (#3435)")
+
+
+def _assert_no_superseded_speech_claims(section: str) -> None:
+    """Clause 3: the two sentences the live measurement falsifies stay gone."""
+    flat = _flat(section)
+    for stale in _STALE_SPEECH_CLAIMS:
+        assert stale not in flat, (
+            f"SETUP.md's built-in-refusal section says {stale!r} again: the :8093 engine "
+            "HAS now been measured (400 `BadRequestError`, non-stream and `stream:true`), "
+            "and `tts-1` is a 404 `NotFoundError` there rather than a voice refusal "
+            "(#3435)")
+
+
+def _assert_fallback_measurement_is_labelled(comment: str) -> None:
+    """Clause 4: the :8090 measurement survives, labelled as the fallback's own shape."""
+    flat = _flat(comment)
+    gap = _fallback_token_label_gap(flat)
+    assert "invalid_voice" in flat, (
+        "the vendored fallback's measurement has left the section: `invalid_voice` is "
+        "what :8090 answers a built-in name with, and the section's whole point is that "
+        "the two engines type this refusal differently (#3435)")
+    assert gap <= _FALLBACK_TOKEN_LABEL_WINDOW, (
+        f"`invalid_voice` sits {gap} characters from any word saying it is the fallback "
+        f"(window {_FALLBACK_TOKEN_LABEL_WINDOW}): a reader who reaches that token "
+        "without the label greps it at the room's engine, misses, and records the "
+        "refusal as missing (#3435)")
+
+
+def test_setup_md_speech_check_posts_the_room_s_engine_not_the_fallback():
+    """Clause 1: the built-in-refusal command names `livekit.tts.api_url`'s engine."""
+    text = SETUP.read_text(encoding="utf-8")
+    section = _setup_section("**A built-in voice is not served by the default model")
+    _assert_speech_check_names_the_room_engine(section)
+    _assert_speech_check_names_the_room_engine(text)   # nowhere else either
+    assert f"POST {ROOM_ENGINE}{SPEECH_ROUTE}" in section, (
+        "the section must name the room's engine in the command itself")
+    assert f"POST {FALLBACK_ENGINE}{SPEECH_ROUTE}" not in _flat(text), (
+        "a runnable :8090 speech check is back: the fallback keeps its measurement as "
+        "prose under the room's command, not as a command of its own (#3435)")
+    # The seam: the port in the prose and the port the running worker is configured for
+    # are one fact, so this file cannot agree with a stale ROOM_ENGINE on its own.
+    assert _livekit_tts_api_port() == ROOM_ENGINE.rsplit(":", 1)[1], (
+        f"livekit.tts.api_url selects :{_livekit_tts_api_port()} but this module's "
+        "ROOM_ENGINE still says the room is on the engine #3254 named")
+
+
+def test_setup_md_speech_check_comment_carries_the_measured_omni_shape():
+    """Clauses 2 and 3: the omni refusal in, the two falsified sentences out."""
+    section = _setup_section("**A built-in voice is not served by the default model")
+    _assert_no_superseded_speech_claims(section)
+    _assert_omni_shape_in_comment(_speech_check_comment(section))
+
+
+def test_setup_md_speech_check_keeps_the_fallback_measurement_as_labelled_prose():
+    """Clause 4: the vendored server's own shape stays, labelled, and the section keeps
+    the numbers that justify it."""
+    section = _setup_section("**A built-in voice is not served by the default model")
+    comment = _speech_check_comment(section)
+    _assert_fallback_measurement_is_labelled(comment)
+    # The fallback's token is not the doc's invention: it is the vendored server's code,
+    # and the patch that raises it is the in-repo half of this seam. If either side
+    # renames the token, this fails rather than leaving the prose quoting a miss.
+    patch = (ROOT / "agent-services" / "services" / "tts" / "qwen3-tts-local.patch")
+    patch_text = patch.read_text(encoding="utf-8")
+    assert '"error": "invalid_voice"' in patch_text, (
+        f"the section credits :8090 with `invalid_voice`, but {patch.relative_to(ROOT)} "
+        "no longer raises that token")
+    assert '"type": "invalid_request_error"' in patch_text, (
+        "the section says the fallback types its refusal `invalid_request_error`; the "
+        "patch no longer does")
+    assert "400 361" in _flat(comment), (
+        "the fallback's measured output (`400 361` on the same command shape, "
+        "2026-10-31) has left the prose (#3435)")
+    # Positive controls clause 4 names, restated here so this node cannot be satisfied
+    # by amputating the section. The pre-#3435 node above them is untouched.
+    flat = _flat(section)
+    for required in ("HTTP 400", "stream:true", "zero bytes", "clone:dave_cullen",
+                     "CustomVoice", "~20 s"):
+        assert required in flat, f"the re-pointed section lost {required!r}"
+    assert _fallback_token_label_gap(flat) <= _FALLBACK_TOKEN_LABEL_WINDOW, \
+        _fallback_token_label_gap(flat)
+
+
+def test_the_superseded_speech_check_comment_still_trips_every_check():
+    """Negative controls, pinned in this file: the retired comment is still refusably there.
+
+    `RETIRED_SPEECH_CHECK_COMMENT` is the shipped wording verbatim, so the nodes above
+    are proved against the regression rather than a paraphrase — and the engine arm is
+    exercised on the live section with only its command re-pointed, which is the one
+    edit that leaves all the :8093 prose standing while posting the wrong server.
+    """
+    flat = _flat(RETIRED_SPEECH_CHECK_COMMENT)
+    for stale in _STALE_SPEECH_CLAIMS:
+        assert stale in flat, f"the retired constant no longer holds {stale!r}"
+    assert "BadRequestError" not in flat, "the constant has drifted into the corrected wording"
+    assert "invalid_voice" not in flat, "the constant has drifted into the corrected wording"
+
+    with pytest.raises(AssertionError) as superseded:
+        _assert_no_superseded_speech_claims(RETIRED_SPEECH_CHECK_COMMENT)
+    assert "an omni result" in str(superseded.value), str(superseded.value)
+    with pytest.raises(AssertionError) as omni_shape:
+        _assert_omni_shape_in_comment(RETIRED_SPEECH_CHECK_COMMENT)
+    assert "BadRequestError" in str(omni_shape.value), str(omni_shape.value)
+    with pytest.raises(AssertionError) as no_token:
+        _assert_fallback_measurement_is_labelled(RETIRED_SPEECH_CHECK_COMMENT)
+    assert "invalid_voice" in str(no_token.value), str(no_token.value)
+
+    section = _setup_section("**A built-in voice is not served by the default model")
+    assert "BadRequestError" in _speech_check_comment(section), (
+        "the comment scoper is not reading the fence under the command it is for")
+    repointed = section.replace(f"POST {ROOM_ENGINE}{SPEECH_ROUTE}",
+                               f"POST {FALLBACK_ENGINE}{SPEECH_ROUTE}")
+    assert repointed != section, (
+        "the section's speech command is no longer the one this control re-points, so "
+        "clause 1 has stopped being exercisable")
+    with pytest.raises(AssertionError) as wrong_engine:
+        _assert_speech_check_names_the_room_engine(repointed)
+    assert "#3435" in str(wrong_engine.value), str(wrong_engine.value)
+    assert f"localhost:{FALLBACK_ENGINE.rsplit(':', 1)[1]}" in str(wrong_engine.value), \
+        str(wrong_engine.value)
+    # The window's near edge, on the live comment rather than a paraphrase of it.
+    gap = _fallback_token_label_gap(_flat(_speech_check_comment(section)))
+    assert gap == 37 < _FALLBACK_TOKEN_LABEL_WINDOW, gap

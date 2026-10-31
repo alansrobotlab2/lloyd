@@ -1099,12 +1099,18 @@ is exactly how a capability mismatch gets read as an outage. Verify against the
 running service rather than a mapping table in the source:
 
 ```bash
-curl -s -X POST localhost:8090/v1/audio/speech -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8093/v1/audio/speech -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
-# 400, typed `invalid_request_error` — on `tts-1` and `qwen3-tts` alike, and never a
-# 200 with an empty body. Measured on the vendored :8090 fallback, which is the server
-# #2300 was filed against; the same request on the room's :8093 engine is not on the
-# record, so do not read this line as an omni result.
+# Measured 2026-10-31: 400 206 — and the same 400 206 with `"stream":true` added, never
+# a 200 with an empty body, so the empty-stream path #2300 was filed against is closed
+# on this engine too:
+# {"error":{"message":"Qwen3-TTS Base checkpoint does not support task_type='CustomVoice'. Use task_type='Base' or load the matching CustomVoice checkpoint.","type":"BadRequestError","param":null,"code":400}}
+# Grep the token of the engine you asked, because the two servers do not share one: the
+# vendored `:8090` fallback types this same refusal as `invalid_voice` inside
+# `{"detail": …}` with `type` `invalid_request_error` (measured the same day: 400 361),
+# and `:8090` is the server #2300 was filed against, so its token is what
+# `architecture/voice.md` quotes. `tts-1` is not a model name on :8093 at all — that
+# request 404s `NotFoundError` before the voice check — so ask with `qwen3-tts`.
 ```
 
 The built-in speakers are not missing from the build; they need a **CustomVoice**
