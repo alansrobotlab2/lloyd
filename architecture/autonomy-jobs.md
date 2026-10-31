@@ -813,7 +813,7 @@ decision about which of two names an existing pair always should have shared.
 |----|------|---------|---|
 | #24 | 6×/day | — | Content-hash-gated fact extraction over the vault corpus **allow-listed** in `scripts/memory/next-gen-memory/pipeline_config.yaml` — `knowledge`, `projects`, `people`, `personal`, `work`, and `memory` only once a daily note has settled — then index rebuild. The `kg_health` snapshot is **Step 0, launched ahead of every gate**, so a run that exits early still writes one; it is not a tail step. Emits `mentions` edges as it writes facts; no-ops when no source document changed |
 | #51 | daily | #56 | Session co-access pairs from trajectories → edges **typed by the Stage-2 classifier**, `co_accessed` only as the fallback when nothing classified the pair (#420, 2026-09-12), provenance `INFERRED`, the trajectory session as `source_doc`. Measured 2026-10-26: 562 conversation-origin edges in the store, **none** of them `co_accessed` (321 `related_to`, 129 `implements`, 84 `depends_on`, 23 `derived_from`, 5 other) |
-| #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first |
+| #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first — true on the clock as well as the gate, measured 2026-10-30 and 2026-10-31, when #48 completed 15:04–15:07Z and #74 started 18:00Z |
 
 **#24 is the single most expensive job in the fleet** — 10.4 GPU-h over the seven
 days to 2026-10-26 (window unclamped), against 36 runs: 37% of the autonomy
@@ -824,13 +824,30 @@ group's own #74 at 2.0 h (7%).
 
 **The `Depends` column is a freshness gate, not a clock order.** Measured over the
 seven days to 2026-10-26, #51 dispatched at ~06:00Z and its upstream #56 at
-~08:00Z **every night** — the dependent runs two hours ahead of the job it waits
-for and reads the *previous* night's trajectory file, released by the bound in its
-own row (`stale_bypass_hours: 12`) rather than by the ordering. #74 (~04:30Z)
-likewise precedes #48 (~17:50Z) on the same clock day, so the apply whose
-canonical names it trusts is the previous day's. #24 is what sits in that gap:
-running 6×/day, it writes `mentions` edges twice between #48's apply and #74's
-next run, and those are typed before #48 has ever seen their names.
+~08:00Z **every night** — the dependent ran two hours ahead of the job it waited
+for and read the *previous* night's trajectory file, released by the bound in its own
+row rather than by the ordering
+(`stale_bypass_hours: 6` by #3617, 2026-10-31; 12 → 26 by #3365, 2026-10-26, vault `8ad529fc`; 26 → 6).
+#74 (~04:30Z) likewise preceded #48 (~17:50Z) on the same clock day, so the apply
+whose canonical names it trusted was the previous day's. Both legs now run in the
+order the column claims — measured 2026-10-30 and 2026-10-31 — and what moved was the
+schedule, not the gate: #51's window is `preferred_hours: [3,4,5,6,7,8]`, which opens
+after #56 has run, and #74's is `[11,12]`, behind #48's `[8,9]`. On those two days #51
+started 10:00Z after #56 completed 08:01–08:02Z, and #74 started 18:00Z after #48
+completed 15:04–15:07Z. Those are `preferred_hours` rendered in UTC, so a DST flip
+moves all four stamps by an hour and the pair above is true only of the two days
+named. Re-derive with
+`sqlite3 -readonly ~/lloyd-data/workers.db "SELECT task_id, started_at, completed_at,
+status FROM runs WHERE task_id IN ('48','51','56','74') AND started_at >= '2026-10-29'
+ORDER BY started_at;"`. At an opening that follows its upstream, #56's last success is
+under 2 h old, so the gate closes on freshness and the bound never fires: #3365's raise
+was written against the 21 h 59 m age that 06:00Z opening carried, and that opening is
+gone, so #3617 retired the raise rather than tuning it. #24 is what sits in #74's gap,
+and that gap changed shape with the ordering: measured over the same two days it is
+~3 h wide and holds one #24 write (17:34Z on 10-30, 15:06Z on 10-31) against the two
+the 2026-10-26 measurement counted in the retired schedule's ~11 h — and those writes
+are still typed before #48 has seen their names, because #48's next apply follows #74's
+run on either schedule.
 
 **#51 produced no graph at all until 2026-09-04**, when approval only flipped a
 status field in a JSON file nothing downstream read. It also ran every 15 minutes

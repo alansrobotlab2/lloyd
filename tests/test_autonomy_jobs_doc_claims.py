@@ -6464,6 +6464,9 @@ def test_the_gate_s_mark_expression_selects_the_cadence_pin():
     expected |= {f"{rel}::{_CADENCE_NODES[1]}[{g.lower().replace(' ', '-')}"
                  f"]" for g in CADENCE_TABLES}
     expected |= {f"{rel}::{n}" for n in _CADENCE_NODES[2:]}
+    # The §#3643 nodes belong in the same run: a bound that only goes red on a machine
+    # that happens to collect the whole file is a bound nobody sees go red in a gate.
+    expected |= {f"{rel}::{n}" for n in _BOUNDS_ORDER_NODES}
     missing = sorted(expected - selected)
     assert not missing, (
         f"{missing} is not selected by the gate's own {G.TESTS_MARK_EXPR!r} — the "
@@ -6473,8 +6476,8 @@ def test_the_gate_s_mark_expression_selects_the_cadence_pin():
 
 def test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here():
     """Clause 4's other half, checked against this file's own syntax tree: none of the
-    five new nodes carries a mark the gate deselects on, and none of the three that go
-    looking for a cadence names a path outside the tracked tree.
+    nodes the §Cadence and §#3643 sections add carries a mark the gate deselects on, and
+    none of the ones that go looking for a value names a path outside the tracked tree.
 
     Clause 4 forbids two edits that are both invisible to a green run: putting the pin
     under `live_vault` (or `skip`/`xfail`, the other ways #2833 lists) so the gate stops
@@ -6485,7 +6488,12 @@ def test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here():
     same `_decorator_names`/`_QUIETING_MARKS` pair is used here rather than a copy.
     """
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    wanted = set(_CADENCE_NODES) | {"_cadence_rows"}
+    wanted = (set(_CADENCE_NODES) | set(_BOUNDS_ORDER_NODES)
+              | {"_cadence_rows", "_freshness_paragraph"})
+    # The nodes that go looking for a value in the doc, as opposed to the pair that
+    # watches the others: only these are searched for paths, because the clause-4 pair
+    # parses this file's own tree and shells out a `--collect-only`.
+    readers = _CADENCE_READERS | set(_BOUNDS_ORDER_NODES) | {"_freshness_paragraph"}
     found: dict[str, tuple[set[str], set[str]]] = {}
     for fn in tree.body:
         if isinstance(fn, ast.FunctionDef) and fn.name in wanted:
@@ -6521,10 +6529,230 @@ def test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here():
         # rather than the checked: one parses this file's own syntax tree through
         # `Path(__file__)`, which is tracked, and the other shells out a `--collect-only`
         # — both would trip the verb list for work that stays inside the tree.
-        if name not in _CADENCE_READERS:
+        if name not in readers:
             continue
         reached = _OUTSIDE_THE_TREE & names
         assert not reached, (
             f"{name} names {sorted(reached)}, which reaches outside the tracked tree — "
             f"clause 4 requires the pin to read the doc and the values typed above, "
             f"because a vault-reading cadence node is a live_vault node in substance")
+
+
+# ---------------------------------------------------------------------------
+# #3643: the bound the freshness paragraph types, and the clock order on both legs.
+# ---------------------------------------------------------------------------
+#
+#   $ git grep -n 'stale_bypass_hours: 12' -- architecture/autonomy-jobs.md   # before
+#   architecture/autonomy-jobs.md:829:own row (`stale_bypass_hours: 12`) rather than …
+#   $ git grep -n 'stale_bypass_hours: 12' -- architecture/autonomy-jobs.md   # after
+#   (no match)
+#
+# The paragraph said #51 "runs two hours ahead of the job it waits for … every night",
+# and it said so of the seven days to 2026-10-26 — a framing that kept the sentence
+# honest while the schedule behind it was replaced under it. Two dispatch changes did
+# that: #3617 took #51's and #57's `stale_bypass_hours` from 26 to 6 on 2026-10-31
+# (vault `03ff9741`), and the windows #3578 and #3359 put on #51, #74 and #48 moved the
+# openings themselves, so the inversion the paragraph described stopped happening. What
+# is left is a paragraph that has to carry three things at once — the live bound, the
+# dated history of how it got there, and a dated measurement of the order that replaced
+# the inversion — and one value-bearing line, because a second copy of a moved number is
+# the rot these nodes exist to catch.
+
+#: Opens §Build the graph's freshness paragraph. The paragraph, not the document, is
+#: the unit all four clauses below speak to: searching the whole file would let a copy
+#: in another section answer for a sentence that moved out of this one.
+FRESHNESS_OPEN = "**The `Depends` column is a freshness gate, not a clock order.**"
+
+#: The field with a value typed after it. The other mention in the doc is bare —
+#: "with `stale_bypass_hours` as the escape" — so this pattern is the doc's value
+#: statements and nothing else.
+BOUND_VALUE_LINE = re.compile(r"stale_bypass_hours:\s*\d+")
+
+#: The one line the doc may type the bound on, verbatim, and the two dated moves that
+#: produced it. The live value is what #51's own task file declares as of 2026-10-31
+#: (vault `03ff9741`, #3617), which took it from the 26 that #3365 raised it to in vault
+#: `8ad529fc` on 2026-10-26 — and the retired 12 that this line replaced before #3643.
+#: The doc's convention is to keep a moved number with its date rather than overwrite it,
+#: so the chain travels with the value and the retired value itself does not.
+LIVE_BOUND_LINE = ("(`stale_bypass_hours: 6` by #3617, 2026-10-31; "
+                   "12 → 26 by #3365, 2026-10-26, vault `8ad529fc`; 26 → 6)")
+
+#: The paragraph's measurement frame, which survived the schedule change precisely
+#: because it bounds the claim to the window it was measured over.
+FRESHNESS_FRAME = "Measured over the seven days to 2026-10-26"
+
+#: The ordered reading, its window, and the two legs as they ran in it. The stamps are
+#: `preferred_hours` rendered in UTC, so a DST flip moves all four by an hour — which is
+#: why the window is named beside them and the re-deriving command travels in the same
+#: paragraph rather than being left to a later pass (#2805's rule for a measurement).
+ORDERED_WINDOW = "measured 2026-10-30 and 2026-10-31"
+ORDERED_LEGS = ("#51 started 10:00Z after #56 completed 08:01–08:02Z, and #74 started "
+                "18:00Z after #48 completed 15:04–15:07Z")
+CENSUS_COMMAND = ("SELECT task_id, started_at, completed_at, status FROM runs "
+                  "WHERE task_id IN ('48','51','56','74') AND started_at >= "
+                  "'2026-10-29' ORDER BY started_at;")
+
+#: The paragraph's last sentence, which is about #24's exposure rather than about the
+#: clock, and so had to be re-measured when the ordering changed the gap's width.
+GAP_SHAPE = "measured over the same two days it is ~3 h wide and holds one #24 write"
+
+#: The nodes this block adds. They join `_CADENCE_NODES` in the guard's wanted set, and
+#: `_CADENCE_READERS`, because all four read only the tracked doc: a bound pinned by a
+#: vault read would go red on the night a nightly retypes the field, which is the whole
+#: reason `live_vault` exists rather than a second reason.
+_BOUNDS_ORDER_NODES = (
+    "test_the_freshness_paragraph_types_the_live_bound_and_its_chain",
+    "test_the_freshness_paragraph_dates_the_inversion_and_the_order",
+    "test_the_74_row_states_its_order_with_the_window_it_was_measured_in",
+    "test_the_24_gap_carries_the_shape_the_ordering_left_it",
+)
+
+
+def _freshness_paragraph() -> str:
+    """§Build the graph's freshness paragraph, raw, cut out of the live prose.
+
+    Ends at the first blank line, which is how the doc separates paragraphs; the block
+    is one paragraph and the clauses below are about sentences inside it.
+    """
+    prose = _live_prose()
+    start = prose.find(FRESHNESS_OPEN)
+    assert start != -1, (
+        f"{FRESHNESS_OPEN} is gone from the live prose — it is the paragraph that "
+        f"states whether the `Depends` column orders dispatch or only ages it")
+    end = prose.find("\n\n", start)
+    assert end != -1, "the freshness paragraph does not end, so nothing below is scoped"
+    return prose[start:end]
+
+
+def test_the_freshness_paragraph_types_the_live_bound_and_its_chain():
+    """Clauses 1 and 2. The doc types the bound once, at its live value, dated to the
+    change that set it, with both moves that got there.
+
+    #3474's clauses were written against the 26 that #3365 raised the bound to, and the
+    vault moved again five days later: #3617 took it back to 6 once #3578's window puts
+    #51's opening after #56 has run, at which point 26 h is not slack but the failure the
+    bound exists to prevent (`51-conversation-relation-linking.md`'s own dated note says
+    that in terms). So the expectation is typed here rather than derived from the vault,
+    and the retired value is pinned absent — the line this file must never see again is
+    `stale_bypass_hours: 12`, which stood here while nobody was reading.
+    """
+    text = _text()
+    typed = [ln.strip() for ln in text.splitlines() if BOUND_VALUE_LINE.search(ln)]
+    assert len(typed) == 1, (
+        f"{len(typed)} lines type `stale_bypass_hours:` with a value: {typed}. The doc "
+        "may state the bound in exactly one place — each extra copy rots on its own "
+        "schedule, and whichever survives longest reads as the live one")
+    assert "stale_bypass_hours: 6" in typed[0], (
+        f"the single value-bearing line reads {typed[0]!r}, which does not carry the "
+        "bound #3617 set on 2026-10-31; the number has moved twice since this sentence "
+        "was written and a reader cannot tell which of them the doc means")
+    assert typed[0] in _freshness_paragraph(), (
+        "the line that types the bound is outside §Build the graph's freshness "
+        "paragraph, so the paragraph that explains the gate no longer owns its number")
+    for retired in ("stale_bypass_hours: 12", "stale_bypass_hours: 26"):
+        assert retired not in text, (
+            f"{retired} is back in the doc as a present-tense bound; both are history "
+            "and belong inside the dated chain, not beside it")
+    assert _flat(LIVE_BOUND_LINE) in _flat(_freshness_paragraph()), (
+        "the bound's line no longer carries the dated chain — the value alone is the "
+        "same shape of claim that sat here wrong for five days, since a bare number "
+        "cannot say which move it is the product of")
+    # Positive control: the count has to notice a second bound, or "exactly one line"
+    # would be a fact about a pattern that stopped matching anything.
+    doubled = text + "\nIts bound is `stale_bypass_hours: 36` there.\n"
+    assert len([ln for ln in doubled.splitlines()
+                if BOUND_VALUE_LINE.search(ln)]) == 2, (
+        "`BOUND_VALUE_LINE` missed a bound typed into a fresh line, so the count above "
+        "cannot see a competing value and clause 2 is untested")
+
+
+def test_the_freshness_paragraph_dates_the_inversion_and_the_order():
+    """Clause 3. The retired clock order keeps its measurement window and moves to the
+    past tense; the order that replaced it arrives with its own window and its command.
+
+    The inversion is not deleted. It is the reason the paragraph exists, and the reason
+    #3365 raised the bound at all, so it stays with the seven-day window that measured
+    it — but in the past tense, because "every night" while the nights have changed is a
+    present-tense claim a reader cannot falsify from the page.
+    """
+    para = _flat(_freshness_paragraph())
+    assert FRESHNESS_FRAME in para, (
+        "the paragraph lost the window its inversion was measured over; without it the "
+        "retired order reads as today's, which is how the stale bound stayed green")
+    for retired_present in ("the dependent runs two hours ahead", "likewise precedes"):
+        assert retired_present not in para, (
+            f"{retired_present!r} is present tense again, and the schedule it described "
+            "was retired by #3578's and #3359's windows before 2026-10-31")
+    for past in ("ran two hours ahead of the job it waited for", "likewise preceded"):
+        assert past in para, (
+            f"the dated history lost {past!r}; the paragraph needs the retired order to "
+            "explain why the bound was ever raised")
+    assert ORDERED_WINDOW in para, (
+        "the ordered reading carries no window, so it cannot be falsified by a later "
+        "census and #2805's form rule is unmet")
+    assert ORDERED_LEGS in para, (
+        "the paragraph no longer names the two legs with their stamps, so the claim "
+        "that both legs are ordered points at nothing a reader can re-check")
+    assert CENSUS_COMMAND in para, (
+        "the re-deriving command is gone: these stamps are `preferred_hours` in UTC and "
+        "a DST flip moves them, so the command is the only thing that keeps the pair "
+        "checkable after the hour shifts")
+    assert "DST" in para, (
+        "the paragraph stopped saying the stamps are DST-sensitive, which is the "
+        "sentence that stops a reader hardening 15:04Z into a schedule fact")
+
+
+def test_the_74_row_states_its_order_with_the_window_it_was_measured_in():
+    """Clause 4. §Build the graph's #74 row still claims it runs after #48, and now says
+    when that was last true on the clock as well as on the gate.
+
+    #3474 read this cell as false and asked for it to be rewritten to the inversion. It
+    is true today, because #3359's `[11,12]` landed behind #48's `[8,9]` — so the cell
+    stands and gains its window. Rewriting it would have replaced a true sentence with a
+    description of a schedule that no longer exists, which is the other way a doc can be
+    wrong about the same two lines.
+    """
+    # Sliced from the raw text, not `_group_section`: that helper returns the section
+    # flattened, and `splitlines()` on a one-line string is one line, which would read
+    # as a missing row rather than as a helper that cannot be used this way.
+    head = re.search(r"^## Build the graph: .*$", _text(), re.M)
+    assert head, "architecture/autonomy-jobs.md lost its `## Build the graph:` heading"
+    section = _text()[head.end():].split("\n## ", 1)[0]
+    rows = [ln for ln in section.splitlines() if ln.startswith("| #74 |")]
+    assert len(rows) == 1, (
+        f"§Build the graph has {len(rows)} `#74` rows; the clause is about one cell and "
+        "there is nothing to grade without exactly one")
+    cell = _flat(rows[0])
+    assert "Runs after #48 so canonical names are settled first" in cell, (
+        "the row's order claim is gone — #48's apply does settle the names #74 re-types, "
+        "and the row is where a reader looks for that before trusting an upgrade")
+    assert ORDERED_WINDOW in cell, (
+        "the order claim carries no window; it was false on the clock for five days "
+        "before the windows landed, so an undated 'runs after' is not a claim about now")
+    assert "15:04–15:07Z" in cell and "18:00Z" in cell, (
+        "the row lost the stamps that make the order checkable against the runs table")
+
+
+def test_the_24_gap_carries_the_shape_the_ordering_left_it():
+    """The paragraph's last sentence, which is about #24's exposure and not about the
+    clock, so it had to be re-measured rather than left beside the new order.
+
+    It claimed #24 "writes `mentions` edges twice between #48's apply and #74's next run".
+    That count was a property of the retired ~11 h gap; with #74 behind #48 the gap is
+    ~3 h and holds one write on the two days measured. The half that stays is the half
+    that is still true on either schedule — the write is typed before #48's *next* apply
+    has seen its name — and it stays in the present tense for that reason.
+    """
+    para = _flat(_freshness_paragraph())
+    assert "#24 is what sits in #74's gap" in para, (
+        "the sentence stopped naming which gap #24 sits in; 'that gap' pointed at the "
+        "retired ~11 h one and a reader would keep counting the old exposure")
+    assert GAP_SHAPE in para, (
+        "the gap carries no measured width or write count, so the paragraph keeps a "
+        "number (two writes) that belongs to a schedule it has just retired")
+    assert "writes `mentions` edges twice between" not in para, (
+        "the twice-a-day claim is back in the present tense; the 2026-10-26 measurement "
+        "still counts it, and the paragraph says so with its window")
+    assert "still typed before #48 has seen their names" in para, (
+        "the paragraph dropped the exposure that survives the reordering, and a reader "
+        "would conclude the gap closed when only its width did")
