@@ -1793,6 +1793,7 @@ _RETIRED_WITNESS_NAMES = frozenset(
 #:   `logcursors.json`          guardian.py:463 (`logtail.LogCursor(self.gdir / …)`)
 #:   `signatures.json`          guardian.py:1028 (the chronic-error cache, re-written when it refreshes)
 #:   `voice.json`               speak.py:126 (`CONFIG_NAME`), re-written into the state dir at every guardian stage by bin/sync-voice-config.py:28
+#:   `conversation-relation-proposals.json`  conversation_relations.py:45 (`PROPOSALS_FILE`), rewritten by `save_proposals` at :807 — under `commit_lock` and via `atomic_write_text` at :856, which replaces the same path — on every #51 run, so the file's counts move nightly
 #:
 #: The guardian cannot be IMPORTED for this (`agent-services/guardian/` has no
 #: `__init__.py`; `scripts/` reads those files by path only, as promote.py:533 does), so
@@ -1809,6 +1810,7 @@ _ROLLING_STATE_NAMES = frozenset({
     "logcursors.json",
     "signatures.json",
     "voice.json",
+    "conversation-relation-proposals.json",
 })
 
 

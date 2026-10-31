@@ -2812,6 +2812,75 @@ def test_a_fifth_rolling_source_dates_without_touching_the_ban(tmp_path, monkeyp
         "backlog/data/pool-report.md"), "a name in neither set lost its bare slot"
 
 
+#: The day and item #3644's triage measured the emitter against, kept as this node's
+#: arguments so the expected name is exactly the one a re-triage re-derives.
+_STAMP_3644 = "2026-10-31"
+_ITEM_3644 = 3364
+_PROPOSALS_NAME = "conversation-relation-proposals.json"
+
+
+def test_the_proposals_store_is_a_declared_rolling_source(tmp_path, monkeypatch):
+    """#3644. `conversation-relation-proposals.json` joins the registry, so a witness of
+    it can no longer take the bare slot — and the registry gained one name, not a rule.
+
+    #3480 died on this. Its clause 1 demanded bytes `cmp`-identical to
+    `backlog/data/conversation-relation-proposals.json` and its clause 2 demanded those
+    bytes report the counts of 2026-10-26, but #51 rewrites that store nightly: five runs
+    replaced the file between the demand and the round, and the figures existed nowhere.
+    Dating the slot by rule is what stops the next demand arriving already stale — the day
+    in the name is the moment the snapshot was cut, which is the whole point of #2769.
+
+    The direction that matters is the negative one, so it is seeded: the copy below takes
+    the member OUT of the set and asserts the bare name comes back. A node that asserted
+    only the dated name would stay green if the registry had been widened by a pattern
+    instead of a name, and `state/qmd/index.db` and `sessions.jsonl` are pinned bare
+    elsewhere precisely because a pattern would have swallowed them.
+    """
+    before = set(B._ROLLING_STATE_NAMES)
+    assert _PROPOSALS_NAME in B._ROLLING_STATE_NAMES, (
+        "the proposals store is not a declared rolling source, so a witness of it still "
+        "takes the undated bare slot that cost #3480 its round")
+
+    src = _state_store(tmp_path, _PROPOSALS_NAME, sub="_pipeline")
+    got = B._witness_artifact(src, taken=lambda d, n: False, day=_STAMP_3644,
+                              item_id=_ITEM_3644)
+    assert got == (f"backlog/data/{_STAMP_3644}.{_ITEM_3644}"
+                   f"-_pipeline-{_PROPOSALS_NAME}"), (
+        f"the emitter answered {got!r} for a source whose parent directory is "
+        "`_pipeline`; the tag is the source directory, so this is the name a re-triage "
+        "of #3364's six demand sites re-derives")
+    assert got != f"backlog/data/{_PROPOSALS_NAME}", (
+        "the bare slot is still on offer for a file #51 rewrites nightly")
+    assert B._witness_name_must_be_dated(_PROPOSALS_NAME) is True, (
+        "the predicate and the emitter disagree: the name is in the registry but the "
+        "rule that reads it did not fire")
+
+    without = before - {_PROPOSALS_NAME}
+    assert without != before, "the member is not removable, so the seed tests nothing"
+    monkeypatch.setattr(B, "_ROLLING_STATE_NAMES", frozenset(without))
+    seeded = B._witness_artifact(src, taken=lambda d, n: False, day=_STAMP_3644,
+                                 item_id=_ITEM_3644)
+    assert seeded == f"backlog/data/{_PROPOSALS_NAME}", (
+        f"with the member removed the emitter still answered {seeded!r}, so the dated "
+        "name above is not this member's doing and the node proves nothing")
+    assert B._witness_name_must_be_dated(_PROPOSALS_NAME) is False, (
+        "the predicate fired for a name in neither registry — the pattern that "
+        "`state/qmd/index.db` and `sessions.jsonl` are pinned bare to forbid")
+    assert set(B._ROLLING_STATE_NAMES) == without, "the seed never applied"
+
+    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl",
+                                             "landed_outcomes.jsonl"}, (
+        "the retired-slot ban moved while the registry was widened; the two are "
+        "separate judgements and #3398's rail above exists to keep them apart")
+    assert B._witness_name_must_be_dated("pool-report.md") is False, (
+        "an undeclared basename dates too, so the registry widened by a rule")
+    assert B._witness_artifact(tmp_path / "state/_pipeline/pool-report.md",
+                               taken=lambda d, n: False) == (
+        "backlog/data/pool-report.md"), (
+        "a name in neither set, sitting in the SAME directory as the source above, lost "
+        "its bare slot — the half that widened is the basename, not the path")
+
+
 # ---------------------------------------------------------------------------
 # #3175 — an over-bound demand points at the extracts it would duplicate.
 #
