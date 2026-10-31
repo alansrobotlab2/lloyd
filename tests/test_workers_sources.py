@@ -3485,3 +3485,249 @@ def test_claims_presence_is_the_copy_so_the_adapter_never_decides_the_pilot(sche
         "an empty bundle was dropped, so the pilot's 'the model emitted nothing' gap "
         "is now indistinguishable from an un-piloted run")
     assert pool.normalize_result(_item({"task_id": 77}), empty)["claims"] == []
+
+
+# ---------------------------------------------------------------------------
+# #3517 — a pin config does not define was gated on the primary's health
+#
+# `_model_health_url` answered with the PRIMARY's endpoint for every pin it could
+# not resolve, so two different situations produced one verdict: a model that is
+# configured but whose endpoint lives in `base_url` rather than
+# `env.ANTHROPIC_BASE_URL` (probed at a server its runs never touch), and a pin
+# that names no model at all — `model: secodary`, one transposed letter, which the
+# gate waved through and `run_task` then refused with `unconfigured_model`
+# (#1209's guard, `app/autonomy.py:3120`). The dispatch that arrived in between was
+# decided against the wrong server, and in `execute`'s pre-flight it could spend 90
+# s waiting on the primary and then defer with a message naming that primary's URL
+# for a task that never pinned it. These tests pin the refusal, its wording, the
+# base_url leg, and the one case that must keep falling through — an unreadable
+# config, where refusing every pin is a bigger outage than the typo.
+# ---------------------------------------------------------------------------
+
+
+def _secondary_with_only_a_base_url(monkeypatch, tmp_path) -> str:
+    """Redirect this module's config reader at a `config.yaml` whose secondary
+    declares its endpoint in `base_url:` and NOT in its `env:` block, and return the
+    health URL the app's own precedence implies for it.
+
+    This is the shape one edited `config.yaml` produces, and the shape
+    `_primary_health_target` calls the source of truth. Both shipped entries carry
+    `env.ANTHROPIC_BASE_URL` as well and agree with their `base_url`, so no task in
+    the fleet exercises the disagreement today — which is why the port below is one
+    no other test in this file uses: a leg that collapsed onto the primary's endpoint
+    or onto this module's literal could not satisfy the assertions. The
+    `MODEL_CONFIGS` line keeps the in-memory table telling the same story as the file
+    the refusal reads, so the two sources cannot disagree inside one test.
+    """
+    from app import autonomy, config as cfg
+
+    (tmp_path / "config.yaml").write_text(
+        "model:\n"
+        "  default: primary\n"
+        "models:\n"
+        "  primary:\n"
+        "    alias: primary\n"
+        "    base_url: http://127.0.0.1:8096\n"
+        "    env:\n"
+        "      ANTHROPIC_BASE_URL: http://127.0.0.1:8096\n"
+        "  secondary:\n"
+        "    alias: secondary\n"
+        "    base_url: http://127.0.0.1:9992\n"
+        "    env:\n"
+        "      ANTHROPIC_API_KEY: no-key-required\n",
+        encoding="utf-8")
+    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
+    monkeypatch.setitem(cfg.MODEL_CONFIGS, "secondary",
+                        {"alias": "secondary",
+                         "base_url": "http://127.0.0.1:9992",
+                         "env": {"ANTHROPIC_API_KEY": "no-key-required"}})
+    # Shipped config says `secondary_enabled: false`, which rewrites the alias to
+    # primary; switch it on so the named leg is exercised at all — the same switch
+    # `_secondary_on_its_own_port` flips.
+    monkeypatch.setitem(cfg.CONFIG, "secondary_enabled", True)
+    return "http://127.0.0.1:9992/health"
+
+
+def test_a_model_configured_with_only_a_base_url_is_probed_at_its_own_endpoint(
+        monkeypatch, tmp_path):
+    """Clause 3: `base_url` is a second source for the leg, not a fallthrough.
+
+    The shipped `models.secondary` carries both keys and they agree, so this shape
+    only appears when someone adds a model the way `models.primary` is written —
+    `base_url` and an `env` block without `ANTHROPIC_BASE_URL` — which is the form
+    `_primary_health_target`'s docstring calls the source of truth.
+    """
+    from workers.sources import scheduled_task as ST
+
+    secondary_url = _secondary_with_only_a_base_url(monkeypatch, tmp_path)
+
+    assert ST._model_health_url("secondary") == secondary_url, (
+        "a configured model whose endpoint is only in base_url was gated "
+        f"somewhere else: {ST._model_health_url('secondary')}")
+    assert ST._model_health_url("secondary") != ST._model_health_url("primary"), (
+        "the named pin still collapses onto the primary's endpoint")
+    assert ST._model_health_url("secondary") != ST._VLLM_HEALTH_URL, (
+        "the named pin landed on the fallback literal")
+
+
+def _pinned_task_files(tmp_path, monkeypatch, pins: dict) -> None:
+    """Write real task files for these ids and point `AUTONOMY_DIR` at them.
+
+    Pins live in task files, which is the only place the gate reads them from:
+    `get_due_tasks` returns the fields a scheduler tick needs to decide due-ness and has
+    never carried a `model:` key, so a stub that put one in the due dict would be testing
+    a key production does not send. The scratch directory is not the vault, so nothing
+    here leaves a task file a later fleet tick could pick up.
+    """
+    from app import autonomy
+
+    tasks = tmp_path / "autonomy"
+    tasks.mkdir(exist_ok=True)
+    for tid, pin in pins.items():
+        (tasks / f"{tid}-pinned.md").write_text(
+            f"---\ntype: note\ntask_id: {tid}\nname: pinned-{tid}\n"
+            f"model: {pin}\nfrequency: hourly\n---\n\n# pinned\n",
+            encoding="utf-8")
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tasks)
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "autonomy-runs")
+
+
+def test_a_pin_that_names_no_configured_model_is_skipped_at_enqueue(
+        monkeypatch, tmp_path, q, caplog):
+    """Clause 1: one real tick, one typo'd pin, and the warning a human reads.
+
+    Both tasks are due and both servers answer, so the only thing that separates the
+    pinned-`secondary` row from the pinned-`secodary` silence is the pin — the skip
+    cannot be the harness failing to enqueue anything. The warning has to name the
+    offending value AND the set config does hold, which is what makes a typo
+    self-diagnosing instead of a task that quietly stops running.
+    """
+    from app import autonomy
+    from workers.sources import scheduled_task as ST
+
+    _secondary_on_its_own_port(monkeypatch, tmp_path)
+    _pinned_task_files(tmp_path, monkeypatch, {561: "secodary", 562: "secondary"})
+    monkeypatch.setattr(autonomy, "recover_stuck_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(autonomy, "get_due_tasks", lambda *a, **k: [
+        {"id": 561, "name": "typo-pinned", "priority": "low"},
+        {"id": 562, "name": "good-pinned", "priority": "low"}])
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(ST.enqueue_if_due(q, {"max_duration_seconds": 1800}))
+
+    enqueued = {r.payload.get("task_id") for r in q.list_items(source=ST.NAME)}
+    assert enqueued == {562}, (
+        f"the typo'd pin was enqueued alongside the good one: {enqueued}")
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("secodary" in m for m in warned), (
+        f"nothing warned about the pin the tick refused: {warned}")
+    assert any("primary" in m and "secondary" in m for m in warned), (
+        f"the warning names the pin but not the models config holds: {warned}")
+
+
+def test_the_preflight_refuses_an_unresolvable_pin_before_waiting_on_health(
+        monkeypatch, tmp_path, q):
+    """Clause 2: the pre-flight must not spend 90 s on a server the task didn't pin.
+
+    The wait is inline (`for _ in range(18)` … `raise RuntimeError(f"model server
+    {health_url} unhealthy …")`), and it is reached through `_vllm_healthy` — so
+    tripling that probe with a tripwire is the measurement: a refusal placed after the
+    loop fails on "the pre-flight probed a server" instead of on this assertion. The
+    expected outcome is a `skipped` result rather than a raise, because a raise is the
+    pool's failure path — it charges the failure and re-queues until the attempts run
+    out, which is the harm this clause is about, just arriving without the 90 s.
+    """
+    from app import autonomy
+    from workers.sources import scheduled_task as ST
+
+    _secondary_on_its_own_port(monkeypatch, tmp_path)
+    _pinned_task_files(tmp_path, monkeypatch, {561: "secodary"})
+
+    def _tripwire(*a, **k):
+        raise AssertionError("the pre-flight probed a server for a task whose pin "
+                             "the config does not define")
+
+    async def _must_not_dispatch(*a, **k):
+        raise AssertionError("the refused pin dispatched anyway")
+
+    monkeypatch.setattr(ST, "_vllm_healthy", _tripwire)
+    # `execute` imports run_task from app.autonomy inside its body, so the seam is
+    # the module attribute, not one on this source module.
+    monkeypatch.setattr(autonomy, "run_task", _must_not_dispatch)
+
+    q.enqueue(source=ST.NAME, kind="run",
+              payload={"task_id": 561, "name": "typo-pinned"}, dedup_key="t-561")
+    item = q.list_items(source=ST.NAME)[0]
+    result = asyncio.run(ST.execute(item))
+
+    text = str(result.get("skipped", ""))
+    assert result.get("status") == "skipped", (
+        "the refused pin did not come back as a skip, so the pool charges it as a "
+        f"failure and re-queues it until the attempts run out: {result}")
+    assert "secodary" in text, f"the refusal does not name the pin: {text}"
+    assert "configured" in text, f"the refusal does not name the configured set: {text}"
+    assert "/health" not in text and "8096" not in text, (
+        f"the refusal still blames a health URL: {text}")
+    assert result.get("refusal") == "unconfigured_model", (
+        "the gate's skip must carry the class the engine's refusal carries, or one "
+        f"query cannot find both: {result.get('refusal')!r}")
+
+
+def test_an_unreadable_config_fails_open_rather_than_refusing_every_pin(
+        monkeypatch, tmp_path, q):
+    """Clause 4: `models:` unreadable is not "no model is valid".
+
+    #1684's ruling keeps the fallback literal for the config-unreadable leg, and the
+    same reasoning has to reach the refusal: `_configured_model_names` returns an empty
+    list when its own read fails, and a gate that reads that as "nothing matches" stops
+    the fleet with the config file. So an unknown-looking pin goes through on an
+    unreadable config, and the primary leg still answers with the fallback.
+    """
+    from app import autonomy, config as cfg
+    from workers.sources import scheduled_task as ST
+
+    # Leg one: the read succeeds and answers with nothing. An empty in-memory model
+    # table is that state as both readers see it — `default_model_base_url_source`
+    # finds no default endpoint and `_configured_model_names` finds no key.
+    monkeypatch.setattr(cfg, "MODEL_CONFIGS", {})
+    assert autonomy._configured_model_names() == [], (
+        "the empty table this test stands for an unreadable config did not in fact "
+        "produce an empty model set")
+    assert ST._model_pin_refusal(563, "secodary") is None, (
+        "an unreadable config was read as an empty model set, which refuses every "
+        "task in the fleet")
+    assert ST._model_health_url("primary") == ST._VLLM_HEALTH_URL, (
+        "the no-endpoint leg no longer answers with the fallback literal")
+    assert "fallback" in ST._primary_health_target()[1].lower(), (
+        "the no-endpoint leg must name itself as a fallback, not as a config key: "
+        f"{ST._primary_health_target()[1]!r}")
+
+    # Leg two: the helper itself raises. The answer #1684 pinned
+    # (`test_the_primary_leg_falls_back_to_the_literal_only_when_config_raises`) is
+    # this module's own literal plus the key that names itself as the fallback, and it
+    # has to survive the refusal being added beside it.
+    def _raises():
+        raise RuntimeError("config.yaml could not be read")
+
+    monkeypatch.setattr(cfg, "default_model_base_url_source", _raises)
+    assert ST._primary_health_target() == (ST._VLLM_HEALTH_URL,
+                                          ST._VLLM_URL_FALLBACK_KEY), (
+        "the config-raises leg changed while the refusal was added beside it")
+    assert ST._model_pin_refusal(563, "secodary") is None, (
+        "a raising config reader was read as an empty model set, which refuses every "
+        "task in the fleet")
+
+    # And end to end, on the same unreadable table: the typo'd pin still enqueues.
+    # The health probe is stubbed True, so the only thing that could keep this task out
+    # of the queue is the refusal — and the refusal is the part that must not fire
+    # without a config to check the pin against.
+    _pinned_task_files(tmp_path, monkeypatch, {563: "secodary"})
+    assert autonomy._configured_model_names() == []
+    monkeypatch.setattr(autonomy, "recover_stuck_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(autonomy, "get_due_tasks", lambda *a, **k: [
+        {"id": 563, "name": "typo-pinned", "priority": "low"}])
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+    asyncio.run(ST.enqueue_if_due(q, {"max_duration_seconds": 1800}))
+    assert {r.payload.get("task_id") for r in q.list_items(source=ST.NAME)} == {563}, (
+        "the refusal paused the fleet on a config the gate could not read")

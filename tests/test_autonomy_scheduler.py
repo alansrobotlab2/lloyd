@@ -4080,6 +4080,97 @@ async def test_a_refusal_leaves_one_line_in_the_task_file_it_refuses(aut, monkey
     # front-matter field moved to carry it.
     assert int(read_task(aut, 1)["failure_count"]) == 0
 
+# ---------------------------------------------------------------------------
+# #3517 — the gate decides a `model:` pin, and decides it before the health wait
+#
+# The site is `workers/sources/scheduled_task.py`, and the defect was that its
+# per-model gate could not tell two things apart: a model config DOES define, whose
+# endpoint is in `base_url:` rather than `env.ANTHROPIC_BASE_URL`, and a pin naming no
+# model at all. Both resolved to the PRIMARY's health URL, so the first was gated on a
+# server its runs never touch and the second was waved through and refused later by the
+# engine (`#1209`'s `_model_dispatch_refusal`, which writes no run record — the queue
+# row was the only trace that a dispatch was even attempted). Clause 4, the
+# config-unreadable leg that keeps falling back to the literal, is pinned in
+# `tests/test_workers_sources.py` beside the #1684 test for it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_model_pin_is_decided_at_the_gate_before_the_health_wait(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1-3 at one seat: the typo is skipped, the endpoint is its own.
+
+    Pins live in task files, which is where the gate reads them: `get_due_tasks`
+    returns the fields a tick needs for due-ness and has never carried a `model:` key,
+    so a due dict with one in it would be testing a key production does not send.
+    """
+    from app import config as cfg
+    from workers.queue import QueueItem, WorkQueue
+    from workers.sources import scheduled_task
+
+    write_task(aut, 91, name="good", model="primary")
+    write_task(aut, 92, name="typo", model="secodary")
+    monkeypatch.setattr(aut, "recover_stuck_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(
+        aut, "get_due_tasks", lambda *a, **k: [
+            {"id": 91, "name": "task91", "priority": "medium"},
+            {"id": 92, "name": "task92", "priority": "medium"}])
+
+    # A `secondary` that declares its endpoint ONLY as `base_url:`, with the
+    # secondary switch on so the alias is not rewritten to primary.
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: primary\n"
+        "models:\n"
+        "  primary:\n    alias: primary\n"
+        "    env:\n      ANTHROPIC_BASE_URL: http://127.0.0.1:8096\n"
+        "  secondary:\n    alias: secondary\n"
+        "    base_url: http://127.0.0.1:9993\n"
+        "    env:\n      ANTHROPIC_API_KEY: no-key-required\n",
+        encoding="utf-8")
+    monkeypatch.setattr(aut, "LLOYD_HOME", tmp_path)
+    monkeypatch.setitem(cfg.MODEL_CONFIGS, "secondary",
+                        {"alias": "secondary",
+                         "base_url": "http://127.0.0.1:9993",
+                         "env": {"ANTHROPIC_API_KEY": "no-key-required"}})
+    monkeypatch.setitem(cfg.CONFIG, "secondary_enabled", True)
+
+    monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
+    q = WorkQueue(tmp_path / "pin-gate.db")
+    await scheduled_task.enqueue_if_due(q, {"max_enqueue_per_tick": 5})
+
+    enqueued = sorted(r.payload.get("task_id")
+                      for r in q.list_items(source="scheduled-task"))
+    assert enqueued == [91], (
+        f"the queue holds {enqueued}: a pin config does not define was enqueued, or "
+        "the refusal took the valid one with it")
+
+    assert scheduled_task._model_health_url("secondary") == (
+        "http://127.0.0.1:9993/health"), (
+        "a configured model whose endpoint is only in base_url was resolved to "
+        f"{scheduled_task._model_health_url('secondary')}")
+    assert scheduled_task._model_health_url("primary") == (
+        "http://127.0.0.1:8096/health")
+
+    def _tripwire(*_a, **_k):
+        raise AssertionError("the pre-flight probed a server for an unresolvable pin")
+
+    monkeypatch.setattr(scheduled_task, "_vllm_healthy", _tripwire)
+    item = QueueItem(id=1, source="scheduled-task", kind="run", priority=50,
+                     payload={"task_id": "92"}, dedup_key=None, state="running",
+                     attempts=1, enqueued_at="", claimed_at=None, claimed_by=None,
+                     completed_at=None, error=None)
+    out = await scheduled_task.execute(item)
+    assert out["status"] == "skipped", out
+    assert "secodary" in out["skipped"], out
+    assert "secodary" in out["summary"], (
+        "`summary` is the key `normalize_result` lifts into the runs row's error "
+        f"column, so the refusal has to be in it to be readable afterwards: {out}")
+    assert "http://" not in out["skipped"], (
+        f"the refusal names a server rather than the pin: {out['skipped']}")
+    assert out["refusal"] == "unconfigured_model", (
+        "the gate and the engine must stamp one class, so one query finds both")
+
+
 
 async def test_the_refusal_survives_the_real_execute_adapter(
         aut, monkeypatch, tmp_path):
@@ -4113,6 +4204,14 @@ async def test_the_refusal_survives_the_real_execute_adapter(
     _stub_sessions(monkeypatch)
     write_task(aut, 1, name="Nightly Secondary Routing Eval", model="eco")
     monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
+    # #3517 put a gate refusal in front of this: the same pin now stops in `execute`'s
+    # pre-flight, so `run_task` is never reached and the stub below never speaks.
+    # Pinned off deliberately — what this node exists to prove is that the ENGINE's
+    # refusal survives the adapter's whitelist, and that is unchanged. The gate's own
+    # answer for this pin is pinned by
+    # `test_a_model_pin_is_decided_at_the_gate_before_the_health_wait` below.
+    monkeypatch.setattr(scheduled_task, "_model_pin_refusal",
+                        lambda *_a, **_k: None)
 
     async def _no_notify(*_a, **_k):
         return None

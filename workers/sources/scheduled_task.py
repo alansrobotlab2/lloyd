@@ -82,18 +82,152 @@ def _primary_health_target() -> tuple[str, str]:
     return base.rstrip("/") + "/health", source_key
 
 
+def _read_model_table() -> dict:
+    """`models:` from config.yaml as a dict, `{}` when it cannot be read.
+
+    Read off disk for the same reason `_read_primary_health_config` is: the gate
+    runs inside the pool's process, which may have imported `app.config` before an
+    edit, and `app.autonomy._get_model_env` has always re-read the file per call.
+    Never raises — the caller's fail-open verdict depends on `{}` meaning "no
+    answer", which is why an unreadable file cannot be reported as an empty table.
+    """
+    import yaml
+    try:
+        # `app.autonomy.LLOYD_HOME`, read the way `app.autonomy._get_model_env` reads
+        # it — the same file, and the attribute the named leg has always been tested
+        # through, so one redirect moves both readers instead of leaving the env leg
+        # on a scratch config while the table leg still sees the shipped one.
+        from app import autonomy
+        cfg = yaml.safe_load(
+            (autonomy.LLOYD_HOME / "config.yaml").read_text(encoding="utf-8"))
+        models = (cfg or {}).get("models") or {}
+        return models if isinstance(models, dict) else {}
+    except Exception:
+        return {}
+
+
+def _model_endpoint(model: str) -> str | None:
+    """A model's own health endpoint, or None when config does not name one.
+
+    `env.ANTHROPIC_BASE_URL` first and `base_url` as the second source, which is the
+    order the app itself resolves a model's endpoint in — `app.config._model_base_url`
+    (`env` block, then the flat key) and `default_model_base_url_source`, whose whole
+    contract is that the default's endpoint is `<name>.base_url` only when its env
+    block has no `ANTHROPIC_BASE_URL`. `_primary_health_target` already reads both;
+    this leg read only the env, so a model added with `base_url` and an env block that
+    omits the key — the shape #1684 pushed the primary leg toward, and the shape both
+    shipped entries happen to avoid by carrying the key twice with the same value —
+    answered with the PRIMARY's endpoint, and the gate watched a server the task's runs
+    never touched (#3517).
+    """
+    entry = _read_model_table().get(model)
+    if not isinstance(entry, dict):
+        return None
+    env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
+    for source in (env.get("ANTHROPIC_BASE_URL"), entry.get("base_url")):
+        if isinstance(source, str) and source.strip():
+            return source.strip().rstrip("/") + "/health"
+    return None
+
+
+#: The class `run_task` stamps on its own refusal of an undeclared pin (#1209,
+#: `app/autonomy.py:4631`). The gate's skip carries the identical value, so one query
+#: over `runs.meta_json` finds every refusal of a bad pin whichever side spoke it —
+#: which is only safe because both sides ask ONE predicate, the function below.
+_MODEL_REFUSAL_CLASS = "unconfigured_model"
+
+
+def _gate_task_view(task_id) -> dict | None:
+    """The task dict the gate asks the predicate about: the file, else nothing.
+
+    Read from the task file rather than the due dict, because `get_due_tasks` returns
+    the fields a scheduler tick needs to decide DUE-NESS (`id`, `name`, `priority`, the
+    window) and not the `model:` pin — so a check written against the due dict reads a
+    key that is usually absent, passes every test that stubs that call, and does nothing
+    in production. That is the difference between a gate and a test fixture, and it is
+    why `execute` has always re-parsed the file itself before deciding anything.
+
+    `None` on an unreadable file, which the predicate answers as "cannot adjudicate"
+    rather than as a refusal: an unreadable task file is not this gate's business.
+
+    Measured at this round's base: `get_due_tasks`' own source contains no occurrence
+    of the word `model`, so the due dict has never carried the pin and the per-task
+    `_model_health_url(t.get("model"))` below has always been probing the primary
+    whoever the task pinned. Changing that call is out of scope here (it would move
+    every enqueue onto a second probe per task); what is not out of scope is refusing a
+    pin this gate can see, and seeing it requires the file.
+    """
+    try:
+        from app.autonomy import _find_task_file, _parse_task_file
+        path = _find_task_file(task_id)
+        if path:
+            return _parse_task_file(path) or None
+    except Exception:
+        pass
+    return None
+
+
+def _model_pin_refusal(task_id, pin: object) -> str | None:
+    """Skip text for this pin, `None` when the config can honour it.
+
+    The verdict is the engine's, not a second copy of it: the text, the name list, the
+    empty-pin case and the fail-open on an unreadable `models:` block all live in
+    `app.autonomy._model_dispatch_refusal` (#1209, `app/autonomy.py:3145`) and are
+    tested there. Re-implementing it here would be a second hand-maintained list of
+    what config defines — the #3516 class of defect — and the two would drift the way
+    the fleet-watch rosters did.
+
+    What this function adds is the two rewrites `run_task` applies before it asks, so
+    the gate's question is about the same string the engine would receive: no pin is the
+    absence of a name (it resolves through `model.default`, and #1209 lets the empty
+    string through on purpose), and `secondary` becomes `primary` while
+    `secondary_enabled: false` — refusing the switched-off slot would be a behaviour
+    change wearing a bug fix.
+
+    Why ask at the gate when the engine already refuses: a refused `run_task` writes NO
+    run record, so the only trace of the dispatch is the queue row, and a row that keeps
+    re-failing is the whole witness. Refusing at enqueue means the task never enters the
+    queue and the WARNING naming the pin is spoken in the tick that could have run it;
+    refusing in `execute` means the item never spends 90 s waiting on a server it did not
+    pin. Two surfaces, one predicate, one refusal class.
+    """
+    pin = str(pin or "").strip()
+    if not pin or pin.lower() in ("null", "none"):
+        try:
+            from app.config import CONFIG
+            pin = str(((CONFIG.get("model") or {}).get("default")) or "").strip()
+        except Exception:
+            return None
+    if not pin:
+        return None
+    try:
+        from app.config import resolve_model_alias
+        pin = resolve_model_alias(pin)
+    except Exception:
+        pass
+    try:
+        from app.autonomy import _model_dispatch_refusal
+        return _model_dispatch_refusal(task_id, pin)
+    except Exception:
+        return None
+
+
 def _model_health_url(model: str) -> str:
     """Health endpoint for the model a task actually runs on.
 
     Tasks can pin `model: secondary` in their frontmatter (autonomy.run_task
-    resolves it through config.models.<name>.env.ANTHROPIC_BASE_URL). Probing
-    only the primary would let a dead secondary turn every one of its tasks
-    into a ConnectError flood — the exact failure the primary gate prevents.
+    resolves it through that model's config entry). Probing only the primary would
+    let a dead secondary turn every one of its tasks into a ConnectError flood — the
+    exact failure the primary gate prevents.
 
     Every leg is config-derived: an empty/`primary` pin resolves through
-    `_primary_health_target`, a named pin through that model's own env, and the
-    post-`except` leg lands on the primary's config-derived endpoint rather than
-    a literal (#1684).
+    `_primary_health_target`, a named pin through `_model_endpoint` — its own
+    `base_url`, falling back to its `env.ANTHROPIC_BASE_URL` (#3517) — and only the
+    `except` leg, a config this process could not read at all, lands on the primary's
+    derived endpoint rather than a literal (#1684). A named pin that config does not
+    define is a different verdict, and `_model_pin_refusal` is where it is taken; this
+    function still answers with the primary's endpoint for it, because the refusal
+    runs first at both call sites and a health URL is not a way to say "skip".
     """
     model = str(model or "").strip()
     try:
@@ -104,10 +238,9 @@ def _model_health_url(model: str) -> str:
     if not model or model in ("primary", "null", "none"):
         return _primary_health_target()[0]
     try:
-        from app import autonomy
-        base = autonomy._get_model_env(model).get("ANTHROPIC_BASE_URL")
-        if base:
-            return base.rstrip("/") + "/health"
+        endpoint = _model_endpoint(model)
+        if endpoint:
+            return endpoint
     except Exception:
         pass
     return _primary_health_target()[0]
@@ -333,6 +466,18 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         task_id = task.get("id")
         if task_id is None:
             continue
+        # #3517: decided before the probe, because a probe is the one thing that
+        # cannot answer for an undeclared pin — it would be taken against the
+        # primary (that is what `_model_health_url` still returns for such a pin) and
+        # read as a green light. Per task rather than a gate-wide return: every step
+        # above this loop is fleet-wide, and the fleet does not stop enqueuing
+        # because one task file has a typo in its `model:`.
+        refusal = _model_pin_refusal(
+            task_id, (_gate_task_view(task_id) or {}).get("model"))
+        if refusal:
+            logger.warning("Skipping #%s (%s): %s",
+                           task_id, task.get("name"), refusal)
+            continue
         # A task pinned to a model whose server is down should be skipped, not
         # enqueued into a retry loop.
         url = _model_health_url(task.get("model"))
@@ -395,6 +540,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     loop = asyncio.get_event_loop()
     from app.autonomy import _find_task_file as _ftf, _parse_task_file as _ptf
     _t = _ptf(_ftf(task_id)) if _ftf(task_id) else None
+    # Same predicate as the enqueue gate, and it has to be here too: an item can sit
+    # in the queue across the edit that broke its pin, and the wait below would then
+    # spend up to 90 s on a server this task never pinned and raise a deferral naming
+    # that server's health URL — which the pool reads as a failure, charges it, and
+    # re-queues until the attempts run out. The answer is the shape `run_task` itself
+    # gives for this same verdict (#1209): `status: skipped`, which `normalize_result`
+    # records without a failure and the pool releases without burning an attempt, and
+    # whose text names the pin and the configured names instead of a machine (#3517).
+    # Same verdict, arrived at without the wait.
+    refusal = _model_pin_refusal(task_id, (_t or {}).get("model"))
+    if refusal:
+        logger.warning("deferring #%s (%s) without running: %s",
+                       task_id, item.payload.get("name"), refusal)
+        return {"status": "skipped", "skipped": refusal, "summary": refusal,
+                "task_id": task_id, "refusal": _MODEL_REFUSAL_CLASS,
+                "meta": _MODEL_REFUSAL_CLASS}
     health_url = _model_health_url((_t or {}).get("model"))
     for _ in range(18):  # up to 90s
         if await loop.run_in_executor(None, _vllm_healthy, 4.0, health_url):

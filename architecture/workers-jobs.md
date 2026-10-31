@@ -239,13 +239,20 @@ source can both preempt everything and sit behind everything in the same tick.
 Four behaviours are load-bearing:
 
 - **It gates on the health of the model each task pins**, not just the
-  primary. A task pinned to a dead secondary is skipped, not enqueued into a
-  retry loop that becomes a ConnectError flood. The named-model leg has no member
-  on this box as of 2026-10-27 — every one of the 45 task files pins
-  `model: primary` — and a pin `config.models` does not define resolves to the
-  *primary's* endpoint (`_model_health_url`, `workers/sources/scheduled_task.py:113`
-  falls through to `_primary_health_target()`), so until a pin names a real second
-  model this gate is a second copy of the fleet gate.
+  primary, and it decides the pin before the health check. A task pinned to a dead
+  secondary is skipped, not enqueued into a retry loop that becomes a
+  ConnectError flood; a pin naming no `models:` slot key and no declared alias is
+  skipped too, on #1209's predicate, with a warning naming the pin and the names
+  config holds (#3517, 2026-10-31). Both are per-task decisions in the tick's
+  loop, so neither pauses the rest of the fleet. A configured model is checked at
+  its own endpoint read the way `app.config` reads any model's — the `env` block
+  first, then the flat `base_url` — so an entry that declares only `base_url:` is
+  no longer gated on the primary's server, which is what the named leg used to do
+  whenever its env block omitted `ANTHROPIC_BASE_URL` (#3517). What the leg has no
+  member for on this box is the named pin itself: measured 2026-10-27, all 45 task
+  files pin `model: primary`. `models:` unreadable answers as `None` at both
+  call sites rather than as a refusal, so a bad config pauses no schedule
+  (#1684's ruling, kept).
 - **It passes the pool's cap into `run_task`** (`max_duration_seconds: 3600`;
   `run_task` (`app/autonomy.py:4586`) keeps its own timeout 30 s under the value
   it is handed, the margin being `_POOL_TIMEOUT_MARGIN`) so the task's own timer
