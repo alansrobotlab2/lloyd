@@ -330,10 +330,24 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         return topic_size_error(topic, prospective)
     ceiling = memory_ceiling(filename) or 0
     size = len(prospective.encode("utf-8"))
+    if filename == INDEX_MEMORY_FILE:
+        # #3562: the room reserve is asked HERE, above the shrink escape, because a
+        # tightening pass is by definition a shrink and the escape below answers
+        # None for every one of them — which is how #3542 shipped an index left with
+        # 225 B of room and orphaned run 47's two topic files. The long-line refusal
+        # still goes first even on this path, for the reason the chain below gives:
+        # it names an edit this very write can make, where the reserve names a room
+        # the writer has to go and free.
+        reserve = index_room_reserve_error(path, filename, prospective)
+        if reserve is not None:
+            return index_line_length_error(filename, prospective) or reserve
     if size < _on_disk_bytes(Path(path)):
         # The shrink escape, tested first so it covers every bound below — the
         # ceiling, the tight limit and the line cap — or the guard would refuse
-        # the only write that could bring the file back under them.
+        # the only write that could bring the file back under them. It no longer
+        # covers the room reserve above it, and that is deliberate: the reserve
+        # guards the room a file is LEFT with, which is not a quantity a shrink can
+        # escape by being small.
         return None
     if size > ceiling:
         return size_error(filename, prospective)
@@ -706,7 +720,6 @@ def index_no_room_error(path, filename: str | None, prospective: str) -> str | N
     if room >= TOPIC_LINE_MIN_BYTES:
         return None
     size = len(prospective.encode("utf-8"))
-    owed = f"Record `{filename} at ceiling — consolidation owed` in the completion note."
     head = (
         f"{filename} would be {size:,} bytes, over the {limit:,}-byte tight limit "
         f"({MEMORY_TIGHTNESS:.0%} of its {ceiling:,}-byte ceiling) that keeps the index "
@@ -714,12 +727,27 @@ def index_no_room_error(path, filename: str | None, prospective: str) -> str | N
         f"{TOPIC_LINE_MIN_BYTES}-byte floor of any typed index line. No new index line "
         f"can be added while the file sits over that limit, so this refusal will not tell "
         f"you to add one.")
+    return head + " " + _index_room_advice(path, filename, prospective)
+
+
+def _index_room_advice(path: str | os.PathLike[str], filename: str,
+                       prospective: str) -> str:
+    """Where a detail goes when the index has no room for the line that would carry it.
+
+    The merge route if a linked topic file can take it, the consolidation route if none can.
+    Extracted by #3562 so `index_room_reserve_error` — which refuses a write that FITS under
+    the tight limit but leaves too little room in it — sends a writer to the same place
+    `index_no_room_error` does, with one copy of each instruction and its byte counts. The
+    wording is what `index_no_room_error` returned before the extraction, byte for byte; the
+    leading space is the caller's, because both heads end on a period.
+    """
     target = merge_target(linked_topic_files(prospective))
+    owed = f"Record `{filename} at ceiling — consolidation owed` in the completion note."
     if target is not None:
         name, free, topic_ceiling_bytes = target
         slug = name[len(TOPIC_PREFIX):]
         return (
-            head + f" This is merge-into-a-linked-topic-file: append the detail to "
+            f"This is merge-into-a-linked-topic-file: append the detail to "
             f"`{name}` ({free:,} bytes free of its {topic_ceiling_bytes:,}-byte topic "
             f"ceiling), which `{filename}` already links — "
             f"`memory_add(file=\"{name}.md\")`, or `Edit` on "
@@ -733,11 +761,98 @@ def index_no_room_error(path, filename: str | None, prospective: str) -> str | N
             f"which nothing loads and nothing prunes. Do not trim or shorten an unrelated "
             f"entry to squeeze a line in — tightening `{filename}` is "
             f"`dream-consolidation`'s decision, not a write-side one. " + owed)
+    return _consolidation_owed_tail(filename)
+
+
+def _consolidation_owed_tail(filename: str) -> str:
+    """The tail a refusal ends on when there is nowhere to merge the detail to.
+
+    Extracted by #3562 because `index_room_reserve_error` reaches the same dead end — every
+    linked topic full, so only `dream-consolidation` (#47) can reopen room — and the one
+    instruction that unblocks a writer cannot have two copies. The text is what
+    `index_no_room_error` returned before the extraction, byte for byte: the leading space is
+    the caller's, because the heads end on a period.
+    """
     return (
-        head + f" This is a consolidation, not a write: no topic file `{filename}` links "
-        f"has enough room under its own ceiling to take the merge, and a new topic file "
-        f"cannot be created, because the new line that would link it is the line that "
-        f"cannot be written (#2613/#2649 leave the reason). Do not trim or shorten an "
-        f"unrelated entry to squeeze a line in either — reopen room by merging linked "
-        f"topic files together in `dream-consolidation` (#47), which is also the run that "
-        f"reopens the tight limit. " + owed)
+        f"This is a consolidation, not a write: no topic file `{filename}` links has enough "
+        f"room under its own ceiling to take the merge, and a new topic file cannot be "
+        f"created, because the new line that would link it is the line that cannot be "
+        f"written (#2613/#2649 leave the reason). Do not trim or shorten an unrelated entry "
+        f"to squeeze a line in either — reopen room by merging linked topic files together "
+        f"in `dream-consolidation` (#47), which is also the run that reopens the tight "
+        f"limit. Record `{filename} at ceiling — consolidation owed` in the completion note."
+    )
+
+
+#: How much room a write has to leave under `MEMORY.md`'s tight limit (#3562). The
+#: ceiling chain — `memory_ceiling`, `tight_limit`, `TOPIC_LINE_MIN_BYTES` — answers one
+#: question, *does this write fit*, and a write that fits has always been admitted however
+#: little room it left behind. Room is the thing the NEXT writer spends: the nightly finishes
+#: a topic file and needs one typed index line per file to hook it, and on 2026-10-29 the run
+#: record (`~/lloyd-data/autonomy-runs/47/run_47_20261029_180839.md`) found two of them
+#: shipped unhooked because the curation pass before it (#3542, vault `e9af9933`) had
+#: tightened the index to leave *exactly* 225 B — inside the tight limit, above the 24-byte
+#: floor, and under two hook lines, so the guard that owns the tight limit had nothing to
+#: say. A never-linked detail file is unrecoverable from the index: nothing loads it, nothing
+#: prunes it, and no line points at it.
+#:
+#: Two lines, then, and two of the WIDEST kind: `INDEX_LINE_MAX_CHARS` is the cap
+#: `index_line_length_error` enforces, `+ 1` is the newline that ends the line, and the
+#: reserve is twice that. Derived rather than typed for the reason #1895 gave about the tight
+#: limit itself — a literal beside the cap it is two of rots the moment the cap moves, and
+#: the figure in this comment would become a second hand-tuned number wearing a name. So no
+#: size of the reserve is written down here: every term is a constant, and the two
+#: relationships that matter are both stated against constants — it is under the cost of the
+#: widest hook line the grammar allows, and above the `TOPIC_LINE_MIN_BYTES` floor whose
+#: refusal this arm replaces. What the reserve is sized FOR is a measurement of the board,
+#: and it lives in the test that measures the board
+#: (`tests/test_memory_index_cap.py::test_the_reserve_is_two_of_the_widest_lines_the_index_grammar_allows`
+#: + the live-hook-line node), where a figure goes red when the population moves instead of
+#: disagreeing with the cap in silence.
+#:
+#: It is a floor, not a second ceiling: `index_room_reserve_error` fires ONLY at or under the
+#: tight limit and never tells anyone to shrink the index — the `consolidation owed` escape
+#: that `index_no_room_error` states stays the only route that reopens room, and a repair of
+#: an over-limit file keeps the shrink escape below it. `dream-consolidation` (#47) is the
+#: run that owns the number; this constant only refuses to let a pass take the room down to
+#: a level where that run is the only thing that can write again.
+INDEX_ROOM_RESERVE_BYTES = 2 * (INDEX_LINE_MAX_CHARS + 1)
+
+
+def index_room_reserve_error(path: str | os.PathLike[str], filename: str,
+                             prospective: str) -> str | None:
+    """Refuse an index write that fits but leaves less than two hook lines of room (#3562).
+
+    Returns None for anything that is not `MEMORY.md`, for a file already at or over its
+    tight limit — `index_tight_limit_error` and `index_no_room_error` own those verdicts, and
+    their text is unchanged by this predicate, byte for byte — and for a write that leaves
+    `INDEX_ROOM_RESERVE_BYTES` or more. `room` is `tight_limit(filename) - size`: the space
+    the next typed index line would have to fit in.
+
+    Called by `memory_write_error` BEFORE its shrink escape, which is the whole reason it is
+    a separate function placed where it is: a tightening pass shrinks the file, so a rule
+    beneath that escape answers None for exactly the writes that made this item, and the
+    generator of the orphan keeps generating it. Every string of consequence is a callee's,
+    so the 40-character rule on `memory_write_error`'s own code objects is untouched.
+    """
+    if filename != INDEX_MEMORY_FILE:
+        return None
+    limit = tight_limit(filename)
+    if limit is None:
+        return None
+    size = len(prospective.encode("utf-8"))
+    room = limit - size
+    if room < 0 or room >= INDEX_ROOM_RESERVE_BYTES:
+        return None
+    head = (
+        f"{filename} would be {size:,} bytes, inside the {limit:,}-byte tight limit but "
+        f"leaving only {room:,} B of room, and a write has to leave "
+        f"{INDEX_ROOM_RESERVE_BYTES:,} B — two typed index lines, the room the NEXT writer "
+        f"spends — so this one is {INDEX_ROOM_RESERVE_BYTES - room:,} B short."
+    )
+    # The same advice `index_no_room_error` gives a sub-floor index, from the same helper:
+    # merge into a linked topic file that has room, or report consolidation owed when none
+    # does. Only the reason differs, and the reason is what `head` carries — a refusal whose
+    # advice was copied would be a second text to keep honest, which is what #2637/#2838 left
+    # as the standing warning against doing this twice.
+    return head + " " + _index_room_advice(path, filename, prospective)

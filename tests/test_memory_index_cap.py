@@ -14,7 +14,9 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -662,8 +664,22 @@ def test_a_growing_index_past_the_tight_limit_is_refused_and_routed(memories_roo
     assert "20,480" in msg and "21,145" in msg, msg          # the line, and the size
     assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, msg
     assert "300" in msg, msg                                 # the hook it routes to
-    # The same append landing exactly ON the line is the largest legal write.
-    assert ceiling.memory_write_error(root / "MEMORY.md", _index_of_size(limit)) is None
+    # The limit itself stays INCLUSIVE, and that is this node's claim: at the callee, a file
+    # of exactly `limit` bytes is not "over" it. #3562 moved what a writer may reach
+    # end-to-end, not the comparison — an index written to exactly the limit leaves 0 bytes of
+    # room, which is inside the reserve, so `memory_write_error` refuses it and the largest
+    # legal write is `limit - INDEX_ROOM_RESERVE_BYTES`. Both halves are asserted here so the
+    # boundary stays pinned and the new floor beside it is not mistaken for `>=`.
+    at_limit = _index_of_size(limit)
+    assert ceiling.index_tight_limit_error("MEMORY.md", at_limit) is None, (
+        "the tight limit stopped being inclusive: it is `size > limit`, not `>=`")
+    reserve_refusal = ceiling.memory_write_error(root / "MEMORY.md", at_limit)
+    assert reserve_refusal is not None and "inside the" in reserve_refusal, (
+        "an index written to exactly the limit leaves no room for the next hook line, and "
+        "#3562's floor is what refuses it")
+    assert ceiling.memory_write_error(
+        root / "MEMORY.md", _index_of_size(limit - ceiling.INDEX_ROOM_RESERVE_BYTES)
+    ) is None, "the largest legal write is the limit minus the reserve, and it must land"
 
 
 def test_an_index_line_past_the_cap_is_refused_at_301_characters(memories_root):
@@ -1366,7 +1382,9 @@ def test_the_no_room_branch_moves_no_verdict(memories_root):
     line over a no-room index is the ordering proof: the line-cap refusal is still first, so
     `index_no_room_error` sits between the two and not above them. The shrink escape is sampled
     at the no-room size on purpose, since that is the state where losing it would strand the
-    file over its limit with no way back.
+    file over its limit with no way back. Two cases are the documented exceptions, listed and
+    checked rather than skipped below, because #3562 added a refusal on purpose and this node
+    is where a sweep that silently stops noticing it would be caught.
     """
     session, root = memories_root
     limit = ceiling.tight_limit("MEMORY.md")
@@ -1396,10 +1414,30 @@ def test_the_no_room_branch_moves_no_verdict(memories_root):
     assert [len(ln) for ln in ceiling.overlong_index_lines(tight + long_line)] == [
         len(long_line) - 1], "exactly one line is over the cap: the line the case appended"
 
+    # #3562 moved exactly two verdicts in this sweep, and both are named rather than waived:
+    # an index that sits 512 B under the limit and a write that would put a file exactly ON
+    # it. Both leave less room than the reserve, which is the state the item exists to
+    # refuse — 512 B could not carry the ~250 B hook line run 47 needed twice. Every other
+    # case here is out of the band (negative room, or the line-cap term answering first), so
+    # parity with the pre-#2838 chain still grades the branch this node is about.
+    reserve_moved = {"a line that fits the room", "exactly on the limit"}
+
     for label, (on_disk, prospective) in cases.items():
         (root / "MEMORY.md").write_text(on_disk, encoding="utf-8")
         got = ceiling.memory_write_error(root / "MEMORY.md", prospective)
         want = _chain_before_2838(root / "MEMORY.md", prospective)
+        if label in reserve_moved:
+            room = limit - len(prospective.encode("utf-8"))
+            assert 0 <= room < ceiling.INDEX_ROOM_RESERVE_BYTES, (
+                f"{label}: the fixture left {room} B, outside the band #3562 refuses, so the "
+                "exception below is no longer the reason the verdict differs")
+            assert want is None and got is not None, (
+                f"{label}: #3562 was expected to refuse where #2838's chain allowed, got "
+                f"{want!r} / {got!r}")
+            assert f"{ceiling.INDEX_ROOM_RESERVE_BYTES:,}" in got and f"{room:,}" in got, (
+                f"{label}: the refusal that moved this verdict is not the room reserve's: "
+                f"{got}")
+            continue
         assert (got is None) == (want is None), (
             f"{label}: the new branch moved a verdict — now "
             f"{'refused' if got else 'allowed'}, before #2838 "
@@ -1546,3 +1584,441 @@ def test_the_line_floor_is_the_line_the_add_a_line_route_orders():
     assert ceiling.topic_slug("topics/a") == "a"
     assert ceiling.linked_topic_files(shortest) == ["topics/a"]
     assert 20 < ceiling.TOPIC_LINE_MIN_BYTES
+
+
+# ── #3562: the room a write may leave under the tight limit ──────────────────
+#
+# Run 47's own record (`~/lloyd-data/autonomy-runs/47/run_47_20261029_180839.md`) names the
+# generator of a never-indexed topic file: the curation pass before it (#3542, vault
+# `e9af9933`) tightened `lloyd/MEMORY.md` to leave *exactly* 225 B under the tight limit, and
+# the nightly then wrote two topic files needing ~250 B each of hook line — under 225 B, so it
+# shipped them unhooked. Every bound this module had was a *ceiling*: a write that fits is
+# admitted however little room it leaves, and room is precisely what the next writer spends.
+#
+# `INDEX_ROOM_RESERVE_BYTES` is the floor under that room, and `index_room_reserve_error` is
+# the predicate. It runs BEFORE the shrink escape (`app/memory_ceiling.py:333`), which is the
+# whole reason it exists: a tightening pass is by definition a shrink, so a rule placed under
+# that escape measures only growing writes and leaves the generator untouched. Every fixture
+# below therefore states the room by the bytes it writes, because `_on_disk_bytes` reads the
+# file and refuses to be handed a number.
+
+def _reserve_probe(root: Path, on_disk_room: int, prospective_room: int) -> str | None:
+    """Ask the guard about an index sitting at `on_disk_room`, written to `prospective_room`.
+
+    Both rooms are `tight_limit('MEMORY.md') - bytes`, which is the quantity the reserve
+    guards, and `_index_linking` sizes the file to the byte. A negative room is an
+    over-the-limit state, which is how the sub-floor and over-limit refusals are reached.
+    """
+    limit = ceiling.tight_limit("MEMORY.md")
+    (root / "MEMORY.md").write_text(
+        _index_linking("topics/a-topic", room=on_disk_room, limit=limit), encoding="utf-8")
+    return ceiling.memory_write_error(
+        root / "MEMORY.md",
+        _index_linking("topics/a-topic", room=prospective_room, limit=limit))
+
+
+def test_the_room_reserve_is_two_of_the_widest_lines_the_index_grammar_allows():
+    """Clause 1's first half: the reserve is derived, and from this module's own constants.
+
+    Two lines is the unit the orphan is measured in — the nightly writes a topic file and
+    needs one hook line per file, and two of them is what run 47 needed room for — and the
+    widest line the grammar allows is `INDEX_LINE_MAX_CHARS` characters plus the newline that
+    ends it, so a reserve of `2 * (INDEX_LINE_MAX_CHARS + 1)` is two of those and no less.
+    The definition is read out of the source as well as evaluated, because the clause says
+    *derived*: a future edit that types `602` in place of the expression keeps the number
+    today and severs it from the cap tomorrow, which is the drift #1895 removed from the
+    tight limit and #3143 from the skip rail.
+    """
+    # No byte figure on this line: the point of the node is that the reserve is the
+    # expression and nothing else, and a literal here is the drift #1895 removed from the
+    # tight limit — a cap change would redden this node instead of moving both sides.
+    assert ceiling.INDEX_ROOM_RESERVE_BYTES == 2 * (ceiling.INDEX_LINE_MAX_CHARS + 1)
+    src = (ROOT / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    defined = re.search(r"^INDEX_ROOM_RESERVE_BYTES\s*=\s*(.+)$", src, re.M)
+    assert defined is not None, "the reserve is not a module-level constant"
+    assert "INDEX_LINE_MAX_CHARS" in defined.group(1), (
+        f"the reserve is assigned {defined.group(1)!r}, which does not read the line cap it "
+        "is two of — the figure would then be a literal wearing a name")
+    widest = "- [project] " + "a" * (ceiling.INDEX_LINE_MAX_CHARS - len("- [project] "))
+    assert len(widest) == ceiling.INDEX_LINE_MAX_CHARS, "fixture is a maximal index line"
+    assert ceiling.INDEX_ROOM_RESERVE_BYTES >= 2 * len(widest.encode("utf-8")), (
+        "two maximal lines do not fit in the room the reserve claims to hold")
+    assert ceiling.INDEX_ROOM_RESERVE_BYTES > 2 * 250, (
+        "run 47's two hook lines cost ~250 B each: the reserve has to clear that measurement")
+
+
+def test_an_index_write_inside_the_tight_limit_but_under_the_reserve_is_refused(
+        memories_root):
+    """Clause 1 + clause 3's boundary, in one sweep: 602 B of room, then 601, then less.
+
+    The on-disk file always sits 1,000 B under the tight limit — clear of the reserve — so
+    every case here is a write that *grows* the index and still lands under it. That is the
+    state no bound in this module refused before #3562, and it is the state that produced the
+    orphan: room is a resource the next writer spends, and today a write may spend all of it.
+    """
+    session, root = memories_root
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    assert _reserve_probe(root, on_disk_room=1000, prospective_room=reserve) is None, (
+        f"a write landing exactly ON the reserve ({reserve} B of room left) must be "
+        "admitted: a floor that refuses its own figure is a ceiling with extra steps")
+    msg = _reserve_probe(root, on_disk_room=1000, prospective_room=reserve - 1)
+    assert msg is not None, (
+        f"leaving {reserve - 1} B — one byte under the reserve — was admitted, so the floor "
+        "is not a floor")
+    assert f"{reserve:,}" in msg, f"the refusal does not name the reserve: {msg}"
+    assert f"{reserve - 1:,}" in msg, f"the refusal does not name the room: {msg}"
+    assert "1 B" in msg, f"the refusal does not name the shortfall: {msg}"
+    assert "tight limit" in msg, f"the refusal lost the bound it is a floor under: {msg}"
+
+    # The item's own live shape, one assertion per fact rather than one expression that
+    # reads itself. 381 B is not a size this node invents: it is the room the triage probe
+    # measured on the live index, and the shortfall is whatever the shipped reserve makes it,
+    # so the pair below stays true if the line cap moves and false if the arithmetic does not.
+    live_shape = _reserve_probe(root, on_disk_room=1000, prospective_room=381)
+    assert live_shape is not None, (
+        "a write leaving 381 B of room under the tight limit was admitted: that is the "
+        "measured state of the live index, and the exact write that orphans a topic file")
+    assert f"{381:,}" in live_shape, f"the refusal does not name the room: {live_shape}"
+    assert f"{reserve - 381:,}" in live_shape, (
+        f"the refusal does not name the shortfall the writer has to free: {live_shape}")
+
+
+def test_a_shrinking_index_write_that_still_leaves_under_the_reserve_is_refused(
+        memories_root):
+    """Clause 1's whole point: the arm runs before the shrink escape, not after it.
+
+    #3542 was a shrink — 20,460 B down to 20,255 B, leaving 225 B — and the escape at
+    `app/memory_ceiling.py:333` returns None for every write smaller than the file, so that
+    pass was never measured against anything. A reserve that sat below the escape would be
+    tested only on growing writes and would leave the generator exactly where it found it.
+    The other half of the node is what keeps the escape honest: a shrink that reaches the
+    reserve lands, and a shrink of an over-limit file stays writable by the escape, or the
+    guard refuses its own repair.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+
+    msg = _reserve_probe(root, on_disk_room=200, prospective_room=381)
+    assert msg is not None, (
+        "a trim that leaves 381 B — 221 B under the reserve — was admitted because it shrank "
+        "the file: this is #3542's pass, and it is the write that orphaned run 47")
+    assert f"{reserve - 381:,}" in msg and f"{381:,}" in msg, (
+        f"a shrink refused by the reserve must still name room and shortfall: {msg}")
+
+    assert _reserve_probe(root, on_disk_room=200, prospective_room=reserve) is None, (
+        "the same trim, freeing enough to reach the reserve, must land — the refusal names "
+        "the shortfall so the writer can free it, which is what makes this a floor and not a "
+        "deadlock for the one pass whose job is to free room")
+
+    over = _index_linking("topics/a-topic", room=-1000, limit=limit)
+    (root / "MEMORY.md").write_text(over, encoding="utf-8")
+    assert len(over.encode()) > limit, "fixture is over the tight limit"
+    assert ceiling.memory_write_error(
+        root / "MEMORY.md", _index_linking("topics/a-topic", room=5_000, limit=limit)
+    ) is None, "a shrinking repair of an over-limit index must stay writable"
+
+
+def test_the_reserve_refusal_routes_to_a_linked_topic_file_and_never_to_a_trim(
+        memories_root):
+    """Clause 2: the advice is the merge, and no sentence tells the writer to trim.
+
+    `index_tight_limit_error`'s own docstring gives the reason a bare number is the wrong
+    refusal: a writer shown only a byte count trims an unrelated entry to squeeze its line
+    in. So this pins the three figures the writer needs (reserve, room, shortfall), the named
+    merge target reached the way `memory_add` takes it, and the ABSENCE of any instruction to
+    shorten someone else's entry — the prohibition against it is present, which is the only
+    way to state that rule and keep it readable.
+    """
+    session, root = memories_root
+    topic = root / "memory" / "a-topic.md"
+    topic.parent.mkdir(exist_ok=True)
+    topic.write_text("# A topic\n\n" + "detail. " * 200, encoding="utf-8")   # ~1.6 KB of 32,768
+    room = 381
+    msg = _reserve_probe(root, on_disk_room=1000, prospective_room=room)
+    assert msg is not None, "fixture must be a refused write"
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    assert f"{reserve:,}" in msg and f"{room:,}" in msg and f"{reserve - room:,}" in msg, msg
+    # The discriminator has to be a sentence that exists on ONE arm only. Both refusals name
+    # `dream-consolidation`, both name "Do not trim or shorten", and both quote the tight
+    # limit, so asserting those three proves nothing about which route the writer was given —
+    # which is how the first version of this node passed while grading the wrong branch.
+    # "merge-into-a-linked-topic-file" is on the merge arm alone, and "This is a
+    # consolidation, not a write" on the other, so each is asserted for its own arm and
+    # against the other.
+    assert "merge-into-a-linked-topic-file" in msg, (
+        f"a linked topic with room is the route this item's whole argument points at, and the "
+        f"refusal did not name it: {msg}")
+    assert "This is a consolidation, not a write" not in msg, (
+        f"the merge arm reached the consolidation arm's sentence: {msg}")
+    assert "topics/a-topic" in msg and 'memory_add(file="topics/a-topic.md")' in msg, (
+        f"the index links `topics/a-topic` and that file has kilobytes free, so the refusal "
+        f"must send the detail there: {msg}")
+    assert "dream-consolidation" in msg and "consolidation owed" in msg, msg
+    assert not re.search(r"(?:^|\s)(?:trim|shorten|cut) (?:another|any other|an other|the "
+                         r"other)\b", msg, re.I), (
+        f"the refusal orders a trim of someone else's entry: {msg}")
+    assert "Do not trim or shorten" in msg, (
+        f"the refusal dropped the prohibition that keeps §2a-bis true: {msg}")
+
+
+def test_the_reserve_refusal_with_no_linked_topic_room_reopens_through_consolidation(
+        memories_root):
+    """Clause 2's other arm, and the escape that keeps a floor from being a freeze.
+
+    With every linked topic over its ceiling there is nowhere to merge, and the only action
+    that reopens room under the tight limit is the dream pass. The refusal has to say so and
+    to ask for the `consolidation owed` line, because a writer that cannot write and is not
+    told to report it is how the shortfall stays invisible until the next orphan.
+    """
+    session, root = memories_root
+    topic = root / "memory" / "a-topic.md"
+    topic.parent.mkdir(exist_ok=True)
+    topic.write_text("x" * ceiling.topic_ceiling("topics/a-topic"), encoding="utf-8")
+    assert topic.stat().st_size >= ceiling.topic_ceiling("topics/a-topic"), (
+        "the fixture's topic is not full, so the consolidation arm would not be reached")
+    msg = _reserve_probe(root, on_disk_room=1000, prospective_room=100)
+    assert msg is not None, "the write must stay refused"
+    assert "dream-consolidation" in msg and "consolidation owed" in msg, msg
+    assert "This is a consolidation, not a write" in msg, msg
+    assert "merge-into-a-linked-topic-file" not in msg, (
+        f"with every linked topic full the refusal invented a merge route: {msg}")
+    assert "memory_add" not in msg, (
+        f"a full topic was offered as a merge target: {msg}")
+
+
+def test_the_reserve_leaves_user_md_alone_and_every_over_limit_refusal_unchanged(
+        memories_root):
+    """Clause 3's scope, clause 1's ordering, and clause 3's byte-for-byte text.
+
+    The item's word is "byte for byte", and a test that re-derives each expectation from the
+    same callees the function under test calls cannot fail on a rewording — it can only fail
+    on routing. So the texts here are rendered by a copy of the guard loaded from the commit
+    this branch descends from (`Base commit` of the round's run spec, which is the tree that
+    shipped no reserve at all) and compared string-for-string with what this tree renders for
+    the same bytes. A rewording in this round reddens this node; a cap change moves both sides
+    together, which is exactly the property the previous version of this node did not have.
+
+    Routing is graded beside the text, because the two are different claims: the callee that
+    owns the sub-floor case must still own it, `USER.md` must never see the reserve, and a
+    write the tight-limit refusal already refused must still hear that refusal first.
+    """
+    session, root = memories_root
+    base = _base_memory_ceiling(root)
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+
+    def both(text: str):
+        """(this tree's answer, the pre-reserve tree's answer) for one prospective write."""
+        return (ceiling.memory_write_error(root / "MEMORY.md", text),
+                base.memory_write_error(root / "MEMORY.md", text))
+
+    # A write that GROWS the file past its tight limit while the index-room budget is
+    # nowhere near exhausted (`room` negative means the size is over the limit, so the
+    # reserve arm is out of scope by its own bound and cannot be the answer): the refusal a
+    # writer hears here is the tight-limit text, byte for byte as the pre-reserve tree
+    # renders it for the same bytes.
+    over = _index_linking("topics/a-topic", room=-4_000, limit=limit)
+    assert limit < len(over.encode()) <= ceiling.memory_ceiling("MEMORY.md"), (
+        "fixture is over the tight limit and still inside the hard ceiling, so the refusal "
+        "under comparison is the tight-limit one and not a ceiling refusal")
+    (root / "MEMORY.md").write_text(_index_linking("topics/a-topic", room=8_000, limit=limit),
+                                     encoding="utf-8")
+    assert not ceiling.overlong_index_lines(over), "no long-line refusal can answer first"
+    got, was = both(over)
+    assert was is not None, "the pre-reserve guard did not refuse this write at all"
+    assert "INDEX_ROOM_RESERVE_BYTES" not in got + was, (
+        f"the reserve arm spoke for a write that leaves NEGATIVE room ({limit - len(over.encode()):,} B), "
+        "outside the `0 <= room < reserve` band the clause bounds it to — the tight-limit "
+        f"refusal owns this case on both trees: {was!r}")
+    assert got == was, (
+        "the over-the-tight-limit refusal changed text:\n"
+        f"  before: {was}\n  after:  {got}")
+    assert "tight limit" in got, f"the refusal lost the bound it is a refusal over: {got}"
+
+    # The sub-floor dead end, whose owner is `index_no_room_error`: text identical to the
+    # pre-reserve tree, and identical to its own callee so the ownership is named too.
+    floor = _index_linking("topics/a-topic", ceiling.TOPIC_LINE_MIN_BYTES - 1, limit)
+    (root / "MEMORY.md").write_text(floor, encoding="utf-8")
+    grown = floor + ("- [project] an entry with something worth recording → topics/a-topic\n"
+                    "- [project] and a second entry the same write carries → topics/x\n")
+    assert len(grown.encode()) > limit, "fixture is a growing write over the tight limit"
+    assert ceiling.index_no_room_error(root / "MEMORY.md", "MEMORY.md", grown) is not None, (
+        "the callee that owns the sub-floor case answers None here, so the comparison below "
+        "would grade nothing")
+    got, was = both(grown)
+    assert got == was, (
+        "the sub-floor refusal changed text:\n"
+        f"  before: {was}\n  after:  {got}")
+    assert got == ceiling.index_no_room_error(root / "MEMORY.md", "MEMORY.md", grown), (
+        "the sub-floor refusal moved, so `index_no_room_error` no longer owns the case #2838 "
+        "gave it")
+
+    # A cap-exhausted board: the consolidation text, unchanged, with the reserve arm unable
+    # to reach it (the file is over the tight limit, so the reserve returns None).
+    tight = _index_linking("topics/a-topic", room=0, limit=limit)
+    (root / "MEMORY.md").write_text(tight, encoding="utf-8")
+    grew = tight + "- [project] one more line, short enough to pass the cap\n"
+    got, was = both(grew)
+    assert got == was, (
+        "the consolidation escape's text changed, and that is the sentence every writer who "
+        f"hits the cap is told:\n  before: {was}\n  after:  {got}")
+    assert "consolidation owed" in got, got
+    assert "INDEX_ROOM_RESERVE_BYTES" not in got, (
+        f"a file already over its tight limit was handed the reserve ({reserve:,} B) instead "
+        "of the consolidation route, which is the dead end this arm exists to replace")
+
+    # `USER.md` is out of scope, and its own refusal is unchanged too. A USER.md write
+    # GROWS the file past its tight limit, which is the only branch there that could
+    # plausibly gain an arm; the reserve is defined on the index file, so reaching USER.md
+    # would freeze the file the curator has to act on.
+    user = "---\ntype: note\nsegment: memory\n---\n\n# User\n\n" + "filler " * 40 + "\n"
+    assert len(user.encode("utf-8")) < ceiling.tight_limit("USER.md"), (
+        "USER.md starts inside its own limit, so a refusal here can only come from a new arm")
+    (root / "USER.md").write_text(user, encoding="utf-8")
+    grew_user = user + "- [user] a preference the curator records later\n"
+    got_user, was_user = (ceiling.memory_write_error(root / "USER.md", grew_user),
+                          base.memory_write_error(root / "USER.md", grew_user))
+    assert got_user == was_user is None, (
+        f"the reserve reached USER.md, the one file the curator has to be able to write:\n"
+        f"  this tree: {got_user!r}\n  pre-reserve tree: {was_user!r}")
+    assert "INDEX_ROOM_RESERVE_BYTES" not in str(got_user), got_user
+
+
+def _base_memory_ceiling(root: Path):
+    """`app/memory_ceiling.py` from the commit BEFORE the reserve arm, loaded side by side.
+
+    Read through git, not copied by hand: `git log -S` names the commit that introduced
+    `INDEX_ROOM_RESERVE_BYTES`, and that commit's parent is the tree that shipped the refusals
+    this item promises to leave byte-for-byte alone. The node asserts the parent really has no
+    reserve in it, so if the archaeology ever lands on the wrong commit the node says so
+    instead of comparing a tree against itself. Nothing here is a snapshot of text, which is
+    what makes the comparison able to survive a cap change: both sides move together, and only
+    a rewording inside the round moves one of them.
+    """
+    found = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "-S", "INDEX_ROOM_RESERVE_BYTES",
+         "--format=%H", "--", "app/memory_ceiling.py"],
+        capture_output=True, text=True, timeout=60)
+    assert found.returncode == 0 and found.stdout.strip(), (
+        f"cannot find the commit that introduced the reserve ({found.stderr.strip()[:200]}); "
+        "the byte-for-byte comparison needs a real pre-reserve tree and refuses to guess one")
+    introduced = found.stdout.split()[-1]
+    src = subprocess.run(["git", "-C", str(ROOT), "show", f"{introduced}^:app/memory_ceiling.py"],
+                         capture_output=True, text=True, timeout=60)
+    assert src.returncode == 0, (
+        f"{introduced}^ has no guard to read: {src.stderr[:200]}")
+    assert "INDEX_ROOM_RESERVE_BYTES" not in src.stdout, (
+        f"{introduced}^ already carries the reserve, so it is not the pre-reserve tree and the "
+        "comparison below would be a tautology")
+    ns: dict = {"__file__": str(ROOT / "app" / "memory_ceiling.py")}
+    label = f"<memory_ceiling@{introduced[:8]}^>"
+    exec(compile(src.stdout, label, "exec"), ns)
+    # The guard answers only for a file under its own `MEMORIES_DIR` (module docstring,
+    # :31), so the copy has to be pointed at the fixture the live module was pointed at.
+    # Left at the real vault it would call every fixture path "an unrelated file" and
+    # return None for all of them — a comparison of two refusals would then be a
+    # comparison of two Nones and pass on nothing.
+    ns["MEMORIES_DIR"] = root
+    return SimpleNamespace(memory_write_error=ns["memory_write_error"],
+                           tight_limit=ns["tight_limit"])
+
+def test_the_reserve_refusal_is_deterministic_and_names_which_side_the_live_index_is_on():
+    """The reserve's verdict comes from the arithmetic, not from how full the vault happens to be.
+
+    The node this replaces padded the live index with filler until the padding would not fit,
+    and then asserted `room < reserve` unconditionally. That room is `limit - reserve - (0 or
+    one filler unit)` — always in the band just above the reserve — so the final assert passed
+    only while the live index was already starved (room 427 B on 2026-10-31) and turned red the
+    moment dream #47 did its job. A node that grades a refusal only in one state of the store
+    is the same mistake as a guard that fires in only one: it stops being a check.
+
+    So the refusal is now graded at a room COMPUTED from the reserve, at both edges of the
+    boundary, and the live index is reported rather than assumed: the guard's answer on the
+    live bytes must agree with the side of the reserve the measurement puts it on, which is
+    true whichever side the board is on and false if the arm ever reads something other than
+    `tight_limit - size`.
+    """
+    mem = Path.home() / "obsidian" / "lloyd"
+    if not (mem / "MEMORY.md").is_file():
+        pytest.skip("no vault")
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    unit = "- [project] filler entry that is comfortably short\n"
+    assert len(unit) <= ceiling.INDEX_LINE_MAX_CHARS, "the filler is a legal index line"
+
+    def at_room(room: int) -> str:
+        """Index text whose encoded size is `limit - room`, exactly, byte-rule-clean."""
+        head = "---\ntype: note\nsegment: memory\n---\n\n# Memory\n\n"
+        n = (limit - room - len(head.encode())) // len(unit.encode())
+        body = head + unit * n
+        return body + " " * (limit - room - len(body.encode()))
+
+    starved = at_room(reserve - 1)
+    room_starved = limit - len(starved.encode())
+    assert room_starved == reserve - 1, (
+        f"the fixture is the one-byte-under case, not room {room_starved}")
+    assert not ceiling.overlong_index_lines(starved), (
+        "the refusal must not be the long-line rule wearing the reserve's clothes")
+    msg = ceiling.memory_write_error(mem / "MEMORY.md", starved)
+    assert msg is not None, (
+        f"the item's probe — a `lloyd/MEMORY.md` write leaving {room_starved:,} B, one byte "
+        f"under the {reserve}-byte reserve — was admitted, so the floor is not a floor")
+    assert f"{reserve:,}" in msg and f"{room_starved:,}" in msg, msg
+    assert "1 B" in msg, f"the shortfall the writer has to free is missing: {msg}"
+
+    at_edge = at_room(reserve)
+    room_edge = limit - len(at_edge.encode())
+    assert room_edge == reserve, "the fixture is the exactly-the-reserve case"
+    assert ceiling.memory_write_error(mem / "MEMORY.md", at_edge) is None, (
+        f"a write leaving exactly the reserve — {room_edge:,} B — was refused, so the bound "
+        "is `room >= reserve + 1` and a writer with room for two hook lines cannot land one")
+
+    live = (mem / "MEMORY.md").read_text(encoding="utf-8")
+    live_room = limit - len(live.encode())
+    verdict = ceiling.memory_write_error(mem / "MEMORY.md", live)
+    if live_room < reserve:
+        assert verdict is not None, (
+            f"the live index sits {live_room:,} B under the {reserve}-byte reserve and the "
+            "guard does not say so: this is the starved state that orphaned run 47")
+        assert f"{live_room:,}" in verdict and f"{reserve - live_room:,}" in verdict, verdict
+    else:
+        assert verdict is None, (
+            f"the live index has {live_room:,} B of room, at or above the reserve, and the "
+            f"guard refused it anyway: {verdict}")
+def test_a_write_under_the_reserve_that_also_breaks_the_line_cap_is_told_the_line_first(
+        memories_root):
+    """Clause 3's ordering, at the new arm's own boundary.
+
+    A writer whose index is short of room AND carries a 301-character line is refused twice
+    over, and only one of those refusals is an edit it can make from the keyboard it is
+    already at. `memory_write_error` asks the line cap first on the reserve path for the same
+    reason the chain below asks it before the tight limit (#2637): the byte-rule refusal that
+    wins must name the line to shorten, where the reserve refusal names a room to go and
+    free. Both halves are asserted, because a mutant that returns the reserve text here is a
+    mutant that sends a writer off to consolidate when its own line was the problem.
+    """
+    session, root = memories_root
+    cap = ceiling.INDEX_LINE_MAX_CHARS
+    long_line = "- [project] " + "a" * cap + " → topics/a-topic\n"
+    assert len(long_line.rstrip("\n")) > cap, "the line is over the cap the guard enforces"
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    head = ("---\ntype: note\n---\n# Lloyd Long-Term Memory\n\n"
+            "## Section\n- [project] filler entry that is comfortably short → topics/a-topic\n")
+    filler = "- [project] filler entry that is comfortably short → topics/a-topic\n"
+    body = head + long_line
+    while len(body.encode()) + len(filler.encode()) <= limit - reserve + 500:
+        body += filler
+    (root / "MEMORY.md").write_text(body, encoding="utf-8")
+    grown = body + filler
+    assert len(grown.encode()) < limit, (
+        "the write must stay inside the tight limit, or the tight-limit refusal answers this "
+        "case and the ordering claim is graded on the wrong arm")
+    msg = ceiling.memory_write_error(root / "MEMORY.md", grown)
+    assert msg is not None, "the write is both over the cap and under the reserve"
+    assert f"{cap}" in msg and "characters" in msg, (
+        f"the long-line refusal did not answer first: {msg}")
+    assert "leaving only" not in msg, (
+        f"the reserve refusal answered a case the line cap owns: {msg}")
+    assert msg == ceiling.index_line_length_error("MEMORY.md", grown), msg

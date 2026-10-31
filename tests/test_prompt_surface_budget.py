@@ -812,10 +812,19 @@ def test_memory_add_still_writes_an_entry_that_stays_under_the_ceiling(name, mem
     landing for the index is its tight limit and that is where its fixture starts.
     `USER.md` keeps the original start: the new bounds are scoped to the index and
     clause 3 requires a write to USER.md right up to its ceiling to go on working.
+
+    #3562 moved that largest legal landing down again, by `INDEX_ROOM_RESERVE_BYTES`: a
+    write that lands inside the tight limit but leaves less than two typed index lines of
+    room is now refused, because room is what the NEXT writer spends and the pass before run
+    47 spent all of it. A control that starts above that line stops being a control, so the
+    index's start carries the reserve and `USER.md`'s start does not — which is also the
+    clause-3 check, from the tool side: the reserve does not reach the curator's file.
     """
     session, root = memories_root
     ceiling = ps.MEMORY_CEILINGS[name]
     limit = (mc.tight_limit(name) if name == mc.INDEX_MEMORY_FILE else ceiling)
+    if name == mc.INDEX_MEMORY_FILE:
+        limit -= mc.INDEX_ROOM_RESERVE_BYTES
     (root / name).write_text("# Heading\n\n" + "x" * (limit - 400) + "\n",
                              encoding="utf-8")
 
@@ -823,6 +832,72 @@ def test_memory_add_still_writes_an_entry_that_stays_under_the_ceiling(name, mem
 
     assert out.get("success") is True, out
     assert (root / name).read_text(encoding="utf-8").endswith("- a remembered thing\n")
+
+
+def test_memory_add_refuses_an_index_entry_that_would_eat_the_room_reserve(memories_root):
+    """#3562 across the tool boundary: `memory_add` reports the room floor and writes nothing.
+
+    The guard is one predicate but the writer meets it through `agent_mcp.session`, so the
+    refusal has to survive that hop as an `INVALID_PARAM` the nightly can act on, and the
+    entry must not be on disk afterwards — "returned an error" and "refused the write" are
+    different claims, and the guard sits inside `commit_lock` between the read and
+    `write_text_durable`. Three arms, because the floor's whole design is a floor and not a
+    freeze: refused at one byte under the reserve with its shortfall named, admitted at the
+    reserve exactly, and USER.md left alone at a size the floor would refuse on the index.
+    """
+    session, root = memories_root
+    limit = mc.tight_limit(mc.INDEX_MEMORY_FILE)
+    reserve = mc.INDEX_ROOM_RESERVE_BYTES
+    entry = "- [project] something worth remembering in the index"
+    head = "# Heading\n\n"
+
+    def _index_leaving(room_after_entry: int) -> str:
+        # `_memory_add` appends `entry + "\n"` to text already ending in a newline, so the
+        # prospective size is the file plus the entry plus one — the padding is for that, and
+        # the assert below is what stops an off-by-one from grading the other arm.
+        pad = limit - room_after_entry - len(entry.encode()) - len(head) - 2
+        text = head + "x" * pad + "\n"
+        assert len(text.encode()) + len(entry.encode()) + 1 == limit - room_after_entry, (
+            "the fixture is the branch here: the room the entry is left with decides which "
+            "refusal this is, so a padding slip silently grades a different arm")
+        return text
+
+    under = _index_leaving(reserve - 1)
+    (root / "MEMORY.md").write_text(under, encoding="utf-8")
+    out = session._memory_add({"file": "MEMORY.md", "entry": entry})
+    assert "error" in out, out
+    assert out.get("code") == "INVALID_PARAM", out
+    assert f"{reserve:,}" in out["error"], out["error"]
+    assert f"{reserve - 1:,}" in out["error"], out["error"]      # the room it would leave
+    assert "1 B" in out["error"], out["error"]                    # the shortfall to free
+    # `agent_mcp/_shared._err` caps a message at 500 chars, and both branches of this refusal
+    # run past it, so the ADVICE prose is cut — the cap is asserted as a fact about the
+    # boundary rather than pretended away. What has to survive is what a writer can act on
+    # without the prose: the room it would leave, the reserve, and the shortfall to free, all
+    # of which sit in the first 240 bytes. The advice itself is graded at the guard, in
+    # `test_the_reserve_refusal_routes_to_a_linked_topic_file_and_never_to_a_trim`, which reads
+    # `memory_write_error`'s own text and is not behind the cap.
+    assert out["error"].endswith(" …[truncated]"), (
+        f"the 500-char cap stopped firing and this node's premise about the boundary is "
+        f"stale: {out['error']}")
+    assert "This is a consolidation, not a write" in out["error"], out["error"]
+    assert (root / "MEMORY.md").read_text(encoding="utf-8") == under, (
+        "the entry was written and the refusal is a report only")
+
+    at = _index_leaving(reserve)
+    (root / "MEMORY.md").write_text(at, encoding="utf-8")
+    assert session._memory_add({"file": "MEMORY.md", "entry": entry}).get("success") is True, (
+        "a write landing exactly ON the reserve must land: the floor refuses only below it")
+
+    user_ceil = ps.MEMORY_CEILINGS["USER.md"]
+    user = head + "u" * (user_ceil - len(entry.encode()) - 1 - len(head) - 1) + "\n"
+    assert len(user.encode()) + len(entry.encode()) + 1 == user_ceil, (
+        f"the fixture lands at {len(user.encode()) + len(entry.encode()) + 1}, not the "
+        f"{user_ceil:,}-byte ceiling: this arm is the one that says the floor stayed off "
+        "USER.md, so the size has to be exactly at the boundary")
+    (root / "USER.md").write_text(user, encoding="utf-8")
+    assert session._memory_add({"file": "USER.md", "entry": entry}).get("success") is True, (
+        "the room floor reached USER.md, the file the curator has to act on")
 
 
 @pytest.mark.parametrize("name", sorted(ps.MEMORY_CEILINGS))
