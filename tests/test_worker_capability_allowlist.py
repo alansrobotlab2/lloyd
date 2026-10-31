@@ -435,16 +435,18 @@ def test_the_shipped_declarations_all_resolve(tmp_path, monkeypatch):
 def test_a_source_that_declares_nothing_keeps_todays_compile():
     """The strict default is today's behaviour, not the pool and not an empty set.
 
-    Eleven sources still run on the deny union, one source per round is this
-    item's own risk rule, and the alternative — defaulting an undeclared source
-    to nothing — would take the fleet down on the day this landed. Every one of
-    them still appears in the table, which is how the owed work stays visible.
+    Every source that has not declared a ceiling still runs on the deny union,
+    one source per round is this item's own risk rule, and the alternative —
+    defaulting an undeclared source to nothing — would take the fleet down on the
+    day this landed. How many sources that is today is deliberately not asserted
+    here: a count in the node that supervises the roster goes red on the very
+    progress it watches, which is what #3533 took out (`>= 10`, written against a
+    live roster of exactly 10 — zero slack). What keeps the owed work visible is
+    coverage, and the node that pins that is
+    `test_the_owed_roster_all_appears_in_the_table_and_no_count_is_needed`.
     """
     undeclared = sorted(set(gam.worker_source_names())
                         - set(caps.SOURCE_CAPABILITIES))
-    assert len(undeclared) >= 10, (
-        f"only {len(undeclared)} sources are undeclared; the table's owed "
-        "column has quietly emptied")
     for source in undeclared:
         opts = C._worker_run_options(4, source=source)
         assert opts.allowed_tools is None
@@ -453,6 +455,90 @@ def test_a_source_that_declares_nothing_keeps_todays_compile():
     rows = _table()["sources"]
     for source in undeclared:
         assert rows[source]["reachable_after"] == rows[source]["reachable_before"]
+
+
+# ── #3533: owed visibility is coverage, not a population count ───────────────
+#
+# `test_a_source_that_declares_nothing_keeps_todays_compile` guarded the owed
+# roster with `assert len(undeclared) >= 10` while the live roster was exactly
+# 10 deep. Zero slack: the seventh declaration — the step
+# `app/harness/capabilities.py:37-58` documents as the plan — makes it 9 and
+# turns that node red with a message blaming an emptying roster for progress the
+# node exists to supervise. The two nodes below are the same guarantee with the
+# expiry date taken out of it.
+
+def _owed_sources_without_a_row(table_rows: dict,
+                               roster: set[str] | None = None) -> list[str]:
+    """Registered sources the before/after table has no row for, sorted.
+
+    The denominator is `gam.worker_source_names()` — the registry's own import
+    list — never a hand-kept list and never the committed artifact, so this is
+    the owed roster read against what the fleet actually registers.
+    """
+    names = set(gam.worker_source_names()) if roster is None else set(roster)
+    return sorted(names - set(table_rows))
+
+
+def test_the_owed_roster_all_appears_in_the_table_and_no_count_is_needed():
+    """Every owed source is visible by coverage, which cannot expire (#3533).
+
+    A count is the wrong instrument in a node that supervises declarations: the
+    roster only ever gets shorter (one source per round is the risk rule), so any
+    floor written against today's number is a snapshot with a fuse. Coverage asks
+    the question the number was reaching for — an owed source cannot leave the
+    table unseen — and stays true however far the roster is declared down.
+    """
+    rows = _table()["sources"]
+    assert _owed_sources_without_a_row(rows) == [], (
+        "these registered sources have no row in the before/after table, so "
+        "their owed ceiling is invisible — `_table()` must iterate the roster")
+    assert set(rows) == (set(gam.worker_source_names())
+                         | set(caps.SOURCE_CAPABILITIES)), (
+        "the table's rows are no longer exactly the roster plus what is "
+        "declared; it is a measurement and must not carry a row of its own")
+    # Both assertions would also pass if the predicate could never report a
+    # missing row, which is the same nothing as no node at all. So the
+    # regression this exists for is forged, in the shape it would really arrive
+    # in: `_table()` losing its roster leg and keeping only the declared rows.
+    # The floor this node replaces caught that only once the roster had already
+    # crossed the number.
+    declared_only = {s: r for s, r in rows.items() if r["declared"]}
+    assert _owed_sources_without_a_row(declared_only) == sorted(
+        set(gam.worker_source_names()) - set(caps.SOURCE_CAPABILITIES)), (
+        "a table holding only the declared rows reports nothing missing, so the "
+        "predicate above cannot see the regression it is written for")
+
+
+def test_declaring_a_seventh_source_leaves_the_deny_floor_node_green(monkeypatch):
+    """A new declaration is the event the deny-floor node has to survive (#3533).
+
+    Forged rather than hypothetical, on this file's own precedent
+    (`test_an_ingest_set_that_grants_a_sender_is_reported`). With the
+    `len(undeclared) >= 10` floor still in place the call below dies with "only 9
+    sources are undeclared; the table's owed column has quietly emptied" — which
+    is the opposite of what happened, and lands on the round that was making the
+    progress. What must stay green is the per-source deny floor for the nine that
+    are still owed, and that is what a clean return means here.
+    """
+    target = "owed-check"        # undeclared on main; the roster moves one per round
+    undeclared_before = sorted(set(gam.worker_source_names())
+                               - set(caps.SOURCE_CAPABILITIES))
+    assert target in undeclared_before, (
+        f"{target} has declared a ceiling on main, so this forge needs a source "
+        "that has not — the precondition, not a preference")
+    forged = dict(caps.SOURCE_CAPABILITIES)
+    forged[target] = ("READ_FILES",)
+    monkeypatch.setattr(caps, "SOURCE_CAPABILITIES", forged)
+
+    # The forge has to reach the compile, not sit in the dict it was patched
+    # into. `envelope_for` reads the roster at call time and
+    # `_worker_run_options` is exactly what the deny-floor node calls per source,
+    # so this is the same path — and without this line the call below would pass
+    # on a patch that did nothing.
+    assert C._worker_run_options(4, source=target).allowed_tools is not None, (
+        f"declaring {target} gave its turn no envelope, so the call below proves "
+        "nothing about a seventh declaration")
+    assert test_a_source_that_declares_nothing_keeps_todays_compile() is None
 
 
 # ── The seam: worker pool → backend, two processes, one envelope ────────────
@@ -1328,7 +1414,8 @@ def test_the_default_mode_is_shadow_and_an_unknown_value_stays_shadow(
 #  calls, counted as distinct FILES containing a name (the #2471 denominator rule).
 #  The >5%-of-files line is 87 files. Above it: Bash 1714, backlog_write_task
 #  1176, Read 455, Grep 191, backlog_get_task 180. Its volume is why this source
-#  went first among the undeclared twelve — 1615 runs in `workers.db` since
+#  went first among the sources that were still undeclared when that census ran
+#  — 1615 runs in `workers.db` since
 #  2026-10-06, against 622 for owed-check and 438 for autocode.
 # ════════════════════════════════════════════════════════════════════════════
 #: The five names the census puts above the 87-file line. This is the floor the
