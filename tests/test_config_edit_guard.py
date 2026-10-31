@@ -28,6 +28,7 @@ commit) so the guard cannot pass by always refusing.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -40,13 +41,15 @@ from scripts.automod import spec
 ROOT = Path(__file__).resolve().parent.parent
 GUARD_CLI = ROOT / "scripts" / "config_edit_guard.py"
 
-#: The committed baseline of the fixture repo. `workers.slots` sits under a
-#: denied prefix, `discord.token` is a denied leaf (the key #40's own skill
-#: refuses at `grep -n 'discord.home_channel' skills/nightly-reflection-config/SKILL.md`),
-#: and `logging.level` and `reflection.confidence_floor` are free. The
-#: credential block has to exist at `HEAD` for the leaf rule to have a path to
-#: name: the differ records an *added* key at the node that was added, so a
-#: whole new block would diff as `discord`, not `discord.token`.
+#: The committed baseline of the fixture repo. `workers.slots` sits under a denied
+#: prefix, `discord.token` is a denied leaf name, `discord.home_channel` and
+#: `discord.owner_id` are denied exact paths (#3472), and `logging.level`,
+#: `reflection.confidence_floor` and `discord.require_mention` are free. The keys
+#: the leaf and path rules name exist at `HEAD` so those tests judge a VALUE change;
+#: a denied path that exists only in the edit is the added-block case, which is what
+#: #3472 closed — `_diff_paths` used to record an added key at the node that was
+#: added and never descend, so a whole new `discord:` block diffed as `discord` and
+#: was admitted. That case is `test_a_denied_block_added_whole_is_refused_naming…`.
 BASE_CONFIG = """\
 # Lloyd engine config — fixture baseline.
 workers:
@@ -54,6 +57,8 @@ workers:
   slots: 4
 discord:
   home_channel: ""
+  owner_id: ""
+  require_mention: true
   token: ""
 logging:
   level: info
@@ -190,6 +195,193 @@ def test_the_cli_reports_a_comment_edit_and_a_denial_as_different_outcomes(
     assert denied_verdict["allowed"] is False
     assert denied_verdict["status"] == guard.DENIED
     assert denied_verdict["status"] != comment_verdict["status"]
+
+
+# --- #3472: the two measured holes in the fence this guard inherits -----------
+
+
+@pytest.mark.parametrize("key, old, new", [
+    ("home_channel", '  home_channel: ""', '  home_channel: "1234567890123456789"'),
+    ("owner_id", '  owner_id: ""', '  owner_id: "1234567890123456789"'),
+])
+def test_the_two_discord_routing_keys_are_refused_naming_path_and_rule(
+    repo: Path, key: str, old: str, new: str
+) -> None:
+    """Where the fleet's alerts go is Alan's call, not a nightly run's.
+
+    `skills/nightly-reflection-config/SKILL.md` forbids a `config.yaml` edit to
+    `discord.home_channel`/`token`/`owner_id`, and until #3472 the fence behind that
+    sentence backed one of the three: `token` is caught only because `token` happens
+    to be a denied LEAF name, while these two came back as a value change inside the
+    fence. `discord.home_channel: null` in the live file is a ruling, not an unset
+    credential — see that skill's pinned row and
+    `topics/retired-decisions-alan-s-rulings-do-not` — which is why filling it in
+    unattended has to be refused rather than merely advised against.
+    """
+    _edit(repo, old, new)
+
+    verdict = guard.check_config_edit(repo)
+
+    assert verdict.allowed is False
+    assert verdict.status == guard.DENIED
+    assert f"discord.{key}" in verdict.reason, verdict.reason
+    assert "denied key" in verdict.reason, verdict.reason
+    assert f"discord.{key}" in verdict.changed_paths, verdict.changed_paths
+
+
+def test_a_sibling_discord_tunable_still_lands_through_the_commit_route(
+    repo: Path,
+) -> None:
+    """Positive control on the same block: `require_mention` is a tunable, so
+    fencing two keys of `discord` must not freeze the section. The route is the
+    job's own `commit`, so a fence that had widened to the whole block would show up
+    here refusing an edit #40 is allowed to make."""
+    _edit(repo, "  require_mention: true", "  require_mention: false")
+
+    run = _run_cli("--repo", str(repo), "commit",
+                   "-m", "nightly-reflection: config require_mention off", repo=repo)
+
+    assert run.returncode == guard.EXIT_ALLOWED, f"{run.stdout}\n{run.stderr}"
+    head = guard.head_config(repo)
+    assert head is not None and "require_mention: false" in head, head
+    assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == "2"
+
+
+def test_a_denied_block_added_whole_is_refused_naming_the_key_inside_it(
+    repo: Path,
+) -> None:
+    """Hole 1 on #40's own route, across the boundary the job actually uses.
+
+    The differ records an added key at the node that was added, so until #3472 a
+    whole `observability:` block carrying a collector credential diffed as
+    `observability` — no denied prefix, and `observability` is not a denied leaf
+    name — and this guard committed it to `main`. The refusal now names the key
+    inside the block, which is the one a reviewer has to see.
+    """
+    cfg = repo / guard.CONFIG_PATH
+    cfg.write_text(cfg.read_text() + "observability:\n  otel:\n"
+                   "    sample_rate: 0.1\n    token: 'collector-secret'\n")
+
+    run = _run_cli("--repo", str(repo), "--json", repo=repo)
+
+    assert run.returncode == guard.EXIT_DENIED, run.stdout
+    verdict = json.loads(run.stdout)
+    assert verdict["status"] == guard.DENIED
+    assert "observability.otel.token" in verdict["reason"], verdict
+    assert "observability.otel.token" in verdict["changed_paths"], verdict
+
+    # Positive control: the same block, credential removed, is a value change.
+    cfg.write_text(cfg.read_text().replace(
+        "    token: 'collector-secret'\n", "    endpoint_name: otel-collector\n"))
+    allowed = _run_cli("--repo", str(repo), "--json", repo=repo)
+    assert allowed.returncode == guard.EXIT_ALLOWED, allowed.stdout
+    assert json.loads(allowed.stdout)["status"] == guard.VALUE_CHANGED
+
+
+def test_an_untouched_tree_and_a_comment_edit_stay_no_value_changed(
+    repo: Path,
+) -> None:
+    """Clause 5, after the recursion: an untouched tree and a comment-only edit are
+    admitted outcomes, not denials, and `status` is what separates them from a
+    refusal — the differ underneath answers `ok=False` for all three of them."""
+    untouched = _run_cli("--repo", str(repo), "--json", repo=repo)
+    assert untouched.returncode == guard.EXIT_ALLOWED, untouched.stderr
+    assert json.loads(untouched.stdout)["status"] == guard.NO_VALUE_CHANGED
+
+    cfg = repo / guard.CONFIG_PATH
+    cfg.write_text(cfg.read_text() + "# a comment the run added\n")
+    commented = _run_cli("--repo", str(repo), "--json", repo=repo)
+    assert commented.returncode == guard.EXIT_ALLOWED, commented.stderr
+    assert json.loads(commented.stdout)["status"] == guard.NO_VALUE_CHANGED
+
+    _edit(repo, "  slots: 4", "  slots: 16")
+    denied = _run_cli("--repo", str(repo), "--json", repo=repo)
+    assert denied.returncode == guard.EXIT_DENIED, denied.stdout
+    assert json.loads(denied.stdout)["status"] == guard.DENIED
+
+
+# --- clause 6: the skill's prose and this fence are one rule, not two ----------
+
+#: The Discord keys `skills/nightly-reflection-config/SKILL.md` refuses and the
+#: fence has to back: `token` by denied leaf name, `home_channel` and `owner_id`
+#: by denied exact path (#3472 — until then only `token` was, because `token`
+#: happens to be a leaf name). One tuple read by BOTH halves of the test below, so
+#: prose and fence are graded against the same list and a rename in either trips it.
+DISCORD_ROUTING_KEYS = ("discord.home_channel", "discord.token", "discord.owner_id")
+
+#: Where the skill's enumeration of refused keys begins, in its own words. Located
+#: by wording rather than by line number or heading, which both drift.
+_FENCE_BULLET_MARKER = "The refused keys are"
+
+
+def _nightly_config_skill() -> str:
+    """The live `nightly-reflection-config` skill — the file job #40 reads.
+
+    `Path.home() / "obsidian"`, deliberately not `app.data_root.vault_root()`: a
+    suite run that redirects the vault would otherwise judge a fixture's prose
+    instead of the instruction the nightly run actually follows. Fails rather than
+    passing an absence, the shape of `test_ambient_inject.py::_skill` — a test that
+    returned early on a missing vault would report prose and fence as agreeing on
+    the strength of there being no prose at all.
+    """
+    skill = Path.home() / "obsidian" / "skills" / "nightly-reflection-config" / "SKILL.md"
+    if not skill.exists():
+        pytest.fail(f"no live skill at {skill} — cannot check prose against the fence")
+    return skill.read_text(encoding="utf-8")
+
+
+#: A line that starts a bullet, at any indent. Everything after it until the next
+#: one is that bullet's own prose, however the file wraps it.
+_BULLET_START = re.compile(r"^\s*- ")
+
+
+def _bullets(text: str) -> list[str]:
+    """Every bullet of the document, each wrapped lines joined into one string.
+
+    The skill wraps at ~100 columns, so a sentence searched for in raw lines is
+    two sentences: matching `The refused keys are` against the file as read fails
+    when the phrase happens to straddle a newline, which is a reflow away from a
+    red test that says nothing about the fence.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        if _BULLET_START.match(line) or not out:
+            out.append(line.strip())
+        else:
+            out[-1] = f"{out[-1]} {line.strip()}".strip()
+    return out
+
+
+def _fence_bullet(text: str) -> str:
+    """The one bullet that enumerates the keys the guard refuses. Located by its
+    own wording, so editing anywhere else in the skill cannot move the window."""
+    hits = [b for b in _bullets(text) if _FENCE_BULLET_MARKER in b]
+    if len(hits) != 1:
+        pytest.fail(f"expected exactly one bullet enumerating the refused keys, found "
+                    f"{len(hits)} — the prose the fence has to match has moved or gone")
+    return hits[0]
+
+
+def test_the_skills_fence_bullet_and_the_fence_name_the_same_discord_keys() -> None:
+    """Clause 6, pinned from both sides.
+
+    #3472 was filed because that skill refused three keys in prose and the fence
+    behind the sentence enforced one of them, so an unattended run read a rule that
+    was not there and could repoint every alert the fleet emits. Checking the key
+    list twice — that the fence refuses each one, and that the skill's bullet names
+    each one — is what makes the two files unable to drift apart silently, which is
+    the failure a vault-side edit outside the graded tree would otherwise hide.
+    """
+    bullet = _fence_bullet(_nightly_config_skill())
+
+    for key in DISCORD_ROUTING_KEYS:
+        # The fence side: a value change to a key the prose refuses is refused,
+        # naming that key as the offending path.
+        ok, reason, paths = spec.config_value_change(f"{key}: old\n", f"{key}: new\n")
+        assert not ok, f"the fence admits `{key}`, which the skill refuses in prose"
+        assert key in reason and key in paths, (key, reason, paths)
+        # The prose side: the bullet still names it.
+        assert f"`{key}`" in bullet, f"the skill's fence bullet no longer names `{key}`"
 
 
 # --- clause 3: the nightly commit route reaches the refusal -------------------

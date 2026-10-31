@@ -624,6 +624,100 @@ def test_a_top_level_key_removal_is_refused():
     assert ok and paths == ["b.x"], reason
 
 
+def test_an_added_denied_subtree_is_refused_naming_the_deepest_key():
+    """#3472 hole 1, by the measurement triage filed it with.
+
+    `_diff_paths` recorded an ADDED key at the node that was added and never
+    descended into its value, so a denied subtree introduced whole under a
+    top-level key that is present at `HEAD` and not itself denied reached
+    `config_value_change` as ONE path — `discord`, `automod.guardian` — and came
+    back `(True, 'value change within the fence: …')`. The live-tree witness is
+    `automod:` at config.yaml:1436, which carries `enabled`/`chamber`/`gate`/
+    `review`/`landing` and no nested `guardian`: `_config_denied_prefix` cannot
+    match `automod.guardian` (`guardian` is not a dotted prefix of it, nor is
+    `automod.landing`), so the whole rollback engine sat inside the fence.
+    """
+    # A credential introduced under a parent absent at HEAD: refused at the leaf
+    # inside it, which is the key a reviewer has to see.
+    ok, reason, paths = spec.config_value_change("a: 1\n", "a: 1\ndiscord:\n  token: x\n")
+    assert not ok, reason
+    assert "`discord.token` is a denied leaf name (`token`)" in reason, reason
+    assert "discord.token" in paths, paths
+    # Denied WHOLE at the top level, introduced one level down: the path the
+    # prefix rule cannot reach, named by the rule that can.
+    ok, reason, paths = spec.config_value_change(
+        "automod:\n  thing: 1\n", "automod:\n  thing: 1\n  guardian:\n    x: 1\n")
+    assert not ok and paths == ["automod.guardian"], paths
+    assert "`automod.guardian` is a denied block name (`guardian`)" in reason, reason
+    # Two denied keys inside one added block are both named, and the block's own
+    # path stays in the report: it is the change that was made.
+    ok, reason, paths = spec.config_value_change(
+        "a: 1\n", "a: 1\ndiscord:\n  token: x\n  home_channel: '#42'\n")
+    assert not ok and "discord.token" in reason, reason
+    assert "discord.home_channel" in reason, reason
+    assert paths == ["discord", "discord.home_channel", "discord.token"], paths
+
+
+def test_an_added_benign_block_is_still_admitted():
+    """The bound on the fix: descending into an added subtree must not refuse a
+    block the fence has no interest in. Same shape as the positive control in
+    `test_a_top_level_key_removal_is_refused`, one level deeper — where a whole
+    added block reports the block's own path and lands.
+
+    Descending stops AT a denied key rather than through it: a `token` appearing
+    anywhere, at any depth, is the credential the 2026-06-04 TTS incident was
+    about, so an added block containing one is refused however benign the block.
+    """
+    ok, reason, paths = spec.config_value_change(
+        "a:\n  cap: 400\n", "a:\n  cap: 400\n  logging:\n    level: info\n")
+    assert ok and paths == ["a.logging"], (reason, paths)
+    ok, reason, paths = spec.config_value_change(
+        "a:\n  cap: 400\n", "a:\n  cap: 400\nb:\n  deep:\n    deeper: 1\n")
+    assert ok and paths == ["b"], (reason, paths)
+    ok, reason, paths = spec.config_value_change(
+        "a:\n  cap: 400\n", "a:\n  cap: 400\nb:\n  token: literal-not-a-tunable\n")
+    assert not ok and "`b.token` is a denied leaf name (`token`)" in reason, reason
+
+
+def test_a_removed_denied_subtree_is_refused_by_the_same_rule():
+    """The recursion has two sides and a config edit can come from either.
+
+    Deleting a `guardian:` block out from under an existing `automod:` is the same
+    hole read backwards: the differ recorded `automod.guardian` as the changed path,
+    no denied prefix reaches it, and the top-level-removal rule needs a path with no
+    dot in it — measured at base `0fa26e0b`, the call returned `(True, 'value change
+    within the fence: automod.guardian')`, which is a diff that switches off the
+    rollback engine by deleting its configuration and ships. The block rule travels
+    in the differ's third slot rather than being read off the path, so it fires
+    whichever side the node went missing from. A block with nothing denied in it
+    still simply disappears.
+    """
+    ok, reason, paths = spec.config_value_change(
+        "automod:\n  thing: 1\n  guardian:\n    x: 1\n", "automod:\n  thing: 1\n")
+    assert not ok and paths == ["automod.guardian"], (reason, paths)
+    assert "`automod.guardian` is a denied block name (`guardian`)" in reason, reason
+    ok, reason, paths = spec.config_value_change(
+        "automod:\n  thing: 1\n  observe:\n    x: 1\n", "automod:\n  thing: 1\n")
+    assert ok and paths == ["automod.observe"], (reason, paths)
+
+
+def test_the_gate_moves_an_added_denied_subtree_out_of_the_value_lane():
+    """#3472 clause 3: the recursion changes the GATE's verdict, not only #40's
+    guard. This diff used to land in `config_value` and ship a collector
+    credential to `main`; now it is a denied path, and the reason a reviewer reads
+    names the deepest key rather than the block that hid it."""
+    ok, reason, buckets = _scope_with(
+        "a:\n  cap: 400\n", "a:\n  cap: 400\n  otel:\n    token: 'collector-secret'\n")
+    assert not ok, reason
+    assert buckets["denied"] == ["config.yaml"], buckets
+    assert buckets["config_value"] == [] and buckets["comment_only"] == [], buckets
+    assert "otel.token" in reason, reason
+    # The benign version of the same shape still takes the value lane.
+    ok, reason, buckets = _scope_with(
+        "a:\n  cap: 400\n", "a:\n  cap: 400\n  otel:\n    sample_rate: 0.1\n")
+    assert ok and buckets["config_value"] == ["config.yaml"], reason
+
+
 def test_no_value_change_is_not_a_value_lane():
     """Identical documents are the comment lane's business; the value lane
     refuses them, so a diff that passes neither says so for both."""
@@ -711,7 +805,18 @@ def test_the_denied_key_set_is_the_one_landed():
         # `write_gate`, not `knowledge_graph` — the sibling tunable stays editable,
         # pinned by test_the_write_gate_fence_stops_at_arming.
         "knowledge_graph.write_gate",
+        # #3472: the two Discord routing keys the nightly skill refused in prose
+        # and the fence did not. `discord.token` was caught by the `token` LEAF
+        # name; these were admitted, and they decide where every alert goes.
+        "discord.home_channel",
+        "discord.owner_id",
     )
+    # The names `_diff_paths` refuses for ARRIVING one level down, derived from the
+    # tuple above: adding `guardian:` under an existing `automod:` is the case.
+    assert spec.CONFIG_DENIED_BLOCKS == frozenset({
+        "mcp_servers", "models", "model", "subagents", "server", "services",
+        "guardian",
+    })
     assert spec.CONFIG_LOOP_SOURCES == ("autocode", "autotriage", "owed-check")
     assert spec.CONFIG_LOOP_SOURCE_LEAVES == {
         "enabled", "max_inflight", "model", "max_turns", "max_duration_seconds", "apply"}

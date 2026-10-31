@@ -360,6 +360,55 @@ def test_preflight_lands_a_comment_only_config_edit_and_no_other(live_repo, tmp_
         assert "config value change → drill required" in reason, reason
 
 
+@pytest.mark.parametrize("added, refused", [
+    # A block denied WHOLE at the top level, introduced one level down. The path
+    # is `automod.guardian`, which sits under no denied prefix — `guardian` is not
+    # a dotted prefix of it and neither is `automod.landing` — so before #3472 this
+    # came back a value change inside the fence and took the lane that ships it to
+    # `main` with a drill as its only witness.
+    ("  guardian:\n    enabled: true\n    auto_rollback: true\n", True),
+    # The same shape with no denied key in it: the value lane stays open, so the
+    # widened fence has not frozen an ordinary config edit.
+    ("  observe:\n    sample_rate: 0.1\n", False),
+])
+def test_preflight_judges_the_keys_inside_an_added_config_block(
+    live_repo, tmp_path, monkeypatch, added, refused,
+):
+    """#3472 clause 3, across the boundary the GATE itself crosses.
+
+    Preflight hands `check_scope` a `contents` callable that reads `config.yaml`
+    out of two git revs — `git show <base>:config.yaml` and `git show HEAD:…` in
+    `_both_sides` — and that route is what decides whether a denied subtree reaches
+    `main`. The differ's own tests reach `check_scope` through a lambda over two
+    strings, which proves the rule but not the reading of a real committed pair, so
+    this builds a base commit and a round commit in a throwaway repo and stubs
+    nothing but the ledger and the halt flags."""
+    (live_repo / "config.yaml").write_text(
+        "automod:\n  enabled: true\n  gate:\n    floor_lines: 162\n", encoding="utf-8")
+    git(live_repo, "add", "-A")
+    git(live_repo, "commit", "-q", "-m", "config")
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/added", str(wt), base)
+    cfg = wt / "config.yaml"
+    cfg.write_text(cfg.read_text() + added, encoding="utf-8")
+    git(wt, "commit", "-q", "-am", "add a nested block")
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+
+    ok, reason, data = g.rung_preflight()
+
+    buckets = data["buckets"]
+    assert ok is not refused, reason
+    if refused:
+        assert "denied" in reason, reason
+        assert "`automod.guardian` is a denied block name (`guardian`)" in reason, reason
+        # Not one path of it reaches the value lane: no ship, and no drill armed in
+        # its place — the diff is refused outright.
+        assert buckets["config_value"] == [] and buckets["comment_only"] == [], buckets
+    else:
+        assert buckets["config_value"] == ["config.yaml"], buckets
+
+
 def test_preflight_accepts_an_in_scope_diff(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"

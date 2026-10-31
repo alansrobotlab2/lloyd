@@ -343,6 +343,17 @@ CONFIG_DENIED_KEYS: tuple[str, ...] = (
     # `write_gate`, NOT `knowledge_graph`: `knowledge_graph.write_enabled` is a
     # tunable a round may change — see the test of the same shape.
     "knowledge_graph.write_gate",
+    # #3472: the two Discord routing keys `skills/nightly-reflection-config/SKILL.md`
+    # refused in prose only. `discord.token` was caught all along, because `token`
+    # happens to be a denied LEAF name; `home_channel` and `owner_id` were admitted,
+    # so an unattended run could repoint every alert the fleet emits at the channel
+    # and owner Alan ruled stay unset (`discord.home_channel: null` is a ruling, not
+    # an unset credential — see that skill's pinned row and
+    # `topics/retired-decisions-alan-s-rulings-do-not`). Dotted exact paths, not the
+    # bare leaf names: `owner_id` is a routing key, not a credential, and fencing the
+    # spelling would freeze every unrelated key that shares it.
+    "discord.home_channel",
+    "discord.owner_id",
 )
 
 # The loop's own three worker sources are fenced by LEAF, not by prefix. The
@@ -367,6 +378,20 @@ CONFIG_DENIED_LEAVES: frozenset[str] = frozenset({
     "token", "api_key", "password", "secret",
 })
 
+#: The names of the blocks `CONFIG_DENIED_KEYS` denies WHOLE: its undotted
+#: entries, derived rather than hand-copied so the two cannot drift. Used only by
+#: the added/removed-node lane of `_fenced_reason` (#3472). A block denied at the
+#: top level must not be able to arrive one level down: `automod.guardian` is
+#: under no denied prefix (`guardian` is not a dotted prefix of it, and neither is
+#: `automod.landing`), so before this the whole rollback engine could be
+#: introduced as a nested block and read as inside the fence. A value change to an
+#: unrelated key that merely shares one of these spellings (`whisper.model`) is
+#: untouched — the name rule fires only where a node appeared or disappeared
+#: whole, which is the case the differ used to leave unjudged.
+CONFIG_DENIED_BLOCKS: frozenset[str] = frozenset(
+    key for key in CONFIG_DENIED_KEYS if "." not in key
+)
+
 #: How many changed paths an admitting reason lists before "…".
 _CONFIG_REASON_PATHS = 10
 
@@ -383,20 +408,80 @@ def _config_denied_prefix(path: str) -> str | None:
     return None
 
 
+def _denied_block_rule(path: str) -> str | None:
+    """Refuse a block denied WHOLE at the top level for arriving one level down.
+
+    `automod.guardian` sits under no denied prefix — `guardian` is not a dotted
+    prefix of it, and neither is `automod.landing` — so prefix-matching alone read a
+    nested rollback engine introduced under an existing `automod:` as inside the
+    fence (measured on the live file 2026-10-27: `automod:` is config.yaml:1436 with
+    children `enabled`/`chamber`/`gate`/`review`/`landing` and no `guardian`). The
+    caller invokes this only for a node that appeared or vanished whole, which is
+    where the block-name spelling matters: an ordinary value change to an unrelated
+    key that merely shares one of these names (`whisper.model`) stays a tunable.
+    """
+    leaf = path.rsplit(".", 1)[-1]
+    if "." in path and leaf in CONFIG_DENIED_BLOCKS and _config_denied_prefix(path) is None:
+        return f"`{path}` is a denied block name (`{leaf}`)"
+    return None
+
+
+def _denied_paths_under(node, prefix: str) -> list[tuple[str, object]]:
+    """Every denied dotted path inside `node`, with its value, depth-first.
+
+    A deny rule has to be checked against the keys INSIDE a block, not only the
+    block's own name — which is what `agent_mcp/config_writer.py`'s
+    `_check_denied_keys` has done since the 2026-06-04 TTS-credential incident, when
+    a whole `providers.qwen_tts` block carrying a real credential walked past a fence
+    keyed on the file path. This is that walk, widened to the dotted prefixes, the
+    loop-source control leaves and the nested block names rather than the flat leaf
+    list that incident left behind. A list is a leaf, so its items get no paths of
+    their own and a denied key cannot hide in one; only a `${` placeholder can, and
+    that is judged on the whole value.
+    """
+    found: list[tuple[str, object]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            inner = f"{prefix}.{key}" if prefix else str(key)
+            leaf = inner.rsplit(".", 1)[-1]
+            if (_config_denied_prefix(inner) is not None or leaf in CONFIG_DENIED_LEAVES
+                    or ("." in inner and leaf in CONFIG_DENIED_BLOCKS)):
+                found.append((inner, value))
+            else:
+                found.extend(_denied_paths_under(value, inner))
+    return found
+
+
 def _diff_paths(before, after, prefix: str = "") -> dict[str, tuple]:
-    """Changed dotted key paths → (before, after). A list is a leaf."""
+    """Changed dotted key paths → (before-value, after-value, block rule or None).
+
+    A list is a leaf. The function recurses into a node only when it exists on BOTH
+    sides, since those are the branches whose individual leaves moved; a subtree that
+    appeared or vanished is therefore reported at its block. #3472 closed the hole
+    that left: an added or removed block now ALSO reports every denied key inside it
+    (`_denied_paths_under`) as a path of its own, so the fence judges those and a
+    refusal names the deepest one — `discord.token`, not `discord` — however deep it
+    sits. The third slot carries the one rule that cannot be read off a path alone:
+    a denied WHOLE-block name arriving below the top level (`automod.guardian`). A
+    wholly benign added block gains no paths and lands. For a modified leaf the two
+    value slots keep their old meaning: the placeholder rule judges either side.
+    """
     out: dict[str, tuple] = {}
     if isinstance(before, dict) and isinstance(after, dict):
         for key in sorted(set(before) | set(after), key=str):
             path = f"{prefix}.{key}" if prefix else str(key)
             if key not in before:
-                out[path] = (None, after[key])
+                out[path] = (None, after[key], _denied_block_rule(path))
+                for inner, value in _denied_paths_under(after[key], path):
+                    out[inner] = (None, value, _denied_block_rule(inner))
             elif key not in after:
-                out[path] = (before[key], None)
+                out[path] = (before[key], None, _denied_block_rule(path))
+                for inner, value in _denied_paths_under(before[key], path):
+                    out[inner] = (value, None, _denied_block_rule(inner))
             else:
                 out.update(_diff_paths(before[key], after[key], path))
     elif before != after:
-        out[prefix] = (before, after)
+        out[prefix] = (before, after, None)
     return out
 
 
@@ -419,7 +504,13 @@ def config_value_change(before: str, after: str) -> tuple[bool, str, list[str]]:
     compared whole. Refused when any changed path sits under a
     `CONFIG_DENIED_KEYS` prefix, names a `CONFIG_DENIED_LEAVES` leaf, carries a
     `${` placeholder on either side, or removes a top-level key; the reason
-    names every offending path and the rule that caught it.
+    names every offending path and the rule that caught it. A block that
+    appeared or vanished whole is judged by the keys inside it as well, and
+    those are what the reason names — so adding `guardian:` under an existing
+    `automod:` is refused as `automod.guardian`, and a new `discord:` block
+    carrying a `token:` as `discord.token`, never as the block's own name (#3472;
+    the differ reported one path for a whole added block and nothing below it was
+    ever judged, so both refusals used to come back `ok=True`).
     """
     import yaml
     docs = []
@@ -435,20 +526,33 @@ def config_value_change(before: str, after: str) -> tuple[bool, str, list[str]]:
     changed = sorted(diff)
     if not changed:
         return False, "no value changed", []
+    # Per changed path, the three rules that were always there — denied prefix,
+    # denied leaf name, placeholder on either side (replacing `${LIVEKIT_API_KEY}`
+    # with a literal is the secret-in-the-tree path) — plus the differ's own verdict
+    # on the node, which for an added or removed block is about the keys INSIDE it
+    # (its third slot, #3472). A removed block can be accused by both, so the
+    # accumulate dedupes rather than naming one offence twice.
     offences: list[str] = []
+
+    def accuse(text: str) -> None:
+        if text not in offences:
+            offences.append(text)
+
     for path in changed:
-        old, new = diff[path]
+        old, new, block_rule = diff[path]
+        if block_rule:
+            accuse(block_rule)
         prefix = _config_denied_prefix(path)
         if prefix is not None:
-            offences.append(f"`{path}` is under the denied key `{prefix}`")
+            accuse(f"`{path}` is under the denied key `{prefix}`")
         leaf = path.rsplit(".", 1)[-1]
         if leaf in CONFIG_DENIED_LEAVES:
-            offences.append(f"`{path}` is a denied leaf name (`{leaf}`)")
+            accuse(f"`{path}` is a denied leaf name (`{leaf}`)")
         if _has_placeholder(old) or _has_placeholder(new):
-            offences.append(f"`{path}` carries a `${{` placeholder — secrets reach "
-                            f"config.yaml only that way")
+            accuse(f"`{path}` carries a `${{` placeholder — secrets reach "
+                   f"config.yaml only that way")
         if "." not in path and new is None:
-            offences.append(f"`{path}` is a top-level key and the change removes it")
+            accuse(f"`{path}` is a top-level key and the change removes it")
     if offences:
         return False, "; ".join(offences), changed
     shown = ", ".join(changed[:_CONFIG_REASON_PATHS])
