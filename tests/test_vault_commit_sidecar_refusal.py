@@ -59,6 +59,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -97,6 +98,96 @@ SCF = _load_rung()
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True)
+
+
+_REPO = Path(__file__).resolve().parents[1]
+
+# The env var `refusal_disabled_by_environment()` reads, taken from the module
+# under test so the pin cannot drift from the seam it guards, and the name that
+# module EXports — which is why grepping the bare variable name is not enough:
+# `os.environ[MEASUREMENT_SEAM] = "off"` contains neither the name nor any
+# assignment spelling of it.
+_SEAM = SCF.MEASUREMENT_SEAM
+_ALIAS = "MEASUREMENT_SEAM"
+
+# A line outside `tests/` STANDS THE GUARD DOWN when it puts a value into an
+# environment under either name. The rule is the inverse of the list it replaces
+# (#3427): the old check named two spellings and matched 3 of the 9 realistic
+# setters, missing `env[<seam>] = …`, `os.environ.setdefault(…)`, the YAML form
+# and the alias — so a spelling list has to anticipate every future form, and this
+# one does not. Outside `tests/`, ANY line naming the seam is a setter unless it
+# only does one of the two things the reader legitimately does with it.
+_LEGITIMATE = (
+    # Binding the NAME to the alias is not writing the variable.
+    re.compile(rf"^\s*{_ALIAS}\s*=\s*[\"']{re.escape(_SEAM)}[\"']\s*$"),
+    # Reading it. Kept narrow (`.get(<name>)`) rather than "mentions environ", so
+    # a line that reads AND writes on one line stays a setter.
+    re.compile(rf"\.get\(\s*(?:{_ALIAS}|[\"']{re.escape(_SEAM)}[\"'])\s*\)"),
+)
+
+# The shapes that WRITE an environment. Needed only for the alias: `MEASUREMENT_SEAM`
+# is a generic enough constant name that "names it at all" would report any
+# unrelated module's own seam, while a name-specific line needs no such filter.
+_WRITES_ENV = re.compile(
+    r"environ\s*\[[^\]]*\]\s*="             # os.environ[NAME] = … (or via the alias)
+    r"|environ\.(?:update|setdefault)\b"    # os.environ.update({…}) / .setdefault(…)
+    r"|\b(?:putenv|setenv)\s*\("            # the C-level routes
+    r"|\benv\s*(?:\[[^\]]*\]\s*=|\.update\s*\(|=\s*\{)"   # env[NAME] = / env = {…}
+)
+
+
+def _exempt(line: str) -> bool:
+    """True when a line names the seam without writing it."""
+    return (any(p.search(line) for p in _LEGITIMATE)
+            and not _WRITES_ENV.search(line))
+
+
+def seam_lines(repo: Path) -> list[tuple[str, int, str]]:
+    """Every line outside `tests/` naming the seam or its exported alias.
+
+    `--untracked` because `git grep` is tracked-only by default, and a setter in a
+    file nobody has `git add`ed still runs (precedent for the flag: `:287` of
+    `tests/test_daily_note_shared_header.py`). The corpus is the repo's own text —
+    the vault's autonomy task files are a different tree and a different ruling.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "grep", "-n", "-I", "--untracked",
+         "--fixed-strings", "-e", _SEAM, "-e", _ALIAS, "--", ":!tests/"],
+        capture_output=True, text=True)
+    assert proc.returncode in (0, 1), proc.stderr   # 1 is simply "no match"
+    hits = []
+    for raw in proc.stdout.splitlines():
+        path, _, rest = raw.partition(":")
+        lineno, _, text = rest.partition(":")
+        hits.append((path, int(lineno), text))
+    return hits
+
+
+def seam_setters(repo: Path) -> list[tuple[str, int, str]]:
+    """Lines outside `tests/` that stand the #3236 guard down."""
+    return [h for h in seam_lines(repo) if not _exempt(h[2])]
+
+
+def _plant(tmp_path: Path, *files: tuple[str, str]) -> Path:
+    """A scratch repo with COMMITTED non-test files holding the given text.
+
+    Committed, not merely written: `seam_lines` reads tracked and untracked text,
+    so a plant that only sat on disk would stay green even if the check dropped
+    `--untracked` tomorrow. No path is ever under `tests/`, which is the scope the
+    pin excludes.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    assert _git(repo, "init", "-q").returncode == 0
+    for name, text in files:
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    assert _git(repo, "add", "--", *[name for name, _ in files]).returncode == 0
+    committed = _git(repo, "-c", "user.name=pin", "-c", "user.email=pin@invalid",
+                     "commit", "-q", "-m", f"plant {len(files)} file(s)")
+    assert committed.returncode == 0, committed.stderr
+    return repo
 
 
 @pytest.fixture()
@@ -414,8 +505,8 @@ if __name__ == "__main__":
 
 def test_the_measurement_seam_stands_the_guard_down_and_production_never_sets_it(
         vault_repo, monkeypatch):
-    """`LLOYD_VAULT_SIDECAR_REFUSAL=off` is for controls, and nothing on the live
-    path sets it.
+    """The seam is for controls — set it to `off` and the guard stands down — and
+    nothing on the live path sets it.
 
     #2960's and #3230's controls must SHOW the leak — run the wrapper with the ignore
     lines deleted and require the WAL+SHM in its commit — and a suffix refusal sits in
@@ -436,13 +527,112 @@ def test_the_measurement_seam_stands_the_guard_down_and_production_never_sets_it
         f"reproduce the leak: {proc.stderr}")
     assert "sidecar REFUSED" not in proc.stderr, proc.stderr
 
-    # Production never sets it: no source file, no config, no autonomy task writes
-    # the name. Scoped to the repo's own text so a fixture that merely READS the
-    # seam (this file, the #2960 helper) is not mistaken for a setter.
-    setters = subprocess.run(
-        ["git", "-C", str(Path(__file__).resolve().parents[1]), "grep", "-l",
-        "-e", "LLOYD_VAULT_SIDECAR_REFUSAL=", "-e", 'LLOYD_VAULT_SIDECAR_REFUSAL": ',
-        "--", ":!tests/"],
+    # Production never sets it: no source file, no config writes the name. Scoped
+    # to the repo's own text so a fixture that merely READS the seam (this file,
+    # the #2960 helper) is not mistaken for a setter. This used to be a grep for
+    # two assignment spellings, which matched 3 of the 9 realistic setters #3427
+    # planted and missed `env[<seam>] = …`, `os.environ.setdefault(…)`, the YAML
+    # form and any write through the exported alias — see `seam_setters`.
+    setters = seam_setters(_REPO)
+    assert not setters, (
+        "a non-test file stands the #3236 guard down, so a #2960 or #3230 control "
+        "would silently un-guard BOTH doors — `vault-commit.sh` and "
+        f"`vault_round.land()` — and the leak would not reproduce: {setters}")
+
+
+# ── #3427: the pin fires on the spellings the two-pattern grep could not see ───
+#
+# Each node plants COMMITTED non-test files in a scratch git repo and asks
+# `seam_setters` the same question the live-tree pin asks it. The first node also
+# runs the pin's OLD patterns over the same plant and requires them to find
+# nothing — that negative control is what proves the check can fire, because a
+# plant the old grep already saw would stay green on the un-widened pin.
+#
+# The old patterns are rebuilt from `_SEAM` rather than written out: this file must
+# not contain the narrow literal again (the item's verification is a grep for it),
+# and a control that re-embeds the spelling it exists to retire is the thing being
+# removed, not a way to keep it.
+_LEGACY_SHELL = _SEAM + "="              # matched `export LLOYD…=off`
+_LEGACY_DICT = f'"{_SEAM}": '            # matched `{"LLOYD…": "off"}`
+
+
+def _legacy_pin(repo: Path, pattern: str) -> list[str]:
+    """The #3236 pin's mechanism, kept only as the negative control."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "grep", "-l", "--untracked", "--fixed-strings",
+         "-e", pattern, "--", ":!tests/"],
         capture_output=True, text=True)
-    assert setters.stdout.strip() == "", (
-        f"something outside tests/ sets the seam: {setters.stdout}")
+    return proc.stdout.split()
+
+
+def _bare_symbol_pin(repo: Path) -> list[str]:
+    """What the item's title asks for: grep the variable name and nothing else."""
+    return _legacy_pin(repo, _SEAM)
+
+
+def test_the_pin_fires_on_the_python_assignment_the_two_pattern_grep_missed(tmp_path):
+    """Clause 1: `env[<seam>] = "off"` is reported — the subscript-assignment
+    idiom `tests/test_witness_artifact_clause.py:1403` already uses, rescued today
+    only by the `:!tests/` exclusion, and the form a non-test script would copy.
+    """
+    repo = _plant(tmp_path, ("scripts/control.py",
+                             f'def control(env):\n    env["{_SEAM}"] = "off"\n'))
+    assert [p for p, _, _ in seam_setters(repo)] == ["scripts/control.py"], (
+        "the widened pin did not report the assignment form the two-pattern grep "
+        f"misses: {seam_setters(repo)}")
+
+    # The control that makes the node above a control: the same plant, the same
+    # repo, the patterns as filed — invisible to both.
+    assert _legacy_pin(repo, _LEGACY_SHELL) == [], (
+        "the shell pattern saw this plant, so the node would have passed on the "
+        "narrow pin and proved nothing about the widening")
+    assert _legacy_pin(repo, _LEGACY_DICT) == [], (
+        "the dict pattern saw this plant, so the node would have passed on the "
+        "narrow pin and proved nothing about the widening")
+
+
+def test_the_pin_fires_on_the_shell_and_yaml_forms(tmp_path):
+    """Clause 2: an `export` in a `.sh` and a `KEY: value` in a `.yml` are both
+    reported. Neither is a Python assignment — the family the two patterns were
+    written for — and the YAML form matches neither `NAME=` nor `NAME": `."""
+    repo = _plant(
+        tmp_path,
+        ("scripts/control.sh", f"#!/bin/sh\nexport {_SEAM}=off\n"),
+        ("config/autonomy.yml", f"{_SEAM}: off\n"),
+    )
+    assert sorted(p for p, _, _ in seam_setters(repo)) == \
+        ["config/autonomy.yml", "scripts/control.sh"], seam_setters(repo)
+
+
+def test_the_pin_fires_on_a_write_through_the_exported_alias(tmp_path):
+    """Clause 3: the reader EXports the name as `MEASUREMENT_SEAM`, so a file can
+    stand the guard down without ever naming the variable. The bare symbol the
+    title proposes is blind to it, which the last assert pins rather than argues.
+    """
+    repo = _plant(tmp_path, ("scripts/alias_control.py",
+                             f"import os\nos.environ[{_ALIAS}] = \"off\"\n"))
+    assert [p for p, _, _ in seam_setters(repo)] == ["scripts/alias_control.py"], (
+        f"a write through the exported alias was not reported: {seam_setters(repo)}")
+    assert _bare_symbol_pin(repo) == [], (
+        "the bare symbol matched after all, so the node no longer distinguishes "
+        "alias-aware matching from name-only matching")
+
+
+def test_the_widened_pin_passes_on_the_unchanged_tree():
+    """Clause 4, with its own non-vacuity control.
+
+    Outside `tests/` the live tree names either symbol on exactly two lines, both
+    in the reader module: the line binding the alias and the `os.environ.get` read.
+    Those two are found by the grep and dropped as non-setters, which is what makes
+    a green result mean something — an exemption pattern wide enough to swallow
+    them would also have swallowed the three plants above, and those nodes fail it.
+    """
+    hits = seam_lines(_REPO)
+    assert sorted({p for p, _, _ in hits}) == \
+        ["scripts/util/sqlite_sidecar_findings.py"], hits
+    assert len(hits) == 2, f"expected only the alias definition and the read: {hits}"
+    assert not seam_setters(_REPO), (
+        f"the reader's own lines were reported as setters: {seam_setters(_REPO)}")
+    texts = [t.strip() for _, _, t in hits]
+    assert any(t.startswith(f"{_ALIAS} = ") for t in texts), texts
+    assert any(f".get({_ALIAS})" in t for t in texts), texts
