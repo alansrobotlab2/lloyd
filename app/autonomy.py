@@ -157,7 +157,7 @@ def _parse_task_file(path: Path) -> Optional[dict]:
         )
         fm["body"] = parts[2] if len(parts) > 2 else ""
         fm["_path"] = str(path)
-        return fm
+        return _id_from_filename(fm, path)   # #3625: fill a missing `id:`, and say so
     except Exception as e:
         logger.error("Failed to parse %s: %s", path, e)
         return None
@@ -6118,3 +6118,62 @@ def slot_arm_block(task: dict | None, new_status: str) -> Optional[str]:
         f"that). Boot the engine or set `{flag}: true` — which needs the GPU headroom "
         f"the park noted — and it arms normally."
     )
+
+# ── #3625: a numbered task file that forgot its own id ────────────────────────────
+#
+# `105-check-health-census-weekly.md` carried its number under `task_id:` instead of
+# `id:`, so its dict had no `id` key at all. `GET /api/autonomy/health` rendered that as
+# `task_id: 'None'` — `str(t.get("id"))` with no default, seven sites in this module —
+# and the payload line was the least of it: the write-back looks a task's file up by
+# its `NN-` name prefix, so with `task_id=None` `_find_task_file` finds nothing and
+# `_update_task_field` returns without raising (the `if not path: return` above this
+# block). A task whose file is mis-keyed therefore has every `status`, `last_run` and
+# `failure_count` write dropped in silence, which is a worse failure than the cosmetic
+# row that got it found. `~/lloyd-data/autonomy-runs/` has no `None` directory, so no
+# such task ever dispatched while this was live — the loss was in the board's state, not
+# in runs.
+#
+# The fix is here, at the one loader every consumer reads through, and not at the render
+# sites: the filename prefix is already this codebase's id authority
+# (`_find_task_file` resolves by `f"{id}-"`, `agent_mcp/autonomy.py::_next_task_id` mints
+# new ids from the same prefix), and it is the only number that cannot disagree with the
+# lookup the task has to survive. A `"?"` default at the render site would have renamed
+# the symptom to `task_id: '?'` and left the silent write loss exactly where it was.
+# The warning is not decoration: `scripts/autonomy/validate_tasks.py` drops an id-less
+# numbered file from its id map with no message (`if tid: parsed[tid] = fm`), so without
+# this line the file shape is invisible to every instrument on the board — and a repair
+# nobody is told about is how one wrong key sat for a month.
+#
+# Placed at the bottom of the module, and the call site inside `_parse_task_file`
+# replaced a line instead of adding one: `architecture/` cites this module by line
+# number at :710, :2000, :2819, :2899, :4586, :4636 and :4938, and any line inserted
+# above those moves all seven numbers out from under the prose that cites them.
+# `agent_mcp/autonomy.py`'s `frontmatter.get("id", 0)` — which renders the same file as
+# `task_id: 0` — is deliberately untouched; widening there is the owed-check's call.
+
+def _id_from_filename(task: dict, path: Path) -> dict:
+    """Give a numbered task file the id its front matter failed to declare.
+
+    Returns `task` with `id` set to the `NN-` prefix of `path.name`, or unchanged in
+    three cases: the file declares an id (even one that disagrees with its name —
+    reconciling a disagreement is `validate_tasks`'s job, and overwriting a declared id
+    from the name would make the two spellings fight), the name carries no leading
+    number (`_config.md` and the report artifacts beside it, which `_iter_task_files`
+    skips for the same reason and which must not gain an id or a nightly warning), or
+    the value is blank. The int is what a declared `id: 105` already parses to, so a
+    repaired task is indistinguishable from a healthy one downstream.
+    """
+    declared = task.get("id")
+    if declared is not None and str(declared).strip():
+        return task
+    match = re.match(r"(\d+)-", path.name)
+    if not match:
+        return task
+    task["id"] = int(match.group(1))
+    logger.warning(
+        "%s is a numbered task file with no `id:` in its front matter: using %s from "
+        "its filename. Until that key is written, every status/last_run/failure_count "
+        "write for this task reaches its file only because of that fallback, and "
+        "`scripts/autonomy/validate_tasks.py` does not see the task in its id map.",
+        path.name, task["id"])
+    return task

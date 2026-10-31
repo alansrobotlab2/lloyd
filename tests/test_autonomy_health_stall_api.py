@@ -706,3 +706,78 @@ def test_the_stalled_membership_is_the_shared_predicate_and_nothing_else(
     assert ids == expected, (
         f"the payload's stalls {sorted(ids)} are not the tasks "
         f"next_run_gap(...)['past_next_run'] flags {sorted(expected)}")
+
+
+# ── #3625: an id-less task file cannot render the literal 'None' into this payload ──
+#
+# The row that started this was `task_id: 'None'`. The builder is
+# `{"task_id": str(t.get("id")), ...}` at `app/autonomy.py:5929`, so the value was
+# `str(None)` — the literal a task dict with no `id` key produces. The file behind it
+# (`105-check-health-census-weekly.md`) carried its number under `task_id:` rather than
+# `id:`; that one-key edit is already landed (`8c781006`, 2026-10-31 01:12), and the
+# board is clean today, so this section cannot prove the fix by checking for absence: it
+# builds the offender as a fixture. Three numbered files, none declaring `id:`, driven
+# through the route exactly as `105` was — `_iter_task_files()` → `compute_health` →
+# this JSON. What the payload must show is that each file is keyed by the number in its
+# OWN NAME: an id-bearing field of this payload may be wrong about a task, but it may
+# not read as a human-shaped word for one.
+
+
+def _orphan_file(dirn: Path, task_id: int, name: str, status: str, **extra) -> Path:
+    """A numbered task file whose front matter declares no `id:`.
+
+    Same shape as `_task_file` minus the one key under test, so the fixture differs
+    from a healthy task in exactly the respect this item is about.
+    """
+    fm = {"type": "autonomy", "segment": "autonomy", "name": name, "status": status,
+          "frequency": "daily"}
+    fm.update(extra)
+    path = dirn / f"{task_id}-{name.lower().replace(' ', '-')}.md"
+    path.write_text(f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n{TASK_BODY}",
+                    encoding="utf-8")
+    return path
+
+
+def test_an_id_less_task_file_is_keyed_by_its_own_name_in_every_id_bearing_field(
+        client, autonomy_dir, queue):
+    """Clause 1: no id-bearing value in the payload is the string 'None'.
+
+    One file per destination field, because a task has one `status` and the id-bearing
+    fields this clause names are not all reachable from one row: `999-orphan` is
+    `up_next` two periods past its `next_run` (so it is idle over zero rows AND
+    stalled), `997-broken` is `failed`, `998-halted` is `paused`. `998` also carries the
+    window's only run row — the per-task `tasks` rollup is built from rows, so with zero
+    rows it is `[]` and a check against it grades nothing — and that same row is why
+    `998` is absent from `idle_tasks` below rather than present. The whole-body
+    assertion is the load-bearing one: `'None'` anywhere in the serialised payload IS the
+    defect, whichever field produced it. The keyed assertions say what the fix must
+    produce instead of merely what it must not suppress.
+    """
+    overdue = (PIN - dt.timedelta(days=2)).isoformat()
+    _orphan_file(autonomy_dir, 999, "Orphan", "up_next", next_run=overdue)
+    _orphan_file(autonomy_dir, 997, "Broken", "failed", next_run=overdue)
+    _orphan_file(autonomy_dir, 998, "Halted", "paused", next_run=overdue)
+    _seed_run(queue, PIN, "998")
+
+    body = client.get("/api/autonomy/health", params={"days": 7}).json()
+    assert "error" not in body, body
+    assert '"None"' not in json.dumps(body), (
+        "an id-bearing field rendered the literal 'None' again — the payload a human "
+        "reads as 'a task called None'")
+
+    assert "999" in {s["task_id"] for s in body["stalled"]}, (
+        f"999-orphan is two daily periods past its next_run and not in the stall list: "
+        f"{sorted(s['task_id'] for s in body['stalled'])}")
+    idle = {r["task_id"] for r in body["idle_tasks"]}
+    assert {"999", "997"} <= idle, (
+        f"an id-less file with no runs in the window dropped out of the idle rollup: "
+        f"{sorted(idle)}")
+    fleet = body["fleet"]
+    assert fleet["failed_tasks"] == ["997"], (
+        f"997-broken is status failed and renders as {fleet['failed_tasks']}: the file's "
+        "own number is the only id it can be keyed by")
+    assert fleet["paused_tasks"] == ["998"], (
+        f"998-halted is status paused and renders as {fleet['paused_tasks']}")
+    assert "998" in {t["task_id"] for t in body["tasks"]}, (
+        "the per-task rollup lost the one id-less file that ran, so its row is keyed by "
+        f"something else: {sorted(t['task_id'] for t in body['tasks'])}")
