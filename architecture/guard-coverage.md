@@ -462,7 +462,9 @@ allowlist the socket stamped when the Bash call started, plus the part of
 `Bash` hard-deny pass does not apply here and cannot: `_rpc_call` re-enters
 `call_tool`, but a nested `Bash` is refused a rung earlier by `FIXED_DENY`
 (`app/harness/rpc_policy.py:76`, admitted at `agent_mcp/_rpc.py:219`), so the
-`if name == "Bash"` branch at `agent_mcp/main.py:532` never sees the call. That
+`if name == "Bash"` branch at `agent_mcp/main.py:532` never sees the call —
+`git grep -n 'if name == "Bash"' -- agent_mcp/main.py` prints that branch's one
+line and nothing else. That
 is a stronger statement than the one it replaces, not a weaker one — and read-only
 is precisely the probe's class, so what a script pulls back *is* scanned.
 

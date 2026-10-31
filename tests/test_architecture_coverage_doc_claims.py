@@ -10642,3 +10642,374 @@ def test_measurement_doc_states_which_floor_term_can_actually_bind():
     # a later pass to paraphrase the bullet into one.
     assert "can never bind" not in text and "never binds" not in text, (
         "measurement.md overstates the arithmetic into a general impossibility")
+
+
+# ── Witness-bound line anchors ────────────────────────────────────────────────
+# A `path:NNN` cite whose prose names no resolvable `def` is graded by
+# containment: `_span_verdict` asks only whether the line falls inside SOME
+# definition, so a drifted call-site cite that slid into an unrelated function
+# still passes. 2026-10-31 measured eight of them stale on
+# architecture/guard-coverage.md for a month with the file green — 259 passed
+# with all ten of the review's replaced numbers seeded back in, and
+# `anchor_span_report` returned [] both ways. `agent_mcp/session.py:299` was
+# inside `_memory_read`, `app/harness/safety.py:526` inside `check_bash_command`,
+# `agent_mcp/main.py:529` inside `call_tool`. Containment is the wrong question
+# for "the line where X is called".
+#
+# The doc already publishes the stronger claim: its fenced blocks print the
+# `git grep -n <pat> -- <files>` commands that produced each number. That
+# command's live output is an independently checkable witness for the cite, so
+# an anchor in a file one of those blocks names must be a line that command
+# prints NOW. Not one of the ten stale numbers appears in any witness output,
+# which is why this catches the shape containment cannot see while grading the
+# live doc green with no prose rewritten. A pattern's output is memoised for the
+# run, so a page costs a handful of greps rather than one per sentence.
+#
+# This is deliberately NOT a wider prose matcher. `_symbol_before` takes the last
+# backticked token within `_SYMBOL_GAP` and `named_symbol` reads 90 chars back,
+# and a markdown table row is one physical line: widening that window over the
+# guard table yields `memory_replace` where the row means `_check_injection`, so
+# call-site binding cannot come from a prefix window.
+
+#: (doc, span, reason) — an anchor a covering witness block does NOT print,
+#: admitted on the record. Same shape and same forced failure as
+#: PATH_CITATION_EXEMPTIONS: an admission for a citation the doc no longer makes
+#: is stale and fails, so a future re-anchor cannot leave its excuse behind.
+WITNESS_EXEMPTIONS: set[tuple[str, str, str]] = {
+    # Review-log history: the number the 2026-10-31 review REPLACED, quoted
+    # because the entry records which anchor moved. It is the pre-move line, so
+    # no command prints it and none should.
+    ("architecture/guard-coverage.md", "app/harness/safety.py:526", "historical"),
+    # A definition cite, not a call site: the sentence reads "admitted at
+    # `agent_mcp/_rpc.py:219`" and that line is `def admit(...)` — the function
+    # the RPC section names as the rung that refuses a nested `Bash`. A grep
+    # witness prints the lines matching its pattern, never a definition's
+    # address, so no block covering `agent_mcp/` can print it.
+    ("architecture/guard-coverage.md", "agent_mcp/_rpc.py:219", "definition"),
+}
+
+#: The reasons an admission may carry. `historical` is a number the doc quotes as
+#: history; `definition` is an anchor naming a `def`, which no grep prints;
+#: `generated` / `other-tree` are the path rail's, carried for symmetry.
+WITNESS_ADMISSION_KINDS = ("historical", "definition", "generated", "other-tree")
+
+#: `git grep -n <pat> -- <files>`, the quoting the doc writes it in. Only a grep
+#: WITH a path list qualifies: one with no paths greps the whole tree and cannot
+#: say which anchors it speaks for.
+_WITNESS_CMD = re.compile(
+    r"git grep -n\s+(?:-[IEA]\s+)?(?P<q>[\"'])(?P<pat>.*?)(?P=q)\s+--\s+(?P<files>.*)$")
+#: The same command written as one inline code span in prose: the whole span is
+#: the command, so it is anchored at both ends — a sentence that merely mentions
+#: a grep is not a witness, and a loose window would capture the prose after it.
+_WITNESS_INLINE = re.compile(
+    r"git grep -n\s+(?:-[IEA]\s+)?(?P<q>[\"'])(?P<pat>.*?)(?P=q)\s+--\s+(?P<files>\S.*)$")
+#: One inline code span.
+_BACKTICKED_CODE = re.compile(r"`([^`\n]+)`")
+#: A backticked repo path, with its optional `:NNN`.
+_PATH_FILE = re.compile(
+    r"`(?P<p>[A-Za-z0-9_./-]+\.(?:py|md|sh|ts|tsx|js|json|sql|yaml|toml))(?::\d+)?`")
+#: A bare `:NNN` anchor, the file named elsewhere.
+_BARE_ANCHOR = re.compile(r"`:(?P<n>\d{1,6})`")
+_WITNESS_HITS: dict[tuple[str, tuple[str, ...]], dict[str, set[int]]] = {}
+
+
+def _unfold_commands(block_lines: list[str]) -> list[str]:
+    """Commands from a fenced block, backslash continuations joined.
+
+    The matrix command is long enough to fold, and the file list — not just the
+    pattern — is what decides which anchors are graded, so a fold that dropped
+    the tail would silently shrink coverage rather than fail.
+    """
+    out: list[str] = []
+    buf = ""
+    for line in block_lines:
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            buf += stripped[:-1]
+            continue
+        out.append((buf + stripped).strip())
+        buf = ""
+    if buf.strip():
+        out.append(buf.strip())
+    return out
+
+
+def _witness_commands(text: str) -> list[tuple[str, tuple[str, ...], str]]:
+    """(pattern, files, command) for each witness the doc publishes.
+
+    Two surfaces. Fenced blocks are the primary one, and the bulk of every
+    witness set. The second is a whole command written as one inline code span
+    in prose — ```git grep -n "build_turn_options" -- app/routers/voice.py``` —
+    which this doc already writes four times and which says "prints"/"shows" about
+    its live output. Inline spans are needed here rather than everywhere: this
+    page's fenced blocks are frozen against `ed1cecfd` by
+    `test_the_stamped_tree_s_fenced_blocks_are_the_page_s`, so a witness line
+    that a drifted cite requires can only be written in prose.
+    """
+    found: list[tuple[str, tuple[str, ...], str]] = []
+    in_block = False
+    block: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            if in_block:
+                for cmd in _unfold_commands(block):
+                    parts = _witness_parts(cmd)
+                    if parts:
+                        found.append(parts)
+            in_block = not in_block
+            block = []
+            continue
+        if in_block:
+            block.append(line)
+            continue
+        for span in _BACKTICKED_CODE.findall(line):
+            parts = _witness_parts(span, inline=True)
+            if parts:
+                found.append(parts)
+    return found
+
+
+def _witness_parts(cmd: str, *, inline: bool = False) -> tuple[str, tuple[str, ...], str] | None:
+    """(pattern, files, command) when `cmd` is a grep that names its paths."""
+    m = (inline and _WITNESS_INLINE or _WITNESS_CMD).match(cmd.strip())
+    if not m:
+        return None
+    files = tuple(p for p in m["files"].split() if p)
+    return (m["pat"], files, cmd.strip()) if files else None
+
+
+def _witness_files(cmd: str, files: tuple[str, ...],
+                   root: Path) -> dict[str, set[int]]:
+    """The lines this witness prints, as {repo path: {line numbers}}.
+
+    Run as a human runs it — the pattern as the doc wrote it, the path list as
+    the doc wrote it — so a witness whose quoting broke prints nothing and reads
+    as "covers no anchors" instead of quietly matching something else.
+    """
+    # Run the command AS THE DOC WROTE IT, through a shell, so whatever the doc's
+    # quoting and flags say is what runs: `-E` selects ERE, `"\|a\|b"` is BRE
+    # alternation and `"a|b"` a literal pipe. Rebuilding argv from the parsed
+    # pattern alone would drop the flag and grade a different regex than the one
+    # the reviewer ran, printing the wrong line set and reading as drift.
+    key = (cmd, files)
+    if key in _WITNESS_HITS:
+        return _WITNESS_HITS[key]
+    proc = subprocess.run(["sh", "-c", cmd], cwd=str(root),
+                          capture_output=True, text=True)
+    hits: dict[str, set[int]] = {}
+    for out in proc.stdout.splitlines():
+        head, _, rest = out.partition(":")
+        num, _, _ = rest.partition(":")
+        if num.isdigit():
+            hits.setdefault(head, set()).add(int(num))
+    _WITNESS_HITS[key] = hits
+    return hits
+
+
+def _rel_target(hit: Path, root: Path) -> str:
+    try:
+        return hit.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return hit.as_posix()
+
+
+def _bare_anchor_citations(text: str) -> list[tuple[str, str]]:
+    """(file, line number) for each bare `:NNN` cite bound to a named file.
+
+    `py_anchor_citations` is line-scoped, so a cite wrapped across two markdown
+    lines —
+    ``The reviewer call is at `app/routers/turn_options.py:259`, inside the`` /
+    ```kind == "stream" branch that opens at `:257```` —
+    is extracted by no rule at all today, graded by nothing, and free to drift.
+    A bare anchor belongs to the nearest file named BEFORE it: on its own line
+    first, then the line above. Nothing after it can own it — a file named on
+    the next line is a different citation.
+    """
+    out: list[tuple[str, str]] = []
+    prev: list[str] = []
+    for line in text.splitlines():
+        cands = [(m.start(), m["p"]) for m in _PATH_FILE.finditer(line)]
+        for m in _BARE_ANCHOR.finditer(line):
+            before = [p for start, p in cands if start < m.start()]
+            owner = before[-1] if before else (prev[-1] if prev else None)
+            if owner:
+                out.append((owner, m["n"]))
+        prev = [p for _start, p in cands]
+    return out
+
+
+def _covered_by(files: tuple[str, ...], target: str) -> bool:
+    """Whether a witness block's path list includes `target`.
+
+    A block names a file (`app/harness/safety.py`) or a directory (`agent_mcp/`);
+    an anchor under a directory it names is covered by it.
+    """
+    for entry in files:
+        if entry.endswith("/"):
+            if target.startswith(entry):
+                return True
+        elif target == entry or target.startswith(entry + "/"):
+            return True
+    return False
+
+
+def witness_anchor_report(text: str, *, doc: str,
+                          root: Path | None = None) -> list[str]:
+    """Anchors in `text` that a covering witness block does not print at HEAD.
+
+    An anchor no covering witness prints is not thereby wrong — it may be a
+    definition line, or history — so it needs an entry in WITNESS_EXEMPTIONS
+    naming doc, span and reason, which the corpus node also refuses when stale.
+    """
+    root = root or ROOT
+    commands = _witness_commands(text)
+    spans: set[tuple[str, str]] = set()
+    for span, hit, _line in py_anchor_citations(text):
+        spans.add((_rel_target(hit, root), span))
+    for owner, num in _bare_anchor_citations(text):
+        spans.add((owner, f"{owner}:{num}"))
+    findings: list[str] = []
+    for target, span in sorted(spans):
+        # The strong rail already owns an anchor whose own prose names a symbol
+        # the file defines, when the anchor falls inside THAT symbol: it cannot
+        # land in an unrelated function, which is the only gap this pass grades.
+        # So the witness rule takes the anchors containment decided alone, and
+        # adds no rule to a citation `named_symbol` already bound.
+        hit = root / target
+        defn = definition_spans(hit) if hit.is_file() else None
+        if defn is not None:
+            named = named_symbol(text, span)
+            num0 = int(span.rsplit(":", 1)[1])
+            if named and any(lo <= num0 <= hi for lo, hi, n in defn if n == named):
+                continue
+        printed: set[int] = set()
+        covered = False
+        for _pat, files, cmd in commands:
+            if _covered_by(files, target):
+                covered = True
+                printed |= _witness_files(cmd, files, root).get(target, set())
+        if not covered:
+            continue
+        num = int(span.rsplit(":", 1)[1])
+        if num in printed:
+            continue
+        for d, s, r in WITNESS_EXEMPTIONS:
+            if d != doc or s != span or r not in WITNESS_ADMISSION_KINDS:
+                continue
+            if r != "historical":
+                break
+            # `historical` means the doc quotes this number AS history. Then it
+            # must appear nowhere else: an admission wide enough to cover the
+            # live citation too would admit the drift it exists to catch.
+            log = text.find("\n## Review log")
+            at = [m.start() for m in re.finditer(re.escape(f"`{span}`"), text)]
+            if log >= 0 and at and all(i > log for i in at):
+                break
+        else:
+            findings.append(
+                f"{span}: the witness block(s) covering {target} print "
+                f"{sorted(printed) if printed else 'nothing'} — this line is not one "
+                "of them")
+            continue
+    return findings
+
+
+def test_a_line_anchor_a_witness_command_covers_must_be_a_line_it_prints():
+    """The acceptance rule, over every architecture doc that publishes a witness.
+
+    An anchor in a file some `git grep -n <pat> -- <files>` block names must be a
+    line that command prints at HEAD. The 2026-10-31 review replaced eight such
+    numbers after a month of green; the corpus as written must report none.
+
+    The count assertion is the anti-vacuous half: an extractor that matched
+    nothing would report nothing and pass. `graded` counts anchors this pass
+    actually put a witness against, per doc, and guard-coverage.md alone puts 15
+    (10 distinct `path:NNN` cites from 11 occurrences, plus 4 bare continuations).
+    """
+    findings: list[str] = []
+    graded: dict[str, int] = {}
+    for path in sorted(ARCH.glob("*.md")):
+        doc = f"architecture/{path.name}"
+        text = path.read_text()
+        commands = _witness_commands(text)
+        if not commands:
+            continue
+        targets = {(_rel_target(hit, ROOT), _span)
+                   for _span, hit, _l in py_anchor_citations(text)} | {
+            (own, f"{own}:{n}") for own, n in _bare_anchor_citations(text)}
+        graded[doc] = sum(1 for t, _s in targets
+                          if any(_covered_by(f, t) for _p, f, _c in commands))
+        findings += witness_anchor_report(text, doc=doc)
+    for path in sorted(ARCH.glob("*.md")):
+        doc = f"architecture/{path.name}"
+        text = path.read_text()
+        for d, span, reason in WITNESS_EXEMPTIONS:
+            if d != doc:
+                continue
+            if reason not in WITNESS_ADMISSION_KINDS:
+                findings.append(f"{span}: admitted as {reason!r}, which is not an "
+                                "admission this rule makes")
+            if span not in text:
+                findings.append(
+                    f"{doc}: WITNESS_EXEMPTIONS admits {span} ({reason}) but the "
+                    "doc no longer makes that citation — the admission is stale")
+    assert not findings, (
+        "line anchors a published `git grep -n` witness covers, but that witness "
+        "does not print — a call-site cite has drifted into an unrelated "
+        "definition, which containment cannot see:\n"
+        + "\n".join(sorted(set(findings))))
+    assert graded.get("architecture/guard-coverage.md", 0) >= 12, (
+        f"guard-coverage.md: the witness pass graded "
+        f"{graded.get('architecture/guard-coverage.md', 0)} anchors, expected at "
+        "least 12 — the rule must not be an extractor that matches nothing")
+    # No corpus-wide floor beside it: guard-coverage.md's count is a term of that
+    # sum, so a total assert could never fire when the per-doc one already passed.
+
+
+
+def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_replaced():
+    """The crispness proof: the ten replaced numbers, seeded back, each reported.
+
+    Each seed is the old number in the same position, with the doc's own prose
+    (`armed (inside `install_default_safety_hook`)`, the `kind == "stream"` branch
+    that opens at `:247`) — the shapes that made containment grade them. Before
+    this pass all ten graded green: `agent_mcp/session.py:299` → `_memory_read`,
+    `app/harness/safety.py:526` → `check_bash_command`,
+    `agent_mcp/main.py:529` → `call_tool`, `app/routers/turn_options.py:249` →
+    `options_row`. `app/routers/turn_options.py:247` is the wrapped bare cite,
+    graded only by the continuation rule; `agent_mcp/main.py:529` is the §RPC
+    cite whose witness line this round added beside it.
+    """
+    text = (ARCH / "guard-coverage.md").read_text()
+    stale = {
+        "`agent_mcp/session.py:408`": "`agent_mcp/session.py:299`",
+        "`:460`": "`:351`",
+        "`agent_mcp/http_tools.py:108`": "`agent_mcp/http_tools.py:119`",
+        "`:435`": "`:413`",
+        "`:549`": "`:523`",
+        "`agent_mcp/browser.py:723`": "`agent_mcp/browser.py:694`",
+        "`app/harness/safety.py:616`": "`app/harness/safety.py:526`",
+        "`app/routers/turn_options.py:259`": "`app/routers/turn_options.py:249`",
+        "`:257`": "`:247`",
+        "`agent_mcp/main.py:532`": "`agent_mcp/main.py:529`",
+    }
+    seeded = text
+    for now, was in stale.items():
+        assert now in seeded, f"the doc no longer cites {now} — the seed is stale"
+        seeded = seeded.replace(now, was)
+    clean = witness_anchor_report(text, doc="architecture/guard-coverage.md")
+    assert clean == [], f"the live doc already reports findings: {clean}"
+    findings = witness_anchor_report(seeded, doc="architecture/guard-coverage.md")
+    bare_owner = {"`:351`": "agent_mcp/session.py", "`:413`": "agent_mcp/http_tools.py",
+                  "`:523`": "agent_mcp/http_tools.py", "`:247`": "app/routers/turn_options.py"}
+    for was in stale.values():
+        if was in bare_owner:
+            target, num = bare_owner[was], was.strip("`")[1:]
+        else:
+            target, _colon, num = was.strip("`").rpartition(":")
+        assert any(f.startswith(f"{target}:{num}:") for f in findings), (
+            f"seeding {was.strip('`')} back produced no finding for "
+            f"{target}:{num}. Reported: {sorted(findings)}")
+    assert len(findings) == 10, (
+        f"expected exactly the ten seeded anchors to be reported, got "
+        f"{len(findings)}: {sorted(findings)}")
