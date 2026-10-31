@@ -1756,3 +1756,47 @@ def test_the_hourly_leg_alerts_a_zero_row_copy_under_a_heading_that_says_duplica
         f"the hourly all-clear has to walk every heading this incident could ever have "
         f"been opened under, retired ones included: {sorted(cleared)}")
     assert quarantined == []
+
+
+def test_the_retract_leg_no_longer_asserts_a_byte_size():
+    """#3603: #3481 renamed the heading; the all-clear printed under it was not visited.
+
+    One repo-wide grep is the whole premise — `git grep -n 'no 0-byte database shadowing'`
+    returned exactly one hit, in the sentence `Guardian._runtime_data_incident` hands to
+    `notifier.resolve`. #3481 amended the heading constant, amended the alert body, and
+    pinned `"0-byte" not in RUNTIME_DATA_SHADOW_ALERT_TITLE` in
+    `test_the_hourly_leg_alerts_a_zero_row_copy_under_a_heading_that_says_duplicate` above.
+    The bytes-first claim survived only in the line a person reads AFTER the incident, under
+    a finding whose own words were "81,920 bytes, 0 rows in 4 tables"
+    (`~/obsidian/memory/2026-10-29.md:31` against `:41`).
+
+    Read off the builder's own source, deliberately, not the file's: the #3481 amendment
+    comment (`guardian.py:185-189`) and the retired heading constant (`:198`) MUST keep the
+    old words, because that constant is what retracts a section opened before the rename —
+    a file-wide "no 0-byte anywhere" assertion would be unsatisfiable and wrong.
+    """
+    import inspect
+
+    import guardian as G
+
+    builder = inspect.getsource(G.Guardian._runtime_data_incident)
+    assert "no 0-byte database shadowing" not in builder, (
+        "the all-clear is asserting a byte size again over a predicate that has measured "
+        "rows at ANY byte size since #3481 — the sentence a person acts on after the "
+        "incident is the one that must not be false as printed")
+    # The negative must not be passable by deleting the branch: the clearance still names
+    # the root it walked and is still conditional on having measured it. `inspect` reads the
+    # f-string's expressions, so both names are still live in the builder.
+    assert "shadow_root" in builder and "shadow_measured" in builder, (
+        "the clearance lost either the root it names or the measurement that gates it — "
+        "#2056's unreadable-is-not-empty is the reason that gate exists")
+    # The half that must NOT move. A section opened before #3481 carries the old heading
+    # verbatim and `notify.resolve` matches headings literally, so rewording the all-clear
+    # must leave the retired heading standing and walkable (#1536's standing claim is the
+    # section that survived its own fix).
+    assert G.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED == (
+        "A 0-byte database under the data root is shadowing a populated store", ), (
+        "rewording the clearance must not retire the heading a still-open section carries")
+    assert set(G.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED) <= set(
+        G.RUNTIME_DATA_ALERT_TITLES), (
+        "a retired heading the hourly all-clear does not walk is retired only on paper")

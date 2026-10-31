@@ -2929,8 +2929,21 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # and 2990 because the rewrite was written line-count neutral on purpose: the new
     # node below now checks the DOC's number against the file directly, so a future
     # round that nets lines here is caught by that node instead of by this chain.
-    assert heads[guardian]["main"] == 2990, (
-        f"`main` moved off :2990 ({heads[guardian]['main']}) — if it is gone "
+    # 2990 → 3002 is #3603: ONE hunk, `@@ -2070,8 +2070,20 @@` (+12 — the comment block
+    # on why the all-clear may claim only what the scan measured, plus the re-worded
+    # `shadow_note` it replaces), inside `_runtime_data_incident`. Below
+    # `evaluate_liveness` and above `main`, so only `main` moves, by exactly +12, and
+    # `architecture/threat-model.md`'s T-26 cell — which cites the `evaluate_liveness`
+    # head, still 923 — does not move. This is the case #3577's closing note pointed at:
+    # the round that netted lines inside the shadow block is caught HERE, on this
+    # literal, and `test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has`
+    # stayed green untouched because the head the doc cites did not move. Re-check as
+    # before: `git diff <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'`
+    # shows that one hunk and nothing else, and `grep -n
+    # '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py` prints
+    # 923 with 3002 below it.
+    assert heads[guardian]["main"] == 3002, (
+        f"`main` moved off :3002 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 923, (
         f"`evaluate_liveness` moved off :879 "
@@ -2967,9 +2980,11 @@ def test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has():
     That node pins the head against a literal in the test. This one closes the half
     nothing pinned before: it reads the number the DOC prints and asserts it equals
     the head measured from the file by the same rule the item names -
-    a line-anchored grep of the two `def` prefixes, which prints 923 today with 2990
-    below it. A round that nets lines above the head is exactly what #3577 risked,
-    because the paragraph it rewrites sits in `_shadow_alert_body`, above both heads;
+    a line-anchored grep of the two `def` prefixes, which prints 923 today with 3002
+    below it (#3603 moved `main` and not this head; the chain of those moves is the
+    comment block above). A round that nets lines above the head is exactly what
+    #3577 risked, because the paragraph it rewrites sits in `_shadow_alert_body`,
+    above both heads;
     such a round fails HERE, on the row a human reads, instead of shipping a stale
     number in a threat table.
     """

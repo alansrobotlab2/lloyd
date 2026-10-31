@@ -2070,8 +2070,20 @@ class Guardian:
             # Said only when the shadow scan actually measured, because the sentence
             # asserts an absence: a shadow check that raised must not buy the clearance a
             # root it never walked (#3109, and #2056's unreadable-is-not-empty again).
-            shadow_note = (f", and no 0-byte database shadowing a populated store under "
-                           f"{shadow_root}" if shadow_measured else "")
+            #
+            # And it claims ROWS, not a byte size (#3603). #3481 renamed the heading and
+            # the alert body once `data_root_shadows` began answering "no row for any data
+            # table, at ANY byte size", and never visited this branch — so on 2026-10-29 the
+            # finding read "81,920 bytes, 0 rows in 4 tables" (`memory/2026-10-29.md:31`)
+            # while the sentence sealing it, `:41`, asserted a 0-byte database: false as
+            # printed, in the one line a person acts on after an incident. #3124's rule is
+            # that a condition-dependent sentence may depend only on what the check
+            # measured. The retired heading constant above keeps the old words because a
+            # pre-#3481 section may still carry them as a TITLE, which is not a claim about
+            # any file's size.
+            shadow_note = (
+                f", and no database with zero data rows shadowing a populated store "
+                f"under {shadow_root}" if shadow_measured else "")
             if moved:
                 cleared = (
                     f"no runtime stores inside the code tree of {policy.REPO}"

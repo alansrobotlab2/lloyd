@@ -4479,6 +4479,48 @@ def test_a_cleared_data_root_retracts_the_open_alert(tmp_path, monkeypatch):
         "the clearance lost the code tree it also claims about")
 
 
+def test_the_data_root_all_clear_claims_rows_because_rows_are_what_was_measured(
+        tmp_path, monkeypatch):
+    """The sealed `cleared:` line states a row property, because rows are the measurement.
+
+    `datawatch.data_root_shadows` has answered "no row for any data table, at ANY byte
+    size" since #3481, and #3481 renamed the HEADING to match (`guardian.py:185-193`,
+    pinned by `tests/test_guardian_datawatch.py`). The retract leg one branch later was
+    never visited, so the one sentence a person acts on after the incident kept asserting
+    0 BYTES — and on 2026-10-29 it printed false: `~/obsidian/memory/2026-10-29.md:31`
+    reports an 81,920-byte `kg.sqlite` with "0 rows in 4 tables", and `:41` of that same
+    section cleared "no 0-byte database shadowing a populated store". #3124's rule is that
+    a condition-dependent sentence may only depend on what the check measured.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, alerts, scan, root, moved_calls = _shadow_incident(
+        tmp_path, monkeypatch)
+    scan.set([_shadow_finding(root)])
+    tick()
+    assert len(alerts) == 1, "the incident did not open, so there is nothing to clear"
+    scan.set([])
+    tick()
+
+    sections = _sections(note, gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE)
+    assert len(sections) == 1, sections
+    assert "cleared:" in sections[0], sections[0]
+    # The alert body above this line legitimately prints byte sizes — a finding names the
+    # file it measured — so the assertion is scoped to the clearance sentence itself.
+    cleared = sections[0][sections[0].index("cleared:"):]
+    assert "no database with zero data rows shadowing a populated store" in cleared, (
+        f"the all-clear does not state the property the scan measured: {cleared}")
+    assert "byte" not in cleared, (
+        f"the all-clear is back to asserting a byte size, which is the confusion #3481 "
+        f"exists to close: {cleared}")
+    # The fix is the property, not the detail: the root that was walked is still named,
+    # which is what keeps this from reading as the whole-volume all-clear #2056 warned
+    # about. `test_a_cleared_data_root_retracts_the_open_alert` pins the same for the
+    # section as a whole; this node pins it inside the sentence that changed.
+    assert str(root) in cleared, (
+        f"the row-claim clearance lost the data root it measured: {cleared}")
+
+
 def test_a_clean_data_root_raises_no_alert(tmp_path, monkeypatch):
     """An empty result is not an incident: the check runs and says nothing.
 
