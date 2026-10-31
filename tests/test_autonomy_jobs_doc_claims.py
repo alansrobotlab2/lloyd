@@ -202,6 +202,14 @@ WATCH_JOBS = {
     # flag that would move the filing somewhere no later reader looks.
     102: ("weekly", "primary.lock", "find-all-", "report the run"),
     103: ("weekly", "code_rules.toml", "code-rules-census", "--no-file"),
+    # #3633: the four probes read off ~/obsidian/autonomy/105-check-health-census-weekly.md
+    # on 2026-10-31. `reads` is the module its front-matter `command:` drives, `writes`
+    # the one journal that command appends (`--record`), and `prohibition` the bound the
+    # task file puts on its own verdict — it may call a check `vacuous` and must not
+    # "retire, disable or weaken" one — which is why the tier table has it in
+    # `Reports only` beside #97 rather than with #94, whose ledger rewrite is a write.
+    105: ("daily", "check_health_census", "check-health-census.jsonl",
+          "retires, disables or weakens"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.

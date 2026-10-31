@@ -870,6 +870,86 @@ def fleet_reaches_census_floor(declared: list[str], floor: int, sentence: str) -
         len(declared), floor, sentence)
 
 
+def test_only_primary_passes_the_model_check_for_task_105(tmp_path):
+    """Clause 1's rule: of the three values #105 could have carried, one is clean.
+
+    The file shipped `model: deepseek/deepseek-v3.2` — not a `models:` key and not an
+    alias, so the board pointed at a name this box serves no row for. The tempting
+    alternative is worse in a way a reader cannot see from the value alone:
+    `secondary` IS a key of `models:`, and is still refused, because
+    `secondary_enabled: false` in the checkout's own config means agent-llm-secondary
+    is not booted — the #68 case #2632 exists for. `primary` is the only value that
+    passes both arms, and it is what the other 46 board files carry.
+
+    Passing the tracked config's bytes is what makes this gate-enforceable rather than a
+    `live_vault` node: `~/lloyd/config.yaml` is a tracked file, the one a scheduled run
+    reads, so the fixture is built from the fleet's real slot switches instead of from
+    a hand-written two-key stub — and had `config=None` been used the linter's config
+    file would not exist, every model line would print `unchecked … has no readable
+    models: mapping`, and a node asserting a refusal would be answered by a warning that
+    refuses nothing. The live copy of the task file is pinned beside it under
+    `@live_vault`, because the automod gate deselects that mark (`pytest.ini:10-13`) and
+    the value that closes #3633 lives in the vault.
+
+    The three files carry different ids because a duplicated `id:` is its own warning,
+    and each line below says which file the verdict belongs to.
+    """
+    lint = Linter(tmp_path, config=(ROOT / "config.yaml").read_text(encoding="utf-8"))
+    lint.add("105-a-shipped.md", id=105, name="a", status="draft", frequency="daily",
+             skill_name="heartbeat", model="deepseek/deepseek-v3.2")
+    lint.add("105-b-secondary.md", id=106, name="b", status="draft", frequency="daily",
+             skill_name="heartbeat", model="secondary")
+    lint.add("105-c-fixed.md", id=107, name="c", status="draft", frequency="daily",
+             skill_name="heartbeat", model="primary")
+
+    code, out = lint.run()
+
+    assert code == 0, "a structural warning fails the run only under --strict"
+    assert "105-a-shipped.md: model 'deepseek/deepseek-v3.2' is not a models: key" in out, out
+    assert "105-b-secondary.md: model 'secondary' names a switched-off slot" in out, out
+    assert "105-c-fixed.md: model" not in out, (
+        "`primary` was refused by the box's own config, so nothing on the board can "
+        "be made green by naming it: " + out)
+    assert lint.run("--strict")[0] == 2, out
+
+
+@live_vault
+def test_task_105_declares_primary_the_one_model_value_this_board_can_run():
+    """Clause 1's own surface: the live front matter reads `model: primary`.
+
+    A node that only scanned the whole board could go green because someone deleted
+    the file, so this reads the one field on the one file: the shipped value
+    (`deepseek/deepseek-v3.2`) and the tempting wrong fix (`secondary`, a key of
+    `models:` whose switch is off) are named refused, and `primary` accepted, all by
+    the linter's own `model_slot_problem` against the tracked config. The whole-board
+    leg is `test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live`;
+    this is the half that says which value closed it.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "validate_tasks_3633", str(SCRIPT))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    text = (Path.home() / "obsidian" / "autonomy"
+            / "105-check-health-census-weekly.md").read_text(encoding="utf-8")
+    front = text.split("---", 2)
+    assert len(front) == 3, "105-*.md has no front matter to read a model from"
+    declared = yaml.safe_load(front[1]).get("model")
+    assert declared == "primary", (
+        f"#105 declares model: {declared!r}; the fleet has only `primary` live — "
+        "`secondary` is a `models:` key with secondary_enabled: false "
+        "(config.yaml:38), so it stays flagged")
+
+    config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    real_config = ROOT / "config.yaml"
+    assert module.model_slot_problem("primary", config, real_config) is None
+    assert module.model_slot_problem("secondary", config, real_config), (
+        "a value this node accepts would be the warning the item is about")
+
+
 @live_vault
 def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_path):
     """Clause 3's real-directory leg: 0 warnings, exit 0, over `~/obsidian/autonomy`.
