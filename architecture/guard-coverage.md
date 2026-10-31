@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, safety, guards, coverage, injection]
 type: reference
 status: implemented
-date: 2026-10-01
+date: 2026-10-31
 ---
 
 # Guard coverage — the union of what no guard on this box sees
@@ -89,8 +89,8 @@ absence grep, `text_delta` in `app/harness/action_review.py`, with its control i
 | `app/harness/outbound_content.py` | what is inside the arguments | string argument values, direction `out` | beside the safety hook, and per scoped turn builder |
 | `app/harness/action_review.py` | is this call what the task asked for | the worker's prompt and the calls it has made | `build_turn_options`, `kind == "stream"`, worker platforms only |
 | `agent_mcp/_injection_probe.py` | is this result instruction-shaped | the text of five tools' results, background sessions | `agent_mcp/main.call_tool` |
-| `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:299`, `:351`) — it **refuses**, `ErrorCode.INJECTION` |
-| `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:119`, `:413`, `:523`, `agent_mcp/browser.py:694` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, which **is set `false`** at `config.yaml`: #2123 seeded that block on 2026-10-04 and the comment above it closes "Arming `enforce` is a separate decision", so the branch is unarmed by reviewed decision, not by an unset default a reader could flip (#1965, which also made the value parsed rather than `bool()`-coerced, so a quoted `"off"` cannot arm it). The posture is published by `egress.network_report()`'s `policy.enforce`, live at `GET /api/dashboard` → `network.policy` and rendered `enforcing` / `recording only` |
+| `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:408`, `:460`) — it **refuses**, `ErrorCode.INJECTION` |
+| `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:108`, `:435`, `:549`, `agent_mcp/browser.py:723` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, which **is set `false`** at `config.yaml`: #2123 seeded that block on 2026-10-04 and the comment above it closes "Arming `enforce` is a separate decision", so the branch is unarmed by reviewed decision, not by an unset default a reader could flip (#1965, which also made the value parsed rather than `bool()`-coerced, so a quoted `"off"` cannot arm it). The posture is published by `egress.network_report()`'s `policy.enforce`, live at `GET /api/dashboard` → `network.policy` and rendered `enforcing` / `recording only` |
 
 ```
 git grep -n "_check_injection" -- agent_mcp/session.py
@@ -115,7 +115,7 @@ below are shaped the way they are: **four** of the guards reach a worker's strea
 turn through one builder — `install_default_safety_hook`, `install_policy_hook`
 where a grant scope exists, `_install_action_review` on `kind == "stream"`, and
 the outbound gate, which is armed from *inside* the safety installer at
-`app/harness/safety.py:526` and so appears in that command only because
+`app/harness/safety.py:616` and so appears in that command only because
 `app/harness/safety.py` is in its path list. The first version of this page said
 "three", and its own table cell reading "beside the safety hook" contradicted it:
 the command could not see the transitive arm, so the sentence was copied from the
@@ -175,8 +175,8 @@ git grep -n "_install_action_review" -- app/routers/turn_options.py app/routers/
 git grep -n "if kind == \"stream\"" -- app/routers/turn_options.py
 ```
 
-The reviewer call is at `app/routers/turn_options.py:249`, inside the
-`kind == "stream"` branch that opens at `:247` — so a `flush` or `voice` turn
+The reviewer call is at `app/routers/turn_options.py:259`, inside the
+`kind == "stream"` branch that opens at `:257` — so a `flush` or `voice` turn
 never reaches the reviewer even on a worker session, and the eligibility test in
 `messages.py` (the first command) is the second gate on the same path.
 
@@ -251,7 +251,7 @@ Nothing on this box scans what a tool was **sent**, or what came back from the
 provider. One thing does scan text the model authored, and it is not on this
 path: `agent_mcp/session.py::_check_injection` reads the `entry` of `memory_add`
 and the `new_text` of `memory_replace` against six families and
-answers `ErrorCode.INJECTION` (`agent_mcp/session.py:299`, `:351`). It sits
+answers `ErrorCode.INJECTION` (`agent_mcp/session.py:408`, `:460`). It sits
 between a model and loaded memory, never between a model and a call, so it
 narrows this section's claim without weakening it. Its families and the probe's
 come from one table, `agent_mcp/_injection_patterns.py`, and are **different
@@ -462,7 +462,7 @@ allowlist the socket stamped when the Bash call started, plus the part of
 `Bash` hard-deny pass does not apply here and cannot: `_rpc_call` re-enters
 `call_tool`, but a nested `Bash` is refused a rung earlier by `FIXED_DENY`
 (`app/harness/rpc_policy.py:76`, admitted at `agent_mcp/_rpc.py:219`), so the
-`if name == "Bash"` branch at `agent_mcp/main.py:529` never sees the call. That
+`if name == "Bash"` branch at `agent_mcp/main.py:532` never sees the call. That
 is a stronger statement than the one it replaces, not a weaker one — and read-only
 is precisely the probe's class, so what a script pulls back *is* scanned.
 
@@ -594,3 +594,16 @@ neither omission was in a file a reader would think to look in.
   builder" contradicted the table's own "beside the safety hook" row, because the
   matrix command could not see `app/harness/safety.py:526`. Filed #1959, #1960,
   #1961, #1962, #1963.
+- 2026-10-31 — **current** (verified at `b1275f82`). Every mechanism claim stands
+  as re-measured here: five probed tools, `SCAN_CHARS = 200_000`, eight probe
+  families off the thirteen-key table, six gate families, `("off", "shadow")`
+  against shipped `warn`, `enforce: false` with the live `GET /api/dashboard`
+  printing `policy.enforce: false`, the matrix still thirteen rows in the named
+  composition, the sandbox miss answering `True` under `guard=tool_sandbox`, and
+  `live_git_writes` still never calling `classify_session`. What had moved under
+  the page were eight of its convenience anchors — `session.py`, the egress
+  wiring sites, the safety installer's transitive arm, the stream-branch reviewer
+  call, the dispatch `Bash` branch — every one stale since the 2026-10-08 stamp
+  and every one passing the anchor rail, which only requires a cited line to sit
+  inside *some* definition. Re-anchored in place; filed #3627 for that grader
+  gap. No fenced block was touched, so the stamped pairing holds.
