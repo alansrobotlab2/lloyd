@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Link stranded entities to the registered entity name inside their own name — #1019.
 
-Dry-run by default. Nothing is written without --apply, and --apply is refused
-while `knowledge_graph.write_enabled` is false — the flag `kg_rebuild.py` sets
-for the duration of a rebuild freeze and restores at the end. That refusal is
-what `writes_disabled_by_rebuild` below is for; the dry run is never refused.
+Dry-run by default. Nothing is written without --apply, and --apply is refused on
+two counts, neither of which reaches a dry run. One is the store's state: while
+`knowledge_graph.write_enabled` is false — the flag `kg_rebuild.py` sets for the
+duration of a rebuild freeze and restores at the end — see
+`writes_disabled_by_rebuild` below. The other is the caller: --apply is refused
+unless the process that invoked it can name an attended Lloyd session through
+`LLOYD_SESSION_ID`, the variable `agent_mcp/_rpc.py` stamps into every nested Bash
+child. That is `session_class` below. It enforces, in code, the SD-stranded-1
+executor rule that until #3437 existed only as prose in
+`skills/autonomy-data-pipeline/SKILL.md` and as the wording of the standing debt in
+`tests/test_owed_check.py::APPLY_DEBT` — an attended, write-permitted session, never
+a round and never an autonomy task.
 
 WHY THIS EXISTS. An entity gets an edge only two ways, and both can miss it
 entirely: the extractor links entities *named inside a fact's prose*
@@ -91,6 +99,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -427,6 +436,73 @@ def writes_disabled_by_rebuild() -> bool:
         return False
 
 
+#: What `session_class` answers when the environment carries no id at all. This is
+#: deliberately NOT a fourth answer of `classify_session`: that function returns
+#: `ATTENDED` for an empty id (`app/harness/service_control.py:406-409` — no id is a
+#: session anyone can attribute privileges to, and guards read an empty id as "no
+#: guard applies"), which is precisely the answer a permission must not accept. A
+#: caller that never read the variable would inherit the write. #1053 settled the
+#: direction for the sibling guard: an absent id is the bypass, not the fallback
+#: (`app/harness/supply_chain.py::_attended_by_session_id` refuses before it asks).
+NO_SESSION_ID = "no-session-id"
+
+#: Names this caller in `classify_session`'s miss record, so a systematic miss here
+#: is attributable rather than reading as a window with no misses (#1961).
+SESSION_GUARD = "stranded_linker_apply"
+
+
+def session_class() -> str:
+    """`ATTENDED`, `BACKGROUND`, `UNKNOWN` or `NO_SESSION_ID` for this process.
+
+    The environment only — never the working directory. `app/session_cwd.py:114`
+    names a scratch directory after a *sanitised* projection of a session id
+    (untrusted characters replaced, truncated at 120), which is not invertible to an
+    id, and any process on this machine may `cd` into one of the live directories
+    under `~/lloyd-data/session-cwd/` before it runs a command. Deriving a privilege
+    from a path the caller chooses is the hole, not the fallback.
+
+    The variable is read through `rpc_policy.ENV_SESSION_ID`, the same constant
+    `agent_mcp/_rpc.py` stamps into every nested Bash child — attended and background
+    alike — so the name cannot drift from the stamper's, and a background run gets its
+    own four-part id here rather than an empty one. That is what makes the class
+    meaningful instead of merely absent: a worker or autonomy task arrives as
+    `BACKGROUND`, a `task:*` subagent as `UNKNOWN` (no parent resolver exists in a
+    standalone script, and #1961 made an unresolvable subagent pay the lookup rather
+    than inherit the attended answer), and a shell with no Lloyd parent as
+    `NO_SESSION_ID`.
+
+    Lazy imports, like `writes_disabled_by_rebuild` above: this module's two top-level
+    `app` imports pull neither `app.config` nor `app.harness`, and the class has to be
+    read at the check point, after the multi-second `find_proposals` pass.
+    """
+    from app.harness.rpc_policy import ENV_SESSION_ID
+    from app.harness.service_control import classify_session
+    sid = str(os.environ.get(ENV_SESSION_ID) or "").strip()
+    if not sid:
+        return NO_SESSION_ID
+    return classify_session(sid, guard=SESSION_GUARD)
+
+
+def unattended_reason(klass: str) -> str:
+    """Why a caller of class `klass` may not `--apply`; "" when it may.
+
+    Every refusal names the class the gate is asking for, because the readable
+    failure this replaces was silence: the linker obeyed `--apply` from any session
+    that thought to pass it, while the rule that said it must not was a sentence in a
+    skill file. The empty case is spelled out rather than folded into the others
+    because it is the one an unattended caller reaches by doing nothing at all.
+    """
+    from app.harness.rpc_policy import ENV_SESSION_ID
+    from app.harness.service_control import ATTENDED
+    if klass == ATTENDED:
+        return ""
+    if klass == NO_SESSION_ID:
+        return (f"no session is established: `{ENV_SESSION_ID}` is unset or empty, and "
+                "this tool does not read a session out of anything else — an absent id "
+                "is the bypass #1053 refuses, not a fallback")
+    return f"the calling session class is {klass}, not an attended chat turn"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Link degree-zero entities to the registered entity name in their own name (#1019)")
@@ -447,6 +523,20 @@ def main(argv: list[str] | None = None) -> int:
     st = KGStore(args.db)
     proposed, dens = find_proposals(st, min_facts=args.min_facts, limit=args.limit)
     print_denominators(dens, "APPLYING" if args.apply else "dry-run")
+
+    # Same seat as the #1833 freeze gate: after the denominators have printed, before
+    # the backup, exit 2 — a caller who cannot write still gets to see the numbers
+    # (#3437). It comes first of the two because it is a fact about the caller and
+    # costs no config read, and because "this run was never allowed to write" is the
+    # more fundamental answer when both are true.
+    refusal = unattended_reason(session_class()) if args.apply else ""
+    if refusal:
+        print("\nREFUSED --apply: an attended Lloyd session is required to write, and "
+              + refusal + ". No edge was written and no backup was taken; the "
+              "denominators above are the dry-run reading of this store. A dry run "
+              "needs no such evidence and stays available to any caller.")
+        st.close()
+        return 2
 
     # Outside the `if proposed:` branch below, and before the backup: an apply
     # that found nothing must refuse just as loudly as one that found 18 edges,

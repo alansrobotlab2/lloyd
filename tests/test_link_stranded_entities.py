@@ -29,6 +29,7 @@ real guard with a config the test owns — never by patching the predicate away.
 import ast
 import importlib.util
 import json
+import logging
 import os
 import re
 import subprocess
@@ -1343,3 +1344,400 @@ def test_the_linker_scan_finds_the_shape_it_claims_to_find():
     stamps = _z_stamps(module_form_utc)
     assert stamps[0]["clock_sourced"] and not stamps[0]["naive"], \
         "time.strftime over a gmtime struct was reported as a defect"
+
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# #3437 — `--apply` needs an attended caller, and the environment is the only
+# evidence a caller gets to offer.
+#
+# Before this section the linker's `--apply` was governed by one check,
+# `writes_disabled_by_rebuild()`, which asks the store one question and never looks at
+# who is asking. The rule it was supposed to honour — the autonomy-data-pipeline
+# skill's SD-stranded-1 executor rule, and the standing debt whose wording is read out
+# of `tests/test_owed_check.py` below — lived only as prose, so any caller that thought
+# to pass the flag was obeyed. These nodes pin the class the code admits, and the two
+# ways the gate could be made decorative if it were written the obvious way:
+# `classify_session` answers ATTENDED for an id that names nothing, and a working
+# directory under the session scratch root looks exactly like session evidence to a
+# fallback that reads the directory name.
+# ─────────────────────────────────────────────────────────────────────────────────
+
+#: A live chat id, three parts — the shape `app.sessions_io` calls attended.
+ATTENDED_SESSION = "20260922_201704_iv5e28"
+
+#: A live worker id, four parts, date and time first: a background session.
+BACKGROUND_SESSION = "20261031_093148_autocode_449b"
+
+#: A subagent's own id. A standalone script carries no parent resolver, so
+#: `classify_session` answers UNKNOWN for it — which is the point: an unresolvable
+#: subagent pays the lookup and is refused rather than inheriting the attended answer
+#: (#1961).
+SUBAGENT_SESSION = "task:0f3c9e2a7b"
+
+#: What a refused run must print. The freeze gate above also opens with `REFUSED
+#: --apply`, so the marker has to reach into the caller half of the sentence: the two
+#: refusals share a prefix precisely because they share a seat, and this file asserts
+#: that they stay separable.
+REFUSAL = "REFUSED --apply: an attended Lloyd session is required"
+
+#: The session scratch root's directory name, as a literal: the bypass node below must
+#: not reach `app.paths`, whose value a guard could re-point out from under the test.
+SCRATCH_CWD_ROOT = "session-cwd"
+
+#: The debt this gate enforces, read from the module that carries it, so a rewording
+#: there is felt here instead of quietly diverging from the code.
+APPLY_DEBT = (ROOT / "tests" / "test_owed_check.py").read_text(encoding="utf-8")
+
+
+def _env_var() -> str:
+    """The variable the gate reads, by the constant the stamper writes it under.
+
+    `agent_mcp/_rpc.py` stamps the calling session's id into every nested Bash child
+    through `rpc_policy.ENV_SESSION_ID`, attended and background alike. Naming it
+    through that constant is what keeps this file from pinning a string the stamper is
+    free to rename.
+    """
+    from app.harness.rpc_policy import ENV_SESSION_ID
+    return ENV_SESSION_ID
+
+
+@pytest.fixture(autouse=True)
+def attended_caller_by_default(monkeypatch):
+    """Every node in this file tests the linker's linking behaviour.
+
+    So the twelve existing `linker.main(... "--apply" ...)` call sites — 28 lines of
+    this file carry the token, twelve of them are calls, both measured at the base
+    commit — stay exactly as they were written: the change under test is who may call,
+    not what the linker does. The fixture supplies the attended caller for all of them
+    through the one channel the script reads, the Bash tool's session variable, holding
+    an id shaped like a live chat session's.
+
+    Autouse and unconditional, the dry-run nodes included: a dry run from an attended
+    caller is the ordinary case. The unattended nodes clear it again themselves, which
+    is also what proves the gate consults the environment rather than some ambient
+    default this fixture happens to leave set.
+    """
+    monkeypatch.setenv(_env_var(), ATTENDED_SESSION)
+
+
+def _apply_call_sites(tree) -> list:
+    """Every `linker.main([...])` call in a parsed copy of this file passing `--apply`."""
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "main" and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "linker"
+            # `--apply` sits inside the argv list literal the call is handed, so the
+            # scan has to go down into the argument rather than only over it.
+            and any(isinstance(c, ast.Constant) and c.value == "--apply"
+                    for a in node.args for c in ast.walk(a))]
+
+
+def _pre_existing_apply_sites(text: str, mine=frozenset({
+        "test_apply_refuses_unless_the_environment_proves_an_attended_caller",
+        "test_the_working_directory_confers_no_session_class",
+        "test_an_attended_apply_writes_exactly_what_it_always_wrote",
+        "test_a_refused_apply_prints_below_the_denominators_and_above_the_backup",
+        "test_the_attended_refusal_and_the_freeze_refusal_name_different_remedies",
+    })) -> list:
+    """The `--apply` call sites that were in this file before #3437.
+
+    Everything under a node named in `mine` is this round's own probe; what is left is
+    the inherited suite, and that is the population clause 3 says nobody edited.
+    """
+    # One parse, so the two walks speak about the same node objects.
+    tree = ast.parse(text)
+    owned = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name in mine:
+            owned |= {id(n) for n in _apply_call_sites(fn)}
+    return [n for n in _apply_call_sites(tree) if id(n) not in owned]
+
+
+def _deciding_bodies() -> dict:
+    """Executable source of the two functions that answer "may this caller write".
+
+    Docstrings stripped, deliberately: both functions spend their prose naming the
+    bypass they forbid, so a scan over the whole segment would flag the sentences that
+    warn against it. Nothing executable is dropped — `ast.get_source_segment` of each
+    body statement below the docstring is the code that runs.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    out = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef) and n.name in ("session_class",
+                                                        "unattended_reason"):
+            body = n.body[1:] if (n.body and isinstance(n.body[0], ast.Expr)
+                                  and isinstance(n.body[0].value, ast.Constant)
+                                  and isinstance(n.body[0].value.value, str)) else n.body
+            out[n.name] = "\n".join(ast.get_source_segment(src, s) or "" for s in body)
+    return out
+
+
+def test_apply_refuses_unless_the_environment_proves_an_attended_caller(tmp_path, capsys,
+                                                                        monkeypatch,
+                                                                        caplog):
+    """Clause 1: unset, empty, whitespace, BACKGROUND or UNKNOWN all refuse, no edge written.
+
+    The empty case is why this gate had to be written deliberately rather than copied
+    from the item's wording: `classify_session` answers ATTENDED for an empty id — by
+    design, since no id is a session anyone can attribute privileges to and every
+    guard already reads an empty id as "no guard applies". A gate that asked that
+    question first would hand the write to any caller that never read the variable.
+    #1053 settled the direction for the sibling guard, whose `_attended_by_session_id`
+    refuses on an absent id *before* it calls the classifier; that shape is what is
+    pinned here, together with the whitespace id the classifier would also hand over.
+    """
+    from app.harness.service_control import ATTENDED, classify_session
+
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)   # isolate this gate from the #1833 freeze
+    var = _env_var()
+
+    # The hole itself, recorded as a fact this gate must not inherit.
+    assert classify_session("") == ATTENDED, \
+        "classify_session no longer answers ATTENDED for an empty id, so the " \
+        "refusal-before-asking needs re-justifying (#3437)"
+
+    cases = [
+        ("unset", lambda: monkeypatch.delenv(var, raising=False), linker.NO_SESSION_ID),
+        ("empty string", lambda: monkeypatch.setenv(var, ""), linker.NO_SESSION_ID),
+        ("whitespace only", lambda: monkeypatch.setenv(var, "   "), linker.NO_SESSION_ID),
+        ("a background worker's id", lambda: monkeypatch.setenv(var, BACKGROUND_SESSION),
+         "background"),
+        ("a subagent's id", lambda: monkeypatch.setenv(var, SUBAGENT_SESSION), "unknown"),
+    ]
+    for label, act, expected in cases:
+        act()
+        assert linker.session_class() == expected, \
+            f"{label}: session_class answered {linker.session_class()!r}"
+        rc = linker.main(["--db", str(tmp_path / "kg.sqlite"), "--min-facts", "1",
+                          "--sample", "0", "--out", str(tmp_path / "p.jsonl"), "--apply"])
+        out = capsys.readouterr().out
+        assert rc == 2, f"{label}: exit {rc}, out was {out[-500:]!r}"
+        assert REFUSAL in out, f"{label}: refused without saying so — {out[-500:]!r}"
+        assert "attended" in out.lower(), \
+            f"{label}: the message must name the class it needs — {out[-500:]!r}"
+        assert var in out or expected != linker.NO_SESSION_ID, \
+            f"{label}: an absent id must name the variable it looked for — {out[-400:]!r}"
+        assert "write_enabled" not in out, \
+            f"{label}: met the freeze refusal instead of the caller's — {out[-400:]!r}"
+
+    assert _backup_traces(tmp_path) == [], \
+        "a refused --apply took a backup; refusing and mutating are exclusive"
+    assert st.edges.count(active_only=True) == seeded, "a refused --apply wrote edges"
+
+    # A miss against this gate is attributable to it rather than being invisible: #1961
+    # made an unresolvable subagent pay the lookup, and the lookup is only useful if it
+    # says which guard missed. `guard=` must therefore reach the warning.
+    monkeypatch.setenv(var, SUBAGENT_SESSION)
+    with caplog.at_level(logging.WARNING, logger="app.harness.service_control"):
+        assert linker.session_class() == "unknown"
+    assert linker.SESSION_GUARD in caplog.text, \
+        f"no miss was attributed to {linker.SESSION_GUARD!r}: the guard name is not " \
+        "reaching classify_session, so a systematic miss here reads as a quiet window"
+
+
+def test_the_working_directory_confers_no_session_class(tmp_path, capsys, monkeypatch):
+    """Clause 2: standing in a session's scratch directory proves nothing.
+
+    The item asked for a cwd fallback — read the basename when the environment is
+    empty. `app/session_cwd.path_for` names that directory after a *sanitised*
+    projection of an id (untrusted characters replaced, truncated at 120), so it is not
+    an invertible id to begin with, and any process on this machine may `cd` into one
+    of the live directories under the session scratch root before running a command. A
+    privilege conferred by a path the caller chooses is the hole, not the fallback, so
+    the implementation reads the environment only.
+    """
+    scratch = tmp_path / SCRATCH_CWD_ROOT / ATTENDED_SESSION   # attended-shaped: 3 parts
+    scratch.mkdir(parents=True)
+    st = build_store(tmp_path / "elsewhere")                   # the store is not in the cwd
+    seeded = _seed_one_live_edge(st)
+    _write_flag(monkeypatch, True)
+    monkeypatch.delenv(_env_var(), raising=False)
+    monkeypatch.chdir(scratch)
+
+    assert linker.session_class() == linker.NO_SESSION_ID, \
+        "the working directory answered for the caller"
+    rc = linker.main(["--db", str(tmp_path / "elsewhere" / "kg.sqlite"),
+                      "--min-facts", "1", "--sample", "0",
+                      "--out", str(tmp_path / "p.jsonl"), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 2, f"a cwd shaped like an attended session bought a write: exit {rc}"
+    assert REFUSAL in out, out[-500:]
+    assert st.edges.count(active_only=True) == seeded, \
+        "the scratch-directory decoy bought an actual write"
+    assert _backup_traces(tmp_path / "elsewhere") == []
+
+    # The same thing from source level, so the behaviour cannot be bought back by a
+    # later "fallback" that reads the directory: the two deciding functions touch
+    # `os.environ` and nothing that could report where the process is standing.
+    deciding = _deciding_bodies()
+    assert set(deciding) == {"session_class", "unattended_reason"}, \
+        "the deciding functions were renamed or split, and this scan is reading " \
+        "whatever now shares their names"
+    joined = "\n".join(deciding.values())
+    assert "os.environ" in joined, "the caller is no longer read from the environment"
+    for tell in ("getcwd", "cwd", SCRATCH_CWD_ROOT, "session_cwd", "chdir", "expanduser",
+                 "readlink", "realpath", "os.path"):
+        assert tell not in joined, \
+            f"the deciding functions now consult {tell!r}: the working directory is " \
+            "caller-controlled and confers no session class (#3437)"
+    # Positive control, so the scan above is not vacuously true: a fallback spelled the
+    # way the item asked for it carries exactly these tells.
+    decoy = ('def session_class():\n    import os\n    return os.environ.get("X") '
+             'or os.path.basename(os.getcwd())\n')
+    for tell in ("getcwd", "cwd", "os.path"):
+        assert tell in decoy, f"the decoy lost {tell!r}; the control no longer bites"
+
+
+def test_an_attended_apply_writes_exactly_what_it_always_wrote(tmp_path, capsys,
+                                                               monkeypatch):
+    """Clause 3: attended in, nothing about the run moves — and the attended id is the
+    fixture's, not something this node or a call site passes.
+
+    The clause the round had to be careful of: the file's existing `--apply` call
+    sites drive the linker directly, and a fail-closed gate goes red across every one of
+    them. They stay green by one autouse fixture, so this node pins both halves — the
+    write still happens exactly as before, and the call sites were not edited to
+    accommodate the gate.
+    """
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    _write_flag(monkeypatch, True)
+    monkeypatch.setenv(_env_var(), ATTENDED_SESSION)   # explicit: not an ambient default
+
+    rc = linker.main(["--db", str(tmp_path / "kg.sqlite"), "--min-facts", "1",
+                      "--sample", "0", "--out", str(tmp_path / "p.jsonl"), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"an attended apply refused: {out[-700:]!r}"
+    assert REFUSAL not in out, out[-700:]
+    assert "applied 4 edges" in out, out[-400:]
+    assert len(_backup_traces(tmp_path)) == 1, \
+        "the attended apply's backup discipline changed"
+    assert st.edges.count(active_only=True) == seeded + 4, out[-400:]
+
+    # The pre-existing call sites did not move, and none of them started carrying
+    # session evidence of its own. Twelve is the figure measured at the base commit;
+    # the clause's 28 is the number of lines here that mention `--apply`, most of them
+    # prose. A smaller figure than twelve would mean a site was deleted rather than
+    # inherited by the fixture.
+    text = Path(__file__).read_text(encoding="utf-8")
+    pre = _pre_existing_apply_sites(text)
+    assert len(pre) == 12, \
+        f"{len(pre)} pre-existing `--apply` call sites, twelve at the base commit: the " \
+        "gate was meant to be satisfied by the autouse fixture, not by call-site edits"
+    for node in _apply_call_sites(ast.parse(text)):
+        call = ast.get_source_segment(text, node) or ""
+        assert _env_var() not in call and "session" not in call.lower(), \
+            f"a call site started carrying session evidence: {call[:160]}"
+
+    # Exactly one autouse fixture supplies it, so there is one lever, and no second
+    # place where an id gets conjured for a node that did not ask for one.
+    autouse = {}
+    for n in ast.walk(ast.parse(text)):
+        if isinstance(n, ast.FunctionDef) and any(
+                isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "fixture"
+                and any(k.arg == "autouse" and getattr(k.value, "value", None) is True
+                        for k in d.keywords)
+                for d in n.decorator_list):
+            seg = ast.get_source_segment(text, n) or ""
+            if "setenv" in seg:
+                autouse[n.name] = seg
+    assert list(autouse) == ["attended_caller_by_default"], \
+        f"autouse fixtures that setenv anything: {list(autouse)}"
+    assert "monkeypatch.setenv(_env_var(), ATTENDED_SESSION)" in \
+        autouse["attended_caller_by_default"], \
+        "the fixture stopped setting exactly the attended id through the stamper's " \
+        f"constant `{_env_var()}`: {autouse['attended_caller_by_default'][-260:]!r}"
+
+    # And the rule the gate enforces is the rule its carrier records, not a paraphrase
+    # written beside the code.
+    assert "attended" in APPLY_DEBT and "--apply" in APPLY_DEBT, \
+        "APPLY_DEBT stopped naming an attended --apply: the class this gate admits has " \
+        "moved and needs re-deriving from it"
+
+
+def test_a_refused_apply_prints_below_the_denominators_and_above_the_backup(
+        tmp_path, capsys, monkeypatch):
+    """Clause 4: the seat is the #1833 gate's seat, and a dry run is never refused.
+
+    The freeze node above pins that ordering for its own gate — denominators after the
+    multi-second scan, refusal before `st.backup()`, because a snapshot of a store
+    about to be replaced is a restore point and one of a store that will not be touched
+    is noise. The attended gate takes the same position so a reader meets one block
+    rather than two orders, and a refused apply leaves no `kg-stranded-*` file.
+
+    The second half is the other direction of the same rule: with no session evidence at
+    all, the run *without* `--apply` still exits 0 and still prints its denominators. A
+    gate that blocked the read would be worked around by running the script from a
+    shell with the flag — the behaviour this round exists to stop.
+    """
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    _write_flag(monkeypatch, True)
+    monkeypatch.delenv(_env_var(), raising=False)
+
+    rc = linker.main(["--db", str(tmp_path / "kg.sqlite"), "--min-facts", "1",
+                      "--sample", "0", "--out", str(tmp_path / "p.jsonl"), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 2, f"exit {rc}, out was {out[-400:]!r}"
+    assert "proposed edges" in out, f"the denominators were swallowed: {out[-400:]!r}"
+    assert out.index("proposed edges") < out.index(REFUSAL), \
+        "the refusal came before the denominators; a refused caller still gets the " \
+        "numbers, and the block is scanned top-down (#1833)"
+    assert _backup_traces(tmp_path) == [], \
+        "the refusal came above st.backup(); #1833's ordering governs this gate too"
+    assert st.edges.count(active_only=True) == seeded
+
+    # The same caller, the same store, no `--apply`: exit 0, denominators, no refusal.
+    capsys.readouterr()
+    rc = linker.main(["--db", str(tmp_path / "kg.sqlite"), "--min-facts", "1",
+                      "--sample", "0", "--out", str(tmp_path / "p.jsonl")])
+    out = capsys.readouterr().out
+    assert rc == 0, f"a dry run was refused for having no session: exit {rc}, " \
+                    f"{out[-400:]!r}"
+    assert REFUSAL not in out, out[-400:]
+    assert _shown_number(out, "proposed edges") == 4, out[-400:]
+    assert _backup_traces(tmp_path) == []
+    assert st.edges.count(active_only=True) == seeded, "a refused apply wrote edges"
+
+
+def test_the_attended_refusal_and_the_freeze_refusal_name_different_remedies(
+        tmp_path, capsys, monkeypatch):
+    """The two refusals stay separable, because their remedies are opposite.
+
+    A freeze says *not now, this store*; an unattended caller says *not you*. Read as
+    one message the first invites a retry that cannot succeed and the second invites
+    waiting on a flag that was never the problem. So each names only its own cause, and
+    when both are true the caller answer comes first — it is a fact about the process
+    and costs no config read.
+    """
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    argv = ["--db", str(tmp_path / "kg.sqlite"), "--min-facts", "1", "--sample", "0",
+            "--out", str(tmp_path / "p.jsonl"), "--apply"]
+
+    _write_flag(monkeypatch, True)
+    monkeypatch.delenv(_env_var(), raising=False)
+    assert linker.main(argv) == 2
+    out = capsys.readouterr().out
+    assert REFUSAL in out and "write_enabled" not in out and "freeze" not in out.lower(), \
+        f"the caller's refusal blamed the store: {out[-400:]!r}"
+
+    _write_flag(monkeypatch, False)
+    monkeypatch.setenv(_env_var(), ATTENDED_SESSION)
+    assert linker.main(argv) == 2
+    out = capsys.readouterr().out
+    assert "write_enabled" in out and REFUSAL not in out, \
+        f"the store's refusal blamed the caller: {out[-400:]!r}"
+
+    _write_flag(monkeypatch, False)
+    monkeypatch.delenv(_env_var(), raising=False)
+    assert linker.main(argv) == 2
+    out = capsys.readouterr().out
+    assert REFUSAL in out and "attended" in out.lower(), \
+        f"with both gates shut, the caller answer must come first: {out[-400:]!r}"
+    assert _backup_traces(tmp_path) == []
+    assert st.edges.count(active_only=True) == seeded, \
+        "one of the refusals wrote edges anyway"
