@@ -2302,6 +2302,63 @@ def test_the_step4_report_block_promises_only_what_a_floor_only_night_prints(
         f"on the floor line: {enabled}")
 
 
+def test_step4_names_the_retired_suffix_as_fired_and_keeps_no_live_row_count():
+    """#3521 clauses 1-3: the page says the retired suffix has fired, and the
+    count that said it had not is gone.
+
+    What this node deletes from the page is `The retired suffix has not fired yet
+    (0 `rejected` rows in the file, measured 2026-10-01)`. Production falsified it
+    on 2026-10-27: `run_51_20261027_080655`, a floor-only night, printed `| 11
+    below-floor rows retired unreviewed after 30d`. What replaces it is a witness,
+    not a fresh measurement — a sentence stating how many `rejected` rows the file
+    holds today is false the next time a row retires, which is the exact failure
+    mode the surrounding section exists to prevent — so the node forbids the
+    *shape*: no "has not fired yet", no dated row count, no `N rejected rows`,
+    anywhere in step 4.
+
+    Read through `_skill_text()` and flattened by `_flat()` rather than grepped,
+    because the deleted claim straddled a line break (`measured` ended one line,
+    `2026-10-01` began the next): `grep -n 'measured 2026-'` on the pre-fix page
+    returned no hit for it at all and one hit for an unrelated observation in the
+    band subsection, so the line-based check the item proposed could not have
+    passed either before the fix or after it.
+    """
+    step4 = _skill_section_lines(_skill_text(), "### 4. Auto-approve strong proposals")
+    flat = _flat(step4)
+    low = flat.lower()
+    sentences = re.split(r"(?<=[.!?]) +", flat)
+
+    # (clause 1) the falsified claim, in both of its halves.
+    assert "has not fired yet" not in low, (
+        "step 4 claims the retired suffix has never fired again")
+    assert "measured 2026-10-01" not in flat, (
+        "step 4 still carries the 2026-10-01 measurement the claim rested on")
+    assert not re.search(r"\d+ `?rejected`? rows", low), (
+        "step 4 states a rejected-row count, which is the same stale-by-construction "
+        f"claim under new words: {flat}")
+
+    # (clause 2) the firing is named, quoting what printed, on a night with no flag.
+    witness = [s for s in sentences if "run_51_20261027_080655" in s]
+    assert witness, f"step 4 cites no witness for the retired suffix's first firing: {flat}"
+    assert "| 11 below-floor rows retired unreviewed after 30d" in witness[0], (
+        f"the witness does not quote the suffix that printed: {witness[0]}")
+    assert "no band flag" in witness[0], (
+        "the witness does not say the run that printed the suffix carried no band "
+        f"flag — that is the only reason to cite it: {witness[0]}")
+
+    # (clause 3) the #1957 sentences this replacement sits among still stand.
+    rule = [s for s in sentences if "not the flags this run carried" in s]
+    assert rule, "step 4 no longer says a suffix keys off the file, not the run's flags"
+    assert re.search(r"status:\s*\"?rejected\"?", rule[0]), (
+        f"the rule sentence no longer names the row that triggers the retired "
+        f"suffix: {rule[0]}")
+    assert re.search(r"header, which prints only with `--approve-band`", flat), (
+        "step 4 no longer names the flag-only header as the band-enabled marker")
+    assert "no band figure" not in low, (
+        "step 4 promises a floor-only night prints no band figure again; #1957 "
+        "removed that promise when production printed one the next morning")
+
+
 # ── #1842: retiring the below-band pool at a bounded age ─────────────────────
 #
 # A row under `BAND_FLOOR` is refused by both gates in `auto_approve_strong`: too
@@ -2514,6 +2571,52 @@ def test_the_approve_line_reports_retired_rows_beside_the_other_three_counts(
     assert plain == ("Auto-approve floor 0.85: auto-approved 0 "
                      "| 1 LLM-classified below the floor, awaiting a review that "
                      "does not exist"), plain
+
+
+def test_the_retired_suffix_prints_on_a_floor_only_night_as_step4_now_says(
+        cr, monkeypatch, capsys, tmp_path):
+    """#3521 clause 4, across the seam between the page and the process.
+
+    Step 4 now tells the reporter that the retired suffix "needs no flag to appear"
+    and that its number is the cumulative count of the file's `status: "rejected"`
+    rows. That is a claim about output, so it is checked against output: one aged
+    0.53 row, the same pool run twice, `--approve-strong` alone and then with
+    `--approve-band`, and the acceptance line must come out identical — the suffix
+    grows for the floor-only night exactly as it grows for the band-enabled one,
+    which is what made `run_51_20261027_080655`'s print a witness at all. The
+    identity is also the no-regression half of this clause: #3521 changed prose and
+    no code, and the line a run prints when it retires nothing stays as #1842
+    shipped it (pinned by the node above).
+    """
+    def _acceptance_line(**kw) -> str:
+        proposals = tmp_path / "p.json"
+        proposals.write_text(json.dumps(
+            {"watermark": {},
+             "proposals": [_classified_aged(cr, 400, confidence=0.53)],
+             "stats": {}}), encoding="utf-8")
+        monkeypatch.setattr(cr, "PROPOSALS_FILE", proposals)
+        monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "i.json")
+        # Stubbed landing, as in the two reporter nodes above: nothing here is
+        # approved (0.53 clears neither gate), so this only guards the store.
+        monkeypatch.setattr(cr, "land_approved_edges", lambda proposals: 0)
+        capsys.readouterr()
+        cr.cmd_approve(**kw)
+        out = capsys.readouterr().out
+        line = [ln for ln in out.splitlines() if ln.startswith("Auto-approve floor")]
+        assert len(line) == 1, f"the approve run printed no single acceptance line:\n{out}"
+        return line[0]
+
+    suffix = " | 1 below-floor rows retired unreviewed after 30d"
+    nightly = _acceptance_line()
+    assert nightly.endswith(suffix), (
+        f"a floor-only night that retired one aged row printed no retired suffix, "
+        f"so the page's witness night could not have printed one either: {nightly}")
+    assert "admitted by the" not in nightly, (
+        f"the acceptance line grew a band suffix over a pool holding no band row, so "
+        f"the line is not the pure file count the page describes: {nightly}")
+    assert nightly == _acceptance_line(band=True), (
+        "the acceptance line changed with the band flag, so the retired count is not "
+        f"the flag-independent file count step 4 says it is: {nightly}")
 
 
 # ── #3364: the two stage commands were two unlocked whole-file writers ────────
