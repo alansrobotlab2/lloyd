@@ -533,6 +533,110 @@ def test_a_shadows_only_check_heads_itself_as_a_shadow_not_a_writer(tmp_path, mo
         "the daily note still heads a data-root shadow with the wording a stray owns")
 
 
+# ── #3628: the leg hands over the root it measured, and a foreign seal is labelled ──
+
+
+def test_a_shadow_finding_sealed_from_another_root_re_alerts_with_the_label(
+        tmp_path, monkeypatch):
+    """#3628 clause 3: end to end through the check, not through a hand-built write.
+
+    A real shadow finding under `tmp_path/lloyd-data` alerts, a clearance naming a root
+    THIS process never measured seals its section, and the next hourly pass of
+    `_runtime_data_incident` re-alerts the same finding. Two things are pinned here that
+    no node in `tests/test_guardian_predicates.py` can pin: that the shadow leg hands
+    the notifier the same `datawatch.DATA_ROOT` string its alert body and its clearance
+    already print (so the two are comparable with no new state), and that the second
+    section — reached by running the check, never by calling `_vault_note` — carries the
+    dated `cross-root seal:` line naming both roots.
+
+    This is the shape of 2026-10-29: the guardian alerted hourly on
+    `/home/alansrobotlab/lloyd-data/kg.sqlite` while five automod rounds, each walking
+    its own `home/lloyd-data`, sealed the section between the ticks. Nothing in the note
+    said so; five sections each read as a fresh incident that had honestly cleared.
+    """
+    import types
+
+    import guardian as gmod
+    import notify
+
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    shadow = _store(data / "kg.sqlite", 0)
+    _store(data / SHIPPED_KG, 4096)
+
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    monkeypatch.setattr(gmod.policy, "REPO", str(repo))
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(data))
+    monkeypatch.setattr(gmod.datawatch, "stray_in_tree", lambda _tree: [])
+    # The arrivals leg of the same hourly check persists a baseline, and a whole pytest
+    # session shares one scratch data root; pointed at `tmp_path` it cannot reach the
+    # live guardian's state directory (the reason is in `_stray_incident_with`).
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", str(tmp_path / "guardian-state"))
+    # `Guardian.alert`'s 900 s repeat guard reads `time.time()` while the check takes
+    # `now` as an argument, so the two must come from ONE clock or the second hourly
+    # pass is silently suppressed. Started at `NOW` because that is the instant the
+    # stores' mtimes were laid relative to: an hour later they are still inert.
+    clock = {"t": NOW}
+    monkeypatch.setattr(gmod.time, "time", lambda: clock["t"])
+
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(vault), backend_url="http://127.0.0.1:1")
+    fired: list[dict] = []
+    real_vault_note = n._vault_note
+
+    def spy(title, text, *, coalesce=False, measured_root=""):
+        fired.append({"title": title, "text": text, "coalesce": coalesce,
+                      "measured_root": measured_root})
+        return real_vault_note(title, text, coalesce=coalesce,
+                               measured_root=measured_root)
+
+    n._vault_note = spy
+    n.announce = lambda *a, **k: {}
+    g = gmod.Guardian.__new__(gmod.Guardian)
+    g.notifier = n
+    g.data = types.SimpleNamespace(armed=True)
+    g._alert_seen = {}
+    g.last_alert = ""
+
+    def check():
+        clock["t"] += gmod.policy.STRAY_CHECK_SECONDS
+        g._runtime_data_incident(clock["t"])
+
+    check()
+    title = gmod.RUNTIME_DATA_SHADOW_ALERT_TITLE
+    assert len(fired) == 1, f"one shadow finding, one note write: {fired}"
+    assert fired[0]["measured_root"] == str(data), (
+        "the shadow leg alerted without handing the notifier the root it measured, so "
+        "its body's root and its clearance's root cannot be compared")
+    assert str(shadow) in fired[0]["text"]
+
+    foreign = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+    assert n.resolve(title, (
+        f"no runtime stores inside the code tree of {repo}, and no database with zero "
+        f"data rows shadowing a populated store under {foreign} — absent with no move "
+        "recorded by the guardian")) is True
+
+    check()
+    daily = sorted((vault / "memory").glob("*.md"))
+    assert len(daily) == 1, daily
+    text = daily[0].read_text(encoding="utf-8")
+    assert len(fired) == 2, (
+        f"the foreign seal closed the section but the next check did not re-alert:\n{text}")
+    assert fired[1]["measured_root"] == str(data), fired[1]
+    secs = [text[a:b] for (t, a, b) in notify.Notifier._daily_sections(text)
+            if t == title]
+    assert len(secs) == 2, f"one section, so the foreign seal was never honoured:\n{text}"
+    seals = [ln for ln in secs[1].splitlines()
+             if ln.startswith(notify.DAILY_CROSS_ROOT_PREFIX)]
+    assert len(seals) == 1, f"expected one label in the new section:\n{secs[1]}"
+    assert foreign in seals[0] and str(data) in seals[0], seals[0]
+    # The label is detection only: the finding, its root and the ask are all still the
+    # body's own words, unchanged by the label beside them.
+    assert str(shadow) in secs[1], secs[1]
+    assert notify.DAILY_CROSS_ROOT_PREFIX not in secs[0], secs[0]
+
+
 # ── #3481: bytes are not rows — the schema-current, content-empty duplicate ──
 
 #: The data tables of the shipped schema, i.e. every table but the `meta` bookkeeping

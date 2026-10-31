@@ -2017,12 +2017,23 @@ class Guardian:
             # call whatever the number of conditions reporting: the repeat guard is keyed
             # on the title, so splitting the two conditions into two calls would deliver
             # one body and log the other away (#1536, unchanged above).
+            # `measured_root` is the same `shadow_root` string this body prints and the
+            # clearance below prints, handed over so the daily-note writer can notice
+            # when the clearance that sealed this incident's previous section came from a
+            # process on a DIFFERENT root (#3628). Nothing is newly measured and nothing
+            # is newly stored: both roots were already in the note, in two sentences
+            # nobody read against each other. Both conditions ride this one call, so both
+            # carry it — and the value is this process's read-only `datawatch.DATA_ROOT`,
+            # which is exactly the field an automod round's or a test run's process fills
+            # in with its own, and so exactly the one that can disagree with the live
+            # guardian's without either side being wrong.
             self.alert("error",
                        RUNTIME_DATA_ALERT_TITLE if strays
                        else RUNTIME_DATA_SHADOW_ALERT_TITLE,
                        body,
                        coalesce=True,
-                       needs_human=bool(retained) or bool(shadows))
+                       needs_human=bool(retained) or bool(shadows),
+                       measured_root=shadow_root)
         elif not strays and not shadows and shadow_measured:
             # `and shadow_measured`, and it is the reason the scan above records whether
             # it ran at all: the two conditions share one coalesced section, so a shadow

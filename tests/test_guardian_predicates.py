@@ -2214,6 +2214,167 @@ def test_a_stray_finding_after_a_clear_opens_a_new_section(tmp_path, monkeypatch
     assert "sessions" in secs[1] and "workers.db" not in secs[1], secs[1]
 
 
+#: A clearance written by a process whose `datawatch.DATA_ROOT` was NOT this check's,
+#: spelled the way `agent-services/guardian/guardian.py` writes one — the same sentence
+#: with the sealing process's own data root in the `under <root>` clause. An automod
+#: round's `home/lloyd-data` is the live shape: `scripts/automod/worktree.py` symlinks
+#: the round's `home/obsidian` at the real vault while its `LLOYD_DATA` is the round's
+#: own directory, so a round that finds nothing seals the live guardian's section in the
+#: live note. `memory/2026-10-29.md` is that artefact: five sections for one incident,
+#: each sealed by a clearance naming a different `SM_*/home/lloyd-data`.
+FOREIGN_SEAL_CLEARANCE = (
+    "no runtime stores inside the code tree of {repo}, and no database with zero data "
+    "rows shadowing a populated store under {foreign} — absent with no move recorded by "
+    "the guardian, so the instructions above are stale and nothing here accounts for a "
+    "path that was named and is now gone")
+
+
+def _foreign_seal(gmod, g, foreign):
+    """Seal the live section the way a process on ANOTHER data root does.
+
+    `Notifier.resolve(title, note_text)` takes no root, and the daily note is shared
+    state, so calling it with a clearance naming a root this check never measured is
+    exactly the write such a process performs — no stub, no new seam.
+    """
+    g.notifier.resolve(
+        gmod.RUNTIME_DATA_ALERT_TITLE,
+        FOREIGN_SEAL_CLEARANCE.format(repo=gmod.policy.REPO, foreign=foreign))
+
+
+def test_a_clearance_from_a_foreign_root_labels_the_next_section(tmp_path, monkeypatch):
+    """#3628 clause 1: a seal from another root is named, not silently obeyed.
+
+    Tick 1 finds a stray and opens one section. A process measuring a DIFFERENT data
+    root then seals it with a clearance of the ordinary shape, and tick 2 re-alerts the
+    still-true finding. #1536 clause 4 is right that a fresh section is now owed —
+    openness is a fact about the note, and the marker is gone — but that section as it
+    stands reads "this incident honestly cleared and came back", which is false: nothing
+    on THIS root ever cleared. The new section therefore carries one line beginning
+    `cross-root seal:` naming both the sealing root and the root this check measured.
+
+    The clearance also names `policy.REPO`, which the honest clearance names too, so
+    what is detected is the measured root being ABSENT from the clearance, not a second
+    path being present in it.
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db"])
+    measured = str(tmp_path / "lloyd-data")     # the root this harness hands the check
+    foreign = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+
+    tick()
+    _foreign_seal(gmod, g, foreign)
+    tick(["sessions"])
+
+    text = note.read_text(encoding="utf-8")
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 2, f"one section, so the seal was never honoured:\n{text}"
+    seals = [ln for ln in secs[1].splitlines()
+             if ln.startswith(notify.DAILY_CROSS_ROOT_PREFIX)]
+    assert len(seals) == 1, f"expected one label in the new section:\n{secs[1]}"
+    assert seals[0].startswith(f"{notify.DAILY_CROSS_ROOT_PREFIX} "), seals[0]
+    assert foreign in seals[0], f"the sealing root is not named: {seals[0]}"
+    assert measured in seals[0], f"the measured root is not named: {seals[0]}"
+    # The label is dated with this tick's own stamp, in the shape every other note
+    # timestamp uses: without it a reader cannot tell a fresh cross-root seal from an
+    # old one.
+    assert re.search(rf"{re.escape(notify.DAILY_CROSS_ROOT_PREFIX)} "
+                     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", seals[0]), seals[0]
+    # The sealed section is left exactly as the foreign seal wrote it: no label, and its
+    # marker stays replaced.
+    assert notify.DAILY_CROSS_ROOT_PREFIX not in secs[0], secs[0]
+    assert notify.DAILY_STILL_OPEN not in secs[0], "a sealed section reopened"
+    assert text.count(f"{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+
+
+def test_a_clearance_from_the_measured_root_leaves_the_next_section_untouched(
+        tmp_path, monkeypatch):
+    """#3628 clause 2: the honest reopen is byte-identical to today's format.
+
+    The same harness, the same two incidents, and an all-clear from THIS root: the
+    second section is what `_vault_note` has written since #1536 — heading, body, one
+    `_(still open on the next check)_` — with no label anywhere in the note. The
+    comparison is against the SAME alert text written into a note that never saw a
+    clearance and with no root handed over at all, which is the only way "byte-identical
+    to today's format" can be checked without pasting today's format into the test and
+    letting it drift.
+
+    The first assertion is the other half of clause 3: the leg handed the notifier the
+    root it measured, so there is something to compare.
+    """
+    import guardian as gmod
+    import notify
+    from datetime import datetime as _dt
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db"])
+    measured = str(tmp_path / "lloyd-data")
+    fired: list[tuple] = []
+    real_vault_note = g.notifier._vault_note
+
+    def spy(title, text, *, coalesce=False, measured_root=""):
+        fired.append((title, text, coalesce, measured_root))
+        return real_vault_note(title, text, coalesce=coalesce,
+                               measured_root=measured_root)
+
+    g.notifier._vault_note = spy
+    tick()
+    assert fired[-1][3] == measured, (
+        "the stray/shadow leg did not hand the notifier the root it measured")
+    tick([])                      # the honest all-clear, naming THIS root
+    tick(["sessions"])            # a second incident under the same title
+
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_CROSS_ROOT_PREFIX not in text, (
+        f"an honest reopen grew a label:\n{text}")
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 2, text
+    assert secs[1].rstrip().endswith(notify.DAILY_STILL_OPEN), secs[1]
+
+    clean = tmp_path / "clean-vault"
+    (clean / "memory").mkdir(parents=True)
+    plain = notify.Notifier(ledger=tmp_path / "plain.jsonl", state_dir=tmp_path,
+                            vault_root=str(clean), backend_url="http://127.0.0.1:1")
+    title, body, coalesce, _root = fired[-1]
+    assert plain._vault_note(title, body, coalesce=coalesce) is True
+    fresh = _sections(clean / "memory" / f"{_dt.now().strftime('%Y-%m-%d')}.md", title)
+    assert len(fresh) == 1, fresh
+    assert secs[1] == fresh[0], (
+        "the reopened section is not byte-identical to an unlabelled append:\n"
+        f"{secs[1]!r}\n{fresh[0]!r}")
+
+
+def test_the_cross_root_label_appears_once_per_section(tmp_path, monkeypatch):
+    """#3628 clause 4: one label per section, across a refresh.
+
+    The next check of the same incident REFRESHES the open section in place. That
+    rewrite must keep the label the section already carries — losing it is how the note
+    stops saying the seal was foreign — and must not append a second copy of it, nor
+    restore the `_(still open on the next check)_` marker into the section the foreign
+    seal has already closed.
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db"])
+    foreign = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+
+    tick()
+    _foreign_seal(gmod, g, foreign)
+    tick(["sessions"])
+    tick(["sessions"])            # same incident: a refresh, not a new section
+
+    text = note.read_text(encoding="utf-8")
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 2, f"the refresh opened a third section:\n{text}"
+    assert secs[1].count(notify.DAILY_CROSS_ROOT_PREFIX) == 1, secs[1]
+    assert secs[1].rstrip().endswith(notify.DAILY_STILL_OPEN), secs[1]
+    assert secs[1].count(f"{notify.DAILY_STILL_OPEN}\n") == 1, secs[1]
+    assert secs[0].count(notify.DAILY_CROSS_ROOT_PREFIX) == 0, secs[0]
+    assert notify.DAILY_STILL_OPEN not in secs[0], "writing the label re-opened the seal"
+    assert text.count(f"{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+
+
 def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
     """#1536 clause 5: another alert's repetition is untouched.
 

@@ -60,14 +60,26 @@ DAILY_STILL_OPEN = "_(still open on the next check)_"
 # What replaces that marker when the condition clears. A prefix rather than prose so
 # a reader scanning the note sees the section's state, not another alarm body.
 DAILY_CLEARED_PREFIX = "cleared:"
-# The other word a sealed block may carry, and the only other one this module defines.
-# It is NOT a retraction: `cleared:` records that the guardian watched the condition come
+# The other word a sealed block may carry, and the only other one this module defines
+# that CLOSES a section (`DAILY_CROSS_ROOT_PREFIX` below annotates a seal, it never
+# makes one). It is NOT a retraction: `cleared:` records that the guardian watched the condition come
 # back, `dated:` records only that a later read refutes the state the body quoted. The
 # historical sweep of #2221 clause 5 writes it (`scripts/maintenance/guardian_note_sweep.py`)
 # because the notes it must fix are older than `DAILY_SCAN_DAYS` above, which is the reach
 # `resolve` will ever have — and nobody reading them months later can tell an inferred
 # refutation from an observed recovery unless the two words stay different.
 DAILY_DATED_PREFIX = "dated:"
+#: The line `_vault_note` puts in a NEW coalescing section when the newest `cleared:`
+#: line for that title names a root other than the one this check measured (#3628). It
+#: is a third kind of line but NOT a third kind of retraction: `cleared:` and `dated:`
+#: close a section, this one says WHY the section above it closed. The symptom it names
+#: is #1536's own — one incident's whole block re-appended once per hour — because a
+#: seal written by a process on a different data root removes the open marker exactly as
+#: an honest one does, and the next tick then correctly owes a fresh section. Detection
+#: only: whether a cross-root process may seal at all is a ruling #3628 does not take,
+#: and no root is recorded here that the alert body and the clearance do not already
+#: print.
+DAILY_CROSS_ROOT_PREFIX = "cross-root seal:"
 #: How many dated daily notes `resolve` scans back when it retracts an alarm (#1590). An
 #: alert written at 23:05 and cleared at 00:05 lives in TWO files, because `_daily_note` is
 #: keyed on the date it is called; scanning today's alone finds nothing to seal and used to
@@ -79,6 +91,44 @@ DAILY_SCAN_DAYS = 3
 #: A daily note's filename stem as `_daily_note` writes it. Only a dated note can hold an
 #: open section, so only dated notes are consulted outside the window.
 DATED_NOTE_STEM = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+#: The punctuation a clearance's prose puts after a path: the sentence carries on past
+#: it, so a path token has to be read without the character that follows it.
+_ROOT_TRAILING_PUNCT = "`*_.,;:!?()[]{}\"'"
+
+
+def _absolute_roots(line: str) -> list[str]:
+    """Absolute path tokens of one line, in the order they appear (#3628).
+
+    A clearance names the root it measured as a bare absolute path — the runtime-data
+    one is "no runtime stores inside the code tree of {REPO}, and no database with zero
+    data rows shadowing a populated store under {DATA_ROOT}" — and the alert body names
+    its own the same way, so comparing the two needs no new state anywhere. Deliberately
+    dumb: whitespace-split, strip the punctuation a sentence leaves hanging on a path,
+    keep what starts with `/`. A root is a path, and a path with a space in it is not
+    something the guardian has ever printed.
+    """
+    out: list[str] = []
+    for token in line.split():
+        stripped = token.strip(_ROOT_TRAILING_PUNCT)
+        if stripped.startswith("/") and len(stripped) > 1:
+            out.append(stripped)
+    return out
+
+
+def _cross_root_line_of(section_text: str) -> str | None:
+    """The cross-root label already inside one section's text, if it carries one.
+
+    A refresh rewrites the section from `text` alone, so without carrying the line
+    forward the label would vanish on the next check of the same incident and the note
+    would stop saying the seal it is describing was foreign. #3628 clause 4's "once per
+    section" is once AND kept.
+    """
+    for line in reversed(section_text.splitlines()):
+        if line.strip().startswith(DAILY_CROSS_ROOT_PREFIX):
+            return line.strip()
+    return None
 
 
 def _open_marker_span(text: str, body_start: int, window_end: int):
@@ -268,7 +318,8 @@ class Notifier:
 
     def alert(self, level: str, title: str, body: str, *, evidence: str = "",
               commit: str = "", trigger: str = "", tag: str = "",
-              needs_human: bool = False, coalesce: bool = False) -> dict:
+              needs_human: bool = False, coalesce: bool = False,
+              measured_root: str = "") -> dict:
         """Fan out one alert. Returns per-channel success for the heartbeat.
 
         `coalesce` changes the daily note only, and only for this title. The
@@ -281,6 +332,15 @@ class Notifier:
         other channel still fans out per firing: the ledger is the per-check audit
         trail rather than a reading surface, and the toast and the speech already
         have their own repeat windows.
+
+        `measured_root` is the absolute data root the CALLING check walked, and only the
+        runtime-data check passes it (#3628). `_vault_note` reads it for one purpose: to
+        notice that the newest `cleared:` line for this title names a DIFFERENT root,
+        which means the section that line sealed was closed by a process that never
+        measured this one. Every other caller leaves it empty and gets byte-for-byte the
+        note it got before. A caller with no single root to name is not asked to invent
+        one; the runtime-data check names `datawatch.DATA_ROOT`, because that is the
+        root its own alert body and its own clearance already print.
 
         `needs_human=True` says the guardian has run out of actions: rollback is
         not the right answer here, and only a person can make it one. It routes
@@ -310,7 +370,8 @@ class Notifier:
         results["journal"] = self._journal(level, f"{title} :: {body}")
         results["desktop"] = self._desktop(level, title, body)
         results["voice"] = self._speak(level, title, body)
-        results["vault"] = self._vault_note(title, text, coalesce=coalesce)
+        results["vault"] = self._vault_note(title, text, coalesce=coalesce,
+                                            measured_root=measured_root)
         # Four ways into the one channel that becomes work: a terminal state, a
         # rollback's trigger, a site's explicit flag, and the prose that predates
         # the flag. Everything above this line is either ephemeral, overwritten
@@ -695,7 +756,8 @@ class Notifier:
                      for k in keys)
         return split[0][len("# "):], sealed
 
-    def _vault_note(self, title: str, text: str, *, coalesce: bool = False) -> bool:
+    def _vault_note(self, title: str, text: str, *, coalesce: bool = False,
+                    measured_root: str = "") -> bool:
         """Write this alert's section into today's daily note.
 
         `coalesce=False` — every alert but the runtime-data stray one — appends a
@@ -731,14 +793,33 @@ class Notifier:
                 start, end = open_at
                 stale = body[start:end]
                 lead = stale[:len(stale) - len(stale.lstrip())]   # keep its blank lead
-                body = (body[:start] + lead + text.rstrip()
+                # A section that already carries the cross-root label keeps it: the
+                # refresh rewrites the section from `text` alone, so dropping the line
+                # here would un-say, on the second hour of an incident, the one thing
+                # that explains why the section above it closed (#3628 clause 4). It is
+                # CARRIED and never recomputed — an open section has no new clearance to
+                # describe, so a refresh cannot add a label that was not there.
+                carry = _cross_root_line_of(stale)
+                refreshed = text.rstrip()
+                if carry:
+                    refreshed += f"\n\n{carry}"
+                body = (body[:start] + lead + refreshed
                         + "\n\n" + DAILY_STILL_OPEN + "\n" + body[end:])
                 note.write_text(body, encoding="utf-8")
                 return True
             with open(note, "a", encoding="utf-8") as f:
                 if coalesce:
-                    f.write(f"\n\n## Self-mod guardian: {title}\n\n{text.rstrip()}\n\n"
-                            f"{DAILY_STILL_OPEN}\n")
+                    # Appending a fresh section is the one moment this writer can see the
+                    # seal that made it necessary, so it is the moment the label goes in
+                    # (#3628). Written as its own `f.write` and NOT folded into the line
+                    # above: with nothing to say the bytes below must be exactly what
+                    # this method wrote before the label existed, clause 2's
+                    # byte-identical case.
+                    seal = self._cross_root_seal_line(body, title, measured_root)
+                    f.write(f"\n\n## Self-mod guardian: {title}\n\n{text.rstrip()}\n")
+                    if seal:
+                        f.write(f"\n{seal}\n")
+                    f.write(f"\n{DAILY_STILL_OPEN}\n")
                 else:
                     f.write(f"\n\n## Self-mod guardian: {title}\n\n{text}\n")
             return True
@@ -973,6 +1054,73 @@ class Notifier:
             if span is not None:
                 return span
         return None
+
+    def _newest_cleared_line(self, text: str, title: str) -> str | None:
+        """The most recent `cleared:` line belonging to `title`, else None (#3628).
+
+        Section-scoped and title-scoped for the same reason `_daily_open_at` is: a day's
+        note carries many incidents' sections under several titles, and #1536's heading is
+        the only index it has. Sections are walked newest-first and the first section that
+        has a clearance wins, because a clearance in an older section cannot be the newest
+        fact about a title that has since alerted again.
+
+        A `dated:` line is deliberately NOT a match. It records that a later read refutes
+        the state a body quoted, not that a check watched the condition come back, and what
+        this answers is a question about a MEASUREMENT — so only the word a measurement
+        writes can carry its root.
+        """
+        for sect in reversed(self._daily_sections(text)):
+            if sect[0] != title:
+                continue
+            for line in reversed(text[sect[1]:sect[2]].splitlines()):
+                if line.startswith(DAILY_CLEARED_PREFIX):
+                    return line
+        return None
+
+    def _cross_root_seal_line(self, text: str, title: str,
+                              measured_root: str) -> str | None:
+        """The label for an append whose newest clearance names ANOTHER root (#3628).
+
+        None — silence, and the old bytes — whenever there is nothing true to say:
+
+        * no `measured_root` was handed over. Only the runtime-data check has a root to
+          name, and every other alert in the file must keep writing what it wrote before;
+        * the title has no prior `cleared:` line. This is the ordinary first incident, and
+          the ordinary reopen after an honest one takes the third branch below;
+        * that clearance names no absolute path at all. Nothing can be compared, so this
+          method claims nothing — which is also why a clearance written without a root
+          (the arrivals leg's line, for a title of its own) cannot read as a foreign seal;
+        * the measured root IS in it. Presence is the test, not sole-ness: the honest
+          runtime-data clearance names the code tree as well as the data root, and a rule
+          that demanded one path would label every honest seal on the box.
+
+        Otherwise the line names the roots that clearance carries and this check does not
+        share, plus this check's own, and is stamped with `_stamp()` like every other
+        timestamp that reaches the note. Detection only: the ruling on whether a
+        cross-root process may seal at all is owed elsewhere, and if it comes back
+        root-keyed this line becomes a backstop rather than the fix.
+        """
+        if not measured_root:
+            return None
+        cleared = self._newest_cleared_line(text, title)
+        if cleared is None:
+            return None
+        foreign: list[str] = []
+        for root in _absolute_roots(cleared):
+            if root == measured_root or root.startswith(measured_root + "/"):
+                return None
+            if root not in foreign:
+                foreign.append(root)
+        if not foreign:
+            return None
+        return (
+            f"{DAILY_CROSS_ROOT_PREFIX} "
+            f"{self._stamp().strftime('%Y-%m-%dT%H:%M:%SZ')} the most recent "
+            f"`{DAILY_CLEARED_PREFIX}` line for this title names "
+            f"{' or '.join(foreign)}, which this check did not measure; this check "
+            f"measured {measured_root}. A process on that other root closed the section "
+            "above, so the finding below is re-printed because a foreign seal ended it, "
+            "not because anything here cleared.")
 
     def _backlog_task(self, title: str, text: str, commit: str, tag: str) -> bool:
         """File a backlog item so the revert becomes work, not a mystery.

@@ -2941,9 +2941,16 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # before: `git diff <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'`
     # shows that one hunk and nothing else, and `grep -n
     # '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py` prints
-    # 923 with 3002 below it.
-    assert heads[guardian]["main"] == 3002, (
-        f"`main` moved off :3002 ({heads[guardian]['main']}) — if it is gone "
+    # 923 with 3013 below it.
+    # 3002 → 3013 is #3628: ONE hunk, `@@ -2017,12 +2017,23 @@` (+11 — the comment on why
+    # the alert hands the daily-note writer the root it measured, plus the
+    # `measured_root=shadow_root` keyword it replaces a line of), inside
+    # `_runtime_data_incident`. The same shape as #3603 one round later: below
+    # `evaluate_liveness` and above `main`, so only `main` moves, by exactly +11, and
+    # `architecture/threat-model.md`'s T-26 cell — which cites the `evaluate_liveness`
+    # head, still 923 — does not move with it.
+    assert heads[guardian]["main"] == 3013, (
+        f"`main` moved off :3013 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 923, (
         f"`evaluate_liveness` moved off :879 "
@@ -2980,9 +2987,10 @@ def test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has():
     That node pins the head against a literal in the test. This one closes the half
     nothing pinned before: it reads the number the DOC prints and asserts it equals
     the head measured from the file by the same rule the item names -
-    a line-anchored grep of the two `def` prefixes, which prints 923 today with 3002
-    below it (#3603 moved `main` and not this head; the chain of those moves is the
-    comment block above). A round that nets lines above the head is exactly what
+    a line-anchored grep of the two `def` prefixes, which prints 923 today with 3013
+    below it (#3603 and then #3628 each moved `main` and left this head alone; the
+    chain of those moves is the comment block above). A round that nets lines above the
+    head is exactly what
     #3577 risked, because the paragraph it rewrites sits in `_shadow_alert_body`,
     above both heads;
     such a round fails HERE, on the row a human reads, instead of shipping a stale
