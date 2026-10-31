@@ -963,8 +963,18 @@ measured since #904 — `scripts/automod/board_decisions.py`, surfaced through
 `up_next` joined to the ledger event that made it and to its terminal state,
 per-day counts, and retirements later reversed. It sees #35 only when a round
 picks its promotion up (`unrecorded`, since the MCP store writes no ledger
-row); #65 has no such join — its proposals are counted only as registry state
-(`research_stats`' `by_status`), never attributed to the night that made them.
+row); #65 has no such join — the registry writes no ledger event and
+`scripts/automod/board_decisions.py` reads the board's ledger alone, so no
+per-night cohort of its proposals is surfaced anywhere: not on the dashboard, not
+in the steward's `<board_health>` block, not in `round board-decisions`. The
+missing thing is that rollup, not the attribution. The `topics` row has carried
+both halves of it since the registry was minted — `proposed_by`, which
+`research_propose` stamps from the session bound to the run that proposed, and
+`proposed_at` — and `research_stats` answers with the pool as it stands
+(`by_status`, plus a `done_today` counted over `finished_at`) without ever
+grouping on either column, so the cohort is attributed in the store and surfaced
+nowhere; producing it is one `GROUP BY`, and what is genuinely open is which
+surface should publish it — a placement decision, not a schema change.
 
 | ID | Freq | Role |
 |----|------|---|

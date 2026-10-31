@@ -2748,6 +2748,151 @@ def test_queue_the_work_no_longer_calls_the_hygiene_skill_stale_about_the_closed
         "produced #3409")
 
 
+# ── #3420: what §Queue the work says #65's proposals are missing ────────────
+#
+# The section's verdict on how #65 is measured ended "… never attributed to the
+# night that made them", and that clause is false as written. `topics.proposed_by`
+# and `topics.proposed_at` sit in the registry's own `_SCHEMA` and are original to
+# the commit that minted the registry (1766c487, "research: a registry, because a
+# checklist cannot hold an outcome"); `propose()` takes `proposed_by` and inserts
+# both, and the MCP tool stamps it from the session bound to the run. The registry
+# held 140 topics on 2026-10-26 with 140 non-null `proposed_by` and 140 non-null
+# `proposed_at`, and `group by substr(proposed_at, 1, 10)` prints the night cohorts
+# straight out of it.
+#
+# What the sentence got right is its first half — there is no join, because the
+# registry writes no ledger event and `scripts/automod/board_decisions.py` reads the
+# board's ledger alone — and what it should have named is the absence of a SURFACED
+# cohort: `ResearchStore.stats()` answers with the pool as it stands (`by_status`,
+# saturation, and a `done_today` counted over `finished_at`) and never groups on
+# either column, so no per-night proposal figure reaches any report. The two
+# statements are not interchangeable, and the two halves of that nuance are what
+# this node keeps apart: "no surfaced per-night cohort exists" is true, "the
+# proposals are unattributed" is not.
+#
+# The reason to pin the wording rather than fix it again: `4b9f8977` (2026-10-26)
+# wrote the false sentence and, in the same landing, filed #3411 on the columns'
+# existence — which autotriage closed `stale` minutes later on exactly this
+# evidence. The item was retracted; the sentence was not, and #3412 was generated
+# from it four days later. A retracted premise kept producing work because the doc,
+# not the item, is what the next reviewer reads.
+
+#: The refuted sentence, kept verbatim so the matcher below is visibly built to
+#: catch the thing it was written for, and so a later reader can see what passed as
+#: the section's verdict.
+QUEUE_FALSE_ATTRIBUTION = (
+    "#65 has no such join — its proposals are counted only as registry state "
+    "(`research_stats`' `by_status`), never attributed to the night that made them.")
+
+#: Words that make an attribution-absence sentence a claim about the surfaced
+#: rollup rather than about the data. Spelled out, not a regex nobody can
+#: re-derive — the same reason `NEGATORS` above is four words.
+_ATTRIBUTION_QUALIFIERS = ("surfaced", "surface", "rollup", "roll-up", "cohort")
+
+
+def _says_attribution_absent(sentence: str) -> bool:
+    """True of a sentence that says something is NOT attributed.
+
+    Deliberately coarse — `attribut*` plus any of `NEGATORS` — because its job is
+    to make every attribution claim in the section pass the qualification test
+    below, the way the `archiv*` sweep makes every archiving claim state its
+    negation. It is a trigger, not a verdict.
+    """
+    low = sentence.lower()
+    return "attribut" in low and any(n in low for n in NEGATORS)
+
+
+def _names_the_surfaced_rollup(sentence: str) -> bool:
+    """True when the sentence's absence is about a report, not about the row."""
+    low = sentence.lower()
+    return any(q in low for q in _ATTRIBUTION_QUALIFIERS)
+
+
+def test_queue_the_work_calls_the_missing_rollup_unsurfaced_not_unattributed():
+    """#3420 clauses 1-4, in one node because the two halves are one distinction.
+
+    Clause 1: an unnegated attribution-absence sentence may not stand in §Queue the
+    work. Clause 2: the section must still state the real gap in the negative — a
+    sentence saying no surfaced per-night cohort/rollup exists — because deleting
+    the false claim and naming nothing is how this section acquired its next false
+    claim. Clause 3: the replacement sentence names the columns that DO carry the
+    attribution, `proposed_by` and `proposed_at`, so a reader can go and look.
+    Clause 4: this node re-checks its own premise against `app/research_store.py`
+    rather than trusting the doc, so the day those columns leave the `topics` schema
+    the doc's defence of them goes red with them.
+    """
+    # The matcher first, against the sentence that motivated it and its true form.
+    assert _says_attribution_absent(QUEUE_FALSE_ATTRIBUTION), (
+        "the trigger no longer fires on the refuted sentence, so every loop below "
+        "is checking nothing: " + QUEUE_FALSE_ATTRIBUTION)
+    assert not _names_the_surfaced_rollup(QUEUE_FALSE_ATTRIBUTION), (
+        "the refuted sentence now reads as a claim about a report, which is the "
+        "distinction this node exists to hold: " + QUEUE_FALSE_ATTRIBUTION)
+    # Positive control: the same absence, scoped to the surfaced cohort, is what a
+    # true sentence here looks like — negated, and naming the rollup as the thing
+    # that is missing. If this fails, the rule forbids the fix it was written for.
+    control = ("no per-night cohort of its proposals is surfaced anywhere, though "
+               "the row attributes the night it was proposed on")
+    assert _says_attribution_absent(control) and _names_the_surfaced_rollup(control), (
+        f"the positive control was rejected, so the rule cannot tell a surfaced-rollup "
+        f"sentence from a false one: {control!r}")
+
+    section = _group_section(QUEUE_HEADER)
+    for sentence in _sentences(section):
+        if not _says_attribution_absent(sentence):
+            continue
+        assert _names_the_surfaced_rollup(sentence), (
+            f"an unqualified attribution-absence sentence is back in §Queue the "
+            f"work: {sentence!r}. The registry has attributed every proposal to a "
+            f"proposer and a night since 1766c487, so the only true absence here is "
+            f"of a SURFACED cohort/rollup — say that, or drop the sentence. This is "
+            f"the wording #3411 was closed `stale` over and #3412 was filed from.")
+
+    # Clause 2: the gap, stated as a gap. One sentence must carry the negator, the
+    # surfacing word and the thing that is not surfaced.
+    gap = [s for s in _sentences(section)
+           if "surfaced" in s.lower()
+           and any(w in s.lower() for w in ("cohort", "rollup", "roll-up"))
+           and any(n in s.lower() for n in NEGATORS)]
+    assert gap, (
+        "§Queue the work no longer states the real gap — that no surfaced per-night "
+        "cohort or rollup of #65's proposals exists. The false claim has been "
+        "deleted; nothing has replaced it, and the next arch review will fill the "
+        "hole with 'unmeasurable' again, which is the loop #3411/#3412 came from.")
+
+    # Clause 3: the reader is told where the attribution actually lives.
+    for col in ("proposed_by", "proposed_at"):
+        assert col in section, (
+            f"the section defends an attribution without naming `{col}`, the column "
+            f"that carries it — the claim is then the reader's to re-derive, which is "
+            f"what produced the sentence this node refuses")
+
+    # Clause 4: the premise, re-checked against the code rather than the doc.
+    store = (ROOT / "app" / "research_store.py").read_text()
+    schema = re.search(r"_SCHEMA = \"\"\"(.*?)\"\"\"", store, re.S)
+    assert schema, (
+        "app/research_store.py no longer spells `_SCHEMA` as one triple-quoted block, "
+        "so this node has no schema to re-check the section's claim against")
+    topics = re.search(r"CREATE TABLE IF NOT EXISTS topics \(.*?\n\);",
+                       schema.group(1), re.S)
+    assert topics, (
+        "the `topics` table is no longer created inside `_SCHEMA`; the section cites "
+        "its columns and this node has to follow the table, not just the file")
+    for col in ("proposed_by", "proposed_at"):
+        assert col in topics.group(0), (
+            f"`{col}` has left the `topics` schema, and §Queue the work still tells a "
+            f"reader the registry records it — the section's sentence and this node "
+            f"have to go red together, not one alone")
+    assert "def propose(" in store and "proposed_by" in store.split("def propose(", 1)[1], (
+        "`propose()` no longer takes or writes `proposed_by`, so the columns are "
+        "declared and never populated — the section's 'the row has carried both "
+        "halves of it' would be a schema-only claim")
+    assert "done_today" in store, (
+        "the registry stopped reporting `done_today`, the one per-day figure "
+        "`research_stats` does surface; the section names it precisely so a reader "
+        "does not conclude no per-day number exists anywhere")
+
+
 # ── #1568: what #35's eight-to-twelve actually is ───────────────────────────
 #
 # One status, two owners, and one number that described neither of them. `up_next`
