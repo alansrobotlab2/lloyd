@@ -454,6 +454,204 @@ def provenance_coverage(root: Path = VAULT_FACTS_ROOT) -> dict[str, Any]:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+# ── the human-only merge queue (#3407) ───────────────────────────────────────
+
+#: Both queues that are left for a person live in the sweep's output dir under
+#: the pipeline root, beside the graph baseline the health report already reads.
+MERGE_QUEUE_PLANS_GLOB = "entity-merges-*.jsonl"
+MERGE_QUEUE_PLANS_PREFIX = "entity-merges-"
+#: A run writes its dry plan and then a second plan holding only what it
+#: applied; the applied one carries this marker in its name.
+MERGE_QUEUE_APPLY_MARKER = "-apply-"
+MERGE_QUEUE_PROPOSALS_FILENAME = "semantic-proposals-latest.jsonl"
+#: The tier `--apply` never touches on schedule, so every approval in it is by
+#: construction waiting on a person.
+SUFFIX_TIER = "SUFFIX_SAFE"
+
+
+def _plan_date(name: str) -> dt.date | None:
+    """The run date a plan filename carries, or None when it carries none.
+
+    The date exists ONLY in the filename. The semantic gate's own cache
+    (`semantic-verdicts.jsonl`) has keys `a,b,decision,def_a,def_b,judges,key`
+    and no timestamp field at all, so an approval carries no date where it was
+    written and the age of a waiting queue cannot be derived from the verdict
+    that granted it (#3407). A pointer like `entity-merges-latest.jsonl` is not
+    a dated plan and returns None: it can be read as the newest document while
+    the run that writes it is still going.
+    """
+    if not name.startswith(MERGE_QUEUE_PLANS_PREFIX) or not name.endswith(".jsonl"):
+        return None
+    if MERGE_QUEUE_APPLY_MARKER in name:
+        return None
+    try:
+        return dt.date.fromisoformat(name[len(MERGE_QUEUE_PLANS_PREFIX):][:10])
+    except ValueError:
+        return None
+
+
+def _jsonl_rows(path: Path) -> list[dict]:
+    """Every object row of a JSONL file; an unreadable file is an empty list.
+
+    A torn line is skipped rather than raised: this feeds one report row, and
+    the queue's own shape must never be able to take the report down (#3407
+    clause 4).
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _parse_seen(value) -> dt.date | None:
+    """The UTC date of an ISO timestamp, or None when it has no readable one."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def merge_queue_report(memory_graph_dir: Path,
+                       *,
+                       today: dt.date | None = None) -> dict[str, Any]:
+    """The two proposal queues that are left for a person — counted, and dated.
+
+    Two members of the entity-resolution fleet write *proposals* and apply
+    nothing: #48's suffix tier (`SUFFIX_SAFE` is never passed to `--apply` on
+    schedule, per `architecture/autonomy-jobs.md` §Canonicalize) and #67, which
+    only ever proposes. That boundary is deliberate. What was not deliberate is
+    that the waiting is unwatched: until now the number existed only inside a
+    per-run record under `autonomy-runs/<id>/`, a retention-bounded store nobody
+    opens unless a human goes looking, so there was no surface where "N clusters
+    have waited M days" was ever printed, and with no age bound a cluster the
+    gate approved in September was re-presented as fresh in November (#3407).
+
+    Two figures, each carrying the age of its oldest entry:
+
+    `suffix_clusters` — clusters approved but never applied: plan rows of tier
+        `SUFFIX_SAFE` whose `status` is `SAFE`. The status filter is
+        load-bearing. On the 2026-10-26 tree the tier ALONE matches 63 clusters
+        because the 40 the gate refused share the tier and differ only in
+        `status` (`SAFE` vs `AMBIGUOUS`), so an unfiltered tier walk counts the
+        refused set as waiting — and dates it from `python`, first seen
+        2026-09-22, which is a REFUSED cluster.
+        The queue is read across the plan files of the NEWEST run DATE, never
+        from "the newest file": a run also writes a plan of what it applied, and
+        newest-of-the-day is that file, whose suffix-approved count is 0
+        (measured 2026-10-31: `entity-merges-2026-10-30-20261030T150213Z.jsonl`,
+        109 rows, 0 approved suffix clusters, written a minute after the dry
+        plan that holds the 23). The applied plan is a subset of its run's dry
+        plan, so a union across one date cannot invent a cluster the dry plan
+        lacked.
+        Age: the earliest DATED plan in which each waiting cluster appears
+        approved; the figure carries the oldest of those.
+    `merge_proposals` — rows of `semantic-proposals-latest.jsonl` whose `action`
+        is `merge`. `alias_only` rows are excluded: they ask for an alias, not a
+        merge, and reach the same human at a different cost.
+        Age: the earliest `first_seen_at` among the merge rows — #67 stamps its
+        own proposals, so this queue needs no filename archaeology.
+
+    An absent or empty store yields a zero with an explicit `*_no_data` reason,
+    never a missing figure and never an exception: a drained queue and an
+    unreadable queue are different claims, and a silent row is precisely how a
+    queue of 23 came to read as a queue of none.
+
+    Nothing here is an alarm. A non-empty queue is the designed steady state of
+    a human-only merge step; the defect was the un-reported growth. The caller
+    must keep these numbers out of the report's exit-code channel, which is
+    reserved for counts a job can repair itself.
+    """
+    graph = Path(memory_graph_dir)
+    today = today or dt.datetime.now(dt.timezone.utc).date()
+
+    plans: dict[dt.date, list[Path]] = {}
+    for path in graph.glob(MERGE_QUEUE_PLANS_GLOB):
+        day = _plan_date(path.name)
+        if day is not None:
+            plans.setdefault(day, []).append(path)
+    newest = max(plans) if plans else None
+
+    first_approved: dict[str, dt.date] = {}
+    waiting: set[str] = set()
+    refused: set[str] = set()
+    any_plan_row = False
+    for day in sorted(plans):                        # oldest first, so the first
+        for path in sorted(plans[day]):              # date seen is the earliest
+            rows = _jsonl_rows(path)
+            any_plan_row = any_plan_row or bool(rows)
+            for row in rows:
+                if row.get("tier") != SUFFIX_TIER:
+                    continue
+                key = row.get("norm_key") or row.get("canonical") or row.get("old")
+                if not key:
+                    continue
+                if row.get("status") == "SAFE":
+                    first_approved.setdefault(key, day)
+                    if day == newest:
+                        waiting.add(key)
+                elif day == newest:
+                    refused.add(key)
+
+    approved_dates = [first_approved[k] for k in waiting if k in first_approved]
+    oldest_approved = min(approved_dates) if approved_dates else None
+    if not plans:
+        suffix_no_data = f"no dated {MERGE_QUEUE_PLANS_PREFIX}*.jsonl plan file"
+    elif not any_plan_row:
+        suffix_no_data = "no readable row in any plan file"
+    else:
+        suffix_no_data = None
+
+    proposals_path = graph / MERGE_QUEUE_PROPOSALS_FILENAME
+    proposal_rows = _jsonl_rows(proposals_path)
+    merge_rows = [r for r in proposal_rows if r.get("action") == "merge"]
+    seen = [d for d in (_parse_seen(r.get("first_seen_at")) for r in merge_rows)
+            if d is not None]
+    oldest_seen = min(seen) if seen else None
+    if not proposals_path.exists():
+        proposals_no_data = f"{MERGE_QUEUE_PROPOSALS_FILENAME} is absent"
+    elif not proposal_rows:
+        proposals_no_data = f"{MERGE_QUEUE_PROPOSALS_FILENAME} holds no readable row"
+    else:
+        proposals_no_data = None
+
+    def _age(day):
+        return None if day is None else max(0, (today - day).days)
+
+    return {
+        "suffix_clusters": len(waiting),
+        "suffix_oldest_date": oldest_approved.isoformat() if oldest_approved else None,
+        "suffix_age_days": _age(oldest_approved),
+        # The refused set is counted so the printed figure can say what it
+        # EXCLUDED: the most likely misreading of this number is the tier total.
+        "suffix_refused": len(refused - waiting),
+        "suffix_tier_total": len(waiting | refused),
+        "suffix_no_data": suffix_no_data,
+        "merge_proposals": len(merge_rows),
+        "alias_only": sum(1 for r in proposal_rows if r.get("action") == "alias_only"),
+        "proposals_oldest_date": oldest_seen.isoformat() if oldest_seen else None,
+        "proposals_age_days": _age(oldest_seen),
+        "proposals_no_data": proposals_no_data,
+        "plans_scanned": sum(len(v) for v in plans.values()),
+        "newest_plan_date": newest.isoformat() if newest else None,
+        "measured_on": today.isoformat(),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--json", action="store_true")

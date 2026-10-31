@@ -890,7 +890,14 @@ act is every merge that
 suffix queue waits on a person — 17 clusters on 2026-09-24, 19 on 2026-09-25,
 23 on 2026-10-26, growing while nobody runs them (that night's report named 40
 further suffix clusters the gate refused and 42 symbol-ambiguous ones, none of
-them a candidate for the schedule either). #67 proposes into a JSONL and stops; its own
+them a candidate for the schedule either). The waiting itself was the unwatched
+half until #3407: #60 now prints both queues — the approved suffix clusters and
+#67's `merge` proposals — with the age of each queue's oldest entry, on the
+Hygiene table a human already reads. It is a report and never an alarm: an
+unapplied queue is the designed state of a human-only merge step, so alarming on
+it would fire every night and teach a reader to ignore the exit code.
+The age comes from the dated plan filename, because the gate cache
+`semantic-verdicts.jsonl` stores no timestamp at all. #67 proposes into a JSONL and stops; its own
 `--apply` was retired 2026-09-04. #84 reports and writes nothing; applying is an
 operator act. The rails are the whole point of the arrangement, since the
 2026-08-22 wipe (12,131 edges) and the 2026-09-03 151-merge incident were both
@@ -1144,7 +1151,7 @@ two incidents (#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
 worse than none.** #60 exits 2 (`EXIT_ALARM`,
-`scripts/memory/knowledge-health-report.py:1847`) and alerts when the store
+`scripts/memory/knowledge-health-report.py:1924`) and alerts when the store
 cannot be read, when active edges fall below half the
 baseline, when any directory holds facts about another entity, when fact records
 carry no `entity:` tag over the hygiene floor (#2474), or when any fact file

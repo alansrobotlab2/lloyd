@@ -173,6 +173,12 @@ EDGE_TYPE_SHARE_HISTORY_NIGHTS = 7
 #: +68), so a snapshot-to-snapshot trend would FAIL on every single run.
 EDGE_TYPE_METRICS_DIR = PIPELINE_DIR / "metrics"
 
+#: The entity-resolution sweep's output dir: the degraded-edge floor, the dated
+#: merge plans and #67's proposals all live in it. One spelling for all three, so
+#: the merge-queue row can never be read off a tree the floor alarm is not
+#: looking at (#3407).
+MEMORY_GRAPH_RELPATH = "memory-graph"
+
 # Questions, not a listing — 20 is plenty for the section a research worker
 # reads out of `## Suggested Research Questions`.
 RESEARCH_QUESTION_COUNT = 20
@@ -1017,8 +1023,14 @@ def _trace_coverage_cell(tc: tuple[int, int] | None) -> str:
 
 
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
-                    baseline_path=None) -> dict:
+                    baseline_path=None, merge_queue_dir=None) -> dict:
     """Contamination, untagged records, near-duplicate clusters and regrowth.
+
+    Also carries `merge_queue`: the two proposal queues that only a person can
+    drain, measured by `kg_hygiene.merge_queue_report` (#3407). It rides in this
+    dict rather than a section of its own because the Hygiene table is the one
+    graph surface a human already reads, and the queue's numbers are meaningless
+    apart from the merge counts they sit beside.
 
     Delegates to `kg_hygiene`, which is the measured definition of all four.
     This module had its own re-implementation of each — same intent, different
@@ -1055,6 +1067,9 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
         if older:
             regrown.append((name, older[0], sweep.classify_pair(name, older[0])[0]))
 
+    queue_dir = (Path(merge_queue_dir) if merge_queue_dir is not None
+                 else PIPELINE_DIR / MEMORY_GRAPH_RELPATH)
+
     return {
         "contaminated": contaminated,
         "contaminated_dirs": c["dirs"],
@@ -1076,6 +1091,13 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
         "baseline_at": r.get("baseline_at"),
         "dirs_at_baseline": r.get("dirs_at_baseline"),
         "provenance": kg_hygiene.provenance_coverage(root),
+        # The queue that CANNOT be zero by any job's action: #48's approved
+        # suffix tier and #67's merge proposals, both waiting on a person who
+        # until now was never told the queue existed, how big it was, or how old
+        # its oldest entry. Read-only, and deliberately absent from `_alarms`
+        # (#3407) — the alarm channel is for counts a job can repair.
+        "merge_queue": kg_hygiene.merge_queue_report(
+            queue_dir, today=now.date() if hasattr(now, "date") else now),
     }
 
 
@@ -1169,6 +1191,50 @@ def _provenance_cell(pv: dict | None) -> str:
         return "not measured" + (f" ({why})" if why else "")
     return (f"{pv['both_pct']}% of {pv['facts']:,} facts "
             f"(created_at {pv['created_at_pct']}%, source_doc {pv['source_doc_pct']}%)")
+
+
+def _age_phrase(days, date_str) -> str:
+    """"waiting 37 days (since 2026-09-24)", or what it cannot say instead.
+
+    The age is the whole point of the row: a count with no age cannot tell a
+    queue that filled yesterday from one a person has been ignoring for five
+    weeks, which is how a September approval kept being re-presented as fresh
+    (#3407)."""
+    if days is None:
+        return "age unknown" if date_str is None else f"since {date_str}, age unknown"
+    return f"waiting {days} day{'s' if days != 1 else ''}" + (
+        f" (since {date_str})" if date_str else "")
+
+
+def _merge_queue_cell(mq: dict | None) -> str:
+    """The human-only merge queue: both counts, each with the age of its oldest.
+
+    Printed even at zero and even with no data, in which case it says WHY there is
+    no data — "0" and "I could not read the queue" are different statements, and
+    the row that goes silent is the reason the queue was invisible (#3407).
+    """
+    if not mq:
+        return ("not measured (no merge-queue dir was named)"
+                if mq is None else "not measured")
+    suffix = (f"{mq['suffix_clusters']} gate-approved suffix cluster"
+              f"{'' if mq['suffix_clusters'] == 1 else 's'} "
+              f"({_age_phrase(mq.get('suffix_age_days'), mq.get('suffix_oldest_date'))})")
+    if mq.get("suffix_refused"):
+        # Names the exclusion, because the tier total (23 approved + 40 refused =
+        # 63 on 2026-10-26) is the number a reader would otherwise arrive at.
+        suffix += (f"; the {mq['suffix_refused']} gate-REFUSED clusters of the "
+                   f"{mq['suffix_tier_total']} sharing the tier are excluded")
+    if mq.get("suffix_no_data"):
+        suffix += f" — no data: {mq['suffix_no_data']}"
+    proposals = (f"{mq['merge_proposals']} #67 merge proposal"
+                 f"{'' if mq['merge_proposals'] == 1 else 's'} "
+                 f"({_age_phrase(mq.get('proposals_age_days'), mq.get('proposals_oldest_date'))})")
+    if mq.get("alias_only"):
+        proposals += f"; {mq['alias_only']} `alias_only` proposals excluded"
+    if mq.get("proposals_no_data"):
+        proposals += f" — no data: {mq['proposals_no_data']}"
+    return (f"{suffix}, and {proposals} — left for a person, "
+            f"report-only and never an alarm")
 
 
 #: #94's referential-integrity ledger: the one report of the only job that notices
@@ -1689,6 +1755,17 @@ def generate_report(
         # first evidence that the resolve path is being used at all.
         lines.append(f"| Fact records carrying a `conflicts_with` resolution trace | "
                      f"{_trace_coverage_cell(trace_coverage)} |")
+        # The queue that no job can drain, on the table a person already reads.
+        # Both members that write merge proposals write them for a human and
+        # apply nothing, and the count lived only in a per-run record under
+        # `autonomy-runs/` that no process reads — so 23 clusters sat unmentioned
+        # while the mechanical tiers ran down to single digits. Printed at zero,
+        # printed with no data, and never fed to `_alarms`: the queue being
+        # non-empty is the designed state, the un-reported growth is the defect
+        # (#3407).
+        lines.append(f"| Merge proposals left for a human "
+                     f"(`SUFFIX_SAFE` approved but never applied; #67 `merge`) | "
+                     f"{_merge_queue_cell(hygiene.get('merge_queue'))} |")
         lines.append("")
         if hygiene["contaminated"]:
             lines.append("**Contamination must be 0.** A rise means an entity merge fused two different things; "
@@ -2090,7 +2167,7 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
 #: Where the degraded-edge floor lives, relative to ``PIPELINE_DIR``. One spelling for
 #: the read in `main()` and for the text of the alarm that names it (#3222), so the
 #: alarm can never point a reader at a path the report does not actually read.
-GRAPH_BASELINE_RELPATH = "memory-graph/graph-baseline.json"
+GRAPH_BASELINE_RELPATH = f"{MEMORY_GRAPH_RELPATH}/graph-baseline.json"
 
 
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
@@ -2183,6 +2260,16 @@ def main():
              "than an exit code.",
     )
     parser.add_argument(
+        "--merge-queue-dir",
+        type=Path,
+        default=PIPELINE_DIR / MEMORY_GRAPH_RELPATH,
+        help="Read the human-only merge queue (the dated entity-merges plans and "
+             f"#67's semantic proposals) from here (default: "
+             f"{PIPELINE_DIR / MEMORY_GRAPH_RELPATH}). Read, never written: the "
+             "row it produces is a report to a person, and the figures that drive "
+             "the merge itself live with the jobs that write them.",
+    )
+    parser.add_argument(
         "--no-alarm-exit", action="store_true",
         help="Always exit 0, even on an alarm condition (for ad-hoc runs)",
     )
@@ -2218,7 +2305,7 @@ def main():
     # this walks the parsed dict, not the tree.
     stamp_cohort = stale_stamp_cohort(entities)
 
-    hygiene = compute_hygiene(entities, now)
+    hygiene = compute_hygiene(entities, now, merge_queue_dir=args.merge_queue_dir)
     fact_dups = fact_duplicate_stats()
     dup_id_files = _duplicate_id_files(entities)
     # Over the entities already parsed above — no second walk of the tree.
@@ -2274,6 +2361,11 @@ def main():
     # Its own stdout line for the same reason it has its own table row: 0 in the
     # line above does not mean "nothing misattributed" (#2474).
     print(f"  Untagged fact records: {_untagged_cell(hygiene.get('untagged'))}")
+    # On stdout too, because the job log is what an operator reads: the whole
+    # point of #3407 is that this number had never been printed anywhere a human
+    # looks, only inside a run record under `autonomy-runs/`.
+    print(f"  Merge proposals left for a human: "
+          f"{_merge_queue_cell(hygiene.get('merge_queue'))}")
     # Not "regrown in 7d": with #1535 the count is a delta against the stored
     # entity-dir baseline, so the stdout line prints kg_hygiene's own phrase,
     # which carries the date that delta runs from.

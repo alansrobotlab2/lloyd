@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 import io
+import json
 import os
 import re
 import subprocess
@@ -767,6 +768,7 @@ def test_the_rewording_removed_nothing_but_prose_and_touched_no_other_file():
         "the rewording touched the entity-alias assertion, which names a real entity and is "
         "not this item's prose")
     assert touched and touched <= set(PROSE_SURFACES), sorted(touched - set(PROSE_SURFACES))
+
     for path in sorted(touched):
         removed, added = per_file[path]
         assert removed, f"{path}: the rewording deletes no line, so that diff is empty"
@@ -779,3 +781,332 @@ def test_the_rewording_removed_nothing_but_prose_and_touched_no_other_file():
             assert not bad2, (
                 "the report script gained non-prose line(s) "
                 f"{bad2[:6]}; the change there is comment-only")
+
+
+# ── #3407: the human-only merge queue is printed, dated, and never an alarm ───
+#
+# Both members that write merge proposals write them for a person and apply
+# nothing: #48's `SUFFIX_SAFE` tier is never passed to `--apply` on schedule, and
+# #67 only ever proposes. The count lived only in a per-run record under
+# `autonomy-runs/`, on a retention-bounded store nobody reads — so 23 approved
+# clusters sat unmentioned, aged 32 days, and were re-presented as fresh.
+#
+# A cluster is WAITING when a dated plan file holds it with `tier ==
+# "SUFFIX_SAFE"` and `status == "SAFE"`. The status filter is load-bearing: on
+# the 2026-10-26 tree the tier alone matches 63 clusters, because the 40 the gate
+# REFUSED share the tier and differ only in status — and dating from that set
+# would date the queue from `python`, first seen 2026-09-22, a refused cluster.
+# The approval date exists only in the plan FILENAME: the gate cache
+# `semantic-verdicts.jsonl` carries no timestamp field at all.
+
+import datetime as _dt                                                # noqa: E402
+from datetime import date as _date                                    # noqa: E402
+
+QUEUE_TODAY = _date(2026, 10, 30)
+SUFFIX_OLDEST = "2026-09-24"          # 36 days before QUEUE_TODAY
+SUFFIX_AGE = 36
+PROPOSAL_OLDEST = "2026-09-23"        # 37 days, and older than any approval
+PROPOSAL_AGE = 37
+DRY_PLAN = "entity-merges-2026-10-30-20261030T150100Z.jsonl"
+# The real apply plan of the same run carries NO marker in its name — only a
+# later timestamp and a subset of the rows — which is why newest-of-the-day is
+# the wrong file to read.
+APPLY_PLAN = "entity-merges-2026-10-30-20261030T150213Z.jsonl"
+
+
+def _plan_rows(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _sweep_row(canonical, *, tier="SUFFIX_SAFE", status="SAFE"):
+    return {"status": status, "norm_key": canonical.lower().replace(" ", ""),
+            "canonical": canonical, "tier": tier, "decision": "judged",
+            "variants": [[canonical, 1]], "merges": []}
+
+
+def _proposal_row(canonical, variant, action, first_seen):
+    return {"canonical": canonical, "variant": variant, "action": action,
+            "verdict": "same", "confidence": 1.0, "cached": False,
+            "first_seen_at": f"{first_seen}T02:11:00+00:00",
+            "proposed_at": "2026-10-30T02:11:00+00:00",
+            "last_seen_at": "2026-10-30T02:11:00+00:00"}
+
+
+def _queue_store(root, *, proposals=True, extra_latest=False):
+    """A memory-graph dir shaped like the live one: two run dates, the older
+    holding a cluster that has since dropped out, the newer holding a dry plan
+    and the apply plan of the same run."""
+    graph = root / "memory-graph"
+    graph.mkdir(parents=True, exist_ok=True)
+    _plan_rows(graph / "entity-merges-2026-09-24-20260924T180000Z.jsonl", [
+        _sweep_row("Alpha"), _sweep_row("Beta"),
+        _sweep_row("Gamma"),                       # approved then, gone now
+        _sweep_row("Delta", status="AMBIGUOUS"),   # refused, and stays refused
+    ])
+    _plan_rows(graph / DRY_PLAN, [
+        _sweep_row("Alpha"), _sweep_row("Beta"),
+        _sweep_row("Epsilon"),                     # approved later than Alpha
+        _sweep_row("Delta", status="AMBIGUOUS"),
+        _sweep_row("Kappa", tier="PUNCT"),         # applied unattended, not for a human
+    ])
+    _plan_rows(graph / APPLY_PLAN, [_sweep_row("Kappa", tier="PUNCT")])
+    if extra_latest:
+        _plan_rows(graph / "entity-merges-latest.jsonl", [_sweep_row("Zeta")])
+    if proposals:
+        _plan_rows(graph / "semantic-proposals-latest.jsonl", [
+            _proposal_row("Gemma", "gemma", "merge", PROPOSAL_OLDEST),
+            _proposal_row("Claude", "claude", "merge", "2026-10-21"),
+            _proposal_row("Vllm", "vllm", "alias_only", "2026-09-20"),
+        ])
+    return graph
+
+
+def _queue(**over):
+    q = {"suffix_clusters": 3, "suffix_oldest_date": SUFFIX_OLDEST,
+         "suffix_age_days": SUFFIX_AGE, "suffix_refused": 1, "suffix_tier_total": 4,
+         "suffix_no_data": None, "merge_proposals": 2, "alias_only": 1,
+         "proposals_oldest_date": PROPOSAL_OLDEST, "proposals_age_days": PROPOSAL_AGE,
+         "proposals_no_data": None, "plans_scanned": 3,
+         "newest_plan_date": "2026-10-30", "measured_on": "2026-10-30"}
+    q.update(over)
+    return q
+
+
+def _report_line(report, needle):
+    lines = [l for l in report.splitlines() if needle in l]
+    assert len(lines) == 1, f"expected exactly one line containing {needle!r}"
+    return lines[0]
+
+
+# -- clause 1: the count is the gate-approved suffix rows, and prints at zero --
+
+def test_the_suffix_count_is_the_safe_rows_of_the_suffix_tier(tmp_path):
+    """3 waiting, not the 4 that share the tier and not the PUNCT row either.
+
+    `Delta` is the gate-refused cluster (same tier, status AMBIGUOUS) and `Kappa`
+    is a PUNCT cluster #48 applies unattended, so neither is "waiting on a
+    person". `Gamma` was approved on 2026-09-24 but is absent from the newest
+    run's plan, so it is no longer something a person could apply.
+    """
+    graph = _queue_store(tmp_path, extra_latest=True)
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["suffix_clusters"] == 3
+    assert q["suffix_refused"] == 1 and q["suffix_tier_total"] == 4
+    assert q["suffix_no_data"] is None
+    # The `-latest` pointer is not a dated plan: it can be read as the newest
+    # document while the run writing it is still going, and `Zeta` is in no
+    # dated plan at all.
+    assert "zeta" not in str(q)
+
+
+def test_the_suffix_count_reads_the_dry_plan_not_the_apply_plan_of_the_run(tmp_path):
+    """Newest-of-the-day is the apply plan, and it holds no approved suffix row.
+
+    On the live tree 2026-10-30 the newest file is
+    `entity-merges-2026-10-30-20261030T150213Z.jsonl`: 109 rows, 0 approved
+    suffix clusters, written a minute after the dry plan that holds the 23. A
+    newest-of-the-day reading therefore reports a drained queue.
+    """
+    graph = _queue_store(tmp_path)
+    newest = max(graph.glob("entity-merges-*.jsonl"), key=lambda p: p.name)
+    assert newest.name == APPLY_PLAN
+    assert _jsonl_suffix_safe(newest) == 0
+    assert _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)["suffix_clusters"] == 3
+
+
+def _jsonl_suffix_safe(path):
+    return sum(1 for l in path.read_text().splitlines() if l.strip()
+               and json.loads(l).get("tier") == "SUFFIX_SAFE"
+               and json.loads(l).get("status") == "SAFE")
+
+
+def test_the_suffix_row_prints_the_count_and_names_the_excluded_refused_set():
+    row = _report_line(_report(_hygiene(merge_queue=_queue())),
+                       "| Merge proposals left for a human")
+    assert "3 gate-approved suffix clusters" in row, row
+    assert "1 gate-REFUSED clusters of the 4 sharing the tier are excluded" in row, row
+
+
+def test_an_empty_suffix_queue_still_prints_a_zero():
+    """A drained queue is a real state and must not be a missing row."""
+    q = _queue(suffix_clusters=0, suffix_oldest_date=None, suffix_age_days=None,
+               suffix_refused=0, suffix_tier_total=0)
+    row = _report_line(_report(_hygiene(merge_queue=q)),
+                       "| Merge proposals left for a human")
+    assert "0 gate-approved suffix clusters" in row, row
+    assert "age unknown" in row, row
+
+
+def test_an_empty_but_readable_queue_is_not_reported_as_no_data(tmp_path):
+    graph = tmp_path / "memory-graph"
+    graph.mkdir(parents=True)
+    _plan_rows(graph / DRY_PLAN, [_sweep_row("Delta", status="AMBIGUOUS")])
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["suffix_clusters"] == 0
+    assert q["suffix_no_data"] is None, "a refused-only plan is readable, not absent"
+
+
+# -- clause 2: the proposal count is #67's merge rows, alias_only excluded ----
+
+def test_the_proposal_count_is_merge_rows_only(tmp_path):
+    graph = _queue_store(tmp_path)
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["merge_proposals"] == 2, "the alias_only row must not join the count"
+    assert q["alias_only"] == 1
+
+
+def test_the_proposal_row_prints_the_count_and_names_the_excluded_alias_only():
+    row = _report_line(_report(_hygiene(merge_queue=_queue())),
+                       "| Merge proposals left for a human")
+    assert "2 #67 merge proposals" in row, row
+    assert "1 `alias_only` proposals excluded" in row, row
+
+
+# -- clause 3: each number carries the age of its oldest entry ----------------
+
+def test_the_suffix_age_is_the_oldest_dated_plan_holding_a_waiting_cluster(tmp_path):
+    """36 days, from the earliest plan holding `Alpha` — not from the newest plan.
+
+    `Gamma`'s 2026-09-24 approval does not count: it is no longer waiting. And
+    the date had to come from the filename, because the gate cache that granted
+    the approval stores no timestamp.
+    """
+    q = _kg_hygiene().merge_queue_report(_queue_store(tmp_path), today=QUEUE_TODAY)
+    assert q["suffix_oldest_date"] == SUFFIX_OLDEST
+    assert q["suffix_age_days"] == SUFFIX_AGE
+
+
+def test_the_proposal_age_is_the_earliest_first_seen_among_merge_rows(tmp_path):
+    """37 days from `first_seen_at`, and the alias_only row older than it is ignored."""
+    q = _kg_hygiene().merge_queue_report(_queue_store(tmp_path), today=QUEUE_TODAY)
+    assert q["proposals_oldest_date"] == PROPOSAL_OLDEST
+    assert q["proposals_age_days"] == PROPOSAL_AGE
+
+
+def test_an_unparseable_first_seen_loses_its_row_from_the_age_but_not_the_count(tmp_path):
+    graph = _queue_store(tmp_path)
+    rows = [_proposal_row("Gemma", "gemma", "merge", "not-a-date"),
+            _proposal_row("Claude", "claude", "merge", "2026-10-21")]
+    _plan_rows(graph / "semantic-proposals-latest.jsonl", rows)
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["merge_proposals"] == 2
+    assert q["proposals_oldest_date"] == "2026-10-21"
+    assert q["proposals_age_days"] == 9
+
+
+def test_the_row_prints_both_ages_beside_their_dates():
+    row = _report_line(_report(_hygiene(merge_queue=_queue())),
+                       "| Merge proposals left for a human")
+    assert f"waiting {SUFFIX_AGE} days (since {SUFFIX_OLDEST})" in row, row
+    assert f"waiting {PROPOSAL_AGE} days (since {PROPOSAL_OLDEST})" in row, row
+
+
+# -- clause 4: reading the queue cannot break the report or trip the alarm ----
+
+def test_an_absent_queue_store_prints_the_row_with_a_no_data_reason(tmp_path):
+    q = _kg_hygiene().merge_queue_report(tmp_path / "memory-graph", today=QUEUE_TODAY)
+    assert q["suffix_clusters"] == 0 and q["merge_proposals"] == 0
+    assert q["suffix_no_data"] == "no dated entity-merges-*.jsonl plan file"
+    assert q["proposals_no_data"] == "semantic-proposals-latest.jsonl is absent"
+    row = _report_line(_report(_hygiene(merge_queue=q)),
+                       "| Merge proposals left for a human")
+    assert "no data: no dated entity-merges-*.jsonl plan file" in row, row
+    assert "no data: semantic-proposals-latest.jsonl is absent" in row, row
+
+
+def test_an_empty_plan_and_an_empty_proposal_file_say_which(tmp_path):
+    graph = tmp_path / "memory-graph"
+    graph.mkdir(parents=True)
+    (graph / DRY_PLAN).write_text("", encoding="utf-8")
+    (graph / "semantic-proposals-latest.jsonl").write_text("", encoding="utf-8")
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["suffix_no_data"] == "no readable row in any plan file"
+    assert q["proposals_no_data"] == "semantic-proposals-latest.jsonl holds no readable row"
+
+
+def test_a_torn_plan_line_is_skipped_and_the_section_stands(tmp_path):
+    """One corrupt line cannot cost the report its Hygiene section."""
+    graph = _queue_store(tmp_path)
+    with open(graph / DRY_PLAN, "a", encoding="utf-8") as fh:
+        fh.write("{ this line was never closed\n")
+    q = _kg_hygiene().merge_queue_report(graph, today=QUEUE_TODAY)
+    assert q["suffix_clusters"] == 3 and q["suffix_no_data"] is None
+    body = _report(_hygiene(merge_queue=q))
+    assert "## Hygiene" in body and "| Provenance coverage" in body
+
+
+def test_the_merge_queue_is_never_fed_to_the_alarm_channel():
+    """A non-empty queue is the DESIGNED state, so it must not exit 2.
+
+    The alarm channel is reserved for counts a job can repair itself: a
+    contaminated dir, an untagged share, a duplicate fact ID. `SUFFIX_SAFE` is
+    never applied on schedule and #67 never applies at all, so an alarm here
+    would fire every night forever on a state nothing can fix, and would teach
+    a reader to ignore the channel. A repairable alarm still has to fire beside
+    the same queue, which is what the second half of this node pins.
+    """
+    queue_hygiene = _hygiene(merge_queue=_queue())
+    store = {"edges_total": 100, "edges_active": 100}
+    assert khr._alarms(store, queue_hygiene, 0, 80) == []
+    # Contamination trips its own alarm over the SAME non-empty queue, and the
+    # two wordings must not be confused: the repairable alarm's own sentence
+    # contains "a merge went wrong", so the filter keys on the queue's terms.
+    broken = _hygiene(merge_queue=_queue(), contaminated_dirs=2, foreign_facts=3,
+                      contaminated=[("Foo", "Bar", 3)])
+    alarms = khr._alarms(store, broken, 0, 80)
+    assert len(alarms) == 1 and "2 directories" in alarms[0], alarms
+    assert not [a for a in alarms
+                if any(t in a.lower() for t in ("suffix", "proposal", "queue"))], alarms
+
+
+def _run_script(tmp_path, graph, *extra):
+    """`main()` as the nightly job runs it, over an ephemeral data root."""
+    import subprocess
+    from app import kg_store
+
+    root = tmp_path / "facts"
+    _facts(root, "vLLM", "state", [("vLLM", "serves openai api")])
+    db = tmp_path / "kg.sqlite"
+    st = kg_store.configure(db)
+    st.facts_idx.reindex(sorted(root.rglob("*.md")), root=root)
+    kg_store.reset()
+
+    out = tmp_path / "out"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/memory/knowledge-health-report.py"),
+         "--facts-dir", str(root), "--output-dir", str(out),
+         "--merge-queue-dir", str(graph), *extra],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "LLOYD_KG_DB": str(db), "LLOYD_FACTS_ROOT": str(root),
+             "LLOYD_DATA": str(tmp_path)})
+    dated = next(out.glob("knowledge-health-*.md"))
+    run_date = _dt.datetime.strptime(
+        dated.name[len("knowledge-health-"):][:10], "%Y-%m-%d").date()
+    return proc, dated.read_text(), run_date
+
+
+def test_a_full_human_queue_leaves_the_nightly_exit_status_at_zero(tmp_path):
+    """Clause 4 end to end: the row is in the report the job writes, the number
+    is on stdout where an operator reads it, and exit status stays 0 WITHOUT
+    `--no-alarm-exit` — the flag is what would hide an alarm, so passing it here
+    would pin nothing.
+
+    Ages are read off the report's own run date rather than `QUEUE_TODAY`,
+    because this node runs the real `main()`, which dates from the clock: the
+    fixture's dates are what the queue holds, the run date is what the script
+    measures them against, and a node that hardcoded today's number would rot
+    tomorrow.
+    """
+    proc, report, run_date = _run_script(tmp_path, _queue_store(tmp_path))
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "ALARM" not in proc.stderr, proc.stderr[-1500:]
+    row = _report_line(report, "| Merge proposals left for a human")
+    suffix_age = (run_date - _dt.date.fromisoformat(SUFFIX_OLDEST)).days
+    proposal_age = (run_date - _dt.date.fromisoformat(PROPOSAL_OLDEST)).days
+    assert "3 gate-approved suffix clusters" in row
+    assert f"waiting {suffix_age} days (since {SUFFIX_OLDEST})" in row, row
+    assert f"waiting {proposal_age} days (since {PROPOSAL_OLDEST})" in row, row
+    assert "2 #67 merge proposals" in row
+    # The same figure on the job's stdout, which is what an operator reads.
+    assert ("Merge proposals left for a human: 3 gate-approved suffix clusters"
+            in proc.stdout), proc.stdout[-1500:]
