@@ -4211,7 +4211,8 @@ class Gate:
 
         Returns the rung's finished answer as a `(ok, detail, data)` tuple
         when no grading turn is owed — no item, no clauses, the hard cap, a
-        reused patch-id, the same head refused, the attempt cap — or else a
+        reused patch-id, the same head refused, the per-head void ceiling
+        (#3619), the attempt cap — or else a
         dict of what a grade and its judgment need. Appends no ledger event
         and spends nothing, so the prefetch beside the tests rung can call it
         and the rung can call it again: the one write, orphaning another
@@ -4256,8 +4257,25 @@ class Gate:
         graded_refusals: list[dict] = []
         graded_total = 0
         spent = 0
+        # Voided grades by head (#3619): a `review` row carrying a non-empty
+        # `unreliable` list is a grading turn that graded nothing. It spends no attempt
+        # — nothing on this diff was judged — but it is a TURN, and it used to charge
+        # nothing at all: `refused_by_head` is only ever filled from an `ok` row, so the
+        # same-head ledger answer below was unreachable for these, and SM_20261030_035050
+        # bought two of them over one unchanged head for 687.9 s while every surviving
+        # bound read zero. Counted here against REVIEW_HARD_CAP, and per head against
+        # REVIEW_VOIDS_PER_HEAD.
+        voided_by_head: dict[str, list[dict]] = {}
         for e in prior:
             if not e.get("ok"):
+                # Keyed on `unreliable` being PRESENT, never on `ok` being false. The
+                # grader-unreachable, unusable-object and unreadable-clause-entries rows
+                # are the same `ok: false, blocking: false` shape and carry no
+                # `unreliable` key: an engine outage is not a reason to exhaust a round,
+                # so it is charged neither this ceiling nor the per-head count.
+                if e.get("unreliable"):
+                    graded_total += 1
+                    voided_by_head.setdefault(str(e.get("head") or ""), []).append(e)
                 continue
             graded_total += 1
             if not e.get("blocking"):
@@ -4328,6 +4346,43 @@ class Gate:
                                "review_attempt": int(same.get("attempt") or spent),
                                "clauses": same.get("clauses") or [],
                                "review_same_head": True}
+        # The third void over one unchanged head, refused in code (#3619). The shape
+        # SM_20261030_035050 died in: two `review_unreliable` rows on head 961f2465
+        # (190.2 s and 497.7 s), each attempt-spared, none of them visible to the hard
+        # cap, the per-round cap or the same-head answer above — the round stopped
+        # because an AGENT decided to, and its `round_aborted` reason is prose. This one
+        # is not an `external_blocker` on purpose: `automod_gate_wait` turns that key
+        # into "wait and gate again, do NOT abort" and publishes its own `retry_after_s`,
+        # which is the opposite instruction. The detail carries the mis-bound pair —
+        # the file the line count was bounded against with that count — which #3579
+        # already puts in `citation_unresolved`, pulled with its own predicate rather
+        # than rebuilt here.
+        voids = ([] if pending_amendments or not head
+                 else list(voided_by_head.get(head) or []))
+        if len(voids) >= RV.REVIEW_VOIDS_PER_HEAD:
+            last = voids[-1]
+            pair = ""
+            for cand in ([u for c in (last.get("clauses") or [])
+                          for u in (c.get("citation_unresolved") or [])]
+                         + list(last.get("unreliable") or [])):
+                if "long enough to hold it" in str(cand):
+                    pair = str(cand)
+                    break
+            why = (f"review has voided {len(voids)} grades on this exact commit "
+                   f"{head[:8]} (ceiling {RV.REVIEW_VOIDS_PER_HEAD} per head) and nothing "
+                   f"has been committed since — no grading turn spent: the grader keeps "
+                   f"re-asking with a citation that is not in the tree it is handed")
+            why += f": {pair}" if pair else ""
+            return False, (
+                why + " — abort and report (automod_abort with this as the reason); a "
+                      "third grade of an unchanged head answers the same question with the "
+                      "same phantom citation, and the item comes back to the next round "
+                      "with it"), {
+                    "review_retry": True, "review_exhausted": True,
+                    "review_voids_on_head": len(voids),
+                    "review_unreliable": last.get("unreliable") or [],
+                    "review_attempt": attempt,
+                    "clauses": last.get("clauses") or []}
         # Same reason: a round holding an unratified amendment has not had
         # its new contract judged even once. The HARD_CAP above still bounds
         # it — that one counts grading turns, not refusals, so amendments

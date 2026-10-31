@@ -6102,3 +6102,36 @@ def test_an_unhonoured_past_eof_line_names_the_mis_bound_pair(multi_wt):
     # hint cannot read as "it is in a file you changed" when it is in none of them.
     assert "(201 lines)" not in detail and "(30 lines at" not in record.split(
         "long enough to hold it")[1], detail
+
+
+def test_the_re_ask_comment_names_the_per_head_void_ceiling_and_its_owner():
+    """"No new bound is needed. `rung_review` counts every grading turn against
+    REVIEW_HARD_CAP" was false in the one way that mattered: the counter skipped every
+    row whose `ok` was false, and this path's own row IS `ok: false, blocking: false`, so
+    the re-ask it describes was the one grading turn the sentence swore was bounded.
+    Measured at #3619's filing over the live ledger: SM_20261030_035050, two voided
+    grades of head 961f2465, `seconds` 190.2 and 497.7 — 687.9 s of primary-model grading
+    that charged neither the cap nor an attempt.
+
+    A prose pin, deliberately: the artefact under test is the sentence the next reader
+    consults before adding a bound, and a stale "no new bound is needed" there is an
+    invitation to re-measure a hole already closed. The bound itself is pinned as
+    behaviour by `tests/test_review_transport.py`, six nodes from the void fixture to the
+    amendment reset."""
+    src = (ROOT / "scripts" / "automod" / "review.py").read_text()
+    assert "No new bound is needed" not in src, "the refuted sentence is still shipped"
+    parts = src.split("# A new bound WAS needed", 1)
+    assert len(parts) == 2, "the replacement sentence is missing"
+    comment = parts[1].split("    reasked = ", 1)[0]
+    assert "reasked = " in parts[1], "the pin must stay scoped to the comment block"
+    # What the sentence now states, each term load-bearing: the cap the void joins, the
+    # per-head ceiling, the constant that holds it, and the module that enforces it.
+    for term in ("REVIEW_HARD_CAP", "REVIEW_VOIDS_PER_HEAD", "rung_review",
+                 "scripts/automod/gate.py"):
+        assert term in comment, (term, comment)
+    # The behaviour it still promises: a voided grade spends no attempt, because nothing
+    # on the diff was graded from it.
+    assert "spends no attempt" in comment, comment
+    # And the numbers it cites are the measurement, not an appeal.
+    for figure in ("SM_20261030_035050", "190.2", "497.7", "687.9"):
+        assert figure in comment, (figure, comment)

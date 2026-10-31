@@ -83,6 +83,19 @@ REVIEW_MAX_PER_ROUND = 2
 # ceiling that keeps that free move from becoming a loop: graded reviews of
 # any kind per round, after which the rung refuses without asking.
 REVIEW_HARD_CAP = 5
+# How many VOIDED grades one head may buy in one round (#3619). A `review` row with a
+# non-empty `unreliable` is a grading turn that graded nothing: the grader cited
+# evidence that is not in the tree it was handed, so the row is not blocking and spends
+# no attempt. It is still a TURN, and until now it charged nothing — SM_20261030_035050
+# bought two over head 961f2465 (190.2 s + 497.7 s = 687.9 s of primary-model time),
+# invisible to REVIEW_HARD_CAP, to REVIEW_MAX_PER_ROUND and to the same-head ledger
+# answer alike, and the round ended on an agent's judgement rather than on a ceiling.
+# Enforced per HEAD by `rung_review` in scripts/automod/gate.py: a new commit or an
+# unratified amendment of this round is a different question and resets the count.
+# These rows now also count toward REVIEW_HARD_CAP above, so 2 voids plus 3 graded
+# refusals end a round that previously continued — how the ceiling should split between
+# the two is settled by the landed counting's real distribution, not here.
+REVIEW_VOIDS_PER_HEAD = 2
 # The grader's wall clock, and the gate's: past this the rung is `external`
 # (the engine, not the diff) and the item keeps its attempt.
 REVIEW_TIMEOUT_S = 600.0
@@ -3963,9 +3976,18 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     # same timestamp, 0 of those 23 pair a blocking precheck with the row that spent no
     # attempt.
     #
-    # No new bound is needed. `rung_review` counts every grading turn against
-    # REVIEW_HARD_CAP, so a grader that repeats its own phantom number ends there, and
-    # `premise_problems` keeps a broken-premise refusal charging its attempt.
+    # A new bound WAS needed, and this sentence said the opposite until #3619. The claim
+    # was that `rung_review` counts every grading turn against REVIEW_HARD_CAP; what it
+    # counted was every turn whose row came back `ok: true` — and the row THIS path
+    # writes is `ok: false, blocking: false`, so a grader repeating its own phantom
+    # number ended nowhere. Measured at filing: SM_20261030_035050, two voided grades of
+    # one unchanged head, 190.2 s and 497.7 s, 687.9 s together, charging zero.
+    # Now a voided grade counts toward REVIEW_HARD_CAP, and `rung_review` in
+    # scripts/automod/gate.py refuses a third void over an unchanged head at
+    # REVIEW_VOIDS_PER_HEAD without buying another grading turn. What stays is the
+    # attempt rule the sentence was really protecting: the void grades nothing on this
+    # diff, so it spends no attempt, and `premise_problems` keeps a broken-premise
+    # refusal charging its attempt.
     reasked = [c for c in clauses if c.get("citation_only")]
     # `PREMISES` is ("sound", "unsound"); an unsound premise is a finding about the ITEM
     # rather than about this review's arithmetic, so it keeps its charged refusal.

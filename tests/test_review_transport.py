@@ -1271,3 +1271,172 @@ def test_an_identical_diff_that_already_passed_is_reused(monkeypatch, tmp_path):
     ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
     assert ok is True and data["review_reused"] and data["review_attempt"] == 1
     assert grade.calls == []
+
+
+# ── the citation void: a grading turn that charged nothing (#3619) ─────────
+#
+# SM_20261030_035050 is the ledger's own account of the hole. Two `review` rows, both
+# head 961f2465, both `ok: false, blocking: false` with a non-empty `unreliable` and no
+# `review_attempt` key at all, `seconds` 190.2 and 497.7 — 687.9 s of primary-model
+# grading on ONE unchanged head. `graded_total` skipped every `ok: false` row, so the
+# hard cap saw 0 grading turns; `spent` rises only behind `ok && blocking`, so
+# REVIEW_MAX_PER_ROUND saw 0 refusals; `refused_by_head` is filled from `ok` rows only,
+# so the same-head ledger answer was unreachable too. The round stopped because an
+# AGENT decided to — its `round_aborted` reason is prose.
+
+PAST_EOF = ("evidence_line 5120 is past EOF of scripts/automod/gate.py (4412 lines at "
+            "the graded head)")
+# #3579's pair: the file the number was bounded against WITH its length, and the
+# changed files long enough to hold it. `citation_unresolved` already carries it, so
+# the per-head refusal reuses the string rather than rebuilding it. Rendered the way
+# `_changed_paths_admitting` renders it (`review.py`: every candidate is
+# `f"{p} ({n_lines} lines)"`), so the fixture is the real shape and not a paraphrase.
+MISBOUND = ("evidence_line 5120 is not in scripts/automod/gate.py (4412 lines at the "
+            "graded head); 2 changed path(s) at the graded head are long enough to hold "
+            "it: scripts/automod/review.py (5188 lines), "
+            "tests/test_review_transport.py (1345 lines)")
+
+
+def _void_row(head: str, *, clause: int = 1) -> dict:
+    """One `review` row in the shape the citation rail writes from `rung_review`'s
+    `if parsed and parsed.get("unreliable"):` branch: the grader cited evidence that is
+    not in the tree it was handed, so nothing on this diff was graded. Not blocking,
+    and no `review_attempt` key — it spends no attempt, and that part is right."""
+    return {"event": "review", "round_id": "SM_REV", "ok": False, "blocking": False,
+            "head": head,
+            "unreliable": [f"clause {clause}: {PAST_EOF} ({MISBOUND}) — a line past EOF "
+                           f"of a file whose path resolved is the grader's own citation, "
+                           f"not a finding about the diff, so the clause is re-asked and "
+                           f"nothing on this diff was graded from it"],
+            "clauses": [{"clause": clause, "verdict": "met", "citation_only": True,
+                         "citation_unresolved": [PAST_EOF, MISBOUND]}],
+            "error": f"review unreliable: clause {clause}: {PAST_EOF}"[:400],
+            "seconds": 190.2}
+
+
+def _outage_row(head: str, reason: str) -> dict:
+    """An `ok: false, blocking: false` row the ENGINE earns — grader unreachable,
+    unusable object, unreadable clause entries. Identical to a voided grade except for
+    the absent `unreliable` key, which is the whole difference: an outage must not
+    exhaust a round, so it is charged nothing."""
+    return {"event": "review", "round_id": "SM_REV", "ok": False, "blocking": False,
+            "head": head, "error": reason}
+
+
+def test_a_citation_void_counts_toward_the_hard_cap_and_buys_no_more_grading(
+        monkeypatch, tmp_path):
+    """Clause 1: the void is a grading TURN. Five of them over five distinct heads now
+    answer from the ledger with no grading turn, where at #3619's filing they each
+    bought a fresh full grading pass — `graded_total` counted 0 of them."""
+    grade = _grader(UNMET)
+    _arm(monkeypatch, tmp_path, grade=grade, head="f" * 40,
+         prior=[_void_row(f"{i:040d}") for i in range(RV.REVIEW_HARD_CAP)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert ok is False and data["review_exhausted"] is True, detail
+    assert grade.calls == [], "the ceiling must answer without asking the model again"
+    assert "ceiling" in detail and str(RV.REVIEW_HARD_CAP) in detail
+
+
+def test_two_citation_voids_and_no_graded_refusal_still_report_attempt_one(
+        monkeypatch, tmp_path):
+    """Clause 1's other half: counting the turn must not charge the attempt. Two voids
+    on two heads and zero graded refusals is still attempt 1 of 2 — the diff has never
+    been judged, and `spent` rises only on a graded refusal."""
+    grade = _grader(UNMET)
+    _arm(monkeypatch, tmp_path, grade=grade, head="f" * 40,
+         prior=[_void_row("a" * 40), _void_row("b" * 40)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert data["review_attempt"] == 1 and "1/2" in detail
+    assert len(grade.calls) == 1, "a round with two voids and no refusal is graded"
+    assert data.get("review_exhausted") is None
+
+
+def test_an_engine_outage_row_costs_the_round_no_ceiling_and_no_void(
+        monkeypatch, tmp_path):
+    """Clause 2, the ceiling arm. Grader unreachable, unusable object and unreadable
+    clause entries all write the same `ok: false, blocking: false` shape a void does,
+    and none of them carries `unreliable`. Six such rows — more than REVIEW_HARD_CAP —
+    still buy a grading turn: an engine outage is not a reason to end a round."""
+    grade = _grader(UNMET)
+    reasons = ["review could not run: 503 Service Unavailable",
+               "review returned an unusable object",
+               "review clause entries unreadable: 2 entries, no usable 1-based index"]
+    _arm(monkeypatch, tmp_path, grade=grade, head="f" * 40,
+         prior=[_outage_row(f"{i:040d}", reasons[i % 3]) for i in range(6)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1, "an outage may not exhaust a round"
+    assert data.get("review_exhausted") is None and data["review_attempt"] == 1
+
+
+def test_outage_rows_on_one_head_do_not_fill_the_per_head_void_ceiling(
+        monkeypatch, tmp_path):
+    """Clause 2, the per-head arm. Four outage rows on the head about to be gated are
+    more than REVIEW_VOIDS_PER_HEAD: were the count keyed on `ok` being false instead of
+    on `unreliable` being present, this round would be refused a grading turn by a
+    grader that was down."""
+    grade = _grader(UNMET)
+    head = "a" * 40
+    _arm(monkeypatch, tmp_path, grade=grade, head=head,
+         prior=[_outage_row(head, "review could not run: connection refused")
+                for _ in range(RV.REVIEW_VOIDS_PER_HEAD + 2)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1, "an outage on this head is not a void on this head"
+    assert data.get("review_exhausted") is None and data.get("review_voids_on_head") is None
+
+
+def test_a_third_citation_void_on_one_head_is_refused_without_a_grading_turn(
+        monkeypatch, tmp_path):
+    """Clause 3: SM_20261030_035050's third gate on head 961f2465 is refused in code.
+    No grading turn is bought; the row is not an `external_blocker`, because
+    `automod_gate_wait._report` turns that key into "wait and gate again, do NOT abort"
+    and publishes a `retry_after_s` of its own — the opposite of this instruction; and
+    the detail names the pair #3579 put on the row, which is the one fact that made
+    those three gate runs unanswerable."""
+    grade = _grader(UNMET)
+    head = "9" * 39 + "1"          # stands for 961f2465: the unchanged head
+    _arm(monkeypatch, tmp_path, grade=grade, head=head,
+         prior=[_void_row(head), _void_row(head)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert ok is False and grade.calls == [], "no grading turn for the third void"
+    assert data["review_exhausted"] is True and data["review_retry"] is True
+    assert data["review_voids_on_head"] == RV.REVIEW_VOIDS_PER_HEAD
+    assert data["review_attempt"] == 1, "the void still spends no attempt"
+    assert "retry_after_s" not in data and data.get("external_blocker") is not True
+    assert "abort and report" in detail
+    # The whole pair, not a word about "a bad citation": the length the number was
+    # bounded against, and the length of a changed file that DOES admit it — the two
+    # numbers #3565's three gate runs could not recover, and the reason a refusal that
+    # names only the path is not enough to act on.
+    assert "long enough to hold it" in detail and "4412 lines" in detail, detail
+    assert "scripts/automod/gate.py" in detail
+    assert "scripts/automod/review.py (5188 lines)" in detail, detail
+    assert str(RV.REVIEW_VOIDS_PER_HEAD) in detail, "the ceiling it hit is named"
+
+
+def test_a_new_commit_resets_the_per_head_void_ceiling(monkeypatch, tmp_path):
+    """Clause 4, the commit arm: a void belongs to the head it was bought on. Two voids
+    on `a…` say nothing about a commit made since, so the next gate grades."""
+    grade = _grader(UNMET)
+    _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40,
+         prior=[_void_row("a" * 40), _void_row("a" * 40)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1, "a new head is a different question"
+    assert data.get("review_exhausted") is None
+
+
+def test_a_pending_amendment_resets_the_per_head_void_ceiling(monkeypatch, tmp_path):
+    """Clause 4, the amendment arm: an unratified amendment from THIS round changes the
+    contract, so the same head is a different question — the same reason
+    `refused_by_head` and the per-round cap both yield to it."""
+    grade = _grader(UNMET)
+    monkeypatch.setattr(B, "settle_amendments", lambda *a, **k: [1])
+    head = "a" * 40
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["the thing happens once"],
+                "path": "", "human_clauses": [],
+                "amendments": [{"clause": 1, "was": "the old thing", "now": "the thing",
+                                "reason": "unsatisfiable as written", "round_id": "SM_REV"}]}
+    _arm(monkeypatch, tmp_path, grade=grade, head=head, contract=contract,
+         prior=[_void_row(head), _void_row(head)])
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert len(grade.calls) == 1, "the amended contract has never been judged"
+    assert data.get("review_exhausted") is None
