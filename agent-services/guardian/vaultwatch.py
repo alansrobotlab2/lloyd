@@ -52,7 +52,12 @@ from typing import Any
 #: a home no other reader names, and as the second argument of `os.environ.get` it let a
 #: set-but-empty `LLOYD_VAULT_ROOT` resolve to `""`, which `or` now routes to `$HOME`
 #: (#3149).
-VAULT_ROOT = os.environ.get("LLOYD_VAULT_ROOT") or str(Path.home() / "obsidian")
+# Both override names, at `app.data_root.vault_root()`'s precedence (#3403): the
+# watchdog that watches the vault one reader chose while a writer chose the
+# other is watching the wrong tree, and the damage it misses is the point.
+VAULT_ROOT = (os.environ.get("LLOYD_VAULT_ROOT")
+              or os.environ.get("LLOYD_VAULT")
+              or str(Path.home() / "obsidian"))
 GUARDIAN_STATE = Path(os.environ.get("LLOYD_GUARDIAN_STATE",
                                      Path.home() / ".local" / "state" / "lloyd-guardian"))
 STATE_FILE = "vault_watch.json"

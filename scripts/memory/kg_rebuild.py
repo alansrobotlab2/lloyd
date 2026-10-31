@@ -47,6 +47,7 @@ from app.paths import (  # noqa: E402
     EVAL_BASELINES_DIR, PIPELINE_DIR, VAULT_DERIVED_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB,
 )
 from app.kg_store import CARRY_EDGE_ORIGINS, KGStore, canonical_edge_type  # noqa: E402
+from app.data_root import vault_root
 from _invocation import invocation_ledger  # noqa: E402
 # The extractor writes this index (as a subprocess, with LLOYD_CONTENT_HASHES
 # pointed here) and this module reads it, so the rule for what one of its entries
@@ -135,7 +136,7 @@ def cmd_freeze(args) -> int:
 
     paused = []
     for task_id in PAUSED_TASKS:
-        for path in (Path.home() / "obsidian" / "autonomy").glob(f"{task_id}-*.md"):
+        for path in (vault_root() / "autonomy").glob(f"{task_id}-*.md"):
             text = path.read_text(encoding="utf-8")
             if "\nstatus: paused\n" in text:
                 paused.append({"task": task_id, "path": str(path), "was": "paused"})

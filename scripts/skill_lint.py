@@ -74,11 +74,12 @@ from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
 # drifted before #1294).
 from app.prompt_builder import (  # noqa: E402
     _skills_index_settings, clip_skill_description, skill_index_description)
+from app.data_root import vault_root
 
 #: Category name of the P5 bucket, used as the table row and the payload key.
 DESCRIPTION_CATEGORY = "DESCRIPTION"
 
-REPORT_PATH = Path.home() / "obsidian" / "autonomy" / "skill-lint-report.md"
+REPORT_PATH = vault_root() / "autonomy" / "skill-lint-report.md"
 
 STALE_DAYS = 90
 DUPLICATE_EDIT_RATIO_THRESHOLD = 0.85  # difflib ratio; 1.0 is identical

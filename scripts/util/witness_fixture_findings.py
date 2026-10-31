@@ -52,6 +52,14 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+# Run by path (`python …/scripts/util/witness_fixture_findings.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
@@ -196,7 +204,7 @@ def report(rows: list[tuple[str, bytes]],
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--repo", default=os.environ.get("VAULT_DIR", str(Path.home() / "obsidian")),
+    parser.add_argument("--repo", default=os.environ.get("VAULT_DIR", str(vault_root())),
                         help="git repo to inspect (default $VAULT_DIR or ~/obsidian)")
     parser.add_argument("--path", action="append", default=None, metavar="REL",
                         help="check this vault-relative path instead of the index "

@@ -19,8 +19,16 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+# Run by path (`python …/scripts/maintenance/apply-1287-phase-1-3-source-gate.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
-SKILL = Path.home() / "obsidian" / "skills" / "nightly-skill-consolidation" / "SKILL.md"
+SKILL = vault_root() / "skills" / "nightly-skill-consolidation" / "SKILL.md"
 
 MARKER = "consolidation_source_gate.py"
 

@@ -29,8 +29,16 @@ import sys
 from pathlib import Path
 
 import yaml
+# Run by path (`python …/scripts/repair_skill_frontmatter.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
-SKILLS_DIR = Path.home() / "obsidian" / "skills"
+SKILLS_DIR = vault_root() / "skills"
 
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(\s|$)")
 INDENTED_KEY_RE = re.compile(

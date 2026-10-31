@@ -44,6 +44,7 @@ from app.sessions_io import ambient_clock_stamp
 # is what drifts. The memory eval's `sleep_notes` arm exists to price exactly
 # this charge against the per-turn prefetch arm.
 from app.next_session_notes import NEXT_SESSION_CONTENT_MAX, NEXT_SESSION_SUMMARY_MAX
+from app.data_root import vault_root
 
 logger = logging.getLogger("lloyd.prefetch")
 
@@ -580,7 +581,7 @@ def _get_backlog_index() -> dict[int, dict]:
         if now - _backlog_id_cache_ts <= BACKLOG_CACHE_TTL and _backlog_id_cache:
             return _backlog_id_cache
         try:
-            backlog_dir = Path.home() / "obsidian" / "backlog"
+            backlog_dir = vault_root() / "backlog"
             new_cache: dict[int, dict] = {}
             new_files: dict[str, tuple[int, int, dict]] = {}
             if backlog_dir.exists():

@@ -328,14 +328,12 @@ def test_the_skill_check_resolves_exactly_what_the_dispatch_loader_loads(
     real_path.parent.mkdir()
     real_path.write_text("print('here')\n")
 
-    real_path_cls = autonomy.Path
-
-    class _VaultHome(real_path_cls):  # Path.home() is how the loader finds skills
-        @classmethod
-        def home(cls):
-            return tmp_path
-
-    monkeypatch.setattr(autonomy, "Path", _VaultHome)
+    # Since #3403 the loader's skills root is `app.data_root.vault_root() / "skills"`, and
+    # that function reads `LLOYD_VAULT_ROOT` on every call. Setting the override is now the
+    # way to hand it a fixture root — and it is the honest one: the same name a bench trial
+    # sets to stay off the live vault is the name this proves the dispatch loader honours,
+    # which patching `Path.home()` here would have sidestepped.
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(vault))
 
     cases = {
         "nightly-seam": True,                      # slug that exists in the skills root
@@ -1940,14 +1938,10 @@ def test_a_moved_skill_path_is_a_terminal_miss_and_never_retries_as_a_slug(
     dead_path.write_text(body, encoding="utf-8")
     dead_path.unlink()
 
-    real_path_cls = autonomy.Path
-
-    class _VaultHome(real_path_cls):  # Path.home() is how the loader finds skills
-        @classmethod
-        def home(cls):
-            return tmp_path
-
-    monkeypatch.setattr(autonomy, "Path", _VaultHome)
+    # The skills root is `vault_root() / "skills"` since #3403, so the fixture is handed
+    # over by its override name rather than by patching `Path.home()` — the same override a
+    # sandboxed bench trial sets, which is what makes this node read as the real seam.
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(tmp_path / "obsidian"))
 
     assert autonomy._load_skill_content(str(dead_path)) is None, (
         "a path miss is no longer terminal: the path branch resolved a value that "

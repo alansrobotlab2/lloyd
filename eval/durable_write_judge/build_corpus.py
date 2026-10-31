@@ -28,8 +28,17 @@ import re
 import subprocess
 from collections import Counter
 from pathlib import Path
+import sys
+# Run by path (`python …/eval/durable_write_judge/build_corpus.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
-DEFAULT_VAULT = Path.home() / "obsidian"
+DEFAULT_VAULT = vault_root()
 NOTE_PREFIX = "knowledge/youtube/"
 MAX_TEXT_CHARS = 4000
 

@@ -30,9 +30,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
 from app.supervisor_client import process_info, restart_process, start_process, stop_process
 from scripts.automod import ram_gate, state as S, worktree as W
+from app.data_root import vault_root
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -518,7 +518,7 @@ def count_vault_files(root: Path | None = None) -> int | None:
     `rglob` here counted git's loose objects, and a repack during the
     observation window then read as a 6.7% loss of notes (2026-09-17, #1206).
     """
-    root = root or (Path.home() / "obsidian")
+    root = root or vault_root()
     if not root.is_dir():
         return None
     try:

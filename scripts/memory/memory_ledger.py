@@ -88,6 +88,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from app.memory_ceiling import tight_limit  # noqa: E402
+from app.data_root import vault_root
 
 #: How much of an entry identifies it. Long enough that two entries in one
 #: file never share it (checked: 0 collisions in USER.md and MEMORY.md on
@@ -404,7 +405,7 @@ def _print_retire(rep: dict) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    default_dir = str(Path.home() / "obsidian" / "lloyd")
+    default_dir = str(vault_root() / "lloyd")
     s = sub.add_parser("status")
     s.add_argument("--memories-dir", default=default_dir)
     s.add_argument("--json", action="store_true")

@@ -42,10 +42,10 @@ except ImportError:
 import yaml
 
 sys.path.insert(0, str(_REPO_ROOT))
+from app.paths import VAULT_ROOT as VAULT
 from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 from app.paths import production_data_root  # noqa: E402
 _STATE_PIPELINE = Path(os.environ.get("LLOYD_DATA") or production_data_root()) / "_pipeline"
-VAULT = Path.home() / "obsidian"
 # No index path belongs here (#1148). This module reaches both indexes through
 # `self.rel_generator`: `rebuild()` writes that module's own
 # `_pipeline/relations-index-typed.json`, and the derived

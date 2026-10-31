@@ -46,6 +46,14 @@ DATA_ROOT_ENV = "LLOYD_DATA"
 #: `scripts/backup/backup-vault.sh:28` already read; `vault_root()` honours the
 #: same name rather than inventing a second knob.
 VAULT_ROOT_ENV = "LLOYD_VAULT_ROOT"
+#: The vault override's other existing spelling, already read by
+#: `scripts/automod/vault_round.py:60` and `agent_mcp/vault.py:27`. Honouring only one
+#: of the two is what made an override a coin flip — a caller that set `LLOYD_VAULT` got
+#: a sandboxed vault from half the tree and the live vault from the other half — so
+#: `vault_root()` reads both, `VAULT_ROOT_ENV` first. A half-honoured root is the
+#: dangerous outcome, not the absent one: the writer believes it is sandboxed while it
+#: is editing the house.
+VAULT_ROOT_FALLBACK_ENV = "LLOYD_VAULT"
 #: Where a data root keeps the knowledge-graph store, relative to the root.
 #: Spelled once, here, because two readers name that file and only one of them
 #: can import `app.paths`: `app.paths.VAULT_KG_DB_DEFAULT` builds it from this
@@ -110,6 +118,41 @@ def production_data_root() -> Path:
 
 
 PRODUCTION_DATA_ROOT = production_data_root()
+
+
+def production_vault() -> Path:
+    """The account's real Obsidian vault, whatever `$HOME` and the overrides say.
+
+    `ACCOUNT_HOME` and not `Path.home()`, for the same reason `production_data_root()`
+    uses it: under a gate round, `scripts/automod/worktree.py::ensure_round_home` points
+    `$HOME` at `~/lloyd-work/<round>/home` and symlinks `obsidian` INTO the live vault
+    (`HOME_LINK_SKIP` covers `lloyd` and `lloyd-data`, not `obsidian`). Compared against
+    `Path.home()/"obsidian"` that round would read as production-with-no-override and
+    would also pass a realpath test it exists to fail.
+    """
+    return ACCOUNT_HOME / "obsidian"
+
+
+def is_production_vault(root: Path | str) -> bool:
+    """Whether `root` IS the account's vault, following one symlink hop if it must.
+
+    Realpath on both sides, which is what makes a round's linked vault answer True
+    instead of False: `worktree.py:65 HOME_LINK_SKIP` leaves a round holding
+    `$HOME/obsidian` as a symlink to the live vault, so a string comparison calls that
+    copy isolated and every write through it lands in the house anyway. Reporting a
+    symlinked root as not isolated would be the one false answer this predicate can
+    give, and it is the false answer that writes real memory while believing it is in a
+    fixture. A missing path has no realpath to compare, so it falls back to the lexical
+    one — a fixture directory that does not exist yet is not the vault.
+    """
+    p = Path(root)
+    try:
+        return p.resolve() == PRODUCTION_VAULT.resolve()
+    except OSError:  # pragma: no cover - unreadable home, not a vault either way
+        return False
+
+
+PRODUCTION_VAULT = production_vault()
 
 
 def data_root_for_tree(tree: Path) -> Path:
@@ -199,7 +242,7 @@ def kg_store_for_tree(tree: Path | None = None) -> Path:
 def vault_root() -> Path:
     """The Obsidian vault, derived exactly as `app.paths.VAULT_ROOT` is.
 
-    `Path.home()` and not passwd: that is what `app.paths:110` does, and a
+    `Path.home()` and not passwd: that is what `app.paths` does, and a
     second answer here would be the same divergence #1415 is about. It means
     that under a gate's `HOME` this is the round's `~/obsidian`, which
     `scripts/automod/worktree.py::ensure_round_home` *links* into the live vault
@@ -207,5 +250,12 @@ def vault_root() -> Path:
     write here reaches the live vault from a round, and only a symlink stops
     `rmtree`, not `write_text`. That is why the sweep's one vault write is
     overridable: `LLOYD_VAULT_ROOT` lets a round exercise it against a copy.
+
+    Both override names are read — `VAULT_ROOT_ENV` then `VAULT_ROOT_FALLBACK_ENV` —
+    because `vault_round.py` and `agent_mcp/vault.py` already read the second one, and a
+    root that only some callers honour is worse than no override at all: the caller who
+    set the ignored name writes the house believing it set a fixture. Whether the result
+    is actually somebody's copy is `is_production_vault`'s question, not this one's.
     """
-    return Path(os.environ.get(VAULT_ROOT_ENV) or (Path.home() / "obsidian"))
+    override = os.environ.get(VAULT_ROOT_ENV) or os.environ.get(VAULT_ROOT_FALLBACK_ENV)
+    return Path(override) if override else (Path.home() / "obsidian")

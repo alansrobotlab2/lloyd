@@ -32,7 +32,7 @@ into the system prompt (`maxSkillsInPrompt=0`). None of that is true of Lloyd.
 Neither path exists on this box, no marketplace or installer code exists in the
 tree, and the skills index **is** in the system prompt on every turn. The doc
 also named `skills_get` and `file_read` as the way to read a skill; both are on
-the phantom-tool ban list (`scripts/skill_lint.py:261`,
+the phantom-tool ban list (`scripts/skill_lint.py:262`,
 `tests/test_skill_tool_names.py::PHANTOM_TOOLS`) — this file was itself an instance of the
 defect described under "Phantom tool names" below. Its skill inventory listed
 34 skills, of which 8 have since been archived and 3 no longer exist at all.
@@ -132,14 +132,14 @@ would read as "call something to load these"; what actually happens is surface
 
 `include_skills_index` defaults to `True` and every production caller takes the
 default (`app/routers/turn_options.py::build_turn_options`, the one builder
-for chat, ambient, flush and voice turns since P13.4, and `app/autonomy.py:4635`). The `False` branch is for tests
+for chat, ambient, flush and voice turns since P13.4, and `app/autonomy.py:4636`). The `False` branch is for tests
 that assert on the rest of the prompt.
 
 **A quarantined skill is excluded from the index, and that is not cosmetic.**
 `_is_quarantined_skill` is an **alias** (`:1007`) of the walker's
 `agent_mcp.skills.is_quarantined_skill_file` (`:178`) — the old name survives
 for its tests, the rule lives once. It drops anything whose frontmatter
-`status:` is in `_QUARANTINE_STATUSES` (`agent_mcp/skills.py:87`) — `inactive`,
+`status:` is in `_QUARANTINE_STATUSES` (`agent_mcp/skills.py:88`) — `inactive`,
 `archived`, `disabled`, `retired`, `quarantined`. The vocabulary is **imported
 from `agent_mcp.skills`** (`:237`) rather than restated, and the fallback that
 used to sit beside the import is **gone**: the `try/except` wrapper and its
@@ -150,7 +150,7 @@ the wrapper protected a path that does not exist. `prompt_builder` holding no
 second list is now asserted: `tests/test_prompt_builder_overlay.py:207`
 checks `not hasattr(pb, "_QUARANTINE_STATUSES")` and that the alias *is* the
 walker's function. The check therefore pays the walker's real front-matter
-parse (`_parse_frontmatter`, `agent_mcp/skills.py:96`) for every skill on every
+parse (`_parse_frontmatter`, `agent_mcp/skills.py:97`) for every skill on every
 prompt build — the 2,000-char head read and line scan it replaced called a
 nested `metadata: openclaw: status: archived` a retirement and missed a
 `status:` below the cut, and one definition outranked the saved microseconds.
@@ -159,7 +159,7 @@ nested `metadata: openclaw: status: archived` a retirement and missed a
 
 `app/prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`app/prefetch.py:52`):
+(`app/prefetch.py:53`):
 
 | | value |
 |---|---|
@@ -201,7 +201,7 @@ prefetch legs; it is ~1 ms now. And the skill list is rebuilt only when a
 `SKILL.md` mtime changes, checked at most every 15 s (`_skills_signature`,
 `:470`).
 
-`_stem` (`agent_mcp/skills.py:318`) is a single-suffix plural collapse, not a real stemmer, and
+`_stem` (`agent_mcp/skills.py:319`) is a single-suffix plural collapse, not a real stemmer, and
 exists for one logged failure: "full systems check" picked `claude-sdk-check`
 over `system-health-check` because "systems" ≠ "system".
 
@@ -224,7 +224,7 @@ carrying the matched `SKILL.md`, and the model re-issues the call informed.
 
 **`is_error=False` is the entire point of the second outcome.** The same
 intercept expressed as a deny comes back `is_error=True` and is booked into
-`tool_errors` (appended at `app/autonomy.py:4937`, reported at `:4989`) — the very
+`tool_errors` (appended at `app/autonomy.py:4938`, reported at `:4989`) — the very
 number this feature exists to improve, so a deny would make the fleet look
 sicker exactly where it is being taught something.
 `HookRegistry.fire_pre_tool_use` recognises
@@ -301,7 +301,7 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2818`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2819`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 `~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
 under "Follow the skill instructions below" (`:2863`).
@@ -333,7 +333,7 @@ There is no install tool, no catalog, no remote source, and no `skills_get` or
 
 ## Frontmatter
 
-`_parse_frontmatter` (`agent_mcp/skills.py:96`) splits on the first `\n---`
+`_parse_frontmatter` (`agent_mcp/skills.py:97`) splits on the first `\n---`
 after a leading `---` and `yaml.safe_load`s it; a parse failure degrades to an
 empty mapping and a body, never an exception. Fields the loaders actually read:
 
@@ -548,8 +548,8 @@ loaders are actually run against the change:
    whose front matter broke is a skill nobody can find.
 2. The system prompt must still build (`build_system_prompt()` returning ≥ 500
    chars), and **each touched skill must still load** — through
-   `agent_mcp.skills.skill_load_defect` (def `agent_mcp/skills.py:262`, called
-   at `scripts/automod/vault_round.py:189`), not `_load_skill`.
+   `agent_mcp.skills.skill_load_defect` (def `agent_mcp/skills.py:263`, called
+   at `scripts/automod/vault_round.py:209`), not `_load_skill`.
 
 Scoped to the diff on purpose: a pre-existing broken file elsewhere in the
 vault must not block every round — the same delta principle as pyflakes and tsc

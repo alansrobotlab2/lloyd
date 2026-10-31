@@ -13,8 +13,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from app.paths import VAULT_FEEDS_DIR  # noqa: E402
+from app.data_root import vault_root
 
-VAULT_ROOT = Path.home() / "obsidian"
+VAULT_ROOT = vault_root()
 KNOWLEDGE_DIR = VAULT_ROOT / "knowledge"
 
 FEEDS_DIR = VAULT_FEEDS_DIR

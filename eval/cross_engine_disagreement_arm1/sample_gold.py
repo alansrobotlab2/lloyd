@@ -61,6 +61,7 @@ os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")
 
 from app.djev_shadow import _digest                       # noqa: E402  (the ONE digest impl)
 from app.paths import production_data_root                # noqa: E402  (data root, not the checkout)
+from app.data_root import vault_root
 from eval.djev import schemas                             # noqa: E402
 from eval.cross_engine_disagreement_arm1 import rubric    # noqa: E402
 
@@ -78,7 +79,7 @@ SESSIONS_DIR = production_data_root() / "sessions"
 #: the production data root, the same way `SESSIONS_DIR` above is.
 FACTS_ROOT = production_data_root() / "_pipeline" / "vault-derived" / "facts"
 CANARY_ROWS = _REPO / "eval/measurements/injection-canary/rows.jsonl"
-BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+BACKLOG_DIR = vault_root() / "backlog"
 GOLD_PATH = _HERE / "gold.jsonl"
 SAMPLE_PATH = _HERE / "sample.json"
 

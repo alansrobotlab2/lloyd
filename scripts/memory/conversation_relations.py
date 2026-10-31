@@ -33,11 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, SESSIONS_DIR, VAULT_FACTS_ROOT_DEFAULT  # noqa: E402
 from app.kg_store import canonical_edge_type  # noqa: E402
 from app.atomic_io import atomic_write_text, commit_lock  # noqa: E402
+from app.data_root import vault_root
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-VAULT = Path.home() / "obsidian"
+VAULT = vault_root()
 # Fact graph lives under the data root, NOT the vault (migrated 2026-06-03).
 FACTS_ROOT = VAULT_FACTS_ROOT_DEFAULT
 TRAJECTORY_DIR = PIPELINE_DIR / "trajectories"
@@ -50,7 +51,7 @@ RELATIONS_INDEX = PIPELINE_DIR / "relations-index.json"
 #: very rows the writer produces.
 EDGE_ORIGIN = "conversation"
 LLOYD_SESSIONS = SESSIONS_DIR
-AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+AUTONOMY_DIR = vault_root() / "autonomy"
 
 # The skill_name of the autonomy task that runs this script. Its frontmatter is
 # where the Stage-2 model decision lives — see resolve_llm_target().
@@ -114,7 +115,7 @@ DEFAULT_RELATION_TYPE = "related_to"
 # ── Tool → vault path extraction rules ───────────────────────────────────────
 
 OBSIDIAN_PREFIXES = [
-    str(Path.home() / "obsidian") + "/",
+    str(vault_root()) + "/",
     "~/obsidian/",
 ]
 

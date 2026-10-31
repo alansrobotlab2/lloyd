@@ -38,13 +38,14 @@ from app.backlog_move import now_stamp, record_status_move, utc_instant
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import NEEDS_HUMAN_TAG, new_task_tags, normalize_tags
 from app import frontmatter as FM
+from app.data_root import vault_root
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+_BACKLOG_DIR = vault_root() / "backlog"
 _VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 _BACKLOG_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]

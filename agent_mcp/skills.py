@@ -24,6 +24,7 @@ from mcp.types import Tool
 # Local alias preserves the existing internal name `_QUERY_STOPWORDS` so
 # the rest of skills.py doesn't change.
 from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS, text_result
+from app.data_root import vault_root
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 #: whatever `config.yaml skills.directories` names, so that the config key steers
 #: every surface instead of only the two that happened to read it (#1294).
 _BUILTIN_SKILL_DIRS = [
-    Path.home() / "obsidian" / "skills",
+    vault_root() / "skills",
     Path(__file__).parent.parent / "skills",
 ]
 

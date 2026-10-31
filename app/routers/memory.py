@@ -4,13 +4,12 @@ import asyncio
 import logging
 import re
 from datetime import date, datetime
-from pathlib import Path
-
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
+from app.data_root import vault_root
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +108,7 @@ def _split_frontmatter(text: str) -> "tuple[dict, str]":
     return _parse_fm(raw), body
 
 
-_VAULT = Path.home() / "obsidian"
+_VAULT = vault_root()
 
 # What is cached here is now ONLY the tag tally. `docCount` and `types` — the two
 # numbers the Memory tab actually renders — are answered straight from

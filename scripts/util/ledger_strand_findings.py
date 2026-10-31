@@ -86,6 +86,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+# Run by path (`python …/scripts/util/ledger_strand_findings.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 # scripts/util/ -> scripts/ -> the lloyd checkout that carries the instrument.
 _ROOT = Path(__file__).resolve().parents[2]
@@ -305,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="print the findings to stdout instead of the refusal block")
     args = ap.parse_args(argv)
     vault = Path(args.vault or (__import__("os").environ.get("LLOYD_VAULT") or
-                                (Path.home() / "obsidian")))
+                                (vault_root())))
     try:
         records = stranded_rows(vault)
     except StrandCheckUnavailable as exc:

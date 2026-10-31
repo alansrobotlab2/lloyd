@@ -572,7 +572,12 @@ def vault_root(repo: str = REPO) -> str:
                 return str(resolve())
             except Exception:  # noqa: BLE001 - a watchdog that cannot start is worse
                 pass
-    return str(Path(os.environ.get("LLOYD_VAULT_ROOT") or (Path.home() / "obsidian")))
+    # Both override names, at the precedence `app.data_root.vault_root()`
+    # uses: this watchdog reports on the vault a trial believes it is writing,
+    # so honouring one name and not the other watches the wrong tree.
+    override = (os.environ.get("LLOYD_VAULT_ROOT")
+                or os.environ.get("LLOYD_VAULT"))
+    return str(Path(override)) if override else str(Path.home() / "obsidian")
 
 
 KG_DB, KG_DB_SOURCE = kg_db_path()

@@ -61,6 +61,14 @@ import os
 import re
 import sys
 from pathlib import Path
+# Run by path (`python …/scripts/skill_run_citation.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 #: A run-record citation: `run_<task>_<yyyymmdd>_<hhmmss>`, bare, path-prefixed, with
 #: or without `.md`. The task part is lazy and cannot start with a separator, so
@@ -252,7 +260,7 @@ def report(vault: Path, runs_dir: Path | None = None) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--vault", default=str(Path.home() / "obsidian"))
+    ap.add_argument("--vault", default=str(vault_root()))
     ap.add_argument("--runs", default=None, help="override the autonomy-runs corpus")
     ap.add_argument("--ids", action="store_true", help="list the dangling ids, not just counts")
     args = ap.parse_args(argv)

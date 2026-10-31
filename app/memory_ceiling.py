@@ -53,11 +53,11 @@ from pathlib import Path
 # imported so the index-line rule below measures the same lines the read-side
 # validator measures, from one function and not two copies of its regex.
 from app.prompt_surface import ENTRY_TYPES, body, memory_ceiling, size_error
-
+from app.data_root import vault_root
 # The directory `prompt_builder._load_memories` reads the two names from. The guard
 # fires on a path only when it resolves INTO this directory, which is what keeps a
 # fixture vault and the live vault from being the same question.
-MEMORIES_DIR = Path.home() / "obsidian" / "lloyd"
+MEMORIES_DIR = vault_root() / "lloyd"
 
 # ── topic files (review 2026-09-24, P4) ─────────────────────────────────────
 # MEMORY.md is meant to become an *index*: one typed line per entry, the detail

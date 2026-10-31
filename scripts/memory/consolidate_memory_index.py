@@ -52,11 +52,12 @@ if str(ROOT) not in sys.path:
 
 from app import prompt_surface as ps  # noqa: E402
 from app import memory_ceiling as mc  # noqa: E402
+from app.data_root import vault_root
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_memory_index as vmi  # noqa: E402
 
-VAULT_ROOT = Path.home() / "obsidian"
+VAULT_ROOT = vault_root()
 # The ratio is #1895's app-side constant, imported rather than restated or read
 # through the validator, so the target this consolidator builds to is the number
 # the write guard refuses growth past. The INDEX ceiling is named explicitly (not

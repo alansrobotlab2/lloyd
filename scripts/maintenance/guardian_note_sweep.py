@@ -69,6 +69,7 @@ sys.path.insert(0, str(REPO / "agent-services" / "guardian"))
 
 import notify  # noqa: E402  (DAILY_CLEARED_PREFIX / DAILY_DATED_PREFIX)
 import tmpwatch as tw  # noqa: E402  (ALERT_TITLE / CLEAR_FRACTION / measure — the second witness)
+from app.data_root import vault_root
 
 #: The supervisor states that read as "this program is not up". `RUNNING` is absent by
 #: construction; `STOPPED` is present because a body quoting it is asserting the program is
@@ -392,7 +393,7 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
     to mean "nothing was written".
     """
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--notes", default=str(Path.home() / "obsidian" / "memory"),
+    ap.add_argument("--notes", default=str(vault_root() / "memory"),
                     help="directory of dated daily notes")
     ap.add_argument("--conf",
                     default=str(REPO / "agent-services/supervisor/supervisord.conf"))

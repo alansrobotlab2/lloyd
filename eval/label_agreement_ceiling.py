@@ -101,6 +101,7 @@ if str(REPO) not in sys.path:
 # (eval/run_eval.py imports this module lazily, inside its loader, so there is no
 # import cycle at module load.)
 import eval.run_eval as ev  # noqa: E402
+from app.data_root import vault_root
 
 CORPUS_PATH = Path(__file__).resolve().parent / "vault_recall_queries.yaml"
 
@@ -351,7 +352,7 @@ def vault_markdown_paths(root: Path | str | None = None) -> list[str]:
     """Vault-relative `.md` paths, sorted. This is the doc leg's whole namespace:
     the same namespace the gold `expect_docs` substrings live in, and the reason
     no retrieval output is needed to offer a plausible candidate list."""
-    base = Path(root) if root else (Path.home() / "obsidian")
+    base = Path(root) if root else (vault_root())
     out: list[str] = []
     if not base.exists():
         raise SystemExit(f"VAULT_ROOT_MISSING: {base} — the doc leg has no namespace "

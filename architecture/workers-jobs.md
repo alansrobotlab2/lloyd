@@ -247,7 +247,7 @@ Four behaviours are load-bearing:
   falls through to `_primary_health_target()`), so until a pin names a real second
   model this gate is a second copy of the fleet gate.
 - **It passes the pool's cap into `run_task`** (`max_duration_seconds: 3600`;
-  `run_task` (`app/autonomy.py:4585`) keeps its own timeout 30 s under the value
+  `run_task` (`app/autonomy.py:4586`) keeps its own timeout 30 s under the value
   it is handed, the margin being `_POOL_TIMEOUT_MARGIN`) so the task's own timer
   always wins. When the two were equal the pool cancelled the handler before it could
   write anything, and 237 runs and 73.6 GPU-hours recorded with a NULL `task_id`

@@ -118,7 +118,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import logging
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -339,6 +341,269 @@ def _trial_session_id(variant_id: str, task_id: str) -> str:
 RECORDED_SESSION_SLUG = "bench"
 
 
+#: Tools a `writes:` scope may name, and the flag each one needs to be worth granting.
+#: Keyed off `STATEFUL_TOOLS` rather than a second list so the two cannot drift: a name
+#: here that is not in `STATEFUL_TOOLS` would be a tool that was never banned and so
+#: needs no grant, and one in `STATEFUL_TOOLS` that is missing here is a task that
+#: declares a scope it can never use.
+#:
+#: BARE names, matching `STATEFUL_TOOLS` and `disallowed_tools` byte for byte. An earlier
+#: cut of this table spelled its keys `mcp__lloyd-mcp__memory_add`, the MCP-qualified
+#: spelling — and silently granted nothing, because `t not in admitted` compared a bare
+#: `t` against qualified keys, so every scoped trial still had all of `STATEFUL_TOOLS` in
+#: its deny list while its row claimed a scope. `test_every_grantable_name_is_a_stateful_
+#: tool_bare_and_the_three_write_classes_are_covered` pins the spelling that makes the
+#: intersection real.
+#:
+#: Read-only names (`vault_search`, `vault_recall`) are deliberately absent: they are in no
+#: deny list and `_tool_sandbox.refusal` already lets them through, so granting one would
+#: add a name to a list whose only purpose is to name what was banned.
+WRITE_SCOPE_TOOLS: dict[str, str] = {
+    # the vault-note write class
+    "vault_write": "vault",
+    # the cross-session-memory write class, which writes into the vault tree
+    "memory_add": "vault", "memory_replace": "vault", "memory_remove": "vault",
+    # the fact/KG-row write class
+    "fact_add": "kg", "fact_invalidate": "kg", "fact_relate": "kg",
+    # the backlog-card write class
+    "backlog_write_task": "backlog",
+}
+
+
+class TrialRefused(RuntimeError):
+    """A trial that must not dispatch. Refusing is a result, not a crash.
+
+    Carries the isolation flags as they were MEASURED, defaulting to the production pair.
+    A refusal that never got to measure — a fixture whose copy step failed — therefore
+    reports `True`/`True`, which is the only honest reading of "we could not prove this is
+    a copy", and a refusal that did measure reports what it saw instead of the assumption.
+    """
+
+    def __init__(self, message: str,
+                 flags: dict[str, Any] | None = None,
+                 state: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        # What the aggregator that was asked reported, when the refusal IS its answer.
+        # Kept apart from `flags`, which are the probe's reading of the fixture env: two
+        # processes, two fields, and a row that can say which one failed.
+        self.state: dict[str, Any] = dict(state or {})
+        self.flags: dict[str, Any] = {
+            "is_production_data": True, "is_production_vault": True,
+            **{k: v for k, v in (flags or {}).items()
+               if k in ("is_production_data", "is_production_vault")}}
+
+
+def write_scope_of(task: dict) -> list[str]:
+    """The tool names a task's `writes:` scope grants, in `disallowed_tools` spelling.
+
+    Empty for every task that declares no scope, which is every task in the corpus today
+    — and that empty list is what keeps the present behaviour exactly intact: no tool is
+    re-admitted, and `_tool_sandbox.refusal` keeps refusing all of them.
+    """
+    from scripts.autoresearch.bench_fixture import declared_scopes
+
+    scopes = set(declared_scopes(task))
+    if not scopes:
+        return []
+    return [name for name, scope in WRITE_SCOPE_TOOLS.items() if scope in scopes]
+
+
+def isolation_flags(env: dict[str, str] | None = None) -> dict[str, bool]:
+    """`IS_PRODUCTION_DATA`/`IS_PRODUCTION_VAULT` as a process holding `env` would see.
+
+    A fresh interpreter, deliberately, rather than `from app.paths import ...` here. The
+    trial runs IN this process, and `app.paths` resolves both roots once at import and
+    freezes them as constants — reading them after setting the fixture env would report
+    the runner's own production roots and refuse a trial that is in fact sandboxed, or
+    (worse, if the runner had itself been launched sandboxed) bless a trial that is not.
+    The child resolves exactly what the MCP server the harness spawns for the trial will
+    resolve, which is the only process whose answer matters.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    probe = ("import json,sys;import app.paths as p;"
+             "print(json.dumps({'is_production_data':bool(p.IS_PRODUCTION_DATA),"
+             "'is_production_vault':bool(p.IS_PRODUCTION_VAULT),"
+             "'vault_root':str(p.VAULT_ROOT),'data_root':str(p.DATA_ROOT)}))")
+    try:
+        r = _sp.run([sys.executable, "-c", probe], cwd=str(Path(__file__).resolve().parents[2]),
+                    env=env, capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa: BLE001 — an unreadable probe is not an isolation proof
+        return {"is_production_data": True, "is_production_vault": True,
+                "probe_error": True}
+    try:
+        return _json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001
+        return {"is_production_data": True, "is_production_vault": True,
+                "probe_error": True}
+
+
+def build_task_fixture(task: dict, trial_id: str):
+    """Build the disposable copy for one `writes:`-scoped trial, or raise `TrialRefused`."""
+    from app.paths import DATA_ROOT, VAULT_ROOT
+    from scripts.autoresearch.bench_fixture import (
+        build_fixture, declared_scopes, fixture_parent)
+
+    scopes = declared_scopes(task)
+    try:
+        return build_fixture(
+            trial_id=trial_id, writes=scopes, vault=VAULT_ROOT, data_root=DATA_ROOT,
+            fixtures_parent=fixture_parent(DATA_ROOT))
+    except Exception as exc:  # noqa: BLE001 — a fixture that will not build is a refusal
+        raise TrialRefused(f"fixture build failed: {type(exc).__name__}: {exc}") from exc
+
+
+def isolation_refusal(task: dict, env: dict[str, str],
+                      trial_id: str) -> dict[str, Any]:
+    """For a `writes:`-scoped task: build its fixture and prove the copy is a copy.
+
+    Returns the trial context — `{"env": …, "fixture": …, "flags": …}`, or raises `TrialRefused` — before the first message
+    reaches the model, never after. The order is the point: the fixture is built first,
+    because the flags are meaningless until something has been copied to point at, and
+    asserted against the environment the fixture WOULD give, so the trial is refused for
+    a fixture that does not actually isolate rather than running and grading a real write
+    to the house.
+    """
+    fixture = build_task_fixture(task, trial_id)
+    fixture_env = {**env, **fixture.env()}
+    flags = isolation_flags(fixture_env)
+    if flags.get("is_production_data") or flags.get("is_production_vault"):
+        fixture.cleanup()
+        raise TrialRefused(
+            "a `writes:`-scoped trial needs both `IS_PRODUCTION_DATA` and "
+            "`IS_PRODUCTION_VAULT` False inside the trial process; they read "
+            f"data={flags.get('is_production_data')} vault={flags.get('is_production_vault')} "
+            f"(vault resolved to {flags.get('vault_root')}). Refused rather than run "
+            "unsandboxed (#3403).", flags=flags)
+    return {"env": fixture_env, "fixture": fixture, "flags": flags}
+
+
+#: Points a bench runner at the aggregator whose trials it owns. Unset — every
+#: runner today — resolves off `mcp_servers.lloyd-mcp.url` like every other
+#: harness caller.
+STATE_URL_ENV = "LLOYD_BENCH_STATE_URL"
+
+
+def resolve_state_url() -> str:
+    """The aggregator's `/state`, as this process was told to see it.
+
+    `LLOYD_BENCH_STATE_URL` wins because a `writes:`-scoped trial is the one caller that
+    needs to point at an aggregator other than the supervised one — the one booted under
+    its fixture's roots — and the two URLs (this one and `mcp_servers.lloyd-mcp.url`) must
+    name the same process or the assertion below checks a bystander."""
+    override = os.environ.get(STATE_URL_ENV)
+    if override:
+        return override
+    from app.mcp_discovery import _get_mcp_servers
+    server = (_get_mcp_servers() or {}).get("lloyd-mcp") or {}
+    base = str(server.get("url") or "http://127.0.0.1:8500/mcp")
+    return base.rsplit("/mcp", 1)[0] + "/state"
+
+
+#: The `tool_sandbox` keys a `writes:`-scoped trial needs the server to report, and a
+#: refusal otherwise. An aggregator that predates #3403 answers `GET /state` with no
+#: isolation block at all, which is why the check is membership and never `.get(...) or
+#: False`: a missing key must read as "this server cannot tell me", not as "not
+#: production".
+_SERVER_ISOLATION_KEYS = ("is_production_data", "is_production_vault",
+                          "state_is_copied", "allowed_writes")
+
+
+async def require_copied_state(declared: list[str], state_url: str | None = None,
+                               *, measured: dict[str, Any] | None = None) -> dict:
+    """Ask the process that will EXECUTE the writes whether its state is a copy.
+
+    The second half of the isolation assertion, across the boundary the first half cannot
+    reach. `isolation_flags` proves what a fresh interpreter holding the fixture's
+    environment resolves — which is the environment the fixture would hand a child — but a
+    `writes:`-scoped trial's `memory_add` does not run in the runner's interpreter or in a
+    child of it: the harness dispatches MCP tools to whatever `mcp_servers.lloyd-mcp.url`
+    names, and on a box where that is a supervised aggregator, that process imported
+    `app.paths` at its own boot, under the account's real roots, with no
+    `LLOYD_BENCH_WRITE_SCOPE` in its environment. It will write `~/obsidian` no matter
+    what the runner's fixture points at, and it will refuse the granted tools because its
+    own `allowed_bench_writes()` is empty. So a scoped trial is admissible only when the
+    SERVER reports the copy: restarted (or spawned) under the fixture's roots, and holding
+    the declared scope.
+
+    Fails closed in every direction, including the one that matters most — an older
+    aggregator that reports nothing. Its answer is a refusal naming the missing keys, not
+    a pass-by-absence, and the trial row carries the flags it did report.
+    """
+    import httpx
+
+    url = state_url or resolve_state_url()
+    from app.aggregator_config import auth_headers_for
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=auth_headers_for(url))
+            body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — unreadable is not "isolated"
+        raise TrialRefused(
+            f"could not read {url} to confirm the aggregator's own roots: {exc}; "
+            "a `writes:`-scoped trial is refused rather than dispatched to a server "
+            "whose state is unknown (#3403).") from exc
+    sb = body.get("tool_sandbox") if isinstance(body, dict) else None
+    if not isinstance(sb, dict):
+        raise TrialRefused(f"{url} reported no `tool_sandbox` block; refusing a "
+                           "`writes:`-scoped trial (#3403).")
+    missing = [k for k in _SERVER_ISOLATION_KEYS if k not in sb]
+    if missing:
+        raise TrialRefused(
+            f"the aggregator at {url} does not report {missing}; an aggregator older "
+            "than #3403 cannot say whether its state is a copy, so a `writes:`-scoped "
+            "trial is refused rather than assumed sandboxed.")
+    if sb["is_production_data"] or sb["is_production_vault"] or not sb["state_is_copied"]:
+        raise TrialRefused(
+            "the aggregator that will execute the writes resolves production state: "
+            f"is_production_data={sb['is_production_data']} "
+            f"is_production_vault={sb['is_production_vault']} "
+            f"state_is_copied={sb['state_is_copied']}. The fixture's roots travel only as "
+            "far as this process's environment, so a supervised aggregator booted under "
+            f"{os.environ.get('HOME', '~')} would write the house. Point "
+            f"{STATE_URL_ENV} (and the trial's MCP url) at an aggregator booted under the "
+            "fixture's roots (#3403).",
+            state=sb,
+            # The refused row's `is_production_*` pair is what the FRESH-INTERPRETER PROBE
+            # measured (passed in as `measured`), because that is what the field means
+            # everywhere else in this file; the server's own answer travels beside it as
+            # `aggregator_isolation`. Overwriting one with the other would make the two
+            # readings indistinguishable, and they name two different processes.
+            flags=dict(measured or {"is_production_data": bool(sb["is_production_data"]),
+                                    "is_production_vault": bool(sb["is_production_vault"])}))
+    honoured = set(sb["allowed_writes"] or [])
+    gap = sorted(set(declared) - honoured)
+    if gap:
+        raise TrialRefused(
+            f"the aggregator at {url} honours none of {gap}, though its state is a copy: "
+            "the declared scope never reached the process that will execute it, so every "
+            "granted call would come back refused and the reward could never go green "
+            "(#3403).",
+            state=sb,
+            flags=dict(measured or {"is_production_data": False,
+                                    "is_production_vault": False}))
+    return dict(sb)
+
+
+def score_side_effects(task: dict, fixture, repo_root: Path) -> dict:
+    """Run the task's `side_effect_checks:` against the copy. Never raises.
+
+    A verifier that cannot run is a failed check with a reason on the row, not a
+    traceback that loses the trial's trace: the run already happened, its metrics are
+    worth having, and a check that errors is itself the finding.
+    """
+    from scripts.autoresearch.bench_side_effects import run_verifiers
+
+    try:
+        return run_verifiers(fixture=fixture, checks=task.get("side_effect_checks") or [],
+                             search_root=repo_root)
+    except Exception as exc:  # noqa: BLE001
+        return {"checks": [], "reward": 0.0, "ran": 0,
+                "reward_reason": f"verifier runner failed: {type(exc).__name__}: {exc}",
+                "fixture_writes": []}
+
+
 class ToolSandboxUnavailable(RuntimeError):
     """The aggregator cannot promise a trial read-only execution."""
 
@@ -400,6 +665,7 @@ def build_options(
     priority: int = AUTORESEARCH_PRIORITY,
     system_append: str = "",
     writes_into: Path | str | None = None,
+    stateful_admitted: list[str] | None = None,
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -450,8 +716,21 @@ def build_options(
         install_trial_write_scope(hooks, Path(writes_into))
 
     disallowed = list(_get_disallowed_tools(plan_mode=False))
+    # #3403: a durable-write trial's scope names are the ONLY state-changing tools that
+    # come back, and only when the caller says the isolation assertion passed — the
+    # caller is `run_trial`, and it only reaches this with a `stateful_admitted` list
+    # after `isolation_refusal` returned None inside the same call. Subtracting from the
+    # STATEFUL_TOOLS denial is the whole change here; an empty list reproduces today's
+    # behaviour exactly, which is why
+    # `test_the_default_admits_nothing_and_every_stateful_name_is_still_denied` pins the
+    # default rather than the new path. The aggregator needs the same list again to
+    # actually let a call through (`agent_mcp/_tool_sandbox.refusal`), so a name that is
+    # admitted on one side and not the other fails the trial rather than writing the
+    # house — the belt is the second gate, not a decoration on the first.
+    admitted = {str(n) for n in (stateful_admitted or ()) if str(n).strip()}
     if sandbox_stateful_tools:
-        disallowed += [t for t in sorted(STATEFUL_TOOLS) if t not in disallowed]
+        disallowed += [t for t in sorted(STATEFUL_TOOLS)
+                       if t not in disallowed and t not in admitted]
     disallowed += list(extra_disallowed or [])
 
     # #427. Everything else is inherited so a trial stays faithful to the chat
@@ -638,6 +917,67 @@ async def run_trial(
     trial_id = _trial_session_id(variant_id, task_id)
     session_id = new_background_session_id(RECORDED_SESSION_SLUG)
 
+    # #3403: a task that declares `writes:` gets a disposable copy of the state it is
+    # asked to change, and that copy is proved to be a copy BEFORE the first message
+    # reaches the model. Refusal is a returned row, never a crash: what is graded is
+    # whether the run did the write, and a trial dispatched against the house would answer
+    # that truthfully at the cost of Alan's vault.
+    from scripts.autoresearch.bench_fixture import declared_scopes
+    write_scope = declared_scopes(task)
+    fixture_ctx: dict[str, Any] | None = None
+    # What the server that will EXECUTE the writes reported about its own roots. Empty on
+    # every trial that declared no scope (nothing was asked of it) and on a refusal that
+    # never got as far as asking — which is why it is a dict and not a `True`/`False`.
+    server_state: dict[str, Any] = {}
+    if write_scope:
+        try:
+            fixture_ctx = isolation_refusal(task, dict(os.environ), trial_id)
+            try:
+                server_state = await require_copied_state(
+                    write_scope_of(task), measured=fixture_ctx["flags"])
+            except TrialRefused:
+                # The copy was built and then found to be pointless: the process that
+                # would have written it resolves the house. Leaving the copy behind is
+                # exactly the orphaned second copy of Alan's memory the item's Risks name,
+                # and the fixture's own `cleanup` refuses to delete anything else, so one
+                # call here is both the removal and the assertion.
+                fixture_ctx["fixture"].cleanup()
+                raise
+        except TrialRefused as exc:
+            # A refusal that got as far as asking the server carries its answer, and the
+            # row has to show it: "the copy was fine and the writer was production" is the
+            # finding, and it is invisible if only the probe's reading is recorded.
+            server_state = exc.state or server_state
+            now = time.time()
+            return {"variant_id": variant_id, "task_id": task_id,
+                    "task_category": task.get("category", "unknown"),
+                    "task_safety_critical": bool(task.get("safety_critical")),
+                    "status": "refused_unsandboxed", "final_text": "",
+                    "objective_check_failures": [], "objective_checks_expected": 0,
+                    "turns": 0, "tool_calls": [], "tool_call_count": 0,
+                    "denied_calls": [], "unresolved_calls": [], "usage": {},
+                    "first_token_ms": None, "wall_ms": 0, "prompt_tokens": 0,
+                    "completion_tokens": 0, "reasoning_tokens": 0,
+                    "tokens_per_second": None, "cost_usd": 0.0, "error": str(exc),
+                    "start_ts": now, "end_ts": now, "duration_seconds": 0.0,
+                    "session_id": None, "trial_id": trial_id, "stop_reason": "",
+                    "inner_voice": False, "bench_probe_count": 0, "bench_probes": [],
+                    "corpus_read_attempts": 0, "corpus_reads_succeeded": 0,
+                    "write_scope": list(write_scope), "side_effect_reward": 0.0,
+                    "side_effect_checks": [], "side_effect_reward_reason": str(exc),
+                    # The flags as measured, not the assumption. A refusal that got as far
+                    # as the probe reports what the probe read (so a reader can see which
+                    # of the two roots failed), and one that never reached it reports the
+                    # production pair — the only honest answer to "unmeasured".
+                    "is_production_data": exc.flags["is_production_data"],
+                    "is_production_vault": exc.flags["is_production_vault"],
+                    # What the executing process said, when we got that far: a refusal
+                    # whose fixture was fine and whose SERVER said production is a
+                    # different finding from one whose copy never isolated, and the row
+                    # has to tell them apart without a re-run.
+                    "aggregator_isolation": dict(server_state),
+                    "stateful_admitted": []}
+
     trace: dict[str, Any] = {
         "variant_id": variant_id,
         "task_id": task_id,
@@ -654,6 +994,21 @@ async def run_trial(
         "error": "",
         "session_id": session_id,
         "trial_id": trial_id,
+        # #3403: the two isolation flags as the TRIAL process resolved them, and the
+        # scope it was granted. Recorded on every row and not only a refusing one, so a
+        # reader can tell "declared no write scope" from "scoped and sandboxed" without
+        # re-running anything. Both fields are None here when the task asked for no
+        # writes, because then nothing needed asserting.
+        "write_scope": list(write_scope),
+        "is_production_data": (fixture_ctx or {}).get("flags", {}).get(
+            "is_production_data"),
+        "is_production_vault": (fixture_ctx or {}).get("flags", {}).get(
+            "is_production_vault"),
+        # The same reading as the refused row's, from the same pre-dispatch assertion:
+        # the runner's fresh interpreter proves what the fixture's env RESOLVES; this is
+        # what the process holding the tools actually resolved. A green trial on this box
+        # is one where the two agree on "copy".
+        "aggregator_isolation": dict(server_state),
         "stop_reason": "",
         "usage": {},
         "inner_voice": False,  # no IV-less runtime gate to compare against yet
@@ -705,10 +1060,55 @@ async def run_trial(
     # stamp, and its failure must not be logged as "could not create session".
     stamp_new_session(session_id)
 
+    from agent_mcp._tool_sandbox import BENCH_WRITE_SCOPE_ENV
+    #: The keys this trial may overwrite, with whatever THIS process held before. A
+    #: `--trials 5` loop runs five `run_trial` calls in one process: if trial 1's fixture
+    #: roots stayed set, trial 2 — which may have declared no scope at all, and so expects
+    #: the house — would inherit a path trial 1 already deleted, and the aggregator would
+    #: resolve a data root that is not there. Restored in the `finally` below, so a
+    #: timeout or a crash cannot strand it either.
+    _SAVED_ENV_KEYS = ("LLOYD_DATA", "LLOYD_VAULT_ROOT", "LLOYD_VAULT",
+                       "LLOYD_KG_DB", BENCH_WRITE_SCOPE_ENV)
+    saved_env = {k: os.environ.get(k) for k in _SAVED_ENV_KEYS}
+    if fixture_ctx is not None:
+        # The aggregator spawns the MCP server as a child, so the fixture's roots reach it
+        # through this process's environment. The declared scope travels with them:
+        # `_tool_sandbox.allowed_bench_writes()` re-reads both production flags inside the
+        # SERVER's own process, so a grant whose state turned out to be production is
+        # refused there rather than honoured on this process's assurance.
+        for _k, _v in fixture_ctx["env"].items():
+            os.environ[_k] = _v
+        os.environ[BENCH_WRITE_SCOPE_ENV] = ",".join(write_scope_of(task))
+    # The names this trial may write through, in the same bare spelling as
+    # `STATEFUL_TOOLS` and therefore as `disallowed_tools`.
+    #
+    # Why the declared scope and not `_tool_sandbox.allowed_bench_writes()` read here:
+    # `app.paths` froze THIS process's roots at its own import, before the fixture env
+    # existed, so the predicate would answer from the runner's production constants and
+    # admit nothing — a scoped trial that could never take its own action, scoring 0 on a
+    # check only it can perform. The proof that the grant is safe is `isolation_refusal`,
+    # which already resolved both flags to False in a FRESH interpreter holding the
+    # fixture env; the server the harness spawns is a second fresh interpreter holding the
+    # same env, so it reaches the same answer through `allowed_bench_writes()`. Two
+    # processes, one environment, and the call is refused if either says production.
+    admitted_names: list[str] = sorted(write_scope_of(task)) if fixture_ctx else []
+    trace["stateful_admitted"] = list(admitted_names)
+
     options = build_options(
         model=model, overlay_dir=overlay_dir, session_id=session_id,
         max_agent_turns=max_agent_turns, hooks=hooks,
-        extra_disallowed=extra_disallowed, system_append=system_append,
+        extra_disallowed=extra_disallowed,
+        # The `sandbox_stateful_tools` route stays ON for a scoped trial and does the
+        # scoping itself through `stateful_admitted`: the whole `STATEFUL_TOOLS` set is
+        # still denied EXCEPT the names the task declared, and those are the tools the task
+        # exists to exercise. Turning the route off and pre-filtering the names into
+        # `extra_disallowed` instead would reach the same list by a second route no test
+        # names, so there would be two ways to get this wrong. `True` here is
+        # `build_options`' own default, written out because the line below it only means
+        # anything when this route is the one doing the denying.
+        sandbox_stateful_tools=True,
+        stateful_admitted=admitted_names,
+        system_append=system_append,
         # #1971: the hop that was missing. `run_trial` took `writes_into`, its
         # docstring promised to forward it, and this call dropped it — so the
         # scope hook `build_options` installs was armed on no live trial, and a
@@ -753,10 +1153,40 @@ async def run_trial(
                        task_id, variant_id, trace["error"])
     finally:
         trace["duration_seconds"] = round(time.time() - started, 2)
+        # Undo the fixture's environment whether the trial finished, timed out or raised.
+        # The verifier below does not need it — `run_verifiers` is handed the fixture's own
+        # env and merges it over this process's, which is why restoring here first is safe
+        # — but the NEXT trial in the same process does.
+        for _k, _v in saved_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
     # Computed after the turn from what was recorded, not inside the event
     # callback: the count and the deny then cannot disagree, because both call
     # `bench_corpus.target_paths` on the same recorded arguments.
+    if fixture_ctx is not None:
+        # The verifier runs here — after the trial, in the runner's process, over the
+        # fixture — and the agent never saw it: its text is in no prompt, no tool list and
+        # no trace. The reward sits BESIDE the composite rather than inside it, so an
+        # existing task's promotion math does not move.
+        se = score_side_effects(task, fixture_ctx["fixture"],
+                                Path(__file__).resolve().parents[2])
+        trace["side_effect_reward"] = se["reward"]
+        # Per-check detail is read under `detail`, the key `run_verifiers` emits — see
+        # `bench_side_effects.VerifierResult`. Reading a name the producer never writes is
+        # a KeyError on the first durable-write trial that ever runs a check, which is the
+        # worst possible moment to discover it: the trial is over, its trace is in hand, and
+        # the exception is thrown on the way to recording the reward it just earned.
+        trace["side_effect_checks"] = [
+            {"name": c["name"], "passed": c["passed"],
+             **({"reason": c["detail"]} if c.get("detail") else {})}
+            for c in se["checks"]]
+        trace["side_effect_reward_reason"] = se["reward_reason"]
+        trace["fixture_writes"] = se["fixture_writes"]
+        fixture_ctx["fixture"].cleanup()
+
     trace["bench_probes"] = rubric_probes(trace)
     trace["bench_probe_count"] = len(trace["bench_probes"])
     trace["corpus_read_attempts"] = corpus_read_attempts(trace)
@@ -919,6 +1349,17 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         # no score at all; now it is also null when the objective layer had no
         # dispatch record to grade, with `rankable: False` saying why.
         **rankability_fields(score),
+        # #3403 deliberately adds NO key here. The isolation flags (`is_production_data`,
+        # `is_production_vault`), the admitted names (`write_scope`, `stateful_admitted`)
+        # and the verifier's `side_effect_reward` live on the TRIAL RECORD — the trace this
+        # function reads and the JSON the runner writes per trial — and that is where
+        # clause 4's "recorded on the trial row either way" is read and pinned
+        # (tests/test_autoresearch_bench_runner_sdk.py). Putting them here instead would
+        # have to grow `PUBLISHED_TRIAL_KEYS` AND `run_round.trial_ledger_row` in the same
+        # commit, which is #884's named change (the two writers are pinned to one key set
+        # by `test_the_ondemand_writer_emits_the_same_per_trial_keys`, and a key on this
+        # arm only is the #353 bug again), and would move `run_round.py:1428`, which four
+        # sites cite by number. The ledger's denominator is #428's to move.
         "promoted": None,
         "created_at": now_iso(),
     }

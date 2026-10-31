@@ -29,6 +29,7 @@ from app import host_metrics, sessions_io, vllm_metrics
 from app.sessions_io import is_background_session_name, is_conversation_session
 from app.aggregator_config import route as aggregator_route
 from app.backlog_status import CLOSED_STATUSES
+from app.data_root import vault_root
 
 # One cold cycle parses the front matter of every file on the backlog board
 # (1,141 item files at the board census of 2026-09-16), and on exactly those
@@ -658,9 +659,8 @@ def _autonomy() -> dict[str, Any]:
     is not.
     """
     from datetime import datetime, timezone
-    from pathlib import Path
 
-    autonomy_dir = Path.home() / "obsidian" / "autonomy"
+    autonomy_dir = vault_root() / "autonomy"
 
     def _scan() -> dict[str, Any]:
         # A missing directory is an empty fleet, not a different shape. This
@@ -806,9 +806,8 @@ def _autonomy() -> dict[str, Any]:
 
 def _backlog() -> dict[str, Any]:
     """Backlog board: open work by status and by board."""
-    from pathlib import Path
 
-    backlog_dir = Path.home() / "obsidian" / "backlog"
+    backlog_dir = vault_root() / "backlog"
 
     def _scan() -> dict[str, Any]:
         # Same rule as `_autonomy`: a missing board is empty, not shaped

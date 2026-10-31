@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 import yaml
@@ -32,6 +31,7 @@ from app.sessions_io import is_background_session_name, is_conversation_session
 # or `people` — so the tab's headline number and the notes its search box could
 # reach were decided by two lists nothing read against each other.
 from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
+from app.data_root import vault_root
 
 logger = logging.getLogger("lloyd-server")
 
@@ -113,9 +113,15 @@ async def post_mc_navigate(request: Request):
     # caller can retry focus with vault_search results.
     focus_error: str | None = None
     if tab == "memory" and focus_id and ("/" in focus_id or focus_id.endswith(".md")):
-        vault_path = (Path.home() / "obsidian" / focus_id).resolve()
-        vault_root = (Path.home() / "obsidian").resolve()
-        if not str(vault_path).startswith(str(vault_root) + "/"):
+        # The local that holds the resolved root is NOT named `vault_root`: this block
+        # used to assign `vault_root = VAULT_ROOT.resolve()`, and when the reader sweep
+        # replaced the constant with the `vault_root()` CALL, that assignment silently
+        # turned the function into a function-local for the whole `if`, so the line above
+        # it raised `UnboundLocalError` on every memory-tab focus with a path-shaped id —
+        # a 500 on the tab, from a rename that looked like a pure substitution.
+        vault_path = (vault_root() / focus_id).resolve()
+        resolved_vault = vault_root().resolve()
+        if not str(vault_path).startswith(str(resolved_vault) + "/"):
             focus_error = f"path escapes vault: {focus_id}"
         elif not vault_path.exists():
             focus_error = (
@@ -249,7 +255,7 @@ async def get_mc_events(request: Request):
 # endpoint already reads. Failures are swallowed into {} so a broken
 # fixture in one tab can't crash the navigate response.
 
-_VAULT = Path.home() / "obsidian"
+_VAULT = vault_root()
 # `_VAULT_SEGMENTS` is imported above, from `agent_mcp.vault` — one list for the
 # count here, `app/routers/memory.py`'s qmd query and its stats walk (#3160).
 
@@ -375,7 +381,7 @@ def _summarize_chat() -> dict:
     }
 
 
-_BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+_BACKLOG_DIR = vault_root() / "backlog"
 # No `_AUTONOMY_DIR` of its own: #1594. A second constant for one directory is how
 # the summary came to enumerate it independently of the route that owns it — see
 # `_summarize_autonomy` and `app/routers/autonomy.py::autonomy_task_files`.

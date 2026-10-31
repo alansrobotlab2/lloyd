@@ -42,6 +42,7 @@ from agent_mcp._shared import (
 # tests. `prompt_builder` is too heavy to import into this process, and a second
 # copy of the number is how two writers end up disagreeing about what is bounded —
 # which is exactly the state #1010 was filed on.
+from app.data_root import vault_root
 from agent_mcp import _injection_patterns
 from app.memory_ceiling import (
     TOPIC_SLUG_RE,
@@ -54,7 +55,7 @@ from app.prompt_surface import ENTRY_TYPES
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-MEMORIES_ROOT = Path.home() / "obsidian" / "lloyd"
+MEMORIES_ROOT = vault_root() / "lloyd"
 MEMORY_FILES = {"MEMORY.md", "USER.md"}
 
 # The families the memory gate REFUSES on, by id in the shared table

@@ -144,6 +144,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.paths import LIVE_CHECKOUT, PIPELINE_DIR  # noqa: E402
+from app.data_root import vault_root
 
 # Append-only, under the data root's `_pipeline/`. This JSONL and the durable copy
 # below are the ledger's only two surfaces; there is no markdown view beside them.
@@ -157,7 +158,7 @@ DEFAULT_CANDIDATES = PIPELINE_DIR / "skills" / "candidates"
 # non-prose payload gets its own directory under `memory/`, where `memory/facts/`
 # already sets the precedent for machine-written data files.
 MIRROR_FILENAME = "verdicts.jsonl"
-DEFAULT_MIRROR = Path.home() / "obsidian" / "memory" / "skill-verdicts" / MIRROR_FILENAME
+DEFAULT_MIRROR = vault_root() / "memory" / "skill-verdicts" / MIRROR_FILENAME
 
 # How long one stored `evidence_cmd` may take before `check` stops waiting for it.
 # Measured on the live ledger 2026-09-19: all 75 blocking keys re-execute in 2.0 s

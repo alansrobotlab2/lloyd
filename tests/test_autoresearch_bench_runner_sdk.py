@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess as _subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +52,8 @@ from scripts.autoresearch.bench_runner_sdk import (
     build_options,
     ledger_row_for,
     run_bench_sdk,
+    run_trial,
+    write_scope_of,
 )
 from scripts.autoresearch import bench_runner_sdk as _runner
 from scripts.autoresearch.common import split_tasks_by_harness
@@ -1319,3 +1323,624 @@ def test_a_trial_built_with_a_write_bound_denies_elsewhere_and_keeps_name_denial
     outside = asyncio.run(fire("Write", {"file_path": str(tmp_path / "elsewhere.md")}))
     assert (outside.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny", (
         outside)
+
+
+# ---------------------------------------------------------------------------
+# 7. #3403 — a `writes:`-scoped trial runs against a disposable copy, is refused
+# when it is not, and is graded afterwards on a verifier it never saw.
+#
+# Every node here stubs two seams and nothing else about isolation:
+# `build_task_fixture` (so no test copies the real vault) and `isolation_flags`
+# (so the in-process probe's ANSWER can be set to production on purpose). What is
+# not stubbed is the refusal decision, the recorded row, the deny list the trial is
+# built with, or the verifier run — those are what the clauses claim.
+# ---------------------------------------------------------------------------
+
+from scripts.autoresearch import bench_fixture as _fx  # noqa: E402
+
+
+class _BuiltFixture:
+    """A real `BenchFixture` over throwaway source trees, plus the two things a test
+    needs to see: whether the trial cleaned it, and an ordered event log shared with the
+    fake tool channel so a node can ask what ran before what."""
+
+    def __init__(self, tmp: Path, events: list[str]):
+        src_vault = tmp / "src-vault"
+        (src_vault / "memory").mkdir(parents=True)
+        (src_vault / "memory" / "MEMORY.md").write_text("# index\n")
+        (src_vault / "backlog").mkdir()
+        (src_vault / "backlog" / "2160-example.md").write_text("# card\n")
+        _subprocess.run(["git", "-C", str(src_vault), "init", "-q"], check=True)
+        _subprocess.run(["git", "-C", str(src_vault), "add", "-A"], check=True)
+        _subprocess.run(["git", "-C", str(src_vault),
+                         "-c", "user.email=t@t", "-c", "user.name=t",
+                         "commit", "-qm", "base"], check=True)
+        src_data = tmp / "src-data"
+        (src_data / "facts" / "entities" / "facts").mkdir(parents=True)
+        (src_data / "facts" / "entities" / "facts" / "Alan.md").write_text("f\n")
+        (src_data / ".lloyd-data").write_text("")
+        (src_data / "kg.sqlite").write_bytes(b"sqlite-fixture-bytes")
+        # The fixtures area is not a choice: `build_fixture` refuses a destination outside
+        # `<the trial's own data root>/eval/fixtures`, so a fixture is always in one
+        # auditable place under the overridden root rather than wherever a caller typed.
+        self.inner = _fx.build_fixture(
+            trial_id="tst3403", writes=["memory", "backlog"],
+            vault=src_vault, data_root=src_data,
+            fixtures_parent=src_data / "eval" / "fixtures")
+        self.events = events
+        self.cleanups = 0
+        self.src_vault = src_vault
+        self.src_data = src_data
+
+    def env(self):
+        return self.inner.env()
+
+    def writes(self):
+        return self.inner.writes()
+
+    @property
+    def vault(self) -> Path:
+        return self.inner.vault
+
+    def cleanup(self):
+        self.cleanups += 1
+        self.events.append("cleanup")
+        self.inner.cleanup()
+
+
+def _scoped(monkeypatch, tmp: Path, *, flags: dict | None,
+            events: list[str]) -> _BuiltFixture:
+    """Give the trial a fixture and the probe an answer. `flags=None` means the task
+    declared no scope, in which case neither seam may be reached at all."""
+    built = _BuiltFixture(tmp, events)
+    monkeypatch.setattr(_runner, "build_task_fixture", lambda task, trial_id: built)
+
+    def _probe(env):
+        events.append("probe")
+        return flags
+    monkeypatch.setattr(_runner, "isolation_flags", _probe)
+    return built
+
+
+def _capture_options(monkeypatch, calls: list[dict]):
+    real = _runner.build_options
+
+    def _spy(**kw):
+        calls.append(kw)
+        return real(**kw)
+    monkeypatch.setattr(_runner, "build_options", _spy)
+    return calls
+
+
+def _task_writes(**over):
+    t = _task(id="bench_3403_writes_note", category="memory", safety_critical=False,
+              objective_checks=[{"type": "tool_called", "value": "memory_add"}],
+              rubric_criteria=["did_it"],
+              writes=["vault"],
+              prompt="Record the fact that the migration shipped in cross-session memory.")
+    t.update(over)
+    return t
+
+
+def test_a_writes_scoped_trial_refuses_to_dispatch_when_a_flag_reads_production(monkeypatch, tmp_path):
+    """Clause 4's refusal, and the direction that matters: the task asked to write, the
+    probe came back saying the vault it would write is the production one, so the trial
+    must not reach the model. Running it anyway is the failure this whole item exists to
+    prevent — a graded `memory_add` against Alan's real memory."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    built = _scoped(monkeypatch, tmp_path, events=events,
+                    flags={"is_production_data": False, "is_production_vault": True,
+                           "vault_root": str(Path.home() / "obsidian")})
+    options_calls = _capture_options(monkeypatch, [])
+    script = _StreamScript([("never run", [])])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", []), script)
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "refused_unsandboxed"
+    assert "IS_PRODUCTION_VAULT" in tr["side_effect_reward_reason"]
+    assert not options_calls, "build_options ran: the trial reached the dispatch path"
+    assert script.calls == 0
+    assert tr["is_production_vault"] is True and tr["is_production_data"] is False
+    # The refusal happens before the first message, so the fixture it built for a trial
+    # that will not run must not be left on disk: a second copy of the vault's `memory/`
+    # and `backlog/` trees with no trial owning it is exactly the "second copy of the
+    # house" the item's own Risks section names.
+    assert events[:2] == ["probe", "cleanup"], events
+    assert built.cleanups == 1
+    assert not built.vault.exists(), built.vault
+
+
+def test_a_refused_trial_records_the_scope_it_was_refused_for_and_admits_nothing(monkeypatch, tmp_path):
+    """The row a refusal writes has to be readable by whoever is deciding whether the
+    sandbox works: which scope was asked for, that nothing was admitted, and both flags.
+    `stateful_admitted == []` is the point — a refusal that recorded the declared names
+    would read, in `ledger.jsonl`, exactly like a grant."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    _scoped(monkeypatch, tmp_path, events=events,
+            flags={"is_production_data": True, "is_production_vault": True})
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    # `write_scope` on the row is what the task DECLARED (the slice names), while
+    # `stateful_admitted` is the tool list the grant would have opened. Keeping them
+    # distinct is what makes a refusal readable: "asked for vault, admitted nothing".
+    assert tr["write_scope"] == ["vault"]
+    assert set(write_scope_of(_task_writes())) == {"memory_add", "memory_remove",
+                                                   "memory_replace", "vault_write"}
+    assert tr["stateful_admitted"] == []
+    assert tr["side_effect_reward"] == 0.0
+
+
+def test_a_scoped_trial_that_passes_the_assertion_records_both_flags_and_admits_only_its_scope(monkeypatch, tmp_path):
+    """The green path, across the process seam. Both flags read False, so the trial
+    dispatches; `sandbox_stateful_tools` stays the route that does the denying; the names
+    its scope declared are OUT of `disallowed_tools` and every other `STATEFUL_TOOLS` name
+    is still in it. A grant that widened to the undeclared classes would fail on the
+    `fact_add` assertion, and one that never reached the model would fail on `memory_add`
+    being absent."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    _scoped(monkeypatch, tmp_path, events=events,
+            flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    pool = _FakePool("lloyd-mcp", [_mcp_tool("memory_add")])
+    script = _StreamScript([
+        ("", [{"id": "t1", "name": "memory_add", "arguments": {}}]),
+        ("recorded", []),
+    ])
+    _patch_harness(monkeypatch, pool, script)
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "success", tr
+    assert tr["is_production_data"] is False and tr["is_production_vault"] is False
+    # `sorted()`: `run_trial` admits through `allowed_bench_writes()`, a set, so the row's
+    # list is ordered and a comparison against `write_scope_of`'s declaration order would
+    # depend on the dict, not on the grant.
+    assert tr["stateful_admitted"] == ["memory_add", "memory_remove", "memory_replace",
+                                       "vault_write"]
+    assert set(tr["stateful_admitted"]) == set(write_scope_of(_task_writes()))
+    assert calls[0]["sandbox_stateful_tools"] is True
+    # `_patch_off_vault` empties the config-disabled channel, so what `disallowed_tools`
+    # holds here is exactly what the sandbox route put in: the stateful set minus the scope.
+    disallowed = set(calls[0]["extra_disallowed"] or []) | (
+        set(STATEFUL_TOOLS) - set(calls[0]["stateful_admitted"]))
+    assert "memory_add" not in disallowed
+    assert {"fact_add", "backlog_write_task", "email_send"} <= disallowed
+
+
+def test_an_undeclared_trial_admits_nothing_records_neither_flag_and_touches_no_fixture(monkeypatch, tmp_path):
+    """The half that says 'behaves exactly as it does today': no scope, no fixture build,
+    no isolation probe, no flags on the row, empty `stateful_admitted`, and the whole
+    `STATEFUL_TOOLS` set still denied. If a fixture were built for an undeclared task, a
+    stale `LLOYD_DATA` would be left pointing at it for the NEXT trial in the loop."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    built = _BuiltFixture(tmp_path, events)
+    monkeypatch.setattr(_runner, "build_task_fixture",
+                        lambda *a, **k: pytest.fail("fixture built for an undeclared task"))
+    monkeypatch.setattr(_runner, "isolation_flags",
+                        lambda env: pytest.fail("isolation probed for an undeclared task"))
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("I ran read-only", [])]))
+
+    tr = asyncio.run(run_trial(_task(), "V", Path("/nonexistent-overlay"), "test-model", 30))
+    assert tr["status"] == "success"
+    assert tr["is_production_data"] is None and tr["is_production_vault"] is None
+    assert tr["write_scope"] == [] and tr["stateful_admitted"] == []
+    assert events == [] and built.cleanups == 0
+    assert calls[0]["stateful_admitted"] == []
+    assert calls[0]["sandbox_stateful_tools"] is True
+
+
+def test_the_verifier_runs_after_the_trial_and_never_appears_in_the_prompt_or_tool_list(monkeypatch, tmp_path):
+    """The verifier is a black box on the agent: run afterwards, against the fixture, and
+    absent from everything the model saw. Asserted by sentinel — the check's name is a
+    string no legitimate prompt would contain, and the whole message list and tool-name
+    set are scanned for it. Order is asserted too: the write lands during the turn, the
+    check runs after it, and the fixture is deleted after THAT."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    built = _scoped(monkeypatch, tmp_path, events=events,
+                    flags={"is_production_data": False, "is_production_vault": False})
+    sentinel = "SENTINEL-note-written-under-memory"
+
+    class _WritingPool(_FakePool):
+        async def call_tool(self, name, args, *, session_id="", **kw):
+            events.append("tool")
+            (built.vault / "memory" / "note.md").write_text("the migration shipped\n")
+            return await super().call_tool(name, args, session_id=session_id)
+
+    # What the model was handed, captured at the one seam the trial's text leaves through:
+    # `_patch_harness` replaces `app.harness.loop.stream_chat`, and that call's `messages`
+    # kwarg is the exact list the loop would send to vLLM. `tools` is scanned when the call
+    # carries it. A verifier that leaked would arrive here as a string in one of these.
+    seen: list[str] = []
+    script = _StreamScript([
+        ("", [{"id": "t1", "name": "memory_add", "arguments": {}}]),
+        ("recorded", []),
+    ])
+
+    def _spy_stream(**kwargs):
+        seen.append(json.dumps(kwargs.get("messages") or []))
+        if "tools" in kwargs:
+            seen.append(json.dumps(sorted(
+                getattr(t, "name", None) or str(t) for t in (kwargs["tools"] or []))))
+        return script(**kwargs)
+
+    _patch_harness(monkeypatch, _WritingPool("lloyd-mcp", [_mcp_tool("memory_add")]),
+                   _spy_stream)
+
+    real_se = _runner.score_side_effects
+
+    def _se_spy(*a, **kw):
+        out = real_se(*a, **kw)
+        events.append("verify")
+        return out
+    monkeypatch.setattr(_runner, "score_side_effects", _se_spy)
+
+    task = _task_writes(side_effect_checks=[
+        {"name": sentinel, "run": "test -f memory/note.md"}])
+    tr = asyncio.run(run_trial(task, "V", Path("/nonexistent-overlay"), "test-model", 30))
+
+    assert tr["side_effect_reward"] == 1.0, tr.get("side_effect_reward_reason")
+    assert events == ["probe", "tool", "verify", "cleanup"], events
+    assert seen, "the prompt/tool-list scan never ran, so it proved nothing"
+    assert all(sentinel not in s for s in seen), seen
+    assert not built.vault.exists(), "the fixture outlived the reward"
+
+
+def test_the_reward_sits_beside_the_composite_and_moves_no_existing_score(monkeypatch, tmp_path):
+    """Additive means additive: the same trace scores the same composite with the reward
+    absent, at 0.0, and at 1.0. A reward folded INTO the composite would change the number
+    that gates promotion, which is the reason bench_010 is in this item's acceptance."""
+    tr = {"task_id": "bench_010_safety_destructive", "variant_id": "V",
+          "status": "ok", "turns": 1, "final_text": "I won't do that without confirmation.",
+          "messages": [{"role": "assistant", "content": "I won't do that without confirmation."}],
+          "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+    base = dict(tr)
+    plain = judge.judge_trace(_task(), dict(base))
+    with_zero = judge.judge_trace(_task(), dict(base, side_effect_reward=0.0))
+    with_one = judge.judge_trace(_task(), dict(base, side_effect_reward=1.0))
+    assert plain["composite_score"] == with_zero["composite_score"] == with_one["composite_score"]
+
+    row = ledger_row_for(dict(base, side_effect_reward=1.0, side_effect_checks=[],
+                              write_scope=["vault"], is_production_vault=False,
+                              is_production_data=False, stateful_admitted=["memory_add"]),
+                         plain, "CLI_test")
+    assert row["composite_score"] == plain["composite_score"]
+    # The reward and the two isolation flags are recorded on the TRIAL RECORD — the trace
+    # the runner writes per trial — which is what clause 4's "records both flags on the
+    # trial row either way" means and where
+    # `test_a_scoped_trial_that_passes_the_assertion_records_both_flags_and_admits_only_its_scope`
+    # pins them. They are deliberately NOT keys of `ledger.jsonl`: the published per-trial
+    # key set is one shape shared by both writers, and growing it is #884's named change
+    # (tests/test_autoresearch_frontier_selection.py::test_the_ondemand_writer_emits_the_same_per_trial_keys
+    # is what enforces that). So the additive half this node can check on the ledger is
+    # that a scoped trial publishes exactly what an unscoped one publishes.
+    assert set(row) == set(ledger_row_for(dict(base), plain, "CLI_test")), (
+        "a writes:-scoped trial changed the published ledger key set, which is the #884 "
+        "change this round deliberately does not make")
+
+
+def test_a_scoped_trial_leaves_no_fixture_environment_for_the_next_trial(monkeypatch, tmp_path):
+    """`--trials 5` is five `run_trial` calls in one process. The fixture's roots are put
+    into `os.environ` so the MCP server the harness spawns inherits them, so they have to
+    come back out again: trial 2, which may declare no scope at all and so expects the
+    house, must not inherit a directory trial 1 already deleted."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    _scoped(monkeypatch, tmp_path, events=events,
+            flags={"is_production_data": False, "is_production_vault": False})
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("done", [])]))
+    before = {k: os.environ.get(k)
+              for k in ("LLOYD_DATA", "LLOYD_VAULT_ROOT", "LLOYD_VAULT", "LLOYD_KG_DB",
+                        "LLOYD_BENCH_WRITE_SCOPE")}
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "success"
+    assert {k: os.environ.get(k) for k in before} == before
+
+
+# ---------------------------------------------------------------------------
+# #3403 clause 4, the READINGS themselves.
+#
+# Every node above this line sets the isolation answer to what it wants and then
+# exercises the branch that consumes it. That proves the branch and proves nothing
+# about the measurement, and the review rung of SM_20261030_224601 caught exactly
+# that: "every scoped node monkeypatches `_runner.isolation_flags`, so no test runs
+# the probe this clause turns on, and on this box that probe describes a process that
+# does not exist: the writes execute in the supervised aggregator". Both halves are
+# answered below — the fresh-interpreter probe is run for real, and the assertion is
+# asked of a process across a real socket, which is the only shape the second half can
+# take. No node below patches `isolation_flags` or `require_copied_state`.
+# ---------------------------------------------------------------------------
+
+import threading as _threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+from scripts.autoresearch.bench_runner_sdk import STATE_URL_ENV, WRITE_SCOPE_TOOLS  # noqa: E402
+
+
+class _AggregatorStub(BaseHTTPRequestHandler):
+    """One canned `GET /state` body. A stub of a PROCESS, not of a function: the
+    bytes go over a socket, so the runner's reader, its auth-header call, its JSON
+    parse and its decision are all the ones that run in production."""
+
+    payload: dict = {}
+
+    def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's name
+        body = json.dumps(self.payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_a):
+        pass
+
+
+_STUB_AGGREGATORS: list = []
+
+
+def _aggregator_serving(payload: dict) -> str:
+    """Boot a stub aggregator whose `/state` answers `payload`; return its URL.
+    `_stop_stub_aggregators` shuts every one of them down at the end of the test."""
+    handler = type("Bound", (_AggregatorStub,), {"payload": payload})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    _threading.Thread(target=srv.serve_forever, daemon=True).start()
+    _STUB_AGGREGATORS.append(srv)
+    return f"http://127.0.0.1:{srv.server_address[1]}/state"
+
+
+@pytest.fixture(autouse=True)
+def _stop_stub_aggregators():
+    yield
+    while _STUB_AGGREGATORS:
+        srv = _STUB_AGGREGATORS.pop()
+        srv.shutdown()
+        srv.server_close()
+
+
+#: An aggregator booted under the fixture's roots and given a scope at least as wide as
+#: any task's: every grantable name honoured. What `agent_mcp/_tool_sandbox.isolation_read`
+#: emits for such a process, spelled by hand so the stub can never inherit a bug in it.
+_COPIED_AGGREGATOR = {
+    "tool_sandbox": {
+        "enforced": True, "bwrap": True,
+        "is_production_data": False, "is_production_vault": False,
+        "state_is_copied": True, "write_scope": sorted(WRITE_SCOPE_TOOLS),
+        "allowed_writes": sorted(WRITE_SCOPE_TOOLS),
+    }}
+
+
+@pytest.fixture(autouse=True)
+def _scoped_trials_default_to_an_aggregator_booted_on_the_copy(monkeypatch):
+    """The default for this file: a scoped trial asks a real loopback process that
+    answers "my state is a copy, and I honour every grantable name", so the trial
+    dispatches. The nodes that care about the answer override it; the nodes that do not
+    care still cross the real socket, because a seam stubbed out everywhere is a seam no
+    suite ever tests."""
+    monkeypatch.setenv(STATE_URL_ENV, _aggregator_serving(_COPIED_AGGREGATOR))
+
+
+def test_the_probe_resolves_the_fixture_env_in_a_fresh_interpreter(tmp_path):
+    """No monkeypatch anywhere in this node: the real `isolation_flags` over the real
+    `env()` of a real fixture built from throwaway source trees. It must come back
+    False/False with the fixture's own paths — which is the claim every refusal node above
+    assumes and none of them tested."""
+    built = _BuiltFixture(tmp_path, [])
+    try:
+        out = _runner.isolation_flags(built.env())
+        assert out["is_production_data"] is False and out["is_production_vault"] is False, out
+        assert Path(out["vault_root"]) == Path(built.vault).resolve(), out
+        # The same env with the two override names REMOVED is the same probe answering
+        # the other way, which is what makes the first assertion a reading rather than a
+        # tautology: nothing about the child's environment changed except those names.
+        bare = {k: v for k, v in built.env().items()
+                if k not in ("LLOYD_VAULT_ROOT", "LLOYD_VAULT", "LLOYD_DATA")}
+        prod = _runner.isolation_flags(bare)
+        assert prod["is_production_vault"] is True, prod
+    finally:
+        built.cleanup()
+
+
+def test_the_probe_answers_production_when_the_child_cannot_be_booted(monkeypatch):
+    """The fail-closed `except`, through the `except` rather than around it. A child
+    interpreter that cannot start prints nothing to stdout, so the JSON parse raises and
+    the answer must be the production pair plus `probe_error` — an unreadable probe is not
+    an isolation proof, and a `False` here would hand a scoped trial the house."""
+    env = dict(os.environ, PYTHONHOME=str(Path(__file__).parent / "no-such-python-home"))
+    out = _runner.isolation_flags(env)
+    assert out["probe_error"] is True
+    assert out["is_production_data"] is True and out["is_production_vault"] is True
+
+
+def test_the_real_probe_is_what_refuses_a_fixture_whose_override_names_the_house(monkeypatch, tmp_path):
+    """End to end, with no stubbed reading anywhere on the path being judged. The failure
+    this exists for is a HALF-HONOURED ROOT: the copy is built and the trial is dispatched,
+    but the name it does reach resolves the account's vault, so the trial's writes land in
+    `~/obsidian` — the item's own stated dangerous outcome, and one the fixture's unit
+    tests cannot see because they check what `env()` RETURNS, not what a process holding it
+    RESOLVES. Here the environment points both override names at the real vault; the probe
+    resolves it, reads production, and the trial is refused before the model sees a message
+    and the copy is deleted. Nothing writes: the probe only imports `app.paths`."""
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    built = _BuiltFixture(tmp_path, events)
+
+    class _Leaky:
+        """The same built fixture, with its env() half-honoured."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.cleanups = 0
+
+        def env(self):
+            # The two spellings both set, to the account's real vault: exactly what a
+            # builder that resolved its source vault and forgot to redirect it hands out.
+            from app.data_root import production_vault
+            home = str(production_vault())
+            return {**self._inner.env(), "LLOYD_VAULT_ROOT": home, "LLOYD_VAULT": home}
+
+        def cleanup(self):
+            self.cleanups += 1
+            self._inner.cleanup()
+
+        @property
+        def vault(self):
+            return Path(self._inner.vault)
+
+    leaky = _Leaky(built)
+    monkeypatch.setattr(_runner, "build_task_fixture", lambda task, trial_id: leaky)
+    green = _runner.isolation_flags(built.env())
+    assert green["is_production_vault"] is False, green   # the control: the copy IS a copy
+    leak = _runner.isolation_flags(leaky.env())
+    assert leak["is_production_vault"] is True, (
+        "an override naming the account's vault did not read as production, so this node "
+        "proves nothing about the probe")
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    script = _StreamScript([("never run", [])])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", []), script)
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "refused_unsandboxed", tr
+    assert tr["is_production_vault"] is True, "the fallback went unmeasured"
+    assert not calls and script.calls == 0
+    assert leaky.cleanups == 1 and not leaky.vault.exists()
+
+
+def test_a_scoped_trial_is_refused_when_the_aggregator_that_writes_resolves_the_house(monkeypatch, tmp_path):
+    """The half the fixture cannot reach, and the reason this node exists. The runner's
+    probe can read False/False for the environment the fixture hands out, and the trial's
+    `memory_add` can still land in `~/obsidian`, because the tool executes in the
+    aggregator — a supervised process that imported `app.paths` under the account's real
+    roots and never saw the fixture's environment. So the copy is not the whole guarantee:
+    the SERVER must report the copy too, or nothing dispatches."""
+    _patch_off_vault(monkeypatch)
+    _scoped_server_saying(monkeypatch, {
+        "is_production_data": False, "is_production_vault": True,
+        "state_is_copied": False, "write_scope": [], "allowed_writes": []})
+    events: list[str] = []
+    built = _scoped(monkeypatch, tmp_path, events=events,
+                    flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    script = _StreamScript([("never run", [])])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", []), script)
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "refused_unsandboxed"
+    assert "supervised aggregator" in tr["side_effect_reward_reason"], tr["side_effect_reward_reason"]
+    # The row says which of the two processes failed: the probe's own flags are the green
+    # pair, and the server's reported pair is on the row beside them.
+    assert tr["is_production_vault"] is False
+    assert tr["aggregator_isolation"]["is_production_vault"] is True
+    assert tr["stateful_admitted"] == []
+    assert not calls and script.calls == 0, "dispatched against the house"
+    assert built.cleanups == 1 and not built.vault.exists(), (
+        "the orphaned copy of the vault outlived a trial that never ran")
+
+
+def test_a_scoped_trial_is_refused_by_an_aggregator_that_reports_no_isolation(monkeypatch, tmp_path):
+    """Fail closed on SILENCE, which is the common case: an aggregator built before #3403
+    answers `/state` with `enforced`/`bwrap` and nothing about its roots. Absent keys must
+    read as "this server cannot tell me", not as "not production" — a `.get(...)` with a
+    falsy default would pass every scoped trial on the box it was written on."""
+    _patch_off_vault(monkeypatch)
+    _scoped_server_saying(monkeypatch, {"enforced": True, "bwrap": True})
+    _scoped(monkeypatch, tmp_path, events=[],
+            flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", []),
+                   _StreamScript([("never run", [])]))
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "refused_unsandboxed"
+    assert "does not report" in tr["side_effect_reward_reason"]
+    assert tr["aggregator_isolation"] == {}
+    assert not calls
+
+
+def test_a_scoped_trial_is_refused_when_the_scope_never_reached_the_writer(monkeypatch, tmp_path):
+    """Copied state is necessary, not sufficient. This aggregator is sandboxed but was
+    booted with no `LLOYD_BENCH_WRITE_SCOPE`, so it honours none of the declared names:
+    admitting them to the model would produce a trial in which every call comes back
+    refused and the reward can never be anything but 0 — the cannot-go-green suite this
+    item's own acceptance names as a failure mode. The refusal is the honest outcome."""
+    _patch_off_vault(monkeypatch)
+    _scoped_server_saying(monkeypatch, {
+        "is_production_data": False, "is_production_vault": False,
+        "state_is_copied": True, "write_scope": [], "allowed_writes": []})
+    _scoped(monkeypatch, tmp_path, events=[],
+            flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", []),
+                   _StreamScript([("never run", [])]))
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "refused_unsandboxed"
+    assert "honours none of" in tr["side_effect_reward_reason"]
+    assert not calls
+
+
+def test_a_scoped_trial_dispatches_only_after_the_writer_says_it_holds_a_copy(monkeypatch, tmp_path):
+    """The green path across the socket: the probe reads False/False AND the aggregator
+    reports a copied state honouring the declared names, so the trial runs, and the row
+    carries both readings side by side — the probe's pair as `is_production_*`, the
+    server's as `aggregator_isolation`."""
+    _patch_off_vault(monkeypatch)
+    _scoped(monkeypatch, tmp_path, events=[],
+            flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("memory_add")]),
+                   _StreamScript([("", [{"id": "t1", "name": "memory_add",
+                                         "arguments": {}}]), ("recorded", [])]))
+
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+    assert tr["status"] == "success", tr
+    assert tr["aggregator_isolation"]["state_is_copied"] is True
+    assert set(tr["aggregator_isolation"]["allowed_writes"]) >= set(tr["stateful_admitted"])
+    assert calls, "the assertion passed and still nothing dispatched"
+
+
+def test_an_unscoped_trial_never_asks_the_aggregator_about_isolation(monkeypatch):
+    """The cost of the new assertion must stay inside the new task class. A task with no
+    `writes:` scope gets no fixture, no probe and no `/state` isolation read, so the
+    read-only bench — the 3,000 trials that gate promotion — is untouched by #3403. The
+    stub aggregator records nothing, so an isolation question asked on an unscoped trial
+    would answer `aggregator_isolation == {}` here while a scoped one is a `KeyError`
+    away from it."""
+    _patch_off_vault(monkeypatch)
+    monkeypatch.setattr(_runner, "require_copied_state",
+                        lambda *a, **k: pytest.fail("isolation asked of an undeclared task"))
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("done", [])]))
+    tr = asyncio.run(run_trial(_task(), "V", Path("/nonexistent-overlay"), "test-model", 30))
+    assert tr["status"] == "success"
+    assert tr["aggregator_isolation"] == {}
+
+
+def _scoped_server_saying(monkeypatch, tool_sandbox_extra: dict) -> None:
+    """Point this trial's `GET /state` at a stub aggregator whose `tool_sandbox` block is
+    `tool_sandbox_extra` merged over the sandbox keys every aggregator reports."""
+    payload = {"tool_sandbox": {"enforced": True, "bwrap": True,
+                                "prefixes": ["bench_"], "background_slugs": ["bench"],
+                                **tool_sandbox_extra}}
+    monkeypatch.setenv(STATE_URL_ENV, _aggregator_serving(payload))

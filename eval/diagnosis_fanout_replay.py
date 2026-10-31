@@ -81,6 +81,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
+# Run by path (`python …/eval/diagnosis_fanout_replay.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 LLOYD_HOME = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LLOYD_HOME))
@@ -102,7 +110,7 @@ LEDGER_PATH = Path.home() / ".local" / "state" / "lloyd-automod" / "promotions.j
 #: `witness` below recomputes the census from it. Dated, because the vault
 #: retires the wholesale-copy path (see the module docstring) — do not "fix"
 #: this by pointing it at `backlog/data/promotions.jsonl`.
-VAULT_WITNESS = (Path.home() / "obsidian" / "backlog" / "data"
+VAULT_WITNESS = (vault_root() / "backlog" / "data"
                  / "2026-10-06.2258-ledger-witness.jsonl")
 #: `wc -l` of the witness as committed. Pinned by a test so a corpus rebuilt
 #: over different bytes cannot quietly inherit the quoted figures.
@@ -117,7 +125,7 @@ WITNESS_SHA = "5c00fdb5"
 WITNESS_CASES = 98
 #: Daily-note tree holding the retraction tables (`| n | area | 1 (retracted) |
 #: "<claim>" — correction |`). The only prose source, and only its table cells.
-LEARNINGS_ROOT = Path.home() / "obsidian" / "memory" / "learnings"
+LEARNINGS_ROOT = vault_root() / "memory" / "learnings"
 
 MIN_CASES = 10
 THEORIES_PER_CASE = 3

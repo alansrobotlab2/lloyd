@@ -161,7 +161,7 @@ instant — no measurement, no stamp, rather than a 1969 date offered as evidenc
   is never the one that waits.
 - **`content` is truncated at 800 chars** when rendered, with an ellipsis. The
   summary line has its own, tighter cap the page did not used to state:
-  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:145`), marked with
+  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:146`), marked with
   ` [... truncated]`, applied to every ambient line — and the next-session
   channel caps its own fields at 720 / 2000 before a note is ever stored
   (`NEXT_SESSION_SUMMARY_MAX` / `NEXT_SESSION_CONTENT_MAX`,
@@ -418,7 +418,7 @@ mechanism as a whole — the switches are all at the tool layer.
 in `harness.tool_search.baseline_tools` and `session_inject_context` does not,
 which costs nothing today because `tool_search.enabled` is `false` in both
 config.yaml and the live override — `TOOL_OVERRIDES_PATH`, which is
-`$LLOYD_DATA/data/tool_overrides.yaml` (`app/paths.py:119`:
+`$LLOYD_DATA/data/tool_overrides.yaml` (`app/paths.py:120`:
 `~/lloyd-data/data/tool_overrides.yaml`, not a file in the checkout;
 `data/**` under the repository is build input and is denied to the self-mod
 loop) — and every tool is advertised; if

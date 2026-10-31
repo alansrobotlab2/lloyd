@@ -22,13 +22,14 @@ from agent_mcp._shared import (
 # single route calls; this is a field that must be right on every row of every
 # listing, where a handler-local import would only move the failure from a loud
 # one at boot to a per-request one.
+from app.data_root import vault_root
 from app.autonomy import max_retries_budget
 
 
 router = APIRouter()
 logger = logging.getLogger("lloyd-server")
 
-_AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+_AUTONOMY_DIR = vault_root() / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR as _AUTONOMY_RUNS_DIR
 
 # A task file is named `NN-slug.md`; anything else in the directory is a report, a

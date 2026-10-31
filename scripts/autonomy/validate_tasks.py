@@ -59,6 +59,14 @@ import sys
 from pathlib import Path
 
 import yaml
+# Run by path (`python …/scripts/autonomy/validate_tasks.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 # The scheduler's own frequency vocabulary (#815): a `frequency:` outside it
 # with no `runs_per_day` resolves to no interval and never dispatches, silently
@@ -117,10 +125,10 @@ try:
 except Exception:  # noqa: BLE001
     MODEL_ROW_ALIASES = None
 
-DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
+DEFAULT_DIR = vault_root() / "autonomy"
 # Mirrors the slug branch of app.autonomy._load_skill_content, which is the
 # only skills root that path consults. --skills-dir overrides it.
-DEFAULT_SKILLS_DIR = Path.home() / "obsidian" / "skills"
+DEFAULT_SKILLS_DIR = vault_root() / "skills"
 # config.yaml sits at the repo root, two levels above scripts/autonomy/.
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.yaml"
 # The KNOWN-STATUS vocabulary, not a runnability set: it holds paused, draft,

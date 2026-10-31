@@ -76,6 +76,7 @@ from app.secondary_models import (  # noqa: E402
     _sync_secondary_title,
     _sync_secondary_voice_summary,
 )
+from app.data_root import vault_root
 
 EVAL_DIR = Path(__file__).resolve().parent
 ITEMS_PATH = EVAL_DIR / "secondary_generation_items.yaml"
@@ -1485,7 +1486,7 @@ def main(argv: list[str] | None = None) -> int:
                              f"({EXIT_NO_DOWNSTREAM}) when either window holds under "
                              f"{MIN_DOWNSTREAM_ENTRIES} captured entries — a rate over a "
                              "window that thin is not a verdict.")
-    parser.add_argument("--memory-dir", default=str(Path.home() / "obsidian" / "memory"),
+    parser.add_argument("--memory-dir", default=str(vault_root() / "memory"),
                         help="daily notes for --downstream")
     parser.add_argument("--pin", metavar="JOB[,JOB]", default=None,
                         help="write the named job(s) into app.secondary_models.JOBS_ON_PRIMARY. "

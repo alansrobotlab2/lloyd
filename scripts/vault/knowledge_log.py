@@ -42,11 +42,19 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+# Run by path (`python …/scripts/vault/knowledge_log.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 #: The live log. Not overridable by the environment on purpose: an owner that quietly
 #: appended to a different file would look like a working contract while the real file kept
 #: rotting. Tests pass ``--log`` / the ``path`` argument instead.
-DEFAULT_LOG = Path(os.path.expanduser("~")) / "obsidian" / "knowledge" / "_log.md"
+DEFAULT_LOG = vault_root() / "knowledge" / "_log.md"
 
 #: A conformant date heading: the ISO date and nothing else on the line.
 DATE_HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2})$")

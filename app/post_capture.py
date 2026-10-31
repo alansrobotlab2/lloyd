@@ -43,6 +43,7 @@ logger = logging.getLogger("lloyd-server")
 
 from app import uptake  # #1647: the machine-injected-row screen lives there
 from app.paths import VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR
+from app.data_root import vault_root
 
 
 def _rendered_text(msg: dict) -> Optional[str]:
@@ -496,7 +497,7 @@ def _append_daily_note(session_id: str, summary: str,
     if now is None:
         now = datetime.now(pst)
     today = now.strftime("%Y-%m-%d")
-    daily_path = Path.home() / "obsidian" / "memory" / f"{today}.md"
+    daily_path = vault_root() / "memory" / f"{today}.md"
 
     entry = f"\n---\n\n{_auto_captured_heading(now)}\n\n{summary}\n"
 

@@ -73,6 +73,14 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+# Run by path (`python …/eval/extraction_disagreement.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -147,7 +155,7 @@ document supports neither, so at least one pass wrote something it did not say.
 """
 
 
-VAULT_ROOT = Path.home() / "obsidian"
+VAULT_ROOT = vault_root()
 
 
 def _load_module(path: Path, name: str):
@@ -1399,7 +1407,7 @@ def _endpoint_up(port: int) -> bool:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", required=True, help="run dir is written under here; nothing else is")
-    ap.add_argument("--vault-root", default=str(Path.home() / "obsidian"))
+    ap.add_argument("--vault-root", default=str(vault_root()))
     ap.add_argument("--sample-size", type=int, default=40)
     # A re-run has to name the config as well as the seed and the vault: the draw is
     # a function of all three, so pinning the seed alone redraws a different corpus

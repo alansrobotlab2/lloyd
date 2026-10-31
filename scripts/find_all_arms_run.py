@@ -83,14 +83,15 @@ if str(_REPO_ROOT) not in sys.path:
 
 from app.atomic_io import _flock_exclusive  # noqa: E402  (bounded-wait flock, already in the tree)
 from app.paths import VAULT_FACTS_ROOT  # noqa: E402  (the env-overridable derived-fact root)
+from app.data_root import vault_root
 
 #: The engine lock. The same root as `scripts/automod/state.py` STATE_DIR, spelled here so
 #: importing this launcher does not import the automod state module, which mkdirs on load.
 PRIMARY_LOCK = Path.home() / ".local" / "state" / "lloyd-automod" / "primary.lock"
 
 DRIVER = "eval/run_find_all_arms.py"
-BENCH_DIR = Path.home() / "obsidian" / "lloyd" / "bench"
-VAULT = Path.home() / "obsidian"
+BENCH_DIR = vault_root() / "lloyd" / "bench"
+VAULT = vault_root()
 #: The markdown tree the derived fact index is built from; #015's copies live here. NOT
 #: ``~/obsidian/facts``: that path exists and is EMPTY (verified 2026-10-18 — it is a real
 #: directory holding 0 ``*.md``, while the index is built from the derived root below, which

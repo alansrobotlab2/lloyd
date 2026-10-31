@@ -141,6 +141,7 @@ def _proposal_type_to_index_spelling(type_: str) -> str:
 # one index is a retrieval design call and is deliberately NOT made here.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from app.paths import PIPELINE_DIR  # noqa: E402
+from app.data_root import vault_root
 DERIVED_INDEX_FILE = PIPELINE_DIR / "relations-index.json"
 TYPED_INDEX_FILE = PIPELINE_DIR / "relations-index-typed.json"
 
@@ -198,7 +199,7 @@ class RelationsIndexGenerator:
     """
 
     def __init__(self):
-        self.vault = Path.home() / "obsidian"
+        self.vault = vault_root()
         # Read-only: the derived index owned by scripts/memory/rebuild_index.py
         # (#1148). Kept under its original attribute name because it is the file
         # this module's readers consult; the module's own write target below is

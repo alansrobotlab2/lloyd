@@ -55,6 +55,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import sys
+# Run by path (`python …/scripts/automod/scorecard.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 # `app/kg_store.py:48` shape, for the reason in `app/routers/dashboard.py`:
 # `compute` parses the front matter of every board file twice per call
@@ -773,7 +782,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
             provenance: Path | None = None) -> dict[str, Any]:
     from scripts.automod import state as S
     ledger = ledger or S.LEDGER_PATH
-    backlog_dir = backlog_dir or (Path.home() / "obsidian" / "backlog")
+    backlog_dir = backlog_dir or (vault_root() / "backlog")
     repo = repo or LIVE_ROOT
     now = now or time.time()
     since = now - since_days * 86400

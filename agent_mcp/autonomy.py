@@ -41,6 +41,7 @@ from app.routers.autonomy import _TASK_NAME_RE
 # consults to ask why a task is still running (#2640). Imported for the same
 # reason as `_TASK_NAME_RE` above: one value, one place it is written.
 from app.autonomy import max_retries_budget
+from app.data_root import vault_root
 
 #: Same convention as every other module in `agent_mcp/` (`skills.py:28`, `browser.py`,
 #: `automod.py`). `autonomy.py` itself had no logger until #2895 — the note at
@@ -49,7 +50,7 @@ from app.autonomy import max_retries_budget
 #: return value needs a channel for the case where there is no return value to ride on.
 logger = logging.getLogger(__name__)
 
-AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+AUTONOMY_DIR = vault_root() / "autonomy"
 
 
 def _slugify(name: str) -> str:

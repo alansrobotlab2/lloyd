@@ -271,7 +271,7 @@ passes its `run_id` into `execute`, so the queue id is the link.
   run — what separates them is `mark_failed`, not the run status — so the
   sentence now says that and drops its `:717` / `:744` / `:773` anchors, which
   were ~1200 lines out after the #2510 cost-outlier trigger moved the pool and
-  reordered that arm; §4's `_row_task_id` anchor (`app/autonomy.py:1999`) had
+  reordered that arm; §4's `_row_task_id` anchor (`app/autonomy.py:2000`) had
   drifted into `_dependency_refusal` and is now a pointer, the form #2971
   settled on for `workers/queue.py`. §1's `archived` corpus is gone: 314 rows
   measured 2026-09-20, none today, over 117 rows whose ids restart at 1, so the

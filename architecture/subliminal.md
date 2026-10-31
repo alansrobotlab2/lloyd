@@ -207,7 +207,7 @@ facts@6ms vault@140ms` shows when each one arrived.
   `name×3.0 + desc×2.0 + tags×1.5 + min(body_hits, 4)×0.3`, plus
   `pseudo_query_hits × weight` when the #1490 Skill2Query arm is on
   (`skills.pseudo_queries.enabled`; **off** in `config.yaml` today, and the cache
-  that arm reads — `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:195` — has never
+  that arm reads — `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:227` — has never
   been generated, so the effective formula is the four terms above).
 - **Metadata-hit gate:** a skill with zero name/desc/tag overlap scores 0.0
   regardless of body accidents (a pseudo-query hit counts as a metadata hit when

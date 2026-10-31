@@ -978,7 +978,7 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     '~/obsidian/memory/facts/': (
       "historical: the sentence exists to report that 15,299 queue rows name a vault prefix "
       "that is gone, and it names the layout that replaced it — "
-      "~/lloyd-data/_pipeline/vault-derived/facts/, VAULT_FACTS_ROOT at app/paths.py:278 — so "
+      "~/lloyd-data/_pipeline/vault-derived/facts/, VAULT_FACTS_ROOT at app/paths.py:310 — so "
       "the dead prefix is quoted, not followed"
   ),
  },
@@ -1507,7 +1507,7 @@ def test_the_absent_pseudo_query_cache_is_cited_by_what_defines_it():
     outlive its reason the moment the file is written, since the anti-growth rail
     only refuses an entry no doc cites, never one that stopped being needed. So
     the sentence now names the constant that decides the location,
-    `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:195`, which holds whether or not
+    `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:227`, which holds whether or not
     the cache exists.
 
     Graded three ways: every citation in that claim resolves; no exemption
@@ -3169,15 +3169,16 @@ def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
     `:NNN` spans are line numbers at all. The corpus's 92 bare spans split three
     ways, and all three are seeded here on one line so a rule that only handles
     one shape cannot pass it: a continuation after an anchored path (`:100`,
-    inside `_parse_frontmatter`), a stale continuation (`:80`, in the gap between
-    two defs), and two port spellings that a number-blind rule would grade as
+    inside `_parse_frontmatter`), a stale continuation (`:81`, in the gap between
+    `SKILLS_DIRS` and `_QUARANTINE_STATUSES`), and two port spellings that a
+    number-blind rule would grade as
     line 8080 and 5173 of a Python file — which would have invented anchors out
     of `localhost:8080` and `vllm:8080` on the day it shipped.
     """
-    line = ("`agent_mcp/skills.py:96`, body `:100` and stale `:80`; vLLM at "
+    line = ("`agent_mcp/skills.py:97`, body `:100` and stale `:81`; vLLM at "
             "`http://localhost:8080`, djev at `vllm:8080`, MC on `:5173`\n")
     graded = bare_anchor_citations(line)
-    assert [g[0] for g in graded] == ["`:100`", "`:80`"], (
+    assert [g[0] for g in graded] == ["`:100`", "`:81`"], (
         f"the continuation rule graded {[(g[0]) for g in graded]}; it must take "
         "the two spans that continue the source path on the line and no others")
     assert all("8080" not in g[0] and "5173" not in g[0] for g in graded), (
@@ -3185,10 +3186,10 @@ def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
         "would have manufactured 40+ false anchors across the corpus")
 
     _g, bad = anchor_span_report(line)
-    assert bad == ["`:80`"], (
+    assert bad == ["`:81`"], (
         f"a bare span was mis-reported as {bad}: `:100` is inside the function "
-        "line names, `:80` sits in the gap between `_dedupe_paths` and "
-        "objection available")
+        "line names, `:81` sits in the gap between `SKILLS_DIRS` and "
+        "`_QUARANTINE_STATUSES`")
 
 
 def test_the_span_rule_grades_the_file_the_resolver_pointed_at(tmp_path, monkeypatch):
@@ -3241,10 +3242,10 @@ def test_the_span_rule_sees_an_anchor_inside_a_table_cell():
     assert bad == ["app/paths.py:100"], (
         f"app/paths.py:100 is a comment above `FAILURE_LEDGER_DB`, so the cell "
         f"has to be reported; got {bad}")
-    clean = "| T-99 | x | E | a threat that reads plausibly | `app/paths.py:102` |\n"
+    clean = "| T-99 | x | E | a threat that reads plausibly | `app/paths.py:103` |\n"
     assert anchor_span_report(clean)[1] == [], (
-        "the binding line itself is reported, so the rule has no tolerance for "
-        "an anchor that is merely one line out")
+        "app/paths.py:103 is the `FAILURE_LEDGER_DB` binding itself, so the rule "
+        "has no tolerance for an anchor that is merely one line out")
 
 
 ARCHIVE_DIR = ARCH / ".archive"
@@ -7687,12 +7688,14 @@ def test_the_cleared_citations_resolve_and_the_one_the_item_got_wrong_was_not_re
         assert verdicts[span] is not None, (
             f"{slug} cites {span} for {why} and the resolver cannot find it")
 
-    # The facts anchor is cited where it is true: line 278 of app/paths.py is the
+    # The facts anchor is cited where it is true: line 300 of app/paths.py is the
     # VAULT_FACTS_ROOT binding, and the sentence names the symbol and that line together.
+    # (The number moved from 278 to 300 when #3403 put the vault-root resolver at the
+    # top of that module; the citation in autonomy-jobs.md was re-pointed with it.)
     assert "VAULT_FACTS_ROOT" in _text("autonomy-jobs.md")
-    assert jobs.get("app/paths.py:278") is not None, "app/paths.py:278 does not resolve"
-    line = (ROOT / "app" / "paths.py").read_text(encoding="utf-8").splitlines()[277]
-    assert "VAULT_FACTS_ROOT =" in line, f"app/paths.py:278 is {line!r}, not the binding"
+    assert jobs.get("app/paths.py:310") is not None, "app/paths.py:310 does not resolve"
+    line = (ROOT / "app" / "paths.py").read_text(encoding="utf-8").splitlines()[309]
+    assert "VAULT_FACTS_ROOT =" in line, f"app/paths.py:310 is {line!r}, not the binding"
 
     # The exception, both halves: the item's target stays absent, and the entry says the
     # sentence is a record of a deletion.

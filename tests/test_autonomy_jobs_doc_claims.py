@@ -4534,7 +4534,7 @@ NOT_A_SYMBOL = frozenset({"py", "tsx", "ts", "md", "sh", "json", "true", "false"
 
 #: How far either side of a citation to look for the symbol the doc quotes beside it.
 #: 320 characters is one or two sentences of this doc's prose: wide enough that
-#: "`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:281` (`PHANTOM_EXEMPT`)" resolves
+#: "`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:282` (`PHANTOM_EXEMPT`)" resolves
 #: whichever side the name falls on, narrow enough that a citation is not credited to a
 #: symbol named two sections away.
 CITATION_WINDOW = 320
@@ -4561,15 +4561,21 @@ CITATION_WINDOW = 320
 #: right. The row now names `build_report` and `_now()` by symbol instead, and
 #: `test_the_name_prior_report_row_states_a_utc_date_key_and_keeps_its_four_tokens`
 #: forbids the numeric form coming back.
+#: Re-pointed for #3403: resolving the vault root in `app/paths.py` and routing every
+#: vault reader through it put an import above the first definition of nearly every
+#: module, shifting each binding below it by one line — except `app/paths.py`, which
+#: also grew the `IS_PRODUCTION_VAULT` derivation and its comment, so `VAULT_FACTS_ROOT`
+#: moved 278→310 rather than 278→279. A set pinned to the old numbers would go red on a
+#: doc whose citation had just been corrected, which is the worst thing a witness can do.
 REQUIRED_CITATIONS = frozenset({
-    "app/autonomy.py:2898",                        # EVIDENCE_PILOT_TASK_IDS
+    "app/autonomy.py:2899",                        # EVIDENCE_PILOT_TASK_IDS
     "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
-    "scripts/skill_lint.py:281",                   # PHANTOM_EXEMPT
-    "agent_mcp/skills.py:87",                      # _QUARANTINE_STATUSES
-    "app/routers/backlog.py:849",                  # backlog_task_delete
+    "scripts/skill_lint.py:282",                   # PHANTOM_EXEMPT
+    "agent_mcp/skills.py:88",                      # _QUARANTINE_STATUSES
+    "app/routers/backlog.py:850",                  # backlog_task_delete
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
-    "app/paths.py:278",                            # VAULT_FACTS_ROOT, added by #2795
+    "app/paths.py:310",                            # VAULT_FACTS_ROOT, added by #2795
 })
 
 
@@ -4652,7 +4658,7 @@ def _symbol_definition(rel: str, src_text: str, symbol: str) -> int | None:
 def _citation_drift(text: str) -> tuple[int, int, list[str]]:
     """`(instances, distinct, drift lines)` for one slice of the document.
 
-    Two counts because the doc cites one number twice — `app/autonomy.py:2898` appears
+    Two counts because the doc cites one number twice — `app/autonomy.py:2899` appears
     in both §The functions and §Evidence pilot, so `instances > distinct` is the shape
     of today's prose and a node below asserts it. The pair count is no longer asserted
     as a number: see `REQUIRED_CITATIONS` for the #2833 failure that produced, and a
@@ -4721,9 +4727,9 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     points at its symbol, and a doc that GAINS a true citation stays green.
 
     Ten citation instances over nine distinct `path:line` pairs in today's live prose
-    (`app/autonomy.py:2898` twice — §The functions and §Evidence pilot — then
+    (`app/autonomy.py:2899` twice — §The functions and §Evidence pilot — then
     `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
-    `scripts/skill_lint.py:281`, `agent_mcp/skills.py:87`,
+    `scripts/skill_lint.py:282`, `agent_mcp/skills.py:88`,
     `app/routers/backlog.py:849`,
     `web/src/components/pages/BacklogPage.tsx:572`, `app/paths.py:278` from #2795, and
     `eval/djev_name_prior_probe.py:647` from cffd22e6), the nine of them named in
@@ -4755,7 +4761,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
         f"resolver that matches nothing reports no drift, which is not a clean result")
     assert instances > distinct, (
         f"{instances} instances over {distinct} pairs: live prose is supposed to cite "
-        f"one `path:line` twice (`app/autonomy.py:2898`, in §The functions and "
+        f"one `path:line` twice (`app/autonomy.py:2899`, in §The functions and "
         f"§Evidence pilot), and an instances count equal to the distinct count means "
         f"the second of them is gone")
 
@@ -4788,7 +4794,7 @@ def test_a_drifted_citation_names_the_line_and_where_the_symbol_actually_is():
     the sentence — no hunt, because the hunt is the thing that was never done.
     """
     seeded = ("Two linters enforce rule 4. `tests/test_skill_tool_names.py:137` "
-              "(`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:281` "
+              "(`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:282` "
               "(`PHANTOM_EXEMPT`) let `nightly-skills-management` write the phantom "
               "names down.")
 
@@ -4814,9 +4820,9 @@ def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log
     requirement. (b) The SAME citation and symbol, fed as live prose, DOES drift, so
     "not reported" is the scope doing the work rather than a blind pattern: the
     2026-09-12 entry cites `app/autonomy.py:710` for `EVIDENCE_PILOT_TASK_IDS`, which
-    is defined at `app/autonomy.py:2898` today (#2675 moved it there from 2818 by
+    is defined at `app/autonomy.py:2899` today (#2675 moved it there from 2818 by
     writing the roster's per-id reasons above it) — seed that sentence as live prose
-    and it drifts, naming 2898. (c) The two existing nodes that keep the log's
+    and it drifts, naming 2899. (c) The two existing nodes that keep the log's
     history honest (`test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`
     forbidding the number in live prose, `test_the_dated_review_log_entry_keeps_what_was_true_that_day`
     requiring it in the log) still assert their own pair of claims — this node neither
@@ -5015,7 +5021,7 @@ def test_growing_one_exemption_list_reddens_the_rail():
     """Clause 4's failure leg, seeded: the drift a line-number pin cannot see.
 
     `PHANTOM_EXEMPT` gains one entry and the sentence still says seven. Appending to a
-    set literal moves no definition line, so every `scripts/skill_lint.py:281`-style
+    set literal moves no definition line, so every `scripts/skill_lint.py:282`-style
     check — including the citation resolver above in this same file — stays green while
     the sentence goes stale. That is the drift #2633 was filed for, so its failure is
     exercised rather than assumed:

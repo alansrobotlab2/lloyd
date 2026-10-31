@@ -68,9 +68,9 @@ from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, norma
 # `app.backlog_write` and `app.atomic_io` hold to the same rule (#3036).
 from app import backlog_write as BW, frontmatter as FM
 from app.atomic_io import commit_lock
-from app.data_root import PRODUCTION_DATA_ROOT
+from app.data_root import PRODUCTION_DATA_ROOT, vault_root
 
-BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+BACKLOG_DIR = vault_root() / "backlog"
 
 # The module had no logger, which is why a writer that refused a file left no
 # trace of why: `False` from `update_frontmatter` was indistinguishable from

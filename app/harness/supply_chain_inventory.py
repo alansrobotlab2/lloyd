@@ -819,13 +819,32 @@ def non_advisory_rows(repo_root: Path | str = LIVE_CHECKOUT,
     return rows, gaps
 
 
+def _vault_root_by_path() -> Path:
+    """Load `app/data_root.py` by path and ask it, for a checker with no `app` package.
+
+    Loading the resolver rather than restating it is the point (#3403). The precedence
+    between `LLOYD_VAULT_ROOT` and `LLOYD_VAULT` then lives in exactly one function; a
+    fallback that spelled a home-relative vault would report the live tree's provenance
+    for a trial that had asked for a fixture, which is the half-honoured root in reader
+    form. This file sits in `app/harness/`, so one level up is the checkout whose
+    data-root contract it reports on.
+    """
+    import importlib.util
+
+    src = Path(__file__).resolve().parents[1] / "data_root.py"
+    spec = importlib.util.spec_from_file_location("_lloyd_data_root", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod.vault_root()
+
+
 def _vault_root() -> Path:
     """The vault, derived the way `app.paths` derives it — never hard-coded."""
     try:
         from app.paths import VAULT_ROOT
         return Path(VAULT_ROOT)
     except Exception:  # noqa: BLE001 — the checker runs without app.paths too
-        return Path.home() / "obsidian"
+        return _vault_root_by_path()
 
 
 def advisory_count_from(rows: list[dict[str, Any]]) -> int:

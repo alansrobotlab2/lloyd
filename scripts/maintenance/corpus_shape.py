@@ -75,6 +75,14 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+# Run by path (`python …/scripts/maintenance/corpus_shape.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 CORPORA = ("daily", "user_memory", "skills", "trajectories")
 PROSE = ("daily", "user_memory", "skills")
@@ -467,7 +475,7 @@ def _vault_default() -> Path:
     The same precedence as `tests/board_presence.py::vault_root`, which is how the rest
     of this repo reaches a vault — including a test's redirected one. Before #2039 the
     fallback here was `app.paths.VAULT_ROOT` and nothing else, a plain
-    `Path.home() / "obsidian"`, so the variable other modules honour was silently
+    `vault_root()`, so the variable other modules honour was silently
     ignored at this entry point. The first real injection of a rubric sentence ran with
     that variable pointing at a dirty vault, read an undeclared clean one, printed
     nothing and exited 0 — a check reporting "clean" about a corpus it never opened,
@@ -478,7 +486,7 @@ def _vault_default() -> Path:
     place, and a test that redirects it is redirecting the corpus, not the machine.
     """
     raw = os.environ.get("LLOYD_OBSIDIAN_VAULT")
-    return Path(raw).expanduser() if raw else Path.home() / "obsidian"
+    return Path(raw).expanduser() if raw else vault_root()
 
 
 def _pipeline_default() -> Path:

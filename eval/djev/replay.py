@@ -71,6 +71,7 @@ os.environ.setdefault("LLOYD_DJEV_SHADOW", "0")
 
 from app import djev  # noqa: E402
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT  # noqa: E402
+from app.data_root import vault_root
 from eval.djev import schemas  # noqa: E402
 
 #: The recorded corpora. `_pipeline/` is runtime data under the data root, so it
@@ -83,7 +84,7 @@ PIPELINE = Path(os.environ.get("LLOYD_DJEV_CORPUS_ROOT",
                                str(PIPELINE_DIR / "memory-graph")))
 AUTOMOD_STATE = Path.home() / ".local" / "state" / "lloyd-automod"
 SHADOW_LOG = Path.home() / ".local" / "state" / "lloyd-djev" / "shadow.jsonl"
-BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+BACKLOG_DIR = vault_root() / "backlog"
 
 #: A replayed pair is one read; at ~45 ms warm plus prefill this is minutes,
 #: not hours. The bound exists because 35,802 rows is not a thing to run by

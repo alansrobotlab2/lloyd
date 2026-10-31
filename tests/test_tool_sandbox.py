@@ -866,3 +866,257 @@ async def test_a_write_from_an_unresolvable_task_session_is_refused_at_dispatch(
     monkeypatch.setattr(S, "_parent_of", lambda _sid: CHAT_PARENT)
     await M.call_tool("vault_write", dict(args), {"lloyd/session_id": sid})
     assert not [c for c in seen if c.get("guard") == "tool_sandbox"], seen
+
+
+# ---------------------------------------------------------------------------
+# #3403 — a `writes:`-scoped bench trial may write the named tools, and nothing
+# else may. The refusal above this line is blanket because the vault was deleted
+# twice (2026-09-10 truncation restored next cycle, 2026-09-12 bulk commit that
+# invalidated 20 memory entries); every node below re-runs that gate as its first
+# assertion, so a grant that quietly widened the hole fails here rather than in
+# the house.
+# ---------------------------------------------------------------------------
+
+from scripts.autoresearch.bench_runner_sdk import (  # noqa: E402
+    STATEFUL_TOOLS, WRITE_SCOPE_TOOLS, write_scope_of)
+
+SCOPE_ENV = "LLOYD_BENCH_WRITE_SCOPE"
+#: Names a `writes: [vault]` task grants, and one a `writes: [kg]` task would, for the
+#: node that shows the second class is NOT opened by the first scope.
+VAULT_SCOPE_NAMES = write_scope_of({"writes": ["vault"]})
+
+
+def _scope_off(monkeypatch):
+    """No declared scope and no copied state — the state of every session that is not a
+    durable-write bench trial, which is every session in production."""
+    monkeypatch.delenv(SCOPE_ENV, raising=False)
+    import app.paths
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_DATA", True)
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_VAULT", True)
+
+
+def _scope_on(monkeypatch, scope: str = "vault"):
+    """A trial that declared `writes: [<scope>]` and whose both roots resolve to a copy."""
+    monkeypatch.setenv(SCOPE_ENV, ",".join(write_scope_of({"writes": [scope]})))
+    import app.paths
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_DATA", False)
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_VAULT", False)
+
+
+def _refuses(name: str) -> str | None:
+    token = S.current_sandboxed.set(True)
+    try:
+        return S.refusal(name, {})
+    finally:
+        S.current_sandboxed.reset(token)
+
+
+def test_the_blanket_refusal_still_holds_for_a_task_that_declares_no_scope(monkeypatch):
+    """The gate that exists because the vault was deleted twice, re-run with the #3403
+    branch in place: an undeclared task's every `STATEFUL_TOOLS` name that the refusal
+    governs is refused, and `allowed_bench_writes()`, which is what both the refusal and
+    the runner's admission list read, is empty. A fixture env that a previous trial leaked
+    would otherwise hand the next, undeclared trial write access to the house.
+
+    One name in `STATEFUL_TOOLS` (`autonomy_config`) is annotated read-only, so the refusal
+    has always let it through and still does; it is held by the DENY LIST instead, which is
+    the other half of the blanket and is pinned by
+    `test_an_undeclared_trial_denies_every_stateful_name` on the runner side. Positive
+    control inside the loop: `memory_add`, the tool whose undeclared use clobbered
+    `MEMORY.md` on 2026-09-10."""
+    from agent_mcp import annotations as A
+    _scope_off(monkeypatch)
+    assert S.allowed_bench_writes() == frozenset()
+    for name in sorted(STATEFUL_TOOLS):
+        if name in A.READ_ONLY:
+            continue
+        assert _refuses(name), f"{name} was let through with no declared scope"
+    assert "memory_add" in STATEFUL_TOOLS and _refuses("memory_add") is not None
+
+
+def test_every_grantable_name_is_a_stateful_tool_in_the_deny_list_spelling(monkeypatch):
+    """The grant reaches a trial through `disallowed_tools`, which holds BARE names. An
+    earlier cut of `WRITE_SCOPE_TOOLS` spelled its keys `mcp__lloyd-mcp__memory_add`, the
+    MCP-qualified form, and silently granted nothing: `t not in admitted` compared a bare
+    `t` against qualified keys, so a scoped trial still had all of `STATEFUL_TOOLS` denied
+    while its row claimed a scope. Pinned as a set relation, because the bug is a spelling
+    and no trial-level assertion can see it — the row looks correct either way.
+
+    The three write classes the item names must each have a grantable name, or the suite
+    has no way to express them."""
+    _scope_off(monkeypatch)
+    assert set(WRITE_SCOPE_TOOLS) <= set(STATEFUL_TOOLS), (
+        f"grantable names absent from the deny list: "
+        f"{sorted(set(WRITE_SCOPE_TOOLS) - set(STATEFUL_TOOLS))}")
+    for scope in ("vault", "kg", "backlog"):
+        assert write_scope_of({"writes": [scope]}), f"scope {scope} grants no tool"
+    # The three classes the item's acceptance names, by their representative tool.
+    assert {"vault_write", "memory_add", "fact_add", "backlog_write_task"} \
+        <= set(WRITE_SCOPE_TOOLS)
+
+
+def test_a_declared_name_is_refused_while_either_root_is_still_the_house(monkeypatch):
+    """Scope alone is not a grant. The task asked for `memory_add`; the state it would
+    write is production, so the answer is the same refusal it always gave."""
+    _scope_on(monkeypatch)
+    import app.paths
+    for flag in ("IS_PRODUCTION_DATA", "IS_PRODUCTION_VAULT"):
+        monkeypatch.setattr(app.paths, flag, True)
+        assert _refuses("memory_add") is not None, (
+            f"a declared name was granted with {flag} True")
+        monkeypatch.setattr(app.paths, flag, False)
+    assert _refuses("memory_add") is None  # both False: now it is a copy
+
+
+def test_only_the_declared_names_are_opened(monkeypatch):
+    """`writes: [vault]` opens the vault-note class and nothing else. A fact/KG row and a
+    backlog card stay refused, so a scoped trial cannot reach the classes it did not
+    declare and a suite cannot accidentally grade them."""
+    _scope_on(monkeypatch, "vault")
+    for name in VAULT_SCOPE_NAMES:
+        assert _refuses(name) is None, f"{name} declared but refused"
+    assert _refuses("fact_add") is not None
+    assert _refuses("backlog_write_task") is not None
+    assert _refuses("email_send") is not None
+    assert set(S.allowed_bench_writes()) == set(VAULT_SCOPE_NAMES)
+
+
+def test_the_grant_dies_with_the_environment_it_arrived_in(monkeypatch):
+    """Session-only, not global: the same name that acted a moment ago is refused again as
+    soon as the trial's env is gone, which is what makes the grant expire rather than
+    become a setting. This is also the leak guard for the runner's `os.environ` write."""
+    _scope_on(monkeypatch)
+    assert _refuses("memory_add") is None
+    monkeypatch.delenv(SCOPE_ENV)
+    assert S.allowed_bench_writes() == frozenset()
+    assert _refuses("memory_add") is not None
+
+
+def test_a_granted_scope_leaves_the_bash_read_only_bind_alone(monkeypatch):
+    """The other half of the same guarantee, on the other write surface. `Bash` is in no
+    declared scope, so an open grant must not touch its `--ro-bind / /`: one writable bind
+    would be an escape hatch no task declaration asked for and no refusal governs.
+
+    Stated as byte-identity rather than as a count of writable binds, so a mount added for
+    the fixture's root fails here even if it were spelled `--dev-bind`, `--bind-try`, or
+    anything else this node had not thought to look for."""
+    _scope_off(monkeypatch)
+    closed = S.bwrap_argv("echo hi", None)
+    assert closed[1:4] == ["--ro-bind", "/", "/"], closed[:6]
+    _scope_on(monkeypatch)
+    assert _refuses("memory_add") is None, "the grant is not open, so this proves nothing"
+    assert S.bwrap_argv("echo hi", None) == closed
+
+
+def test_the_admitted_names_and_the_refusal_are_built_from_one_measurement(monkeypatch):
+    """The process seam. `run_trial` builds `stateful_admitted` from the declared scope and
+    cannot call `allowed_bench_writes()` itself, because `app.paths` froze the RUNNER's own
+    roots before the fixture env existed; the aggregator answers that predicate in the MCP
+    server's process. Two readers, one truth — so this asserts that the list a scoped trial
+    is admitted by is exactly the set of names THIS process would let through `refusal`,
+    given the same environment. A drift between them is a trial that either cannot perform
+    its own task or can write a class it never declared.
+
+    Read-only-annotated names are out of the second loop for the reason given at
+    `test_the_blanket_refusal_still_holds_for_a_task_that_declares_no_scope`: they are
+    never in the deny list, so nothing here is admitting or refusing them."""
+    from agent_mcp import annotations as A
+    for scope in ("vault", "kg", "backlog"):
+        _scope_on(monkeypatch, scope)
+        admitted = set(write_scope_of({"writes": [scope]}))
+        assert admitted == set(S.allowed_bench_writes()), scope
+        for name in admitted:
+            assert _refuses(name) is None, f"{scope}: {name} admitted but refused"
+        for name in (set(STATEFUL_TOOLS) - admitted) - set(A.READ_ONLY):
+            assert _refuses(name) is not None, f"{scope}: {name} undeclared but allowed"
+
+
+# ---------------------------------------------------------------------------
+# #3403 clause 5's other half: the ANSWER the bench runner reads.
+#
+# Clause 5 above pins what this process does with a declared scope — which names it
+# admits, and that an undeclared session is still refused every write. What it could not
+# pin is how anyone on the other side of a socket finds out: the runner that decides
+# whether to dispatch a `writes:`-scoped trial is not the process that will execute the
+# trial's `memory_add`, and the review rung of SM_20261030_224601 named exactly that
+# seam ("the writes execute in the supervised aggregator"). So the sandbox has to
+# publish its own isolation truth, and these nodes pin the publication and the
+# fail-closed direction of the probe behind it.
+# ---------------------------------------------------------------------------
+
+def test_the_sandbox_publishes_the_isolation_answer_the_runner_asks_for(monkeypatch):
+    """Every key `require_copied_state` requires is present, and each carries this
+    process's own reading — not the runner's. Agreement between the two files is asserted
+    by importing the runner's required-key list rather than repeating it: a rename on
+    either side fails here, which is the only way a contract across a socket can be
+    tested from one side of it."""
+    from scripts.autoresearch.bench_runner_sdk import _SERVER_ISOLATION_KEYS
+
+    declared = ["fact_add", "memory_add"]
+    monkeypatch.setenv(S.BENCH_WRITE_SCOPE_ENV, ",".join(declared))
+    out = S.isolation_read()
+    assert set(_SERVER_ISOLATION_KEYS) <= set(out), (
+        "the bench runner requires keys this process does not report, so it refuses every "
+        "`writes:`-scoped trial it can reach")
+    import app.paths as P
+    assert out["is_production_data"] is bool(P.IS_PRODUCTION_DATA)
+    assert out["is_production_vault"] is bool(P.IS_PRODUCTION_VAULT)
+    assert out["state_is_copied"] is S.state_is_copied()
+    # The grant opens exactly the declared names, and only when this process's own state
+    # is a copy — the `if` below is the clause, read from the same measurement the grant is.
+    assert out["allowed_writes"] == sorted(S.allowed_bench_writes())
+    assert out["allowed_writes"] == (sorted(declared) if S.state_is_copied() else [])
+    assert out["write_scope"] == sorted(S.write_scope_tools())
+    # The same block on `/state`, because that is the route the runner reads it from:
+    # `/state` is what `require_copied_state` GETs, so the keys must be at the top level of
+    # the same answer the dashboard reads, not on some second route it would never call.
+    st = S.status()
+    assert set(_SERVER_ISOLATION_KEYS) <= set(st), sorted(st)
+    assert st["state_is_copied"] is out["state_is_copied"]
+    assert st["allowed_writes"] == out["allowed_writes"]
+
+
+def test_an_unreadable_root_resolves_to_production_and_says_so(monkeypatch):
+    """The probe's fail-closed direction, in the one field the runner cannot
+    distinguish. A process whose `app.paths` cannot be imported reports the production
+    pair — so the runner's assertion refuses the trial — plus `probe_error`, so the row
+    says the flags were never measured rather than leaving a reader to guess which of the
+    two roots failed."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_paths(name, *a, **k):
+        if name == "app.paths":
+            raise ImportError("simulated: app.paths unavailable in this process")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_paths)
+    out = S.isolation_read()
+    assert out["is_production_data"] is True and out["is_production_vault"] is True
+    assert "simulated" in out["probe_error"]
+    # The scope half is still the truth: it reads os.environ, which never needed `app.paths`.
+    assert isinstance(out["state_is_copied"], bool)
+    assert out["allowed_writes"] == sorted(S.allowed_bench_writes())
+
+
+def test_a_scoped_bench_session_still_refuses_the_names_its_scope_does_not_declare(monkeypatch):
+    """The scope is a grant, not a mode. Inside one `writes:`-scoped bench session, the
+    declared names are opened AND every other durable-write name is still refused, so a
+    task admitted for a vault note cannot move a card or send mail. Together with
+    `test_the_blanket_refusal_still_holds_for_a_task_that_declares_no_scope` above, which
+    re-runs the gate that exists because the vault was deleted on 2026-09-10 and
+    2026-09-12, this is the whole of clause 5: admitted for the scope, refused for the
+    undeclared write, and refused for the out-of-scope half of a declared one."""
+    from scripts.autoresearch.bench_runner_sdk import WRITE_SCOPE_TOOLS
+
+    import app.paths
+    monkeypatch.setenv(SCOPE_ENV, "memory_add")
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_DATA", False)
+    monkeypatch.setattr(app.paths, "IS_PRODUCTION_VAULT", False)
+    assert S.allowed_bench_writes() == frozenset({"memory_add"})
+    assert _refuses("Read") is None          # read-only tools were never the grant's subject
+    assert _refuses("memory_add") is None    # the one name this scope declared
+    out_of_scope = sorted(set(WRITE_SCOPE_TOOLS) - {"memory_add"})
+    for name in out_of_scope:
+        assert _refuses(name), name

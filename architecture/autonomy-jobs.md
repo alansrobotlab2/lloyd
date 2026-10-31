@@ -203,7 +203,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:2898` in that module, pinned by
+  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:2899` in that module, pinned by
   `tests/test_worker_evidence.py`) — 7 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
@@ -557,7 +557,7 @@ sessions it wrote into one dated JSONL per day. #81 QMD Index Maintenance is hel
 out by that same ruling: what it would claim is the qmd embedding index's own
 state, which none of the four check kinds can read —
 `EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})`
-(`app/autonomy.py:2898`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:2899`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:686`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
@@ -723,7 +723,7 @@ and re-enabled as #83 only once the skill could state the rules that prevent it:
 **Two linters enforce rule 4, and each carries a seven-name exemption list of
 which three entries are this chain.**
 `tests/test_skill_tool_names.py:150` (`ALLOWED_TO_MENTION`) and
-`scripts/skill_lint.py:281` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
+`scripts/skill_lint.py:282` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
 `trajectory-skill-mining` and `nightly-skill-consolidation` write the phantom
 names down, because their job is to say those names are not real. The same two
 lists now also carry `web-search-and-fetch`, `create-hermes-plugin`,
@@ -744,7 +744,7 @@ a grandfathering.
   `status: "draft"` variant a string grep misses.
 - **Flagging is not withdrawal.** A low-quality skill marked `status: needs-review`
   stays in circulation. `_QUARANTINE_STATUSES` is
-  `{inactive, archived, disabled, retired, quarantined}` (`agent_mcp/skills.py:87`),
+  `{inactive, archived, disabled, retired, quarantined}` (`agent_mcp/skills.py:88`),
   and since #1294 `prompt_builder._is_quarantined_skill` is a plain alias of that
   module's `is_quarantined_skill_file` — one spelling of the rule, where
   `prompt_builder` used to re-scan the front matter against its own copy of the
@@ -982,7 +982,7 @@ moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions 
 run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
 ("One definition of 'record a backlog status move'") and never touches a path; the
 only writer in the tree that removes a backlog file is `backlog_task_delete`
-(`app/routers/backlog.py:849`), which deletes rather than archives and is wired to
+(`app/routers/backlog.py:850`), which deletes rather than archives and is wired to
 no job. The board hides the pile after `DONE_WINDOW_DAYS = 7`
 (`web/src/components/pages/BacklogPage.tsx:572`), so nothing downstream feels it
 either. Whether anyone may retire the pile is **a closed question, not an owned one:
@@ -1323,7 +1323,7 @@ Four properties worth knowing before touching any of it:
   writes `source_file: memory/facts/<entity>/`, vault-relative;
   `~/obsidian/memory/facts/` is gone and the fact tree moved to
   `~/lloyd-data/_pipeline/vault-derived/facts/` (`VAULT_FACTS_ROOT`,
-  `app/paths.py:278`). That is 15,299 `THIN_PROFILE` plus
+  `app/paths.py:310`). That is 15,299 `THIN_PROFILE` plus
   9,559 `ENRICH_THIN_PROFILE` items each naming a directory nothing can open.
   `STALE_FACT` is wrong more loudly: `relpath` against `VAULT_ROOT` on a path
   outside it yields a `../lloyd/...` escape.
@@ -1691,7 +1691,7 @@ decide what gets worked on next.
 - **2026-10-12 — `stale`.** Re-verified against `3b438c45` and the live
   `~/obsidian/autonomy/`. The wiring holds: exactly the ten `depends_on` edges
   the diagram draws exist, and `EVIDENCE_PILOT_TASK_IDS` really is
-  `app/autonomy.py:2898` pinned at `tests/test_worker_evidence.py:686` (both numbers
+  `app/autonomy.py:2899` pinned at `tests/test_worker_evidence.py:686` (both numbers
   retyped on 2026-10-14, the drift-in-place this file's own 2026-10-12 pass does to a
   stale pointer: #2675 widened the roster to seven and wrote its per-id reasons above
   the definition, which moved it from 2818, and moved the pin's assert from 663).

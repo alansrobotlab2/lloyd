@@ -121,13 +121,13 @@ appears in this table: those threats are in the next one.
 | T-02 | B6 | T | A turn truncates or overwrites a sacred file without deleting it | `app/harness/safety.py:417` |
 | T-03 | B6 | T | A turn runs a denied shape on a path that never installed the hook | `agent_mcp/main.py:531` |
 | T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py::protected_write_roots` |
-| T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:238` |
+| T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:239` |
 | T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1715` |
 | T-07 | B7 | E | The one exempt write lane commits bytes no loader validated | `scripts/automod/vault_round.py` |
 | T-08 | B7 | I | A vault write copies a credential into a file the sync client pushes | `app/harness/outbound_content.py:526` |
 | T-09 | B3 | T | A durable memory line becomes an instruction every later turn obeys | `app/prompt_surface.py` |
-| T-10 | B3 | T | A scheduled writer shrinks loaded memory and the correction is gone | `app/memory_ceiling.py:272` |
-| T-11 | B3 | D | Loaded memory grows past the window and every turn pays for it | `app/memory_ceiling.py:150` |
+| T-10 | B3 | T | A scheduled writer shrinks loaded memory and the correction is gone | `app/memory_ceiling.py:273` |
+| T-11 | B3 | D | Loaded memory grows past the window and every turn pays for it | `app/memory_ceiling.py:151` |
 | T-12 | B3 | R | An unattributed writer changes the prompt and nothing says who | `app/memory_snapshot.py:89` |
 | T-13 | B4 | persist | A skill body delivered as a dispatch marker carries an instruction nobody re-reads | `app/harness/skill_dispatch.py:276` |
 | T-14 | B4 | S | A skill named to collide with a real one is delivered instead of it | `app/harness/skill_dispatch.py:212` |

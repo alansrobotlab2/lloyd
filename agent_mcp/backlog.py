@@ -11,7 +11,6 @@ import json
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
 
 from mcp.types import Tool
 
@@ -24,6 +23,7 @@ from app.backlog_move import now_stamp
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import SPAWN_TAG_PREFIX, new_task_tags, normalize_tags
 from app import frontmatter as FM
+from app.data_root import vault_root
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 SAVE_FAILED = ("Failed to save task: the item file was left unchanged — its front "
                "matter no longer parses, or the write lock could not be taken")
 
-BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
+BACKLOG_DIR = vault_root() / "backlog"
 VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 
 

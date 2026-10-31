@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from app.data_root import vault_root
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -1528,7 +1529,7 @@ def memory_entries(root: Path | str | None = None,
     USER.md the grammar barely reads.
     """
     root = Path(root) if root else REPO
-    vault = Path.home() / "obsidian"
+    vault = vault_root()
     out: list[Entry] = []
     seen: set[str] = set()
     for doc in docs:
@@ -1732,7 +1733,7 @@ def skills_read_by_session(root: Path | str | None = None):
 
 
 def active_skill_names(vault: Path | None = None) -> list[str]:
-    vault = vault or (Path.home() / "obsidian")
+    vault = vault or vault_root()
     return sorted(p.parent.name for p in (vault / "skills").glob("*/SKILL.md"))
 
 

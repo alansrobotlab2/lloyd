@@ -58,6 +58,14 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
+# Run by path (`python …/eval/dup_detect.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 CALIBRATION_PATH = HERE / "dup_calibration.json"
@@ -1141,7 +1149,7 @@ def main(argv=None) -> int:
                     help="census threshold (default: the calibrated one)")
     args = ap.parse_args(argv)
     if args.census:
-        roots = [Path(r) for r in args.root] or [Path.home() / "obsidian"]
+        roots = [Path(r) for r in args.root] or [vault_root()]
         print(json.dumps(census(roots, threshold=args.threshold), indent=2))
         return 0
     print(calibration_report(Path(args.calibration)))

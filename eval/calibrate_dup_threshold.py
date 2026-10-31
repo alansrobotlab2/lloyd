@@ -35,6 +35,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from eval import dup_detect as dd  # noqa: E402
+from app.data_root import vault_root
 
 CALIBRATION_PATH = HERE / "dup_calibration.json"
 DJEV_DECIDE_URL = "http://127.0.0.1:8080/api/djev/decide"
@@ -466,7 +467,7 @@ def main(argv=None) -> int:
         agree, total, _bad = dd.agreement(data["pairs"], dd.DUP_JACCARD_THRESHOLD)
         return 0 if (total and agree == total) else 1
 
-    roots = [Path.home() / "obsidian" / r for r in DEFAULT_ROOTS]
+    roots = [vault_root() / r for r in DEFAULT_ROOTS]
     rows = build_rows(roots, djev=not args.no_djev)
     meta = write_calibration(rows, Path(args.out),
                              roots=tuple(f"~/obsidian/{r}" for r in DEFAULT_ROOTS))

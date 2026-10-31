@@ -32,8 +32,9 @@ IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
 # `resolve_data_root` and `DataRootMissing` at the place it always did.
 from app.data_root import (
     ACCOUNT_HOME, DATA_ROOT_MARKER, DataRootMissing, KG_DB_RELATIVE,
-    PRODUCTION_DATA_ROOT, QUARANTINE_DIR_RELATIVE, data_root_for_tree,
-    production_data_root, resolve_data_root)
+    PRODUCTION_DATA_ROOT, PRODUCTION_VAULT, QUARANTINE_DIR_RELATIVE,
+    data_root_for_tree, is_production_vault, production_data_root,
+    resolve_data_root, vault_root)
 
 #: The names re-exported through `app.paths`, listed so the import above reads as
 #: the API it is rather than as four unused imports a later tidy-up can delete —
@@ -42,9 +43,9 @@ from app.data_root import (
 #: re-export list, not this module's whole surface: the constants below are its
 #: other half.
 __all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing",
-           "KG_DB_RELATIVE", "PRODUCTION_DATA_ROOT", "data_root_for_tree",
-           "production_data_root",
-           "resolve_data_root"]
+           "KG_DB_RELATIVE", "PRODUCTION_DATA_ROOT", "PRODUCTION_VAULT",
+           "data_root_for_tree", "is_production_vault",
+           "production_data_root", "resolve_data_root", "vault_root"]
 
 LIVE_CHECKOUT = ACCOUNT_HOME / "lloyd"
 
@@ -186,7 +187,38 @@ TREE_STRAY_JOURNAL_PATH = SAFETY_DIR / "tree-strays.jsonl"
 # reader trying to find a moved file had two candidate roots and no authority.
 QUARANTINE_DIR = DATA_ROOT / QUARANTINE_DIR_RELATIVE
 
-VAULT_ROOT = Path.home() / "obsidian"
+# The vault, resolved the way the data root is resolved (#3403). It used to be
+# `Path.home() / "obsidian"` with no override, which is why every bench task that ends
+# in a durable write is ungradeable: `memory_add`, `fact_add` and `backlog_write_task`
+# are banned by name in `bench_runner_sdk.STATEFUL_TOOLS` because a trial that could
+# call them edits the house, and the only reason nobody could sandbox them was that this
+# line had no knob. It now reads the same two overrides the rest of the tree already
+# reads (`LLOYD_VAULT_ROOT`, then `LLOYD_VAULT`), through `data_root.vault_root()` so
+# that `app.data_root.vault_root()`, `agent-services/guardian/vaultwatch.py` and
+# `agent_mcp/vault.py` cannot drift to different answers — three of them already read an
+# override and this one read none, which is the half-honoured root the item names as the
+# dangerous case. Empty-but-set (`LLOYD_VAULT=""`) falls through to the default rather
+# than becoming the relative path `Path("")` = cwd, which would quietly make the trial's
+# working directory the vault.
+VAULT_ROOT = vault_root()
+
+#: Whether `VAULT_ROOT` is the account's real vault — the gate a durable-write trial
+# must see as False before it may run. Derived beside `IS_PRODUCTION_DATA` and by the
+# same test, and it is a CONSTANT read once at import, so the trial asserts on it before
+# dispatch rather than trusting an inherited environment: an override applied after
+# import would leave this True and the writer pointed at the fixture, which is the one
+# combination that reads as sandboxed while writing the house.
+#: `is_production_vault(...)` and not `VAULT_ROOT == PRODUCTION_VAULT`, because `==` is
+#: lexical and the thing being compared is a root that may be a symlink. A gate round's
+#: `$HOME/obsidian` IS a symlink into the live vault (`scripts/automod/worktree.py::
+#: ensure_round_home`, whose `HOME_LINK_SKIP` covers `lloyd` and `lloyd-data` and not
+#: `obsidian`), so the equality answers False there — "isolated" — for the one root that
+#: is nothing but the house, and both readers of this flag (`agent_mcp/_tool_sandbox.py`'s
+#: pre-admission check and `scripts/autoresearch/bench_runner_sdk.py`'s in-process probe)
+#: would green-light a scoped trial whose every write then follows the link into the real
+#: vault. A sandbox flag that is green for the wrong reason is the failure this item
+#: exists to refuse, so the comparison resolves both sides.
+IS_PRODUCTION_VAULT = is_production_vault(VAULT_ROOT)
 
 VAULT_DERIVED_ROOT = PIPELINE_DIR / "vault-derived"
 # Skill2Query pseudo-queries per skill (#1490): written offline by

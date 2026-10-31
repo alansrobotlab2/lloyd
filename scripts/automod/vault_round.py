@@ -57,7 +57,7 @@ import yaml
 from scripts.automod import spec, state as S, vault_guards as VG
 
 LLOYD_HOME = Path(__file__).resolve().parent.parent.parent
-VAULT = Path(os.environ.get("LLOYD_VAULT") or (Path.home() / "obsidian"))
+VAULT = Path(os.environ.get("LLOYD_VAULT_ROOT") or os.environ.get("LLOYD_VAULT") or (Path.home() / "obsidian"))  # noqa: E501  (#3403: both override names in `vault_root()`'s precedence; the agreement AND the precedence across all three readers are pinned by tests/test_no_runtime_paths_in_code.py::test_the_vault_readers_agree_under_both_names — this line stays one line because a note cites vault_round.py:237 by number)
 PYTHON = Path(sys.executable)
 
 DENIED_GLOBS: tuple[str, ...] = (".obsidian/**", ".git/**", ".trash/**")

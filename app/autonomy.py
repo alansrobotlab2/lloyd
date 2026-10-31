@@ -28,6 +28,7 @@ from typing import Optional
 # High-precision phrases that suggest a tool/subprocess failed even though the
 # agent's turn completed successfully. Used by _detect_silent_failures() to flag
 # runs whose summary should not be trusted as a clean success.
+from app.data_root import vault_root
 _SILENT_FAILURE_PATTERNS = [
     re.compile(r"\bfailed because\b", re.IGNORECASE),
     re.compile(r"\bTraceback \(most recent call last\)"),
@@ -78,7 +79,7 @@ from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
 
 logger = logging.getLogger("lloyd-autonomy")
 
-AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+AUTONOMY_DIR = vault_root() / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
 from app.run_acceptance import GRADE_KEY as _ACCEPTANCE_GRADE_KEY, DispatchTrace, grade_run
 from app.silent_sentinel import is_silent_response, run_is_silent
@@ -2838,7 +2839,7 @@ def _load_skill_content(skill_name: str) -> Optional[str]:
         return None
 
     # Treat as slug: ~/obsidian/skills/<slug>/SKILL.md
-    expanded = Path.home() / "obsidian" / "skills" / skill_name / "SKILL.md"
+    expanded = vault_root() / "skills" / skill_name / "SKILL.md"
     if expanded.exists():
         try:
             return expanded.read_text(encoding="utf-8")
@@ -3484,7 +3485,7 @@ def _daily_note_dir() -> Path:
     env = os.environ.get("LLOYD_DAILY_NOTE_DIR")
     if env:
         return Path(env)
-    return Path.home() / "obsidian" / "memory"
+    return vault_root() / "memory"
 
 
 # ── #1798: a mismatch also files one coalesced backlog item ──────────────────

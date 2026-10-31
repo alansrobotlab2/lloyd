@@ -63,6 +63,65 @@ SANDBOXED_ID_PREFIXES: tuple[str, ...] = ("bench_", "pt-eval-")
 #: (the bench-mining worker) is a different producer and is not sandboxed.
 SANDBOXED_BACKGROUND_SLUGS: frozenset[str] = frozenset({"bench"})
 
+#: Names a task may be granted for one trial, which the bench runner sets as a
+#: comma-separated list (#3403). This is the answer to `STATEFUL_TOOLS`: those tools are
+#: config-disabled for every trial, on the correct grounds that a trial able to call
+#: `memory_add` or `backlog_write_task` edits the house — and that same ban is why no
+#: bench task has ever been able to ask "did the run do the thing", which is what a
+#: skill's successful outcome actually is. A name is a rule; a copy of the state is
+#: isolation, so the grant is keyed to the copy and never lifted from it.
+BENCH_WRITE_SCOPE_ENV = "LLOYD_BENCH_WRITE_SCOPE"
+
+
+def write_scope_tools() -> frozenset[str]:
+    """The tool names this process's trial declared it writes through, or empty."""
+    raw = os.environ.get(BENCH_WRITE_SCOPE_ENV, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def state_is_copied() -> bool:
+    """Whether THIS process resolves a non-production data root AND a non-production vault.
+
+    Read here, per call, rather than passed in: the grant's whole justification is that
+    what a scoped tool writes is a copy, and a caller's assurance of that is worth what an
+    inherited environment variable is — a trial launched without the fixture env would
+    otherwise be handed the live vault. Both flags are required because they are two
+    roots: moving `LLOYD_DATA` alone would put a KG row in a fixture while `vault_write`
+    reached `~/obsidian`, and the trial row would still say "sandboxed".
+
+    An unimportable `app.paths` answers False, which is the closed direction: no grant,
+    the present refusal, and a trial that scores 0 on a check it cannot satisfy rather
+    than a write nobody meant to make.
+    """
+    try:
+        from app.paths import IS_PRODUCTION_DATA, IS_PRODUCTION_VAULT
+    except Exception:  # noqa: BLE001 — closed, not open
+        return False
+    return (not IS_PRODUCTION_DATA) and (not IS_PRODUCTION_VAULT)
+
+
+def write_scope_open() -> bool:
+    """Whether a declared name may act now: the task asked for it AND the state is a copy."""
+    return bool(write_scope_tools()) and state_is_copied()
+
+
+def allowed_bench_writes() -> frozenset[str]:
+    """The names this process would honour right now, or empty.
+
+    `refusal` and the bench runner's re-admission list are both built from THIS, so the
+    two sides cannot disagree about which names are open: a name admitted to the model
+    but refused here wastes the trial, and a name opened here but never advertised is the
+    grant nobody can reach. Empty whenever either half is missing — no declared scope, or
+    a state that resolves to production — which is what keeps an unscoped trial behaving
+    exactly as it did before #3403.
+
+    Computed per call and from this process's own `app.paths`: the runner cannot answer
+    this question for the MCP server it spawns, because the runner imported `app.paths`
+    under its own roots and those constants froze there.
+    """
+    return write_scope_tools() if write_scope_open() else frozenset()
+
+
 #: Bound by `main.call_tool` around each dispatch.
 current_sandboxed: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "lloyd_tool_sandboxed", default=False)
@@ -290,6 +349,16 @@ def refusal(name: str, arguments: dict | None) -> str | None:
         return "desktop tools are not available in a read-only session"
     if name in _annotations.READ_ONLY:
         return None
+    # #3403's grant, and the only thing that makes this line conditional. `Bash` is in no
+    # declared scope — it is not a `STATEFUL_TOOLS` name — so its `--ro-bind / /` mount is
+    # untouched by this branch whatever it returns.
+    #
+    # Both this branch and the runner's re-admission list read `allowed_bench_writes()`,
+    # never the env var alone: the two conditions are checked in ONE place, so a grant that
+    # is open here but closed there (or the reverse, which is a write the model was never
+    # told it could make) cannot be built by editing one of the two call sites.
+    if name in allowed_bench_writes():
+        return None
     return (f"{name} can change state, and this session is read-only (bench and "
             "eval sessions may observe this machine but never change it)")
 
@@ -308,6 +377,37 @@ def state_changing_tool(name: str) -> bool:
     return name not in _annotations.READ_ONLY
 
 
+def isolation_read() -> dict:
+    """How THIS process resolves the two roots, and which writes it would honour now.
+
+    Here, and not in the bench runner, because this is the process that executes the
+    write. A `writes:`-scoped trial's `memory_add` does not run in the runner's
+    interpreter: the harness dispatches it over loopback to the MCP server, and on a
+    supervised box that server was booted long before the trial, under the account's own
+    environment. So the runner's own fresh-interpreter probe — however honest a reading of
+    the fixture env — describes a process that is not the one holding the vault. Only an
+    answer from HERE says whether the tool call the model is about to make would land in a
+    copy or in `~/obsidian`, and #3403's whole claim is that it lands in a copy.
+
+    An unimportable `app.paths` answers with the production pair and `probe_error`, which
+    is the closed direction: a runner that reads this refuses the trial.
+    """
+    out: dict = {
+        "write_scope": sorted(write_scope_tools()),
+        "state_is_copied": state_is_copied(),
+        "allowed_writes": sorted(allowed_bench_writes()),
+    }
+    try:
+        from app.paths import IS_PRODUCTION_DATA, IS_PRODUCTION_VAULT
+        out["is_production_data"] = bool(IS_PRODUCTION_DATA)
+        out["is_production_vault"] = bool(IS_PRODUCTION_VAULT)
+    except Exception as exc:  # noqa: BLE001 — reported, and the reader refuses
+        out["is_production_data"] = True
+        out["is_production_vault"] = True
+        out["probe_error"] = repr(exc)
+    return out
+
+
 def status() -> dict:
     ok, err = sandbox_available()
     return {
@@ -316,4 +416,9 @@ def status() -> dict:
         "error": err or None,
         "prefixes": list(SANDBOXED_ID_PREFIXES),
         "background_slugs": sorted(SANDBOXED_BACKGROUND_SLUGS),
+        # #3403: the isolation truth of the process that will execute the tool call, read
+        # by the bench runner before it dispatches a `writes:`-scoped trial. Flat keys
+        # rather than a nested block because the runner reads them beside `enforced` and
+        # `bwrap`, the two it already refuses a trial over.
+        **isolation_read(),
     }

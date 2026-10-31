@@ -42,6 +42,15 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+# Run by path (`python …/scripts/autonomy/jobs_membership.py`), which puts this file's own directory on
+# `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
+# raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
+# `scripts/skill_lint.py`'s insertion. (#3403)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from app.data_root import vault_root  # noqa: E402
 
 #: The doc whose tables are reconciled. Two levels above `scripts/autonomy/`, so it
 #: resolves to the tree that is *running* — the live checkout in production, a round's
@@ -51,7 +60,7 @@ JOBS_DOC = Path(__file__).resolve().parents[2] / "architecture" / "autonomy-jobs
 #: The directory the scheduler dispatches from, mirrored from `agent_mcp.autonomy`'s
 #: `AUTONOMY_DIR`. A writer passes its own module attribute instead of this constant, so a
 #: caller that redirects its dir is honoured rather than a second hard-coded path.
-DEFAULT_TASK_DIR = Path.home() / "obsidian" / "autonomy"
+DEFAULT_TASK_DIR = vault_root() / "autonomy"
 
 #: The two headers the membership tables sit under, paired with the name a report calls
 #: each by. Spelled exactly as the doc writes them, because `lines.index(header)` is how a

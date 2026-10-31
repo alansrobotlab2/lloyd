@@ -55,6 +55,7 @@ sys.path.insert(0, str(HERE))
 import yaml  # noqa: E402
 
 from run_prefetch_eval import _quiet_logging  # noqa: E402
+from app.data_root import vault_root
 
 with _quiet_logging():
     from agent_mcp import session as session_mod  # noqa: E402
@@ -243,7 +244,7 @@ def _p50(xs: list[float]) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--memory-dir", default=str(Path.home() / "obsidian" / "memory"))
+    ap.add_argument("--memory-dir", default=str(vault_root() / "memory"))
     ap.add_argument("--sessions-json-dir", required=True,
                     help="production's sessions/*.json, read by the token scorer")
     ap.add_argument("--window-min", type=int, default=90)

@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -300,7 +301,17 @@ def _vault_root_real() -> str:
         from app.paths import VAULT_ROOT
         vault = str(VAULT_ROOT)
     except Exception:  # noqa: BLE001 — a checker that cannot import still checks
-        vault = os.path.join(os.path.expanduser("~"), "obsidian")
+        # The resolver, by path, not a home-relative spelling (#3403). This value IS the
+        # guard: `_knowledge_root()` and `protected_roots()` derive from it, so a
+        # fallback here that ignored `LLOYD_VAULT_ROOT` would guard the live vault while
+        # the tools wrote the fixture — refusing a legal fixture write and permitting an
+        # illegal live one, in the same trial.
+        import importlib.util
+        src = pathlib.Path(__file__).resolve().parents[1] / "app" / "data_root.py"
+        spec = importlib.util.spec_from_file_location("_lloyd_data_root_guard", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        vault = str(mod.vault_root())
     return os.path.realpath(vault)
 
 
