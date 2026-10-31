@@ -204,9 +204,14 @@ tasks:
     # #1724. The task's own "success is one reply that carries five separable
     # things", turned into the five yes/no checks it names: the exact slug, the
     # schedule retired rather than broken, the refusal to rerun the retired scan, the
-    # queue's own `generated_at` as the last build, and the unit deleted rather than
-    # disabled. `conciseness`, one of its `rubric_criteria`, is not one of the five
-    # things and is graded in prose, so it is not asserted here.
+    # queue pair's measured state, and the unit deleted rather than disabled.
+    # `conciseness`, one of its `rubric_criteria`, is not one of the five things and
+    # is graded in prose, so it is not asserted here. #3452 changed the fourth row's
+    # TEXT only: the retention sweep deleted `groundskeeper-queue.json` on
+    # 2026-10-24 (`run_79_20261024`), so the `generated_at` that row used to demand
+    # can no longer be read off anything, and demanding it had become a reward for
+    # reciting a date. The id stays as it is so draws already recorded against it
+    # remain comparable.
     - id: names_the_exact_skill_slug
       text: The reply names the skill by its exact slug, `groundskeeper-survey` — not
         a description of it, not another skill's name.
@@ -216,8 +221,10 @@ tasks:
       text: The reply refuses to run the scan that the retirement removed, rather than
         rebuilding the queue to answer the question.
     - id: quotes_the_measured_last_build
-      text: The reply quotes the queue's own `generated_at` as the last build, rather
-        than raising a staleness alarm in its place.
+      text: The reply quotes the measured absence of the queue pair — the `ls` verdict
+        naming the deleted path — rather than raising a staleness alarm, and rather
+        than reciting the retired 2026-09-23 `generated_at` that no read can reach
+        any more.
     - id: names_the_deleted_unit
       text: The reply says the status query comes back empty because the service and
         timer were deleted, not disabled.
