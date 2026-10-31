@@ -239,9 +239,16 @@ the skip rail uses: `collected floor 5335 (base 21341, fraction 0.25, floor 1000
 The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
 PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the five newest
 green **full** `tests` rungs in the rounds store (not `REUSED`, no `partial` key)
-and the headroom 8, so the ledger of 2026-10-22 yielded a rail of 47, and the
-green full runs of 2026-10-24 report `skip ceiling 48 (base 40, headroom 8,
-floor 40)`. The absolute
+and the headroom is 14 (#3605), so a base of 39 yields a rail of 53 and the rung
+prints the pair on its detail as `skip ceiling 53 (base 39, headroom 14, floor 40)`.
+That headroom is one lost dependency's measured skip width plus one, not one pin
+file's node count: on 2026-10-31 a round whose `web/node_modules` and chromium were
+both absent came in **13** skips over a base of 37 while printing
+`DASHBOARD_PINS_NOT_EXECUTED: 10 of 10 pins in tests/test_dashboard_responsive.py`
+naming both reasons — the same two absent dependencies take dependent nodes outside
+that file with them, so a room sized to the file's ten nodes refused a round for the
+box it ran on, and the refusal's sentence blamed the diff.
+The absolute
 figure had stopped describing the suite — the ledger read 39 skips against 40, a
 margin of one, and the counted set moves with the tree, because the dashboard pins
 skip whenever a worktree has no `web/node_modules`. A fixed rail therefore refused

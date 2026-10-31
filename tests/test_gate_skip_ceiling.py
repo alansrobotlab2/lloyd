@@ -147,14 +147,15 @@ def _five_at(skipped: int, start: int = 1) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 
 def test_the_ceiling_is_the_base_plus_headroom_and_not_the_floor(tmp_path, monkeypatch):
-    """Clause 1: a seeded base of 39 computes 47, and 47 is not the floor's 40.
+    """Clause 1: a seeded base of 39 computes 53, and 53 is not the floor's 40.
 
     Both constants are read out of the module rather than typed, so widening either
     one lands here as a changed expectation instead of a node that contradicts
-    nothing; `47 == max(40, 39 + 8)` is the clause's own arithmetic, restated by the
-    test that grants it.
+    nothing; `53 == max(40, 39 + 14)` is the clause's own arithmetic, restated by the
+    test that grants it. The 14 is #3605's resize: the headroom has to cover one lost
+    dependency's measured skip width, which is wider than the pin file's block.
     """
-    assert G.PYTEST_SKIP_HEADROOM == 8, "clause 1 fixes the headroom at 8"
+    assert G.PYTEST_SKIP_HEADROOM == 14, "clause 1 fixes the headroom at 14 (#3605)"
     assert G.PYTEST_MAX_SKIPPED == 40, (
         "#3143 keeps 40 as the FLOOR; raising the figure is on no open item — "
         "#2205 and #2214 asked for a bigger one and closed as unnecessary when "
@@ -165,12 +166,12 @@ def test_the_ceiling_is_the_base_plus_headroom_and_not_the_floor(tmp_path, monke
     })
     ceiling, base = G._skip_ceiling(g.round_id)
     assert base == 39, f"the median of five rounds at 39 must be 39, got {base}"
-    assert ceiling == max(G.PYTEST_MAX_SKIPPED, base + G.PYTEST_SKIP_HEADROOM) == 47, (
-        f"a base of 39 with headroom 8 must put the rail at 47, not {ceiling} — the "
-        "gap between 47 and 40 is the whole of this item")
+    assert ceiling == max(G.PYTEST_MAX_SKIPPED, base + G.PYTEST_SKIP_HEADROOM) == 53, (
+        f"a base of 39 with headroom 14 must put the rail at 53, not {ceiling} — the "
+        "gap between 53 and 40 is the whole of this item")
     ok, detail, _data = g._tests_pass(_counts(41), None, {})
     assert ok is True, (
-        f"41 skips was the refusal for a year; against a derived rail of 47 it is "
+        f"41 skips was the refusal for a year; against a derived rail of 53 it is "
         f"inside it, which is exactly the drift #3143 exists to tolerate: {detail}")
 
 
@@ -193,20 +194,20 @@ def test_the_base_is_the_median_of_the_five_newest_rows_not_every_row(tmp_path,
 
 
 def test_a_median_of_a_thin_sample_is_a_count_not_a_half(tmp_path, monkeypatch):
-    """Clause 1: rows at 44 and 45 give a base of 44, so the rail is 52.
+    """Clause 1: rows at 44 and 45 give a base of 44, so the rail is 58.
 
     `statistics.median` of an even sample is the mean of its two middle values,
     which is 44.5 — and a ceiling is something an integer skip count gets compared
     against. Truncating is also the only direction that cannot widen the rail on a
-    thin sample: 52 here, where rounding up would have granted 53.
+    thin sample: 58 here, where rounding up would have granted 59.
     """
     _seed_ledger(tmp_path, monkeypatch, {
         "SM_20261001_000002": _green("SM_20261001_000002", 44),
         "SM_20261001_000001": _green("SM_20261001_000001", 45),
     })
     ceiling, base = G._skip_ceiling()
-    assert (ceiling, base) == (52, 44), (
-        f"44 and 45 must truncate to a base of 44 and a rail of 52, got "
+    assert (ceiling, base) == (58, 44), (
+        f"44 and 45 must truncate to a base of 44 and a rail of 58, got "
         f"{(ceiling, base)} — a float base or a rounded-up one is the bug")
 
 
@@ -217,18 +218,18 @@ def test_the_median_resists_two_rounds_that_took_all_their_headroom(tmp_path,
     A green round can never exceed the rail, so a rail that followed the MAXIMUM of
     recent rounds would climb by `PYTEST_SKIP_HEADROOM` every time two rounds
     happened to use their headroom — a skip rail that widens whenever it is
-    approached is not a rail. Two rounds at 47 against three at 39 has to leave the
-    answer at 39: three of the five have to move before the rail does.
+    approached is not a rail. Two rounds at the ceiling (53) against three at 39 has
+    to leave the answer at 39: three of the five have to move before the rail does.
     """
     _seed_ledger(tmp_path, monkeypatch, {
-        "SM_20261003_000001": _green("SM_20261003_000001", 47),
-        "SM_20261002_000001": _green("SM_20261002_000001", 47),
+        "SM_20261003_000001": _green("SM_20261003_000001", 53),
+        "SM_20261002_000001": _green("SM_20261002_000001", 53),
         "SM_20261001_000003": _green("SM_20261001_000003", 39),
         "SM_20261001_000002": _green("SM_20261001_000002", 39),
         "SM_20261001_000001": _green("SM_20261001_000001", 39),
     })
     ceiling, base = G._skip_ceiling()
-    assert (ceiling, base) == (47, 39), (
+    assert (ceiling, base) == (53, 39), (
         f"two rounds that used all their headroom must not widen the rail: "
         f"{(ceiling, base)}")
 
@@ -253,7 +254,7 @@ def test_a_partial_run_is_never_a_base_row(tmp_path, monkeypatch):
     _seed_ledger(tmp_path, monkeypatch, rows)
     assert G._skip_base_median() == 39, (
         "a partial rung reports 0 skips for a whole suite; counting it answers 0")
-    assert G._skip_ceiling() == (47, 39), (
+    assert G._skip_ceiling() == (53, 39), (
         "the same store must yield the derived rail, not the floor")
 
 
@@ -385,18 +386,18 @@ def test_the_vacuity_mutant_still_diverges_on_1600_skips(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_the_rail_bites_one_skip_past_the_derived_figure(tmp_path, monkeypatch):
-    """Clause 3: with base 39 -> 47 passes and 48 is refused, and again at base 33.
+    """Clause 3: with base 39 -> 53 passes and 54 is refused, and again at base 33.
 
-    Two bases, not one. A hard-coded 47 would satisfy the first and fail the second,
+    Two bases, not one. A hard-coded 53 would satisfy the first and fail the second,
     which is the only way to tell a derived rail from a literal that got edited
     upward — the exact move #2205 called a lottery.
     """
     for base in (39, 33):
         g = _gate(tmp_path / f"base{base}", monkeypatch, _five_at(base))
-        ceiling = base + 8
+        ceiling = base + 14
         ok, detail, _ = g._tests_pass(_counts(ceiling), None, {})
         assert ok is True, (
-            f"{ceiling} skips is exactly base {base} + headroom 8: {detail}")
+            f"{ceiling} skips is exactly base {base} + headroom 14: {detail}")
         bad, detail2, _ = g._tests_pass(_counts(ceiling + 1), None, {})
         assert bad is False, (
             f"one skip past the derived figure must still be refused: {detail2}")
@@ -411,20 +412,103 @@ def test_the_rail_bites_one_skip_past_the_derived_figure(tmp_path, monkeypatch):
             f"is one no reader can check: {detail2}")
 
 
+def test_a_lost_dashboard_pin_block_sits_under_the_resized_rail(tmp_path, monkeypatch):
+    """#3605 clause 2: the refused round's own counts pass, finding still printed.
+
+    The counts are `SM_20261031_000301`'s: a base of 37, `tests_skipped` 50 — 13 over
+    the base — and five `pin_findings` whose text names BOTH absent dependencies
+    (`web/node_modules has no vite`, `chromium is not available`). Under the headroom
+    this item shipped the rail is 51, so the round is judged on its diff and the
+    dependency loss survives as a finding the rung prints, which is the whole ask.
+
+    The old figure is patched back in for the first three assertions so the node
+    cannot pass by losing the rail: at headroom 8 the same counts refuse at 45, and it
+    is that refusal, blaming the diff for the box, that this item exists to end. The
+    ceiling clause and the finding are both asserted on the PASSING detail, because a
+    pass that silently dropped the finding would be the worse outcome — an unexecuted
+    pin block invisible in a green line is how #1691 started.
+    """
+    finding = ("DASHBOARD_PINS_NOT_EXECUTED: 10 of 10 pins in "
+               "tests/test_dashboard_responsive.py: web/node_modules has no vite; "
+               "chromium is not available: Executable doesn't exist")
+    counts = _counts(50, pin_findings=[finding, "DASHBOARD_PINS_NOT_EXECUTED: 1 of 1"])
+
+    with monkeypatch.context() as old:
+        old.setattr(G, "PYTEST_SKIP_HEADROOM", 8)
+        refused, refused_detail, _ = _gate(tmp_path / "old", old,
+                                           _five_at(37))._tests_pass(
+                                               dict(counts), None, {})
+    assert refused is False and "tests skipped (limit 45)" in refused_detail, (
+        f"the point of the resize is that this exact shape used to refuse: "
+        f"{refused_detail}")
+
+    g = _gate(tmp_path, monkeypatch, _five_at(37))
+    ok, detail, data = g._tests_pass(counts, None, {})
+    assert (data["skip_ceiling"], data["skip_base"], data["skip_headroom"]) == (51, 37, 14), (
+        f"a base of 37 with the shipped headroom must be a rail of 51, got "
+        f"{(data['skip_ceiling'], data['skip_base'], data['skip_headroom'])}")
+    assert ok is True, (
+        f"a round that loses a whole dashboard-pin block to a missing dependency must "
+        f"pass on its diff, not be refused for the box: {detail}")
+    assert "skip ceiling 51 (base 37, headroom 14, floor 40)" in detail, detail
+    assert "DASHBOARD_PINS_NOT_EXECUTED" in detail, (
+        f"passing must not swallow the finding — 10 unexecuted pins are invisible in "
+        f"a skip total: {detail}")
+    assert detail.index("skip ceiling") < detail.index("DASHBOARD_PINS_NOT_EXECUTED"), (
+        f"the margin comes first and the findings are the tail a clipped detail loses: "
+        f"{detail}")
+
+
+def test_the_resized_headroom_is_width_and_the_purpose_rail_still_bites(
+        tmp_path, monkeypatch):
+    """#3605's purpose clause: widening the room did not exempt anybody.
+
+    The rail is a WIDTH above the base and never consults `pin_findings`, and this
+    node pins both halves of what that costs and what it keeps. It costs honesty about
+    the cost: 13 skips added with NO finding at all now sit inside a base-37 rail, the
+    price of covering the measured dependency width, so the node says so by asserting
+    the pass. What it keeps is the purpose of #3143 and the #2637 failure behind it:
+    two skips above the derived ceiling, with `pin_findings` EMPTY, is still refused
+    with the sentence that says what a skip rail is for — a round cannot skip its way
+    to green by out-growing the room, whatever the total.
+    """
+    g = _gate(tmp_path, monkeypatch, _five_at(37))
+    ceiling, base = G._skip_ceiling(g.round_id)
+    assert (ceiling, base) == (51, 37)
+
+    unattributed, detail_un, _ = g._tests_pass(_counts(base + 13), None, {})
+    assert unattributed is True, (
+        f"13 skips added with no finding at all is the cost of covering the measured "
+        f"dependency width, and the node states it rather than hiding it: {detail_un}")
+
+    bad, detail, data = g._tests_pass(_counts(ceiling + 2), None, {})
+    assert bad is False, (
+        f"two skips past the derived rail must refuse even with the widened headroom: "
+        f"{detail}")
+    assert ("a round that skips its way to green is not a round that passed"
+            in detail), f"the widened rail lost the purpose sentence: {detail}"
+    assert "53 tests skipped (limit 51)" in detail, (
+        f"the refusal has to name the widened rail it refused against (limit 51): "
+        f"{detail}")
+    assert not (data.get("pin_findings") or []), (
+        "this round adds skips it cannot blame on a dependency, which is the case the "
+        "rail is for")
+
+
 def test_a_round_is_never_its_own_base(tmp_path, monkeypatch):
     """A re-gated round must not grade its own skip count into its own rail.
 
     `gate.json` is written at the END of a ladder, so on a re-gate the previous
     attempt's report is sitting in `state.ROUNDS_DIR/<this round>` looking exactly
     like a green full round. Without the exclusion a round that skipped 77 and went
-    green would raise its own base to 77 and hand itself a rail of 85; with it the
+    green would raise its own base to 77 and hand itself a rail of 91; with it the
     store holds only itself, which is the same as holding nothing, and the floor
     refuses 41. Both sides are asserted, so the node cannot pass vacuously.
     """
     g = _gate(tmp_path, monkeypatch, {"SM_T": _green("SM_T", 77)})
     assert G._skip_ceiling(g.round_id) == (40, None), (
         "excluding this round must leave no rows, not one row at 77")
-    assert G._skip_ceiling() == (85, 77), (
+    assert G._skip_ceiling() == (91, 77), (
         "the control: without the exclusion this round's own 77 IS the base, so the "
         "assertion above is the exclusion working")
     ok, detail, _ = g._tests_pass(_counts(41), None, {})
@@ -474,16 +558,16 @@ def test_the_pass_detail_names_the_base_and_the_headroom_it_used(tmp_path, monke
     g = _gate(tmp_path, monkeypatch, _five_at(39))
     ok, detail, data = g._tests_pass(_counts(39), None, {})
     assert ok is True, detail
-    assert "skip ceiling 47 (base 39, headroom 8, floor 40)" in detail, (
+    assert "skip ceiling 53 (base 39, headroom 14, floor 40)" in detail, (
         f"the green detail must carry the base and the headroom it was judged by: "
         f"{detail}")
-    assert (data["skip_ceiling"], data["skip_base"]) == (47, 39)
-    assert (data["skip_headroom"], data["skip_floor"]) == (8, 40)
+    assert (data["skip_ceiling"], data["skip_base"]) == (53, 39)
+    assert (data["skip_headroom"], data["skip_floor"]) == (14, 40)
 
     empty = _gate(tmp_path / "none", monkeypatch, {})
     ok2, detail2, data2 = empty._tests_pass(_counts(39), None, {})
     assert ok2 is True, detail2
-    assert "skip ceiling 40 (base none, headroom 8, floor 40)" in detail2, (
+    assert "skip ceiling 40 (base none, headroom 14, floor 40)" in detail2, (
         f"the fallback has to say it fell back: {detail2}")
     assert data2["skip_base"] is None, (
         "a `base: 0` in the data would read as a suite that skips nothing")
@@ -496,10 +580,15 @@ def test_the_note_survives_the_trip_into_gate_json(tmp_path, monkeypatch):
     the owed-check job and the next round's probe all read, so the report goes
     through `GateReport.to_dict` and `state.write_gate_report` — the one writer of
     that shape — and the assertions are made on the bytes on disk and on what the
-    probe then answers. That last part is the feedback loop itself: a round that
-    skipped 39 becomes tomorrow's base.
+    probe then answers. That last part is the feedback loop itself: the report a
+    round writes is a row the next round's rail is computed from.
+
+    The seeded base is 25, not 39, because #3605 widened the headroom: at a base of
+    30 the derived figure (44) would sit ABOVE the floor, and this node's claim is
+    the floor winning — so the base has to be low enough that `base + headroom` stays
+    under `PYTEST_MAX_SKIPPED`.
     """
-    rounds = _seed_ledger(tmp_path, monkeypatch, _five_at(30, start=9))
+    rounds = _seed_ledger(tmp_path, monkeypatch, _five_at(25, start=9))
     g = G.Gate("SM_20261015_120000", tmp_path / "wt", "b" * 40, live_root=tmp_path)
     ok, detail, data = g._tests_pass(_counts(39), None, {})
     assert ok is True, detail
@@ -511,17 +600,17 @@ def test_the_note_survives_the_trip_into_gate_json(tmp_path, monkeypatch):
 
     stored = json.loads(path.read_text(encoding="utf-8"))
     rung = next(r for r in stored["rungs"] if r["name"] == "tests")
-    assert "skip ceiling 40 (base 30, headroom 8, floor 40)" in rung["detail"], (
+    assert "skip ceiling 40 (base 25, headroom 14, floor 40)" in rung["detail"], (
         f"the base and headroom did not survive the report's serialisation: "
         f"{rung['detail']}")
-    assert rung["data"]["skip_base"] == 30 and rung["data"]["skip_ceiling"] == 40, (
+    assert rung["data"]["skip_base"] == 25 and rung["data"]["skip_ceiling"] == 40, (
         "the data has to carry the pair too, or the sentence is the only copy")
 
-    assert G._skip_base_median(exclude_round=g.round_id) == 30, (
-        "excluding this round, the five seeded rows at 30 are still the base")
-    assert G._skip_base_median() == 30, (
-        "and including it, the newest five rows are this 39 and four 30s, whose "
-        "median is 30 — the file just written is being read back as a row")
+    assert G._skip_base_median(exclude_round=g.round_id) == 25, (
+        "excluding this round, the five seeded rows at 25 are still the base")
+    assert G._skip_base_median() == 25, (
+        "and including it, the newest five rows are this 39 and four 25s, whose "
+        "median is 25 — the file just written is being read back as a row")
 
 
 # --------------------------------------------------------------------------- #
@@ -538,13 +627,13 @@ def test_the_probe_follows_state_rounds_dir_and_nothing_else(tmp_path, monkeypat
     here: a seeded store is followed, and an empty one is followed away from it.
     """
     seeded = _seed_ledger(tmp_path, monkeypatch, _five_at(39))
-    assert G._skip_ceiling() == (47, 39)
+    assert G._skip_ceiling() == (53, 39)
     assert (seeded / "SM_20261001_000001" / "gate.json").is_file()
 
     monkeypatch.setattr(G.S, "ROUNDS_DIR", tmp_path / "moved")
     assert G._skip_ceiling() == (40, None), (
         "the seeded store is still on disk and full, and only the module attribute "
-        "moved — a probe that reads anything but that attribute answers 47 here")
+        "moved — a probe that reads anything but that attribute answers 53 here")
 
 
 def test_the_other_floors_still_fire_under_a_derived_rail(tmp_path, monkeypatch):
@@ -580,7 +669,7 @@ def test_the_other_floors_still_fire_under_a_derived_rail(tmp_path, monkeypatch)
     assert "DASHBOARD_PINS_NOT_EXECUTED" in detail3, (
         f"the pin finding vanished from a detail that now carries a ceiling clause: "
         f"{detail3}")
-    assert "skip ceiling 47 (base 39, headroom 8, floor 40)" in detail3, detail3
+    assert "skip ceiling 53 (base 39, headroom 14, floor 40)" in detail3, detail3
     assert detail3.index("skip ceiling") < detail3.index("DASHBOARD_PINS_NOT_EXECUTED"), (
         f"the counts and the margin come first; the findings are the tail a clipped "
         f"detail loses: {detail3}")
@@ -669,6 +758,52 @@ def _floor_block_prose() -> str:
     stripped = (ln.lstrip().removeprefix("#").strip()
                 for ln in _floor_comment_block().splitlines())
     return " ".join(" ".join(stripped).split())
+
+
+def _headroom_comment_block() -> tuple[str, int]:
+    """The comment block above `PYTEST_SKIP_HEADROOM`, and the figure it documents.
+
+    Located upward from the assignment, the way `_floor_comment_block` finds its own,
+    because the figure and its sentence are what the node compares: a range pin here
+    would grade whatever text had since moved into the range, which is exactly how a
+    comment ends up explaining a number it no longer sits under.
+    """
+    lines = GATE_SRC.splitlines()
+    m = re.search(r"^PYTEST_SKIP_HEADROOM = (\d+)$", GATE_SRC, re.M)
+    assert m, ("`PYTEST_SKIP_HEADROOM` is no longer a bare module-level integer "
+               "assignment, so the comment that documents it cannot be located")
+    at = lines.index(m.group(0))
+    start = at
+    while start - 1 >= 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at]), int(m.group(1))
+
+
+def test_the_headroom_comment_carries_the_figure_and_the_width_behind_it():
+    """#3605: the sentence that sized the room said 8 and described a pin block.
+
+    Three properties, each red on its own drift. The comment names the shipped figure
+    as a numeral, so it cannot have fallen behind the constant — the failure mode this
+    item was filed on, a comment describing a width the code did not have. It names the
+    MEASURED width (13 skips, round `SM_20261031_000301`) the figure is sized from, so
+    the number is traceable to an observation rather than to taste. And the replaced
+    figure appears nowhere in the block, spelled either way: the old sentence is what
+    made the room look like one pin block plus one, and leaving it standing beside the
+    new one would hand a reader two widths and no way to choose.
+    """
+    block, figure = _headroom_comment_block()
+    assert figure == G.PYTEST_SKIP_HEADROOM == 14, (
+        f"the assignment the comment sits under reads {figure} while the module says "
+        f"{G.PYTEST_SKIP_HEADROOM} — one of the two is lying about the rail")
+    assert re.search(rf"\b{figure}\b", block), (
+        f"the comment never states {figure}, so a round refused at the derived rail "
+        f"reads a block that does not name the figure it was judged by: {block}")
+    assert re.search(r"\b13\b", block), (
+        "the comment lost the measured one-dependency skip width, which is the only "
+        f"thing that makes 14 a size rather than a guess: {block}")
+    assert not re.search(r"\b8\b|\beight\b", block, re.I), (
+        "the replaced figure is back in the sentence that sized the room — the "
+        f"comment would then describe two widths at once: {block}")
 
 
 def test_the_floor_block_owes_the_figure_to_no_open_item():

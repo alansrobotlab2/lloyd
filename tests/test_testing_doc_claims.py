@@ -8,7 +8,7 @@ still put data in the tree, and this one did — `sessions/`, `_pipeline/`,
 arch-review pass caught it (#1439). Nothing pinned a line of the doc, so the
 guard is the missing half, not the doc.
 
-Three claims are pinned:
+Four claims are pinned:
 
   * every root the live-data paragraph names is written under `~/lloyd-data/`
     and, read that way, is the `app.paths` constant under `DATA_ROOT` — never
@@ -26,7 +26,13 @@ Three claims are pinned:
     prose, because the ruling it records had lived sole-sourced in one
     `owed_settled` entry on a CLOSED backlog item — the surface nobody greps —
     and the cites for it in this repo's own docs are how a reader would next look
-    for it and find nothing.
+    for it and find nothing;
+  * the derived skip rail's headroom (#3605), which the doc states as a figure and
+    again inside a quoted rung detail. Both are read out of the paragraph and
+    compared with `scripts.automod.gate.PYTEST_SKIP_HEADROOM`, and the quoted
+    `skip ceiling … (base …, headroom …, floor …)` is re-derived from the formula —
+    the doc carried the pre-resize figure with nothing able to notice, which is the
+    drift this bullet now closes.
 
 Fully synthetic: it reads repo files and `app.paths` names, never the data
 root's contents, so it passes in a worktree where `~/lloyd-data` holds nothing.
@@ -318,3 +324,92 @@ def test_the_ruling_guard_fails_on_the_pre_fix_doc_and_on_a_granted_carve_out():
     assert CLAIMS["no in-tree path exists or is planned for live_vault"].search(para)
     assert not CLAIMS["no in-tree path exists or is planned for live_vault"].search(
         "A read-only in-tree path is permitted for live_vault runs.")
+
+
+# --------------------------------------------------------------------------- #
+# #3605 — the skip rail's headroom, as the doc states it
+# --------------------------------------------------------------------------- #
+#
+# `architecture/testing.md` describes the derived skip rail and QUOTES its clause, so
+# the doc holds a figure that moves whenever `PYTEST_SKIP_HEADROOM` does. Nothing read
+# it before #3605: the resize that widened the rail left the doc carrying the old
+# number and the old example, and the tree therefore said two widths at once — the
+# doc's `headroom 8` beside the constant's 14, with no test able to notice. This is
+# the missing half, the same shape as every other node in this file: read the figure
+# out of the doc, compare it to what the code ships, and grade the arithmetic of the
+# example the doc asks a reader to picture.
+
+#: The example clause the doc quotes, verbatim in shape: the rung detail's own words.
+_CEILING_CLAUSE = re.compile(
+    r"skip ceiling (\d+) \(base (\d+), headroom (\d+), floor (\d+)\)")
+
+
+def skip_rail_paragraph(text: str) -> str:
+    m = re.search(r"The skip rail is derived per run.*?(?:\n\s*\n|\Z)", text, re.S)
+    assert m, "architecture/testing.md has no 'The skip rail is derived per run' paragraph"
+    return m.group(0)
+
+
+def test_the_skip_rail_headroom_the_doc_states_is_the_one_the_gate_ships():
+    """Clause 5: one figure, stated in the constant and in the doc, checked across the seam.
+
+    Every `headroom <n>` in the paragraph must equal `gate.PYTEST_SKIP_HEADROOM`: the
+    doc names it twice (once as the prose figure, once inside the quoted rung detail),
+    and a resize that moved the constant and not the doc is exactly the drift this node
+    exists to make loud. The doc also has to spell the mechanism the way the code does
+    and state the measured width the figure is sized from — a paragraph that kept only
+    the number would leave a reader unable to tell 14 from a guess.
+    """
+    from scripts.automod import gate as G
+
+    para = skip_rail_paragraph(DOC.read_text())
+    figures = [int(n) for n in re.findall(r"headroom(?:\s+is)?\s+(\d+)", para)]
+    assert figures, (
+        "the skip-rail paragraph no longer states the headroom as a figure, so there "
+        "is nothing here to compare with the constant and the doc has gone back to "
+        "describing the rail in words a resize cannot update")
+    assert set(figures) == {G.PYTEST_SKIP_HEADROOM}, (
+        f"the doc says headroom {sorted(set(figures))} while "
+        f"gate.PYTEST_SKIP_HEADROOM is {G.PYTEST_SKIP_HEADROOM} — two widths in one "
+        "tree is the #3605 failure: the doc is read as the explanation and the "
+        "constant as the fact")
+    assert "PYTEST_SKIP_HEADROOM" in para and "PYTEST_MAX_SKIPPED" in para, (
+        "the paragraph names the figure without naming what computes it, so a rename "
+        "of the constants would leave it describing nothing")
+    assert re.search(r"max\(PYTEST_MAX_SKIPPED,\s*base\s*\+\s*PYTEST_SKIP_HEADROOM\)",
+                     para), (
+        "the doc no longer spells the rail as max(PYTEST_MAX_SKIPPED, base + "
+        "PYTEST_SKIP_HEADROOM), which is the spelling that says which side is the floor")
+    assert re.search(r"\**13\**", para), (
+        "the paragraph lost the measured one-dependency skip width (13 skips, "
+        "SM_20261031_000301), which is the only thing making the headroom a size")
+
+
+def test_the_quoted_skip_ceiling_clause_in_the_doc_is_arithmetically_true():
+    """The example has to be a real reading of the formula, not a remembered line.
+
+    The doc's `skip ceiling 53 (base 39, headroom 14, floor 40)` is what a reader
+    checks a round's detail against, so every quoted clause is re-derived here: the
+    ceiling is `max(floor, base + headroom)`, the floor is `PYTEST_MAX_SKIPPED`, and
+    the headroom is the shipped figure. A stale example — the 47/48 pair #3605
+    replaced — fails on the ceiling and on the headroom at once.
+    """
+    from scripts.automod import gate as G
+
+    para = skip_rail_paragraph(DOC.read_text())
+    quoted = _CEILING_CLAUSE.findall(para)
+    assert quoted, (
+        "the paragraph no longer quotes a `skip ceiling … (base …, headroom …, floor …)` "
+        "detail, so a reader has nothing here to recognise a rung's own line from")
+    for ceiling, base, headroom, floor in quoted:
+        assert int(floor) == G.PYTEST_MAX_SKIPPED, (
+            f"the example's floor is {floor}, not the shipped PYTEST_MAX_SKIPPED "
+            f"({G.PYTEST_MAX_SKIPPED})")
+        assert int(headroom) == G.PYTEST_SKIP_HEADROOM, (
+            f"the example's headroom is {headroom}, not the shipped "
+            f"PYTEST_SKIP_HEADROOM ({G.PYTEST_SKIP_HEADROOM})")
+        assert int(ceiling) == max(int(floor), int(base) + int(headroom)), (
+            f"`skip ceiling {ceiling} (base {base}, headroom {headroom}, floor "
+            f"{floor})` is not what the formula gives "
+            f"(max({floor}, {base} + {headroom}) = "
+            f"{max(int(floor), int(base) + int(headroom))})")

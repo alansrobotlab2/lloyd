@@ -173,14 +173,22 @@ PYTEST_FLOOR_FRACTION = 0.25
 # mutant only diverges because `_skip_ceiling` reads THIS global at call time, so
 # a derived ceiling built on a copy of the number would silently blind the guard.
 PYTEST_MAX_SKIPPED = 40
-#: How far above the measured baseline the ceiling may sit (#3143). Eight is
-#: roughly the width of one dashboard pin block (the ten
-#: `tests/test_dashboard_responsive.py` pins that skip when a tree has no
-#: `web/node_modules`) plus one, so a dependency going missing is a finding the
-#: rung prints rather than a round it refuses, and a round that ADDS nine skips is
-#: still refused. It is headroom, not a licence: the base is a median, so three of
-#: the five newest green rounds must actually take the room before the rail moves.
-PYTEST_SKIP_HEADROOM = 8
+#: How far above the measured baseline the ceiling may sit (#3143, resized by
+#: #3605). The figure here — 14 — is one lost dependency's measured skip width plus
+#: one, where the width is the whole cost of the dependency and not the size of the
+#: pin file: on 2026-10-31 round `SM_20261031_000301` lost `web/node_modules` and
+#: chromium together, printed `10 of 10 pins in test_dashboard_responsive.py`
+#: naming both reasons, and came in 13 skips over a base of 37 — only ten of
+#: those thirteen are that file, because the same two absent dependencies take
+#: dependent nodes elsewhere with them. Sized against the ten-node pin block
+#: alone the rail sat under the loss it documents, so the round was refused and
+#: the refusal blamed the diff for the box. A round that ADDS fifteen skips is
+#: still refused. It is headroom, not a licence: the rail is a WIDTH and is
+#: never widened by a finding — `pin_findings` is printed, never consulted here
+#: — so the room below covers a dependency's width whether or not the suite
+#: attributed it, and the base is a median, so three of the five newest green
+#: rounds must actually take the room before the rail moves.
+PYTEST_SKIP_HEADROOM = 14
 #: How many green full runs the base is the median of, and how many round
 #: directories the probe may read at all. Five because a median of five cannot be
 #: dragged by one odd round and cannot be dragged down by one partial run (those
