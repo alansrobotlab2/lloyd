@@ -6,7 +6,9 @@ the trend line with no code review signal that it had.
 import ast
 import importlib
 import inspect
+import itertools
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -411,10 +413,18 @@ def test_eval_defaults_are_productions_cannot_be_satisfied_by_a_hand_mirrored_pa
 
 # ── the configuration a programmatic caller inherits (#498) ─────────────────
 
-# The four knobs the eval and the live tool must agree on. `expand_graph` is
-# deliberately NOT one of them: production's default is False (`_vault_recall`
-# reads `params.get("expand_graph", False)`) while the eval runs the graph leg
-# expanded as a measurement choice, and #1000 owns that claim.
+# What `KNOBS` holds: `graph_rerank`, `rerank_alpha`, `graph_top_k`, `graph_hops`
+# and `seed_top_k` — the knobs this file's mirror compares by name between
+# `run_eval()`'s signature and the production constant, each of them a term of
+# `matches_production_defaults` in `eval/run_eval.py`. That conjunction is the
+# authority on how many knobs it has, and
+# `test_the_knob_comment_names_every_conjunction_term` below reads its terms out
+# of the source rather than restating a number, so `KNOBS` carrying fewer names
+# than the conjunction has terms is a deliberate gap in this mirror and nobody may
+# fix it by editing prose. `expand_graph` is deliberately not a key here either:
+# production's default is False (`_vault_recall` reads
+# `params.get("expand_graph", False)`) while the eval runs the graph leg expanded
+# as a measurement choice, and #1000 owns that claim.
 KNOBS = {"graph_rerank": "RECALL_GRAPH_RERANK",
          "rerank_alpha": "RECALL_RERANK_ALPHA",
          "graph_top_k": "RECALL_GRAPH_TOP_K",
@@ -819,6 +829,219 @@ def test_a_run_record_declares_whether_it_matched_production(tmp_path):
     rec = json.loads(latest[-1].read_text())
     assert "matches_production_defaults" in rec
     assert {"graph_rerank", "rerank_alpha", "graph_top_k", "graph_hops"} <= set(rec)
+
+
+# ── #3454: the knob comment and the conjunction it introduces ────────────────
+
+#: Where the knob comment block lives: it opens `count_overreach_regressions`,
+#: far below the call site that introduced it.
+INTRO_HEAD = "# The six retrieval knobs that are terms of"
+
+#: Spellings that must stay out of `eval/run_eval.py` for good. They were two
+#: counts seven lines apart that each misdescribed one list (#3454); the second is
+#: pinned as a phrase rather than a number, because renumbering it to "five" would
+#: keep the wrong-set half of the error. Measured at the base commit, only the
+#: first of these two was findable by grep: the file wrapped the second across a
+#: line break, which is why the check below reads comment prose, not raw bytes.
+STALE_COUNT_PHRASES = ("five retrieval knobs", "NOT one of the four")
+
+_TERM = re.compile(r"\bargs\.([a-z_]+)\s*==\s*RECALL_([A-Z_]+)\b")
+_BACKTICK = re.compile(r"`([a-z_]+)`")
+
+
+def _source(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def _prose(text: str) -> str:
+    """`text` with comment leaders stripped and whitespace collapsed.
+
+    A wrapped comment is one sentence to a reader and to a grep it is several, so
+    matching on raw bytes is how a pin goes silently vacuous: at the base commit
+    the file read `deliberately NOT one of the\\n# four`, and grepping the plain
+    phrase found nothing while the claim it carried was still there.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"(?m)^\s*#\s?", "", text))
+
+
+def _intro_comment(source: str) -> str:
+    """The comment block that opens `count_overreach_regressions`, verbatim.
+
+    Contiguous `#` lines from the block's first line, and nothing past them: the
+    block abuts the `def` it documents with no blank line between, so a slice to
+    the next blank line would swallow the signature and the docstring and make
+    every assertion below a test of that docstring instead.
+    """
+    assert INTRO_HEAD in source, (
+        f"the knob comment block no longer opens with {INTRO_HEAD!r}, so this file "
+        "has no view on which knobs `matches_production_defaults` gates on — "
+        "re-point INTRO_HEAD, do not delete these nodes")
+    lines = source[source.index(INTRO_HEAD):].splitlines()
+    return "\n".join(itertools.takewhile(lambda L: L.startswith("#"), lines))
+
+
+def _conjunction_terms(source: str) -> list:
+    """The `(knob, CONSTANT)` pairs read out of the conjunction's own source.
+
+    `matches_production_defaults` is the only place in the file that spells a
+    comparison `args.<knob> == RECALL_<CONSTANT>`, so the pattern finds the terms
+    wherever they sit and however many there are. That is what lets a seventh
+    term go red here instead of quietly disagreeing with prose.
+    """
+    key = source.index('"matches_production_defaults": (')
+    block = source[key:source.index("),", key)]
+    return _TERM.findall(block)
+
+
+def _constant_knob(const: str) -> str:
+    """The knob name a reader knows: `RECALL_RERANK_ALPHA` → `rerank_alpha`.
+
+    The conjunction spells its terms as `args.<dest> == RECALL_<KNOB>`, and one
+    dest is not the knob's name — `--alpha` lands on dest `alpha` while the
+    parameter, the constant and this repo's prose all call the knob
+    `rerank_alpha` (the argparse node above pins that mapping). So a term counts
+    as named when the block names either spelling, and the divergence itself is
+    pinned below rather than smoothed over.
+    """
+    return const.removeprefix("RECALL_").lower()
+
+
+def _assert_comment_names_the_terms(comment: str, terms) -> None:
+    """The shared check: every knob the conjunction compares is named in the
+    block that introduces it."""
+    named = set(_BACKTICK.findall(_prose(comment)))
+    missing = sorted(knob for knob, const in terms
+                     if knob not in named and _constant_knob(const) not in named)
+    assert not missing, (
+        f"the knob comment block does not name {missing}, although "
+        "`matches_production_defaults` compares each of them — the block is the "
+        "surface a reader cites for which knobs the eval inherits from production, "
+        "and a term missing from it is the drift #3454 was filed about")
+
+
+def test_the_knob_comment_names_every_conjunction_term():
+    """Clause 2: comment and conjunction are read in one test, so a future
+    seventh term fails here until the comment names it.
+
+    The derivation is the point, not the count. Every number this pair of files
+    used to publish — five in `eval/run_eval.py`, four three lines later, four
+    above five entries here — was a restatement of a list somebody had stopped
+    counting.
+    """
+    source = _source("eval/run_eval.py")
+    terms = _conjunction_terms(source)
+    # Positive control on the extractor: two known-equal pairs must come back
+    # with their constants attached, or the pattern is matching nothing and every
+    # assertion below is vacuous.
+    assert ("graph_rerank", "GRAPH_RERANK") in terms, terms
+    assert ("djev_rerank", "DJEV_RERANK") in terms, terms
+    # The clause's own subject: `djev_rerank` is a term, and it is the one the
+    # old comment left out while still claiming to list them all.
+    assert "djev_rerank" in [k for k, _ in terms], terms
+    # The alias `_assert_comment_names_the_terms` allows exists for exactly one
+    # term, and it is a fact about this file rather than a licence: `--alpha` has
+    # dest `alpha` while every other dest is its knob's own name. A second such
+    # term would mean the pattern below is being satisfied by a name that
+    # corresponds to no knob, which is how a mirror test compares a knob to
+    # itself.
+    assert sorted((k, _constant_knob(c)) for k, c in terms if k != _constant_knob(c)) \
+        == [("alpha", "rerank_alpha")], terms
+    _assert_comment_names_the_terms(_intro_comment(source), terms)
+
+
+def test_the_knob_comment_says_which_knobs_are_recorded_but_not_terms():
+    """The other half of the sentence a reader needs: which knobs the eval
+    carries that the conjunction does NOT gate on. `expand_graph` is the one with
+    a live reason (#1000), and the header above `KNOBS` in this file repeats that
+    reason, so both surfaces are pinned to the same owner."""
+    source = _source("eval/run_eval.py")
+    comment = _intro_comment(source)
+    conjunction = {k for k, _ in _conjunction_terms(source)}
+    recorded_not_terms = {"expand_graph", "djev_rerank_top", "semantic_seeding"}
+    assert recorded_not_terms <= set(_BACKTICK.findall(_prose(comment))), comment
+    assert not (recorded_not_terms & conjunction), (
+        f"{sorted(recorded_not_terms & conjunction)} is now a term of the "
+        "conjunction, so the comment's 'recorded but NOT terms' list has to shrink")
+    assert "#1000" in comment, comment
+    assert "#1000" in _source("tests/test_eval_scorer.py"), (
+        "this file's own header above KNOBS carries the same #1000 claim; the two "
+        "surfaces must not disagree about who owns it")
+
+
+@pytest.mark.parametrize("stale", STALE_COUNT_PHRASES)
+def test_the_two_stale_counts_stay_out_of_the_file(stale):
+    """Clause 1's second half. The block's stated number is pinned to the derived
+    term count by the node below, so the way back into this error is a reworded
+    count — pinning the two phrases is what stops a rewrite putting one of these
+    specific ones back. Matched on comment prose, not raw bytes: one of the two
+    survived at the base commit precisely because it was wrapped."""
+    prose = _prose(_source("eval/run_eval.py"))
+    assert stale not in prose, stale
+    # Positive control: the matcher has to be able to see a wrapped count, or a
+    # clean result here is a property of the pattern and not of the file.
+    wrapped = "# deliberately NOT one of\n# the four: production's default\n"
+    assert "NOT one of the four" in _prose(wrapped), _prose(wrapped)
+
+
+#: Spelled-out numbers, so a count in prose can be compared to a count in code.
+_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def test_the_count_the_comment_states_equals_the_derived_term_count():
+    """The block keeps a reader-facing number, and that number is now checked
+    against the conjunction rather than against someone's memory of it. `five`
+    and `four` were both once plausible readings of the same six-term list; a
+    seventh term makes `six` wrong in exactly one place, and this node names it."""
+    source = _source("eval/run_eval.py")
+    comment = _intro_comment(source)
+    stated = [_WORDS[w] for w in re.findall(
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+retrieval\s+knobs\b",
+        _prose(comment))]
+    assert stated, (
+        "the block no longer opens with a spelled-out count, so the phrase pin "
+        "above is the only thing between a rewrite and a wrong number")
+    terms = _conjunction_terms(source)
+    assert stated == [len(terms)], (
+        f"the comment block states {stated} retrieval knob(s) while "
+        f"`matches_production_defaults` compares {len(terms)}: "
+        f"{[k for k, _ in terms]}")
+
+
+def test_the_knobs_header_names_every_key_and_counts_nothing():
+    """Clause 3: the header above `KNOBS` read 'The four knobs' over five entries
+    — #843 added `seed_top_k` and the number did not follow. It now names the keys
+    it claims to name, and the count is gone rather than corrected."""
+    source = _source("tests/test_eval_scorer.py")
+    head = source[:source.index("KNOBS = {")]
+    comment = head[head.rindex("# What `KNOBS` holds"):]
+    assert "KNOBS" in comment, comment
+    for knob in KNOBS:
+        assert f"`{knob}`" in comment, f"the header above KNOBS does not name {knob}"
+    assert not re.search(r"\b(one|two|three|four|five|six|seven|eight) knobs?\b",
+                         comment), f"the header still states a bare count: {comment}"
+    # Membership, unchanged: `djev_rerank` stays out of this mirror. The dict
+    # exists to compare signature-vs-constant by name, and widening it would
+    # change what the two nodes above pin — a different claim than a stale count.
+    assert list(KNOBS) == ["graph_rerank", "rerank_alpha", "graph_top_k",
+                           "graph_hops", "seed_top_k"], list(KNOBS)
+
+
+def test_the_doc_s_citation_still_lands_on_the_conjunction():
+    """Clause 4, from the code side. `architecture/autonomy-jobs.md` cites
+    `eval/run_eval.py:2448` for the conjunction itself, and editing the comment
+    block above it can move that line silently: the #3292/#2971 rail in
+    tests/test_architecture_coverage_doc_claims.py will not notice, because a
+    `path:NNN` citation only has to be shorter than the file. So the number is
+    re-derived here from the doc's own text."""
+    doc = _source("architecture/autonomy-jobs.md")
+    cited = [int(n) for n in re.findall(r"`eval/run_eval\.py:(\d+)`", doc)]
+    assert 2448 in cited, f"the doc no longer cites :2448 for the conjunction: {cited}"
+    lines = _source("eval/run_eval.py").splitlines()
+    for n in cited:
+        assert '"matches_production_defaults": (' in lines[n - 1], (
+            f"architecture/autonomy-jobs.md cites eval/run_eval.py:{n} for the "
+            f"conjunction, and that line reads {lines[n - 1]!r}")
 
 
 # ── #1260 clause 2: the entity leg resolves before it compares ───────────────

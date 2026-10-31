@@ -1183,8 +1183,9 @@ a conjunction over six knobs (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
 `graph_hops`, `seed_top_k`, `djev_rerank`, `eval/run_eval.py:2448`) and graph
 expansion is deliberately a *sibling* field (`expand_graph_matches_production`),
 because production defaults it False while the eval runs it on as a measurement
-choice (#1000) — the comment block introducing those knobs still counts them
-wrong (#3454). The corpus is no longer the 20 queries this row once advertised:
+choice (#1000). The comment block introducing those knobs counted them wrong until
+#3454, whose test now reads the conjunction's own terms out of that file. The
+corpus is no longer the 20 queries this row once advertised:
 `98fa216b` (2026-09-20) grew it n=20 → n=78 because at n=20 the nightly could not
 detect the change it exists to detect, and it holds 81 today (measured 2026-10-26).
 The 27-query reserve beside it (`eval/vault_recall_holdout_queries.yaml`, #1412) is

@@ -724,17 +724,17 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None, *,
     return out
 
 
-# The five retrieval knobs below (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
-# `graph_hops`, `seed_top_k`) default to production's value BY IMPORT, never by a
-# restated literal. Until #498 the literals here were the pre-#322 settings —
+# The six retrieval knobs that are terms of `matches_production_defaults`, far
+# below (`graph_rerank`, `rerank_alpha`, `graph_top_k`, `graph_hops`, `seed_top_k`,
+# `djev_rerank`), default to production's value BY IMPORT rather than a restated
+# literal. Until #498 the literals here were the pre-#322 settings —
 # `rerank_alpha=0.5` against production's 0.3 — and 59cd7bf fixed only the
 # argparse half, so any programmatic caller inherited a configuration nothing
-# serves (its first version of `agent_mcp/fact_improvement.py:_fact_entity_recall`
-# reported exactly such a number). `expand_graph` is deliberately NOT one of the
-# four: production's default for that knob is False (`_vault_recall`) while the
-# eval runs it on as a measurement choice, and #1000 owns that claim.
-# tests/test_eval_scorer.py pins both directions: the signature equals the
-# constants, and build_parser()'s defaults equal the signature.
+# serves (`agent_mcp/fact_improvement.py:_fact_entity_recall`'s first version
+# reported exactly such a number). Recorded but NOT terms: `expand_graph`
+# (production's default is False in `_vault_recall`, the eval runs it on as a
+# measurement choice — #1000), `djev_rerank_top`, `semantic_seeding`, the
+# dup-metric knobs. tests/test_eval_scorer.py pins names, signature, parser.
 def count_overreach_regressions(before: list[dict], after: list[dict]) -> list[dict]:
     """Queries whose expected entity was retrievable before and is not now.
 
