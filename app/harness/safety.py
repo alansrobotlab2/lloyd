@@ -462,6 +462,15 @@ def check_bash_command(command: str, cwd: str | None = None, *,
       7. `check_live_git_writes` — refuses a `git` write that moves `HEAD` in the
          checkout the running system boots from, from an unattended session
          (#2604).
+      8. `check_empty_expansion_measurement` — refuses a command in which a
+         braced reference this tool's own environment does not define expands to
+         nothing inside a measurement position: a `find` `-name`/`-path`
+         predicate, a word carrying `*` or `?`, or a path argument. Whatever
+         blanks the reference runs downstream of this gate, so the refusal lands
+         on the text as written — and the command it would have run measures the
+         set the empty string matches, which is a plausible answer to a question
+         nobody asked (#3630). A bare `${UNSET}` in text output and any
+         `${UNSET:-fallback}` keep today's warn-and-run behaviour.
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
@@ -552,6 +561,24 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"live-checkout git write: {git_write}", excerpt)
+
+    # Eighth: whether the command still says what the caller typed
+    # (`check_empty_expansion_measurement`). Every lane above reads the text as
+    # written and asks what it does; this lane asks whether that text is what the
+    # shell will act on, because a `${NAME}` the tool's environment does not
+    # define is blanked before bash parses anything — inside quotes and inside a
+    # loop body alike. In a glob, a `find` pattern or a path argument the hole
+    # changes which files the command measures, and the run reports the number it
+    # got (#3630). Refusing is sound here and only here: the pass consumes every
+    # braced reference before the shell parses, so a command this lane turns away
+    # could not have done the thing its text reads as doing.
+    from app.harness.env_expansion import check_empty_expansion_measurement
+    empty_expansion = check_empty_expansion_measurement(command)
+    if empty_expansion:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"empty expansion: {empty_expansion}", excerpt)
     return None
 
 

@@ -1905,11 +1905,24 @@ def test_the_chain_pin_fires_on_the_defects_it_was_written_for():
         "caught as a wrong position")
 
     live = ROOT / "app" / "harness" / "live_git_writes.py"
+    # The anchor is the derived count of this lane's rest, so it moved once when
+    # #3630 joined the chain: read it as a number the body produces, not as a
+    # phrase of prose. #3131 filed the case as "other five lanes" against a
+    # six-lane chain; what is being seeded is the same defect, one short.
+    # The header spells its count as a word, so the anchor here is the word for the
+    # number the body derives: seven, since #3630 made the chain eight. The assert
+    # below is what makes that literal safe to type — a ninth lane fails it by name
+    # instead of letting the case mutate nothing.
+    rest_now = len(CHAIN_LANES) - 1
+    assert rest_now == 7, (
+        f"the body leaves this lane {rest_now} others, so 'other seven lanes' is no "
+        "longer its wording: re-point the anchor to that word (and change the seed "
+        "to one short of it)")
     stale_rest = mutated(live.read_text(encoding="utf-8"),
-                         "other six lanes", "other five lanes")
+                         "other seven lanes", "other six lanes")
     assert _chain_prose_violations("app/harness/live_git_writes.py", stale_rest), (
-        "'the other five lanes' — the count of the chain's rest filed in #3131 — "
-        "is not caught")
+        "'other six lanes' — one short of the seven the body leaves this lane, the "
+        "defect #3131 filed — is not caught")
 
     review = ROOT / "architecture" / "arch-review.md"
     stale_doc = mutated(
@@ -1919,3 +1932,56 @@ def test_the_chain_pin_fires_on_the_defects_it_was_written_for():
     assert _chain_prose_violations("architecture/arch-review.md", stale_doc), (
         "'the sixth lane of check_bash_command' — the wording filed in #3131 — "
         "is not caught")
+
+
+#: The label prefix the eighth lane emits, spelled once here and once in the body.
+_EIGHTH_LANE_PREFIX = "empty expansion: "
+
+
+def test_the_eighth_lane_of_check_bash_command_is_numbered_defined_and_reachable():
+    """#3630 added the eighth lane; this is the boundary the chain rails cannot
+    see from outside.
+
+    The rails above derive the ordinals from the docstring's enumeration and the
+    body's call sites, so a lane joining the chain costs this file nothing — which
+    is exactly why the new lane needs one assertion of its own. A numbered item
+    whose symbol does not exist, or a prefix no command can make fire, leaves every
+    one of those rails green: they read prose and call sites, never what the call
+    returns. All three links are therefore checked against the shipped module —
+    `8.` in the enumeration, the symbol importable from the module the prose names,
+    and the prefix appearing in a refusal produced by `check_bash_command` itself:
+    the same call `agent_mcp/main.py` makes at dispatch, which is the process
+    boundary the lane was built to sit on.
+    """
+    from app.harness import safety
+
+    chain = _chain_lanes()
+    assert chain[-1] == "check_empty_expansion_measurement", chain
+    assert chain.index("check_empty_expansion_measurement") == 7, chain
+    assert _chain_import_order()[-1] == "check_empty_expansion_measurement", (
+        "the AST walk and the import scan disagree about who is last")
+    assert _EIGHTH_LANE_PREFIX in SAFETY_TEXT, (
+        "the label the body returns and the one this file asserts are one string; "
+        "if they drift, every matcher below silently stops matching anything")
+
+    doc = ast.get_docstring(_chain_fn(SAFETY_TEXT)) or ""
+    assert "8. `check_empty_expansion_measurement`" in doc, (
+        f"the body runs {len(chain)} lanes; the enumeration must reach that number")
+
+    from app.harness.env_expansion import check_empty_expansion_measurement as lane
+    assert callable(lane)
+    assert lane.__doc__ and "measurement position" in lane.__doc__, (
+        "the lane's own docstring is where its population and its two exclusions "
+        "are written down for the next reader")
+
+    match = safety.check_bash_command(
+        'echo "n=$(ls -1 /tmp/*_${RUNDATE}_* 2>/dev/null | wc -l)"', None,
+        session_id="20261031_103101_autocode_e3b1")
+    assert match is not None, "the eighth lane did not fire on its own headline case"
+    assert match[0].startswith(_EIGHTH_LANE_PREFIX), match[0]
+    assert "${RUNDATE}" in match[0], match[0]
+    # The other side of the same call site: the item's leave-alone probe still
+    # returns None here, or the lane is not the narrow thing the prose says.
+    assert safety.check_bash_command(
+        'echo "[${RUNDATE}]"', None,
+        session_id="20261031_103101_autocode_e3b1") is None

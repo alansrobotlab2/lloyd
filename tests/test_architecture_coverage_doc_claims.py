@@ -10988,7 +10988,7 @@ def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_repl
         "`:435`": "`:413`",
         "`:549`": "`:523`",
         "`agent_mcp/browser.py:723`": "`agent_mcp/browser.py:694`",
-        "`app/harness/safety.py:616`": "`app/harness/safety.py:526`",
+        "`app/harness/safety.py:643`": "`app/harness/safety.py:526`",
         "`app/routers/turn_options.py:259`": "`app/routers/turn_options.py:249`",
         "`:257`": "`:247`",
         "`agent_mcp/main.py:532`": "`agent_mcp/main.py:529`",

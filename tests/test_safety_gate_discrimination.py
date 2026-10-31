@@ -900,6 +900,60 @@ def test_the_canary_commit_step_leaves_the_lane_refusing_the_raw_verbs_it_replac
         "the step's write surface must stay the one directory this lane refuses by verb"
 
 
+# ── #3630: an empty expansion is refused only where it changes a measurement ───
+#
+# The lane exists because a run reported `n=10` as a census of one day's records:
+# `${RUNDATE}` was blanked before bash parsed anything, so the pattern the shell
+# acted on was `/tmp/*__*`, and ten unrelated files answered a question about a
+# date. What separates this lane from a ban on variables is exactly three shapes
+# it must leave alone — text output, the `:-fallback` form, and a braced name the
+# tool's own environment defines — so they are graded here, not only as two rows
+# of the corpus, whose single printed number (`false-block 0/31`) is equally
+# produced by a lane that never fires at all. Each arm is paired with the command
+# one change away from it that IS refused, so an arm passing because the lane is
+# inert cannot pass here.
+
+#: (label, command) that must reach the shell exactly as written.
+_EMPTY_EXPANSION_ALLOW = [
+    ("a bare unset reference in text output",
+     'echo "result=[${RUNDATE}]"'),
+    ("the fallback form, even inside the glob that is refused elsewhere",
+     'echo "n=$(ls -1 /tmp/*_${RUNDATE:-2026-10-31}_* 2>/dev/null | wc -l)"'),
+    ("a glob whose variable the tool's environment actually defines",
+     'ls -l ${HOME}/logs/*'),
+]
+
+#: The same three, each with one thing changed, each refused by name.
+_EMPTY_EXPANSION_REFUSE = [
+    ("text output becomes a path argument",
+     'ls -l /tmp/${RUNDATE}.log', "RUNDATE"),
+    ("the fallback is dropped from the glob",
+     'echo "n=$(ls -1 /tmp/*_${RUNDATE}_* 2>/dev/null | wc -l)"', "RUNDATE"),
+    ("the defined name is replaced by one that is not",
+     'ls -l ${LOGDIR}/logs/*', "LOGDIR"),
+]
+
+
+def test_the_empty_expansion_lane_refuses_measurements_and_nothing_else():
+    """Clause 3 (#3630): three arms keep warn-and-run, and each is one edit away
+    from a command the lane turns away naming its reference."""
+    for label, cmd in _EMPTY_EXPANSION_ALLOW:
+        with corpus._scratch_tree() as home:
+            match = corpus.check_bash_command(cmd, str(home / "lloyd"),
+                                              session_id=corpus._CHAT_SESSION,
+                                              parent_of=corpus._parent_of)
+        assert match is None, f"{label}: refused -> {match!r}"
+    for label, cmd, name in _EMPTY_EXPANSION_REFUSE:
+        with corpus._scratch_tree() as home:
+            match = corpus.check_bash_command(cmd, str(home / "lloyd"),
+                                              session_id=corpus._CHAT_SESSION,
+                                              parent_of=corpus._parent_of)
+        assert match is not None, f"{label}: allowed through: {cmd!r}"
+        assert corpus._deciding_gate(match) == "empty-expansion", (label, match[0])
+        assert "${" + name + "}" in match[0], (label, match[0])
+    print("test_the_empty_expansion_lane_refuses_measurements_and_nothing_else: OK")
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
@@ -913,6 +967,7 @@ TESTS = [
     test_the_lane_replies_for_a_subagent_only_when_its_parent_is_unattended,
     test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live,
     test_the_canary_commit_step_leaves_the_lane_refusing_the_raw_verbs_it_replaces,
+    test_the_empty_expansion_lane_refuses_measurements_and_nothing_else,
 ]
 
 

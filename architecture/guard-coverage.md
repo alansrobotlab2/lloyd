@@ -115,7 +115,7 @@ below are shaped the way they are: **four** of the guards reach a worker's strea
 turn through one builder — `install_default_safety_hook`, `install_policy_hook`
 where a grant scope exists, `_install_action_review` on `kind == "stream"`, and
 the outbound gate, which is armed from *inside* the safety installer at
-`app/harness/safety.py:616` and so appears in that command only because
+`app/harness/safety.py:643` and so appears in that command only because
 `app/harness/safety.py` is in its path list. The first version of this page said
 "three", and its own table cell reading "beside the safety hook" contradicted it:
 the command could not see the transitive arm, so the sentence was copied from the

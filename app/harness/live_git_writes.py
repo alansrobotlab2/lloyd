@@ -85,7 +85,7 @@ Two deliberate asymmetries with the neighbouring lanes:
     `check_service_control` would let it pass. `attended_session` says what counts
     as evidence and why `classify_session`'s "attended" cannot be reused as-is.
   * **`cwd=None` means the aggregator's directory**, the same convention as the
-    other six lanes, not the turn's real working directory. A bare `git commit`
+    other seven lanes, not the turn's real working directory. A bare `git commit`
     is therefore refused only when the caller named the live directory or a `cd`
     got there. A Bash tool call with no `cwd` argument in production runs the
     MCP aggregator, which is not the live checkout — so this is not the hole it
