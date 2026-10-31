@@ -164,8 +164,8 @@ def tight_limit(filename: str, tightness: float = MEMORY_TIGHTNESS) -> int | Non
 
     Derived here and nowhere else, because three readers need the same arithmetic:
     the write guard below, `validate_memory_index.check`'s full mode, and
-    `memory_ledger.py status`'s CURATE trigger. None for a name that is not a
-    loaded memory file — there is no line to hold it to.
+    `memory_ledger.py status`'s CURATE trigger. Only `INDEX_MEMORY_FILE` is held
+    to it (#3629) — see `index_bounds_apply`. None for a name that is not loaded.
     """
     ceiling = memory_ceiling(filename)
     return None if ceiling is None else int(ceiling * tightness)
@@ -189,14 +189,14 @@ def index_tight_limit_error(filename: str, text: str) -> str | None:
 
     The refusal is the instruction, so it routes the writer instead of leaving it
     to improvise: §2a-bis of the knowledge-write skill forbids an ad hoc trim, and
-    a refusal that only names a number is precisely what sends a writer to trim
-    another entry to squeeze its own line in. Names the limit it refused at, in
-    bytes, beside the file's own prospective size.
+    a refusal that only names a number is what sends a writer to trim another
+    entry to fit. None for a name other than `INDEX_MEMORY_FILE` (#3629): this
+    text's advice is the reverse of the ceiling refusal such a write really gets.
     """
     limit = tight_limit(filename)
     ceiling = memory_ceiling(filename) or 0
     size = len(text.encode("utf-8"))
-    if limit is None or size <= limit:
+    if not index_bounds_apply(filename) or limit is None or size <= limit:
         return None
     return (
         f"{filename} would be {size:,} bytes, over the {limit:,}-byte tight limit "
@@ -330,7 +330,7 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         return topic_size_error(topic, prospective)
     ceiling = memory_ceiling(filename) or 0
     size = len(prospective.encode("utf-8"))
-    if filename == INDEX_MEMORY_FILE:
+    if index_bounds_apply(filename):
         # #3562: the room reserve is asked HERE, above the shrink escape, because a
         # tightening pass is by definition a shrink and the escape below answers
         # None for every one of them — which is how #3542 shipped an index left with
@@ -351,7 +351,7 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         return None
     if size > ceiling:
         return size_error(filename, prospective)
-    if filename == INDEX_MEMORY_FILE:
+    if index_bounds_apply(filename):
         # The long-line rule first: it is the specific instruction (shorten this
         # line, route its detail to a topic file) where the tight-limit refusal is
         # the general one, and a writer shown a byte count over a line it could
@@ -835,7 +835,7 @@ def index_room_reserve_error(path: str | os.PathLike[str], filename: str,
     generator of the orphan keeps generating it. Every string of consequence is a callee's,
     so the 40-character rule on `memory_write_error`'s own code objects is untouched.
     """
-    if filename != INDEX_MEMORY_FILE:
+    if not index_bounds_apply(filename):
         return None
     limit = tight_limit(filename)
     if limit is None:
@@ -856,3 +856,38 @@ def index_room_reserve_error(path: str | os.PathLike[str], filename: str,
     # advice was copied would be a second text to keep honest, which is what #2637/#2838 left
     # as the standing warning against doing this twice.
     return head + " " + _index_room_advice(path, filename, prospective)
+
+
+# ── #3629: which file the tight bounds are enforced against ─────────────────────
+#
+# The scope used to exist only as four copies of `filename == INDEX_MEMORY_FILE` inside
+# this module, and the one reader that needed to *report* it had to guess. It guessed the
+# way #3629 recorded it: `status` printed `tight limit NNNN` and `-> CURATE` for
+# `USER.md` and for the index off identical arithmetic, and the nightly chain read the
+# pair as a growth refusal. No writer ever applied that limit to `USER.md` — the ceiling
+# is the only refusal that file can receive, which is what `index_bounds_apply` now says.
+# One predicate answers the question now, the guard branches on it, and the instrument
+# prints what it answers. Placed at the bottom for the reason the block inside
+# `memory_write_error` gives: anything inserted above its `def` moves a line that
+# `lloyd/reviews/2026-09-14-user-md-audit.md` cites by number.
+
+def index_bounds_apply(filename: str) -> bool:
+    """Whether the tight bounds are enforced against writes to `filename`.
+
+    True for `INDEX_MEMORY_FILE` alone. The tight limit (`index_tight_limit_error`),
+    its no-room re-texting (`index_no_room_error`), the room reserve
+    (`index_room_reserve_error`) and the line cap (`index_line_length_error`) are index
+    mechanics, scoped there for the reason `INDEX_MEMORY_FILE`'s own comment gives — and
+    every other loaded memory file has exactly one enforced write bound: its ceiling,
+    answered by `size_error`. `USER.md` is such a file, which is why its `CURATE` is a
+    curation trigger and never a frozen file.
+
+    A predicate and not a comment, because `scripts/memory/memory_ledger.py status` has
+    to *say* which bound bites, and a report that re-spelled the file's name would be a
+    second definition able to disagree with the guard it describes — the same reason
+    `tight_limit` lives here rather than in each script that reads it (#1010).
+    `tests/test_memory_index_cap.py::test_the_status_comment_no_longer_calls_the_tight_limit_a_write_bound_for_both_files`
+    is the pin: it reddens if the entry point stops branching on this name, which is the
+    moment the predicate would become the second definition it exists to avoid.
+    """
+    return filename == INDEX_MEMORY_FILE

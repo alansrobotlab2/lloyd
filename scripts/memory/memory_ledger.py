@@ -87,7 +87,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from app.memory_ceiling import tight_limit  # noqa: E402
+from app.memory_ceiling import index_bounds_apply, tight_limit  # noqa: E402
 from app.data_root import vault_root
 
 #: How much of an entry identifies it. Long enough that two entries in one
@@ -185,8 +185,8 @@ def ledger_rows(text: str) -> list[dict]:
 
 def status(memories_dir: Path) -> dict:
     from app.prompt_surface import memory_ceiling
-    # `tight_limit` derives the same number the write guard refuses growth past
-    # and the validator reports the index red over — one definition, three readers.
+    # `tight_limit` is one definition, three readers; `app/memory_ceiling.py` enforces
+    # its tight bounds on `INDEX_MEMORY_FILE` alone — `enforced_write_bound` says which.
     report = {}
     for name, ledger_name in LEDGERS.items():
         path = memories_dir / name
@@ -209,8 +209,16 @@ def status(memories_dir: Path) -> dict:
         unchecked = sorted((r for r in rows if r["anchor"] in live),
                            key=lambda r: r["checked"] or "")
         limit = tight_limit(name)
+        # Which bound `memory_write_error` would refuse this file's next growth by,
+        # read from the predicate that guard itself branches on (#3629). Both loaded
+        # files print a tight limit and both print CURATE off the same arithmetic; for
+        # a profile the limit is a curation trigger and the ceiling is the refusal.
+        tight_enforced = index_bounds_apply(name)
         report[name] = {
             "bytes": size, "ceiling": ceiling, "tight_limit": limit,
+            "tight_enforced": tight_enforced,
+            "enforced_write_bound": (f"tight limit {limit}" if tight_enforced
+                                     else f"ceiling {ceiling}"),
             "headroom": None if ceiling is None else ceiling - size,
             "curate": limit is not None and size > limit - HEADROOM_BYTES,
             "entries": len(entries), "ledger": str(lpath), "rows": len(rows),
@@ -437,8 +445,17 @@ def main(argv=None) -> int:
         if r.get("missing"):
             print(f"{name}: missing")
             continue
+        # The bound the write guard enforces is printed beside the bound the CURATE
+        # trigger is measured against, because for a profile the two differ — and a
+        # reader given only the second has been reading its `CURATE` as a frozen file
+        # (#3629). This wording is an interface: `tests/test_memory_ledger.py` pins both
+        # clauses, and §2a-ter of the knowledge-write skill opens on the `-> CURATE`.
+        bound = (f"tight limit {r['tight_limit']} enforced on growth"
+                 if r["tight_enforced"] else
+                 f"tight limit {r['tight_limit']} not enforced on writes; enforced "
+                 f"write bound is its {r['ceiling']} B ceiling")
         print(f"{name}: {r['bytes']} / {r['ceiling']} B (headroom {r['headroom']}, "
-              f"tight limit {r['tight_limit']}), "
+              f"{bound}), "
               f"{r['entries']} entries, {r['rows']} ledger rows"
               + ("  -> CURATE" if r["curate"] else ""))
         print(f"  without a row: {len(r['without_row'])}; "

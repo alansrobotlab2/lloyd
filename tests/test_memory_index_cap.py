@@ -2022,3 +2022,76 @@ def test_a_write_under_the_reserve_that_also_breaks_the_line_cap_is_told_the_lin
     assert "leaving only" not in msg, (
         f"the reserve refusal answered a case the line cap owns: {msg}")
     assert msg == ceiling.index_line_length_error("MEMORY.md", grown), msg
+
+
+# ── #3629: no lane can be handed a tight-limit refusal for a file it does not bound ──
+#
+# `memory_write_error` reaches `index_tight_limit_error` only inside
+# `if index_bounds_apply(filename)`, so the arm this round adds was unreachable from the
+# entry point — and the unreachable text is the defect, not a harmless dead branch. The
+# round's own probe: one prospective `USER.md` write of 16,402 B (past the 13,107 B tight
+# limit AND past the 16,384 B ceiling) drew `… or trim another entry in the same edit`
+# from `memory_write_error`, and from a direct call
+# `index_tight_limit_error('USER.md', …)` returned `Do not trim or shorten another entry
+# to squeeze this one in`. Two refusals, opposite instructions, one file: any lane that
+# asks this function a question the guard never asks it was told to do the thing the
+# refusal it *does* receive forbids. The scope now lives in one predicate both sides read.
+
+
+def test_the_tight_limit_refusal_answers_none_below_index_memory_file(memories_root):
+    """Clause 3: the scope is inside the refusal, not only in the chain that calls it.
+
+    Every non-index name is over its own tight limit in this fixture, so a refusal here
+    is a live contradiction rather than a hypothetical one — and the index keeps its
+    refusal unchanged, which is the half that stops the arm from narrowing the bound.
+    """
+    session, root = memories_root
+    user = "- [user] " + "u" * 13_500 + "\n"
+    size = len(user.encode("utf-8"))
+    assert ceiling.tight_limit("USER.md") < size < ceiling.memory_ceiling("USER.md"), size
+    assert ceiling.index_tight_limit_error("USER.md", user) is None, (
+        "USER.md's only enforced write bound is its ceiling, so a tight-limit refusal for "
+        "it is advice about a bound no guard applies to that file")
+    assert ceiling.index_no_room_error(root / "USER.md", "USER.md", user) is None, (
+        "the re-texted tight refusal must follow its own condition out of the file")
+    assert ceiling.index_room_reserve_error(root / "USER.md", "USER.md", user) is None, (
+        "the room reserve is index mechanics too, and answers from the same scope")
+    assert ceiling.index_bounds_apply("USER.md") is False
+    assert ceiling.index_bounds_apply(ceiling.INDEX_MEMORY_FILE) is True
+
+    over_ceiling = "- [user] " + "u" * 17_000 + "\n"
+    msg = ceiling.memory_write_error(root / "USER.md", over_ceiling)
+    assert msg is not None and "ceiling" in msg, msg
+    assert "tight limit" not in msg, (
+        f"a USER.md ceiling refusal carried the tight-limit sentence too: {msg}")
+
+    index = _index_of_size(ceiling.tight_limit("MEMORY.md") + 500)
+    kept = ceiling.index_tight_limit_error("MEMORY.md", index)
+    assert kept is not None and "20,480-byte tight limit" in kept, kept
+
+
+def test_the_status_comment_no_longer_calls_the_tight_limit_a_write_bound_for_both_files():
+    """Clause 4: the comment above `status()` is an artefact, so it is graded as one.
+
+    It read: "`tight_limit` derives the same number the write guard refuses growth past —
+    one definition, three readers", and the nightly lanes that produced the #3629 premise
+    read exactly that sentence. The write guard refuses `USER.md` nothing until its
+    ceiling, so the definition is shared and the enforcement is not. The node reads the
+    comment out of the script's source, because a round that labelled the printed line and
+    left the comment would still ship the false generality to the next reader — and it
+    reads the guard's source too, because the predicate the instrument depends on is only
+    one definition if the guard branches on it as well.
+    """
+    src = (ROOT / "scripts" / "memory" / "memory_ledger.py").read_text(encoding="utf-8")
+    head = src[src.index("def status("):src.index("report = {}")]
+    assert "INDEX_MEMORY_FILE" in head, head
+    assert "app/memory_ceiling.py" in head, head
+    assert "the write guard refuses growth past" not in head, head
+
+    guard = (ROOT / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    body = guard[guard.index("def memory_write_error("):
+                 guard.index("# ── the topic-file NAME bound")]
+    assert body.count("index_bounds_apply(filename)") == 2, (
+        "the entry point must branch on the predicate the instrument reads, at both of "
+        "its scoped arms, or the predicate is a second definition of the scope free to "
+        "drift from the guard")

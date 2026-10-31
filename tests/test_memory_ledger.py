@@ -860,3 +860,113 @@ def test_the_landed_memory_ledger_archive_is_fenced_on_the_live_vault():
     assert fm["type"] in validate_okf.KNOWN_TYPES and fm["segment"] == "lloyd", fm
     assert text.startswith("---\ntype: note\nsegment: lloyd\n"), "the siblings' key order"
     assert "# memory-md-ledger — retired rows" in text[m.end():], "title follows the fence"
+
+
+# ── #3629: the line names the bound the write guard enforces on THAT file ──────
+#
+# `status` printed `tight limit NNNN` and `-> CURATE` for both loaded files, and the
+# nightly chain read that pairing as "growth past this number is being refused" — which
+# is what `signals-latest.md`'s Explicit #3 published as a premise on 2026-10-31. For
+# `USER.md` it is false: `app/memory_ceiling.py` gates every tight bound behind
+# `INDEX_MEMORY_FILE`, so that file's only refusal is the ceiling one, and its CURATE
+# (trigger 12,083 B) has been lit continuously since the file first crossed it — the
+# vault's own history byte-counts it at 16,178 B on 2026-10-08. So the marker carries no
+# bits for `USER.md` and the instrument has to add information to the line. Re-tuning is
+# not on the table: #1895's rule is that the trigger only ever widens who is asked, and
+# `test_the_marker_only_widens_and_never_silences` is the pin. This section keeps it.
+
+
+def _user_dir_at(tmp_path, user_bytes: int) -> Path:
+    """A memories dir whose `USER.md` is exactly `user_bytes`.
+
+    `USER` plus a padding line, the construction
+    `test_the_marker_only_widens_and_never_silences` already uses: the pad is not a
+    bullet, so the entry count stays 3 and only the byte figure moves.
+    """
+    return _dir(tmp_path, user=USER + "x" * (user_bytes - len(USER.encode("utf-8"))))
+
+
+def test_the_status_line_names_the_bound_that_bites_on_that_file(capsys, tmp_path):
+    """Clause 1: each line prints the bound `memory_write_error` enforces for it.
+
+    Both fixtures sit in the band where the two instruments disagree, so the label is
+    the only information that separates them: `USER.md` at 13,600 B is 493 B over its
+    13,107 B tight limit and 2,784 B short of its 16,384 B ceiling, while `MEMORY.md` at
+    19,918 B is 562 B short of its own 20,480 B limit. `status` prints CURATE for both
+    off identical arithmetic; only `MEMORY.md` has a writer that is refused for crossing
+    the number printed beside its marker.
+    """
+    d = _memories_with(tmp_path, 19_918)
+    (d / "USER.md").write_text(USER + "x" * (13_600 - len(USER.encode("utf-8"))),
+                               encoding="utf-8")
+    assert ml.main(["status", "--memories-dir", str(d)]) == 0
+    got = {ln.split(":")[0]: ln
+           for ln in capsys.readouterr().out.splitlines()
+           if ln.startswith(("USER.md:", "MEMORY.md:"))}
+    user, mem = got["USER.md"], got["MEMORY.md"]
+
+    assert user.startswith("USER.md: 13600 / 16384 B"), user
+    assert "tight limit 13107 not enforced" in user, user
+    assert "16384 B ceiling" in user, user
+    assert user.endswith("-> CURATE"), user
+
+    assert mem.startswith("MEMORY.md: 19918 / 25600 B"), mem
+    assert "tight limit 20480 enforced on growth" in mem, mem
+    assert "not enforced" not in mem, mem
+    assert mem.endswith("-> CURATE"), mem
+
+
+def test_the_bound_the_line_names_is_the_one_the_write_guard_refuses(tmp_path, monkeypatch):
+    """The seam #3629 is about, crossed rather than asserted from a constant.
+
+    `status()` takes the scope from `app.memory_ceiling.index_bounds_apply` — the same
+    predicate `memory_write_error` branches on — so a report cannot call a bound enforced
+    that the guard does not apply. And the guard is asked the same question here: a
+    `USER.md` growth write across its 13,107 B tight limit is ADMITTED (the item's probe,
+    reproduced), while the same file grown past its 16,384 B ceiling is refused by the
+    ceiling text alone. "Alone" is the second half of the clause: the tight-limit
+    sentence must not appear in a `USER.md` refusal at all, because its advice — "Do not
+    trim or shorten another entry" — is the opposite of the ceiling refusal's.
+    """
+    from app import memory_ceiling as ceiling
+
+    d = _user_dir_at(tmp_path, 13_600)
+    monkeypatch.setattr(ceiling, "MEMORIES_DIR", d)
+    rep = ml.status(d)["USER.md"]
+    assert rep["tight_enforced"] is False, rep
+    assert rep["enforced_write_bound"] == "ceiling 16384", rep
+    assert ceiling.index_bounds_apply("USER.md") is False
+    assert ceiling.index_bounds_apply("MEMORY.md") is True
+
+    user = (d / "USER.md").read_text(encoding="utf-8")
+    grown = user + "- [user] " + "u" * 400 + "\n"
+    assert ceiling.tight_limit("USER.md") < len(grown.encode()) \
+        < ceiling.memory_ceiling("USER.md"), len(grown.encode())
+    assert ceiling.memory_write_error(d / "USER.md", grown) is None, (
+        "the line prints USER.md's tight limit as unenforced, and the guard refused a "
+        "growth write across it: instrument and guard disagree about the same write")
+
+    over = grown + "- [user] " + "z" * (16_384 - len(grown.encode()) + 40) + "\n"
+    msg = ceiling.memory_write_error(d / "USER.md", over)
+    assert msg is not None and "ceiling" in msg, msg
+    assert "tight limit" not in msg, msg
+
+
+def test_user_md_curate_trigger_is_untouched_on_both_sides_of_its_threshold(tmp_path):
+    """Clause 2: this round adds a label and moves no threshold.
+
+    `USER.md` at `tight_limit("USER.md") - HEADROOM_BYTES` = 12,083 B prints no marker
+    and one byte more prints it, so the trigger is still #1895's arithmetic on the tight
+    limit and not on the ceiling. Whether §2a-ter should keep opening on a marker that
+    has been lit since 2026-10-08 is the ruling this round is forbidden to make — it is
+    owed to the owed-check job, and a clause here would be a threshold move wearing a
+    label.
+    """
+    threshold = ml.tight_limit("USER.md") - ml.HEADROOM_BYTES
+    assert threshold == 12_083, (
+        "the trigger moved, so the two assertions below grade the wrong arm")
+    off = ml.status(_user_dir_at(tmp_path / "off", threshold))["USER.md"]
+    on = ml.status(_user_dir_at(tmp_path / "on", threshold + 1))["USER.md"]
+    assert off["curate"] is False, off
+    assert on["curate"] is True, on
+    assert off["tight_enforced"] is False and on["tight_enforced"] is False
