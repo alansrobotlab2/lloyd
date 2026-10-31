@@ -1130,6 +1130,51 @@ def accumulated_record_lost(cumulative: Path, existing: dict, run_log: Path) -> 
     return dated[-1] if dated else None
 
 
+def canonicals_by_variant(rows: list[dict]) -> dict[str, list[str]]:
+    """Every canonical each `variant` is proposed under, across `rows`.
+
+    The scope must be the whole record, not one invocation: the reviewer loads the
+    ACCUMULATED file (`emit_proposals` re-points `latest` at it, and the sweep's
+    `load_semantic_proposals` follows that link), so a collision formed across two
+    separate runs is as live as one emitted together — the two in
+    `semantic-proposals-2026-09-30.jsonl` (`Claude Code CLI`, `RTX 6000 Blackwell`) are
+    exactly that case, and a one-invocation scope would leave them unlabelled forever.
+    """
+    by_variant: dict[str, list[str]] = {}
+    for row in rows:
+        seen = by_variant.setdefault(str(row.get("variant") or ""), [])
+        canon = str(row.get("canonical") or "")
+        if canon and canon not in seen:
+            seen.append(canon)
+    return by_variant
+
+
+def mark_multi_canonical(rows: list[dict],
+                         by_variant: dict[str, list[str]]) -> int:
+    """Label each row from `canonicals_by_variant`; return how many variants collide.
+
+    `multi_canonical` is the whole canonical list on a colliding row and `False` on the
+    others, so the field's ABSENCE in a record written before #3536 cannot be read as
+    "checked and clean". Labelling only: no action, guard, flag or confidence moves, no
+    row is withheld and no pair is re-judged — the guard that exists is `merge_allowed`
+    and it sees one pair, so nothing in this script can see two rows about one variant.
+
+    Why a row cannot carry this in the flag column instead: for `RTX 6000 Blackwell` the
+    existing `review_flag` is set on ONE of its two rows, so a reader sees a flag on one
+    row, nothing on the other, and no row names the pair. And widening
+    `is_version_suffix_asymmetry` would not catch this pair either — its token sets
+    {deepseek, flash, v4} and {1, 4, deepseek, flash} are incomparable, so both of its
+    branches fall through. That is #1894's settled ruling, which this does not reopen:
+    the collision is computable from the rows exactly as emitted.
+    """
+    colliding = {v for v, c in by_variant.items() if len(c) > 1}
+    for row in rows:
+        variant = str(row.get("variant") or "")
+        row["multi_canonical"] = (sorted(by_variant[variant])
+                                  if variant in colliding else False)
+    return len(colliding)
+
+
 def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
                    latest: Path, now_iso: str | None = None) -> dict:
     """Append this invocation's proposals to the dated file, refresh the
@@ -1168,10 +1213,20 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
               f"{lost_proof.name} holds earlier proposals — rebuilding it from "
               f"{len(existing)} rows; restore the record from a data snapshot "
               f"before the sweep acts on a partial one")
+    merged = merge_proposals(existing, proposals, now_iso)
+    # `merged` is the union the label needs — the prior accumulated rows plus this
+    # run's, deduped on (canonical, variant) — so it is read before anything is
+    # written and the dated file, the cumulative record, the `latest` link and the
+    # count returned below are all one pass over one set (#3536).
+    by_variant = canonicals_by_variant(merged)
+    marked_variants = mark_multi_canonical(merged, by_variant)
+    # The dated file is this run's rows, which `merged` may have dropped as duplicates
+    # of rows already in the record; labelling them from the same map is what makes
+    # "every row in the dated file carries the marker" true rather than accidental.
+    mark_multi_canonical(proposals, by_variant)
     with run_log.open("a") as f:
         for rec in proposals:
             f.write(json.dumps(rec) + "\n")
-    merged = merge_proposals(existing, proposals, now_iso)
     tmp = cumulative.with_name(cumulative.name + ".tmp")
     with tmp.open("w") as f:
         for rec in merged:
@@ -1184,6 +1239,10 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     except OSError:
         pass
     return {"run": len(proposals), "cumulative": len(merged),
+            # Variants this record proposes under more than one canonical. A count of
+            # the SET, not of rows: two rows of one collision is one thing to fix, and
+            # counting rows would make a three-canonical variant look like two problems.
+            "multi_canonical_variants": marked_variants,
             "reset": lost_proof is not None, "reset_from": len(existing)}
 
 
@@ -1448,6 +1507,19 @@ def main() -> int:
     proposals.sort(key=lambda p: -p["confidence"])
     counts = emit_proposals(proposals, run_log=PROPOSAL_LOG,
                             cumulative=PROPOSAL_CUMULATIVE, latest=PROPOSAL_LATEST)
+    # The count of variants the record proposes under more than one canonical — the
+    # set-level reading no per-pair guard can produce (#3536). Same two-space, labelled
+    # shape as the guard-downgrade and review-flag blocks above it, and silent when zero
+    # for the same reason they are: it is a thing to notice, not a statistic. It sits
+    # beside the emit counts rather than above them because the number describes the
+    # merged RECORD, and until `emit_proposals` has merged this run into that record
+    # there is no honest value to print — printing this run's rows alone would report 0
+    # for the 2026-09-30 shape, a collision formed across two runs.
+    marked_variants = counts.get("multi_canonical_variants", 0)
+    if marked_variants:
+        print("  variants proposed under >1 canonical (labelling only, both rows "
+              "kept):")
+        print(f"    {'multi_canonical':<30} {marked_variants}")
     print(f"[info] {counts['run']} proposals → {PROPOSAL_LOG}")
     print(f"[info] {counts['cumulative']} total in the accumulated record; "
           f"{PROPOSAL_LATEST.name} → {PROPOSAL_CUMULATIVE.name}, so a proposal the "

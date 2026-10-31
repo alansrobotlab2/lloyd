@@ -1584,3 +1584,181 @@ def test_the_quoted_run_counts_re_derive_from_the_committed_witness():
     # that can surface them to whoever reviews the section.
     unguarded = [r for r in merge_rows if (r["canonical"], r["variant"]) in flagged]
     assert all(r.get("guard_reason") is None for r in unguarded), unguarded
+
+
+# ---------------------------------------------------------------------------
+# #3536 — one variant under two live canonicals, visible on the row
+#
+# Every guard in this script judges ONE pair, so a variant proposed under two
+# canonicals arrives as two individually-clean rows and a reviewer who approves each on
+# its own merits authorises a transitive collapse of two live entities. The live witness
+# carried into the record: `DeepSeek 4.1 Flash` -> `DeepSeek-V4-Flash` (conf 0.95) and ->
+# `DeepSeek-V4.1-Flash` (conf 1.00), both `action: merge`, `guard_reason: null`,
+# `review_flag: null`, both canonicals live entity dirs with 11 fact files each. The
+# `Claude Code CLI` and `RTX 6000 Blackwell` shapes below are the two that appeared
+# together inside the single dated file of 2026-09-30.
+# ---------------------------------------------------------------------------
+
+
+def test_a_variant_under_two_canonicals_is_marked_in_both_written_files(tmp_path):
+    """Clause 1: the marker is on the row, in the dated file and in the record.
+
+    The marker's VALUE is the list of canonicals rather than a bare boolean: a reviewer
+    deciding one row has to see which other live name it would collapse into. And a row
+    that maps to exactly one canonical gets `multi_canonical: False` rather than no key,
+    so the field's absence in a pre-#3536 record cannot be read as a checked-and-clean
+    row.
+    """
+    dated, cumulative, latest = _paths(tmp_path)
+
+    ser.emit_proposals(
+        [_proposal("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash", 0.95),
+         _proposal("DeepSeek-V4.1-Flash", "DeepSeek 4.1 Flash", 1.00),
+         _proposal("Qwen3-TTS", "qwen 3 tts", 0.9)],
+        run_log=dated, cumulative=cumulative, latest=latest)
+
+    for path, label in ((dated, "the dated file"), (cumulative, "the record")):
+        rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        colliding = [r for r in rows if r["variant"] == "DeepSeek 4.1 Flash"]
+        assert len(colliding) == 2, (label, colliding)
+        for r in colliding:
+            assert r["multi_canonical"] == ["DeepSeek-V4-Flash",
+                                            "DeepSeek-V4.1-Flash"], (label, r)
+        for r in rows:
+            if r["variant"] != "DeepSeek 4.1 Flash":
+                assert r["multi_canonical"] is False, (
+                    f"{label} marked a variant that maps to one canonical: {r}")
+
+
+def test_a_collision_formed_across_two_runs_is_marked_on_the_later_run(tmp_path):
+    """Clause 2: the union of the prior record and this run is the scope.
+
+    Run 1 emits one row, run 2 emits the other, and no pair is judged again. Read back
+    through the sweep's real loader, which is the path the reviewer actually takes —
+    `emit_proposals` points `latest` at the cumulative record, so a marker that lived
+    only in the dated file, or only over this run's rows, would leave both 2026-09-30
+    collisions unlabelled forever.
+    """
+    run1, cumulative, latest = _paths(tmp_path)
+    run2 = tmp_path / "p-2.jsonl"
+
+    ser.emit_proposals([_proposal("CLI", "Claude Code CLI", 0.9)],
+                       run_log=run1, cumulative=cumulative, latest=latest)
+    first = [json.loads(l) for l in cumulative.read_text().splitlines() if l.strip()]
+    assert first[0]["multi_canonical"] is False, (
+        "a lone row was marked before anything could collide with it")
+
+    newer = _proposal("Claude Code", "Claude Code CLI", 0.95)
+    newer["proposed_at"] = "2026-09-19T00:00:00+00:00"
+    ser.emit_proposals([newer], run_log=run2, cumulative=cumulative, latest=latest)
+
+    seen = sweep.load_semantic_proposals(tmp_path)
+    assert len(seen) == 2, seen
+    for r in seen:
+        assert r["multi_canonical"] == ["CLI", "Claude Code"], r
+    by_canon = {r["canonical"]: r for r in seen}
+    # Each row keeps its own provenance across the marking: the label is added to the
+    # row that already existed, and the earlier row's `first_seen_at` is the run that
+    # surfaced it (#1410's rule), not the run that noticed it collides.
+    assert by_canon["CLI"]["first_seen_at"] == "2026-09-12T00:00:00+00:00" and \
+            by_canon["Claude Code"]["first_seen_at"] == "2026-09-19T00:00:00+00:00", (
+        "a row's provenance was rewritten by the later run: "
+        f"{by_canon['CLI']['first_seen_at']} / "
+        f"{by_canon['Claude Code']['first_seen_at']}")
+
+
+def test_marking_labels_only_and_the_sweep_still_returns_both_rows(tmp_path):
+    """Clause 3: nothing withheld, no emitted field moved, no pair re-judged.
+
+    The two claims that matter to whoever reads the queue: both rows are still there for
+    the sweep (this is not a veto wearing a label), and every field each row was emitted
+    with is the field it was written with — the marker is additive.
+    """
+    dated, cumulative, latest = _paths(tmp_path)
+    a = _proposal("RTX PRO 6000", "RTX 6000 Blackwell", 0.88)
+    b = _proposal("RTX Pro 6000 Blackwell", "RTX 6000 Blackwell", 0.99)
+    # main() writes review_flag on every proposal (None when unremarkable); _proposal
+    # omits the key. Set here so the assertion is about a row surviving marking
+    # unchanged. The 2026-09-30 RTX pair carried version_suffix_mismatch on ONE row.
+    a["review_flag"] = None
+    b["review_flag"] = "version_suffix_mismatch"
+    fields = ("canonical", "variant", "action", "confidence", "guard_reason",
+              "review_flag")
+    before = sorted(str({k: r[k] for k in fields}) for r in (a, b))
+
+    ser.emit_proposals([a, b], run_log=dated, cumulative=cumulative, latest=latest)
+
+    seen = sweep.load_semantic_proposals(tmp_path)
+    assert len(seen) == 2, f"a row was withheld: {seen}"
+    after = sorted(str({k: r[k] for k in fields}) for r in seen)
+    assert after == before, f"an emitted field moved:\n{before}\n{after}"
+    assert [r["multi_canonical"] for r in seen] == [
+        ["RTX PRO 6000", "RTX Pro 6000 Blackwell"]] * 2, (
+        "a colliding row lost its marker, or only one of the two was marked: "
+        f"{[r['multi_canonical'] for r in seen]}")
+
+
+def test_marked_variants_are_counted_in_the_counts_and_the_run_report(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4: the count is in `emit_proposals`'s return and in the report, quiet at 0.
+
+    Driven through `main()` because the report is the surface a human reads, and the
+    count comes out of the run's own counts rather than a second scan of the file — an
+    edit to the marker cannot then leave the report describing a set it no longer
+    computes. The quiet case is pinned with it: a line printed on every run reads as
+    decor and gets skipped, which is why the guard-downgrade and review-flag blocks
+    above it print only when non-empty.
+    """
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    _drive_main(quiet, monkeypatch, [])
+    out = capsys.readouterr().out
+    assert "multi_canonical" not in out, (
+        "a run whose every variant maps to one canonical printed a collision count")
+
+    clash = tmp_path / "clash"
+    clash.mkdir()
+    _drive_main(clash, monkeypatch, ["--min-score", "0"],
+                entities=["DeepSeek-V4-Flash", "DeepSeek-V4.1-Flash",
+                          "DeepSeek 4.1 Flash"],
+                neighbors={"DeepSeek-V4-Flash": {"n1", "n2", "n3"},
+                           "DeepSeek-V4.1-Flash": {"n1", "n2", "n3"},
+                           "DeepSeek 4.1 Flash": {"n1"}})
+    out = capsys.readouterr().out
+    assert "variants proposed under >1 canonical" in out, out[-1500:]
+    block = out.split("variants proposed under >1 canonical")[1]
+    assert "multi_canonical" in block.splitlines()[1], block[:300]
+    assert "1" in block.splitlines()[1], block[:300]
+
+
+def test_the_run_report_prints_the_marked_count_only_when_there_is_one(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4, across the process seam: main()'s own stdout, both ways.
+
+    Driven through `_drive_main`, which runs the real `main()` against tmp_path, so the
+    assertion is on the text an operator reading the #67 run log sees — not on a count
+    dict. The collision is seeded in the accumulated record rather than produced by two
+    judged pairs, because the run's two `same` verdicts both pick the shorter name as
+    canonical and so emit one canonical for one variant; seeding is also the shape the
+    clause is about, a collision the run did not itself create.
+    """
+    seeded = tmp_path / "semantic-proposals-cumulative.jsonl"
+    seeded.write_text(json.dumps({
+        "canonical": "DeepSeek-V4-Flash", "variant": "intel-agent-pipeline-config",
+        "action": "alias_only", "verdict": "same", "confidence": 0.7,
+        "reason": "seed", "guard_reason": None, "review_flag": None,
+        "first_seen_at": "2026-09-12T00:00:00+00:00",
+        "last_seen_at": "2026-09-12T00:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+
+    _drive_main(tmp_path, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "variants proposed under >1 canonical" in out, out
+    assert re.search(r"multi_canonical\s+1\b", out), out
+
+    seeded.unlink()
+    _drive_main(tmp_path, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "variants proposed under >1 canonical" not in out, (
+        "the block printed on a run whose record has no collision, so the line stops "
+        f"meaning anything: {out}")
