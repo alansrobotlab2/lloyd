@@ -690,8 +690,9 @@ async def load_and_compact_session(
             # default whenever it was handed None, so arming relief armed nothing at
             # read time and a naive enable yielded a false flat. An explicit value
             # still wins; only None falls back to the shipped dataclass default,
-            # which is what keeps real traffic untouched until
-            # `app/harness/options.py:287` is flipped.
+            # which #3641 flipped to True on 2026-10-31 — so a turn-start pass that
+            # names no value now consults the record, and an explicit False is the
+            # revert route (see the field comment in `app/harness/options.py`).
             if microcompact_sidecar is None:
                 # The knob decides on its own — read the dataclass default
                 # directly instead of building a throwaway RunOptions.
@@ -757,8 +758,9 @@ async def load_and_compact_session(
                 observation_head_chars=int(mc_cfg.get("observation_head_chars", 400)),
                 name_session_record=bool(mc_cfg.get("name_session_record", False)),
                 # #2348 clause 2/4: both are passed only with the knob on, so a
-                # turn-start pass on the shipped default makes the exact call it
-                # makes today — no skip set, no collector, no file.
+                # caller that passes False explicitly makes the exact call the
+                # shipped default made before #3641 flipped it — no skip set, no
+                # collector, no file.
                 already_cleared=(already_cleared if sidecar_on else ()),
                 cleared_calls_out=(cleared_this_pass if sidecar_on else None),
                 # #2689: the rows THIS pass reduces to header-and-path form.
@@ -771,8 +773,9 @@ async def load_and_compact_session(
             micro_cleared += pass_cleared
             if sidecar_on and cleared_this_pass:
                 # Sticky clearing's write half, behind the SAME gate as the read
-                # half: with the shipped default False no sidecar file is created at
-                # all, so nothing reaches real traffic before #2168's ruling.
+                # half: an explicit-False caller creates no sidecar file at all,
+                # which is what keeps #3641's revert route inert — the shipped
+                # default has been True since 2026-10-31.
                 record_cleared_calls(path.stem, cleared_this_pass)
             if sidecar_on and reduced_this_pass:
                 # #2689: the replayable list's second writer, same gate. Without it

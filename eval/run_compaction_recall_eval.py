@@ -331,8 +331,11 @@ ARMS: dict[str, dict[str, Any]] = {
     # below does build, while the read-time pass in `app.compaction` re-reads
     # the RunOptions CLASS default whenever `load_and_compact_session` is handed
     # `microcompact_sidecar=None` — never the arm's instance. So `run_one`
-    # forwards the arm's own value at that call. Compared against `tool_clear`,
-    # which is this arm minus that one switch; see THE SIDECAR ARM'S ONE ROW in
+    # forwards the arm's own value at that call, and since #3641 shipped that
+    # class default True it also stands an unnamed arm down to False: the
+    # runner's arms state their own regime rather than inherit one. Compared
+    # against `tool_clear`, which is this arm minus that one switch; see
+    # THE SIDECAR ARM'S ONE ROW in
     # the header for what a run of the pair can and cannot show.
     "sidecar": {
         "compaction": {"mode": "truncate",
@@ -1919,13 +1922,16 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             # alone cannot open it — it only feeds `RunOptions(...)` further
             # down, and this parameter falls back to the RunOptions CLASS
             # default, not the arm's instance, when handed None. So the arm's
-            # own switch is forwarded here, and an arm that does not name one
-            # still forwards None and follows the shipped default, exactly as
-            # before this arm existed.
+            # own switch is forwarded here. #3641 moved that class default to
+            # True, so forwarding None for an arm that names no value would arm
+            # the read-time sidecar in all ten other arms and in `tool_clear`,
+            # the pair's own control — an arm's regime is therefore stated by
+            # the arm, never inherited: an arm that does not name the switch is
+            # knob-off, which is what every baseline row here was measured with.
             comp = await load_and_compact_session(
                 path, model="primary",
-                microcompact_sidecar=spec["options"].get(
-                    "microcompact_reduction_sidecar"))
+                microcompact_sidecar=bool(spec["options"].get(
+                    "microcompact_reduction_sidecar", False)))
         row["turn_start_wall_s"] = round(time.monotonic() - t_ts, 2)
         row["summarizer"] = summarizer_cost(sum_calls)
         stext = summary_text(comp.get("history") or [])
@@ -1950,6 +1956,14 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         row["oracle_roles"] = {t.turn_id: t.role for t in session.oracle_turns}
         hk = _get_harness_kwargs()
         hk.update(spec["options"])
+        # #3641 shipped `microcompact_reduction_sidecar` True, and relief's
+        # writer reads this INSTANCE, so an arm that names no value would now
+        # inherit the knob and `tool_clear` — the pair's own control — would
+        # start recording reductions it was never measured with. Each arm's
+        # regime is therefore stated here, never inherited: an arm that does
+        # not name the switch is knob-off, which is what every baseline row in
+        # `eval/baselines/` holds.
+        hk.setdefault("microcompact_reduction_sidecar", False)
         row["planted_in_prompt_at_start"] = any(
             m.get("tool_call_id") == PLANTED_CALL_ID and session.planted.passphrase in
             (m.get("content") or "") for m in history)

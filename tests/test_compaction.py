@@ -760,16 +760,26 @@ def test_the_sidecar_is_keyed_by_session_id(tmp_path, monkeypatch):
         "a deleted sidecar must reproduce the knob-off history byte for byte")
 
 
-def test_the_shipped_default_does_not_consult_the_sidecar_at_all(tmp_path, monkeypatch):
-    """#2168 clause 5: the knob ships off, and off means the pre-pass never reads
-    the sidecar — not that it reads it and applies nothing."""
+def test_the_shipped_default_consults_the_sidecar_once_per_session(
+        tmp_path, monkeypatch):
+    """#2168 clause 5, re-keyed by #3641: the knob SHIPS ON now (a bounded 7-day
+    ship-on experiment), and on means the turn-start pre-pass reads the sidecar —
+    not merely that it is able to. Same fixture, same counting spy, same record
+    naming `call_000` and `call_001`: the helper is reached exactly once per
+    session with that session's id, the two rows it names arrive reduced in the
+    history the pass was handed, and the pass therefore clears 3 rather than the
+    knob-off 5. The revert route is a caller that passes
+    `microcompact_sidecar=False`, pinned by
+    `test_the_revert_route_stays_inert_and_books_no_reduction`."""
     from app.harness.options import RunOptions
     import app.harness.microcompact as mc_mod
 
     assert RunOptions.__dataclass_fields__[
-        "microcompact_reduction_sidecar"].default is False, (
-        "the shipped default is what clause 6 turns on after the deploy gate; "
-        "if this flips, the owed measurement has already been skipped")
+        "microcompact_reduction_sidecar"].default is True, (
+        "#3641 shipped this True for a bounded 7-day read of the on-regime "
+        "reprefill share; if it is back to False the experiment was reverted, "
+        "and this node has to be re-keyed back with it rather than left "
+        "asserting the other ship-state")
 
     calls: list[str] = []
     real_apply = mc_mod.apply_reduction_sidecar
@@ -785,33 +795,23 @@ def test_the_shipped_default_does_not_consult_the_sidecar_at_all(tmp_path, monke
 
     out = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
 
-    assert calls == [], "with the shipped default the sidecar is never opened"
+    assert calls == [sid], (
+        "on the shipped default the pre-pass consults the record exactly once "
+        f"for the session it is rebuilding; saw {calls}")
     # And the node is testing the shipped value, not a parameter fixture:
     # `load_and_compact_session` carries no default of its own, so a turn that
-    # passes nothing reads `RunOptions` — which is where clause 6 flips it on.
+    # passes nothing reads `RunOptions` — which is why flipping that default
+    # reaches every caller in `app/` that builds one without naming the field.
     import inspect
     assert inspect.signature(load_and_compact_session).parameters[
         "microcompact_sidecar"].default is None
-    assert out["microcompacted"] == 5, (
-        f"the pass changed with the knob untouched: {out['microcompacted']}")
-    assert "file 0 line 0" in handed[0]["call_000"], handed[0]["call_000"][:200]
-
-    # The ship-on lever, which the assertions above cannot supply on their own: every
-    # one of them still holds if the pre-pass's read of
-    # `options.microcompact_reduction_sidecar` is replaced by a literal False — the
-    # shortcut whoever reaches for after the owed deploy gate answers "stay off" — and
-    # the knob then survives as a comment nobody can turn back on. Same spy, same
-    # sidecar, one run with the knob True: the helper must be reached, and reached with
-    # the two ids it names actually reduced.
-    _on_handed = _handed_to_the_pass(monkeypatch)
-    out_on = _run(load_and_compact_session(
-        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
-    assert calls == [sid], (
-        "with the knob ON the sidecar is still never opened, so the read is not wired "
-        "to the knob and there is nothing for the deploy gate to turn on")
-    assert sum(1 for txt in _on_handed[0].values()
-               if "preview dropped" in txt) == 2, _on_handed[0]
-    assert out_on["microcompacted"] == 3, out_on
+    assert sum(1 for txt in handed[0].values()
+               if "preview dropped" in txt) == 2, handed[0]
+    assert "file 0 line 0" not in handed[0]["call_000"], handed[0]["call_000"][:200]
+    assert out["microcompact_reduced"] == 2, out
+    assert out["microcompacted"] == 3, (
+        "the shipped path is the knob-on path: the 2 recorded rows arrive "
+        f"reduced and the pass clears 3, not the knob-off 5: {out['microcompacted']}")
 
 
 def test_the_relief_pass_that_reduces_a_spill_records_what_it_reduced(
@@ -1945,6 +1945,55 @@ def test_turning_the_knob_on_is_what_the_shipped_default_is_not(tmp_path, monkey
         "second turn start may now replay instead of re-dropping")
 
 
+def test_the_revert_route_stays_inert_and_books_no_reduction(tmp_path, monkeypatch):
+    """#3641 clause 4: the revert route is an explicit `False`, so that caller is
+    the one that has to stay inert now that the shipped default is True.
+
+    `test_turning_the_knob_on_is_what_the_shipped_default_is_not` already drives
+    the read-time half with `microcompact_sidecar=False` and shows the spy is
+    never called, the pass clears the knob-off 5, and the named rows' previews
+    survive. What it does not pin is the WRITE half — that such a turn creates no
+    `<sid>.microcompact-reduced.json` — which is the half #3641 moved off the
+    shipped default and onto this caller. Same fixture and same counting spy, no
+    seeded record, and the file checked before and after: reverting
+    `app/harness/options.py` to `microcompact_reduction_sidecar: bool = False`
+    therefore restores the pre-#3641 behaviour for any caller that asks for off,
+    with no other line needing to change.
+    """
+    from app.harness.microcompact import (
+        read_cleared_calls, read_reduced_calls, reduction_sidecar_path)
+    import app.harness.microcompact as mc_mod
+
+    calls: list[str] = []
+    real_apply = mc_mod.apply_reduction_sidecar
+
+    def _counting(msgs, session_id):
+        calls.append(session_id)
+        return real_apply(msgs, session_id)
+
+    monkeypatch.setattr(mc_mod, "apply_reduction_sidecar", _counting)
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    sidecar = reduction_sidecar_path(sid)
+    assert sidecar is not None and not sidecar.exists(), (
+        "the fixture began with a record, so the absence below would prove nothing")
+    handed = _handed_to_the_pass(monkeypatch)
+
+    off = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                       microcompact_sidecar=False))
+    assert calls == [], (
+        "an explicit False opened the sidecar, so the revert route is not the "
+        f"pre-#3641 path: {calls}")
+    assert off["microcompacted"] == 5, off
+    assert off["microcompact_reduced"] == 0, off
+    assert off["microcompact_sidecar"] is False, off
+    assert "file 0 line 0" in handed[0]["call_000"], handed[0]["call_000"][:200]
+    assert not sidecar.exists(), (
+        "the explicit-False turn booked its 5 clears in a record anyway, so "
+        f"disarming the knob does not stop the writes: {sidecar}")
+    assert read_cleared_calls(sid) == () and read_reduced_calls(sid) == (), (
+        "a turn with the knob disarmed still left ids in the record")
+
+
 def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_named(
         tmp_path, monkeypatch):
     """#2168, the seam the last review asked to see run twice: load -> pass -> load ->
@@ -2042,21 +2091,27 @@ def test_one_runs_options_value_arms_the_read_time_half_too(tmp_path, monkeypatc
     `RunOptions` INSTANCE; before this round the turn-start read-time pass asked the
     dataclass CLASS default whenever a caller left the parameter at None, so a caller
     that armed relief armed nothing at read time and a naive enable read as a flat
-    line. `microcompact_sidecar_for` is the matching read, and with the shipped default
-    still False a caller's True is what makes the difference visible here.
+    line. `microcompact_sidecar_for` is the matching read, and since #3641 flipped the
+    shipped default to True a caller's explicit False is what makes the difference
+    visible here — the revert route is an instance disarming the knob, not the class
+    default disarming it.
     """
     from app.compaction import microcompact_sidecar_for
     from app.harness.options import RunOptions
 
     assert RunOptions.__dataclass_fields__[
-        "microcompact_reduction_sidecar"].default is False, (
-        "this node measures the flipped case only while the shipped default is off")
-    armed = RunOptions(model="primary", session_id="x",
-                          microcompact_reduction_sidecar=True)
+        "microcompact_reduction_sidecar"].default is True, (
+        "#3641 shipped this True; the contrast below is drawn against it, so if "
+        "the revert landed this node has to be re-keyed back with it")
     plain = RunOptions(model="primary", session_id="x")
-    assert microcompact_sidecar_for(armed) is True
-    assert microcompact_sidecar_for(plain) is False, (
-        "a caller that did not arm the knob must not have it forced on")
+    disarmed = RunOptions(model="primary", session_id="x",
+                          microcompact_reduction_sidecar=False)
+    assert microcompact_sidecar_for(plain) is True, (
+        "a caller that names no value must resolve to the shipped default, which "
+        "is what carries the flip to every router and to autonomy traffic")
+    assert microcompact_sidecar_for(disarmed) is False, (
+        "a caller that explicitly disarms the knob must not have it forced on by "
+        "the shipped default — that caller is the revert route")
     assert microcompact_sidecar_for(None) is None, (
         "no caller's instance means the shipped default decides, not a guess")
 
@@ -2065,10 +2120,10 @@ def test_one_runs_options_value_arms_the_read_time_half_too(tmp_path, monkeypatc
     # The two halves driven from the SAME object, the way the routers do it.
     on = _run(load_and_compact_session(
         p, model="qwen", mode_override="truncate",
-        microcompact_sidecar=microcompact_sidecar_for(armed)))
+        microcompact_sidecar=microcompact_sidecar_for(plain)))
     off = _run(load_and_compact_session(
         p, model="qwen", mode_override="truncate",
-        microcompact_sidecar=microcompact_sidecar_for(plain)))
+        microcompact_sidecar=microcompact_sidecar_for(disarmed)))
     assert on["microcompact_reduced"] == 2 and on["microcompacted"] == 3, on
     assert off["microcompact_reduced"] == 0 and off["microcompacted"] == 5, off
 
@@ -2111,38 +2166,48 @@ def test_a_turns_record_and_event_say_whether_the_sidecar_fired(tmp_path, monkey
     assert turn_events[1]["microcompact_reduced"] == 0, turn_events[1]
 
 
-def test_the_shipped_default_writes_no_sidecar_and_counts_what_it_always_did(
+def test_the_shipped_default_books_its_reduction_in_the_sidecar(
         tmp_path, monkeypatch):
-    """#2348 clause 4: nothing reaches real traffic before #2168's ship-on ruling.
+    """#2348 clause 4, re-keyed by #3641: the owed flip of
+    `app/harness/options.py` has happened, so a turn-start pass on the shipped
+    default now OWES the record — the file has to be written, not avoided.
 
-    The owed step is a flip of `app/harness/options.py:287`, and until it happens a
-    turn-start pass must create no file at all — not an empty one, not one holding the
-    sticky list — and must report the same `microcompacted` number it reports today. Both
-    halves of the new behaviour sit behind the resolved switch for that reason, and the
-    denominator beside the first assertion is what says the session WOULD have written
-    one: the same session with the knob on does.
+    Phase 1 is the write half on a session with no record at all: a pass that
+    clears 5 spilled rows must book them, which is the half this node could not
+    reach while the default was off. Phase 2 is the read half on the same session
+    once the record names `call_000` and `call_001`: the shipped pass reports
+    `microcompact_reduced == 2` with `microcompacted == 3`, and
+    `microcompact_sidecar` True — the field #3576's instrument counts the
+    on-regime share from. The inertness this node used to pin is the
+    explicit-False revert route's now, pinned by
+    `test_the_revert_route_stays_inert_and_books_no_reduction`.
     """
-    from app.harness.microcompact import reduction_sidecar_path
+    from app.harness.microcompact import read_cleared_calls, reduction_sidecar_path
 
     p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
-    _record_reduced(sid, ["call_000", "call_001"])
     sidecar = reduction_sidecar_path(sid)
 
-    shipped = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
-    assert shipped["microcompacted"] == 5, shipped
-    assert shipped["microcompact_reduced"] == 0, shipped
-    assert shipped["microcompact_sidecar"] is False, shipped
-
-    armed = _run(load_and_compact_session(
-        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    first = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    assert first["microcompact_sidecar"] is True, first
+    assert first["microcompacted"] == 5, first
+    assert first["microcompact_reduced"] == 0, first
     assert sidecar.exists(), (
-        "the control arm wrote no file, so the absence above proves nothing")
+        "the shipped default cleared 5 rows and booked none of them, so the next "
+        f"turn re-clears all 5 — the reprefill #3641 shipped the knob to stop: {sid}")
+    assert set(read_cleared_calls(sid)) == {
+        "call_000", "call_001", "call_002", "call_003", "call_004"}, (
+        f"the record exists but does not name the 5 rows it cleared: "
+        f"{read_cleared_calls(sid)}")
+
     sidecar.unlink()
-    assert not sidecar.exists()
-    again = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
-    assert not sidecar.exists(), "the shipped default created a sidecar file"
-    assert again["microcompacted"] == 5, again
-    assert armed["microcompacted"] == 3
+    _record_reduced(sid, ["call_000", "call_001"])
+    shipped = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    assert shipped["microcompact_sidecar"] is True, shipped
+    assert shipped["microcompact_reduced"] == 2, shipped
+    assert shipped["microcompacted"] == 3, shipped
+    assert sidecar.exists(), (
+        "a shipped pass that reduced 2 rows left no record, so the next turn "
+        f"re-clears them: {sid}")
 
 
 def test_relief_writing_reductions_keeps_the_pre_pass_cleared_list(

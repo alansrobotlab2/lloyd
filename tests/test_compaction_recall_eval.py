@@ -1101,6 +1101,37 @@ def test_the_sidecar_arm_reaches_the_read_time_reduction_and_tool_clear_does_not
         "the arm still has to be a firing arm, or the row measures nothing")
 
 
+def test_each_arm_states_its_own_sidecar_regime_rather_than_inheriting_the_default(
+        corpus, tmp_path, monkeypatch):
+    """#3641 clause-adjacent blast radius: #3641 moved the `RunOptions` CLASS
+    default for `microcompact_reduction_sidecar` from False to True, and both
+    halves of that switch in `run_one` used to be able to inherit it — the
+    read-time call was handed `spec["options"].get(...)`, and relief's writer
+    reads the `RunOptions` INSTANCE built from `hk`. Either inheritance would
+    have armed `tool_clear`, the pair's own control, and put the knob-off 60.6%
+    price beyond re-measurement. So the runner now states a regime for every arm,
+    and this node pins it on the record the pair is scored on:
+    `turn_start.microcompact_sidecar` is True under `sidecar` and False under
+    `tool_clear` — while the shipped default the pin could have inherited is
+    asserted True in the same breath, which is what makes reading False here a
+    result rather than an accident."""
+    from app.harness.options import RunOptions
+
+    assert RunOptions.__dataclass_fields__[
+        "microcompact_reduction_sidecar"].default is True, (
+        "#3641 shipped this True; if it moved back to False the pin below is "
+        "vacuous again and this node says so rather than passing for nothing")
+
+    _s, rows, opts_by_arm, _reached = _stub_the_loop(corpus, tmp_path, monkeypatch)
+    assert rows["sidecar"]["turn_start"]["microcompact_sidecar"] is True
+    assert rows["tool_clear"]["turn_start"]["microcompact_sidecar"] is False, (
+        "`tool_clear` ran its turn-start pass with the read-time sidecar on, so "
+        "the pair's control is no longer knob-off")
+    assert opts_by_arm["tool_clear"].microcompact_reduction_sidecar is False, (
+        "`tool_clear`'s RunOptions carried the sidecar switch on, so relief's "
+        "writer would have recorded reductions for the control arm")
+
+
 def test_the_sidecar_arm_is_the_one_that_writes_the_sidecar_beside_the_session(
         corpus, tmp_path, monkeypatch):
     """#2349 clause 3: relief's writer reads the RunOptions INSTANCE, so the

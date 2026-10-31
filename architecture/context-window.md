@@ -41,17 +41,27 @@ summarises persistently and then again from scratch.
    `app/compaction.py:753`): everything but the six bookkeeping tools is
    clearable and the `compactable_tools` allow-list is ignored. It has to spill
    a result to disk before it clears it, so the marker can name the file the
-   model can re-read (`app/harness/tool_result_spill.py`). Since #2168 a second,
-   off-by-default knob reaches this layer from the other side:
+   model can re-read (`app/harness/tool_result_spill.py`). Since #2168 a second
+   knob reaches this layer from the other side, and #3641 **shipped it ON** on
+   2026-10-31:
    `load_and_compact_session(microcompact_sidecar=…)` (`app/compaction.py:556`,
    applied by `microcompact.apply_reduction_sidecar`,
    `app/harness/microcompact.py:462`) re-applies at read time the reduction the
    previous turn's in-turn relief made in memory and could not persist, so the
    prompt starts in the shape the engine last saw instead of being re-cleared
    from disk every later turn — that kills the *repeat* front break rather than
-   adding one. It ships off (`RunOptions.microcompact_reduction_sidecar`), so
-   nothing here on the box changes today, and #2348 is what made the knob's
-   being-on distinguishable from its firing.
+   adding one. It ships on (`RunOptions.microcompact_reduction_sidecar`) as a
+   bounded 7-day experiment, not as a settled win: the recall half of #2168's
+   ship-on rule measured no drop (the 2026-10-14 pair, `sidecar` 1.00/1.00
+   against `tool_clear` 0.92/0.92), but the reprefill half could not be measured
+   with the knob off — no row in `usage.db` carried
+   `turn_start.microcompact_sidecar` at all — so the flip is what makes the
+   on-regime share readable. It is read at flip+7d against the knob-off 60.6%
+   row of §What a rewrite costs below; if it has not fallen, the default goes
+   back to `False`, which is also what a caller passing
+   `microcompact_sidecar=False` does today (inert: no read, no record). #2348 is
+   what made the knob's being-on distinguishable from its firing, which is what
+   makes that read possible at all.
 2. **The persisted summary** (`app/compaction_state.py`) — that step, chosen
    under `compaction.persist_summary` or for a session someone hand-compacted
    (`app/compaction_state.py:241`). One record per session in `data["compaction"]`,

@@ -281,10 +281,23 @@ class RunOptions:
     # `sessions/<sid>.microcompact-reduced.json` and the turn-start pre-pass
     # applies that reduction while it rebuilds, so the prompt starts reduced
     # and the first relief pass has nothing to re-do. The session rows are
-    # never rewritten, and with no sidecar file the pass is inert. Default off:
-    # the ship-on decision is owed a measured reprefill drop plus
-    # `eval/run_compaction_recall_eval.py` showing no recall drop (#2168).
-    microcompact_reduction_sidecar: bool = False
+    # never rewritten, and with no sidecar file the pass is inert.
+    # #3641 SHIPS THIS ON (2026-10-31) as a bounded 7-day experiment. The recall
+    # half of #2168's ship-on rule is measured and NOT below: the 2026-10-14 pair
+    # put `sidecar` at 1.00 distinctive / 1.00 ambiguous against `tool_clear`
+    # 0.92 / 0.92, paired +0.08 [+0.00,+0.25], with 12 reductions applied against
+    # 0 (eval/measurements/compaction-recall-sidecar-pair-2026-10-14.md). The
+    # reprefill half could not be measured with the knob off — 0 of ~14.5k
+    # compaction rows carried `turn_start.microcompact_sidecar`, and 0
+    # microcompact-reduced files existed — so flipping it is what makes the
+    # on-regime share readable at all (#3576's instrument reads that field).
+    # Read the share at flip+7d with `usage_store.reprefill_attribution
+    # (since=<the flip's %aI>)` and compare it with the knob-off 60.6% row; if it
+    # has not fallen, the revert is this line back to False. A caller passing
+    # `microcompact_sidecar=False` to `load_and_compact_session` is already
+    # provably inert — no read, the knob-off clear count, no reduction record —
+    # which is the half `tests/test_compaction.py` pins as the revert route.
+    microcompact_reduction_sidecar: bool = True
 
     # ---- context pressure -------------------------------------------------
     # Live view of how much of the window this turn has spent. Caller-owned

@@ -71,16 +71,58 @@ real corpus for the first time.
 1.00 distinctive / 1.00 ambiguous against `tool_clear`
 0.92 / 0.92).
 Neither is below: the ship-on branch is open, and a separate gated round may flip `app/harness/options.py:287` to True and re-key the default-is-False nodes. That flip is not in this commit.
-Either way the default stays False here. The two nodes in
-`tests/test_compaction.py` that assert that default —
-`test_the_shipped_default_does_not_consult_the_sidecar_at_all` (def :721, the
+Either way the default stayed False in that commit. The two nodes in
+`tests/test_compaction.py` that asserted that default —
+test_the_shipped_default_does_not_consult_the_sidecar_at_all (def :721, the
 `__dataclass_fields__[...].default is False` assert at :727-728) and
-`test_one_runs_options_value_arms_the_read_time_half_too` (def :1971, the same
-assert at :1982-1983) — stay green, as does
-`test_the_shipped_default_writes_no_sidecar_and_counts_what_it_always_did`
-(def :2045), which pins the off behaviour through
+test_one_runs_options_value_arms_the_read_time_half_too (def :1971, the same
+assert at :1982-1983) — stayed green, as did
+test_the_shipped_default_writes_no_sidecar_and_counts_what_it_always_did
+(def :2045), which pinned the off behaviour through
 `shipped["microcompact_sidecar"] is False` and `assert not sidecar.exists()`.
-Those three are the re-key list for the flip round and clause 5 of #2682.
+Those three were the re-key list for the flip round and clause 5 of #2682. The
+three names are deliberately unbackicked: #3641 renamed two of them, and
+`test_every_test_node_the_sidecar_pair_writeup_cites_exists` refuses a backticked
+`test_*` citation no tracked file defines, so leaving them ticked would order the
+next reader to re-key a node that no longer exists. What they became is below.
+
+## The flip round: #3641, shipped on 2026-10-31
+
+`RunOptions.microcompact_reduction_sidecar` is `True` now, as a bounded 7-day
+experiment, and the three nodes were re-keyed to the on behaviour rather than
+deleted:
+
+- `test_the_shipped_default_consults_the_sidecar_once_per_session` (was the
+  does-not-consult node): the default asserts `is True`, the counting spy is
+  called exactly once with the session id, the two rows the record names arrive
+  reduced, and the pass clears 3 instead of the knob-off 5.
+- `test_one_runs_options_value_arms_the_read_time_half_too` keeps its name and
+  now reads the other way: a `RunOptions` built without the field resolves
+  `microcompact_sidecar_for(...)` to True, one built with `False` resolves False,
+  and the two passes come out 2 reduced / 3 cleared against 0 reduced / 5 cleared.
+- `test_the_shipped_default_books_its_reduction_in_the_sidecar` (was the
+  writes-no-sidecar node): a shipped pass that clears 5 rows books all 5 in the
+  record, and on a record naming two of them it reports `microcompact_reduced` 2
+  with `microcompacted` 3 and `microcompact_sidecar` True.
+- `test_the_revert_route_stays_inert_and_books_no_reduction` is new and pins the
+  revert route, which is a caller passing `microcompact_sidecar=False`: the
+  record is never opened, the pass clears 5, and no
+  `<sid>.microcompact-reduced.json` is created. Reverting the default therefore
+  needs no other edit.
+
+The runner moved with the default. `run_one` now states each arm's own regime on
+both halves instead of inheriting the class default, which is what keeps
+`tool_clear` — the pair's control — knob-off now that the shipped default is not;
+pinned by `test_each_arm_states_its_own_sidecar_regime_rather_than_inheriting_the_default`.
+
+What this pair still settles is the recall half: measured, and 0 of the two
+measures below `tool_clear`. What it cannot settle is the reprefill half, which
+needs on-regime traffic — the reason #3641 shipped the knob. That read is
+`usage_store.reprefill_attribution(since=<the flip's %aI>)` open-ended at flip+7d,
+against the 60.6% knob-off row of `architecture/context-window.md`
+§What a rewrite costs. That row's regime label stays true and stays pinned by
+`test_the_priced_microcompact_table_is_labelled_with_the_regime_it_measured_in`,
+because its witness window closed before the flip.
 
 ## How it was run, because the shape is not the CLI's own
 

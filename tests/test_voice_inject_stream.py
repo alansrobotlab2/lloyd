@@ -246,7 +246,12 @@ def test_prewarm_skips_a_session_that_will_summarize(prewarm, tmp_path, monkeypa
     client().post("/api/voice/prewarm", json={"session_key": "s5"})
     _drain_tasks()
     assert seen["mode"] == "truncate"
-    # #2348: the prewarm forwards the caller's switch, which with the shipped
-    # dataclass default is False — the same value relief's writer sees.
-    assert seen["sidecar"] is False
+    # #2348: the prewarm forwards the caller's switch, and #3641 moved the shipped
+    # dataclass default to True — so it warms the prompt shape the real turn is
+    # going to rebuild (read-time sidecar consulted) rather than the knob-off one.
+    # It is the same value relief's writer reads off that instance, which is the
+    # one-switch rule #2348 clause 3 exists to hold.
+    assert seen["sidecar"] is True, (
+        "the prewarm now warms a prompt the turn will not send: the forwarded "
+        "switch no longer resolves to the shipped default")
     assert runs == []

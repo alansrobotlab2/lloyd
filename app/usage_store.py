@@ -713,8 +713,10 @@ def _sidecar_flags(turn_start: Mapping[str, Any]) -> tuple[bool, bool]:
     knob-off: a row whose record says nothing cannot have consulted a pass it does
     not mention, which is the same rule `attribution_bucket` applies to a missing
     record. `applied` is a SUBSET reading of `consulted`, not a third regime, because
-    the knob's default is off (`RunOptions.microcompact_reduction_sidecar`) — a row
-    that re-applied rows necessarily consulted the sidecar to do it.
+    the record's read and its write both sit behind the one resolved switch
+    (`RunOptions.microcompact_reduction_sidecar`, shipped ON since #3641 on
+    2026-10-31) — a row that re-applied rows necessarily consulted the sidecar to do
+    it, whichever way that default went for the turn that wrote the row.
     """
     return (bool(turn_start.get("microcompact_sidecar")),
             _as_int(turn_start.get("microcompact_reduced")) > 0)
@@ -782,7 +784,10 @@ def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
     have its previous turn's in-turn reduction re-applied at read time
     (`apply_reduction_sidecar`) instead of clearing from disk again, which is the
     repeat front break these buckets price — and the knob that does it,
-    `RunOptions.microcompact_reduction_sidecar`, ships off. So a window's
+    `RunOptions.microcompact_reduction_sidecar`, shipped off until #3641 flipped it
+    to True on 2026-10-31 as a bounded 7-day experiment. That is why this function
+    counts by regime rather than trusting the default: a window straddling the flip
+    holds both, and every window before it holds only the off one. So a window's
     `turn_start:microcompact` share means different things depending on a field this
     function used not to read. It now counts every window row by that record
     (`sidecar["regimes"]`, keys `knob_on` / `knob_on_and_applied` / `knob_off`, the

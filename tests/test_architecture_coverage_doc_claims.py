@@ -5111,7 +5111,9 @@ def test_the_priced_microcompact_table_is_labelled_with_the_regime_it_measured_i
     #3576's premise is that one figure carried two regimes silently: since #2168 a turn
     can have its previous turn's in-turn reduction re-applied at read time instead of
     clearing from disk again, and that path is the same repeat front break this bucket
-    prices — while the knob is off by default. A label a reader cannot check is the same
+    prices — while the knob was off by default, which it stayed until #3641 shipped
+    it on (2026-10-31) and which is why this window can still be called single-regime.
+    A label a reader cannot check is the same
     claim in a nicer font, so the stated count is re-derived here over the committed
     witness bytes (the same route `test_the_extract_replays_to_its_own_published_split`
     takes) through the instrument's own `sidecar` block: if those bytes ever hold a
