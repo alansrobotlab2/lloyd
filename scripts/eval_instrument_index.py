@@ -214,12 +214,26 @@ def _uptake_dir() -> Path:
     return uptake.UPTAKE_ARTIFACT_DIR
 
 
-#: The table. Seven instruments, weights summing to 1.0, every path resolved
+def _gate_to_land_lag_series() -> Path:
+    """The gate-pass→promote lag journal, resolved through the recorder's OWN
+    accessor (#3541): `record_path()` is `_state_dir() / RECORD_NAME`, so this
+    reaches both names the writer owns — the automod state dir from
+    `scripts/automod/state.py` and the file name from
+    `scripts/maintenance/gate_to_land_lag.py` — and nothing is re-spelled here.
+    The file lives outside `DATA_ROOT`, which is why it could not be an
+    `app.paths` constant, and why the table holds a callable rather than a path."""
+    from scripts.maintenance import gate_to_land_lag as gtll
+    return gtll.record_path()
+
+
+#: The table. Eight instruments, the seven weighted arms summing to 1.0 and the
+#: eighth (`gate_to_land_lag`, #3541) carrying weight 0.0 because it is a latency
+#: in seconds and seconds cannot enter a percentage, every path resolved
 #: through the writer's own constant — which is how the two stores the item calls
 #: out end up IN the table instead of being skipped for living where the data root
-#: does not reach: the automod state dir holds `scorecard.jsonl` and
-#: `landed_outcomes.jsonl` outside `DATA_ROOT`, and uptake's default output is
-#: inside the code tree.
+#: does not reach: the automod state dir holds `scorecard.jsonl`,
+#: `landed_outcomes.jsonl` and the gate-to-land lag journal outside `DATA_ROOT`,
+#: and uptake's default output is inside the code tree.
 INSTRUMENTS: tuple[Instrument, ...] = (
     Instrument(
         key="retrieval_nightly",
@@ -375,6 +389,33 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         ci95_path="stages[surfaced].ci95",
         n_path="stages[surfaced].n",
         unit_path="stages[surfaced].unit",
+    ),
+    Instrument(
+        key="gate_to_land_lag",
+        title="Gate-pass to promotion lag, p50 (automod round latency)",
+        artifact=_gate_to_land_lag_series,
+        pattern=None,
+        value_path="p50",
+        unit="seconds",
+        polarity="down",
+        weight=0.0,
+        weight_why="RULING (#3541): a latency, not a share. Seconds cannot enter a "
+                   "weighted percentage, so this arm carries no weight and is "
+                   "reported in the table only — the funnel_census precedent. What "
+                   "it earns by being here: one dated row a day of how long a "
+                   "passed gate waits for promotion, which is the number that makes "
+                   "a gate-to-land wedge visible instead of inferred",
+        cadence_days=1,
+        hand_run_by_ruling=False,
+        scheduled_by="autonomy/101-gate-to-land-lag-daily-record.md",
+        averageable=False,
+        consumer=Consumer("scripts/maintenance/gate_to_land_lag.py",
+                          "`measure` re-reads the whole ledger and prints fresh "
+                          "percentiles every run; the journal it appends is history, "
+                          "but nothing compares one day's p50 against the last",
+                          compares_rows=False),
+        date_key="generated_at",
+        n_path="n",
     ),
 )
 

@@ -22,9 +22,20 @@ checked against `git ls-files`, and the import probe is run once with the
 publisher imported so that its `False` elsewhere is a verdict and not an inability
 to see.
 
+The table grew from seven arms to eight with #3541, which added
+`gate_to_land_lag` — the gate-pass→promote p50 the #101 job appends to
+`gate_to_land_lag.jsonl`. A latency is not a share, so that arm is carried in the
+published table with its own unit and `averageable=False`, exactly as
+`funnel_census` already is, and it carries weight 0.0. The exclusion is proven by
+arithmetic rather than asserted:
+`test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals` builds the
+row twice over the same fixtures, once with the arm and once without, and requires
+both composites to come out identical — so a future edit that let seconds into the
+percentage total fails there whatever the entry's own flags say.
+
 The five clause tests are numbered to match the item's acceptance clauses:
 
-1  `test_run_appends_one_dated_row_covering_seven_components_with_every_declared_field`
+1  `test_run_appends_one_dated_row_covering_eight_components_with_every_declared_field`
 2  `test_an_absent_instrument_is_recorded_missing_and_enters_neither_numerator_nor_denominator`
    + `test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_reading_100_percent`
 3  `test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_weights`
@@ -53,6 +64,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scripts import eval_instrument_index as EII  # noqa: E402
+from scripts.maintenance import gate_to_land_lag as GTL  # noqa: E402
 
 #: The pinned clock. Every seeded artifact below is dated 2026-10-12 (one day
 #: old) or earlier, so "arriving on cadence" is decided by the code, not by the
@@ -61,7 +73,8 @@ NOW = datetime(2026, 10, 13, 3, 40, tzinfo=timezone.utc)
 FRESH = "2026-10-12"
 
 ALL_KEYS = ("retrieval_nightly", "iv_metrics", "automod_scorecard",
-            "landed_outcomes", "tool_quality", "uptake_probe", "funnel_census")
+            "landed_outcomes", "tool_quality", "uptake_probe", "funnel_census",
+            "gate_to_land_lag")
 
 
 def _instr(key: str):
@@ -142,6 +155,21 @@ def _seed(store: Path, key: str, day: str, value) -> Path:
             "probe_timestamp": f"{day}T08:01:21+00:00", "item": "552",
             "classifier": {"precision": value, "n_positives": 23, "tp": 13,
                            "fp": 0}})
+    if key == "gate_to_land_lag":
+        # The recorder's OWN row shape, as `scripts/maintenance/gate_to_land_lag.py`
+        # appends it: `p50`/`p90`/`p99` in SECONDS at the top level beside the `n`
+        # rounds they were computed over, stamped by `generated_at`. The numbers are
+        # the live journal's (2026-10-29 row, 1509 rounds), because a pointer that
+        # drifted from the writer's real document has to fail here, not publish a
+        # `no-value` arm forever.
+        return _seed_series(store, GTL.RECORD_NAME, [{
+            "generated_at": f"{day}T08:06:26+00:00", "n": 1509,
+            "p50": value, "p90": 147.32102589607243, "p99": 3315.6,
+            "min": 0.41, "max": 4500.0, "over_bucket": 118, "over_ceiling": 0,
+            "ceiling_s": 4500.0, "bucket_s": 600.0, "ledger_lines": 64147,
+            "gate_pass_rows": 24899, "promoted_rows": 1509,
+            "rounds_only_in_archives": 1093, "gate_without_promoted": 7,
+            "ledger_files": 3, "state_dir": str(GTL.record_path().parent)}])
     if key == "funnel_census":
         return _seed_json(store, f"funnel-{day}.json", {
             "artifact": "funnel-census", "version": 1, "item": "#2507",
@@ -211,15 +239,22 @@ GOOD_VALUES = {
     "tool_quality": 0.04,            # down is better -> quality 0.96
     "uptake_probe": 1.0,             # up
     "funnel_census": 0.6,            # share, reported not averaged
+    "gate_to_land_lag": 17.687,      # SECONDS, reported not averaged (#3541)
 }
+
+
+#: The one arm published with weight 0.0: `gate_to_land_lag` is carried in the
+#: table and excluded from the composite (#3541), so the "every weight is
+#: positive" sweep below has to name it rather than silently pass it.
+ZERO_WEIGHT_KEYS = ("gate_to_land_lag",)
 
 
 # ── clause 1: one dated row, >=6 components, every declared field ─────────────
 
-def test_run_appends_one_dated_row_covering_seven_components_with_every_declared_field(tmp_path):
-    """Clause 1: running the publisher appends ONE dated row under the data root
-    covering >=6 components, each carrying its instrument path, newest-artifact
-    date, tier, weight, unit and latest value."""
+def test_run_appends_one_dated_row_covering_eight_components_with_every_declared_field(tmp_path):
+    """Clause 1 (#2597, grown to eight arms by #3541): running the publisher appends
+    ONE dated row under the data root covering >=6 components, each carrying its
+    instrument path, newest-artifact date, tier, weight, unit and latest value."""
     row, path, out = _row(tmp_path, GOOD_VALUES)
 
     assert path == out / "instrument-index.jsonl"
@@ -229,16 +264,20 @@ def test_run_appends_one_dated_row_covering_seven_components_with_every_declared
     assert row["item"] == "#2597"
 
     components = row["components"]
-    assert len(components) == 7, "the table covers seven instruments, not six"
+    assert len(components) == 8, "the table covers eight instruments, not seven"
     assert len(components) >= 6
+    assert sorted(c["key"] for c in components) == sorted(ALL_KEYS)
     for c in components:
         assert c["instrument_path"], c["key"]
         assert c["tier"] in (0, 1, 2), c
-        assert 0.0 < c["weight"] <= 1.0, c
+        if c["key"] in ZERO_WEIGHT_KEYS:
+            assert c["weight"] == 0.0, c
+        else:
+            assert 0.0 < c["weight"] <= 1.0, c
         assert c["unit"], c
         assert c["weight_why"], c
         assert c["status"], c
-        # The four fresh arms carry a latest value; the seeded date is the one
+        # The fresh arms carry a latest value; the seeded date is the one
         # written above, read back off the file name or the row's own timestamp.
         assert c["newest_artifact"] == FRESH, c
         assert c["value"] is not None, c
@@ -251,12 +290,140 @@ def test_run_appends_one_dated_row_covering_seven_components_with_every_declared
     assert retrieval["denominator"] == 74
     assert _component(row, "funnel_census")["unit"] == "rows"
 
+    # #3541: the lag arm reports the recorder's own percentile, in seconds, over
+    # the recorder's own `n` — a value the table shows and no total divides.
+    lag = _component(row, "gate_to_land_lag")
+    assert lag["value"] == pytest.approx(17.687)
+    assert lag["unit"] == "seconds"
+    assert lag["denominator"] == 1509
+    assert lag["polarity"] == "down"
+    assert lag["weight"] == 0.0 and lag["contributes"] is False
+    assert lag["in_total_denominator"] is False
+
     # The two totals and the delta against the prior row are in the row itself.
     assert row["totals"]["status"] == "ok"
     assert row["totals"]["declared_weights"] is not None
     assert row["totals"]["equal_weights"] is not None
     assert row["delta_vs_prior"]["declared_weights"] is None, "no prior row yet"
     assert row["history_rows"] == 0
+
+
+def test_the_lag_arm_reports_its_own_percentile_in_seconds_over_its_own_n(tmp_path):
+    """#3541 clause 2: the arm reads `p50` out of the recorder's own newest row and
+    reports it in seconds over that row's own `n`. The seeded value is 17.687 and
+    the denominator 1509 — both the live journal's 2026-10-29 numbers — so a
+    `value_path` or `n_path` that drifted from the recorder's real row shape fails
+    here rather than publishing an empty arm.
+
+    The status is `not-a-rate`, and that is the module's honest verdict rather than a
+    defect to work around: `read_instrument` refuses any value outside 0..1, which is
+    exactly what a latency of 17.687 seconds is. `funnel_census` arrives the same way
+    on live data. What the arm must still publish is the number, its unit and the
+    round count it was computed over — an excluded component that printed nothing
+    would be indistinguishable from a dead one.
+
+    The second half is the part a zero could fake: with the journal absent the arm
+    reads `missing` with `value` None. A publisher that defaulted a missing
+    percentile to 0.0 would publish a perfect 0-second gate-to-land lag on the day
+    the recorder died — and `down` polarity would score that as quality 1.0."""
+    row, _, _ = _row(tmp_path, GOOD_VALUES)
+    lag = _component(row, "gate_to_land_lag")
+    assert lag["status"] == "not-a-rate", (
+        "a p50 of 17.687 s is outside 0..1 by definition, so the module's share "
+        f"sanity check refuses it by design; got {lag['status']!r}")
+    assert lag["value"] == pytest.approx(17.687), (
+        "the value is published even though it is not scored")
+    assert lag["unit"] == "seconds"
+    assert lag["denominator"] == 1509, "the percentile is quoted over the recorder's n"
+    assert "may not enter the total" in lag["detail"], lag["detail"]
+
+    absent, _, _ = _row(tmp_path / "absent", GOOD_VALUES, omit=("gate_to_land_lag",))
+    missing = _component(absent, "gate_to_land_lag")
+    assert missing["status"] == "missing", (
+        "a journal that is not there must read as absence, never as a lag of zero")
+    assert missing["value"] is None and missing["quality"] is None
+    assert missing["tier"] == 0, (
+        "0.0 seconds would score a perfect 1.0 under `down` polarity, so absence has "
+        "to arrive as absence — and an absent arm cannot be tier 2 either")
+
+
+def test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals(tmp_path):
+    """#3541 clause 3, the ruling made arithmetic: a p50 in seconds is published in
+    the table and contributes nothing to either composite.
+
+    The precedent is `funnel_census`, and the mechanism is the one it already uses
+    — `weight=0.0` plus `averageable=False` — not a second exclusion. The check is
+    a difference, not a reading of the flags: the same seven fixtures are published
+    twice, once through the whole eight-arm table and once with the lag arm taken
+    out of it, and the two composites must be equal to the digit. A `seconds` value
+    that ever reached a weighted total would move that number by roughly 4 points
+    (17.687 x 0.05 of weight against a ~0.6 composite), which is why equality here
+    is the proof rather than the entry's own `weight=0.0`."""
+    with_lag, _, _ = _row(tmp_path, GOOD_VALUES)
+    without = tuple(i for i in EII.INSTRUMENTS if i.key != "gate_to_land_lag")
+    assert len(without) == len(EII.INSTRUMENTS) - 1, (
+        "positive control: the arm is in the table, so the reduced run is a real "
+        "subtraction and not a no-op that would make the equality below vacuous")
+    seven, _, _ = _row(tmp_path / "without", GOOD_VALUES, instruments=without)
+
+    assert with_lag["totals"]["declared_weights"] == pytest.approx(
+        seven["totals"]["declared_weights"])
+    assert with_lag["totals"]["equal_weights"] == pytest.approx(
+        seven["totals"]["equal_weights"])
+    assert with_lag["totals"]["scored"] == seven["totals"]["scored"], (
+        "the lag arm is reported, not scored: the denominator of both totals "
+        "cannot move when it is added")
+
+    keys = [c["key"] for c in with_lag["components"]]
+    assert "gate_to_land_lag" in keys, "the published table still carries the row"
+    assert len(keys) == 8
+    lag = _component(with_lag, "gate_to_land_lag")
+    assert lag["weight"] == 0.0
+    assert lag["averageable"] is False
+    assert lag["contributes"] is False and lag["in_total_denominator"] is False
+    assert with_lag["weights_sum_declared"] == pytest.approx(1.0), (
+        "adding the arm cannot have re-scaled the seven weighted arms")
+    excluded = {e["key"]: e for e in with_lag["totals"]["excluded"]}
+    assert "gate_to_land_lag" in excluded, (
+        "the exclusion has to be PRINTED, the same way the funnel's is — a silent "
+        "omission is indistinguishable from a component that never arrived")
+    assert excluded["gate_to_land_lag"]["weight"] == 0.0, (
+        "the excluded block prints the weight sum it would have carried, so a "
+        "non-zero weight here would be seconds entering the total")
+
+    # The printed form, not just the JSON: `--print` is the only form a human
+    # reads. The arm's own line carries its value and its unit, and it is named in
+    # the excluded block — which is what makes "carried but not averaged" legible
+    # rather than a reader having to diff the two totals.
+    text = EII.render(with_lag)
+    lag_line = next((ln for ln in text.splitlines()
+                     if ln.startswith("gate_to_land_lag  ")), None)
+    assert lag_line is not None, "the printed table omits the lag arm entirely"
+    assert "seconds" in lag_line and "17.687" in lag_line and "1509" in lag_line, lag_line
+    assert "0.00" in lag_line, f"the weight column must print 0.00: {lag_line}"
+    assert "excluded from the total: gate_to_land_lag" in text, (
+        "the printed exclusions must name the arm beside the funnel's")
+
+    # And the case where `averageable=False` is the ONLY rail doing the work.
+    # 17.687 s is caught by the share sanity check before any flag is consulted, so
+    # a lag arm seeded at 17.687 alone would leave the flag untested; a fast day
+    # whose p50 is 0.5 s passes that check and reads `measured`. There it must still
+    # contribute nothing — which is the flag, exactly as `funnel_census` is pinned.
+    fast = dict(GOOD_VALUES, gate_to_land_lag=0.5)
+    fast_row, _, _ = _row(tmp_path / "fast", fast)
+    fast_lag = _component(fast_row, "gate_to_land_lag")
+    assert fast_lag["status"] == "measured", (
+        "the fixture for this half must be a lag a share check would let through, "
+        f"got {fast_lag['status']!r}")
+    assert fast_lag["quality"] == pytest.approx(0.5), (
+        "a quality IS computed for it — which is precisely why the exclusion cannot "
+        "rest on the value check, and is what `funnel_census` shows too")
+    assert fast_lag["contributes"] is False and fast_lag["in_total_denominator"] is False
+    fast_without, _, _ = _row(tmp_path / "fast-without", fast, instruments=without)
+    assert fast_row["totals"]["declared_weights"] == pytest.approx(
+        fast_without["totals"]["declared_weights"])
+    assert fast_row["totals"]["equal_weights"] == pytest.approx(
+        fast_without["totals"]["equal_weights"])
 
 
 def test_the_series_default_lives_under_the_data_root():
@@ -344,10 +511,13 @@ def test_an_absent_instrument_cannot_contribute_a_pass_even_at_a_perfect_score(t
 
 def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_reading_100_percent(tmp_path):
     """Clause 2's fixture: all but one instrument missing, and the one that
-    survives scores 100% — the total must refuse, not publish that as a composite."""
+    survives scores 100% — the total must refuse, not publish that as a composite.
+    Seven of the eight are omitted (#3541 grew the table), the surviving one being
+    `retrieval_nightly`."""
     row, _, _ = _row(tmp_path, {"retrieval_nightly": 1.0},
                      omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
-                           "tool_quality", "uptake_probe", "funnel_census"))
+                           "tool_quality", "uptake_probe", "funnel_census",
+                           "gate_to_land_lag"))
 
     totals = row["totals"]
     assert totals["status"] == "refused"
@@ -357,7 +527,7 @@ def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_readi
     assert totals["min_scored"] == EII.MIN_SCORED_COMPONENTS
     assert "refuses" in row["headline"]
     assert "1.0" not in json.dumps({"declared": totals["declared_weights"]})
-    assert len(row["dead_or_stale"]) == 6
+    assert len(row["dead_or_stale"]) == 7
     assert {d["status"] for d in row["dead_or_stale"]} == {"missing"}
 
 
@@ -449,7 +619,8 @@ def test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_we
               "landed_outcomes": 0.0,      # quality 1.00, weight 0.14
               "tool_quality": 0.9,         # quality 0.10, weight 0.10
               "uptake_probe": 1.0,         # quality 1.00, weight 0.05
-              "funnel_census": 0.6}
+              "funnel_census": 0.6,
+              "gate_to_land_lag": 17.687}  # weight 0.0, reported not averaged
     row, _, _ = _row(tmp_path, values, omit=("tool_quality",))
     totals = row["totals"]
 
@@ -470,7 +641,8 @@ def test_a_sign_disagreement_between_the_two_totals_publishes_the_weights_decide
     values = {"retrieval_nightly": 0.9, "iv_metrics": 0.1,       # quality .9, .9
               "automod_scorecard": 0.1, "landed_outcomes": 0.9,  # quality .1, .1
               "tool_quality": 0.9, "uptake_probe": 0.9,           # quality .1, .9
-              "funnel_census": 0.6}
+              "funnel_census": 0.6,
+              "gate_to_land_lag": 17.687}   # weight 0.0, in neither total
     row, _, _ = _row(tmp_path, values, extra_rows=[prior], prior_rows=1)
     deltas = row["delta_vs_prior"]
 
@@ -489,7 +661,7 @@ def test_agreeing_totals_publish_the_number_rather_than_the_disagreement_headlin
     row, _, _ = _row(tmp_path, GOOD_VALUES, extra_rows=[prior], prior_rows=1)
 
     assert "the weights decide the answer" not in row["headline"]
-    assert row["headline"].startswith("6 of 7 instruments measured")
+    assert row["headline"].startswith("6 of 8 instruments measured")
     assert row["weight_agreement"]["prior_rows_compared"] == 1
     assert row["weight_agreement"]["sign_disagreements"] == 0
     assert row["weight_agreement"]["decorative"] is True
@@ -579,7 +751,13 @@ def test_a_component_with_no_artifact_is_tier_zero_and_a_stale_one_is_tier_one(t
 def test_each_component_path_is_the_path_its_own_writer_declares():
     """Clause 5: the component set resolves through each instrument writer's own
     constant, so a store outside the data root and one defaulting into the code
-    tree are in the table instead of silently skipped."""
+    tree are in the table instead of silently skipped.
+
+    #3541's `gate_to_land_lag` is the awkward case and is asserted in both
+    directions below: its journal lives in the automod state dir, outside
+    `DATA_ROOT`, so there is no `app.paths` constant for it to name, and the only
+    way it can honour this rule is through the recorder's own `record_path()`,
+    which joins that state dir with `RECORD_NAME`."""
     from app import paths, uptake
     from scripts import funnel_census, iv_metrics_record
     from scripts.automod import landed_outcomes, scorecard, state
@@ -592,6 +770,7 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
         "automod_scorecard": scorecard.scorecard_path(),
         "landed_outcomes": landed_outcomes.landed_outcomes_path(),
         "uptake_probe": uptake.UPTAKE_ARTIFACT_DIR,
+        "gate_to_land_lag": GTL.record_path(),
     }
     assert set(expected) == set(ALL_KEYS) == {i.key for i in EII.INSTRUMENTS}
     for key, want in expected.items():
@@ -607,6 +786,41 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
     # And the four that ARE under the data root, so the table spans both worlds.
     for key in ("retrieval_nightly", "tool_quality", "funnel_census", "iv_metrics"):
         assert paths.DATA_ROOT in expected[key].parents, key
+
+    # #3541: the lag journal joins BOTH names the recorder owns — the state dir and
+    # the file name — rather than one re-spelled string, and it is a single dated
+    # series like `landed_outcomes`, not a directory of per-day files.
+    lag = _instr("gate_to_land_lag")
+    assert lag.artifact().parent == state.STATE_DIR
+    assert lag.artifact().name == GTL.RECORD_NAME == "gate_to_land_lag.jsonl"
+    assert state.STATE_DIR not in paths.DATA_ROOT.parents, (
+        "the lag journal is outside the data root, which is why it could not be an "
+        "`app.paths` constant and must resolve through the recorder instead")
+    assert lag.pattern is None and lag.date_key == "generated_at"
+    assert lag.cadence_days == 1 and lag.hand_run_by_ruling is False
+    assert lag.unit == "seconds" and lag.polarity == "down"
+    assert lag.value_path == "p50" and lag.n_path == "n"
+    assert lag.scheduled_by == "autonomy/101-gate-to-land-lag-daily-record.md"
+
+
+def test_the_lag_component_path_is_not_a_re_typed_literal():
+    """#3541 clause 1's negative half: `test_each_component_path_is_the_path_its_own_writer_declares`
+    proves the lag arm RESOLVES to the recorder's path, but a re-typed literal would
+    satisfy that too — the equality would simply hold. This node closes the gap: the
+    recorder's filename must not appear anywhere in the publisher's source, prose
+    included, so the only remaining way to reach the file is `record_path()`.
+
+    The positive control is the same probe run on the recorder, which does spell it:
+    proof the check is reading a file that contains the string rather than scoring a
+    search that could never hit."""
+    source = (ROOT / "scripts" / "eval_instrument_index.py").read_text(encoding="utf-8")
+    assert GTL.RECORD_NAME not in source, (
+        f"the publisher spells `{GTL.RECORD_NAME}` somewhere; the recorder owns that "
+        "name and the table must resolve through it")
+    recorder = ROOT / "scripts" / "maintenance" / "gate_to_land_lag.py"
+    assert GTL.RECORD_NAME in recorder.read_text(encoding="utf-8"), (
+        "positive control failed: the recorder does not name its own journal, so the "
+        "absence above would prove nothing")
 
 
 def test_the_state_dir_store_and_the_in_tree_store_both_appear_with_real_newest_dates(tmp_path):
@@ -952,20 +1166,25 @@ def test_the_module_cli_appends_one_row_and_exits_zero_on_the_ok_branch(tmp_path
         "this fixture is the ok branch — the exit-1 test below is the other one, so "
         "the pair pins a mapping rather than self-consistency")
     assert rows[0]["date"] == "2026-10-13", "`--now` is what stamps the row"
-    assert len(rows[0]["components"]) == 7
+    assert len(rows[0]["components"]) == 8
 
 
 def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(tmp_path):
-    """The other exit branch on the same seam: six instruments missing, so the
-    totals refuse, the refusal is still published as the day's record, and the exit
-    code is 1 — because `main()` returning 0 whatever the totals said is how a
-    scheduler ends up reading an index that measured nothing as a green run."""
+    """The other exit branch on the same seam: seven of the eight instruments
+    missing, so the totals refuse, the refusal is still published as the day's
+    record, and the exit code is 1 — because `main()` returning 0 whatever the
+    totals said is how a scheduler ends up reading an index that measured nothing
+    as a green run. Seven, not six, because #3541 grew the table to eight arms and
+    `gate_to_land_lag` is one of the omitted ones: it is seeded nowhere here, and
+    a fixture that left it reading the live journal would make this run depend on
+    a real artifact instead of a snapshot."""
     out = tmp_path / "cli-refused"
     proc = _run_publisher(
         "--roots", str(_roots_file(
             tmp_path, {"retrieval_nightly": 1.0},
             omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
-                  "tool_quality", "uptake_probe", "funnel_census"))),
+                  "tool_quality", "uptake_probe", "funnel_census",
+                  "gate_to_land_lag"))),
         "--out-dir", str(out), "--now", "2026-10-13T03:40:00+00:00", "--print")
     assert proc.returncode == 1, (
         f"an index that refused exited {proc.returncode}: a caller that ignores the "
@@ -975,7 +1194,7 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     rows = EII.read_series(out)
     assert len(rows) == 1, "a refused run publishes one row, not zero"
     assert rows[0]["totals"]["status"] == "refused"
-    assert len(rows[0]["dead_or_stale"]) == 6
+    assert len(rows[0]["dead_or_stale"]) == 7
 
 
 def test_no_record_prints_and_creates_nothing_even_on_the_refused_branch(tmp_path):

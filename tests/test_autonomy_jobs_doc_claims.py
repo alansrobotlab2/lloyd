@@ -3748,6 +3748,63 @@ def test_the_doc_no_longer_states_that_the_seven_have_no_entry():
         "so the three absences above would prove nothing")
 
 
+def test_the_instrument_index_row_counts_eight_arms_and_the_lag_journal_names_its_reader():
+    """#3541 clause 5. Two sentences in the §Watch the machinery table were false on
+    this change's path, and neither was graded by anything: the #100 row counted
+    "the seven instruments' own artifacts" while #3541 was adding the eighth, and the
+    #101 row described `gate_to_land_lag.jsonl` as "a file that does not exist yet,
+    because the job has never run" when it had held dated rows since
+    `2026-10-22T08:01:57+00:00`. `tests/test_autonomy_jobs_doc_claims.py:181` pinned
+    only four tokens for #101 (`daily`, the script name, the journal name, `re-sort`),
+    so both lay flat.
+
+    Three things are pinned here, all against the same two table rows the per-job
+    grader reads:
+
+    * the #100 row counts EIGHT instruments and lists the lag journal among the
+      artifacts it reads, so the count cannot silently lag the table again;
+    * the #101 row names the instrument it feeds — `gate_to_land_lag`, read by #100 —
+      so the output cell says who consumes the journal rather than leaving it a
+      dangling file;
+    * the never-run / does-not-exist-yet phrasing is gone from that row, by this
+      file's own `_NEVER_RUN` pattern, and the row instead carries a command
+      (`wc -l < …/gate_to_land_lag.jsonl`) a reader can re-derive the streak with.
+
+    The control is the row's own journal name: `gate_to_land_lag.jsonl` must still be
+    in the #101 row, so the two absences below are a corrected sentence and not a row
+    that stopped describing the job at all.
+    """
+    row100 = _flat(_watch_row("#100"))
+    assert "eight instruments" in row100, (
+        "the #100 row must count the eight instruments the publisher now reads; it "
+        f"said: {row100[:200]}")
+    assert "seven instruments" not in row100, (
+        "the #100 row still counts seven artifacts while the publisher's own table "
+        "declares eight")
+    assert "gate_to_land_lag.jsonl" in row100, (
+        "the #100 row must NAME the eighth artifact it reads, not merely count it — "
+        "a count without the path is the sentence #3541 was fixing")
+
+    row101 = _flat(_watch_row("#101"))
+    assert "gate_to_land_lag.jsonl" in row101, (
+        "positive control failed: the #101 row no longer names the journal, so the "
+        "two absences below would only prove the row stopped describing the job")
+    assert "gate_to_land_lag" in row101 and "#100" in row101, (
+        "the #101 row must name the instrument its journal becomes and the job that "
+        "reads it; the output cell is where a reader finds out the journal is not a "
+        f"dangling file: {row101[:200]}")
+    stale = [pat for pat in ("does not exist yet", "has never run", "never ran")
+             if pat in row101]
+    assert not stale, (
+        f"the #101 row again says {stale[0]!r} about a journal that has held dated "
+        "rows since 2026-10-22T08:01:57+00:00; #2805's rule is that a run-state "
+        "claim carries its date and its command, and this row now carries "
+        "`wc -l < ~/.local/state/lloyd-automod/gate_to_land_lag.jsonl`")
+    assert "wc -l" in row101, (
+        "the #101 row's existence claim must be re-derivable by a reader holding "
+        "only the row")
+
+
 def test_the_departed_paper_digests_hold_no_membership_row():
     """#2630 clause 5, the defect that is the seven's mirror image. #87 #88 #89 are
     named in the functions row, the write-authority row and the §Ingest heading as
