@@ -6285,3 +6285,434 @@ async def test_max_turns_on_a_task_declaring_no_artifact_still_succeeds(
     t = read_task(aut, 1)
     assert t.get("last_run"), "a task with nothing to weigh completed as before"
     assert int(t["failure_count"] or 0) == 0
+
+
+# ── #3623: a cap-out verdict gets something to weigh besides file size ─────────
+#
+# `_declared_artifact_evidence` never opens the file: it touches disk through
+# `path.stat()` and compares `st_size` and `st_mtime`, and the mtime arm is inert for
+# this class by construction — `run_started` is the `now` bound at the top of `run_task`,
+# so anything the run itself wrote clears it. #42's producer defeats both arms on
+# purpose: its Step 3 writes the handoff skeleton BEFORE the first source read, 905 B
+# verbatim at `skills/nightly-reflection-knowledge-analysis/SKILL.md:86-145`, front matter
+# `status: in-progress`. So a run capped at turn ~5 arrives at the verdict holding a file
+# that satisfies every claim a byte count can make. Measured at filing: in-progress notes
+# of 3,515 B and 816 B recorded `status: success`, `failure_count` staying 0 so no
+# cooldown and no auto-disable can ever arm, and #2614's consumer
+# (`scripts/validate_handoff.py:448`, `if newest["status"] != "failed": return []`)
+# short-circuiting before it could look.
+
+MARKER = "status: complete"
+
+# #42's Step-3 skeleton as its skill writes it, trimmed to what these nodes weigh: over
+# `_ARTIFACT_MIN_BYTES` (512), placeholder bodies, front matter in-progress.
+_INPROGRESS_SKELETON = """---
+date: 2026-10-31
+generated_at: '2026-10-31T05:07:55+00:00'
+status: in-progress
+---
+
+# Knowledge Handoff — 2026-10-31
+
+## Person: alan
+
+### Mental model changes
+(None yet — this section is a placeholder until a source read fills it.)
+
+### Propagated knowledge
+(None yet — no session log has been read by this run.)
+
+### Tool & conversation patterns
+(None yet — no session log has been read by this run.)
+
+### Corrections & contradictions
+(None yet — no session log has been read by this run.)
+
+### New learnings
+(None yet — no session log has been read by this run.)
+
+## Corpus shape trend
+(placeholder — the trend is written from the census, which this run has not run.)
+
+## Provenance
+Written by task 42 before its first source read, per Step 3 of
+skills/nightly-reflection-knowledge-analysis/SKILL.md, so a capped run leaves a reader
+with a dated file rather than nothing at all.
+"""
+
+# The same note with its sections filled and the flip applied — a finished deliverable.
+_COMPLETE_NOTE = _INPROGRESS_SKELETON.replace(
+    "status: in-progress", "status: complete").replace(
+    "(None yet — no session log has been read by this run.)",
+    "- Propagated: an intake-coverage claim is a grep, not a memory.")
+
+# #39's honest partial note. Its skill REQUIRES this word when the budget runs out
+# (`skills/nightly-reflection-knowledge-write/SKILL.md:29`), which is why clause 1 names
+# it: honest, and still not the declared marker.
+_INCOMPLETE_NOTE = _INPROGRESS_SKELETON.replace(
+    "status: in-progress", "status: incomplete")
+
+
+def _cap_stream(artifact, text: str, *, speak: bool = True):
+    """A capped run that writes `text` to `artifact` DURING the run.
+
+    The write stays inside the stream for the reason `_cap_query` gives: the mtime arm
+    only accepts a file at or after the run's start, so a file the test made beforehand
+    would fail that arm and the node would be measuring the clock, not the marker.
+    `speak=False` leaves the terminal text empty, which is the other path's shape, and
+    `artifact=None` is the "left nothing behind" arm (same shape `_cap_query` takes).
+    """
+    async def _rq(messages, options):
+        if artifact is not None:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(text, encoding="utf-8")
+        if speak:
+            yield {"type": "text_delta",
+                   "text": "**Step 2e skipped**; sections not landed"}
+        yield _MAX_TURNS_RESULT
+    return _rq
+
+
+def _cap_task(aut, tmp_path, task_id, *, marker=MARKER):
+    """Declare `task_id` with an artifact and (optionally) a marker; return the artifact.
+
+    The note the run writes is NOT declared here: it is the text handed to
+    `_cap_stream`, so one caller cannot declare a state and stream another.
+
+
+    `max_turns: 90` matches the two nightly tasks. `timeout_seconds: 60` is roomy against
+    streams that return instantly, so a wall clock can never be what records the failure —
+    that branch also writes `failure_kind: task`, and a node passing because of it would
+    be measuring a different rule.
+    """
+    artifact = tmp_path / "artifact" / f"knowledge-handoff-{task_id}.md"
+    fm = {"frequency": "hourly", "max_turns": 90, "timeout_seconds": 60,
+          "output_artifact": str(artifact)}
+    if marker is not None:
+        fm["artifact_complete_marker"] = marker
+    write_task(aut, task_id, **fm)
+    return artifact
+
+
+def _cap_record(aut, task_id):
+    """The one run record this capped run left, as written to disk."""
+    runs = list((aut.AUTONOMY_RUNS_DIR / str(task_id)).glob("run_*.md"))
+    assert len(runs) == 1, [str(p) for p in runs]
+    return runs[0].read_text()
+
+
+def _cap_fm(aut, task_id):
+    """That record's front matter, as any reader parses it.
+
+    Read rather than grepped: the verdict's own field is `status_basis`, and a substring
+    test over the whole file is answered by any sibling key that happens to spell the
+    same string — which is exactly what `artifact_complete_marker` does here.
+    """
+    return yaml.safe_load(_cap_record(aut, task_id).split("---\n")[1])
+
+
+async def test_a_capped_run_whose_artifact_lacks_the_marker_is_a_task_failure(
+        aut, tmp_path, monkeypatch):
+    """Clause 1: a file of the right size is no longer the whole answer.
+
+    The artifact exists, is over `_ARTIFACT_MIN_BYTES` (512) and was written by this run,
+    so #3596's two arms pass and the verdict used to stop there. The task declares that
+    completion in its own artifact reads `status: complete`; the note reads
+    `status: in-progress`; so this is recorded a task failure — `last_attempt` stamped,
+    `last_run` NOT (a failed cap-out must not arm the next run), and a `status_basis` that
+    names the marker the verdict hinged on rather than a bare `failed`.
+    """
+    artifact = _cap_task(aut, tmp_path, 1)
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(artifact,
+                                                             _INPROGRESS_SKELETON))
+    result = await aut.run_task(1)
+
+    assert result["success"] is False
+    assert result["failure_kind"] == "task"
+    rec = _cap_record(aut, 1)
+    fm = _cap_fm(aut, 1)
+    assert fm["status"] == "failed", fm
+    assert fm["status_basis"].startswith(aut._MAX_TURNS_MARKER_ABSENT), fm["status_basis"]
+    assert MARKER in fm["status_basis"], (
+        "the BASIS itself must name the marker the verdict hinged on: the sibling "
+        "`artifact_complete_marker:` key spells the same string, so a whole-file match "
+        "cannot tell a marker refusal from #3596's byte refusal")
+    assert fm["artifact_complete_marker"] == MARKER, fm
+    assert fm["artifact_evidence"]["bytes"] == artifact.stat().st_size, fm
+    t = read_task(aut, 1)
+    assert t["status"] == "up_next"
+    assert int(t["failure_count"]) == 1
+    assert t.get("last_attempt"), "the cooldown reads last_attempt vs last_run"
+    assert not t.get("last_run"), (
+        "a capped run cannot stamp a completion: `last_run` is what the fleet reads as "
+        "\"the deliverable landed\"")
+    # And the body says plainly that the file WAS there — the repair is its contents, not
+    # "write a file", which is what a reader of #3596's wording would otherwise go and do.
+    assert f"{artifact.stat().st_size} bytes" in rec, rec[-1500:]
+
+
+async def test_a_note_left_reading_status_incomplete_is_not_the_complete_marker(
+        aut, tmp_path, monkeypatch):
+    """Clause 1's second half, and the contract call #3623 made before this round.
+
+    `status: incomplete` is #39's required word when the turn budget is running out
+    (`skills/nightly-reflection-knowledge-write/SKILL.md:29`). It is still not
+    `status: complete`, so the run records failed, `failure_count` increments and the
+    cooldown arms on a run that honestly reported partial work — the intended reading of
+    "not complete", and the reason the marker is a substring test with no fuzzy margin: a
+    task whose partial note contained its own declared marker would have declared the
+    wrong marker, and nothing in the code could catch that.
+    """
+    artifact = _cap_task(aut, tmp_path, 1)
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(artifact,
+                                                             _INCOMPLETE_NOTE))
+    result = await aut.run_task(1)
+
+    assert result["success"] is False
+    assert result["failure_kind"] == "task"
+    fm = _cap_fm(aut, 1)
+    assert fm["status"] == "failed", fm
+    assert fm["status_basis"].startswith(aut._MAX_TURNS_MARKER_ABSENT), fm["status_basis"]
+    assert not read_task(aut, 1).get("last_run")
+    assert int(read_task(aut, 1)["failure_count"]) == 1, (
+        "an honest partial note still arms the cooldown — that is the ruling, not an "
+        "oversight")
+
+
+async def test_a_capped_run_whose_artifact_carries_the_marker_succeeds(
+        aut, tmp_path, monkeypatch):
+    """Clause 2: the marker gates the cap-out verdict, so it cannot fail a run that
+    finished its deliverable and merely ran out of turns.
+
+    One substring separates this note from the one above, and it moves the verdict from
+    `failed` to `success` with `last_run` stamped — which is also what keeps #2614's
+    validator from being handed a `failed` record for a handoff that is complete.
+    """
+    artifact = _cap_task(aut, tmp_path, 1)
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(artifact,
+                                                             _COMPLETE_NOTE))
+    result = await aut.run_task(1)
+
+    assert MARKER in artifact.read_text()
+    assert result["success"] is not False, result
+    rec = _cap_record(aut, 1)
+    assert "status: success" in rec, rec
+    t = read_task(aut, 1)
+    assert t.get("last_run"), "a finished deliverable arms the next run"
+    assert int(t["failure_count"]) == 0, t
+
+
+async def test_a_task_declaring_no_marker_is_still_judged_on_bytes_and_clock(
+        aut, tmp_path, monkeypatch):
+    """Clause 3: for every task that declares nothing, behaviour is byte-for-byte today's.
+
+    The discriminator is the DECLARATION and nothing else. The same in-progress skeleton
+    the node above fails — same size, same stream, marker removed — earns #3596's success
+    with `last_run` stamped. Then the two refusals that path already made, restated here
+    so the "unchanged" claim is measured on all three of its arms rather than asserted: a
+    68-byte stub is failed/task on `max_turns_without_declared_artifact`, and so is no
+    file at all. The three pre-existing `test_max_turns_*` nodes above stay green
+    untouched.
+    """
+    artifact = _cap_task(aut, tmp_path, 1, marker=None)
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(artifact,
+                                                             _INPROGRESS_SKELETON))
+    result = await aut.run_task(1)
+
+    assert MARKER not in artifact.read_text(), (
+        "positive control: the note does not carry the marker, so a failed verdict here "
+        "would mean the marker was consulted without being declared")
+    assert artifact.stat().st_size >= aut._ARTIFACT_MIN_BYTES
+    assert result["success"] is not False, result
+    assert read_task(aut, 1).get("last_run"), "unchanged behaviour includes the stamp"
+
+    stub = _cap_task(aut, tmp_path, 2, marker=None)  # 68-byte note streamed below
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(stub, "x" * 68))
+    stubbed = await aut.run_task(2)
+    assert stubbed["success"] is False and stubbed["failure_kind"] == "task"
+    rec2 = _cap_record(aut, 2)
+    assert "max_turns_without_declared_artifact" in rec2, rec2
+    assert "status: failed" in rec2
+
+    absent = _cap_task(aut, tmp_path, 3, marker=None)
+    monkeypatch.setattr("app.harness.run_query", _cap_stream(None, ""))
+    nowhere = await aut.run_task(3)
+    assert nowhere["success"] is False and nowhere["failure_kind"] == "task"
+    assert "max_turns_without_declared_artifact" in _cap_record(aut, 3)
+    assert not absent.exists()
+
+
+def test_the_marker_is_consulted_in_the_cap_out_branch_and_nowhere_else(aut):
+    """Clause 4: the scope IS the design, so it is pinned structurally as well as by
+    behaviour.
+
+    #3623 rules out a content check inside `_declared_artifact_evidence` explicitly: that
+    ruler is shared with the empty-terminal-text path, whose "a qualifying artifact is
+    enough" ruling the source records as deliberate (#309 / #277). So the marker must be
+    read in exactly one place. Asserted here: the shared helper's signature and its four
+    arms, and that it still never opens the file; one definition and one call site for the
+    new helper, that site inside the cap-out branch; and the two paths the marker must NOT
+    reach, each pinned by a behaviour node —
+    `test_an_empty_text_capped_run_with_a_marker_but_no_content_is_still_success` below for
+    the shared path, and the `stop`-not-`max_turns` case for the ordinary one.
+    """
+    src = Path(aut.__file__).read_text(encoding="utf-8")
+
+    assert list(inspect.signature(aut._declared_artifact_evidence).parameters) == [
+        "task", "run_started"], "the shared ruler's signature is part of its contract"
+    helper = inspect.getsource(aut._declared_artifact_evidence)
+    for arm in ('task.get("output_artifact")', "_artifact_candidates", "path.stat()",
+                "_ARTIFACT_MIN_BYTES", "st_mtime", "modified < run_started"):
+        assert arm in helper, arm
+    assert "read_text" not in helper and "artifact_complete_marker" not in helper, (
+        "the byte/clock ruler still never opens the file — a content check here is the "
+        "change #3623 rules out, because this ruler is shared")
+
+    # The marker is read in ONE function, and that function is reached from ONE place.
+    gap_src = inspect.getsource(aut._cap_out_gap)
+    assert "artifact_complete_marker" in gap_src, gap_src
+    assert src.count("def _cap_out_gap") == 1
+    calls = [ln for ln in src.splitlines()
+             if "_cap_out_gap(task" in ln and not ln.lstrip().startswith("def ")]
+    assert len(calls) == 1, (
+        "the marker helper must be consulted from exactly one place: "
+        + repr(calls))
+    lines = src.splitlines()
+    at = next(i for i, ln in enumerate(lines) if "_cap_out_gap(task" in ln
+              and not ln.lstrip().startswith("def "))
+    window = lines[max(0, at - 8):at + 3]
+    assert any('stop_reason == "max_turns"' in ln for ln in window), "".join(window)
+    # And the two paths it must NOT reach carry no marker read of their own.
+    assert "artifact_complete_marker" not in inspect.getsource(
+        aut._record_artifact_success), "the shared empty-text path stays marker-blind"
+
+
+async def test_an_empty_text_capped_run_with_a_marker_but_no_content_is_still_success(
+        aut, tmp_path, monkeypatch):
+    """Clause 4's shared-path arm, run rather than read: the marker must not leak into
+    the empty-terminal-text branch.
+
+    Same capped stream with nothing said, so `_record_artifact_success` decides — the path
+    whose ruling #3623 leaves alone. Its note is the in-progress skeleton and the task
+    declares a marker, and the verdict is still today's: `status_basis: artifact`,
+    success. The second half pins the other non-cap route: a run that stopped by choice
+    (`stop_reason: stop`) with a marker-less note in place is not judged by a marker at
+    all. This is the narrow gap the item says it is leaving open on purpose, and a later
+    round that wants the marker there has to re-open #309 knowingly.
+    """
+    artifact = _cap_task(aut, tmp_path, 1)
+    monkeypatch.setattr("app.harness.run_query",
+                        _cap_stream(artifact, _INPROGRESS_SKELETON, speak=False))
+    empty_text = await aut.run_task(1)
+
+    assert empty_text["success"] is not False, empty_text
+    assert MARKER not in artifact.read_text()
+    fm = _cap_fm(aut, 1)
+    assert fm["status"] == "success", fm
+    assert fm["status_basis"] == "artifact", fm
+    # And none of the keys the cap-out refusal writes appear on this record: if the marker
+    # ever reached this path, its evidence keys would show up here, not only in prose.
+    assert "artifact_complete_marker" not in fm, fm
+    assert "artifact_evidence" not in fm, fm
+
+    # The other non-cap route, on its own task so its record is the only one to read.
+    stopped = _cap_task(aut, tmp_path, 2)
+
+    async def _stopped_early(messages, options):
+        stopped.parent.mkdir(parents=True, exist_ok=True)
+        stopped.write_text(_INPROGRESS_SKELETON, encoding="utf-8")
+        yield {"type": "text_delta", "text": "halfway — will continue tomorrow"}
+        yield dict(RESULT)
+    monkeypatch.setattr("app.harness.run_query", _stopped_early)
+    again = await aut.run_task(2)
+    assert again["success"] is not False, again
+    fm2 = _cap_fm(aut, 2)
+    assert fm2["status"] == "success", fm2
+    assert not str(fm2.get("status_basis") or "").startswith(
+        aut._MAX_TURNS_MARKER_ABSENT), (
+        "a run that stopped by choice is not judged by a marker: " + str(fm2))
+    assert not fm2.get("artifact_complete_marker"), fm2
+
+
+def test_the_declared_marker_survives_the_task_reader_and_the_recovery_tuple(
+        aut, tmp_path):
+    """Clause 5's reader half: a new front-matter key is only worth declaring if the
+    scheduler still sees it after the writes a verdict provokes.
+
+    The healthy path returns the whole mapping and `_update_task_field` dumps the whole
+    dict, so the round trip is where a key can vanish — `failure_count` is exactly the
+    field this verdict moves. The tuple matters on the other path: `_parse_task_file`
+    recovers a `_yaml_broken` file by regex over `AUTONOMY_TASK_FIELDS`, and every key
+    outside that tuple is lost. Stated with the fix is its honesty: `output_artifact` is
+    NOT in the tuple, so on a recovered file the branch still reads "nothing declared" —
+    a gap that predates #3623, in this same branch, and not this item's to close.
+    """
+    from agent_mcp._shared import AUTONOMY_TASK_FIELDS
+
+    assert "artifact_complete_marker" in AUTONOMY_TASK_FIELDS, (
+        "a recovered task file must not silently lose what its cap-out verdict weighs")
+
+    artifact = tmp_path / "knowledge-handoff-42.md"
+    write_task(aut, 42, frequency="hourly", timeout_seconds=60,
+               output_artifact=str(artifact), artifact_complete_marker=MARKER)
+    parsed = read_task(aut, 42)
+    assert parsed["artifact_complete_marker"] == MARKER, parsed
+    assert parsed["output_artifact"] == str(artifact)
+
+    aut._update_task_field(42, failure_count=1)
+    aut._update_task_field(42, status="up_next")
+    again = read_task(aut, 42)
+    assert again["artifact_complete_marker"] == MARKER, (
+        f"the key must round-trip the writes this verdict makes: {again}")
+    assert int(again["failure_count"]) == 1, again
+
+    # The gap above, pinned so the tuple entry is not read as a closed hole.
+    assert "output_artifact" not in AUTONOMY_TASK_FIELDS
+
+
+def test_the_two_nightly_tasks_declare_their_real_marker_to_the_shipped_verdict(
+        tmp_path):
+    """Clause 5's live half: what #42 and #39 really declare, read by the shipped reader,
+    moved through the shipped verdict. The declarations are on the vault's `main` already
+    (`git -C ~/obsidian log --oneline -2 -- autonomy/42-nightly-reflection-knowledge-analysis.md`),
+    which is why this node is a code-side pin over the real files rather than a diff in
+    this round.
+
+    Both skills flip their note as the LAST action (`SKILL.md:305` for #42, `:29` for
+    #39), so `status: complete` is what completion actually looks like in each artifact —
+    not a string invented for the test. The nodes above run synthetic tasks against
+    synthetic notes; this one takes the real front matter and points it at a note in each
+    state. #38's `signals-latest.md` carries only `generated:` and #40's learnings note no
+    `status:` at all, which is why neither declares a marker: there is no string there for
+    it to name.
+    """
+    from app.autonomy import _ARTIFACT_MIN_BYTES
+
+    vault = Path.home() / "obsidian" / "autonomy"
+    started = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=60)
+    for tid, slug in ((42, "nightly-reflection-knowledge-analysis"),
+                      (39, "nightly-reflection-knowledge-write")):
+        path = vault / f"{tid}-{slug}.md"
+        assert path.exists(), path
+        parsed = autonomy._parse_task_file(path)
+        assert parsed.get("artifact_complete_marker") == MARKER, parsed
+        assert str(parsed.get("output_artifact") or ""), parsed
+
+        for name, note, want_gap in (("in-progress", _INPROGRESS_SKELETON, True),
+                                     ("incomplete", _INCOMPLETE_NOTE, True),
+                                     ("complete", _COMPLETE_NOTE, False)):
+            probe = tmp_path / f"{tid}-{name}.md"
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_text(note, encoding="utf-8")
+            assert probe.stat().st_size >= _ARTIFACT_MIN_BYTES, (
+                "the note has to clear the byte arm, or the gap below is #3596's and "
+                "this node proves nothing about the marker")
+            basis, evidence = autonomy._cap_out_gap(
+                {**parsed, "output_artifact": str(probe)}, started)
+            if want_gap:
+                assert basis and basis.startswith(
+                    autonomy._MAX_TURNS_MARKER_ABSENT), (tid, name, basis)
+                assert MARKER in basis, (tid, name, basis)
+            else:
+                assert basis is None, (tid, name, basis)
+                assert evidence.get("path") == str(probe), evidence

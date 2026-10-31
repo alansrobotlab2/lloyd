@@ -457,6 +457,15 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     # was added to stop. It is asked of the file and never inferred from `status`,
     # because #1121 is on record that a status flips by accident.
     "parked",
+    # #3623: what completion looks like inside a task's own `output_artifact`, read by
+    # the turn-cap branch (`app.autonomy._cap_out_gap`). Listed so the regex-recovery
+    # path (`_yaml_broken`) keeps it — a file that recovered without it would have its
+    # cap-out verdict silently reverted to the byte-count ruler, the hole #3623 closes.
+    # Read this honestly though: `output_artifact` is NOT in this tuple, so a recovered
+    # file loses the artifact the marker qualifies and the branch still sees "nothing to
+    # weigh". That gap predates #3623 and is its own bug in the same branch: closing it
+    # changes what a degraded task file declares, which is not this item's call.
+    "artifact_complete_marker",
 )
 
 #: Backlog #951: an autonomy task file's markdown body is documentation plus the

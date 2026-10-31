@@ -3349,6 +3349,73 @@ def _declared_artifact_evidence(task: dict,
     return None
 
 
+# The two `status_basis` values a turn-capped run can be recorded under. The first is
+# #3596's and its spelling is load-bearing: it is what the run record and the health
+# rollup are grepped for.
+_MAX_TURNS_NO_ARTIFACT = "max_turns_without_declared_artifact"
+_MAX_TURNS_MARKER_ABSENT = "max_turns_artifact_marker_absent"
+
+
+def _cap_out_gap(task: dict,
+                 run_started: datetime.datetime) -> tuple[Optional[str], dict]:
+    """Why a run the harness stopped at its turn cap may NOT claim success, else None.
+
+    Returns `(basis, evidence)`; `basis` is the `status_basis` the failure gets. Called
+    from exactly one place — the `stop_reason == "max_turns"` branch of `run_task` —
+    which is what keeps what it weighs off every other verdict path in this file.
+
+    Half one is #3596, unchanged: a task declaring no `output_artifact` has nothing to
+    weigh and is untouched; a declared artifact that is missing, a stub under
+    `_ARTIFACT_MIN_BYTES`, or older than its own run earns `_MAX_TURNS_NO_ARTIFACT`.
+
+    Half two is #3623. Bytes and mtime cannot see WHAT the file says, and this fleet's
+    own producers defeat them: #42's Step 3 writes its handoff skeleton before its first
+    source read — 905 B verbatim at
+    `skills/nightly-reflection-knowledge-analysis/SKILL.md:86-145`, front matter
+    `status: in-progress` — so a run capped at turn ~5 clears both arms on a document
+    whose body is empty. Measured at filing: in-progress notes of 3,515 B and 816 B
+    earning `status: success`, `failure_count` staying 0 so no cooldown and no
+    auto-disable can ever arm, and #2614's consumer
+    (`scripts/validate_handoff.py:448`, which waits for `failed`) short-circuiting at
+    `if newest["status"] != "failed": return []` before it can look. So a task may
+    declare `artifact_complete_marker` — the string completion looks like in its own
+    artifact, e.g. `status: complete` — and a capped run whose artifact lacks it is
+    recorded `failed` / `task` exactly as one that left no file.
+
+    Two readings this fix takes on purpose:
+
+    * `status: incomplete` does not contain `status: complete`, and it is #39's honest
+      "the budget ran out" note. It counts as not-complete: the run records failed,
+      `failure_count` increments and the cooldown arms. That is the intended meaning of
+      "not complete" — the deliverable is not there, however honestly it was labelled.
+    * An artifact that cannot be read demonstrates nothing either, so it is treated as
+      marker-absent. Same posture as #3596: the cap is not a success claim, and the
+      burden of proof is on the file.
+
+    The marker is a substring test, not a YAML parse, because the producers write it into
+    front matter: a value like `status: completed` contains the declared marker, so a
+    task whose partial note would satisfy its own marker has declared the wrong marker.
+    """
+    if not task.get("output_artifact"):
+        return None, {}                      # nothing to weigh: untouched
+    evidence = _declared_artifact_evidence(task, run_started)
+    if evidence is None:
+        return _MAX_TURNS_NO_ARTIFACT, {}
+    marker = str(task.get("artifact_complete_marker") or "").strip()
+    if not marker:
+        # An artifact and no marker: the byte/clock ruler alone. That is every task's
+        # behaviour before #3623 and the default for every task that declares nothing.
+        return None, evidence
+    basis = f"{_MAX_TURNS_MARKER_ABSENT}: {marker}"
+    try:
+        text = Path(evidence["path"]).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return basis, {}
+    if marker in text:
+        return None, evidence
+    return basis, evidence
+
+
 def _acceptance_grade(task: dict, dispatch, final_text: str) -> Optional[dict]:
     """The run's acceptance grade (#623), or None when the task has `grader:
     false`. Never raises: a grading bug costs the grade, not the run record."""
@@ -5138,26 +5205,51 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # and #623's rule that a verdict may not rest on the grade alone stands), and the
         # evidence test below is the SAME `_declared_artifact_evidence` the empty-text
         # path uses, so both sides read one ruler.
-        if (stop_reason == "max_turns"
-                and task.get("output_artifact")
-                and _declared_artifact_evidence(task, now) is None):
+        #
+        # #3623 widens what THIS branch weighs, and only this branch: a task may declare
+        # `artifact_complete_marker`, so a capped run that left the right-size file but
+        # not a finished one is recorded failed too. `_declared_artifact_evidence` is
+        # deliberately untouched — the same four size/clock arms and the same signature —
+        # because that ruler is shared with the empty-terminal-text path above, whose
+        # "a qualifying artifact is enough" decision the item says is deliberate and
+        # stays. `_cap_out_gap` has exactly one call site, this one.
+        gap, cap_artifact = (_cap_out_gap(task, now)
+                             if stop_reason == "max_turns" else (None, {}))
+        if gap is not None:
+            marker = str(task.get("artifact_complete_marker") or "").strip()
+            on_disk = gap != _MAX_TURNS_NO_ARTIFACT
+            if on_disk:
+                weighed = (
+                    f"the file was there — {cap_artifact.get('bytes')} bytes, modified "
+                    f"`{cap_artifact.get('modified_at')}` — which is every claim a byte "
+                    f"count and an mtime can make. `artifact_complete_marker` declares "
+                    f"what completion looks like inside it, and "
+                    f"`{marker}` is not in the file. A run the harness stopped cannot "
+                    f"call a skeleton its deliverable.")
+            else:
+                weighed = (f"produced no file at or above {_ARTIFACT_MIN_BYTES} bytes "
+                           f"with an mtime at or after the run start — the same evidence "
+                           f"`_declared_artifact_evidence` demands of a run whose "
+                           f"terminal text was empty. A run the harness stopped cannot "
+                           f"call itself a success without it.")
             return await _record_failure(
                 task, task_id, run_id, started_at, now,
-                summary=(f"stopped at max_turns ({num_turns} turns) with no qualifying "
-                         f"output_artifact on disk"),
+                # #3596's wording stays byte-identical for its own basis: records already
+                # on disk say this, and grep-ability across the change is worth more here
+                # than a prettier sentence.
+                summary=(f"stopped at max_turns ({num_turns} turns) with "
+                         + ("its declared output_artifact not carrying the marker"
+                            if on_disk else "no qualifying output_artifact on disk")),
                 body=(f"## Prompt\n\n{prompt[:500]}...\n\n## Response\n\n"
                       f"{final_response}\n\n"
                       f"## Why this is recorded as a failure\n\n"
                       f"`stop_reason: max_turns`, and the task's declared "
-                      f"`output_artifact` produced no file at or above "
-                      f"{_ARTIFACT_MIN_BYTES} bytes with an mtime at or after the run "
-                      f"start — the same evidence "
-                      f"`_declared_artifact_evidence` demands of a run whose terminal "
-                      f"text was empty. A run the harness stopped cannot call itself a "
-                      f"success without it."),
+                      f"`output_artifact` {weighed}"),
                 kind="task",
-                extra={**meta, "status_basis": "max_turns_without_declared_artifact",
-                       "declared_artifact": str(task["output_artifact"])},
+                extra={**meta, "status_basis": gap,
+                       "declared_artifact": str(task["output_artifact"]),
+                       "artifact_complete_marker": marker or None,
+                       "artifact_evidence": cap_artifact or None},
             )
 
         record = _write_run_record(
