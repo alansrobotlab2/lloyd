@@ -1621,7 +1621,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
     }).then(r => r.json()),
-  workersPending: (source?: string, limit = 200): Promise<{
+  /** The review lane's list (#3548). `status` narrows SERVER-SIDE, before the cap:
+   * `pending` is the only way to reach the whole pile the producer's
+   * `max_staged_pending` bound counts, because the newest-mtime window used to be
+   * shared with notes that need no review — 300 rows reached 167 of 325 pending on
+   * 2026-10-29 and dropped 158 back to 2026-09-22. `dropped_by_limit` is what stops a
+   * capped list reading as an empty pile; `pending_count` is the figure
+   * /api/workers/health publishes for the same pile. */
+  workersPending: (opts: { source?: string; limit?: number; status?: string } = {}): Promise<{
     items: Array<{
       path: string
       source: string
@@ -1631,12 +1638,18 @@ export const api = {
       mtime: string
       frontmatter: Record<string, any>
       preview: string
+      status?: string
     }>
     sources: string[]
+    pending_count?: number
+    matched_count?: number
+    dropped_by_limit?: number
+    cap?: number
   }> => {
     const q = new URLSearchParams()
-    if (source) q.set('source', source)
-    q.set('limit', String(limit))
+    if (opts.source) q.set('source', opts.source)
+    q.set('limit', String(opts.limit ?? 200))
+    if (opts.status) q.set('status', opts.status)
     return fetch(`${API_BASE}/workers/pending?${q.toString()}`).then(r => r.json())
   },
   workersPendingRead: (path: string): Promise<{

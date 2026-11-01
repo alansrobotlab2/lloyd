@@ -5,6 +5,9 @@ import {
   ArrowUpCircle, Trash2, FileText, FolderOpen,
 } from "lucide-react";
 import { api } from "../../api";
+import {
+  pendingLaneLabel, pendingLaneParams, type PendingCounts,
+} from "./pendingLaneState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -382,13 +385,23 @@ function ReviewPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  // The pile's depth as the SERVER counts it, kept apart from `items.length`, which is
+  // only what this response carried. They are the same number whenever the cap did not
+  // bite, and the label says which case the reader is in. (#3548)
+  const [counts, setCounts] = useState<PendingCounts | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await api.workersPending(sourceFilter || undefined, 300);
+      const d = await api.workersPending(pendingLaneParams(sourceFilter));
       setItems(d.items || []);
       setSources(d.sources || []);
+      setCounts({
+        pending: d.pending_count,
+        returned: (d.items || []).length,
+        dropped: d.dropped_by_limit,
+        cap: d.cap,
+      });
     } finally {
       setLoading(false);
     }
@@ -450,7 +463,9 @@ function ReviewPanel() {
           >
             <SelectTrigger className="h-8 flex-1"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="__all__">all sources ({items.length})</SelectItem>
+              <SelectItem value="__all__">
+                {pendingLaneLabel(counts ?? { returned: items.length }, sourceFilter || "all sources")}
+              </SelectItem>
               {sources.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
             </SelectContent>
           </Select>
@@ -458,10 +473,17 @@ function ReviewPanel() {
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           </Button>
         </div>
+        {/* Always visible, because the SelectItem above only shows once the dropdown is
+            open and the number it carries is the one fact an operator needs without
+            clicking: how deep the pile the producer is bound on actually is. (#3548) */}
+        <div className="px-2 py-1 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground">
+          {pendingLaneLabel(counts ?? { returned: items.length }, sourceFilter || "all sources")}
+        </div>
         <div className="overflow-y-auto flex-1">
           {items.length === 0 && (
             <div className="p-6 text-center text-muted-foreground italic text-sm">
-              no pending artifacts
+              {pendingLaneLabel(counts ?? { returned: 0 }, sourceFilter || "all sources")} —
+              nothing in this window
             </div>
           )}
           {items.map(it => {

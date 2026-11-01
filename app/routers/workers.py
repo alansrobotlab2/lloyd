@@ -37,6 +37,12 @@ from app.config import CONFIG, save_tool_overrides
 from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import PENDING_WAIT_BOUND_SECONDS, get_queue
 from workers.pool import HOLDER_MACHINE, HOLDER_PERSON, get_pool
+# The review lane and the producer's `max_staged_pending` bound decide what counts as
+# a pending note by ONE read: this parser, this status literal, this count (#3548).
+from workers.sources._common import (
+    PENDING_REVIEW_STATUS,
+    _staged_front_matter,
+)
 
 REJECTED_ROOT = PENDING_ROOT / "_rejected"
 
@@ -806,14 +812,88 @@ def _bench_ids_in(dest_dir: Path) -> set[str]:
         )
 
 
+#: `?status=` accepts only these two values, so a typo cannot ask for a status that
+#: does not exist and have the empty list that answers it read as an empty pile.
+#: `labelled` is the complement, not a status the notes carry: it is what
+#: `staged_pending_count` leaves out — `out_of_band`, `uncalibrated`, and a note whose
+#: review status is missing or whose front matter will not parse.
+PENDING_STATUSES = ("pending", "labelled")
+
+#: The one review-lane ceiling. da5c43de made `max_staged_pending` the PRODUCER's
+#: bound, so a pending note a reviewer cannot reach is no longer a backlog but a halt:
+#: nothing lowers the count but promoting, rejecting or relabelling one. Measured on
+#: the live pile 2026-10-29: 647 notes hold 325 pending, and the 300-row window the tab
+#: asked for reached 167 of them and dropped 158 back to 2026-09-22.
+#:
+#: 1000 rather than a number that fits today's pile: at 647 notes the whole pile fits
+#: in one request, and the day it does not, `dropped_by_limit` is what says so.
+MAX_PENDING_LIMIT = 1000
+
+
+def _pending_limit(limit: int) -> int:
+    """Rows a caller may ask for, clamped to `[1, MAX_PENDING_LIMIT]`.
+
+    One expression feeds both the slice and the `cap` field, so the ceiling the
+    response reports cannot drift from the ceiling that actually cut the list — which
+    is what would make `dropped_by_limit` a count of a different truncation."""
+    return max(1, min(limit, MAX_PENDING_LIMIT))
+
+
+def _review_status_of(content: str) -> str:
+    """`pending` or `labelled`, by the SAME read that gates enqueueing (#3548).
+
+    `workers.sources._common.staged_pending_count` decides a note is pending through
+    `_staged_front_matter` + `PENDING_REVIEW_STATUS`, and this takes the `content` the
+    route has already read, so the review lane, the health row and the producer's bound
+    agree because they are one function rather than two expressions kept in step.
+
+    It cannot be `_parse_frontmatter`'s block instead. A staged note is two documents in
+    one file and `write_staging_note` writes the ENVELOPE first, with the candidate
+    task's own front matter inside the body after it; `_parse_frontmatter` returns the
+    LAST well-formed block, which on such a file is the task's, and the task block
+    carries `status: pending` for a grading state that has nothing to do with review.
+    The shared parser takes the first block, which is the one holding `review_status`.
+
+    A note whose front matter will not parse, or parses to something that is not a
+    mapping, is `labelled` — which is also what the bound declines to count, so an
+    unreadable note never blocks the pile from draining."""
+    env = _staged_front_matter(content)
+    if not isinstance(env, dict):
+        return "labelled"
+    if str(env.get("review_status", "")).strip() == PENDING_REVIEW_STATUS:
+        return "pending"
+    return "labelled"
+
+
 @router.get("/api/workers/pending")
-async def workers_pending(source: str = "", limit: int = 200):
-    """List pending-research artifacts with frontmatter + short preview."""
+async def workers_pending(source: str = "", limit: int = 200, status: str = ""):
+    """List pending-research artifacts with frontmatter + short preview.
+
+    `status=` narrows to the notes the producer's `max_staged_pending` bound counts
+    (`pending`) or to the ones it leaves out (`labelled`). The filter runs BEFORE the
+    `limit` slice — the whole point: filtering after it would still return 167 of 325
+    and call the other 158 unseen. An absent `status` keeps the pre-#3548 response
+    exactly: every status, in the same newest-mtime order.
+
+    `pending_count` is how many notes carry `review_status: pending` under `source`,
+    the figure `staged_pending_count` publishes on `/api/workers/health`; `cap` is this
+    request's own ceiling and `dropped_by_limit` how many MATCHING notes it cut, so a
+    truncated list can never read as an empty pile."""
+    if status and status not in PENDING_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown status {status!r}; expected one of "
+                   f"{', '.join(PENDING_STATUSES)}, or no status at all",
+        )
+
+    cap = _pending_limit(limit)
     if not PENDING_ROOT.exists():
-        return JSONResponse({"items": [], "sources": []})
+        return JSONResponse({"items": [], "sources": [], "pending_count": 0,
+                             "matched_count": 0, "dropped_by_limit": 0, "cap": cap})
 
     items: list[dict] = []
     sources_seen: set[str] = set()
+    pending_count = 0
     for src_dir in PENDING_ROOT.iterdir():
         if not src_dir.is_dir() or src_dir.name.startswith("_") or src_dir.name.startswith("."):
             continue
@@ -829,6 +909,11 @@ async def workers_pending(source: str = "", limit: int = 200):
             except OSError:
                 continue
             fm, body = _parse_frontmatter(content)
+            note_status = _review_status_of(content)
+            if note_status == "pending":
+                pending_count += 1
+            if status and note_status != status:
+                continue
             preview = body.strip().split("\n\n", 1)[0].strip()[:220]
             items.append({
                 "path": str(artifact),
@@ -839,12 +924,18 @@ async def workers_pending(source: str = "", limit: int = 200):
                 "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
                 "frontmatter": fm,
                 "preview": preview,
+                "status": note_status,
             })
 
     items.sort(key=lambda i: i["mtime"], reverse=True)
+    matched = len(items)
     return JSONResponse({
-        "items": items[: max(1, min(limit, 1000))],
+        "items": items[:cap],
         "sources": sorted(sources_seen),
+        "pending_count": pending_count,
+        "matched_count": matched,
+        "dropped_by_limit": matched - min(matched, cap),
+        "cap": cap,
     })
 
 

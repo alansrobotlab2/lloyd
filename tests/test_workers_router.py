@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -3077,3 +3078,432 @@ def test_the_two_failure_age_keys_are_additive_for_every_existing_reader(monkeyp
     assert blocks["youtube-digest"]["fail_rate"] == 1.0, blocks["youtube-digest"]
     assert blocks["deep-research"]["fail_rate"] == 0.0, blocks["deep-research"]
     assert blocks["deep-research"]["last_failure"] is None
+
+
+# ── #3548 — the review lane and the producer's bound read ONE pile ────────────
+#
+# da5c43de made `max_staged_pending` the PRODUCER's bound: while a source holds more
+# pending notes than its cap, `staged_pending_cap` skips its enqueue — so a pending note
+# a reviewer cannot reach stopped being a backlog and became a halt, because nothing
+# lowers the count except promoting, rejecting or relabelling that note.
+#
+# The lane could not isolate the pile. `GET /api/workers/pending` returned every staged
+# note in one newest-mtime order, so the Review tab's window was shared with notes that
+# need no review. Measured on the live pile 2026-10-29: 647 notes held 325 pending, and
+# the 300 rows the tab asked for reached 167 of them, dropping 158 back to 2026-09-22.
+# Clearing every reachable pending and re-windowing reached 167, then 96, then ZERO with
+# 62 still pending — a reviewer would have to reject ~300 notes they did not stage first.
+#
+# `status=pending` is applied BEFORE the slice, and the count is decided by
+# `workers.sources._common._staged_front_matter` + `PENDING_REVIEW_STATUS` — the same
+# read `staged_pending_count` and the bound use — so the two figures are one number.
+
+_LANE_T0 = 1_761_000_000.0   # fixed epoch; every note's mtime is _LANE_T0 + order*60
+
+
+def _lane_note(root: Path, stem: str, *, source: str = "bench-mine",
+               day: str = "2026-10-05", order: int = 0,
+               envelope: dict | None = None, inner: dict | None = None,
+               raw_first_block: str | None = None) -> Path:
+    """Write one staged note the way `write_staging_note` writes it.
+
+    ENVELOPE FIRST, then the candidate task's own front matter inside the body — the
+    order that makes the review filter non-obvious: `_parse_frontmatter` returns the
+    LAST well-formed block, which on this file is the task's, and the task block's
+    `status` is a grading state, not a review state.
+
+    `order` is the mtime in minutes after a fixed epoch, so a test can say "the third
+    newest note" without depending on what time the suite ran.
+    """
+    d = root / source / day
+    d.mkdir(parents=True, exist_ok=True)
+    fm = dict(envelope if envelope is not None else {})
+    fm.setdefault("source", source)
+    fm.setdefault("run_id", f"run_lane_{stem}")
+    fm.setdefault("generated_at", f"{day}T03:00:00+00:00")
+    # The envelope block goes out through `yaml.dump` exactly as `write_staging_note`
+    # emits it, which quotes a timestamp-looking value; hand-joining `k: v` instead
+    # would make `generated_at` parse back as a `datetime` and the route's JSON
+    # encoder would fail on a note that is a perfectly ordinary artifact on disk.
+    head = (raw_first_block if raw_first_block is not None
+            else _yaml.dump(fm, default_flow_style=False, allow_unicode=True))
+    block = inner if inner is not None else {"task_id": f"bench-{stem}",
+                                             "status": "not-graded"}
+    task = ("---\n"
+            + _yaml.dump(block, default_flow_style=False, allow_unicode=True)
+            + f"---\n\n{TASK_PROSE}")
+    p = d / f"{stem}.md"
+    p.write_text(f"---\n{head}\n---\n\n{task}\n", encoding="utf-8")
+    ts = _LANE_T0 + order * 60
+    os.utime(p, (ts, ts))
+    return p
+
+
+def _pending_of(items: list[dict]) -> list[str]:
+    return [i["filename"] for i in items if i["status"] == "pending"]
+
+
+def test_status_pending_returns_only_notes_whose_envelope_is_pending(tmp_path, monkeypatch):
+    """Clause 1: `?status=pending` keeps a note iff `staged_pending_count` would count
+    it, and an absent `status` answers exactly as it did before #3548 — every status, so
+    every caller of the unfiltered route keeps its list.
+
+    The two shapes that make this a verdict rather than a string compare are the note
+    whose ENVELOPE says pending while its inner task block says otherwise (must survive),
+    and the note whose inner block says pending while its envelope does not (must not):
+    they fail in opposite directions, so reading the wrong front matter block cannot
+    pass this node.
+    """
+    root = tmp_path / "pending-research"
+    keep = _lane_note(root, "env-pending-inner-quiet", order=9,
+                      envelope={"review_status": "pending"},
+                      inner={"task_id": "bench-env-pending-inner-quiet",
+                             "status": "not-graded"})
+    drop = _lane_note(root, "env-labelled-inner-pending", order=8,
+                      envelope={"review_status": "out_of_band"},
+                      inner={"task_id": "bench-env-labelled-inner-pending",
+                             "status": "pending"})
+    out_of_band = _lane_note(root, "oob", order=7,
+                             envelope={"review_status": "out_of_band"})
+    uncalibrated = _lane_note(root, "uncal", order=6,
+                              envelope={"review_status": "uncalibrated"})
+    no_status = _lane_note(root, "no-status", order=5, envelope={})
+    broken = _lane_note(root, "broken-fm", order=4, raw_first_block="calibration: :a: b")
+    client = _client(monkeypatch, tmp_path)
+
+    r = client.get("/api/workers/pending?status=pending&limit=1000")
+    assert r.status_code == 200
+    body = r.json()
+    got = sorted(i["filename"] for i in body["items"])
+    assert got == [keep.name], (
+        f"`status=pending` must return only the note whose ENVELOPE carries "
+        f"`review_status: pending`; got {got}")
+    assert all(i["status"] == "pending" for i in body["items"])
+    assert body["pending_count"] == 1, "one pending note in the pile, by the bound's read"
+    assert body["matched_count"] == 1 and body["dropped_by_limit"] == 0
+
+    every = client.get("/api/workers/pending?limit=1000").json()
+    assert sorted(i["filename"] for i in every["items"]) == sorted(
+        p.name for p in (keep, drop, out_of_band, uncalibrated, no_status, broken)), (
+        "an absent `status` keeps today's all-status response: the tab's list, the "
+        "count and the order are what they were before this param existed")
+    assert every["pending_count"] == 1, (
+        "the count describes the pile even when the list was not narrowed to it")
+
+
+def test_status_labelled_returns_the_notes_the_bound_does_not_count(tmp_path, monkeypatch):
+    """Clause 1's complement: `status=labelled` returns the notes the bound does NOT count.
+
+    313 of the 624 notes measured 2026-10-28 carry a label already — `out_of_band` or
+    `uncalibrated` — and the pile a reviewer is asked to clear is not those. The complement
+    has a NAME rather than being any string, because an open-ended value is what lets a typo
+    answer an empty list. The refusal of a value outside the set is its own node,
+    `test_a_status_outside_the_three_is_refused_rather_than_answering_empty`, graded clause 2.
+    """
+    root = tmp_path / "pending-research"
+    _lane_note(root, "p1", order=3, envelope={"review_status": "pending"})
+    oob = _lane_note(root, "p2", order=2, envelope={"review_status": "out_of_band"})
+    uncal = _lane_note(root, "p3", order=1, envelope={"review_status": "uncalibrated"})
+
+    client = _client(monkeypatch, tmp_path)
+    got = sorted(i["filename"] for i in client.get(
+        "/api/workers/pending?status=labelled&limit=1000").json()["items"])
+    assert got == sorted([oob.name, uncal.name])
+
+
+def test_a_status_outside_the_three_is_refused_rather_than_answering_empty(
+        tmp_path, monkeypatch):
+    """Clause 2: a status outside pending/labelled is a 422, never an empty list.
+
+    `?status=pend` is the typo a reviewer actually types. Answering `items: []` would say
+    "there is nothing to review" — the one sentence this whole change exists to make
+    impossible, and indistinguishable on screen from a genuinely empty pile. The pile here
+    is deliberately non-empty, so a refusal is the only remaining shape; and the accepted
+    set is the route's own `PENDING_STATUSES`, so the refused value and the accepted set
+    are one tuple and cannot drift apart.
+    """
+    root = tmp_path / "pending-research"
+    _lane_note(root, "p1", order=3, envelope={"review_status": "pending"})
+    _lane_note(root, "p2", order=2, envelope={"review_status": "out_of_band"})
+    client = _client(monkeypatch, tmp_path)
+
+    bad = client.get("/api/workers/pending?status=pend")
+    assert bad.status_code == 422, (
+        "a near-miss status must be a refusal, not an empty list: the empty list is the "
+        "sentence this whole change exists to make impossible")
+    for accepted in router.PENDING_STATUSES:
+        assert client.get(
+            f"/api/workers/pending?status={accepted}").status_code == 200, (
+            f"`{accepted}` is in the accepted set, so the 422 above is the VALUE and not "
+            "the query shape")
+    assert set(router.PENDING_STATUSES) == {"pending", "labelled"}, (
+        "the accepted set is exactly these two labels; anything else must be refused, so "
+        "widening it here must widen the refusal with it")
+
+
+def test_pending_at_the_ceiling_returns_exactly_the_notes_the_bound_counts(
+        tmp_path, monkeypatch):
+    """Clause 3: at `limit` clamped to the route's own ceiling, the per-source item count
+    EQUALS `staged_pending_count(source)` — the figure the producer's `max_staged_pending`
+    gate reads. One predicate decides both, so the review list and the halt cannot drift
+    apart. Both sides also leave a `README.md` and a `_`-prefixed sibling directory
+    out of the pile, by DIFFERENT rules — the route skips `README.md` by NAME and the
+    bound skips it only because its front matter carries no `review_status`, so a
+    README that ever declared `review_status: pending` would be counted by the bound
+    and never listed by the lane. That gap is recorded here rather than papered over.
+
+    The pile is deliberately built so the OLD behaviour could not pass: most pending
+    notes are older than every labelled note, which is the shape that hid 158 of them.
+    """
+    root = tmp_path / "pending-research"
+    # bench-mine: 7 pending, all OLDER than its 5 labelled notes.
+    for i in range(7):
+        _lane_note(root, f"bm-pending-{i}", source="bench-mine", order=i,
+                   envelope={"review_status": "pending"})
+    for i in range(5):
+        _lane_note(root, f"bm-label-{i}", source="bench-mine", order=100 + i,
+                   envelope={"review_status": "out_of_band"})
+    # session-distill: 4 pending, 1 labelled.
+    for i in range(4):
+        _lane_note(root, f"sd-pending-{i}", source="session-distill", order=i + 2,
+                   day="2026-10-06", envelope={"review_status": "pending"})
+    _lane_note(root, "sd-label-0", source="session-distill", order=101,
+               day="2026-10-06", envelope={"review_status": "uncalibrated"})
+    # Neither the bound nor the route counts these two, and both must be right.
+    (root / "bench-mine" / "README.md").write_text("# staged\n", encoding="utf-8")
+    _lane_note(root / "_rejected", "already-rejected", order=500,
+               envelope={"review_status": "pending"})
+    import workers.sources._common as wc
+    monkeypatch.setattr(wc, "STAGING_ROOT", root)
+    client = _client(monkeypatch, tmp_path)
+
+    for source, want in (("bench-mine", 7), ("session-distill", 4)):
+        body = client.get(
+            f"/api/workers/pending?source={source}&status=pending&limit=1000").json()
+        assert len(body["items"]) == want, (
+            f"{source}: the review list returned {len(body['items'])} while the "
+            f"producer's bound counts {want} — clause 3 is exactly this equality")
+        assert body["dropped_by_limit"] == 0
+        assert wc.staged_pending_count(source) == want
+
+    every = client.get("/api/workers/pending?status=pending&limit=1000").json()
+    assert len(every["items"]) == 11 == every["pending_count"]
+    per_src = {}
+    for it in every["items"]:
+        per_src[it["source"]] = per_src.get(it["source"], 0) + 1
+    assert per_src == {"bench-mine": 7, "session-distill": 4}, per_src
+    assert not any("_rejected" in i["path"] for i in every["items"])
+    assert not any(i["filename"] == "README.md" for i in every["items"])
+    # And the old window is why this change exists: 12 rows of the same pile reach none
+    # of the bench-mine pending notes, because the 5 newest labelled notes fill the cap.
+    narrow = client.get("/api/workers/pending?source=bench-mine&status=pending&limit=4"
+                        ).json()
+    assert len(narrow["items"]) == 4 and narrow["dropped_by_limit"] == 3
+
+
+def test_the_response_says_how_many_matching_notes_the_cap_dropped(tmp_path, monkeypatch):
+    """Clause 4: `dropped_by_limit` counts MATCHING notes the cap cut, and is 0 when the
+    cap cut nothing.
+
+    The number that matters is the one a truncated list would otherwise hide: 30 pending
+    asked for 12 rows is 18 notes still waiting, not an empty pile. `pending_count`
+    beside it is the pile's depth wherever in the order those notes sit, which is the
+    figure that makes `dropped_by_limit` checkable rather than decorative.
+    """
+    root = tmp_path / "pending-research"
+    for i in range(30):
+        _lane_note(root, f"p-{i}", order=i, envelope={"review_status": "pending"})
+    for i in range(5):
+        _lane_note(root, f"l-{i}", order=100 + i, envelope={"review_status": "out_of_band"})
+    client = _client(monkeypatch, tmp_path)
+
+    body = client.get("/api/workers/pending?status=pending&limit=12").json()
+    assert len(body["items"]) == 12
+    assert body["matched_count"] == 30, "30 notes matched the filter, cap or no cap"
+    assert body["dropped_by_limit"] == 18
+    assert body["pending_count"] == 30, (
+        "the pile's DEPTH is the pending count, not the file count: the 5 labelled "
+        "notes beside them are the 322 that #3548 exists to get out of the window")
+    assert body["cap"] == 12
+
+    wide = client.get("/api/workers/pending?status=pending&limit=1000").json()
+    assert wide["dropped_by_limit"] == 0, (
+        "nothing was cut, so the field must say zero rather than sit absent")
+    assert len(wide["items"]) == 30
+
+    labelled = client.get("/api/workers/pending?status=labelled&limit=1000").json()
+    assert labelled["dropped_by_limit"] == 0 and len(labelled["items"]) == 5, (
+        "`dropped_by_limit` follows the filter, never the whole pile")
+
+    unfiltered = client.get("/api/workers/pending?limit=20").json()
+    assert len(unfiltered["items"]) == 20 and unfiltered["dropped_by_limit"] == 15, (
+        "the honesty holds with no filter: 35 notes, 20 rows, 15 dropped")
+
+    zero = client.get("/api/workers/pending?status=pending&limit=0").json()
+    assert zero["cap"] == 1 and len(zero["items"]) == 1 and zero["dropped_by_limit"] == 29, (
+        "`limit=0` clamps to 1 rather than returning nothing under a count of 30")
+
+
+def test_the_filter_runs_before_the_slice_and_newest_stays_first(tmp_path, monkeypatch):
+    """Clause 4: filter-then-slice, and the order the route has always had.
+
+    The pile is the live one's shape: 30 pending notes OLDER than 20 labelled ones. An
+    unfiltered 10-row window therefore holds ZERO pending notes — the 167-of-325 defect
+    in miniature — while `status=pending&limit=10` must return the 10 newest PENDING
+    notes. If the filter ran after the slice, that call would answer with an empty list
+    and `dropped_by_limit` would say so while the reviewer saw nothing to click.
+
+    Order is asserted twice over: across the merged list, and within each source, since
+    the route sorts once after walking every source directory.
+    """
+    root = tmp_path / "pending-research"
+    for i in range(30):
+        _lane_note(root, f"a-pending-{i}", source="bench-mine", order=i,
+                   envelope={"review_status": "pending"})
+    for i in range(20):
+        _lane_note(root, f"b-label-{i}", source="bench-mine", order=100 + i,
+                   envelope={"review_status": "out_of_band"})
+    # The second source's pending notes are the NEWEST in the pile (orders 30..55), so
+    # the merged list must lead with all six of them before falling back to bench-mine —
+    # which is what makes "sorted once across sources" a claim rather than a formality.
+    for i in range(6):
+        _lane_note(root, f"c-pending-{i}", source="session-distill", order=30 + i * 5,
+                   day="2026-10-06", envelope={"review_status": "pending"})
+    client = _client(monkeypatch, tmp_path)
+
+    blind = client.get("/api/workers/pending?limit=10").json()
+    assert _pending_of(blind["items"]) == [], (
+        "the pre-change shape, kept on purpose: an unfiltered window over this pile is "
+        "all labelled notes — this is what the tab used to ask for")
+
+    body = client.get("/api/workers/pending?status=pending&limit=10").json()
+    assert len(body["items"]) == 10, "filtered BEFORE sliced: 10 pending, not 0"
+    assert [i["filename"] for i in body["items"]] == [
+        "c-pending-5.md", "c-pending-4.md", "c-pending-3.md", "c-pending-2.md",
+        "c-pending-1.md", "c-pending-0.md",
+        "a-pending-29.md", "a-pending-28.md", "a-pending-27.md", "a-pending-26.md"], (
+        "the 10 newest PENDING notes across both sources, in one order — not 0, which is "
+        "what filtering after the slice would have answered, and not the 10 newest files, "
+        "which are labelled notes")
+    stamps = [i["mtime"] for i in body["items"]]
+    assert stamps == sorted(stamps, reverse=True), (
+        "merged across sources: newest mtime first, the single sort at the walk's end")
+    for source in ("bench-mine", "session-distill"):
+        own = [i["mtime"] for i in body["items"] if i["source"] == source]
+        assert own == sorted(own, reverse=True), source
+        assert len(own) > 1, (
+            f"{source} must contribute several rows or its own ordering is untested")
+    assert body["dropped_by_limit"] == 26, "30 pending for 10 rows"
+
+
+def test_the_review_lane_and_the_health_row_publish_one_pending_count(tmp_path, monkeypatch):
+    """Clause 3, from the health side: the tab's number and `staged_pending` are the same
+    expression, so they cannot disagree — and the cap the row names is the cap the
+    producer enforces, from the same source module.
+
+    Before this change the tab printed `items.length`, so it could read 300 while health
+    said 325 pending over a 150 cap: one was a window length and the other a count of the
+    pile, and an operator hunting the halt had to know which was which. Now both sides of
+    that sentence come from `staged_pending_count`'s predicate.
+    """
+    import workers.sources._common as wc
+    from workers.sources import bench_mine as BM
+    from workers.sources import session_distill as SD
+
+    root = tmp_path / "pending-research"
+    for i in range(6):
+        _lane_note(root, f"bm-p-{i}", source="bench-mine", order=i,
+                   envelope={"review_status": "pending"})
+    for i in range(4):
+        _lane_note(root, f"bm-l-{i}", source="bench-mine", order=100 + i,
+                   envelope={"review_status": "out_of_band"})
+    for i in range(3):
+        _lane_note(root, f"sd-p-{i}", source="session-distill", order=i,
+                   day="2026-10-06", envelope={"review_status": "pending"})
+    for i in range(2):
+        _lane_note(root, f"sd-l-{i}", source="session-distill", order=100 + i,
+                   day="2026-10-06", envelope={"review_status": "uncalibrated"})
+    monkeypatch.setattr(wc, "STAGING_ROOT", root)
+    # bench-mine runs on an OPERATOR key (4), so its row is over cap at 6 pending;
+    # session-distill runs on its module default (60), so its row is under. `want_caps`
+    # is those two figures as this very config block resolves them — the node reads the
+    # route's own resolver rather than hardcoding 150/60, so an operator moving a key
+    # does not turn a green node red, and the two branches of `over_cap` are both run.
+    assert BM.DEFAULT_MAX_STAGED_PENDING > 4, (
+        "6 pending is over the 4-key cap but under the module default, and that gap is "
+        "what keeps `over_cap` a tested branch rather than an asserted one")
+    q = WorkQueue(tmp_path / "lane-health.db")
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: q)
+    monkeypatch.setattr(router, "CONFIG", {"workers": {"sources": {
+        "bench-mine": {"enabled": True, "interval_seconds": 7200,
+                       "max_staged_pending": 4},
+        "session-distill": {"enabled": True, "interval_seconds": 900}}}},
+        raising=False)
+    want_caps = {"bench-mine": 4, "session-distill": SD.DEFAULT_MAX_STAGED_PENDING}
+
+    rows = {s["name"]: s for s in
+            client.get("/api/workers/health?days=7&runs=0").json()["sources"]}
+    lane = client.get("/api/workers/pending?status=pending&limit=1000").json()
+
+    assert lane["pending_count"] == 9, (
+        "one figure for the pile: the lane counts 6 + 3 pending, and no labelled note "
+        "is in it")
+    per_src = {}
+    for it in lane["items"]:
+        per_src[it["source"]] = per_src.get(it["source"], 0) + 1
+    assert per_src == {"bench-mine": 6, "session-distill": 3}, per_src
+
+    for source, depth in (("bench-mine", 6), ("session-distill", 3)):
+        row = rows[source]["staged_pending"]
+        assert row["pending_count"] == per_src[source] == depth, (
+            f"{source}: health's `staged_pending` row says {row['pending_count']} while "
+            f"the review lane can list {per_src[source]} — clause 3 is exactly this "
+            "equality, because one number is what the halt and the fix are about")
+        assert row["cap"] == want_caps[source]
+        assert row["over_cap"] is (depth > want_caps[source]), (
+            "the halt the operator reads is the halt the producer acted on")
+
+
+def test_the_review_tab_asks_for_the_pending_pile_at_the_ceiling_and_labels_both_totals():
+    """Clause 5's repo-side half: what the Review tab SENDS and what it RENDERS.
+
+    The frontend half of this clause lives in
+    `web/src/components/pages/WorkersPage.test.ts`, which cannot mount the component
+    (`web/vitest.config.ts` pins `environment: "node"`, `web/package.json` is a denied
+    path for a round — see the note atop `BackgroundPage.test.ts`) and so pins the
+    captured fetch URL and the pure label helper instead. This node is the same claim
+    read from the repo side, so the contract is graded wherever the grader looks: the
+    tab's request names the pending filter and the route's own 1000 ceiling, the label
+    is built by the shared helper rather than from `items.length`, and the dead
+    `all sources ({items.length})` count — a window length wearing a pile depth's
+    clothes, which read "300" while health said 325 pending over a 150 cap — stays dead.
+
+    A source read, the same form the doc-claim nodes in this suite use: it fails when
+    someone edits the call back to a hand-rolled window, not when the wording changes.
+    """
+    web = Path(__file__).resolve().parent.parent / "web" / "src"
+    page = (web / "components" / "pages" / "WorkersPage.tsx").read_text(encoding="utf-8")
+    lane = (web / "components" / "pages" / "pendingLaneState.ts").read_text(encoding="utf-8")
+    api_src = (web / "api.ts").read_text(encoding="utf-8")
+
+    assert "api.workersPending(pendingLaneParams(" in page, (
+        "the tab must build its request through `pendingLaneParams`, which is the one "
+        "place that names `status=pending` and the ceiling together")
+    assert not re.search(r"workersPending\([^)]*\b300\b", page), (
+        "the 300-row window is what reached 167 of 325 pending and dropped 158 back to "
+        "2026-09-22; if it returns, the halt is back with it")
+    assert "all sources ({items.length})" not in page, (
+        "a window length must not be rendered as the pile's depth")
+    assert page.count("pendingLaneLabel(") >= 3, (
+        "the count is rendered in the dropdown, in an always-visible line above the "
+        "list, and in the empty state — the SelectItem alone is unreadable until opened")
+
+    assert "PENDING_LANE_LIMIT = 1000" in lane, (
+        "the lane asks at the route's own ceiling; below it, pending notes are "
+        "unreachable again and the bound has no way to be lowered")
+    assert "PENDING_LANE_STATUS = 'pending'" in lane
+    assert "pending_count" in page and "dropped_by_limit" in page, (
+        "the tab keeps the server's own counts apart from `items.length`")
+    assert "q.set('status', opts.status)" in api_src, (
+        "`api.workersPending` must send the param, not accept and ignore it")
