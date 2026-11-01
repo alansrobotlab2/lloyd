@@ -1236,7 +1236,24 @@ def reopen(reopen_raw, cfg) -> dict:
 #: engine restarted inside the window: 2026-10-25 was served start to finish by the 10-19 boot.
 #: `test_the_eleventh_pinned_pool_is_a_committed_boot_line_too` re-derives the integer from those
 #: bytes and pins that it falls before this window, not inside it.
-NO_BOOT_POOL = {"2026-10-15": 844969, "2026-10-23": 844969, "2026-10-25": 844969}
+#:
+#: 2026-10-29 (#3691) is the fourth day that needs a pin, and the only one of the four whose
+#: chat miss does NOT meet the filing condition — it is pinned so the walk can be run at all,
+#: and what the walk finds is the day's close rather than a sixth qualifying event. Its
+#: window holds no boot and its extract ships `pool_tokens: []`. The size is the last boot
+#: before the window, read out of the live rotation on 2026-11-01 and quoted verbatim as
+#: `TWELFTH_BOOT` below rather than cited to a file: `(EngineCore pid=5968) INFO 10-26
+#: 14:58:24 [kv_cache_utils.py:2320] GPU KV cache size: 844,969 tokens, Maximum concurrency
+#: for 262,144 tokens per request: 3.22x`. It is engine-local clock, 2 d 2 h 56 min before the
+#: window's first miss. The rotation's boot lines from 10-19 to 11-01 all read 844,969 except
+#: two brief dips to 484,612 — 359 s from 10-29 23:12:47 to 23:18:46 and 302 s from 10-30
+#: 04:26:06 to 04:31:08, engine-local stamps, which are 06:12 and 11:26 UTC on 10-30 and so
+#: outside this UTC day — so one figure holds for the whole counted day. Quoted rather than
+#: cited because the rotation reaches back only to 2026-10-18 today, and re-reading it stops
+#: being possible. `test_the_twelfth_pinned_pool_is_a_quoted_boot_line_the_walk_can_use`
+#: re-derives the integer from the quoted bytes through the script's own `_POOL_RE`.
+NO_BOOT_POOL = {"2026-10-15": 844969, "2026-10-23": 844969, "2026-10-25": 844969,
+                "2026-10-29": 844969}
 
 
 def _with_pool(ex: dict) -> dict:
@@ -5930,3 +5947,354 @@ def test_the_eleventh_paragraph_states_the_ruled_stance_and_moves_only_the_evide
     assert _NEWEST_CLEARING_DAY in page and "2026-10-25 is the newest day" not in page, (
         "the newest-clearing-day bound moved onto 2026-10-25, which does not clear all four "
         "criteria; this item's day is a record and must not re-bound the acceptance bar")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── #3691: the twelfth tracked day — 2026-10-29 ──────────────────────────────
+# The inverse of every other day in this family. The daily-job sweep that produced
+# #3692 (2026-10-25) and #3693 (2026-10-28) also caught 2026-10-29, and it is the one
+# day on disk that fires trigger (i) ALONE: one chat turn of three carries a miss,
+# while (b) sits comfortably UNDER §6.1's budget, (c) sits far under the gate and (d)
+# holds. So the over-budget noise that swamps a chat miss on the 09-28 and 10-25 days
+# is absent here, and the chat miss is the single thing that failed. The paragraph the
+# nodes below grade is what decides whether that is an escalation or a close: §10's
+# filing condition needs a chat miss with NEITHER churn NOR a gate-level explanation,
+# and this one has the churn half, so the day closes exactly as 2026-09-28's did and
+# joins no evidence set. #3692 already owns "eleventh" for 2026-10-25 in this file, so
+# this day's identifiers are ordinally named for its position in the fixture family.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TWELFTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-29.json"
+
+#: sha256 of the standing daily job's own copy, taken off `~/lloyd-data/vllm-prefix-miss/`
+#: at the moment #3691 copied it into the tree. Both copies hash to this today, and it is
+#: what keeps clause 1's byte identity an assertion after the job's file moves on.
+TWELFTH_JOB_SHA = "0f900a18f2e03b06d7492370fee698895c8a07f2ea44d3277f4463f1c73e9fea"
+
+#: The engine line the pinned pool was read from, quoted verbatim out of the live
+#: rotation on 2026-10-29's re-check. `grep -h "10-26 14:58:24"
+#: ~/lloyd-data/logs/services/agent-llm-primary.log*` returns it today.
+TWELFTH_BOOT = ("(EngineCore pid=5968) INFO 10-26 14:58:24 [kv_cache_utils.py:2320] "
+                "GPU KV cache size: 844,969 tokens, Maximum concurrency for 262,144 tokens "
+                "per request: 3.22x")
+
+
+@pytest.fixture(scope="module")
+def twelfth_raw() -> dict:
+    """2026-10-29 00:00 → 2026-10-30 00:00 UTC, as the standing daily job cut it on 10-30."""
+    return json.loads(TWELFTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def twelfth(twelfth_raw, cfg) -> dict:
+    """The same bytes through `derive`, at the gate `config.yaml` carries.
+
+    `NO_BOOT_POOL` is deliberately NOT applied here: `derive` reads the window's own
+    `pool_tokens` and reports `None` when it holds no boot, and the pinned denominator
+    belongs to the per-event walk in `_gap_events` alone — the division of labour #2852
+    drew for 2026-10-15 and #3692 kept for 2026-10-25.
+    """
+    return W.derive(twelfth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _twelfth_paragraph() -> str:
+    """The twelfth day's §10 bullet, from its own heading to the end of §10.
+
+    Found rather than numbered, and bounded by the section rather than by the next
+    heading: every anchor below it moves by the paragraph's length each time a day is
+    added, which is the rot #2852 and #3271 each had to repair once. The node itself
+    pins that this bullet is the LAST thing in §10, so the slice cannot silently widen
+    or narrow when the next day is appended below it.
+    """
+    s10 = _section(10)
+    start = s10.index("**The twelfth tracked day")
+    assert s10.rindex("- **") == start - 2, (
+        "the twelfth day's bullet is no longer the last thing in §10, so slicing this "
+        "paragraph to the end of the section would hand the grader someone else's prose")
+    return s10[start:]
+
+
+def _flat(text: str) -> str:
+    """Text with its whitespace runs collapsed, so a figure can be matched whole.
+
+    §10 wraps at ~88 columns, which splits a `7,076,768`-class figure across a newline in
+    the source; `_section` already collapses, and this keeps the assertion about the
+    number rather than about the reflow if the helper it came from ever stops doing so.
+    """
+    return " ".join(text.split())
+
+
+def test_the_twelfth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(twelfth_raw):
+    """#3691 clause 1: the day is on disk, tracked by git, one canonical line, and the same
+    bytes the standing daily job wrote on 2026-10-30.
+
+    The identity is asked of the job's copy and not of a re-run of `--write-extract`,
+    because what is worth pinning is that nothing was re-cut between the job that finds a
+    day and the round that commits it. For this particular day a re-run would have
+    survived — the rotation reaches back to 2026-10-18, so 2026-10-29 sits nine days
+    inside it — but that is the accident, not the guarantee, and #2248 lost a day to
+    exactly that assumption.
+    """
+    assert twelfth_raw["window"] == ["2026-10-29", "2026-10-30"]
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(TWELFTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{TWELFTH_EXTRACT.name} is on disk but not in git; `tests/fixtures/.gitignore` "
+        "negates this family on purpose, so an untracked extract is a counted day that the "
+        "evidence set does not outlive")
+    raw = TWELFTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(twelfth_raw, separators=(",", ":")) + "\n", (
+        f"{TWELFTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes for the "
+        "rows it holds, so the committed reading has been edited by hand")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one compact line; a multi-line fixture would make every figure in it "
+        "diffable by hand")
+    # The digest is the half of this identity that survives the box. The job's own file is
+    # the living witness, compared below when it is present, but on a checkout with no
+    # ~/lloyd-data a bare skip would leave clause 1's byte-identity half unchecked rather
+    # than failed. The digest has nothing else to be compared to, so it pins exactly one
+    # thing: that these bytes are the ones the job wrote on 2026-10-30, taken from that file
+    # when this fixture was committed and reproducible by `sha256sum` of either copy.
+    assert hashlib.sha256(TWELFTH_EXTRACT.read_bytes()).hexdigest() == TWELFTH_JOB_SHA, (
+        "the committed day is no longer the bytes the daily job wrote; re-deriving a day and "
+        "committing it is the re-cut this clause exists to catch")
+    daily = DAILY_EXTRACT_DIR / TWELFTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; the living copy is the second half "
+                    "of this identity and only the job can produce it — the digest above still "
+                    "pins which bytes the job wrote")
+    assert daily.read_bytes() == TWELFTH_EXTRACT.read_bytes(), (
+        "the committed day differs from the job's bytes, and the gap between the two is the "
+        "unauditable one")
+
+
+def test_the_twelfth_trigger_i_fired_alone_and_the_bullet_marks_it(twelfth, cfg):
+    """#3691 clause 2: the criterion that fired is recomputed from the fixture at the config
+    gate, and the bullet marks it as failing instead of burying it.
+
+    (a) holds when NO chat turn carries a miss. This day is 1 of 3, so (a) fails while
+    (b), (c) and (d) hold — the inverse of 2026-10-23, where a budget breach fired with
+    no chat miss in it, and the inverse of 2026-10-25, where both triggers fired. The
+    mark is what the rest of §10 reads, so a paragraph carrying the number without it
+    would let a later pass count the day as clearing the bar.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, "the item's readings are at the config gate; this pins which one"
+    assert twelfth["chat_turns"] == 3
+    assert twelfth["chat_turns_with_misses"] == 1, (
+        "the day's whole claim is one chat turn with a miss in it; if the fixture says "
+        "otherwise the paragraph describes a different day")
+    assert twelfth["by_kind"]["chat"] == [1, 102858]
+    assert twelfth["turns"] == 298 and twelfth["turns_with_misses"] == 24
+    p = _flat(_twelfth_paragraph())
+    assert "**(a) does not hold**" in p, "the criterion that failed has to be marked as failed"
+    assert "1 of 3 chat turns carrying a miss" in p
+    assert "102,858 re-prefilled tokens" in p
+    for other in ("**(b)", "**(c)", "**(d)"):
+        assert other in p, f"{other} has to be marked too — the day's point is that one failed"
+    assert "does not hold** — 1 of 3" in p, (
+        "the mark and its reason have to be the same sentence, or a reader takes (a) as a "
+        "bare verdict")
+
+
+def test_the_twelfth_figures_are_the_derivation(twelfth, twelfth_raw, cfg):
+    """#3691 clause 3: every budget, KV and two-request figure the bullet cites equals
+    `derive`/`_per_day_budget` on the fixture at the config gate, and the sample count it
+    cites is derive's in-window figure rather than the extract's raw length.
+
+    That last check is the substance of the clause, not a style note. `extract` fills
+    `kv_samples` over `[t0 - LOOKBACK_S, t1 + STATUS_INTERVAL_S)` — an hour of lookback
+    plus a trailing interval — while `derive` recomputes the count inside the window, so
+    the saved bytes hold 4,587 lines and the day's reading is 4,552. #3695 owns the
+    family's confusion of those two numbers, and this item's own triage had to un-write
+    it from its premise; a paragraph quoting the raw length would read as a rotation loss
+    where nothing was lost.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    p = _flat(_twelfth_paragraph())
+
+    assert twelfth["misses"] == 63 and twelfth["reprefill_tokens"] == 7076768
+    assert f"{twelfth['misses']} misses" in p
+    assert f"{twelfth['reprefill_tokens']:,} tokens" in p
+    miss_budget, tok_budget = _per_day_budget(_section(6))
+    assert (miss_budget, tok_budget) == (97, 10.3), (
+        "§6.1's per-day budget is counted from its own sentence, so the ratio quoted for "
+        "this day is derived and not a remembered constant")
+    assert f"{miss_budget} misses and {tok_budget}M tokens" in p, (
+        "the budget half of the comparison has to restate §6.1's own figures, the way the "
+        "node that marks (b) on the counted reading restates them")
+    assert f"{twelfth['misses'] / miss_budget:.2f}x" in p and \
+        f"{twelfth['reprefill_tokens'] / (tok_budget * 1e6):.2f}x" in p, (
+        "the paragraph's ratios must be the division, not a remembered pair")
+
+    assert round(twelfth["kv_p50"], 3) == 0.163
+    assert f"{twelfth['kv_p50']:.3f}" in p
+    assert round(twelfth["kv_p90"], 3) == 0.363 and round(twelfth["kv_max"], 3) == 0.834
+    assert f"p90 {twelfth['kv_p90']:.3f}" in p and f"max {twelfth['kv_max']:.3f}" in p
+    assert twelfth["kv_samples"] == 4552
+    assert f"{twelfth['kv_samples']:,} status lines" in p, (
+        "the paragraph has to cite derive's in-window count")
+    raw_lines = len(twelfth_raw["kv_samples"])
+    assert raw_lines == 4587 and raw_lines != twelfth["kv_samples"], (
+        "the raw extract length and the in-window count are different numbers by "
+        "construction (the lookback and one trailing interval), and only the second is the "
+        "day's reading")
+    assert f"{raw_lines:,}" not in p, "the raw length must not appear as the day's sample count"
+    assert twelfth["pool_tokens"] is None and twelfth_raw["pool_tokens"] == []
+
+    assert f"against the {gate:.2f} admission gate" in p, (
+        "criterion (c) is a comparison against the configured gate, so the paragraph names "
+        "the same number this derivation used rather than a hard-coded one")
+    assert twelfth["two_request_windows"] == 1660 and f"{1660:,}" in p
+    assert twelfth["two_request_under_stall"] == 2
+    assert twelfth["two_request_under_stall_not_cold"] == 0
+    assert twelfth["two_request_under_stall_cold_admission"] == 2
+    assert "0 not cold" in p
+    assert f"the slowest {twelfth['two_request_tok_s_min']} tok/s" in p
+
+
+def test_the_twelfth_pinned_pool_is_a_quoted_boot_line_the_walk_can_use(twelfth_raw):
+    """#3691 clause 4a: the day carries no boot line, so its pool is pinned in
+    `NO_BOOT_POOL` from an engine line quoted into the test file, and the arithmetic
+    divides by that number.
+
+    Without the entry `_with_pool` raises its KeyError and the chat miss cannot be
+    attributed at all — the same wall #2852 hit for 2026-10-15, #3341 for 2026-10-23 and
+    #3692 for 2026-10-25, and the KeyError is the correct outcome: a default pool would
+    attribute the day to an engine nobody measured. The figure is the size the rotation
+    says the day ran on. That quoted line is engine-local clock — 14:58:24 on 10-26 local,
+    two days and two hours before the window opens — and it is the LAST boot before the
+    window: the rotation's boot lines from 10-19 to 11-01 all read 844,969 except two
+    brief dips to 484,612, 359 s from 10-29 23:12:47 to 23:18:46 and 302 s from 10-30
+    04:26:06 to 04:31:08, both engine-local stamps, which are 06:12 and 11:26 UTC on
+    10-30 and so outside this UTC day. `_gap_events`' own assert ties the per-event walk
+    to `derive`'s aggregate, so a guessed denominator could not survive the next node.
+    """
+    assert twelfth_raw["pool_tokens"] == [], "the window holds no boot, as the paragraph says"
+    assert twelfth_raw["window"] == ["2026-10-29", "2026-10-30"]
+    assert "2026-10-29" in NO_BOOT_POOL, (
+        "a no-boot day with no pinned pool raises KeyError in _with_pool, which is the "
+        "correct outcome — a default pool would attribute the day to an engine nobody measured")
+    assert NO_BOOT_POOL["2026-10-29"] == 844969
+    assert (pool := W._POOL_RE.search(TWELFTH_BOOT)) and int(pool.group(1).replace(",", "")) \
+        == NO_BOOT_POOL["2026-10-29"], (
+        "the quoted boot line must parse, through the script's own pattern, to the pinned "
+        "figure — otherwise the provenance is decoration")
+    quoted = (ROOT / "tests" / "test_vllm_doc_claims.py").read_text(encoding="utf-8")
+    assert "INFO 10-26 14:58:24" in quoted and "GPU KV cache size: 844,969 tokens" in quoted, (
+        "the boot line has to be quoted into the tree, not cited to the rotation, which "
+        "reaches back only to 2026-10-18 today and stops reaching that far tomorrow")
+    pinned = _with_pool(twelfth_raw)
+    assert pinned["pool_tokens"] == [844969] and twelfth_raw["pool_tokens"] == [], (
+        "_with_pool must hand the walk the pool without rewriting the extract it was given")
+
+
+def test_the_twelfth_chat_miss_churned_so_the_filing_condition_is_unmet(twelfth_raw,
+                                                                       twelfth, cfg):
+    """#3691 clause 4 (the join). The per-event half of the churn arm exists once the pool
+    is pinned, and it is what closes the day — clause 5 is ruled on by
+    `test_the_twelfth_paragraph_closes_the_day_and_asks_nothing_upstream`.
+
+    The rule is `derive`'s own, run on the extract's own rows at the pinned pool: a gap in
+    which the engine computed more tokens than the free blocks at the gap's peak implies
+    churned the prefix. The one chat miss churned, and its gap peak of 0.535 is UNDER the
+    0.60 gate, so neither arm of the filing condition is available for it — which is the
+    accepted-loss shape #2209 named, exactly as 2026-09-28's was. `derive` cannot see any
+    of this: it publishes no per-event split, and for a window with no boot its churn arm
+    is `None`, which is why the join lives here rather than in a quoted figure.
+
+    The headline turn and this event are two rows and are cited as two: the turn row
+    (`2026-10-29T17:54:01`, 1 miss / 102,858 tokens) is where (a) comes from, the gap
+    figures below come from the `misses` row, whose own end is
+    `2026-10-29T17:52:43.8Z`. Conflating them is how a gap gets attributed to a turn that
+    did not span it.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    events = _gap_events(_with_pool(twelfth_raw), gate)
+    assert len(events) == twelfth["misses_with_gap"] == 70, (
+        "the per-event walk has to tie to derive's aggregate or the split is invented")
+    assert sum(1 for e in events if e["peak"] >= gate) == twelfth["misses_gap_over_gate"] == 8
+    chat = [e for e in events if e["kind"] == "chat"]
+    assert len(chat) == 1, "one chat miss is the day's whole basis"
+    miss = chat[0]
+    assert miss["gap_s"] == pytest.approx(181.0, abs=0.05)
+    assert miss["n_lines"] == 19
+    assert miss["peak"] == pytest.approx(0.535, abs=0.0005)
+    assert miss["peak"] < gate, (
+        "the gate-level arm explains this miss only because the peak stays under the gate; "
+        "if that stopped being true the paragraph's reasoning would have to change")
+    assert miss["computed"] == 502766 and miss["free_at_peak"] == 392911
+    assert miss["churn"], "the paragraph's closing claim is that this miss churned"
+    assert sum(1 for e in events if e["churn"]) == 31
+    assert sum(1 for e in events if not e["churn"]) == 39
+    assert [e for e in chat if not e["churn"] and e["peak"] < gate] == [], (
+        "a chat miss that neither churned nor crossed the gate would meet the filing "
+        "condition and this item would be about an escalation, not a close")
+    assert [e for e in events if e["peak"] >= gate and e["kind"] == "chat"] == [], (
+        "none of the eight over-gate gaps belongs to a chat turn")
+    assert twelfth["misses_gap_churned_free_pool"] is None, (
+        "derive reports None because the window booted nothing; the join lives here, in "
+        "the test, and the paragraph has to say so rather than quoting a number derive "
+        "printed")
+
+
+def test_the_twelfth_day_is_not_a_counted_day_and_moves_no_evidence_set(twelfth_raw, cfg):
+    """#3691 clause 5's other half, measured rather than asserted in prose: adding this
+    fixture must not grow the accepted-loss evidence set, and must not move any reading
+    the page already grades.
+
+    §10's "counted day" is a term of art — a day carrying a chat miss that meets the
+    filing condition — and there are five of them (09-27, 09-29, 10-01, 10-15, 10-25).
+    This day's one chat miss churned, so `_qualifying` finds nothing in it and the set
+    stays five. `#3692`'s node moved that list to five and pinned the superlatives that
+    grow out of it; if this day ever did qualify, those nodes and the page would have to
+    be re-derived rather than left asserting a stale count, which is the failure this
+    family has been repaired for repeatedly.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+        f"the evidence set moved to {days}: 2026-10-29 was expected to join no set, and "
+        "every paragraph that counts these days is graded against this list")
+    assert "2026-10-29" not in days
+    assert _qualifying(twelfth_raw, gate) == [], (
+        "the day's own chat miss is expected to fail the filing condition on churn")
+
+
+def test_the_twelfth_paragraph_closes_the_day_and_asks_nothing_upstream(cfg):
+    """#3691 clause 5: the bullet closes 2026-10-29 on its own evidence, and asserts no
+    upstream filing, comment or ask.
+
+    Two rulings the text has to respect, neither of them taste. §10's filing condition
+    (#2209) is a chat miss with **neither** free-pool churn **nor** a gate-level KV
+    explanation, so the paragraph has to name which arm it used for the day to be
+    re-checkable. And #2250, Alan's hand ruling of 2026-10-12, dropped the vLLM#57032
+    comment and held that a further counted day does not re-open it — a paragraph that
+    asked would re-open a decision no round is entitled to re-open, which is why the ban
+    here is on phrasings and not on a keyword.
+    """
+    p = _flat(_twelfth_paragraph())
+    assert "neither" in p and "gate-level" in p, "the filing condition it declines must be named"
+    assert "churned" in p
+    assert "**502,766**" in p and "**392,911**" in p, (
+        "tokens computed against free blocks is the arithmetic; a paragraph that named "
+        "only the verdict would not be checkable")
+    assert "844,969" in p and "INFO 10-26 14:58:24" in p, (
+        "the pool and the line it came from both belong in the sentence")
+    assert "no upstream filing" in p and "does not re-open it" in p
+    assert "2026-09-28" in p, "the day this one closes like has to be named"
+    assert "five" in p, (
+        "the paragraph has to say which evidence set this day does NOT join, and that set "
+        "has been five extracts since #3692 counted 2026-10-25")
+    lowered = p.lower()
+    for ask in ("file upstream", "file an upstream", "report upstream", "upstream report",
+                "please comment", "add a comment", "re-open the vllm", "reopen the vllm"):
+        assert ask not in lowered, (
+            f"the new §10 text asserts an upstream ask ({ask!r}); #2250 closed that "
+            "question and a counted day does not reopen it")
+    assert "asserts no upstream filing, comment or ask" in p, (
+        "the paragraph has to say plainly that it asks for nothing — that is what a reader "
+        "arriving with only this page needs")

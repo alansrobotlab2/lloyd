@@ -1398,6 +1398,52 @@ has still not been run as of 2026-09-11.
   event joins the five-extract evidence set rather than an ask — the escalation is
   **DROPPED, not owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the vLLM#57032
   comment is not to be posted, and no counted day re-opens it.
+- **The twelfth tracked day: 2026-10-29 00:00 → 2026-10-30 00:00 UTC.** Committed as
+  `tests/fixtures/vllm_prefix_miss_2026-10-29.json` by #3691, byte-identical to the copy the
+  standing daily job wrote on 2026-10-30. It is the inverse of every other day in this list:
+  the day that fired trigger (i) **alone**, with (b), (c) and (d) all holding. **(a) does not
+  hold** — 1 of 3 chat turns carrying a miss, 102,858 re-prefilled tokens on that one turn
+  (`chat_turns_with_misses` / `by_kind["chat"]`, the turn row `2026-10-29T17:54:01`).
+  **(b) the budget holds**: 63 misses and 7,076,768 tokens against §6.1's per-day budget of
+  97 misses and 10.3M tokens — 0.65x and 0.69x. **(c) holds**: KV p50 **0.163** over 4,552
+  status lines (p90 0.363, max 0.834) against the 0.60 admission gate. **(d) holds**: 1,660
+  windows of two requests ran at the bar's fleet shape, 2 under it, both cold admissions and
+  0 not cold, the slowest 8.8 tok/s. The sample count is `derive`'s own in-window figure and
+  not the extract's stored list length, which carries an hour of lookback and one trailing
+  interval on top of the day: the two are not the same quantity, and #3695 owns the family's
+  having mixed them up. What earns the day a paragraph rather than a silence is the shape of
+  (b): it is comfortably *under* budget, so the over-budget noise that swamps a chat miss on
+  the days that fire (ii) is absent here, and the chat miss is the single thing that failed.
+  The escalation this day was filed to decide does not arise. §10's condition for an upstream
+  filing is a chat-turn miss with **neither** free-pool churn **nor** a gate-level KV
+  explanation, and this one has the churn half: the window holds no engine boot, so `derive`
+  reports `misses_gap_churned_free_pool: None` (`pool_tokens: []`) — and on the pool the day
+  actually ran on, 844,969 tokens, its one chat miss churned. That miss ran a gap of 181.0 s
+  across 19 engine status lines to a peak of **0.535**, which is *under* the gate, so the
+  gate-level arm is unavailable for it too, while **502,766** tokens were computed inside the
+  gap against **392,911** free blocks at that peak. Its gap ends `2026-10-29T17:52:43.8Z`, a
+  different row from the turn named under (a) and cited as one: the turn row is where (a)'s
+  number comes from, and the gap figures come from the `misses` row. The same walk splits the
+  day's 70 gap-joined misses 31 churned / 39 not, and 8 of those 70 sat with a gap peak at or
+  over the gate — none of those eight belongs to a chat turn. The pool is the size the
+  rotation says the day ran on: `(EngineCore pid=5968) INFO 10-26 14:58:24
+  [kv_cache_utils.py:2320] GPU KV cache size: 844,969 tokens`, engine-local, two days and two
+  hours before the window, with every boot line from 10-19 to 11-01 reading the same except
+  two brief 484,612 dips — 359 s from 10-29 23:12:47 to 23:18:46, and 302 s from 10-30
+  04:26:06 to 04:31:08, both engine-local, which are 06:12 and 11:26 UTC on 10-30 and so
+  outside this UTC day. Because the window has no boot of its own,
+  `tests/test_vllm_doc_claims.py` carries the figure in `NO_BOOT_POOL` beside 2026-10-15's,
+  2026-10-23's and 2026-10-25's, with that line quoted into the test file rather than cited to
+  a rotation that stops being readable. 2026-10-29 joins nothing: it is not a counted day, so
+  the five-extract evidence set the accepted-loss ruling is read against — 2026-09-27,
+  2026-09-29, 2026-10-01, 2026-10-15 and 2026-10-25 — is exactly the set it was before this
+  paragraph, and `test_the_twelfth_day_is_not_a_counted_day_and_moves_no_evidence_set`
+  re-counts it from the fixtures instead of trusting this sentence. What the day does settle
+  is the shape itself — trigger (i) can fire on a day whose other three criteria hold, and
+  when it does the miss is explained by the mechanism §10 already names rather than escalated,
+  exactly as 2026-09-28's was. This page asserts no upstream filing, comment or ask for it,
+  and none is owed: #2250 dropped the vLLM#57032 comment on 2026-10-12 and ruled that a
+  further counted day does not re-open it.
 ## 11. Found on the way
 
 - **Direct worker turns ignore every `harness.*` key.**
