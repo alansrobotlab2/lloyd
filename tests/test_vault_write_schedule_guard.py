@@ -110,13 +110,25 @@ from app.harness.denial_journal import record as _REAL_DENIAL_RECORDER  # noqa: 
 _VAULT_PY = Path(__file__).resolve().parents[1] / "agent_mcp" / "vault.py"
 
 
-def _task(**overrides) -> str:
-    """One autonomy task file, with front matter overridden field by field."""
+def _task(*, contract: bool = True, **overrides) -> str:
+    """One autonomy task file, with front matter overridden field by field.
+
+    `contract=False` writes the body WITHOUT `TASK_BODY_CONTRACT`, the shape #3658's rail
+    refuses. It defaults to True because that is what every real task file looks like: both
+    task writers stamp the line through `agent_mcp._shared.with_body_contract`, and all 48
+    files the corpus pin globs in `~/obsidian/autonomy` carry it. A fixture that omitted it
+    would have the lane refuse the write for a reason the node was never about — which is
+    precisely what the other 70 `_task(` calls in this file did on the rail's first run.
+    """
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
     fm = dict(BASE_FM)
     fm.update({k: v for k, v in overrides.items() if v is not None})
     head = "\n".join(f"{k}: {v}" for k, v in fm.items())
-    return ("---\n" + head + "\n---\n\n## Activity Log\n\n"
-            "- 2026-10-05T06:27Z created by an autocode round\n")
+    body = (f"\n{TASK_BODY_CONTRACT}\n\n## Activity Log\n\n" if contract
+            else "\n## Activity Log\n\n")
+    return ("---\n" + head + "\n---\n" + body
+            + "- 2026-10-05T06:27Z created by an autocode round\n")
 
 
 @pytest.fixture
@@ -2214,3 +2226,232 @@ def _ast_names(node) -> set[str]:
         elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
             out.add(sub.value)
     return out
+
+
+# ── #3658: the contract line, on both free-form lanes ──────────────────────────────
+#
+# `TASK_BODY_CONTRACT` is the line every numbered autonomy task body opens with, saying the
+# body is documentation and not an instruction channel. Until this section the check existed
+# only as a corpus node
+# (`tests/test_research_doc_claims.py::test_task_body_opens_by_saying_it_is_not_delivered`),
+# which reddens whichever round's base probe happens to look — never the lane that wrote the
+# file. The live cost, from the item: `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md`
+# was CREATED with the retired wording typed in (vault `d46cdd257`, 2026-10-31 22:29 -0700),
+# #3657 was filed against the base probe that found it, and a 21-turn implement round
+# (`SM_20261101_054543`) was spent healing five words of prose (`469a146f9`).
+#
+# These nodes cover clauses 2, 3 and 5 for the two lanes this file owns, and they go through
+# the real handlers rather than the checker: the checker passing is not the lane refusing.
+
+from agent_mcp._shared import TASK_BODY_CONTRACT  # noqa: E402
+
+#: A numbered task file whose body never says what it is. Built from `_task()` with the
+#: contract line REMOVED, so its front matter is byte-identical to the compliant file the
+#: refusal nodes seed: the only thing these writes change is the body. That matters — a
+#: fixture that also moved `frequency` or dropped `skill_name` is refused by the
+#: dispatch-move rail FIRST, and the node then asserts a refusal it was never about (measured:
+#: `_autonomy_schedule_refusal` answered `would move `frequency` weekly -> daily` for the
+#: hand-written variant of this constant). It is otherwise unremarkable on purpose: no
+#: backticked tool name for #2589's rule to catch, nothing else for either lane to refuse.
+_NO_CONTRACT_TASK = _task(contract=False)
+
+
+def _contract_rows(journal: list[dict]) -> list[dict]:
+    """The contract rail's own denial rows, kept apart from #2589's body rows.
+
+    `_body_rows` above filters to `guard="autonomy_body_rail"`. This rail journals under
+    `autonomy_contract_rail` so the owed grep over the denial journal can tell the two rules
+    apart: both refuse a body, and an author reading one row should not have to guess which
+    line was missing.
+    """
+    return [row for row in journal if row.get("guard") == "autonomy_contract_rail"]
+
+
+# ── clause 2: vault_write, on the phase that sees a whole new file ────────────────
+
+def test_vault_write_refuses_a_task_body_that_never_says_it_is_documentation(scratch):
+    """Clause 2, the create phase: refusal, path named, the line itself named, no bytes.
+
+    A create is how `d46cdd257` arrived, and the pre-lock phase is the only one that can see
+    a whole new file. The expensive assert is the third: the refusal must carry the literal
+    line to add. `_err` caps a tool error at 500 characters and the predicate's violation
+    text alone runs 610, so the first draft of this rail quoted the OFFENDING line and lost
+    the constant to the truncation — which is the half of a fix an author otherwise recovers
+    by grepping `agent_mcp/_shared.py`, the search that #3657's healing cost a round.
+    """
+    rows = len(_audit_rows(scratch))
+
+    out = _write(scratch, TASK_PATH, _NO_CONTRACT_TASK)
+
+    assert "error" in out and out.get("success") is not True, (
+        f"a numbered task body with no contract line was accepted: {out}")
+    assert out["code"] == "PROTECTED_PATH", out
+    assert out["rule"] == "body_missing_contract", out
+    assert TASK_PATH in out["error"], out["error"]
+    assert TASK_BODY_CONTRACT in out["error"], (
+        f"the refusal did not carry the line to add: {out['error'][:520]}")
+    assert not (scratch.root / TASK_PATH).exists(), "the refused create wrote the file anyway"
+    assert len(_audit_rows(scratch)) == rows, "a refused write appended an audit row"
+    assert _contract_rows(scratch.journal), (
+        "a refusal nobody can find after the fact is a refusal nobody learns from")
+
+
+def test_the_vault_lanes_locked_diff_phase_refuses_a_dropped_contract_too(scratch):
+    """Clause 2's phase-B half: an EDIT that deletes the line, over a compliant file.
+
+    Phase A already refuses this content, so a run through `_vault_write` cannot show which
+    phase answered — and the phase is the point. A rule on the create phase alone is blind to
+    the shape this incident actually took: `469a146f9` was a body rewrite over an untouched
+    front matter, exactly the write that reaches the locked-diff path. So the node pins the
+    call out of the code, which is the only way to assert THIS phase asks the question, then
+    proves the behaviour end to end.
+    """
+    import inspect
+
+    import agent_mcp.vault as VP
+
+    phase_b = inspect.getsource(VP._autonomy_schedule_move_refusal)
+    assert "_autonomy_contract_refusal(" in phase_b, (
+        "the locked-diff phase never asks the contract question, so an existing task file can "
+        "still have its line deleted through the path a real edit takes")
+    assert "_autonomy_body_refusal(" in phase_b, (
+        "the contract rule replaced #2589's body rule on this phase rather than joining it")
+
+    before = _seed(scratch, _task())
+    rows = len(_audit_rows(scratch))
+
+    out = _write(scratch, TASK_PATH, _NO_CONTRACT_TASK)
+
+    assert "error" in out and TASK_PATH in out["error"], out
+    assert TASK_BODY_CONTRACT in out["error"], out["error"][:520]
+    assert (scratch.root / TASK_PATH).read_text(encoding="utf-8") == before, (
+        "the refusal changed the body anyway")
+    assert len(_audit_rows(scratch)) == rows, "a refused write appended an audit row"
+
+
+# ── clause 3: Write and Edit, same verdict before the mutation commits ────────────
+
+def test_write_and_edit_refuse_a_task_body_that_never_says_it_is_documentation(fs):
+    """Clause 3 on the fs lane: refusal, path and line named, bytes untouched, one row each.
+
+    `Write` carries the create and `Edit` carries the body rewrite that DELETES the line —
+    the two ways these files change, and the second is the one a create-only rule cannot see.
+    The last two asserts are what separates an fs-lane refusal from a cosmetic one: this lane
+    has no `commit_lock`, so an author's undo point is opened inside the mutation, and a guard
+    that fired after it would leave an undo record pointing at a write that never happened.
+    """
+    out = _refusal(fs.mod._write({"file_path": _abs(fs, TASK_PATH),
+                                  "content": _NO_CONTRACT_TASK}))
+    assert out, "Write accepted a numbered task body with no contract line"
+    assert out["code"] == "PROTECTED_PATH", out
+    assert out["rule"] == "body_missing_contract", out
+    assert TASK_PATH in out["error"], f"Write did not name the path: {out['error'][:300]}"
+    assert TASK_BODY_CONTRACT in out["error"], (
+        f"Write did not carry the line to add: {out['error'][:520]}")
+    assert not (fs.root / TASK_PATH).exists(), "Write wrote the refused file anyway"
+
+    _fs_seed(fs, _task())
+    before = (fs.root / TASK_PATH).read_bytes()
+    edit = _refusal(fs.mod._edit({"file_path": _abs(fs, TASK_PATH),
+                                  "old_string": TASK_BODY_CONTRACT,
+                                  "new_string": "# Body"}))
+    assert edit, ("Edit accepted a body rewrite whose only change was deleting the contract "
+                  "line — the shape of the #3657 heal (`469a146f9`), which is the write a "
+                  "create-only rule is blind to")
+    assert edit["rule"] == "body_missing_contract", edit
+    assert TASK_PATH in edit["error"], f"Edit did not name the path: {edit['error'][:300]}"
+    assert TASK_BODY_CONTRACT in edit["error"], (
+        f"Edit did not carry the line to add: {edit['error'][:520]}")
+    assert (fs.root / TASK_PATH).read_bytes() == before, "a refused Edit changed the bytes"
+
+    assert [r.get("tool") for r in _contract_rows(fs.journal)] == ["Write", "Edit"], (
+        f"expected one contract-denial row per lane, got "
+        f"{[r.get('tool') for r in fs.journal]}")
+
+
+def test_the_contract_rule_rides_the_same_rail_as_the_body_rule_before_any_ledger(fs):
+    """Clause 3's placement half, read off the CODE rather than the prose.
+
+    #2589's rail already sits at the only place this lane can refuse a body before it commits,
+    so the way a second body rule goes wrong is by landing beside a `_ledger_begin` instead.
+    Three things therefore have to hold in `_autonomy_schedule_refusal`'s own source: it calls
+    the contract denial, it calls the body denial too (not instead — #2589's rule is still the
+    thing that refuses a body ordering an undelivered tool), and it names neither ledger entry
+    point. The positional assert is the ordering: the pair is an `or`, so whichever comes first
+    is the first thing an author is told, and the shorter question should lead.
+    """
+    import inspect
+
+    import agent_mcp.builtin_fs as B
+
+    rail = inspect.getsource(B._autonomy_schedule_refusal)
+    names = {n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id
+             for n in ast.walk(ast.parse(rail)) if isinstance(n, ast.Call)}
+    assert "_autonomy_contract_denial" in names, (
+        "the fs rail never calls the contract denial, so Write/Edit are still an open lane")
+    assert "_autonomy_body_denial" in names, (
+        "the contract rule replaced #2589's rule rather than joining it")
+    assert "_ledger_begin" not in names and "_ledger_note_body" not in names, (
+        f"`_autonomy_schedule_refusal` now opens the ledger itself: {sorted(names)}")
+    lines = rail.splitlines()
+    asked = [ln for ln in lines if "_autonomy_contract_denial" in ln
+             or "_autonomy_body_denial" in ln]
+    assert asked and "_autonomy_contract_denial" in asked[0], (
+        "the contract question is not the first thing the pair asks")
+
+
+# ── clause 5: what must keep landing, on both lanes ───────────────────────────────
+
+_BENIGN_SHAPES = [
+    ("autonomy/_config.md",
+     "a leading underscore, so the corpus glob at `app/autonomy.py:101` never reads it"),
+    ("autonomy/referential-integrity-latest.md",
+     "no leading digits, so the same non-recursive glob never reads it"),
+]
+
+_BENIGN_PROSE = ("---\ntype: note\n---\n\n# Config\n\n"
+                 "Settings as prose, with no contract line and none required.\n")
+
+
+@pytest.mark.parametrize("rel,why", _BENIGN_SHAPES, ids=[s[0] for s in _BENIGN_SHAPES])
+def test_a_write_of_an_unglobbed_shape_lands_on_both_lanes(scratch, fs, rel, why):
+    """Clause 5's two unnumbered names, on both lanes: `vault_write` create, then `Write`.
+
+    A refusal here is the false refusal the owed check watches for, and it is exactly what a
+    guard keyed on the DIRECTORY rather than the corpus glob would do: the pin globs 48 files
+    out of a `~/obsidian/autonomy` that also holds this config file, a rolling report and
+    dated notes, so the SHAPE has to be what decides, on both lanes, identically.
+    """
+    first = _write(scratch, rel, _BENIGN_PROSE)
+    assert first.get("success") is True, (why, first)
+    assert (scratch.root / rel).read_text(encoding="utf-8") == _BENIGN_PROSE, why
+
+    (fs.root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (fs.root / rel).write_text(_BENIGN_PROSE, encoding="utf-8")
+    second = _refusal(fs.mod._write({"file_path": _abs(fs, rel),
+                                     "content": _BENIGN_PROSE.replace("# Config", "# Notes")}))
+    assert second == {}, (why, second)
+    assert "# Notes" in (fs.root / rel).read_text(encoding="utf-8"), why
+
+
+def test_a_numbered_task_body_that_already_says_what_it_is_lands_on_both_lanes(scratch, fs):
+    """Clause 5's third shape and by far the most frequent one: a compliant task file.
+
+    Ledgered on both lanes, because "no ledger row for a refusal" only means something if an
+    ACCEPTED write still produces one. This is the shape the two task writers emit on every
+    activity-log append, so a rail that refused it would stop the nightly chain outright.
+    """
+    good = _task()
+    assert TASK_BODY_CONTRACT in good, "the fixture itself stopped carrying the line"
+
+    first = _write(scratch, TASK_PATH, good)
+    assert first.get("success") is True, first
+    assert (scratch.root / TASK_PATH).read_text(encoding="utf-8") == good
+    assert any(TASK_PATH in json.dumps(row) for row in _audit_rows(scratch)), (
+        f"the compliant vault_write left no audit row: {_audit_rows(scratch)}")
+
+    out = _refusal(fs.mod._write({"file_path": _abs(fs, TASK_PATH), "content": good}))
+    assert out == {}, out
+    assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == good
+    assert _contract_rows(fs.journal) == [], (
+        f"the fs lane denied a compliant body: {_contract_rows(fs.journal)}")

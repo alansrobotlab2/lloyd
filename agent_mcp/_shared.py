@@ -496,7 +496,22 @@ TASK_BODY_CONTRACT = (
 
 
 #: What every wording of the contract line has opened with; how an older one is found.
-_TASK_BODY_CONTRACT_OPENING = "> **This body is documentation and the machine-written activity log"
+#:
+#: Widened to the 31 characters the retired and the live wording BOTH share (#3658).
+#: The old value was 67 characters long and ran into the first clause's own words, so
+#: the retired line (`"> **This body is documentation — not an instruction channel.**"`,
+#: the wording before `1c9ea72d` reworded it on 2026-09-24) matched only its first 31
+#: characters, `startswith` could not fire, the loop passed the line, and the function
+#: fell through to the prepend at the bottom — shipping the CURRENT line above the
+#: stale one, both written by a tool lane, while the corpus pin stayed green because
+#: the first line was the correct contract. Measured at `ab6f2be3`: stamping a body
+#: carrying the retired wording returned a body whose `"> **This body is documentation"`
+#: count was 2. `with_body_contract`'s replace branch is the whole point of that
+#: function, and a key that only fits wording nobody has written since cannot run it.
+#:
+#: The assert below is the cheap half of the pin: an opening that is not a prefix of
+#: the live line would make every branch unreachable again.
+_TASK_BODY_CONTRACT_OPENING = "> **This body is documentation"
 assert TASK_BODY_CONTRACT.startswith(_TASK_BODY_CONTRACT_OPENING)
 
 
@@ -554,6 +569,126 @@ def with_body_contract(body: str) -> str:
         lines[i] = TASK_BODY_CONTRACT
         return "\n".join(lines)
     return f"\n{TASK_BODY_CONTRACT}\n\n{text.lstrip(chr(10))}"
+
+
+# ── the contract line as a WRITER's rule (#3658) ──────────────────────────────
+#
+# `with_body_contract` above stamps the line on the two writers that ask for it —
+# `agent_mcp/autonomy.py` and `POST /api/autonomy/task-write` — and both start from an
+# EMPTY body, so neither has ever had to recognise one. That is why the convention held
+# for every file those two routes made and failed for every file anyone else made: the
+# corpus pin in `tests/test_research_doc_claims.py` graded the finished corpus, but the
+# three lanes that can put an ARBITRARY body into a numbered task file — the automod
+# vault-land route, `vault_write`, and `Write`/`Edit` — checked front matter only. Measured
+# at `ab6f2be3`: `git grep -ln "TASK_BODY_CONTRACT"` returned exactly two files, this one
+# and that test. So on 2026-10-31 a vault land of
+# `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md` carrying the RETIRED wording
+# (`d46cdd257`) succeeded, an unrelated round's base probe reddened the file's corpus node,
+# and a 21-turn implement round (`SM_20261101_054543`) was spent on a five-word prose edit
+# that was healed at `469a146f9`. Red tree, a `high` item and a whole round, for the price
+# of the check that should have been at the write.
+#
+# One predicate, four readers — the two tool lanes, the landing route and the pin. That is
+# the same shape #2589 chose for `body_undelivered_tools`, and for the same reason stated
+# there: a rule with two definitions is a rule whose rails drift from the corpus they
+# guard. A write refused here would have reddened that file's node, and a write allowed
+# here cannot redden it.
+
+#: The corpus's own shape as a name test. `[0-9]*-*.md`, spelled the way
+#: `tests/test_research_doc_claims.py::_task_files` globs it, because the corpus is what
+#: the pin grades and a rail wider than the rail's own grader refuses writes for a shape
+#: nothing would ever have caught. `_archived/NN-name.md` is therefore NOT in scope: the
+#: corpus glob is non-recursive (`app/autonomy.py:101`), so those files are ungraded, and
+#: most predate #951. `_config.md` and the dated reports beside it are unnumbered.
+_NUMBERED_TASK_NAME = re.compile(r"[0-9][0-9]*-.*\.md\Z")
+
+
+def body_contract_line() -> str:
+    """The line a numbered task body must open with, for a refusal that has to QUOTE it.
+
+    A lane shows this text and never compares against it: the comparing is
+    `body_contract_violation`'s job and nobody else's (#3658's drift rail in
+    `tests/test_automod_vault_round.py::test_the_three_lanes_and_the_pin_all_call_the_one_predicate`
+    pins exactly that split, refusing a lane that names `TASK_BODY_CONTRACT` itself). The
+    function exists because `_err` caps a tool error at 500 characters and the line is 337
+    of them, so a refusal that quotes the offending line AND this one loses the constant
+    mid-word — which is the half of an author's fix that a grep of this file would otherwise
+    have to recover.
+
+    Returns the live value read from this module, so rewording the contract cannot leave a
+    lane quoting the sentence it just retired.
+    """
+    return TASK_BODY_CONTRACT
+
+
+def is_numbered_task_path(path: str) -> bool:
+    """Whether `path` is a file the corpus pin grades: `…/autonomy/<digits>-<name>.md`.
+
+    Split out of `body_contract_violation` for the one reader that cannot afford to call
+    it blind: `scripts/automod/vault_round.py::task_body_contract_errors` is handed a
+    whole land batch, and reading bytes to ask a question the NAME already answers is how
+    a land of `backlog/data/kg.sqlite` — a SQLite store committed through this door, and
+    a real one — came back "the body could not be read". The name test costs no I/O and
+    answers that batch entirely.
+
+    Last directory must be `autonomy`, so `autonomy/_archived/25-x.md` is NOT a numbered
+    task path (the corpus glob at `app/autonomy.py:101` is non-recursive, so those files
+    are ungraded) and `backlog/2588-x.md` is not either, despite being numbered.
+    """
+    try:
+        parts = Path(str(path)).parts
+    except (TypeError, ValueError):  # a path this cannot even name is not a task file
+        return False
+    return (len(parts) >= 2 and parts[-2] == "autonomy"
+            and bool(_NUMBERED_TASK_NAME.match(parts[-1])))
+
+
+def body_of_document(document: str) -> str:
+    """Everything after a task document's front matter, the way the pin reads it.
+
+    The same two-delimiter cut `tests/test_research_doc_claims.py::_body_of` has always
+    used, moved here so the pin and the rails read ONE front-matter boundary. A writer
+    that cut somewhere else would refuse a body the grader passes — the drift this
+    function exists to make impossible.
+    """
+    parts = (document or "").split("---\n", 2)
+    return parts[2] if len(parts) > 2 else ""
+
+
+def body_contract_violation(path: str, document: str) -> str | None:
+    """Why `document` must not land at `path` as a task body — or None, meaning it may.
+
+    Three answers, in this order:
+
+    * **None for a path the pin does not grade.** The last directory must be `autonomy`
+      and the basename must match `_NUMBERED_TASK_NAME`, so `autonomy/_config.md`,
+      `autonomy/referential-integrity-latest.md`, a dated
+      `autonomy/2026-10-31-notes.md`, an `autonomy/_archived/NN-*.md` and every backlog
+      item answer None. The last one matters most: `backlog/2588-x.md` is numbered too,
+      and a rule keyed on digits alone would start refusing hand-written backlog prose.
+    * **None when the body opens with the contract.** Compared the pin's way — the first
+      NON-BLANK line after the front matter, `.strip()`-ed, equal to the whole line — and
+      not by substring, because #1570 is the case a substring misses (a sentence appended
+      to the END of the contract line still contains it).
+    * **Otherwise the reason, naming the line to add.** The lanes wrap it in their own
+      refusal; the pin asserts it is None. Neither spells the rule again.
+
+    The full contract text is IN the message on purpose: a writer that is refused can
+    paste what it was missing rather than go read a constant, and a refusal that only
+    names a symbol is a refusal that costs the next reader a grep.
+    """
+    if not is_numbered_task_path(path):
+        return None
+    body = body_of_document(document)
+    first = next((ln for ln in body.splitlines() if ln.strip()), "")
+    if first.strip() == TASK_BODY_CONTRACT:
+        return None
+    return (f"the body's first non-blank line after the front matter is "
+            f"{first.strip()[:120]!r}, not the contract line. Add this as the body's "
+            f"first line:\n\n{TASK_BODY_CONTRACT}\n"
+            f"(`agent_mcp/_shared.py::TASK_BODY_CONTRACT`; `with_body_contract` stamps "
+            f"it on the two task writers, so a file that lacks it arrived through a "
+            f"lane that never asked.)")
 
 
 # ── The #2265 body-tool predicate (#2589) ────────────────────────────────────

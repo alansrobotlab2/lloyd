@@ -342,9 +342,15 @@ def _task_files(task_dir: Path | None = None) -> list[Path]:
 
 
 def _body_of(path: Path) -> str:
-    """Everything after the front matter, the way `_parse_task_file` sees it."""
-    parts = path.read_text(encoding="utf-8").split("---\n", 2)
-    return parts[2] if len(parts) > 2 else ""
+    """Everything after the front matter, the way `_parse_task_file` sees it.
+
+    #3658 moved the cut itself to `agent_mcp._shared.body_of_document`, which the three
+    write lanes read too: a rail that cut the front matter somewhere other than where the
+    grader cuts it would refuse bodies the corpus passes.
+    """
+    from agent_mcp._shared import body_of_document
+
+    return body_of_document(path.read_text(encoding="utf-8"))
 
 
 def _prompt_and_region(path: Path) -> tuple[str, str]:
@@ -407,16 +413,25 @@ def test_task_body_opens_by_saying_it_is_not_delivered(task_file: Path):
     collected from, which is exactly the import-versus-call drift
     `test_the_body_tool_guard_sweeps_a_non_empty_corpus` exists to catch.
     """
-    from agent_mcp._shared import TASK_BODY_CONTRACT
+    from agent_mcp._shared import body_contract_violation
 
-    body = _body_of(task_file)
-    first = next((ln for ln in body.splitlines() if ln.strip()), "")
-    assert first.strip() == TASK_BODY_CONTRACT, (
-        f"{task_file.name} does not open by saying it is not delivered to the "
-        f"worker; its first non-blank line is {first.strip()[:120]!r}. Add "
-        "`TASK_BODY_CONTRACT` as the body's first line — a file created after it "
-        "landed has it already (`with_body_contract`), so a failure here is either "
-        "an edit that removed it or the line drifted from `agent_mcp/_shared.py`.")
+    # THE PIN AND THE RAILS ARE ONE CALL (#3658). The comparison used to live here, in
+    # a node, while the three lanes that write these files checked nothing — which is how
+    # `d46cdd257` could commit a task file this node would redden and nobody noticed
+    # until an unrelated round's base probe. `agent_mcp._shared.body_contract_violation`
+    # is now the one answer, read by this node and by the vault-land route, `vault_write`
+    # and `Write`/`Edit` alike, so a write that would redden this node is refused at the
+    # write and a write this node passes could not have been refused anywhere. The path is
+    # spelled vault-relative because that is the shape the corpus was globbed in.
+    violation = body_contract_violation(f"autonomy/{task_file.name}",
+                                        task_file.read_text(encoding="utf-8"))
+    assert violation is None, (
+        f"{task_file.name} does not open by saying it is not delivered to the worker: "
+        f"{violation} A file created after the line landed has it already "
+        "(`with_body_contract` stamps it on both task writers), so a failure here is "
+        "either an edit that removed it or the line drifted from `agent_mcp/_shared.py`. "
+        "All three write lanes refuse this shape now, so the way to land a new wording is "
+        "to change the constant and rewrite the corpus in the same commit.")
 
 
 def test_no_built_task_prompt_carries_the_body_contract_line():
@@ -898,6 +913,76 @@ def test_an_older_wording_of_the_contract_is_replaced_not_stacked():
     assert out.count(TASK_BODY_CONTRACT) == 1 and old not in out, out[:300]
     assert out == body.replace(old, TASK_BODY_CONTRACT)
     assert with_body_contract(out) == out
+
+
+#: The line `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md` carried into the
+#: vault at `d46cdd257` (2026-10-31 22:29 -0700), copied verbatim out of that commit —
+#: the wording the vault held before `1c9ea72d` (2026-09-24) reworded it. Two clauses
+#: differ from the live one: the opening says `documentation and the machine-written
+#: activity log`, and the closing says `a step that lives only below this line`.
+RETIRED_TASK_BODY_CONTRACT = (
+    "> **This body is documentation — not an instruction channel.** It is not delivered "
+    "to the worker: `_build_task_prompt` (`~/lloyd/app/autonomy.py`) renders only the "
+    "`skill_name` SKILL.md and the front-matter `description`, so anything that lives "
+    "only below this line reaches no run."
+)
+
+
+def test_the_retired_wording_is_replaced_in_place_rather_than_stacked_beneath_one():
+    """The detection key was 67 characters long, and this file is the reason that is wrong.
+
+    The neighbour above re-points a wording that still opens with all 67 characters of
+    `_TASK_BODY_CONTRACT_OPENING`, so it never exercised the branch it was named for.
+    The wording below diverges at character 32 — `documentation —` against
+    `documentation and` — so `startswith` could not fire, the loop passed the line, and
+    `with_body_contract` fell through to its prepend, shipping the CURRENT line ABOVE the
+    retired one. Measured at `ab6f2be3` with `.venvs/lloyd/bin/python`: stamping the body
+    below returned one whose `"> **This body is documentation"` count was **2**.
+
+    That is the failure mode the function exists to prevent, made invisible by the key
+    being too wide to see it: the file's FIRST line was the correct contract, so the pin
+    above was green on all 48 graded files while the file still asserted the retired
+    sentence underneath it. A green pin over a file carrying a stale contract is exactly
+    what cost `SM_20261101_050357` a red-tree item and `SM_20261101_054543` a 21-turn
+    implement round to heal five words of prose at `469a146f9`.
+
+    The key is therefore widened to a 30-character prefix BOTH wordings share — the two
+    lines agree for 31 characters, the extra one being the space after
+    `documentation`, which a detection key does not need — and the replace branch is what
+    runs. Asserted three ways: exactly one contract line, the retired sentence gone rather
+    than buried, and the whole body byte-equal to a plain substitution of the line — so the
+    repair cannot have eaten anybody's prose.
+    """
+    from agent_mcp._shared import (TASK_BODY_CONTRACT, with_body_contract,
+                                   _TASK_BODY_CONTRACT_OPENING)
+
+    # The key, stated as a number because the whole bug is a width. Thirty characters, not
+    # the 31 the item's draft clause says: 31 is how far the two WORDINGS agree
+    # (`> **This body is documentation ` — through the space), while the key only has to be
+    # a prefix of both, so it stops after the last letter both have. Measured, not counted:
+    # the loop above prints 31 for the common prefix and `len` prints 30 for this literal.
+    assert _TASK_BODY_CONTRACT_OPENING == "> **This body is documentation"
+    assert len(_TASK_BODY_CONTRACT_OPENING) == 30, len(_TASK_BODY_CONTRACT_OPENING)
+    common = 0
+    while (common < len(TASK_BODY_CONTRACT) and common < len(RETIRED_TASK_BODY_CONTRACT)
+           and TASK_BODY_CONTRACT[common] == RETIRED_TASK_BODY_CONTRACT[common]):
+        common += 1
+    assert common == 31, common
+    assert TASK_BODY_CONTRACT.startswith(_TASK_BODY_CONTRACT_OPENING)
+    assert RETIRED_TASK_BODY_CONTRACT.startswith(_TASK_BODY_CONTRACT_OPENING)
+    # The control that says this fixture is the shape that used to miss: the retired line
+    # shares the 31 characters and NOT the 67 the old key demanded.
+    assert not RETIRED_TASK_BODY_CONTRACT.startswith(
+        "> **This body is documentation and the machine-written activity log")
+
+    body = f"\n{RETIRED_TASK_BODY_CONTRACT}\n\n# Task\n\n- 2026-09-26 activity\n"
+    out = with_body_contract(body)
+
+    assert out.count("> **This body is documentation") == 1, out[:400]
+    assert RETIRED_TASK_BODY_CONTRACT not in out, "the retired sentence survived the stamp"
+    assert next(ln for ln in out.splitlines() if ln.strip()).strip() == TASK_BODY_CONTRACT
+    assert out == body.replace(RETIRED_TASK_BODY_CONTRACT, TASK_BODY_CONTRACT)
+    assert with_body_contract(out) == out, "the replace is not idempotent"
 
 
 def test_a_contract_line_that_grew_extra_prose_is_reclaimed_not_left_alone(

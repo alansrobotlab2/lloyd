@@ -20,6 +20,19 @@ import yaml
 #: The untouched `time.time`, captured before any test patches the module attribute.
 _REAL_TIME = time.time
 
+#: The line every numbered task body opens with (#3658). Imported rather than retyped:
+#: a fixture that pasted a stale copy would have the body rail refuse the write for a
+#: reason the node is not about, which is exactly how this file's 40-odd task lands
+#: behaved on the rail's first run.
+from agent_mcp._shared import TASK_BODY_CONTRACT as CONTRACT
+
+#: The scratch vault's seeded task file, in one place because three nodes pin its exact
+#: bytes as the state a refused land must revert TO. It carries the contract line because
+#: every real numbered task file does (#3658): both task writers stamp it through
+#: `with_body_contract`, and all 48 graded files in `~/obsidian/autonomy` have it. Without
+#: it the body rail refuses the land before the rule any of these nodes is about runs.
+SEED_TASK_TEXT = f"---\nid: 1\nstatus: up_next\n---\n\n{CONTRACT}\n\n# task\n"
+
 from agent_mcp.skills import _QUARANTINE_STATUSES
 from app.harness.policy import SCHEDULE_STATE_FIELDS
 from scripts.automod import state as S, vault_guards as VG, vault_round as V
@@ -45,7 +58,11 @@ def _scratch_vault(tmp_path, monkeypatch, *, mock_loaders: bool):
     (r / "backlog").mkdir()
     git(tmp_path, "init", "-q", "-b", "main", str(r))
     git(r, "config", "user.email", "t@e.com"); git(r, "config", "user.name", "t")
-    (r / "autonomy" / "1-task.md").write_text("---\nid: 1\nstatus: up_next\n---\n# task\n")
+    # The body opens with the contract line because every real numbered task file does:
+    # both task writers stamp it through `with_body_contract`, and all 48 graded files in
+    # `~/obsidian/autonomy` carry it. A fixture without it is refused by #3658's body rail
+    # before the rule the node is about is ever reached.
+    (r / "autonomy" / "1-task.md").write_text(SEED_TASK_TEXT)
     (r / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo\n")
     (r / "backlog" / "9-item.md").write_text("---\nstatus: draft\n---\n# item\n")
     git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
@@ -84,7 +101,7 @@ def test_broken_front_matter_is_refused_and_the_file_put_back(vault):
     f.write_text("---\nid: [unclosed\n---\n# task\n")
     with pytest.raises(V.VaultRoundError, match="reverted"):
         V.land(["autonomy/1-task.md"], "break a task", item_id=1)
-    assert f.read_text() == "---\nid: 1\nstatus: up_next\n---\n# task\n"
+    assert f.read_text() == SEED_TASK_TEXT
     ev = _events("vault_land")[-1]
     assert ev["ok"] is False and ev["reverted"] == ["autonomy/1-task.md"] and ev["item_id"] == 1
 
@@ -1619,13 +1636,16 @@ assert "__LIVE_VAULT__" in GUARD_SRC_ONE_NODE_BAKED_ROOT, \
 
 TASK_A_OFFENDER = ("---\nid: 10\nname: Pre-existing offender\n"
                    "description: Summarise the notes.\n---\n\n"
-                   "# Offender\n\nThe run calls `vault_write` on every note.\n")
+                   + CONTRACT + "\n\n# Offender\n\n"
+                   "The run calls `vault_write` on every note.\n")
 TASK_B_OFFENDER = ("---\nid: 20\nname: Fresh offender\n"
                    "description: Reconcile the facts.\n---\n\n"
-                   "# Fresh\n\nThe run calls `fact_relate` on every pair.\n")
+                   + CONTRACT + "\n\n# Fresh\n\n"
+                   "The run calls `fact_relate` on every pair.\n")
 TASK_CLEAN = ("---\nid: 30\nname: Clean\n"
               "description: Write the notes with `vault_write`.\n---\n\n"
-              "# Clean\n\nWrite the notes with `vault_write`.\n")
+              + CONTRACT + "\n\n# Clean\n\n"
+              "Write the notes with `vault_write`.\n")
 
 TASK_B_PATH = "autonomy/20-b-fresh.md"
 #: The guard's own node id with no param attached: in the corpus-shaped fixture that
@@ -4416,7 +4436,7 @@ TASK_HEAD_FM: dict = {
     "priority": "medium",
 }
 
-TASK_BODY = "\n# task\n\nOriginal body paragraph.\n"
+TASK_BODY = f"\n{CONTRACT}\n\n# task\n\nOriginal body paragraph.\n"
 
 
 def fm_task(fm: dict, body: str = TASK_BODY) -> str:
@@ -4553,7 +4573,7 @@ def test_a_round_that_rewords_the_body_and_description_passes(armed_task_vault):
     """
     f = armed_task_vault / "autonomy" / "1-task.md"
     f.write_text(fm_task({**TASK_HEAD_FM, "description": "reworded, same schedule"},
-                         body="\n# task\n\nRewritten body, more precise.\n"))
+                         body=f"\n{CONTRACT}\n\n# task\n\nRewritten body, more precise.\n"))
     errors, _buckets = V.validate(["autonomy/1-task.md"])
     assert errors == [], errors
     # No item_id: an item's contract would route this land into the vault
@@ -4617,7 +4637,7 @@ def test_a_round_that_resends_the_same_armed_status_is_accepted(armed_task_vault
     records an activity note.
     """
     f = armed_task_vault / "autonomy" / "1-task.md"
-    f.write_text(fm_task(dict(TASK_HEAD_FM), body="\n# task\n\nActivity note appended.\n"))
+    f.write_text(fm_task(dict(TASK_HEAD_FM), body=f"\n{CONTRACT}\n\n# task\n\nActivity note appended.\n"))
     errors, _buckets = V.validate(["autonomy/1-task.md"])
     assert errors == [], errors
 
@@ -5408,6 +5428,9 @@ id: 1
 status: up_next
 description: Sweep the ledger; {WINDOW} (14) is the window.
 ---
+
+{CONTRACT}
+
 # task
 """
 
@@ -5416,6 +5439,9 @@ id: 1
 status: up_next
 description: Sweep the ledger; {WINDOW} (90) is the window.
 ---
+
+{CONTRACT}
+
 # task
 """
 
@@ -5452,7 +5478,7 @@ def test_a_land_whose_description_quotes_a_stale_constant_is_refused(vault, tmp_
     # Reverted: the tree is back at the base commit's text, and the refusal is on
     # the row rather than only in the raised message.
     assert (vault / "autonomy" / "1-task.md").read_text() == (
-        "---\nid: 1\nstatus: up_next\n---\n# task\n")
+        SEED_TASK_TEXT)
     row = _events("vault_land")[-1]
     assert row["ok"] is False and any(WINDOW in x for x in row["errors"]), row
 
@@ -8182,7 +8208,8 @@ SUCCESSOR_TEXT = "---\nstatus: draft\n---\n# successor filed by the round\n"
 
 #: A task file the round created, with front matter that parses, so the only thing
 #: separating it from the backlog files above is the directory it lives in.
-CREATED_TASK_TEXT = "---\nid: 1\nstatus: up_next\n---\n# task, created by the round\n"
+CREATED_TASK_TEXT = (f"---\nid: 1\nstatus: up_next\n---\n\n{CONTRACT}"
+                     + "\n\n# task, created by the round\n")
 
 
 def _untrack_at_head(vault, rel: str) -> None:
@@ -9298,12 +9325,13 @@ import shutil  # noqa: E402  (module imports above do not include it)
 
 TASK_REL = "autonomy/1-task.md"
 ARMED_TASK_HEAD = "---\nid: 1\nstatus: up_next\n---\n"
-ARMED_TASK_BODY = ARMED_TASK_HEAD + "# task\n"
+ARMED_TASK_BODY = ARMED_TASK_HEAD + f"{CONTRACT}\n\n# task\n"
 PARKED_ARMED_BODY = (
     "---\nid: 1\nstatus: up_next\nparked: \"Alan\'s ruling 2026-09-17: parked on "
-    'purpose\"\n---\n# task\n')
-CADENCE_ARMED_BODY = ("---\nid: 1\nstatus: up_next\nfrequency: weekly\n---\n# task\n")
-DRAFT_TASK_HEAD = "---\nid: 1\nstatus: draft\n---\n# task\n"
+    'purpose\"\n---\n\n' + CONTRACT + '\n\n# task\n')
+CADENCE_ARMED_BODY = ("---\nid: 1\nstatus: up_next\nfrequency: weekly\n---\n\n"
+                      + CONTRACT + "\n\n# task\n")
+DRAFT_TASK_HEAD = "---\nid: 1\nstatus: draft\n---\n\n" + CONTRACT + "\n\n# task\n"
 
 
 def _never_armed_task_vault(tmp_path, monkeypatch):
@@ -9465,3 +9493,206 @@ def test_the_round_lane_asks_the_shared_predicate_and_holds_no_copy_of_it(tmp_pa
             "has begun deciding the first arm itself instead of asking policy")
     assert "first_arm_allowed" in {n.id for n in _ast.walk(fn) if isinstance(n, _ast.Name)}, (
         "the lane never calls the shared predicate")
+
+
+# ── #3658: the contract line, checked at the door that let a stale one in ─────
+#
+# `TASK_BODY_CONTRACT` is the line every autonomy task body opens with, saying the body
+# is documentation and not an instruction channel. A pin graded it over the whole corpus
+# (`tests/test_research_doc_claims.py::test_task_body_opens_by_saying_it_is_not_delivered`)
+# while none of the three lanes that can put an ARBITRARY body into a numbered task file
+# checked it — so the corpus went red on whichever round happened to look, not on the
+# write that did it. Measured at `ab6f2be3`: `git grep -ln "TASK_BODY_CONTRACT"` returned
+# exactly two files, `agent_mcp/_shared.py` and that test. The live cost: this route
+# committed `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md` carrying the
+# RETIRED wording at `d46cdd257` (2026-10-31 22:29 -0700), item #3657 filed against the
+# base probe that found it, and a 21-turn implement round (`SM_20261101_054543`) spent
+# healing five words of prose (`469a146f9`) — which neither gate then graded.
+#
+# The three nodes below are this lane's share. All of them go through `V.land`, the real
+# door, rather than calling the checker: a rule that only works when somebody remembers
+# to call it is the rule that was missing in the first place.
+
+#: A body with nothing but prose: no contract line, and nothing else on this route to
+#: refuse it for — the front matter parses, no dispatch field moved, no description
+#: number to check. Exactly the file `d46cdd257` landed.
+_UNSTAMPED_BODY = ("# Scheduled ceiling flip gate\n\n"
+                   "Take the reading, write the row, report the verdict.\n")
+
+
+def _numbered_task(vault, rel: str, body: str, *, fm: str = "---\nid: 7\nstatus: draft\n---\n",
+                   ago_minutes: int = 90):
+    """One numbered autonomy task file, committed clean, with `body` as its body.
+
+    The seed commit is backdated 90 minutes by default because `check_changed_autonomy_window`
+    is LIVE in this fixture — `_scratch_vault` points `AUTONOMY_RUNS_DIR` under the vault's
+    parent, which is exactly the condition that switch's own skip condition describes — and a
+    commit made seconds before the land being tested is refused for touching a task file
+    twice inside half an hour. That refusal would be about the window, not the contract line,
+    and a node that asserts on the wrong refusal proves nothing.
+    """
+    f = vault / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(fm + "\n" + body, encoding="utf-8")
+    git(vault, "add", "--", rel)
+    stamp = f"@{int(time.time()) - ago_minutes * 60} +0000"
+    env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+    subprocess.run(["git", "-C", str(vault), "commit", "-q", "-m", f"seed {rel}"],
+                   capture_output=True, text=True, env=env, check=True)
+    return f
+
+
+def test_a_land_whose_task_body_drops_the_contract_line_is_refused_and_names_it(vault):
+    """Clause 1: the refusal names the path AND the line to add, and nothing commits.
+
+    The left half is the shape of the incident: a tracked task file whose body opens with
+    ordinary prose. The middle is what made the incident expensive — a refusal that named
+    neither the file nor the missing line would have left #3657's healing to a human who
+    had to rediscover which line the pin wanted. The right is `no commit`: this door's
+    whole contract is validate-then-commit, so a refusal that had already written the
+    object would not be a refusal.
+    """
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
+    f = _numbered_task(vault, "autonomy/7-gate.md", _UNSTAMPED_BODY)
+    f.write_text(f.read_text(encoding="utf-8").replace(
+        "# Scheduled ceiling gate", "# Scheduled ceiling gate, edited"), encoding="utf-8")
+    before = _head(vault)
+
+    with pytest.raises(V.VaultRoundError) as exc:
+        V.land(["autonomy/7-gate.md"], "reword task 7", item_id=3658)
+
+    why = str(exc.value)
+    assert "autonomy/7-gate.md" in why, why
+    assert TASK_BODY_CONTRACT in why, (
+        f"a refusal that does not carry the line to add costs the author a grep: {why[:400]}")
+    assert _head(vault) == before, "a refused land still wrote a commit"
+    assert git(vault, "status", "--porcelain").stdout == "", (
+        "the revert left the tree in a state nobody asked for")
+    row = _events("vault_land")[-1]
+    assert row["ok"] is False and row["item_id"] == 3658, row
+    assert any("autonomy/7-gate.md" in e for e in row["errors"]), row
+
+
+def test_a_task_body_already_opening_with_the_contract_line_still_lands(vault):
+    """Clause 5, this lane's half: the rail does not stop the writes that are fine.
+
+    The same file, the same route, one line added — and it lands. Without this half the
+    refusal above would only prove a rail that cries, and the nightly writers that rewrite
+    task files every cycle are the reason a blanket refusal was never the answer.
+    """
+    from agent_mcp._shared import TASK_BODY_CONTRACT
+
+    f = _numbered_task(vault, "autonomy/7-gate.md",
+                       TASK_BODY_CONTRACT + "\n\n# Scheduled ceiling gate\n")
+    f.write_text(f.read_text(encoding="utf-8") + "\n- 2026-11-01 activity note\n",
+                 encoding="utf-8")
+    before = _head(vault)
+
+    # No item_id, for the reason this file names on `test_a_round_that_rewords_the_body_and_description_passes`:
+    # an item contract routes the land into the vault REVIEWER, another gate and an
+    # un-stubbed grader call. The body rail is what is under test.
+    out = V.land(["autonomy/7-gate.md"], "activity note on task 7")
+
+    assert out["ok"] is True, out
+    assert _head(vault) != before
+    assert "- 2026-11-01 activity note" in f.read_text(encoding="utf-8")
+
+
+def test_paths_outside_the_graded_shape_are_never_asked_for_a_contract(vault):
+    """Clause 5's other half: the rail governs exactly what the pin grades, not the batch.
+
+    A land batch is whatever a round happened to touch. Three shapes in it are not numbered
+    task files and must land untouched: an archived task under `autonomy/_archived/`, which
+    the corpus glob (`app/autonomy.py:101`, a non-recursive `glob("[0-9]*-*.md")`) never
+    reads; a numbered note filed under a different segment; and a SQLite store primary under
+    `backlog/data/`. That last one is not a thought experiment — the first draft of this rail
+    read bytes to decide whether a path was a task file, and `land`ing a 0x83-first-byte
+    binary turned the guard's own `read_text` into a UTF-8 decode error that refused the whole
+    round. A guard that cannot state its shape in the file NAME is a guard that reads stores.
+    """
+    (vault / "autonomy" / "_archived").mkdir(parents=True, exist_ok=True)
+    (vault / "autonomy" / "_archived" / "25-retired.md").write_text(
+        "---\nid: 25\nstatus: draft\n---\n\n# Retired, and ungraded\n", encoding="utf-8")
+    (vault / "backlog" / "2588-note.md").write_text(
+        "---\nstatus: done\n---\n\n# A numbered note outside autonomy/\n", encoding="utf-8")
+    (vault / "backlog" / "data").mkdir(parents=True, exist_ok=True)
+    (vault / "backlog" / "data" / "kg.sqlite").write_bytes(b"\x83SQLite\x00\xff\xfe store")
+    before = _head(vault)
+
+    out = V.land(["autonomy/_archived/25-retired.md", "backlog/2588-note.md",
+                  "backlog/data/kg.sqlite"], "file three non-tasks")
+
+    assert out["ok"] is True, out
+    assert _head(vault) != before
+
+
+def test_a_dated_report_filed_beside_the_tasks_is_refused_the_way_the_pin_grades_it(vault):
+    """The known false refusal, pinned as a refusal rather than wished away.
+
+    `autonomy/2026-10-31-notes.md` is a dated report, not a task — but the pin's glob is
+    `[0-9]*-*.md`, so the corpus has always graded it as one and demanded the contract line
+    of it too. This rail agrees with the pin rather than quietly diverging from it: same
+    shape, same refusal. Narrowing the rail to spare the note would leave the pin demanding
+    a line no writer stamps, which is the divergence this item exists to remove. The fix the
+    owed check names is renaming the file out of the corpus.
+    """
+    f = vault / "autonomy" / "2026-10-31-notes.md"
+    f.write_text("---\ntype: note\n---\n\n# Notes\n\nProse with no contract line.\n",
+                 encoding="utf-8")
+    before = _head(vault)
+
+    with pytest.raises(V.VaultRoundError) as exc:
+        V.land(["autonomy/2026-10-31-notes.md"], "file a dated note")
+
+    assert "autonomy/2026-10-31-notes.md" in str(exc.value), str(exc.value)[:300]
+    assert _head(vault) == before
+
+
+def test_the_three_lanes_and_the_pin_all_call_the_one_predicate():
+    """The rule is one function, and no lane is allowed to hold its own copy of it.
+
+    Asserted off the CODE rather than the prose, in the shape
+    `test_the_dispatch_lane_does_not_decide_the_first_arm_itself` beside it already uses:
+    for each of the four readers — this route's `task_body_contract_errors`, the
+    `vault_write` lane, the `Write`/`Edit` lane and the corpus pin's module — the
+    predicate's name must appear, and none of them may mention the constant, the opening
+    key, or `with_body_contract`. A lane that names `TASK_BODY_CONTRACT` is comparing
+    against the line itself, which is how #1570's grown line slipped past a substring
+    test, and a lane that names the opening is deciding for itself what counts as stale.
+
+    This is also the drift rail: the day the predicate's name changes, four nodes go red
+    at once instead of three lanes quietly disagreeing about which bodies are legal.
+    """
+    import ast as _ast
+    import inspect as _inspect
+
+    import agent_mcp.builtin_fs as FS
+    import agent_mcp.vault as VP
+    import tests.test_research_doc_claims as PIN
+
+    readers = {"vault-land": V.task_body_contract_errors,
+               "vault_write": VP._autonomy_contract_refusal,
+               "Write/Edit": FS._autonomy_contract_denial}
+    for label, fn in readers.items():
+        names = {n.id for n in _ast.walk(_ast.parse(_inspect.getsource(fn)))
+                 if isinstance(n, _ast.Name)}
+        attrs = {n.attr for n in _ast.walk(_ast.parse(_inspect.getsource(fn)))
+                 if isinstance(n, _ast.Attribute)}
+        consts = {c.value for c in _ast.walk(_ast.parse(_inspect.getsource(fn)))
+                  if isinstance(c, _ast.Constant) and isinstance(c.value, str)}
+        assert "body_contract_violation" in (names | attrs), (
+            f"{label} does not call the shared predicate")
+        for stolen in ("TASK_BODY_CONTRACT", "_TASK_BODY_CONTRACT_OPENING",
+                       "with_body_contract"):
+            assert stolen not in names and stolen not in attrs, (
+                f"{label} names `{stolen}` in its code — a lane holding its own copy of "
+                "the rule is the failure this item exists to end")
+        assert not any("This body is documentation" in c for c in consts), (
+            f"{label} hardcodes the contract line's text instead of asking the predicate")
+
+    # The pin reads the corpus, so it is graded the weaker way: its module must reach the
+    # predicate by name somewhere, which says the guard and the rails cannot drift apart.
+    pin_src = _inspect.getsource(PIN)
+    assert "body_contract_violation" in pin_src, (
+        "the corpus pin stopped calling the predicate the three rails call")

@@ -1857,6 +1857,78 @@ def _record_body_refusal(path: str, reason: str) -> None:
         logger.debug("autonomy body rail: denial journal unavailable", exc_info=True)
 
 
+def _record_contract_refusal(path: str, reason: str) -> None:
+    """Journal a refused contract line, beside the body-row recorder above.
+
+    Its OWN guard name, `autonomy_contract_rail`, because the owed check after this
+    lands is "did the new rail cry wolf at a real write", and a grep that has to
+    separate two rules by reading prose is a grep that gets answered wrong. Same
+    never-raises discipline: a refusal the journal cannot see is still a refusal.
+    """
+    try:
+        from app.harness import denial_journal
+        from agent_mcp._shared import get_bound_session
+        denial_journal.record(guard="autonomy_contract_rail", where="dispatch",
+                              session_id=get_bound_session() or "", tool="vault_write",
+                              reason=f"{path}: {reason}"[:600], excerpt=str(path),
+                              label="numbered task body missing TASK_BODY_CONTRACT")
+    except Exception:  # noqa: BLE001 — journaling must never become why a write failed
+        logger.debug("autonomy contract rail: denial journal unavailable", exc_info=True)
+
+
+def _autonomy_contract_refusal(path: str, content: str) -> dict | None:
+    """Refuse a numbered task body that does not open with `TASK_BODY_CONTRACT` (#3658).
+
+    The lane the incident took: `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md`
+    went in through a vault land carrying the RETIRED wording of the line (`d46cdd257`,
+    2026-10-31 22:29), nothing refused it, and the file's corpus node went red on an
+    unrelated round's base probe — which cost a `high` item and a 21-turn implement round
+    (`SM_20261101_054543`) to heal five words of prose (`469a146f9`).
+
+    The decision is `agent_mcp._shared.body_contract_violation`, the same call
+    `tests/test_research_doc_claims.py::test_task_body_opens_by_saying_it_is_not_delivered`
+    makes, so this lane cannot refuse a body the pin would pass nor land one it would
+    redden. It answers None for every path the pin does not grade — `autonomy/_config.md`,
+    the dated reports, `autonomy/_archived/*` — which is what keeps a benign write landing.
+    Fail-closed like the rail beside it: a predicate that cannot run is a refusal that
+    says which, not a pass.
+
+    Returns None to let the write through; a refusal changes no bytes, and both callers
+    reach it ahead of the ledger, the audit row and the write itself.
+    """
+    try:
+        from agent_mcp._shared import body_contract_line, body_contract_violation
+        violation = body_contract_violation(path, content)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        logger.exception("autonomy contract rail unavailable for vault path %s", path)
+        _record_contract_refusal(path, f"the predicate itself could not run ({exc})")
+        return _err("vault_write refused: the autonomy contract rail could not run, so "
+                    f"{path} is not being written. Report this rather than working "
+                    "around it.", ErrorCode.PROTECTED_PATH)
+    if violation is None:
+        return None
+    _record_contract_refusal(path, violation)
+    return _err(
+        # The line goes FIRST and alone after one short sentence, because `_err` caps the
+        # message at 500 characters and the violation text is 610 on its own: the first
+        # draft of this rail spent its whole budget quoting the offending line's opening
+        # and truncated the constant mid-word, which is the half of clause 2 an author
+        # otherwise pays a grep of `agent_mcp/_shared.py` to recover. The observed line and
+        # the reasoning ride along uncapped, in fields a JSON reader sees in full.
+        f"vault_write refused: {path} is a numbered autonomy task file with no contract "
+        f"line. Add this as the body's first line:\n\n{body_contract_line()}",
+        ErrorCode.PROTECTED_PATH, path=path, rule="body_missing_contract",
+        guard="autonomy_contract_rail",
+        observed=violation,
+        why=("That line is what says a body is documentation plus the machine-written "
+             "activity log rather than an instruction channel: `_build_task_prompt` "
+             "delivers the `skill_name` SKILL.md and the front-matter `description` and "
+             "never reads below it, so prose here reaches no run while every later reader "
+             "takes it for an order."),
+        graded_by=("tests/test_research_doc_claims.py::"
+                   "test_task_body_opens_by_saying_it_is_not_delivered"))
+
+
 def _autonomy_body_refusal(path: str, content: str) -> dict | None:
     """Refuse a task body that orders a tool the task's own built prompt never names.
 
@@ -1999,6 +2071,11 @@ def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
     # The dispatch fields are clean; the body is the other thing this file can carry
     # that nothing else checks on a create (#2589). Ordered after the arming check so
     # a create that is both armed and badly worded is refused for the dangerous half.
+    # The contract line is the first of the two body rules (#3658): it is the shorter
+    # question, and a create missing it is the exact shape `d46cdd257` landed.
+    refusal = _autonomy_contract_refusal(path, content)
+    if refusal is not None:
+        return refusal
     return _autonomy_body_refusal(path, content)
 
 
@@ -2065,6 +2142,13 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
         # file, and the body check still runs over it — so a write that both arms a task
         # and orders a tool its prompt never names is refused for the body, the same
         # dangerous-half-first order every other case on this lane keeps.
+        #
+        # The contract line rides the same call site (#3658): rewriting a body without
+        # moving a dispatch field is precisely how `d46cdd257`'s stale line reached
+        # `autonomy/104-…`, and a rule on the create phase alone never sees it.
+        refusal = _autonomy_contract_refusal(path, content)
+        if refusal is not None:
+            return refusal
         return _autonomy_body_refusal(path, content)
     field, old, new = moves[0]
     _record_schedule_refusal(path, f"{field}: {old!r} -> {new!r}")

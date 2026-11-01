@@ -578,6 +578,85 @@ def _record_body_denial(mut: "_Mutation", tool: str, reason: str) -> None:
         pass
 
 
+def _record_contract_denial(mut: "_Mutation", tool: str, reason: str) -> None:
+    """One durable row per refused contract line (`app/harness/denial_journal.py`).
+
+    Beside `_record_body_denial` and with its own `guard` name, `autonomy_contract_rail`:
+    the owed check after this lands is whether the new rail cried wolf at a real write,
+    and a grep that must separate two rules by reading each row's prose is a grep that
+    gets answered wrong. `Write` and `Edit` are told apart by `tool`, as elsewhere.
+    """
+    try:
+        from app.harness import denial_journal
+        denial_journal.record(guard="autonomy_contract_rail", where="dispatch",
+                              session_id=get_bound_session(), tool=tool,
+                              reason=f"{mut.path}: {reason}"[:600],
+                              excerpt=str(mut.path),
+                              label="numbered task body missing TASK_BODY_CONTRACT")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _autonomy_contract_denial(mut: "_Mutation", post_text: str,
+                              tool: str) -> str | None:
+    """Refuse a numbered task body that does not open with `TASK_BODY_CONTRACT` (#3658).
+
+    The Write/Edit half of the rule the `vault_write` lane enforces as
+    `_autonomy_contract_refusal`, and both call the SAME shipped predicate —
+    `agent_mcp._shared.body_contract_violation` — which is also what
+    `tests/test_research_doc_claims.py::test_task_body_opens_by_saying_it_is_not_delivered`
+    calls. Three readers, one rule: a body this lane passes cannot redden the corpus, and
+    a body it refuses could not have landed anywhere else. The reason it must be here too
+    is the class rule the vault lane already cites: a guard on one of two write surfaces
+    is not a guard — the file this rail is named for,
+    `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md`, went in at `d46cdd257`
+    through the route that had no check, cost a `high` item and a 21-turn implement round
+    (`SM_20261101_054543`) to heal five words (`469a146f9`).
+
+    `mut.path` is an absolute path on this lane; the predicate reads only its last
+    directory and its basename, so `…/obsidian/autonomy/104-x.md` and
+    `autonomy/104-x.md` are the same answer and no path is re-spelled here.
+
+    Called from the same site as the #2362 dispatch rail and the #2589 body rule, before
+    the mutation commits: a refusal changes no bytes, opens no undo entry and records no
+    change-ledger row. Fail-closed like the rails beside it.
+    """
+    try:
+        from agent_mcp._shared import body_contract_line, body_contract_violation
+        violation = body_contract_violation(str(mut.path), post_text)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        _record_contract_denial(mut, tool, f"the predicate itself could not run ({exc})")
+        return json.dumps({
+            "error": (f"{tool} refused: the autonomy contract rail could not run, so "
+                      f"{mut.path} is not being written. Report this rather than "
+                      "working around it."),
+            "code": ErrorCode.PROTECTED_PATH})
+    if violation is None:
+        return None
+    _record_contract_denial(mut, tool, violation)
+    return json.dumps({
+        "error": (
+            # Path first, then the line, and nothing else competing for the space: the fs
+            # lane's `_denied` json.dumps the whole dict so nothing here is truncated, but
+            # the vault lane's `_err` caps at 500 chars, and the two lanes telling an author
+            # two different things about one rule is how a lane ends up enforcing half of it.
+            # So this message is the same sentence, in the same order, with the same fields.
+            f"{tool} refused: {mut.path} is a numbered autonomy task file with no contract "
+            f"line. Add this as the body's first line:\n\n{body_contract_line()}"),
+        "code": ErrorCode.PROTECTED_PATH,
+        "path": str(mut.path),
+        "rule": "body_missing_contract",
+        "guard": "autonomy_contract_rail",
+        "observed": violation,
+        "why": ("That line is what says a body is documentation plus the machine-written "
+                "activity log rather than an instruction channel: `_build_task_prompt` "
+                "delivers the `skill_name` SKILL.md and the front-matter `description` and "
+                "never reads below it, so prose here reaches no run while every later "
+                "reader takes it for an order."),
+        "graded_by": ("tests/test_research_doc_claims.py::"
+                      "test_task_body_opens_by_saying_it_is_not_delivered")})
+
+
 def _autonomy_body_denial(mut: "_Mutation", post_text: str,
                           tool: str) -> str | None:
     """Refuse a task body ordering a tool its own built prompt never names (#2589).
@@ -715,8 +794,10 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
         # Dispatch state is clean on this create, but the body still came through here,
         # and a create is one of the two ways a bad body arrives (#2589). Ordered after
         # the arming check so a create that is both armed and badly worded is refused
-        # for the dangerous half.
-        return _autonomy_body_denial(mut, post_text, tool)
+        # for the dangerous half. Both body rules run from this one site (#3658): the
+        # contract line first, as the shorter question and the shape `d46cdd257` landed.
+        return (_autonomy_contract_denial(mut, post_text, tool)
+                or _autonomy_body_denial(mut, post_text, tool))
 
     old_fm = front_matter_map(mut.pre_bytes.decode("utf-8", errors="replace"))
     if old_fm is None or new_fm is None:
@@ -745,7 +826,13 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
         # nothing in this file decides it, and the body check still runs over the arming
         # write — so a file that both arms a task and orders a tool its prompt never names
         # is still refused for the body.
-        return _autonomy_body_denial(mut, post_text, tool)
+        #
+        # The contract line rides the same site (#3658): rewriting a body without moving a
+        # dispatch field is exactly how `d46cdd257`'s stale opening reached
+        # `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md`, and a create-only
+        # rule never sees such a write.
+        return (_autonomy_contract_denial(mut, post_text, tool)
+                or _autonomy_body_denial(mut, post_text, tool))
     field, old, new = moves[0]
     _record_schedule_denial(mut, tool, f"{field}: {old!r} -> {new!r}")
     return json.dumps({

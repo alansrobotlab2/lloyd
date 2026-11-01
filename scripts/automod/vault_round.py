@@ -616,6 +616,71 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
     return errors
 
 
+def task_body_contract_errors(paths: list[str], *, vault: Path | None = None) -> list[str]:
+    """Refuse a land whose numbered task body does not open with `TASK_BODY_CONTRACT`.
+
+    `vault` defaults to None and is resolved to the module's `VAULT` AT CALL TIME, not
+    written as `vault: Path = VAULT` in the signature: a default is evaluated once at
+    import, so the scratch vault every test in `tests/test_automod_vault_round.py` installs
+    with `monkeypatch.setattr(V, "VAULT", …)` would have been walked straight past, the
+    checker would have read the real `~/obsidian`, found 48 compliant files, and reported
+    the whole rail green while grading a tree that was not the one under test. Measured
+    before this line existed: the checker returned `[]` for a scratch `autonomy/1-task.md`
+    whose body was `# task`.
+
+    The route the incident actually took. `autonomy/104-scheduled-ceiling-flip-gate-daily-record.md`
+    was created at vault `d46cdd257` (2026-10-31 22:29) with the RETIRED wording of the
+    contract line typed straight into it; this route parsed its front matter, asked
+    nothing of its body, and committed. The next round's base probe reddened that file's
+    corpus node (`tests/test_research_doc_claims.py::test_task_body_opens_by_saying_it_is_not_delivered`),
+    and healing five words of prose cost item #3657 plus a 21-turn implement round
+    (`SM_20261101_054543`) whose gate then aborted for want of a code diff.
+
+    What the route checked before this was exactly one thing about a touched task file:
+    that `_parse_task_file` could read it (`_LOADER_SCRIPT`, and `frontmatter_error`
+    above), plus the dispatch fields (#2190) and the description's numbers (#2317). All
+    three are front-matter rules. The body — the part of the file that is NOT delivered
+    to a worker, which is what the contract line exists to say — was ungraded on this
+    route while a pin graded it over the whole corpus, so every hand-authored body joined
+    the corpus with nothing in front of it.
+
+    One predicate with the two tool lanes and the pin: `agent_mcp._shared.body_contract_violation`,
+    called with the vault-relative path the caller already holds. A land this route refuses
+    could not have landed through `vault_write` or `Write`/`Edit` either, and a land it
+    allows cannot redden the corpus — which is the whole point of not re-spelling the rule.
+
+    Reads the bytes on disk, which is what `land` is about to commit: a refusal here stops
+    the commit, so the file the author left in the working tree is untouched and the
+    message names what to add.
+    """
+    from agent_mcp._shared import body_contract_violation, is_numbered_task_path
+
+    root = VAULT if vault is None else vault
+    errors: list[str] = []
+    for p in paths:
+        # The NAME answers this, so ask it before opening anything. A land batch is
+        # whatever the round touched, and this door legitimately commits
+        # `backlog/data/kg.sqlite` — a real SQLite store whose first byte is 0x83 — so
+        # reading bytes to decide whether a path is a task file turned that land into a
+        # UTF-8 decode error, refusing a write nothing here claims to govern. Caught by
+        # `tests/test_automod_vault_round.py::test_a_store_primary_still_lands_through_this_door`,
+        # which is the node this comment is a receipt for.
+        if not is_numbered_task_path(p):
+            continue
+        f = root / p
+        if not f.is_file():
+            continue  # a deletion or a rename away from here: no body to grade
+        try:
+            violation = body_contract_violation(p, f.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"{p}: the body could not be read to check its contract line "
+                          f"({exc}) — repair the file rather than landing it unread")
+            continue
+        if violation:
+            errors.append(f"{p}: {violation}")
+    return errors
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -645,7 +710,12 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
         errors.extend(VG.autonomy_description_errors(paths=paths, vault=VAULT,
                                                      tree_root=LLOYD_HOME))
     if not errors:
-        errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
+        # And a body that survives the loader is not a body that says what it is: the
+        # contract line (#3658). Ordered with the other content rules rather than first,
+        # so a land that both moves a dispatch field and lacks the line is still refused
+        # for the dangerous half, as every other lane in this loop holds.
+        errors.extend(task_body_contract_errors(paths)
+                      + contract_errors(paths) + reflection_archive_errors(paths)
                       + skill_timezone_errors(paths)
                       + uptake_citability_errors(paths)
                       + run_citation_errors(paths))
