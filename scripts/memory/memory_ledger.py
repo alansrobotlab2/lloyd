@@ -31,6 +31,19 @@ is written unwrapped:
 
     - anchor: **Scope**: agent memory, knowledge and research notes go in | why: … | origin: … | retire_when: … | check: `…` | checked: 2026-09-25
 
+The same row may instead carry its later fields on indented continuation lines —
+the shape `memory_add` writes into a topic file, and 4 of `memory-md-ledger.md`'s
+87 rows hold it:
+
+    - anchor: **A truncated listing is not an inven
+      why: …
+      check: `…`
+      checked: 2026-10-25 (row written at index-line creation)
+
+`ledger_rows` reads the stamp off either shape, and off a code-span-wrapped one
+(`checked: `2026-11-01 12:49Z PASS (1) — …``), but never past the next bullet, so
+one row cannot inherit its successor's stamp (#3674).
+
 The delimiter is not a backtick, and #1730 is why: an anchor is the entry's own
 prose, which in these two files is full of code spans, so a backtick-delimited
 capture silently truncated every anchor that crossed one — 19 of the 54 loaded
@@ -113,7 +126,17 @@ FIELD_SEP = "|"
 # date stamp it prepends are optional in front of `anchor:`.
 _ROW = re.compile(r"^\s*-\s+(?:\[[a-z]+\]\s+)?(?:\(\d{4}-\d{2}-\d{2}\)\s+)?"
                   r"anchor:\s*(?P<field>[^|]*)(?:\s*\|\s*(?P<rest>.*))?$")
-_CHECKED = re.compile(r"checked:\s*(\d{4}-\d{2}-\d{2})")
+# A stamp may be wrapped in a code span: the two 2026-11-01 rows in
+# `lloyd/memory/memory-md-ledger.md` write ``checked: `2026-11-01 12:49Z PASS (1) — …````,
+# and a date a reader cannot see is the same defect as a date that was never
+# written — the row reads as never-checked (#3674). Only the OPENING backtick is
+# optional: what the span wraps is free prose, so nothing can be anchored on its end.
+_CHECKED = re.compile(r"checked:\s*`?(\d{4}-\d{2}-\d{2})")
+#: A row's continuation line: indented content under a `- ` bullet. The ledgers hold
+#: two row shapes — every field pipe-separated on the anchor line, and `why:` /
+#: `origin:` / `retire_when:` / `check:` / `checked:` each on its own indented line
+#: below it, which is how `memory_add`'s topic-file habit reached a ledger (#3674).
+_CONT = re.compile(r"^[ \t]+\S")
 
 
 def _norm(text: str) -> str:
@@ -173,13 +196,49 @@ def loaded_entries(text: str) -> list[str]:
 
 
 def ledger_rows(text: str) -> list[dict]:
-    rows = []
-    for line in text.splitlines():
-        m = _ROW.match(line)
-        if m:
-            c = _CHECKED.search(m.group("rest") or "")
-            rows.append({"anchor": _norm(_anchor_field(m.group("field"))),
-                         "checked": c.group(1) if c else None})
+    """Every row in a ledger, with the `checked:` stamp each one carries.
+
+    A row is its `- ` bullet PLUS that bullet's indented continuation lines, and
+    the stamp is searched across the whole of it. It is not a one-line rule: 4 of
+    `lloyd/memory/memory-md-ledger.md`'s 87 rows keep `checked:` on its own
+    indented line beneath the anchor — measured 2026-11-01, stamps at `:83`, `:89`
+    and `:109`, and the row opening at `:99` has none. Reading the anchor line
+    alone made all four
+    parse as never-checked, and `status` sorts `stalest_checked` on
+    `r["checked"] or ""` — so `None` sorted FIRST and the freshest rows in the
+    corpus were published as the stalest, spending the curator's pruning pass
+    (#47 §4) on exactly the rows checked most recently (#3674).
+
+    The bullet ends at the first line that is neither indented nor a row of its
+    own, so a row never inherits a successor's stamp. That boundary is the live
+    defect's other half: the stamp for the row opening at `:99` was stranded one
+    bullet down at `:110` by an Edit anchored above the wrong row's stamp, and a
+    reader that ran past the next `- ` would credit `:99` with a witness it never
+    ran while `:110`'s own row kept a stamp belonging to someone else.
+
+    The search starts after the `anchor:` field, never inside it: an anchor is a
+    loaded line's own first 60 characters, so prose quoted there is not this
+    row's stamp. Within that body the anchor line's pipe-separated fields come
+    first, which is what makes the two shapes report one date for the same row.
+    """
+    lines = text.splitlines()
+    n = len(lines)
+    rows, i = [], 0
+    while i < n:
+        m = _ROW.match(lines[i])
+        if m is None:
+            i += 1
+            continue
+        j = i + 1
+        # Continuation lines only: a blank, a heading, the next top-level bullet,
+        # or a nested row line all end this row's bullet.
+        while j < n and _CONT.match(lines[j]) and not _ROW.match(lines[j]):
+            j += 1
+        body = "\n".join([m.group("rest") or "", *lines[i + 1:j]])
+        c = _CHECKED.search(body)
+        rows.append({"anchor": _norm(_anchor_field(m.group("field"))),
+                     "checked": c.group(1) if c else None})
+        i = j
     return rows
 
 

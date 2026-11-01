@@ -970,3 +970,112 @@ def test_user_md_curate_trigger_is_untouched_on_both_sides_of_its_threshold(tmp_
     assert off["curate"] is False, off
     assert on["curate"] is True, on
     assert off["tight_enforced"] is False and on["tight_enforced"] is False
+
+
+# ── #3674 — a row is its whole bullet, and `checked:` is read across it ──────
+#
+# `ledger_rows` matched `_ROW` line by line and then searched `_CHECKED` inside
+# `m.group("rest")` — only the text sitting on the ANCHOR line after the first
+# `|`. The other shape these ledgers actually hold, `- anchor: …` followed by
+# indented `why:` / `origin:` / `retire_when:` / `check:` / `checked:` lines,
+# therefore parsed to `{"checked": None}` even when the row carried a dated stamp
+# two lines below its anchor. 4 of MEMORY.md's 87 rows are that shape
+# (`lloyd/memory/memory-md-ledger.md:78`, `:84`, `:99`, `:104`, measured
+# 2026-11-01), and their stamps sit at `:83`, `:89`, `:109` — plus one row that
+# genuinely has none. Because `status` ranks staleness with
+# `key=lambda r: r["checked"] or ""`, `None` sorted FIRST, so all four headed
+# `stalest_checked` ahead of rows dated 2026-09-11 and older, and the curator
+# spent its pruning pass (#47 §4) on the rows checked most recently. A second
+# failure rode along: `_CHECKED` could not match a date opened by a code-span
+# backtick, which is how both 2026-11-01 rows write their stamp.
+
+_MULTI_TAIL = ("  why: the line keeps a class rule reachable from the loaded index\n"
+               "  origin: 2026-10-25 nightly knowledge write #39, Step 2.5.\n"
+               "  retire_when: dream-consolidation folds the pointer elsewhere.\n"
+               "  check: `test -f lloyd/memory/a-truncated-listing-is-not-an-inventory.md`\n")
+
+
+def _multi_row(anchor: str, checked: str | None = "2026-10-25 (row written at creation)") -> str:
+    """One row in the SECOND shape the live ledgers hold: the anchor alone on its
+    bullet, every later field on its own INDENTED line beneath it — byte-for-byte
+    the shape of `lloyd/memory/memory-md-ledger.md:78-83` and `:84-89`. `checked`
+    is appended verbatim after the `checked:` key, so a caller can wrap it in a
+    code span the way the 2026-11-01 rows do, or pass None to write the row the
+    item measured as having no stamp at all (`:99-103`)."""
+    head = f"- anchor: {anchor}\n" + _MULTI_TAIL
+    return head if checked is None else head + f"  checked: {checked}\n"
+
+
+def test_a_checked_on_an_indented_continuation_line_parses_the_single_line_date():
+    """Clause 1: the two shapes of one row report one date. Before the fix the
+    multi-line arm parsed `checked: None`, because `_CHECKED` was searched only in
+    the anchor line's `rest` — and this row's `rest` is nothing at all."""
+    anchor = ml.anchor_of(CLEAN)
+    single = ml.ledger_rows(_row(anchor, checked="2026-10-25 (row written at creation)"))
+    multi = ml.ledger_rows(_multi_row(anchor, "2026-10-25 (row written at creation)"))
+    assert len(single) == 1 and len(multi) == 1, (single, multi)
+    assert single[0]["checked"] == "2026-10-25", single
+    assert multi == single, (multi, single)
+
+
+def test_a_code_span_wrapped_checked_stamp_parses_to_its_date():
+    """Clause 2: `checked: `2026-11-01 12:49Z PASS (1) — …`` is a stamp, not an
+    absence. Both 2026-11-01 rows in `memory-md-ledger.md` write it that way
+    (`:109`, `:110`), so a parse that reached the continuation line but stopped at
+    the backtick would still leave one of them heading `stalest_checked`."""
+    anchor = ml.anchor_of(CLEAN)
+    wrapped = ml.ledger_rows(
+        _multi_row(anchor, "`2026-11-01 12:49Z PASS (1) — measured on the working tree`"))
+    assert wrapped == [{"anchor": anchor, "checked": "2026-11-01"}], wrapped
+    # The unwrapped spelling of the same row reads identically — the backtick is
+    # decoration on the value, not a second grammar.
+    assert ml.ledger_rows(_multi_row(anchor, "2026-11-01 12:49Z PASS (1)")) == wrapped
+    # And the same holds inside the pipe-separated shape.
+    assert ml.ledger_rows(
+        _row(anchor, checked="`2026-11-01 12:49Z PASS (1)`")) == wrapped
+
+
+def test_a_multi_line_row_with_no_checked_in_its_bullet_parses_to_none():
+    """Clause 3: the bullet ends at the next `- `, so a row never inherits its
+    successor's stamp. The fixture is the live adjacency — `:99-103`, which has no
+    stamp of its own, followed by `:104-110`, whose SECOND `checked:` line is the
+    `MASKED_BY_LAST_COMMAND` witness that belongs to the first row. A reader that
+    ran past the next bullet would have made row one look checked on 2026-11-01
+    and left row two holding a witness it never ran."""
+    stranded = ml.anchor_of("- **A pipeline inside an `if` reads only the LAST "
+                            "command** — the shape that hid a red suite.")
+    holder = ml.anchor_of("- **A `vault_land` can be beaten to the commit** — read git.")
+    text = (_multi_row(stranded, None)
+            + _multi_row(holder, "2026-11-01 12:49Z PASS (1) — this row's own stamp")
+            + "  checked: `2026-11-01T12:36:29Z — prints MASKED_BY_LAST_COMMAND`\n")
+    rows = ml.ledger_rows(text)
+    assert len(rows) == 2, rows
+    assert rows[0] == {"anchor": stranded, "checked": None}, rows[0]
+    assert rows[1] == {"anchor": holder, "checked": "2026-11-01"}, rows[1]
+
+
+def test_a_row_stamped_2026_11_01_never_heads_stalest_checked_over_one_stamped_2026_09_11(tmp_path):
+    """Clause 4, across the boundary the curator and this item's own check cross:
+    the script run as a program and `status --json` piped into a JSON reader, not
+    `ml.status` called inside the interpreter that holds the code under test.
+
+    The ledger holds one row of each shape for two loaded lines: the multi-line
+    one stamped 2026-11-01 in a code span, the single-line one stamped 2026-09-11.
+    Before #3674 the ordered pair came out reversed — the fresh row led, because
+    its date was invisible to the parser and `None` sorts first — which is exactly
+    the reading dream-consolidation #47 §4 spends its pruning pass on."""
+    fresh = ml.anchor_of(CLEAN)
+    stale = ml.anchor_of("- **Two daily-note paths** — per-day session notes are FLAT.")
+    ledger = (_multi_row(fresh, "`2026-11-01 12:49Z PASS (1) — re-ran this pass`")
+              + _row(stale, checked="2026-09-11"))
+    d = _dir(tmp_path, ledger=ledger)
+
+    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "memory" / "memory_ledger.py"),
+                           "status", "--memories-dir", str(d), "--json"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)["USER.md"]
+    # Two rows, both joining a loaded line (`stalest_checked` only lists rows whose
+    # anchor is live, so its holding both names is what says so), in date order.
+    assert rep["rows"] == 2 and rep["orphan_rows"] == [], rep
+    assert rep["stalest_checked"] == [stale, fresh], rep["stalest_checked"]
