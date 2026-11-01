@@ -148,6 +148,20 @@ projects. It also modifies its own code through a gated loop.
   perturbation (`eval/counterfactual.py`), review-rung grader calibration
   (`eval/review_calibration/`), secondary-routing replay
   (`eval/secondary_routing_eval.py`).
+- Live tool-call equivalence (`eval/action_equivalence.py` scores the calls,
+  `eval/tool_call_equivalence_probe.py` makes them): the probe posts one
+  `/v1/chat/completions` request per prompt of `eval/tool_call_corpus.yaml`
+  (four prompts, including a negative control whose correct answer is no call)
+  at temperature 0 with that prompt's own `tools` array, and sorts each answer
+  into four tiers — `protocol_invalid` (a call with no name, or arguments that
+  will not parse), `different_tool`, `args_differ`, `canonically_equal` — beside
+  the prose-drift flags `no_tool_call_when_asked` (answered in prose to a prompt
+  that asked for a call) and `call_when_none_asked`. It runs inside the flash-next
+  canary fold (`agent-services/bin/flash-next-canary-step.sh`), never the nightly
+  eval, so a reader who looks for it in the nightly suite will not find it. It is
+  single-turn: one request per prompt, no tool result fed back, so nothing past
+  the first call is in its reach. Harness protocol compliance on live calls is
+  measured at that scope; an arm wanting more than it says so.
 - Behavioural scorecard (`scripts/autoresearch/behavioural.py`, frozen
   scenarios in `eval/behavioural_scenarios/v1/scenarios.yaml`): four axes —
   `uncertainty_preservation`, `source_retention`, `action_consistency`,
@@ -197,7 +211,13 @@ projects. It also modifies its own code through a gated loop.
    attributed to multi-turn degradation that the four-axis scorecard and the
    compaction/context-rot arms would not catch.
 6. Harness robustness: tool-call parsing edge cases, empty tool pools,
-   model drift into prose tool calls, repetition loops.
+   model drift into prose tool calls, repetition loops. Parsing failures and
+   prose drift are counted, not open — `eval/action_equivalence.py` and
+   `eval/tool_call_equivalence_probe.py` (under *Evaluation surfaces that already
+   exist* above) tally `protocol_invalid` and the prose-drift flags against live
+   engine calls. What stays open is everything past the first call: multi-step
+   protocol behaviour, empty tool pools and repetition loops, none of which a
+   single-turn probe can see.
 7. Inference efficiency on 24 GB: KV cache pressure at long context, NVFP4/GGUF
    quality trade-offs. Speculative decoding is in use (MTP, 3 speculative tokens), so
    what is unknown is its acceptance rate — `vllm:spec_decode_num_accepted_tokens_total`

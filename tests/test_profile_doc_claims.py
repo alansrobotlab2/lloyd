@@ -699,3 +699,200 @@ def test_behavioural_docs_record_the_baseline_repin_route_and_its_forbidding_tes
     # Positive control on the absence claims above: a route this module never
     # documented must not be found in it.
     assert "re-pin the manifest hash into baseline.yaml" not in usage
+
+
+# ── #3664: the surfaces section must name the live tool-call comparator ──────
+#
+# `eval/action_equivalence.py` landed 2026-10-16 and `eval/tool_call_equivalence_probe.py`
+# (#3188) is wired into the flash-next canary fold, so harness tool-call protocol
+# compliance has been measured on live engine calls throughout the life of this
+# file — while the section that lists what already exist never named either one.
+# That omission is a premise: #3662 read "Nothing today measures that class in a
+# live environment" out of it and proposed the comparator back. So the nodes below
+# assert *presence*, and assert each term against the code and data that define it
+# rather than against the prose: a tier renamed in the module, a flag dropped from
+# the probe's finding list, a prompt added to the corpus, or the canary step
+# stopping calling the probe each falsify one sentence here, instead of leaving it
+# beside a section that still reads as a gap.
+
+COMPARATOR_MODULES = ("eval/action_equivalence.py", "eval/tool_call_equivalence_probe.py")
+COMPARATOR_TIERS = ("protocol_invalid", "different_tool", "args_differ",
+                    "canonically_equal")
+COMPARATOR_FLAGS = ("no_tool_call_when_asked", "call_when_none_asked")
+COMPARATOR_CORPUS = "eval/tool_call_corpus.yaml"
+COMPARATOR_CANARY = "agent-services/bin/flash-next-canary-step.sh"
+COMPARATOR_CORPUS_PROMPTS = 4
+
+
+def _comparator_omissions(surfaces: str) -> list[str]:
+    """Each part of the comparator's description `surfaces` leaves out; empty when
+    the section is complete.
+
+    A list of omissions rather than one assert: a bullet that names the two modules
+    and stays silent on the tiers, or names the tiers and never says where the arm
+    runs, is the same defect that produced #3662 — the reader has nothing there to
+    stop them proposing the missing half again.
+    """
+    missing: list[str] = []
+    for rel in (*COMPARATOR_MODULES, COMPARATOR_CORPUS, COMPARATOR_CANARY):
+        if rel not in surfaces:
+            missing.append(rel)
+    missing += [f"tier `{tier}`" for tier in COMPARATOR_TIERS if tier not in surfaces]
+    if not any(flag in surfaces for flag in COMPARATOR_FLAGS):
+        missing.append("prose-drift flag")
+    if "single-turn" not in surfaces:
+        missing.append("single-turn limit")
+    if "tool result" not in surfaces and "tool-result" not in surfaces:
+        missing.append("no-tool-result-round-trip limit")
+    return missing
+
+
+def test_surfaces_section_names_the_live_tool_call_comparator():
+    """Clauses 1-3: the section a proposing session checks for what already exists
+    cannot silently omit the instrument that measures tool-call protocol compliance.
+    """
+    surfaces = _surfaces_section()
+    omissions = _comparator_omissions(surfaces)
+    assert not omissions, (
+        f"the surfaces section omits {omissions}. This is the section "
+        "`workers/sources/youtube_digest.py`'s `PROFILE_PATH` puts in front of the "
+        "session that decides whether a video is worth filing, so an arm it does "
+        "not name reads as unmeasured and gets filed again — #3662 proposed this "
+        "comparator back verbatim after this bullet was absent (#3664)"
+    )
+    for rel in (*COMPARATOR_MODULES, COMPARATOR_CORPUS, COMPARATOR_CANARY):
+        assert (ROOT / rel).is_file(), (
+            f"{rel} is named as a surface that already exists and is not in the "
+            "tree: the pointer a proposing session is sent to has to resolve"
+        )
+    bullet = _bullet("Live tool-call equivalence")
+    assert "nightly" in bullet, (
+        "the bullet no longer says the comparator is absent from the nightly eval. "
+        "Cadence is half of why the last digest missed it: a reader who looks in "
+        "the nightly suite, does not find the arm, files the arm"
+    )
+    assert "canary" in bullet, (
+        "the bullet names the canary step without saying the fold it runs in, so "
+        "the path reads as an unrelated script rather than as the arm's cadence"
+    )
+
+
+def test_the_comparator_bullet_says_what_the_code_still_does():
+    """The bullet's four terms, re-read from the modules and data that define them.
+
+    Each is pinned in both directions: prose that keeps a term the code renamed
+    points a reader at a tier that no longer exists, and a term the code renames
+    while the prose is untouched is the same false sentence wearing a new hat. The
+    tiers are read out of the `TIERS` tuple rather than asserted as four separate
+    substrings, so a fifth tier added to the comparator goes red here and reaches
+    the bullet instead of becoming an unstated part of the arm.
+    """
+    ae_src = (ROOT / "eval" / "action_equivalence.py").read_text(encoding="utf-8")
+    tiers_decl = re.search(r"(?m)^TIERS\s*=\s*\(([^)]*)\)", ae_src)
+    assert tiers_decl, (
+        "eval/action_equivalence.py declares no top-level `TIERS` tuple, so the "
+        "bullet's `four tiers` has no authority to be checked against"
+    )
+    tier_values: list[str] = []
+    for const in re.findall(r"\b([A-Z][A-Z_]+)\b", tiers_decl.group(1)):
+        assign = re.search(rf'(?m)^{const}\s*=\s*"([a-z_]+)"', ae_src)
+        assert assign, (
+            f"TIERS names {const} but the module never assigns it a tier string, "
+            "so the tier list below cannot be trusted to be the comparator's"
+        )
+        tier_values.append(assign.group(1))
+    assert tuple(tier_values) == COMPARATOR_TIERS, (
+        f"the comparator's tiers are now {tier_values} and the bullet still says "
+        f"{list(COMPARATOR_TIERS)}: move the sentence and this tuple together"
+    )
+
+    probe_src = (ROOT / "eval" / "tool_call_equivalence_probe.py").read_text(encoding="utf-8")
+    for flag in COMPARATOR_FLAGS:
+        assert f'"{flag}"' in probe_src, (
+            f"the bullet reports `{flag}` as the probe's prose-drift finding and "
+            "the probe no longer defines that flag"
+        )
+
+    corpus = (ROOT / COMPARATOR_CORPUS).read_text(encoding="utf-8")
+    prompts = len(re.findall(r"(?m)^- id:", corpus))
+    assert prompts == COMPARATOR_CORPUS_PROMPTS, (
+        f"{COMPARATOR_CORPUS} holds {prompts} prompts while the bullet says "
+        f"'four prompts'. A count in front of the idea generator is a claim: "
+        "rewrite the sentence with the corpus, do not leave it to age"
+    )
+
+    canary = (ROOT / COMPARATOR_CANARY).read_text(encoding="utf-8")
+    assert "ENGINE_TOOL_PROBE" in canary, (
+        f"{COMPARATOR_CANARY} no longer sets ENGINE_TOOL_PROBE, so the bullet's "
+        "cadence sentence is false and the arm may well be dark"
+    )
+    assert "tool_call_equivalence_probe.py" in canary, (
+        f"{COMPARATOR_CANARY} no longer invokes the probe, so the comparator runs "
+        "in no fold at all and the bullet sends readers to a leg that is not there"
+    )
+
+
+def test_standing_problem_6_no_longer_presents_the_class_as_unmeasured():
+    """Clause 4: a reader who only reads the standing problems must not conclude
+    the class has no counter — that is the exact sentence #3662 quoted back.
+    """
+    bullet = _numbered_problem(6)
+    assert bullet.startswith("6. Harness robustness:"), (
+        "standing problem 6 is no longer the harness-robustness one, so the "
+        "pointer below is pointing at some other problem's text"
+    )
+    # Wrapped to the file's column, the pointer's phrase can break across lines, so
+    # the checks below read the bullet reflowed to single spaces: a node that goes
+    # red because somebody re-wrapped a sentence grades the wrap, not the claim.
+    bullet = " ".join(bullet.split())
+    for rel in COMPARATOR_MODULES:
+        assert rel in bullet, (
+            f"standing problem 6 stopped naming {rel}. Reading the standing "
+            "problems alone is how a proposing session decides a class is open; a "
+            "problem that lists prose drift and parsing edge cases with no "
+            "comparator beside them is the omission #3664 is about"
+        )
+    assert "counted" in bullet, (
+        "the paths are named without saying they count the class, so the problem "
+        "still reads as an open gap with two filenames in it"
+    )
+    assert "Evaluation surfaces that already exist" in bullet, (
+        "the route to the bullet that states the comparator's scope is gone, so "
+        "the pointer cannot tell a reader what it does and does not measure"
+    )
+
+
+def test_the_comparator_rule_fires_on_a_section_with_the_bullet_removed():
+    """Clause 5's control, in the style of
+    `test_the_bare_decimal_rule_fires_on_a_planted_hit_rate`: hand the detector a
+    copy of the section with the comparator bullet cut out — the state
+    `eval/lloyd_profile.md` sat in until this round — and it has to report the
+    omissions. Without this the nodes above could be satisfied by a section that
+    never needed them, which is how a doc-claim test goes decorative.
+    """
+    surfaces = _surfaces_section()
+    bullet = _bullet("Live tool-call equivalence")
+    assert bullet in surfaces, (
+        "the control removes nothing: the bullet is not inside the surfaces "
+        "section, so a pass below would be graded against an unrelated copy"
+    )
+    stripped = surfaces.replace(bullet, "", 1)
+    assert stripped != surfaces, "the removal was a no-op, so nothing is planted"
+    omissions = _comparator_omissions(stripped)
+    assert omissions, (
+        "the detector reports no omission on a section with the comparator bullet "
+        "deleted — every assert that reads it is grading an empty input"
+    )
+    for rel in (*COMPARATOR_MODULES, COMPARATOR_CORPUS, COMPARATOR_CANARY):
+        assert rel in omissions, (
+            f"deleting the bullet left {rel} still named, so something other than "
+            "this bullet is what the detector is really keyed on"
+        )
+    assert "single-turn limit" in omissions, (
+        "the scope limit survived the bullet's removal, so the limit is being "
+        "satisfied by prose elsewhere and this bullet could drop it unseen"
+    )
+    assert _comparator_omissions(surfaces) == [], (
+        "the control fires on the real section too, so planted and real are "
+        "indistinguishable and the control proves nothing"
+    )
