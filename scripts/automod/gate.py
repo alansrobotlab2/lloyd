@@ -3518,6 +3518,26 @@ class Gate:
         # says whether the suite ran redirected is worth nothing if it is absent
         # from every report where nothing went wrong.
         counts["home"] = self.home_isolation
+        # #3431: the same treatment for the two pytest floors. Both figures were
+        # read above to judge this run, and until now they were written into `data`
+        # only on the two refusal branches — so no green rung in the store has ever
+        # carried a pytest rail, and an owed check that wants to know what a green
+        # round was cleared against has to re-derive the median itself. It cannot:
+        # the base is a MOVING median of the five newest green full rows, so the
+        # pair a rung was judged against stops existing once five newer green rungs
+        # land, and the note and the four keys are the only record of it that
+        # survives. That is the property `_skip_ceiling_note`'s own docstring states
+        # for the skip rail, in the same words, on the same rung. The keys are the
+        # refusal branches' names, so one reader can ask either kind of row the same
+        # question.
+        counts["collected_floor"] = min_collected
+        counts["passed_floor"] = min_passed
+        counts["collected_floor_base"] = base_collected
+        counts["passed_floor_base"] = base_passed
+        collected_floor_note = _pytest_floor_note(min_collected, PYTEST_MIN_COLLECTED,
+                                                  base_collected, "collected")
+        passed_floor_note = _pytest_floor_note(min_passed, PYTEST_MIN_PASSED,
+                                               base_passed, "passed")
         return True, (lead + f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
                       f"{counts['tests_skipped']} skipped"
                       + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")
@@ -3528,6 +3548,10 @@ class Gate:
                       # and the pin findings, which are the parts a long detail has
                       # to be able to lose to the 2000-char cap (#2726).
                       + f"; {ceiling_note}"
+                      # #3431: both pytest rails beside the skip rail, for the same
+                      # reason and in the same slot — ahead of the flinch clause and
+                      # the pins is what keeps them whole under `DETAIL_MAX_CHARS`.
+                      + f"; {collected_floor_note}; {passed_floor_note}"
                       + (f"; {len(flinched)} failed only under parallel load and passed "
                          f"serially: {_name_ids(flinched)}" if flinched else "")
                       # #1691: the counts say how many tests ran; they cannot say that

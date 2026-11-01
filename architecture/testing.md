@@ -234,7 +234,12 @@ green" (#3250, #3249). With no readable ledger each floor is exactly its literal
 is what every unit test here and the vacuity probe's floor-at-0 mutant see, because
 `tests/conftest.py` points `LLOYD_AUTOMOD_STATE` at scratch before
 `scripts.automod.state` is imported. A rung detail says which happened in the same words
-the skip rail uses: `collected floor 5335 (base 21341, fraction 0.25, floor 1000)`.
+the skip rail uses, and both rails are printed on every green full rung as well as on
+the two refusals (#3431) — beside the skip clause, ahead of the parallel-flinch clause
+and the pin findings, so the 2000-char cap on a stored detail (#2726) cannot drop them:
+`collected floor 5335 (base 21341, fraction 0.25, floor 1000); passed floor 5325 (base
+21300, fraction 0.25, floor 1000)`. A partial rung prints and records neither, because
+the whole-suite floors do not apply to a run over the changed test files.
 
 The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
 PYTEST_SKIP_HEADROOM)`, `base` being the median `tests_skipped` of the five newest

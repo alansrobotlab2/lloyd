@@ -403,3 +403,227 @@ def test_the_probe_measures_its_rung_fixtures_with_no_rounds_store_behind_them(t
     assert G.PYTEST_FLOOR_FRACTION * 21337 <= 6289, (
         "the fraction now blocks the probe's own HEALTHY fixture even with no store: "
         f"{G.PYTEST_FLOOR_FRACTION} x 21337 > 6289")
+
+
+# --------------------------------------------------------------------------- #
+# #3431 — the two floors are printed on the PASS path too, not only on refusals
+# --------------------------------------------------------------------------- #
+
+#: The four keys the two refusal branches already write, and the only names an owed
+#: check can read the rails off. Clause 2 is that the green rung writes these too;
+#: clauses 1, 3 and 4 are what its detail says around them.
+FLOOR_KEYS = ("collected_floor", "passed_floor",
+              "collected_floor_base", "passed_floor_base")
+
+
+def test_a_green_full_rung_prints_both_floors_ahead_of_the_flinch_clause_and_the_pins(
+        tmp_path, monkeypatch):
+    """Clause 1: a green full rung states both rails in the refusal's spelling, and the
+    2000-char cap cannot reach them.
+
+    The five seeded rows are `collected` 20,000 / `passed` 19,900, so the figures the
+    rung applies are `int(0.25 x 20000) = 5000` and `int(0.25 x 19900) = 4975` — the
+    same pair the two refusals name, now on the line of a run that went green. Before
+    #3431 `_pytest_floor_note` had exactly two call sites, both in `return False, ...`
+    expressions, so the three newest green FULL rungs of the live store carried a skip
+    rail and no pytest rail at all, and an audit had to re-derive a median of five to
+    find out what a round had been judged against. The base is a MOVING median, so the
+    pair a rung was judged against is gone once five newer green rungs land — which is
+    why the figure has to be in the rung that used it.
+
+    Placement is the second half of the clause. `_clip_detail` cuts a stored detail at
+    `DETAIL_MAX_CHARS` = 2000 from the front, so anything after the flinch clause and
+    the pin findings is the part a long detail loses (#2726). The third block below
+    builds that long detail — 21 parallel-only flakes and 24 pin findings — and asserts
+    both notes survive the clip whole, which is only true because they sit beside the
+    skip clause.
+    """
+    _seed_ledger(tmp_path, monkeypatch, _five_rows())
+    g = _gate()
+
+    coll = "collected floor 5000 (base 20000, fraction 0.25, floor 1000)"
+    passed = "passed floor 4975 (base 19900, fraction 0.25, floor 1000)"
+
+    ok, detail, _data = g._tests_pass(_counts(20000, 19900), None, {})
+    assert ok is True, detail
+    assert coll in detail, f"the collected rail is absent from a green detail: {detail!r}"
+    assert passed in detail, f"the passed rail is absent from a green detail: {detail!r}"
+    assert detail.index(coll) < detail.index(passed), (
+        f"clause 1 fixes the order as collected then passed: {detail!r}")
+
+    # Both notes ahead of the two clauses a long detail is allowed to lose.
+    counts = _counts(20000, 19900)
+    counts["parallel_only_failures"] = [f"tests/test_flake_{i}.py::test_node"
+                                        for i in range(3)]
+    counts["pin_findings"] = ["DASHBOARD_PINS_NOT_EXECUTED: 3 of 3 pins in tests/test_dash.py"]
+    ok2, detail2, _ = g._tests_pass(counts, None, {})
+    assert ok2 is True, detail2
+    assert "failed only under parallel load" in detail2, detail2
+    assert detail2.index(passed) < detail2.index("failed only under parallel load"), (
+        f"the rails have to precede the flinch clause to survive the cap: {detail2!r}")
+    assert detail2.index(passed) < detail2.index("DASHBOARD_PINS_NOT_EXECUTED"), (
+        f"the rails have to precede the pin findings to survive the cap: {detail2!r}")
+
+    # The cap itself, on a detail long enough for it to bite.
+    wide = _counts(20000, 19900)
+    wide["parallel_only_failures"] = [f"tests/test_flake_{i:02d}.py::test_node_{i:02d}"
+                                      for i in range(21)]
+    wide["pin_findings"] = [
+        f"DASHBOARD_PINS_NOT_EXECUTED: 10 of 10 pins in "
+        f"tests/test_dashboard_responsive_{i:02d}.py (no web/node_modules)"
+        for i in range(24)]
+    ok3, detail3, _ = g._tests_pass(wide, None, {})
+    assert ok3 is True, detail3
+    assert len(detail3) > G.DETAIL_MAX_CHARS, (
+        f"the fixture is not the shape the cap bites on: {len(detail3)} chars against a "
+        f"cap of {G.DETAIL_MAX_CHARS}, so the assertion below is vacuous")
+    clipped = G._clip_detail(detail3)
+    assert clipped != detail3, "the clip did not clip, so it proved nothing"
+    assert coll in clipped and passed in clipped, (
+        f"the {G.DETAIL_MAX_CHARS}-char cap dropped the rails; the tail that survived "
+        f"was: {clipped[-160:]!r}")
+
+
+def test_a_green_full_rung_records_the_four_floor_keys_the_refusals_already_write(
+        tmp_path, monkeypatch):
+    """Clause 2: `gate.json`'s green row carries the rails under the refusal's key names.
+
+    An owed check is supposed to read the floors off one `gate.json` rather than
+    re-derive the median of five from a window that has since moved, and a prose clause
+    it has to regex out of a detail is not that. So the four keys are asserted by exact
+    name — `collected_floor`, `passed_floor`, `collected_floor_base`,
+    `passed_floor_base` — the same names the collected refusal and the passed refusal
+    already write, holding the figures THIS rung was judged against.
+
+    The fraction half is what makes it a test of the derivation rather than of the
+    constant: at `PYTEST_FLOOR_FRACTION` 0.5 the same green run has to report 10,000 and
+    9,950 in both its data and its detail. Recording `PYTEST_MIN_COLLECTED` would clear
+    the first four assertions and fail that one.
+    """
+    _seed_ledger(tmp_path, monkeypatch, _five_rows())
+    g = _gate()
+    ok, detail, data = g._tests_pass(_counts(20000, 19900), None, {})
+    assert ok is True, detail
+    assert data["collected_floor"] == 5000, data
+    assert data["passed_floor"] == 4975, data
+    assert data["collected_floor_base"] == 20000, data
+    assert data["passed_floor_base"] == 19900, data
+    assert (data["collected_floor"], data["passed_floor"]) == (
+        G._pytest_floors(g.round_id)[:2]), (
+        f"the rung recorded a different pair from the one `_pytest_floors` applies to "
+        f"it: {data}")
+
+    monkeypatch.setattr(G, "PYTEST_FLOOR_FRACTION", 0.5)
+    ok2, detail2, data2 = g._tests_pass(_counts(20000, 19900), None, {})
+    assert ok2 is True, detail2
+    assert data2["collected_floor"] == 10000 and data2["passed_floor"] == 9950, data2
+    assert "collected floor 10000 (base 20000, fraction 0.5, floor 1000)" in detail2, (
+        f"the detail names a figure the moved fraction did not produce: {detail2!r}")
+
+
+def test_the_four_new_keys_on_a_green_row_do_not_feed_the_next_rounds_base(
+        tmp_path, monkeypatch):
+    """Clause 2's other edge: a green row that RECORDS its floors must not set them.
+
+    This is the seam the change actually crosses. A green rung's `data` is a base row —
+    `_green_full_tests_data` accepts it and `_pytest_base_median` reads `collected` /
+    `passed` out of it for the next round's rail — and #3431 puts four more numbers into
+    that same dict on every green pass. If the median were keyed on anything else, a
+    rung recording a floor of 5,000 off a base of 20,000 would become a row saying
+    "collected 5,000", the median would fall toward the fraction of itself, and each
+    round would tighten the rail on the next until the rail reached the literal it was
+    derived away from.
+
+    So the rows here are the shape the code now writes — `collected` 20,000 with
+    `collected_floor` 5,000 beside it — and the answers have to be the ones the raw
+    counts give: a base of 20,000/19,900 and floors of 5,000/4,975. The row is also
+    handed to `_green_full_tests_data` directly, because a filter that silently dropped
+    every floor-carrying row would otherwise satisfy the median assertion too.
+    """
+    rows = {}
+    for rid, rung in _five_rows().items():
+        rung["data"].update({"collected_floor": 5000, "passed_floor": 4975,
+                             "collected_floor_base": 20000, "passed_floor_base": 19900})
+        rows[rid] = rung
+    rounds = _seed_ledger(tmp_path, monkeypatch, rows)
+
+    first = next(iter(rows))
+    data = G._green_full_tests_data(rounds / first / "gate.json")
+    assert data is not None, "a green row carrying its own floors is still a base row"
+    assert data["collected"] == 20000 and data["collected_floor"] == 5000, data
+
+    assert G._pytest_base_median("collected", "SM_UNDER_TEST") == 20000, (
+        "the base read the floor key instead of the run's own collected")
+    assert G._pytest_base_median("passed", "SM_UNDER_TEST") == 19900
+    assert G._pytest_floors("SM_UNDER_TEST") == (5000, 4975, 20000, 19900), (
+        "a recorded floor moved the rail it was derived from")
+
+
+def test_a_partial_run_prints_and_records_neither_floor(tmp_path, monkeypatch):
+    """Clause 3: the whole-suite floors do not apply to a partial run, so it says nothing.
+
+    The partial branch returns before the floors are read at all — a `pytest -q` over
+    the changed test files reports a subtree's counts, and holding it to a floor derived
+    from whole-suite rows would refuse every partial run by construction. So neither
+    floor sentence nor floor key may appear, for the same reason `_green_full_tests_data`
+    drops a `partial` row from the base: a subtree's number in a whole-suite field is a
+    lie, and a rail quoted beside one is a rail quoted for nothing.
+
+    The control at the end is what makes the absence mean anything: the SAME store, the
+    same gate, the same helper, with `only=None`, prints both rails and writes all four
+    keys. Without it the four `not in` assertions would also pass on a code path that
+    never prints the rails anywhere.
+    """
+    _seed_ledger(tmp_path, monkeypatch, _five_rows())
+    g = _gate()
+    ok, detail, data = g._tests_pass(_counts(1200, 1200), ["tests/test_a.py"], {})
+    assert ok is True, (
+        f"a partial run of 1,200 is not held to a 5,000 floor: {detail!r}")
+    assert detail.startswith("pytest (partial, 1 changed test file(s)"), detail
+    assert "floor" not in detail, f"a partial rung quoted a whole-suite floor: {detail!r}"
+    for key in FLOOR_KEYS:
+        assert key not in data, f"{key} rode onto a partial rung's data: {sorted(data)}"
+    assert data["partial"] is True, data
+
+    ok2, detail2, data2 = g._tests_pass(_counts(20000, 19900), None, {})
+    assert ok2 is True, detail2
+    assert "collected floor 5000" in detail2, detail2
+    for key in FLOOR_KEYS:
+        assert key in data2, f"the control run is missing {key}: {sorted(data2)}"
+
+
+def test_a_green_rung_with_no_readable_ledger_reads_base_none_beside_the_literal(
+        tmp_path, monkeypatch):
+    """Clause 4: with no ledger to derive from, the green note SAYS so.
+
+    `(base none, …)` is the spelling #3143 settled for the skip rail and the only one
+    that tells a reader a rail was derived rather than silently fallen back to the
+    literal — and the fallback is not an edge case here: `tests/conftest.py` points
+    `LLOYD_AUTOMOD_STATE` at scratch, so every unit test and the vacuity probe's own
+    scratch store (`scripts/maintenance/guard_vacuity.py:527`) is in this state. A green
+    rung that printed `collected floor 1000` with no base would be indistinguishable
+    from one that derived 1,000 off a 4,000-node ledger.
+
+    With no base the figures are the literals exactly — 1000 and 1000 — and the bases
+    ride into `data` as `None` under the same two keys a derivation fills with a number.
+    The second half contrasts the two states in one string: seed a real ledger and the
+    fallback sentence is gone from the detail.
+    """
+    _no_ledger(monkeypatch, tmp_path)
+    g = _gate()
+    ok, detail, data = g._tests_pass(_counts(2000, 1900), None, {})
+    assert ok is True, detail
+    assert "collected floor 1000 (base none, fraction 0.25, floor 1000)" in detail, (
+        f"with no ledger the green detail must name the fallback, not just the figure: "
+        f"{detail!r}")
+    assert "passed floor 1000 (base none, fraction 0.25, floor 1000)" in detail, detail
+    assert data["collected_floor"] == G.PYTEST_MIN_COLLECTED == 1000, data
+    assert data["passed_floor"] == G.PYTEST_MIN_PASSED == 1000, data
+    assert data["collected_floor_base"] is None and data["passed_floor_base"] is None, data
+
+    _seed_ledger(tmp_path, monkeypatch, _five_rows())
+    ok2, detail2, _ = g._tests_pass(_counts(20000, 19900), None, {})
+    assert ok2 is True, detail2
+    assert "collected floor 1000 (base none" not in detail2, (
+        "the fallback sentence is still in a detail that has a real base to name: "
+        f"{detail2!r}")

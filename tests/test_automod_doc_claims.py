@@ -341,8 +341,9 @@ def test_the_collected_floor_matches_the_doc():
 
 
 def test_both_pytest_floors_are_documented_as_derived_with_their_ledger_figures():
-    """#3250 clause 5: the floor table states both pytest floors as derived, and the
-    figures it prints are the ones the fraction yields on the bases the doc itself names.
+    """#3250 clause 5 + #3431 clause 5: the floor table states both pytest floors as
+    derived, states that BOTH are printed on EVERY green full rung, and the figures it
+    prints are the ones the fraction yields on the bases the doc itself names.
 
     `architecture/testing.md` used to say "Only the skip rail was made relative". That
     sentence is the premise this round refuted, so the node pins three things: the
@@ -350,6 +351,13 @@ def test_both_pytest_floors_are_documented_as_derived_with_their_ledger_figures(
     doc prints for a pytest floor is recomputed from the doc's OWN named bases and
     `gate.PYTEST_FLOOR_FRACTION` — a doc that drifts from the code fails here, and a doc
     that quietly drops its bases fails too.
+
+    #3431 added two more. The paragraph used to promise a rung detail says which happened
+    while the code printed the rails only on the two refusals, so the doc described a
+    green rung's line that no `gate.json` has ever carried; it now says both rails are on
+    every green full rung, and that claim is pinned here in the same node that recomputes
+    the figures — a rewording that keeps the numbers and drops the promise fails, which is
+    the pairing the clause asks for.
     """
     from scripts.automod import gate
 
@@ -381,6 +389,48 @@ def test_both_pytest_floors_are_documented_as_derived_with_their_ledger_figures(
         "the no-ledger edge is the one every unit test and the vacuity probe run in; the "
         "doc has to state it and the code has to hold it "
         "(`test_with_no_ledger_both_floors_are_the_literals_read_from_the_module_at_call_time`)")
+
+    # #3431 clause 5, on whitespace-flattened prose: the paragraph wraps mid-sentence and
+    # a parse that broke on a line break would silently skip the promise it exists to pin.
+    flat = re.sub(r"\s+", " ", doc)
+    assert ("both rails are printed on every green full rung as well as on the two "
+            "refusals") in flat, (
+        "the doc no longer states that the two pytest floors are printed on a GREEN rung "
+        "as well as on a refusal — the only reason an owed check can read a rail off one "
+        "`gate.json` instead of re-deriving a median of five from a window that has since "
+        "moved (`test_a_green_full_rung_prints_both_floors_ahead_of_the_flinch_clause_and_"
+        "the_pins`)")
+    assert "A partial rung prints and records neither" in flat, (
+        "the doc has to say the rails are absent from a partial rung, or a reader of a "
+        "detail with no floor in it cannot tell the branch from a regression "
+        "(`test_a_partial_run_prints_and_records_neither_floor`)")
+
+    # And the quoted green pair has to be a real reading of the formula, the way the skip
+    # rail's quoted clause is (`test_the_quoted_skip_ceiling_clause_in_the_doc_is_
+    # arithmetically_true`): the doc's own bases, the shipped fraction, the shipped
+    # literals, floored the way `_one_pytest_floor` floors it.
+    quoted = re.findall(r"(collected|passed) floor ([\d,]+) \(base ([\d,]+), fraction "
+                        r"([\d.]+), floor ([\d,]+)\)", flat)
+    assert [q[0] for q in quoted] == ["collected", "passed"], (
+        f"the paragraph must quote BOTH rails in the spelling a rung's own detail uses, "
+        f"in that order; found {quoted}")
+    for field, figure, base, fraction, floor in quoted:
+        literal = (gate.PYTEST_MIN_COLLECTED if field == "collected"
+                   else gate.PYTEST_MIN_PASSED)
+        assert float(fraction) == gate.PYTEST_FLOOR_FRACTION, (
+            f"the quoted {field} clause multiplies by {fraction}, not the shipped "
+            f"PYTEST_FLOOR_FRACTION ({gate.PYTEST_FLOOR_FRACTION})")
+        assert int(floor) == literal, (
+            f"the quoted {field} clause's floor is {floor}, not the shipped literal "
+            f"{literal}")
+        assert int(figure) == max(int(floor), int(float(fraction) * int(base))), (
+            f"`{field} floor {figure} (base {base}, fraction {fraction}, floor {floor})` "
+            f"is not what the derivation gives (max({floor}, int({fraction} x {base})) = "
+            f"{max(int(floor), int(float(fraction) * int(base)))})")
+        paired = base_coll if field == "collected" else base_pass
+        assert int(base) == paired, (
+            f"the quoted {field} clause is derived from base {base}, but the same "
+            f"paragraph names {paired} as the {field} base — one of the two is stale")
 
 
 # ── §8.1 regression detector ────────────────────────────────────────────────
