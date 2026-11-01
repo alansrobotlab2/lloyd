@@ -301,7 +301,7 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2819`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2832`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 `~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
 under "Follow the skill instructions below" (`:2863`).

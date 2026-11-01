@@ -700,7 +700,7 @@ def _infra_rest_reason(task: dict) -> str:
             f"failures), resting until {until.isoformat() if until else 'unknown'}")
 
 
-def _infra_rest_seconds(task: dict) -> float:
+def _infra_rest_seconds(task: dict, now: datetime.datetime) -> float:
     """How long a ceilinged task rests: until its next declared period starts.
 
     Two shapes, because a period is declared two ways. A task with
@@ -721,6 +721,18 @@ def _infra_rest_seconds(task: dict) -> float:
     windowless task rests its raw period, which is the number that matters: the
     flat 600 s cooldown already covered the sub-hour case, and a `weekly` task
     resting 604800 s instead of 600 s is the whole of this fix's worth.
+
+    The wait is `ahead` WALL-CLOCK hours, so it is converted and not multiplied:
+    a wall hour is not 3600 SI seconds where the zone steps. Resting 3 x 3600 s
+    from 00:17 PDT on the 2026-11-01 fall-back woke the task at 02:17 PST, an hour
+    before the window it had just been computed from, and the same three hours on a
+    spring-forward land an hour PAST it — which on a one-hour window is a hold
+    through the next 23 h (#3660). `_to_local`/`_from_local`, the pair #1437 left
+    for exactly this, give the real seconds that reach the target hour; on a day
+    with no transition the two expressions are the same number, so nothing changes
+    off the steps. `now` is a required argument because it is the instant the caller
+    adds the rest to: read the clock a second time and the two can straddle the very
+    step this conversion exists to survive.
     """
     period = _infra_ceil_window_seconds(task)
     hours = _effective_preferred_hours(task)
@@ -728,7 +740,8 @@ def _infra_rest_seconds(task: dict) -> float:
         window = set(hours)
         now_hour = _local_hour()
         ahead = next((k for k in range(1, 25) if (now_hour + k) % 24 in window), 24)
-        return max(period, ahead * 3600.0)
+        target = _to_local(now) + datetime.timedelta(hours=ahead)
+        return max(period, (_from_local(target) - now).total_seconds())
     return period
 
 
@@ -4216,7 +4229,7 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
         if infra_n >= _INFRA_CEILING:
             infra_ceiling_crossed = True
             fields["infra_rest_until"] = (now + datetime.timedelta(
-                seconds=_infra_rest_seconds(task))).isoformat()
+                seconds=_infra_rest_seconds(task, now))).isoformat()
             # Spent. The rest is the state now; a counter left reading 5 would
             # put the next single hiccup one step from a second rest, and clause
             # 4 is a self-resuming task, not a permanently twitchy one.

@@ -4721,7 +4721,7 @@ CITATION_WINDOW = 320
 #: moved 278→310 rather than 278→279. A set pinned to the old numbers would go red on a
 #: doc whose citation had just been corrected, which is the worst thing a witness can do.
 REQUIRED_CITATIONS = frozenset({
-    "app/autonomy.py:2899",                        # EVIDENCE_PILOT_TASK_IDS
+    "app/autonomy.py:2912",                        # EVIDENCE_PILOT_TASK_IDS
     "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:282",                   # PHANTOM_EXEMPT
@@ -4811,7 +4811,7 @@ def _symbol_definition(rel: str, src_text: str, symbol: str) -> int | None:
 def _citation_drift(text: str) -> tuple[int, int, list[str]]:
     """`(instances, distinct, drift lines)` for one slice of the document.
 
-    Two counts because the doc cites one number twice — `app/autonomy.py:2899` appears
+    Two counts because the doc cites one number twice — `app/autonomy.py:2912` appears
     in both §The functions and §Evidence pilot, so `instances > distinct` is the shape
     of today's prose and a node below asserts it. The pair count is no longer asserted
     as a number: see `REQUIRED_CITATIONS` for the #2833 failure that produced, and a
@@ -4880,7 +4880,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     points at its symbol, and a doc that GAINS a true citation stays green.
 
     Ten citation instances over nine distinct `path:line` pairs in today's live prose
-    (`app/autonomy.py:2899` twice — §The functions and §Evidence pilot — then
+    (`app/autonomy.py:2912` twice — §The functions and §Evidence pilot — then
     `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
     `scripts/skill_lint.py:282`, `agent_mcp/skills.py:88`,
     `app/routers/backlog.py:849`,
@@ -4914,7 +4914,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
         f"resolver that matches nothing reports no drift, which is not a clean result")
     assert instances > distinct, (
         f"{instances} instances over {distinct} pairs: live prose is supposed to cite "
-        f"one `path:line` twice (`app/autonomy.py:2899`, in §The functions and "
+        f"one `path:line` twice (`app/autonomy.py:2912`, in §The functions and "
         f"§Evidence pilot), and an instances count equal to the distinct count means "
         f"the second of them is gone")
 
@@ -4973,7 +4973,7 @@ def test_the_resolver_ignores_a_citation_that_lives_only_in_the_dated_review_log
     requirement. (b) The SAME citation and symbol, fed as live prose, DOES drift, so
     "not reported" is the scope doing the work rather than a blind pattern: the
     2026-09-12 entry cites `app/autonomy.py:710` for `EVIDENCE_PILOT_TASK_IDS`, which
-    is defined at `app/autonomy.py:2899` today (#2675 moved it there from 2818 by
+    is defined at `app/autonomy.py:2912` today (#2675 moved it there from 2818 by
     writing the roster's per-id reasons above it) — seed that sentence as live prose
     and it drifts, naming 2899. (c) The two existing nodes that keep the log's
     history honest (`test_the_pilot_frozenset_citation_resolves_to_the_line_it_names`

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import zoneinfo
 from pathlib import Path
 
 import pytest
@@ -905,7 +906,12 @@ async def test_the_infra_rest_ends_at_the_next_declared_period_and_self_resumes(
     # crossing lands at some other real hour manufactures exactly the straddle
     # bug it was meant to avoid. `ahead` is derived in the test from the crossing
     # stamp the run itself left in the file, so the two arithmetic claims below
-    # hold on any clock, at 03:00 and at 15:00 and across an hour boundary.
+    # hold on any clock, at 03:00 and at 15:00 and across an hour boundary. What
+    # they now go through is the WALL CLOCK, not `ahead * 3600`: on the two days a
+    # year the zone steps, an hour of wall time is not 3600 seconds of real time,
+    # and the figure below is the one that reaches the window hour either way
+    # (#3660). `test_the_infra_rest_reaches_the_window_hour_across_a_dst_transition`
+    # is what stands on the steps themselves, on any date the suite runs.
     window_hour = (dt.datetime.now().hour + 3) % 24
     write_task(aut, 2, frequency="hourly", preferred_hours=[window_hour])
     for _ in range(5):
@@ -918,9 +924,18 @@ async def test_the_infra_rest_ends_at_the_next_declared_period_and_self_resumes(
         f"fixture bug, not a code finding: the window has to sit beyond one raw "
         f"period or the test cannot tell the window from the period ({ahead} h)")
     window_rest = (resume2 - aut._parse_iso(t2["last_attempt"])).total_seconds()
-    assert window_rest == max(3600.0, ahead * 3600.0), (
-        "the rest is the wait to the window's hour, not the raw hourly period — "
-        "a period-only rest would wake the task outside its own window")
+    # The wait to the window hour, measured the way a human would: `ahead` hours of
+    # WALL time after the crossing. `.timestamp()` is the stdlib's own local-zone
+    # reading, which is the module's zone here (this node pins nothing) and is a
+    # different route from `_to_local`/`_from_local`, so this stays a cross-check and
+    # not a restatement. Off a transition it is exactly `ahead * 3600`, which is what
+    # every run of this node before 2026-11-01 saw.
+    wall_target = (crossed2.replace(tzinfo=None) + dt.timedelta(hours=ahead))
+    assert window_rest == max(3600.0, wall_target.timestamp() - crossed2.timestamp()), (
+        f"the rest is the wait to the window's hour, not the raw hourly period — "
+        f"a period-only rest would wake the task outside its own window "
+        f"(window hour {window_hour}, crossed at {crossed2.isoformat()}, "
+        f"{ahead} wall hours out = {wall_target.isoformat()})")
     assert resume2.astimezone().hour == window_hour, (
         "the resume instant lands INSIDE the declared window, which is the whole "
         "reason `_infra_rest_seconds` consults the window and not just the period")
@@ -928,6 +943,68 @@ async def test_the_infra_rest_ends_at_the_next_declared_period_and_self_resumes(
     # the wall clock, so the due check needs that hour, not the suite's.
     monkeypatch.setattr(aut, "_local_hour", lambda: window_hour)
     assert aut._is_task_due(read_task(aut, 2), [], now=resume2) is True
+
+
+def test_the_infra_rest_reaches_the_window_hour_across_a_dst_transition(aut, monkeypatch):
+    """#3660: the rest is `ahead` WALL-CLOCK hours, and a wall hour is not 3600 SI
+    seconds on a transition day, so a rest computed as `ahead * 3600.0` lands an hour
+    off the window it was just derived from — which turns the board's name for the hold
+    into `outside hours` for a task the ceiling is actually holding, the exact failure
+    mode this helper's own docstring says the window exists to prevent.
+
+    Unlike its sibling above, this node pins the instant, and has to: the sibling
+    derives its arithmetic from the stamp the run left in the file, so the two only
+    meet a transition on the two days a year the suite happens to run across one. This
+    node stands ON both transitions, on whatever date the suite runs, which is what
+    makes the bug pinned here a permanently-closed one rather than a twice-yearly
+    red-tree item. `_local_tz` is pinned to the zone the incident happened in rather
+    inherited from the box, so the expected figures are that zone's published rules and
+    not a fact about this machine. `_local_hour` is pinned to the hour OF the pinned
+    instant — the same pairing `at()` in test_autonomy_dependency_windows.py makes —
+    because pinning an hour the code reads while its instant sits at another hour is
+    precisely the straddle bug the sibling warns about.
+
+    The fall-back row is the real crossing this item was filed from: local 00:17:11 PDT
+    on 2026-11-01, which is 07:17:11Z, with `preferred_hours: [3]`. The run applied
+    3 x 3600 and wrote a resume of 10:17:11Z, whose local hour is 02:17 PST — an hour
+    before the window opened.
+    """
+    la = zoneinfo.ZoneInfo("America/Los_Angeles")
+
+    fallen = dt.datetime(2026, 11, 1, 7, 17, 11, 203203, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(aut, "_local_tz", lambda: la)
+    monkeypatch.setattr(aut, "_local_hour", lambda: fallen.astimezone(la).hour)
+    assert fallen.astimezone(la).hour == 0 and fallen.astimezone(la).tzname() == "PDT", (
+        "fixture bug, not a code finding: the crossing has to sit in the DST offset, "
+        f"three wall hours short of the declared hour ({fallen.astimezone(la)})")
+    rest = aut._infra_rest_seconds({"frequency": "hourly", "preferred_hours": [3]},
+                                   now=fallen)
+    assert rest == 14400.0, (
+        "00:17 PDT plus three wall hours is 03:17 PST, and the clock handed an hour "
+        f"back in between: four hours of real time, not three x 3600 (got {rest} s). "
+        "Applied as three x 3600 the resume is 10:17:11Z = 02:17 PST, an hour before "
+        "the window opens")
+    assert (fallen + dt.timedelta(seconds=rest)).astimezone(la).hour == 3, (
+        "the resume instant, read in the zone the window's hours are declared in, is "
+        "the window hour — that pair is what the board's `next_run` and the hold's "
+        "name are read off")
+
+    # The other direction is worse, not merely symmetric: springing forward makes the
+    # same three-hour rest two hours of real time short of its target, so the resume
+    # lands an hour PAST a one-hour window and the task is then held to the next
+    # occurrence of it — a day of downtime bought by an arithmetic slip.
+    risen = dt.datetime(2026, 3, 8, 9, 17, 11, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(aut, "_local_hour", lambda: risen.astimezone(la).hour)
+    assert risen.astimezone(la).hour == 1 and risen.astimezone(la).tzname() == "PST", (
+        f"fixture bug, not a code finding: {risen.astimezone(la)}")
+    risen_rest = aut._infra_rest_seconds({"frequency": "hourly", "preferred_hours": [4]},
+                                        now=risen)
+    assert risen_rest == 7200.0, (
+        "01:17 PST plus three wall hours is 04:17 PDT, which is two hours of real time "
+        f"away, not three (got {risen_rest} s). Applied as three x 3600 the resume is "
+        "12:17Z = 05:17 PDT, an hour past the window it was computed from")
+    assert (risen + dt.timedelta(seconds=risen_rest)).astimezone(la).hour == 4, (
+        "same claim on the far side of the year: the resume instant is the window hour")
 
 
 async def test_crossing_the_infra_ceiling_alerts_once_and_never_sets_failed(
