@@ -2100,3 +2100,275 @@ def test_the_comment_only_edit_carries_no_new_allow_entry():
         "matcher reports, which is measurable, not a shape a reader believes is harmless")
     missing_why = [(r.id, a.path) for r in rules for a in r.allow if not a.why.strip()]
     assert missing_why == [], f"allow entries with no why: {missing_why}"
+
+
+# ── #3434: which ledger the block reads, and what happens when it drains ─────
+#
+# The figures above the RECOMPUTE block measure a bounded window, and the window lives in a
+# store the retention sweep is emptying: `LEDGER_ARCHIVE_AGE_DAYS = 14` archives a `gate`
+# row two weeks after it is written unless it is its round's newest, and every one of the
+# 384 window rows is superseded — each of the 249 rounds has a later row. Measured on this
+# box when this section was written, the live ledger carried 53 of them and the block
+# printed `rows 53  span 2026-10-18T05:01:54Z ..` under a heading that says 384. So `L`'s
+# DEFAULT is load-bearing, and the arm that matters is the one a reader hits with no
+# override set — which is also the only arm the existing harness never exercised, because
+# `_run_recompute_block` always passes `CODE_RULES_LEDGER` and therefore always overrides.
+
+#: The extract of the window, as #3264 published it into the vault's witness store, and the
+#: copy of those bytes that lives in this tree. `L`'s default is the vault path, but the
+#: gate runs the suite with `HOME` at the round home (`rung_tests` passes `isolate_home=True`
+#: to `_child_env`), where `~/obsidian` does not exist — a node that opened only the vault
+#: copy would not fail there, it would skip, and a skipping node pins nothing. The copy is
+#: what lets the figures be re-derived on a hard gate rung;
+#: `test_the_in_tree_copy_of_the_extract_is_the_bytes_the_vault_witness_holds` compares the
+#: two whenever a vault is reachable, so the copy cannot drift silently.
+EXTRACT_BASENAME = "2026-10-19.2992-lloyd-automod-promotions.jsonl"
+EXTRACT_VAULT_PATH = "backlog/data/" + EXTRACT_BASENAME
+EXTRACT_COPY = ROOT / "tests" / "fixtures" / "promotions_soak_window_2026-10-19-item3434.jsonl"
+
+#: Where `L`'s fallback points, relative to the `$HOME` the child is given.
+LIVE_LEDGER_PATH = ".local/state/lloyd-automod/promotions.jsonl"
+
+
+def _replay_block(tmp_path: Path, *, env_extra: dict[str, str] | None = None,
+                  tail: str = "") -> str:
+    """Run the block with `$HOME` at `tmp_path` and `env_extra` added to the child env.
+
+    The difference from `_run_recompute_block` is the one #3434 turns on: that helper always
+    sets `CODE_RULES_LEDGER`, which IS the override, so it can never exercise a DEFAULT. Here
+    the caller chooses, and `tail` lets a node ask the script which path its own `L` bound to
+    rather than infer it from the figures.
+    """
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+           "HOME": str(tmp_path),
+           "CODE_RULES_SOAK_SINCE": "2026-10-13T03:07:36Z"}
+    env.update(env_extra or {})
+    script = tmp_path / "replay.sh"
+    script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+                      + _recompute_body() + "\n" + tail + "\n", encoding="utf-8")
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                          env=env, cwd=str(tmp_path))
+    assert proc.returncode == 0, (
+        f"the recompute block does not run against $HOME={tmp_path} "
+        f"(rc={proc.returncode}):\n--- stdout ---\n{proc.stdout[:400]}\n"
+        f"--- stderr ---\n{proc.stderr[:400]}")
+    return proc.stdout
+
+
+def test_the_block_reads_the_committed_extract_by_default_and_the_live_ledger_as_fallback(
+        tmp_path):
+    """Clause 1: `L`'s default is the extract when it exists, the live ledger when not.
+
+    Four arms, one per branch the binding can take, each under a tmp `$HOME` — the same tmp
+    home the harness already gives the block, which is what makes the extract path plantable
+    and therefore what makes the fallback arm testable at all. `echo \"$L\"` is appended to
+    the script rather than inferred from the figures, because the clause is about which path
+    the line binds to and a figure only implies it.
+    """
+    row = _fixture_row("2026-10-14T00:00:00Z", {"no-string-in-code-ref": 0},
+                       {"no-string-in-code-ref": 1})
+    extract = tmp_path / "obsidian" / "backlog" / "data" / EXTRACT_BASENAME
+    live = tmp_path / LIVE_LEDGER_PATH
+    for p in (extract, live):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(row + "\n", encoding="utf-8")
+
+    def resolved(**extra: str) -> str:
+        # The block's three figures precede it, so the answer is the last line only.
+        return _replay_block(tmp_path, env_extra=extra,
+                             tail='echo "L=$L"').strip().splitlines()[-1]
+
+    # Arm A: both files present, no override — the extract wins over the live ledger.
+    assert resolved() == f"L={extract}", (
+        "with the extract on disk and no override set, L did not bind to it: the figures "
+        "above the block are a window the live ledger no longer holds")
+    # Arm B: no extract — the live ledger is used, so a checkout without the vault still
+    # runs the block instead of failing on a missing file.
+    extract.unlink()
+    assert resolved() == f"L={live}", (
+        "with no extract on disk, L did not fall back to the live ledger: a reader "
+        "without the vault gets a missing-file error where the block should still run")
+    extract.write_text(row + "\n", encoding="utf-8")
+    # Arm C: the override beats both defaults, which is how a node replays the window.
+    elsewhere = tmp_path / "elsewhere.jsonl"
+    elsewhere.write_text(row + "\n", encoding="utf-8")
+    assert resolved(CODE_RULES_LEDGER=str(elsewhere)) == f"L={elsewhere}", (
+        "CODE_RULES_LEDGER no longer wins over the default, so every node that points the "
+        "block at a planted ledger would be reading the vault instead")
+    # Arm D: the other override still overrides — an UNTIL before the planted row cuts it.
+    cut = _replay_block(tmp_path,
+                        env_extra={"CODE_RULES_SOAK_UNTIL": "2026-10-13T23:59:59Z"})
+    assert "rows 0" in cut, (
+        f"CODE_RULES_SOAK_UNTIL no longer bounds the window, so the block counts rows "
+        f"outside the record it sits under: {cut.splitlines()[:1]}")
+
+    body = _recompute_body()
+    assert "$HOME/obsidian/backlog/data/" + EXTRACT_BASENAME in body, (
+        "the extract is not named as a `$HOME`-relative path; an absolute one would make "
+        "both arms above read the real vault, and the fallback arm could never run")
+    assert "/home/" not in body, (
+        "the block hard-codes an absolute home path — the failure the line above names, "
+        "and unrunnable for any reader whose home is not that directory")
+
+
+def test_the_recompute_block_reproduces_every_recorded_figure_from_the_extract(tmp_path):
+    """Clauses 2 and 5's figure half: the header's numbers are the ones these bytes print.
+
+    Each figure is read out of the header's own prose and demanded of the block's stdout, so
+    this is not a restatement of the header — a figure that drifted from the extract reddens
+    here. That is the half no floor assertion covers:
+    `test_the_refreshed_soak_figures_carry_the_2026_10_19_floor` pins the figures AT OR ABOVE
+    a floor, and a floor cannot notice a figure that moved DOWN to a number the extract never
+    printed. The equality is clause 5's "no figure moves", stated where it can actually fail.
+    """
+    out = _run_recompute_block(tmp_path, EXTRACT_COPY)
+    flat = " ".join(out.split())
+    header = _header_prose()
+
+    rows = _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING")
+    m = re.search(r"(\d+) `?gate`? rows from (\d+) distinct rounds", header)
+    assert m, "the header's rows and rounds are no longer one phrase to read off"
+    rounds = int(m.group(2))
+    span = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \.\. "
+                     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", header)
+    assert span, "the header names no date span"
+
+    assert f"rows {rows} flags 0" in flat, (
+        f"the block prints {flat[:60]!r} against a header denominator of {rows}: this is "
+        "the drift the live ledger was already showing — 53 rows read out of it under a "
+        "heading that says 384")
+    assert span.group(0) in out, (
+        f"the extract's span is not the recorded {span.group(0)}: the window these bytes "
+        "hold is not the window the figures describe")
+    assert f"distinct_rounds {rounds}  unevaluated 0" in out, (
+        f"these bytes span a different number of rounds than the header's {rounds}, or a "
+        "row in them is not `evaluated` — either changes what the zero covers")
+    widened = re.search(r"only (\d+) rows of the (\d+)", header)
+    assert widened, "the header no longer states how many rows were gated after #2810"
+    assert f"widening: {widened.group(1)}" in flat, (
+        f"the widened-scope figure printed something other than the {widened.group(1)} the "
+        "header still states beside it")
+    assert widened.group(2) == str(rows), (
+        f"the header's widened denominator {widened.group(2)} and its "
+        f"SOAK_GATE_ROWS_AT_RECORDING {rows} disagree with each other")
+
+
+def test_the_in_tree_copy_of_the_extract_is_the_bytes_the_vault_witness_holds():
+    """The copy is the same measurement, not a fixture that happens to print 384.
+
+    The line count is re-derived from the in-tree bytes on every run, which is what makes the
+    copy checkable on a gate rung where no vault exists. When a vault IS reachable the two are
+    compared byte for byte, because a copy checked against nothing is how a witness quietly
+    becomes a fixture.
+    """
+    text = EXTRACT_COPY.read_text(encoding="utf-8")
+    assert text.endswith("\n") and text.count("\n") == 384, (
+        f"the in-tree copy has {text.count(chr(10))} lines, not the 384 rows the "
+        "denominator names")
+    # `$HOME/obsidian/...`, the same path `L` binds to — the vault is a directory under the
+    # home, not a sibling of it, and a path one segment short would skip on every box and
+    # report a clean result.
+    vault = Path.home() / "obsidian" / EXTRACT_VAULT_PATH
+    if not vault.is_file():
+        pytest.skip(f"no vault witness at {vault}; the line count above is re-derived "
+                    "from the in-tree bytes either way, and only the byte comparison "
+                    "below needs the vault")
+    assert vault.read_bytes() == EXTRACT_COPY.read_bytes(), (
+        f"the tree's copy has drifted from {EXTRACT_VAULT_PATH}: the path `L` defaults to "
+        "and the bytes a node re-derives its figures from are now two measurements")
+
+
+def test_no_line_inside_the_recompute_block_reaches_bash_as_a_command_name(tmp_path):
+    """Clause 3: prose inside the block is executed, so the block cannot hold bare prose.
+
+    `_recompute_body` strips ONE leading `#` per line and the harness runs the result under
+    `set -euo pipefail`, so a line written `# some prose` arrives at bash as ` some prose` and
+    dies with 127, `command not found` — which fails every node that runs the block, including
+    nodes about something else entirely. `bash -n` cannot see this: a missing command is a
+    runtime error, not a syntax error. And classifying the lines by hand is worse: the block
+    legitimately opens with a keyword, an assignment, a quoted jq program whose continuation
+    lines start with `[` and `}`, and a trailing comment containing an apostrophe, so any list
+    of allowed line-starts is an allow list over an open set.
+
+    So bash is asked, on the real run. `command_not_found_handle` is the function bash calls
+    for a word it cannot resolve, and it is installed here BEFORE the block: if any line of
+    the block is bare prose, the handler fires, names the word, and the node fails on it. A
+    clean run is proof that every line bash started was a command it could find — including
+    the arm the new lines create, which is why both candidate ledgers are planted and no
+    override is set.
+    """
+    row = _fixture_row("2026-10-14T00:00:00Z", {"no-string-in-code-ref": 0},
+                       {"no-string-in-code-ref": 1})
+    for rel in (Path("obsidian") / "backlog" / "data" / EXTRACT_BASENAME,
+                Path(LIVE_LEDGER_PATH)):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(row + "\n", encoding="utf-8")
+
+    script = tmp_path / "trap.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'command_not_found_handle() { echo "BARE-WORD: $1" >&2; exit 97; }\n'
+        + _recompute_body() + "\n", encoding="utf-8")
+    proc_env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path),
+                "CODE_RULES_SOAK_SINCE": "2026-10-13T03:07:36Z"}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                          env=proc_env, cwd=str(tmp_path))
+    bare = [ln for ln in proc.stderr.splitlines() if ln.startswith("BARE-WORD:")]
+    assert not bare and proc.returncode == 0, (
+        f"the block handed bash a word it could not run: {bare or proc.stderr[:200]!r}. "
+        "Inside RECOMPUTE-BEGIN/END one leading '#' is stripped, so prose must be written "
+        "`# # like this` to survive as a shell comment, or go above RECOMPUTE-BEGIN where "
+        f"nothing executes it (rc={proc.returncode})")
+    assert proc.stdout.splitlines()[0].startswith('"rows 1'), (
+        f"the block ran but printed {proc.stdout.splitlines()[:1]!r} against the one row "
+        "planted at it, so it read neither of the two ledgers the trap planted")
+
+    # The control: the same script shape with one stripped-prose line must trip the handler,
+    # or the assertion above is green because the trap never fires rather than because the
+    # block is clean. ` some prose line` is exactly what `# some prose line` becomes after
+    # `_recompute_body` strips its one leading character.
+    control = tmp_path / "control.sh"
+    handler = 'command_not_found_handle() { echo "BARE-WORD: $1" >&2; exit 97; }\n'
+    assert handler in script.read_text(encoding="utf-8")
+    # After the handler, not before: inserted above its definition bash would exit 127 with
+    # no handler installed and the control would report a different failure than the block's.
+    control.write_text(
+        script.read_text(encoding="utf-8").replace(
+            handler, handler + " some prose line\n", 1), encoding="utf-8")
+    ctl = subprocess.run(["bash", str(control)], capture_output=True, text=True,
+                         env=dict(proc_env), cwd=str(tmp_path))
+    assert ctl.returncode == 97 and "BARE-WORD: some" in ctl.stderr, (
+        f"the control did not trip the handler (rc={ctl.returncode}, "
+        f"stderr={ctl.stderr[:120]!r}), so a clean run of the block above proves nothing")
+
+
+def test_this_round_moved_no_rule_and_no_figure_in_the_rules_file():
+    """Clause 5, the file half — stated where it can fail rather than tautologically.
+
+    The clause as filed is `diff <(grep -v '^#' new) <(git show HEAD:... | grep -v '^#')` is
+    empty. Run inside a round that comparison is EMPTY WHATEVER the round did, because HEAD is
+    the round's own commit and both sides read the same blob — a check whose only green path is
+    a tautology is a red instrument (#1753 is the same shape). The non-vacuous form of that
+    equality already exists and stays green:
+    `test_the_rule_surface_below_the_comment_block_is_the_one_the_anchor_shipped` compares the
+    non-comment lines against `NON_COMMENT_SURFACE_ANCHOR`, a commit that legitimately touched
+    a rule line, so any line this round moved reddens it. What that node does NOT cover is the
+    figures inside the comments, which the clause also names — those are asserted here.
+    """
+    header = _header_prose()
+    assert _recorded_figure(header, "SOAK_GATE_ROWS_AT_RECORDING") == 384, (
+        "the denominator moved: only the owed-check pass raises it, by publishing a fresh "
+        "measurement, and re-pointing a ledger is not a measurement")
+    assert _recorded_figure(header, "LANDED_PY_COMMITS_AT_RECORDING") == 205, (
+        "the landing figure moved, and it comes from `git log`, not from any ledger")
+    assert re.search(r"only 162 rows of the 384", header), (
+        "the widened-scope figure moved: 162 of 384 is #2810's coverage of this window")
+    assert set(re.findall(r"(\d+)\s?[- ]?\blandings\b", header)) == {"20"}, (
+        "the header now publishes a flip bound beside gate.py's 20 — a threshold in two "
+        "places is a threshold nobody can satisfy")
+    ids = [r.id for r in CR.load_rules(RULES_PATH)]
+    assert sorted(ids) == SHIPPED_RULE_IDS and ids == RULE_IDS_AT_RECORDING, (
+        f"the shipped rule ids moved: {ids}")
+    assert len(EXTRACT_COPY.read_bytes()) == 286_886, (
+        "the extract copy changed size, so it is no longer the bytes the vault witness holds")

@@ -48,8 +48,25 @@
 # today: rows past the bound exist, and measuring them is the owed-check pass's job under
 # the ruling above, not a figure to be re-quoted from a run of this block.
 #
+# THE LEDGER THIS BLOCK READS (#3434). `L` prefers the committed extract of this window —
+# `backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl` in the vault, #3264's
+# bytes — and falls back to the live ledger only when that extract is absent. Retention is
+# why, not taste: `LEDGER_ARCHIVE_AGE_DAYS = 14` (`scripts/groundskeeper/retention-sweep.py`)
+# archives a `gate` row two weeks after it is written unless it is its round's newest row,
+# and ALL 384 of these rows are superseded — every one of the 249 rounds has a later row —
+# while both monthly archives hold zero rows of this window. So the live ledger is on a
+# schedule to answer `rows 0  flags 0  span null .. null` underneath figures that say 384:
+# the drain opened 2026-10-27 and takes the last row at 2026-11-02T03:14:48Z, and it had
+# already taken 331 of the 384 by the time this line was written. A pointer is the only
+# durable fix, because the block takes one file path and the archives are monthly by row
+# date and gzipped. `CODE_RULES_LEDGER` still overrides both, which is how a reader
+# measures the soak as it stands TODAY rather than this record's, and it is what a node
+# sets to replay the window hermetically.
+#
 # RECOMPUTE-BEGIN
-# L="${CODE_RULES_LEDGER:-$HOME/.local/state/lloyd-automod/promotions.jsonl}"
+# L_LIVE="$HOME/.local/state/lloyd-automod/promotions.jsonl"
+# L_EXTRACT="$HOME/obsidian/backlog/data/2026-10-19.2992-lloyd-automod-promotions.jsonl"
+# if [ -z "${CODE_RULES_LEDGER:-}" ] && [ -f "$L_EXTRACT" ]; then L="$L_EXTRACT"; else L="${CODE_RULES_LEDGER:-$L_LIVE}"; fi
 # SINCE="${CODE_RULES_SOAK_SINCE:-2026-10-13T03:07:36Z}"   # 4592296e's commit time, UTC
 # UNTIL="${CODE_RULES_SOAK_UNTIL:-2026-10-19T03:14:48Z}"   # the Date span end above, UTC
 # jq -s --arg s "$SINCE" --arg u "$UNTIL" '[.[] | select(.event=="gate" and .code_rules and .created_at>=$s and .created_at<=$u)]
