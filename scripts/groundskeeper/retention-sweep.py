@@ -138,7 +138,13 @@ the transcript scratch home from backlog #566:
     the keep, and not the window, is what keeps stores 11 and 12 bounded. And the rewrite
     happens only on a PROOF, `board_health()` run over the live file
     and over the new file as a copy beside it, refusing to write if any key of the two
-    payloads differs. Rewrite is temp-file + `os.replace` with every line appended since
+    payloads differs — except the two `draft` arm counts named by
+    `LEDGER_NEUTRALITY_TOLERATED_KEYS`, the #3650 ruling: `triaged_ids` reads only the file
+    it is handed, so an open `draft` item whose only `backlog_triage` row ages past the
+    window moves `draft.triaged` → `draft.pool` while the board's contents are unchanged,
+    and holding the whole store unbounded on that flip is what refused every fold from
+    #3612 onward. Every other key, `.draft.total` included, still refuses.
+    Rewrite is temp-file + `os.replace` with every line appended since
     the read grafted back verbatim and `st_size` re-checked before the rename, because
     `state.append_event` appends and fsyncs under no lock and an unconditional rename
     would rename a live audit row out of existence.
@@ -2155,6 +2161,32 @@ LEDGER_ARCHIVE_PREFIX = "promotions-archive-"
 #: will not hold still.
 LEDGER_REWRITE_ATTEMPTS = 5
 
+#: The `board_health()` keys the neutrality proof may let move, and the only ones (#3650).
+#:
+#: What the proof exists to catch is a fold that changes what the board panel ANSWERS.
+#: `board_health()` (`scripts/automod/backlog.py:8311`) is what the dashboard's backlog
+#: panel, the scorecard's net-flow row and the board steward's prompt all read, so a
+#: rewrite of the audit ledger that moved any other figure of its payload would be this
+#: sweep editing the board rather than bounding a file — that is the difference a refusal
+#: is for. The two arms below are the exception, and the exception belongs to one reader:
+#: `triaged_ids` (`scripts/automod/backlog.py:3803`) is handed a ledger file and reads
+#: nothing else, so an open `draft` item whose ONLY `backlog_triage` row is past
+#: `LEDGER_ARCHIVE_AGE_DAYS` reads as never-triaged on the folded side and moves from
+#: `draft.triaged` into `draft.pool`. Its item file is not in this write and its status
+#: bytes do not change, so the board still answers the same question about the same item;
+#: only a row-counting arm count moved. That is what #3650 rules acceptable, and it is the
+#: ruling that replaced the earlier "refuse until that item is closed" position, which held
+#: the fold permanently refused on a 35 MB store.
+#:
+#: Exact dotted paths in a `frozenset`, compared with membership — not a prefix, not a
+#: subtree: `draft` is a partition that counts each item once
+#: (`scripts/automod/backlog.py:8348`), so a fold that changed how many items sit in `draft`
+#: would move `.draft.total` with it, and that key stays refused. Spelling this `"draft"` or
+#: `draft.*` would excuse every arm and the total along with them, which is a guard that
+#: refuses nothing; `tests/test_retention_sweep.py` pins this value by equality and pins a
+#: refusal on `.draft.total`, `.up_next.ready` and `.sweep.unswept` for exactly that reason.
+LEDGER_NEUTRALITY_TOLERATED_KEYS = frozenset({".draft.triaged", ".draft.pool"})
+
 
 def _ledger_row_seconds(row: dict) -> float | None:
     """The age `sweep_promotions_ledger` window-members on — `_settle_times`'s own rule.
@@ -2245,6 +2277,42 @@ def _board_health_diff(before, after, path: str = "") -> list[str]:
                                           f"{path}.{key}"))
         return out
     return [path or "<root>"]
+
+
+def _neutrality_refusal(bh_before, bh_after) -> str | None:
+    """Why one fold may not overwrite the ledger, or None if it may.
+
+    What the proof exists to catch is a fold that changes what the board panel ANSWERS.
+    `board_health()` is the backlog panel's body, the scorecard's net-flow row and the board
+    steward's prompt, and this rung is rewriting the audit ledger that three of its figures
+    are counted from — so if any other figure of the payload comes back different over the
+    folded bytes, the sweep has edited the board while pretending to bound a file, and the
+    only honest response is to leave the store alone and say so. That is the whole rule, and
+    every refusal this function returns is that one claim naming a dotted path.
+
+    Two figures are excused, by exact path, in `LEDGER_NEUTRALITY_TOLERATED_KEYS` (#3650).
+    They may move because of who counts them: the `draft` partition splits items by whether
+    `triaged_ids` has ever seen a `backlog_triage` row for them, and `triaged_ids` reads
+    only the file it is handed, never the monthly archives beside it. So an open `draft`
+    item whose ONLY triage row is past `LEDGER_ARCHIVE_AGE_DAYS` is triaged on the before side
+    and never-triaged on the after side, and its one count steps from `.draft.triaged` to
+    `.draft.pool`. Its item file is not in this write and its status bytes do not change, so
+    the board still answers the same question about the same item; only a row-counting arm
+    moved. Before #3650 that flip refused EVERY fold on this box — the one open item it reaches
+    is #2796 — which left `promotions.jsonl` unbounded at 35 MB and the dashboard node that
+    measures it red.
+
+    Not excused, and the reason the tolerance is a set of paths rather than a prefix:
+    `.draft.total` (a partition that counts each item once moves its total only if an item
+    really left or joined `draft`), and everything outside the draft arms — `.up_next.ready`,
+    `.sweep.unswept`, the windows, the `promoted_*` counts. A fold that moves one of those is
+    a fold this sweep must not write.
+    """
+    moved = [key for key in _board_health_diff(bh_before, bh_after)
+             if key not in LEDGER_NEUTRALITY_TOLERATED_KEYS]
+    if not moved:
+        return None
+    return "board_health() changed at " + ", ".join(moved[:5])
 
 
 def _board_health_payload(ledger: Path, backlog_dir: Path | None = None, *,
@@ -2409,7 +2477,9 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
     `promotions-archive-<YYYYMM>.jsonl.gz` beside the ledger and taken out of the live
     file; each round's newest row stays (see `_archive_plan`), and the whole write
     happens only after `board_health()` answers identically over the file as it is and the
-    file as it would be.
+    file as it would be, apart from the two `draft` arm counts
+    `LEDGER_NEUTRALITY_TOLERATED_KEYS` excuses — see that constant for what the proof is
+    for and why those two are the exception.
 
     Order of one applied run, which is the order that makes a crash survivable:
 
@@ -2492,10 +2562,7 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
                 if bh_before is None or bh_after is None:
                     out["refused"] = "board_health() unavailable — neutrality unprovable"
                 else:
-                    moved_keys = _board_health_diff(bh_before, bh_after)
-                    if moved_keys:
-                        out["refused"] = ("board_health() changed at "
-                                          f"{', '.join(moved_keys[:5])}")
+                    out["refused"] = _neutrality_refusal(bh_before, bh_after)
     finally:
         _unlink_quietly(before_copy)
         _unlink_quietly(after_copy)

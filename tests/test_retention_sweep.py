@@ -4964,23 +4964,27 @@ def test_the_shipped_probe_writes_a_fold_the_board_cannot_see(rs, tmp_path, caps
         "the two moved lines have to be in the gzip byte-for-byte")
 
 
-def test_the_shipped_probe_refuses_a_fold_that_loses_a_triaged_item(rs, tmp_path):
-    """Clause 4's other default arm: a fold the board would feel does not write.
+def test_the_shipped_probe_writes_a_fold_that_only_moves_a_draft_arm(rs, tmp_path,
+                                                                     capsys):
+    """Clause 4 of #3650: the flip is tolerated, so the default probe WRITES.
 
-    The mutation is not a stand-in that returns a different dict — it is the effect owed
-    clause 3 names in the item: an item sitting open past the window whose `backlog_triage`
-    row archives with it drops out of `triaged_ids()`, so `board_health()` moves it from
-    `draft.triaged` to `draft.pool`. Measured on this tree: diff
-    `['.draft.pool', '.draft.triaged']`, before `{triaged: 1, pool: 0}`, after
-    `{triaged: 0, pool: 1}`. That is the change the proof exists to catch, and the only way
-    to know the DEFAULT probe catches it is to drive the default probe over a fixture that
-    really has it: the mutation node injects a hand-mutated payload, so it pins the diff
-    arithmetic and the write guard, never the probe.
+    The fixture is the one the retired node used and the effect is unchanged: an open `draft`
+    item whose ONLY `backlog_triage` row is past `LEDGER_ARCHIVE_AGE_DAYS` drops out of
+    `triaged_ids()` once that row archives, and `board_health()` moves it from
+    `draft.triaged` to `draft.pool` — measured on this tree as diff `['.draft.pool',
+    '.draft.triaged']`, before `{triaged: 1, pool: 0}`, after `{triaged: 0, pool: 1}`. What
+    #3650 ruled is that this is not a change in what the board panel ANSWERS: the item file is
+    not in this write, its status bytes do not change, and only a row-counting arm moved —
+    because `triaged_ids` reads only the file it is handed. So the node that asserted a
+    REFUSAL here was pinning the position #3650 replaced, and it asserted a real cost: on the
+    live ledger that refusal was what every scheduled run printed, which is why a 35 MB store
+    went unbounded.
 
-    Consequence worth having in writing: on the live ledger this refusal is what the weekly
-    run will print for as long as a triaged item stays open past the window — owed clause 3
-    is the ruling on whether that ends by making the readers archive-aware or by accepting
-    the flip. Until it is ruled, the rung refusing is correct.
+    Driven with no `health=` because the whole clause is about the shipped probe deciding this
+    on a real flip; the injected-pair nodes beside it pin the arithmetic, never the probe. A
+    DRY run, which is where the rung's report line is decided and where #3650's acceptance
+    puts its assertion: the fold is reported as archived, no REFUSED on the line, and —
+    because a dry run is a dry run — not one byte of the store moves.
     """
     now = time.time()
     board = tmp_path / "board"
@@ -4989,27 +4993,161 @@ def test_the_shipped_probe_refuses_a_fold_that_loses_a_triaged_item(rs, tmp_path
     _write_ledger(rs, [
         _fold_row(now - _OLD * 86400, event="backlog_triage",
                   item_id=_NEUTRALITY_FIXTURE_ID, verdict="confirmed"),
+        _fold_row(now - _OLD * 86400, round_id="SM_SHIPPED_MUT"),
         _fold_row(now - _YOUNG * 86400, round_id="SM_SHIPPED_MUT"),
     ])
     live_before = rs.AUTOMOD_LEDGER.read_bytes()
 
-    out = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
-
-    assert out["refused"], (
-        "a fold that moved an item out of the `draft` partition's `triaged` bucket wrote "
-        "the live ledger: the proof is inert in the direction that matters")
-    assert out["moved"] == 0 and out["after"] == out["before"], out
-    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
-        "a refused fold leaves every byte of the live ledger where it was")
-    assert not _archives(rs), "a refused fold creates no archive file either"
-    assert ".draft.triaged" in out["refused"], out
+    out = rs.sweep_promotions_ledger(False, now, backlog_dir=board)
     line = rs._ledger_line(out)
-    assert out["refused"] in line, (
-        f"a refusal that reaches the weekly report as anything other than itself is how a "
-        f"store silently stays unbounded: {line}")
-    assert f"{out['before']} bytes" in line, (
-        "the refused line has to repeat the live byte count, because `0 archived` would "
-        f"read as an empty window to whoever approves this run: {line}")
+    capsys.readouterr()
+
+    assert out["refused"] is None, (
+        f"the shipped proof still refuses the two draft arm counts #3650 tolerates, which is "
+        f"the refusal that holds the whole store unbounded: {out['refused']}")
+    assert out["moved"] > 0, (
+        f"a fold that moved nothing proves nothing about a flip it never reached: {out}")
+    assert "REFUSED" not in line, line
+    reported = re.match(r"^  promotions ledger: (\d+) archived \((\d+) -> (\d+) "
+                        r"bytes live\)$", line)
+    assert reported, (
+        f"the store line is the one sentence the weekly report carries about this store, and "
+        f"#3650's acceptance is written against its shape: {line}")
+    assert int(reported.group(1)) == out["moved"] > 0, line
+    # A dry run reports the fold without performing it, so the pair is one number twice —
+    # the same shape `_ledger_line` uses for an empty window, and the reason the byte pair on
+    # this line is never the evidence that a fold wrote.
+    assert int(reported.group(2)) == int(reported.group(3)) == out["before"], line
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
+        "the dry run moved bytes it only reported on")
+    assert not _archives(rs), "the dry run created an archive anyway"
+
+
+def _arm_pair(**after_over):
+    """Two `board_health()` payloads: a `draft` partition plus two outside-arm figures.
+
+    Shaped like the real payload in the way that matters here — `draft` is a partition of
+    arms AND a `total`, and there are figures outside it — so a tolerance that quietly grew
+    into the subtree, or shrank to one arm, cannot hide behind a fixture that only has one
+    key to be wrong about. `after_over` replaces a top-level figure on the AFTER side.
+    """
+    before = {"draft": {"pool": 1, "triaged": 13, "quarantined": 0, "total": 14},
+              "up_next": {"ready": 2}, "sweep": {"unswept": 3}}
+    after = {k: (dict(v) if isinstance(v, dict) else v) for k, v in before.items()}
+    for key, value in after_over.items():
+        after[key] = value
+    return before, after
+
+
+def _pair_probe(rs, payloads):
+    """A `health=` stand-in that hands out `payloads` in call order, and records the calls."""
+    calls: list[str] = []
+
+    def probe(ledger, backlog_dir=None):
+        calls.append(Path(ledger).name)
+        return payloads[min(len(calls) - 1, len(payloads) - 1)]
+
+    return probe, calls
+
+
+def test_a_fold_that_moves_only_the_two_draft_arms_is_not_refused(rs, tmp_path):
+    """Clause 1 of #3650: those two arms alone, with `total` held, must not refuse.
+
+    An injected pair, so this pins the guard's decision and nothing else: the shipped-probe
+    node above owns the real flip. `total` stays 14 across the pair because that is the
+    condition under which an arm move cannot be an item arriving or leaving — one item
+    counted in a different bucket of a partition that did not change membership.
+    """
+    now = time.time()
+    before, after = _arm_pair(draft={"pool": 2, "triaged": 12, "quarantined": 0,
+                                     "total": 14})
+    assert before["draft"]["total"] == after["draft"]["total"]
+    probe, _calls = _pair_probe(rs, (before, after))
+    _write_ledger(rs, [
+        _fold_row(now - _OLD * 86400, round_id="SM_ARMS"),
+        _fold_row(now - _YOUNG * 86400, round_id="SM_ARMS"),
+    ])
+
+    out = rs.sweep_promotions_ledger(False, now, health=probe)
+
+    assert out["refused"] is None, (
+        f"a fold whose only moved keys are {sorted(rs.LEDGER_NEUTRALITY_TOLERATED_KEYS)} was "
+        f"refused: {out['refused']}. That pair is the #3650 ruling, and refusing it is what "
+        "left promotions.jsonl unbounded")
+    assert out["moved"] == 1, out
+
+
+def test_any_other_moved_key_still_refuses_naming_that_path(rs, tmp_path):
+    """Clause 2 of #3650: the tolerance is two paths, not a licence over the payload.
+
+    Each case is driven with `apply=True`, because the promise a refusal makes is about the
+    live file — `live file untouched, <before> bytes` — and only an attempted write shows
+    whether that is true. The `.draft.total` case moves the two arms AS WELL, which is the
+    case a subtree tolerance would wave through: an item really did leave the partition.
+    """
+    now = time.time()
+    cases = {
+        ".draft.total": _arm_pair(draft={"pool": 2, "triaged": 12, "quarantined": 0,
+                                         "total": 13}),
+        ".up_next.ready": _arm_pair(up_next={"ready": 3}),
+        ".sweep.unswept": _arm_pair(sweep={"unswept": 4}),
+    }
+    for path, (before, after) in cases.items():
+        _write_ledger(rs, [
+            _fold_row(now - _OLD * 86400, round_id="SM_OTHER"),
+            _fold_row(now - _YOUNG * 86400, round_id="SM_OTHER"),
+        ])
+        for stale in _archives(rs):
+            stale.unlink()
+        probe, _calls = _pair_probe(rs, (before, after))
+        live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+        out = rs.sweep_promotions_ledger(True, now, health=probe)
+        line = rs._ledger_line(out)
+
+        assert out["refused"], f"a fold that moved {path} wrote the live ledger: {out}"
+        assert path in out["refused"], (
+            f"the refusal has to name the dotted path it refused on, or a human reading the "
+            f"weekly report cannot tell which figure the board lost: {out['refused']!r}")
+        assert out["moved"] == 0 and out["after"] == out["before"], out
+        assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
+            f"a refused {path} fold left bytes moved on the live ledger")
+        assert not _archives(rs), f"a refused {path} fold created an archive anyway"
+        assert path in line and "live file untouched" in line, line
+        assert f"{out['before']} bytes" in line, (
+            f"a refused fold that printed a byte count other than the size the store still "
+            f"is reads as a fold that ran: {line}")
+
+
+def test_the_draft_arm_tolerance_is_exactly_two_paths_and_says_why(rs):
+    """Clause 3 of #3650: the tolerance's value, its shape, and its stated reason.
+
+    Pinned by equality on a `frozenset` of two exact dotted paths, which is what makes this
+    node worth having over the behavioural ones: widening the set to a subtree (`".draft"`,
+    `"draft.*"`) or renaming a path both fail here, and either one turns the guard into a
+    formality — a subtree tolerance excuses `.draft.total` and every other arm along with the
+    two paths #3650 rules on, and a renamed path excuses nothing while looking configured.
+    """
+    keys = rs.LEDGER_NEUTRALITY_TOLERATED_KEYS
+
+    assert keys == frozenset({".draft.triaged", ".draft.pool"}), (
+        f"#3650 narrows the neutrality proof to those two dotted paths and nothing else; the "
+        f"tolerance as shipped is {sorted(keys)}")
+    assert isinstance(keys, frozenset), (
+        "a mutable default is a tolerance someone edits in place at import")
+    for leaf in keys:
+        assert leaf.startswith(".") and leaf.count(".") == 2 and "*" not in leaf, (
+            f"{leaf!r} is not an exact dotted leaf path; a prefix or wildcard here stops the "
+            "guard refusing anything")
+
+    doc = rs._neutrality_refusal.__doc__ or ""
+    assert "board panel" in doc and "ANSWERS" in doc, (
+        "the guard has to state what the proof exists to catch — a fold that changes what the "
+        "board panel answers — or the next reader widens it blind")
+    assert "triaged_ids" in doc and "only the file it is handed" in doc, (
+        "and it has to state why these two arms may move: `triaged_ids` reads only the ledger "
+        "file it is handed, so an aged-out triage row moves an arm while the board's contents "
+        "are unchanged")
 
 
 def test_the_neutrality_proof_has_exactly_one_clock(rs, tmp_path, monkeypatch):
