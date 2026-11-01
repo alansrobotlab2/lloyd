@@ -3728,30 +3728,26 @@ def test_prose_that_merely_mentions_subscribe_or_opens_welcome_to_survives(
 # overridable; `test_each_digest_property_fires_on_a_seeded_vault` is what that buys.
 DIGEST_REL = Path("knowledge") / "ai-llms" / "youtube-digest.md"
 
-#: The newest dated section already in the digest when #3121 landed. Residue
-#: under a section AT OR BELOW this date was published before the writer could see
-#: the shape and is excused by the node below; residue under any later section is
-#: a fresh publish and fails it. Keyed on the date heading rather than a list of
-#: titles so the excuse cannot silently grow as entries are appended.
-DIGEST_PRE_3121_DATE = "2026-10-21"
-
 _DATE_SECTION_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 
 
-def _digest_section_dates(lines) -> dict:
-    """Line number → the dated `## ` section it sits in.
+def _empty_dated_sections(lines):
+    """The `## YYYY-MM-DD` headings that hold no `### ` entry — 1-based line number
+    and heading text each.
 
-    A line above the first date heading maps to `None`, which is never excused:
-    front matter has no body to carry residue, and the node's own reading already
-    skips it, so `None` reaching the excuse would mean the two disagreed.
+    This is the shape a whole-entry delete leaves behind when the deleted entry owned
+    its section: the heading survives over nothing. #3497 deleted four such entries,
+    and the note had never held an empty dated section before that delete (measured
+    over the shipped file on 2026-11-01: 0 empty of 319 dated headings before, 0 of
+    315 after). A section's extent runs to the next dated heading, or to the end of
+    the file for the last one; a heading above the first entry is not a dated section
+    and is not this reading's to report.
     """
-    out, current = {}, None
-    for i, ln in enumerate(lines, 1):
-        hit = _DATE_SECTION_RE.match(ln)
-        if hit:
-            current = hit.group(1)
-        out[i] = current
-    return out
+    marks = [i for i, ln in enumerate(lines) if _DATE_SECTION_RE.match(ln)]
+    return [(i + 1, lines[i]) for n, i in enumerate(marks)
+            if not any(lines[j].startswith("### ")
+                       for j in range(i + 1,
+                                      marks[n + 1] if n + 1 < len(marks) else len(lines)))]
 
 
 def _shipped_digest() -> Path:
@@ -3917,6 +3913,14 @@ def test_the_backfill_left_every_entry_populated_and_link_free():
     so the whole-file figure moves with the entry count — which is the reason the check is
     body-scoped (the triage recorded the scope; the item's whole-file wording was
     unsatisfiable).
+
+    #3497 adds `_empty_dated_sections`, because deleting a whole entry can strand its
+    `## <date>` heading over nothing and none of the readings above can see that: they all key
+    on `### ` headings, and an orphaned heading is one that lost its
+    `**Source:**` line, not a section that lost its only entry. Measured over the shipped file
+    on 2026-11-01, that shape was 0 of 319 dated headings before the delete and 0 of 315 after
+    it — the four entries #3497 removed each owned a section, so the heading had to go with
+    them.
     """
     lines = _shipped_digest().read_text(errors="replace").splitlines()
     entries, entry_rules = _digest_structure(lines)[:2]
@@ -3928,7 +3932,25 @@ def test_the_backfill_left_every_entry_populated_and_link_free():
         f"{entries} entries but {entry_rules} `---` rules outside the front matter: "
         f"the writer terminates every entry with exactly one")
 
+    assert _empty_dated_sections(lines) == [], (
+        "a dated section holds no entry: the shape left behind when an entry that owned "
+        "its `## <date>` section is deleted without the heading")
+
     _assert_digest_properties_clean(lines, "shipped digest")
+
+    # The reading above has to be able to fail, and nothing in the file's normal life
+    # can produce the shape: the writer only appends, so an empty dated section arrives
+    # only through a hand delete. Seeded as exactly what #3497's delete could have left —
+    # a heading immediately above another heading, which is the shape of a section whose
+    # only entry went, stealing no entry from the section before it. Seeded into the
+    # shipped lines rather than a fixture, because the property is about this note's
+    # section structure and no writer path reaches it.
+    seeded = list(lines)
+    at = next(i for i, ln in enumerate(seeded) if _DATE_SECTION_RE.match(ln))
+    seeded.insert(at, "## 2099-01-01")
+    seeded.insert(at + 1, "")
+    assert _empty_dated_sections(seeded) == [(at + 1, "## 2099-01-01")], (
+        _empty_dated_sections(seeded))
 
 
 def test_the_digest_structure_readings_fire_on_an_emptied_entry_and_survive_growth(
@@ -4462,6 +4484,15 @@ def test_no_shipped_digest_body_carries_a_tag_run_line():
     was a grep-shaped skip: a node that spelled its own `^#[a-zA-Z]` pattern would pass on a
     file the instrument still cannot see. The seeded half is what keeps this from being a
     green that nothing could turn red.
+
+    #3497 (ruling settled 2026-10-27) is why the assert below carries no date bound. Seven
+    published entries came out of the ai-llms note: four whose whole body was promo labels,
+    deleted heading to terminating rule together with the `## <date>` section each owned, and
+    three that had the label pair appended below a real sentence, reduced to that sentence.
+    Measured over the shipped file on 2026-11-01, before and after that delete: 12 promo-heading
+    lines to 0, 366 `### ` headings to 362, 368 `---` rules to 364. Both counts move with every
+    publish, so the node keeps asserting the relation `rules == headings + 2` and never the
+    figures themselves — #2566 clause 3 is what that is for.
     """
     import board_presence
 
@@ -4495,48 +4526,47 @@ def test_no_shipped_digest_body_carries_a_tag_run_line():
         path = vault / rel
         assert path.is_file(), path
         lines = path.read_text(errors="replace").splitlines()
-        # A reported line is excused only when it sits under a dated section that
-        # was already published when #3121 landed; the bound is a date, so the
-        # excuse cannot grow as entries are appended, and no count is pasted in.
+        # #3497 executed #3121's settled ruling — the seven published promo-label
+        # residues came OUT of the note — so nothing is excused by a date any more
+        # and any reported line fails here, whenever it was published.
         #
-        # Why it has to be said out loud: this node exists to FIRE on a shape,
-        # and until #3121 the predicate could not see `🛒 Gear Links 🛒` — that is
-        # the only reason `== []` held on a note carrying 12 promo-heading lines
-        # under 7 entries dated 2026-10-07 to 2026-10-21. Naming the shape makes
-        # those lines visible; whether the published ones come out of the note is
-        # #3121's owed ruling on a vault this round must not rewrite. Residue
-        # under any section after 2026-10-21 fails here.
-        dated = _digest_section_dates(lines)
+        # What the bound used to be, so its removal is a reading and not a loss:
+        # #3121 made this predicate able to see `🛒 Gear Links 🛒` at all, which is
+        # why `== []` had held for years over a note carrying 12 promo-heading lines
+        # under 7 entries dated 2026-10-07 to 2026-10-21. Rather than fail the
+        # published history it newly exposed, the node excused everything under a
+        # dated section at or below 2026-10-21, and a companion assert required that
+        # excuse to be NON-EMPTY on this file so the guard could not quietly become a
+        # no-op. Both halves went together: an escape hatch with nothing behind it is
+        # the same untested green in the other direction, and the vault half of that
+        # pair is why this round and the vault delete cannot land as two changes —
+        # `_shipped_digest()` reads the live note, so a bound removed before the note
+        # is clean fails on the residues, and a note cleaned before the bound is
+        # removed fails on the now-empty-excuse assert.
         reported = residue_lines(lines)
-        fresh = [(n, t, s) for n, t, s in reported
-                 if not (dated.get(n) and dated[n] <= DIGEST_PRE_3121_DATE)]
-        assert fresh == [], fresh
-        # The excuse covers the one shape #3121 makes visible and nothing else:
-        # any other shape under a historical entry is not this item's to carry.
-        # Over the note the fix was filed from the excuse must also be NON-EMPTY,
-        # because an empty one there would mean the paragraph above had quietly
-        # become a no-op. The robotics digest carries no residue at all, so the
-        # non-empty half is asked of the file that has it, not of both.
-        excused = {s for n, t, s in reported
-                   if dated.get(n) and dated[n] <= DIGEST_PRE_3121_DATE}
-        assert excused <= {"promo-heading"}, excused
-        if rel == str(DIGEST_REL):
-            assert excused == {"promo-heading"}, (
-                "the digest #3121 was filed over no longer carries the historical "
-                "promo headings this node excuses, so the excuse is untested")
+        assert reported == [], reported
         headings = sum(1 for ln in lines if ln.startswith("### "))
         rules = sum(1 for ln in lines if ln.strip() == "---")
         assert rules == headings + 2, (rel, headings, rules)
 
-        seeded = list(lines)
-        at = next(i for i, ln in enumerate(seeded) if ln.startswith("### ")) + 4
-        seeded.insert(at, "#ai #aitools")
-        fired_before = residue_lines(lines)
-        # Compared on (line text, shape) and not on line number, because the
-        # inserted line shifts every number below it by one.
-        fired_new = [(t, s) for _, t, s in residue_lines(seeded)
-                     if (t, s) not in {(t, s) for _, t, s in fired_before}]
-        assert fired_new == [("#ai #aitools", "hashtag-run")], fired_new
+        # Two shapes are seeded, not one. The hashtag run is #2737's original seed;
+        # the promo label is the shape #3121 made visible and #3497 deleted out of the
+        # note, and with the date bound gone it is the seed that shows the guard is
+        # still a guard — over a clean file, a node whose only seed is a shape the
+        # clean file never carried could not tell a working assert from `assert True`.
+        # Both are asked of the robotics file too, which is why neither is scoped to
+        # `rel == str(DIGEST_REL)`.
+        for seed, shape in [("#ai #aitools", "hashtag-run"),
+                            ("🛒 Gear Links 🛒", "promo-heading")]:
+            seeded = list(lines)
+            at = next(i for i, ln in enumerate(seeded) if ln.startswith("### ")) + 4
+            seeded.insert(at, seed)
+            fired_before = residue_lines(lines)
+            # Compared on (line text, shape) and not on line number, because the
+            # inserted line shifts every number below it by one.
+            fired_new = [(t, s) for _, t, s in residue_lines(seeded)
+                         if (t, s) not in {(t, s) for _, t, s in fired_before}]
+            assert fired_new == [(seed, shape)], (rel, seed, fired_new)
 
 
 # ---------------------------------------------------------------------------
@@ -5130,9 +5160,11 @@ def test_an_entry_is_never_filed_under_another_day_s_heading(intel_state):
 # The gate filed this item off round SM_20261026_192853's base probe: `main is
 # red`, one node, `test_no_shipped_digest_body_carries_a_tag_run_line`, firing on
 # three `— — — — — — — — —` lines in knowledge/ai-llms/youtube-digest.md at 4390,
-# 4392 and 4394, under that file's `## 2026-10-26` section — a date after
-# DIGEST_PRE_3121_DATE, so the node is right to fire and the published note is the
-# residue. The instrument did not get stricter and nothing structural moved: the
+# 4392 and 4394, under that file's `## 2026-10-26` section — a date past 2026-10-21,
+# the newest section published before #3121, which is the only date that ever excused
+# a line there and excuses nothing at all since #3497 removed the bound together with
+# the published residues. So the node was right to fire and the published note was
+# the residue. The instrument did not get stricter and nothing structural moved: the
 # stored description that produced the entry ends in
 # `#️⃣ #softwaredevelopment #khadas #llm`, and the FIRST token of that run is a
 # keycap — `#` + U+FE0F + U+20E3, none of which is `\w` — so `_HASHTAG_RUN_RE`'s
