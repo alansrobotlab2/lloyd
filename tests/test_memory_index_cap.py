@@ -2095,3 +2095,359 @@ def test_the_status_comment_no_longer_calls_the_tight_limit_a_write_bound_for_bo
         "the entry point must branch on the predicate the instrument reads, at both of "
         "its scoped arms, or the predicate is a second definition of the scope free to "
         "drift from the guard")
+
+
+# ── #3661: a repair write may spend the reserve ────────────────────────────────
+#
+# Two guardrails, no ordering, and the commit is the loser. The reverse-link arm of
+# `validate_memory_index.py` (#2399) makes an unlinked topic file an error; Step 2.5 of the
+# knowledge-write skill (#2173) forbids the `nightly: knowledge write` commit while `ok` is
+# false; and the room reserve (#3562) refuses the one write that would clear the error,
+# because a hook line costs more than the room the reserve leaves. #3661 read that off the
+# live board: `lloyd/memory/a-vault-land-beaten-to-the-commit-by-the.md`, written by round
+# #3417 on 2026-10-31 with no index line, `ok: false`, and a hook line 585 B short of the
+# reserve — so the night's writes waited for the next night's unattributed pre-flight sweep.
+#
+# The fix is an exemption for ONE shape of write, in ONE arm: added lines that are nothing
+# but hook lines for topic files that are on disk and unlinked (`index_repair_hook_slugs`,
+# `app/memory_ceiling.py`). Every node below is therefore graded against what it does NOT
+# exempt: the #3562 curation pass must still refuse with its old text (#3562's own run record
+# is `~/lloyd-data/autonomy-runs/47/run_47_20261029_180839.md`), a dangling or duplicate
+# pointer must still refuse, and the ceiling, the tight limit, the line floor and the sub-floor
+# re-texting must answer a repair write with their text byte-for-byte unchanged. The seam this
+# change crosses is the one the nightly stands at — the guard admits a write, the validator
+# that gates the commit goes green — so clause 1's node runs both instruments over one fixture.
+
+def _hook_line(slug: str, size: int) -> str:
+    """A legal typed hook line for `slug` of exactly `size` bytes.
+
+    Sized rather than written out because the room left over IS the branch on this path: the
+    live hook line the item measured costs ~184 B, and a fixture that only approximates it
+    would test whichever room its length happened to land on. The pad sits inside the hook
+    text so the `→ topics/<slug>` pointer stays the line's tail, which is the shape
+    `linked_topic_files` and the validator both read.
+    """
+    head, tail = "- [project] **Hook.** ", f" → topics/{slug}\n"
+    pad = size - len(head.encode()) - len(tail.encode())
+    assert pad >= 1, f"{size} B is under the shortest hook line for topics/{slug}"
+    line = head + "h" * pad + tail
+    assert len(line.encode()) == size, f"hook line is {len(line.encode())} B, not {size}"
+    assert len(line.rstrip("\n")) <= ceiling.INDEX_LINE_MAX_CHARS, (
+        "a fixture over the character cap would be refused by the line rule and the node "
+        "would grade the wrong arm")
+    assert ceiling.linked_topic_files(line) == [f"topics/{slug}"], line
+    return line
+
+
+def _repair_root(root: Path, on_disk_room: int, *, orphans: tuple[str, ...] = ("orphan-rule",),
+                 linked: str = "linked-rule") -> str:
+    """Write an index at `on_disk_room` bytes under the tight limit, plus its topic files.
+
+    `linked` is on disk AND hooked by every line of the index; every name in `orphans` is on
+    disk and unhooked — the state the item is about. Built through `_index_linking` so the
+    file is sized to the byte, and the topic files are real because the exemption's whole
+    condition is a fact about disk.
+    """
+    limit = ceiling.tight_limit("MEMORY.md")
+    disk = _index_linking(f"topics/{linked}", room=on_disk_room, limit=limit)
+    (root / "MEMORY.md").write_text(disk, encoding="utf-8")
+    (root / "memory").mkdir(exist_ok=True)
+    for slug in (linked, *orphans):
+        (root / "memory" / f"{slug}.md").write_text(f"# {slug}\ndetail\n", encoding="utf-8")
+    return disk
+
+
+def test_linking_an_already_written_unlinked_topic_file_is_admitted_even_though_it_spends_the_reserve(
+        memories_root):
+    """Clause 1, end to end: the guard admits it and the instrument the commit is gated on goes green.
+
+    The fixture is the item's live board to the byte: an index with 201 B of its 20,480 B
+    tight limit free (`lloyd/MEMORY.md` measured 20,279 B at triage) and a ~184 B hook line
+    for a topic file that is on disk and unhooked. That leaves 17 B — 585 B short of the
+    reserve — so nothing but this exemption can admit it, and `ok: false` is the state that
+    forbids the commit. Both instruments are run over the one fixture because the claim being
+    pinned is across them: a node that asked only the guard would pass while the validator
+    still reported the file unlinked, which is the opposite failure (#3545's clause 3 is the
+    same principle at the commit boundary).
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    disk = _repair_root(root, on_disk_room=201)
+    assert limit - len(disk.encode()) == 201, "the fixture is the live board's room"
+    prospective = disk + _hook_line("orphan-rule", 184)
+    room = limit - len(prospective.encode())
+    assert room == 17, f"the write leaves {room} B, not the 17 B the live index would have"
+    assert 0 <= room < reserve, "the exemption is only reachable inside the reserve's band"
+
+    assert ceiling.index_repair_hook_slugs(root / "MEMORY.md", prospective) == frozenset(
+        {"orphan-rule"}), "the exemption must name the file the write hooks"
+    assert ceiling.memory_write_error(root / "MEMORY.md", prospective) is None, (
+        "linking a topic file already on disk and unhooked was refused: that is the deadlock "
+        "#3661, and it leaves the nightly with no commit path")
+
+    vmi = _vmi()
+    before = vmi.check(root, ceiling=ceiling.memory_ceiling("MEMORY.md"), mode="full")
+    assert before["ok"] is False and before["topic_files_unlinked"] == 1, before["errors"]
+    assert any("orphan-rule" in e for e in before["errors"]), before["errors"]
+    (root / "MEMORY.md").write_text(prospective, encoding="utf-8")
+    after = vmi.check(root, ceiling=ceiling.memory_ceiling("MEMORY.md"), mode="full")
+    assert after["ok"] is True, f"the admitted write did not clear the gate: {after['errors']}"
+    assert after["topic_files_unlinked"] == 0, after["unlinked_topic_files"]
+    assert after["memory_md_bytes"] <= limit, after["memory_md_bytes"]
+
+
+def test_the_repair_exemption_shelters_no_other_write(memories_root):
+    """Clause 3: every shape that is not exactly "adds only hook lines" keeps the refusal.
+
+    Each case is a write whose prospective text sits inside the tight limit and inside the
+    reserve band, so the reserve is the arm being asked — and each adds something a hook line
+    is not. The list is the leak list from `index_repair_hook_slugs`'s docstring, and an
+    exemption that lets any of them through stops being a repair route and becomes a way to
+    buy a reserve-spending line.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    disk = _repair_root(root, on_disk_room=450)
+    hook = _hook_line("orphan-rule", 184)
+    filler = "- [project] filler entry that is comfortably short → topics/linked-rule\n"
+
+    cases = {
+        "a pointer to a slug with no file on disk": disk + _hook_line("no-such-rule", 184),
+        "a pointer to a topic file the index already links": disk + _hook_line(
+            "linked-rule", 184),
+        "an INDENTED hook line, which links nothing": disk + "  " + hook,
+        # The type tag is the one bound from ANOTHER owner this arm does ask, and it asks it
+        # through `prompt_surface.untyped_entry_count` rather than a copy: an untyped line is an
+        # error in the report the exemption exists to turn green, so admitting one would trade
+        # `no index line links it` for `top-level entries carry no [type] tag`.
+        "an untyped hook line, which the validator would error on": disk + (
+            "- no type here → topics/orphan-rule\n"),
+        "a bracket-escaped LITERAL bullet, not a typed entry": disk + (
+            "- \\[summary\\] literal → topics/orphan-rule\n"),
+        "a hook line plus any other added line": disk + hook + filler,
+        # Byte-length-preserving on purpose (one word, same 11 characters): a shorter line
+        # would move the file out of the band the reserve answers in, and the node would be
+        # grading whichever arm the new size happened to land on.
+        "a hook line plus one CHANGED line": disk.replace(
+            filler, filler.replace("comfortably", "extremely"), 1) + hook,
+        "a hook line paid for by REMOVING another line": disk.replace(filler, "", 1) + hook,
+        "a hook line plus a bumped front-matter stamp": disk.replace(
+            "---\ntype: note\n---", "---\ntype: note\ntimestamp: '2026-11-01'\n---") + hook,
+    }
+    for label, prospective in cases.items():
+        room = limit - len(prospective.encode())
+        assert 0 <= room < reserve, (
+            f"{label}: the fixture left {room} B, outside the band the reserve answers in, so "
+            "the refusal below would be some other arm's and grade nothing")
+        slugs = ceiling.index_repair_hook_slugs(root / "MEMORY.md", prospective)
+        msg = ceiling.memory_write_error(root / "MEMORY.md", prospective)
+        assert slugs == frozenset(), f"{label}: exempted anyway, slugs {slugs}"
+        assert msg is not None, f"{label}: admitted, so the exemption leaks"
+        assert "leaving only" in msg and f"{reserve:,}" in msg, (
+            f"{label}: refused by the wrong arm, not the reserve: {msg}")
+
+
+def test_a_repair_write_is_still_refused_by_every_other_arm_with_that_arm_s_own_text(
+        memories_root):
+    """Clause 4: the exemption is scoped to the reserve arm, and every other owner keeps its text.
+
+    Each case is a genuine repair shape — added lines that are only hook lines for files on
+    disk and unhooked — that also breaks a different bound. The expected answer is quoted from
+    that bound's own function, so the assertion is byte-for-byte by construction rather than
+    against a copy of a sentence that could be reworded into passing.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+
+    # Over the tight limit: two hook lines, 150 B each, against 201 B of room.
+    disk = _repair_root(root, on_disk_room=201, orphans=("orphan-rule", "orphan-two"))
+    grown = disk + _hook_line("orphan-rule", 150) + _hook_line("orphan-two", 150)
+    assert ceiling.index_repair_hook_slugs(root / "MEMORY.md", grown) == frozenset(
+        {"orphan-rule", "orphan-two"}), "the shape is a repair"
+    msg = ceiling.memory_write_error(root / "MEMORY.md", grown)
+    assert msg == ceiling.index_tight_limit_error("MEMORY.md", grown), (
+        f"a repair write over the tight limit did not get the tight-limit refusal verbatim: "
+        f"{msg!r}")
+    assert "inside the" not in msg, f"the reserve answered a write it must not reach: {msg}"
+
+    # Sub-floor: the index holds 20 B, under the 24-byte floor of any typed line, and the
+    # repair write goes over the limit — `index_no_room_error` owns that verdict (#2838).
+    floor_disk = _repair_root(root, on_disk_room=20)
+    sub_floor = floor_disk + _hook_line("orphan-rule", 100)
+    msg = ceiling.memory_write_error(root / "MEMORY.md", sub_floor)
+    assert msg == ceiling.index_no_room_error(root / "MEMORY.md", "MEMORY.md", sub_floor), (
+        f"the sub-floor repair did not get the no-room re-texting verbatim: {msg!r}")
+    assert "under the" in msg and str(ceiling.TOPIC_LINE_MIN_BYTES) in msg, msg
+
+    # Over the character cap: a 301-character hook line is still refused, by the line rule.
+    capped = _repair_root(root, on_disk_room=500)
+    cap = ceiling.INDEX_LINE_MAX_CHARS
+    long_hook = f"- [project] {'h' * (cap - len('- [project] '))} → topics/orphan-rule\n"
+    assert len(long_hook.rstrip("\n")) > cap, "the line is over the cap the guard enforces"
+    msg = ceiling.memory_write_error(root / "MEMORY.md", capped + long_hook)
+    assert msg == ceiling.index_line_length_error("MEMORY.md", capped + long_hook), (
+        f"an over-long hook line escaped the line cap: {msg!r}")
+
+    # Over the ceiling itself: the ceiling is absolute and no exemption reaches it. The file
+    # has to be built past 20,480 B to ask, so the room argument is negative on purpose.
+    fat = _repair_root(root, on_disk_room=limit - 25_590)
+    over_ceiling = fat + _hook_line("orphan-rule", 60)
+    assert len(over_ceiling.encode()) > ceiling.memory_ceiling("MEMORY.md"), "fixture"
+    msg = ceiling.memory_write_error(root / "MEMORY.md", over_ceiling)
+    assert msg == ps.size_error("MEMORY.md", over_ceiling), (
+        f"the ceiling refusal for a repair write is not the ceiling's own text: {msg!r}")
+
+
+def _pre_repair_memory_ceiling(root: Path):
+    """`app/memory_ceiling.py` from the commit BEFORE the repair exemption, loaded side by side.
+
+    The same archaeology `_base_memory_ceiling` does for #3562: `git log -S` names the commit
+    that introduced `index_repair_hook_slugs`, and its parent is the tree whose refusals
+    clauses 2 and 4 promise are unchanged. Asserting the parent lacks the symbol is what keeps
+    the comparison from becoming a tautology, and nothing here is a snapshot of a sentence, so
+    a later cap change moves both sides together and only a rewording moves one.
+    """
+    found = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "-S", "index_repair_hook_slugs",
+         "--format=%H", "--", "app/memory_ceiling.py"],
+        capture_output=True, text=True, timeout=60)
+    assert found.returncode == 0 and found.stdout.strip(), (
+        f"cannot find the commit that introduced the exemption "
+        f"({found.stderr.strip()[:200]}); the byte-for-byte comparison needs a real "
+        "pre-exemption tree and refuses to guess one")
+    introduced = found.stdout.split()[-1]
+    src = subprocess.run(["git", "-C", str(ROOT), "show", f"{introduced}^:app/memory_ceiling.py"],
+                         capture_output=True, text=True, timeout=60)
+    assert src.returncode == 0, f"{introduced}^ has no guard to read: {src.stderr[:200]}"
+    assert "index_repair_hook_slugs" not in src.stdout, (
+        f"{introduced}^ already carries the exemption, so it is not the pre-exemption tree and "
+        "the comparison below would be a tautology")
+    ns: dict = {"__file__": str(ROOT / "app" / "memory_ceiling.py")}
+    exec(compile(src.stdout, f"<memory_ceiling@{introduced[:8]}^>", "exec"), ns)
+    ns["MEMORIES_DIR"] = root
+    return SimpleNamespace(memory_write_error=ns["memory_write_error"],
+                           tight_limit=ns["tight_limit"])
+
+
+def test_the_reserve_refusal_and_every_other_refusal_are_byte_for_byte_what_the_pre_exemption_tree_said(
+        memories_root):
+    """Clauses 2 and 4: for every non-repair write, this tree and the pre-exemption tree answer identically.
+
+    Clause 2's canonical case is #3562's own: a curation TRIM that leaves 225 B of room, which
+    is a shrink (so the shrink escape would have let it through, which is how run 47's two
+    topic files got orphaned) and adds no hook line (so it is not a repair). It is in the
+    sweep below, and the sweep is compared against the old module's actual bytes rather than
+    against text transcribed into this file — a transcription is a sentence that goes stale
+    the next time anyone rewords a refusal, and clause 2 asks for the refusal text unchanged.
+    The last assertion is what keeps the sweep from being a tautology: the exemption must move
+    exactly one verdict, the repair write's, or the two trees are the same tree.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    base = _pre_repair_memory_ceiling(root)
+    filler = "- [project] filler entry that is comfortably short → topics/linked-rule\n"
+
+    # (label, text on disk, prospective text). Every label is a write the exemption cannot
+    # rescue: either its shape is not a repair, or its refusal belongs to an arm the
+    # exemption does not reach. `disk_over_limit`/`trim_225` is #3562's pair to the numbers in
+    # its own docstring: run 47 inherited an index 1,228 B OVER the tight limit and its curation
+    # pass trimmed it down to 225 B of room, removing 1,453 B. It is a SHRINK, which is the
+    # whole point — the shrink escape below `index_room_reserve_error` in `memory_write_error`
+    # would have taken it, and no hook line is added, so the repair exemption cannot reach it.
+    disk_over_limit = _repair_root(root, on_disk_room=-1_228)
+    trim_225 = _index_linking("topics/linked-rule", room=225, limit=limit)
+    assert len(trim_225.encode()) < len(disk_over_limit.encode()), (
+        "the fixture stopped being the trim #3562 is about")
+    sweep = {
+        "the #3562 curation trim that leaves 225 B": (disk_over_limit, trim_225),
+        "a growth write leaving 440 B": (_repair_root(root, on_disk_room=500),
+                                         _repair_root(root, on_disk_room=500) + filler),
+        "a growth write leaving exactly the reserve": (
+            _repair_root(root, on_disk_room=ceiling.INDEX_ROOM_RESERVE_BYTES + 60),
+            _repair_root(root, on_disk_room=ceiling.INDEX_ROOM_RESERVE_BYTES + 60) + filler),
+        "a write over the tight limit": (_repair_root(root, on_disk_room=201),
+                                         _grow_by(_repair_root(root, on_disk_room=201), 400)),
+        "a write against an index under the line floor": (
+            _repair_root(root, on_disk_room=20),
+            _grow_by(_repair_root(root, on_disk_room=20), 100)),
+        "a write carrying an over-long line inside the reserve band": (
+            _repair_root(root, on_disk_room=500),
+            _repair_root(root, on_disk_room=500)
+            + "- [project] " + "h" * 300 + " → topics/orphan-rule\n"),
+    }
+    for label, (disk, prospective) in sweep.items():
+        (root / "MEMORY.md").write_text(disk, encoding="utf-8")
+        got = ceiling.memory_write_error(root / "MEMORY.md", prospective)
+        was = base.memory_write_error(root / "MEMORY.md", prospective)
+        assert got == was, (
+            f"{label}: the exemption moved a non-repair verdict\n"
+            f"  this tree: {got!r}\n  pre-exemption tree: {was!r}")
+
+    # The curation case out loud, since clause 2 names it: refused, by the reserve, naming the
+    # room and the shortfall it has to free.
+    (root / "MEMORY.md").write_text(disk_over_limit, encoding="utf-8")
+    msg = ceiling.memory_write_error(root / "MEMORY.md", trim_225)
+    assert msg is not None, (
+        "the #3562 curation pass — a shrink leaving 225 B, no hook line added — was admitted, "
+        "which is the orphan generator restored")
+    assert "leaving only 225 B" in msg, msg
+    assert f"{ceiling.INDEX_ROOM_RESERVE_BYTES:,} B" in msg, msg
+
+    # Non-vacuity: the one verdict the exemption is allowed to move.
+    disk = _repair_root(root, on_disk_room=201)
+    repair = disk + _hook_line("orphan-rule", 184)
+    assert base.memory_write_error(root / "MEMORY.md", repair) is not None, (
+        "the pre-exemption tree admitted the repair write, so this item's premise is false and "
+        "the sweep above graded nothing")
+    assert ceiling.memory_write_error(root / "MEMORY.md", repair) is None, (
+        "the exemption moved no verdict at all")
+
+
+@pytest.mark.live_vault
+def test_the_knowledge_write_skill_names_linking_an_unlinked_topic_file_as_the_remedy():
+    """Clause 5, the half that lives in the vault: Step 2.5 has to say what to DO about this errors[] entry.
+
+    Step 2.5 is what turns `ok: false` into a forbidden commit, so a remedy the guard admits
+    but the skill does not name is a remedy no nightly will use — the 2026-11-01 job read
+    "fix or revert every file named in `errors[]`" and had no route to fix it. Marked
+    `live_vault` for the reason pytest.ini gives: the skill is a live file another job owns,
+    and the gate must not fail one author for the previous one's edit. The assertion itself is
+    unconditional when the vault is there — it is the pin, not a report.
+    """
+    skill = Path.home() / "obsidian" / "skills" / "nightly-reflection-knowledge-write" / "SKILL.md"
+    if not skill.exists():
+        pytest.skip("no vault")
+    text = skill.read_text(encoding="utf-8")
+    step = text[text.index("## Step 2.5"):]
+    assert "no index line links it" in step, (
+        "Step 2.5 no longer names the errors[] entry this remedy is for")
+    assert "already on disk" in step and "unlinked" in step, (
+        "Step 2.5 does not name linking an already-written unlinked topic file as the remedy")
+    assert "reserve" in step, (
+        "Step 2.5 does not say the repair write may spend reserve room, which is the half the "
+        "job cannot guess: the guard refused this write for two nights")
+
+
+def test_the_validator_comments_state_the_rule_and_not_a_count_snapshot():
+    """Clause 5, the repo half: both comments that asserted the live unlinked count is 0 now state a rule.
+
+    `scripts/memory/validate_memory_index.py` carried "the count over the live vault is 0" in
+    its header and "No baseline: the live count is 0" on the reverse-link arm (#3539's triage
+    read the second one as a reason to close the disposition arm, and #3661 found the live
+    count is not 0). A count in a comment is a claim with no owner and no check: the file
+    measures the count and prints it, so the sentence was false the night a file landed. These
+    assertions are deliberately negative about figures — the rule is that the script never
+    asserts one — and positive about the remedy, because a comment that only retreats to
+    vagueness leaves the next reader with no route either.
+    """
+    src = VALIDATOR.read_text(encoding="utf-8")
+    assert "live count is 0" not in src, "a comment still asserts a count snapshot"
+    assert "the live vault is 0" not in src, "the header still asserts a count snapshot"
+    assert src.count("index_repair_hook_slugs") >= 2, (
+        "neither comment names the guard arm that makes the remedy executable")
+    header, arm = src[:src.index("def ")], src[src.index("# The reverse direction"):]
+    assert "MEASURES" in header, "the header must say the count is measured, never remembered"
+    assert "hook line" in header and "hook line" in arm.lower(), (
+        "the comments must name the one write that clears an unlinked file")

@@ -29,9 +29,16 @@ index→topic let exactly that happen: dream consolidation #47 found six such fi
 on 2026-10-07 (five class rules the nightly knowledge write shipped 2026-10-01 →
 10-06, plus `memory-md-ledger`), unread by every prompt for a week while this script
 printed `OK` nightly (#2399). So an unlinked topic file is an error in both modes,
-with no baseline exemption for files already orphaned when the check was written —
-the count over the live vault is 0, and a warning nobody acts on is how the six
-became six.
+with no baseline exemption for files already orphaned when the check was written:
+the unlinked count is a quantity this script MEASURES and never one it remembers,
+so it carries no figure for the live vault — a figure here is a snapshot that goes
+false the night a file lands, which is what #3661 found this header asserting. What
+the rule is: a file on disk that no line links is an error whoever wrote it, a
+warning nobody acts on is how the six became six, and the remedy is one hook line.
+Since #3661 the write guard admits a MEMORY.md write whose whole difference is hook
+lines for files already on disk and unlinked even when that spends its reserve room
+(`index_repair_hook_slugs`), so an error from this arm always has a write that can
+clear it.
 
 The ceiling defaults to `prompt_surface.MEMORY_MD_CEILING_BYTES` — the live one —
 so the day it is lowered to `MEMORY_MD_INDEX_CEILING_BYTES` every caller of this
@@ -221,8 +228,13 @@ def check(root: Path, *, ceiling: int, mode: str = "full",
     # difference over the same two collections the loop above already reads. It is
     # the direction that matters to a READER — an index line pointing at nothing
     # loses one detail, an unlinked file loses a whole rule silently, which is how
-    # five class rules and `memory-md-ledger` sat unread for a week. No baseline:
-    # the live count is 0, so an exemption would only ever shelter a new orphan.
+    # five class rules and `memory-md-ledger` sat unread for a week. No baseline and no
+    # ownership arm: "already orphaned when this check shipped" is not a property this
+    # script can test without a memory of the count it is about to print, and an exemption
+    # keyed on that would shelter whatever orphan happens to be on disk — the exact property
+    # #2399 removed. #3661 settled the freeze that cost from the write side instead: an
+    # unlinked file is always clearable by one hook line, which the guard now admits even
+    # when it spends reserve room (`app/memory_ceiling.index_repair_hook_slugs`).
     unlinked = sorted({p.stem for p in topics} - set(linked))
     report["topic_files_unlinked"] = len(unlinked)
     report["unlinked_topic_files"] = unlinked

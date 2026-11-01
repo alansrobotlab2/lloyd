@@ -52,7 +52,7 @@ from pathlib import Path
 # definition shared by every writer and by the reporting tests (#1010). `body` is
 # imported so the index-line rule below measures the same lines the read-side
 # validator measures, from one function and not two copies of its regex.
-from app.prompt_surface import ENTRY_TYPES, body, memory_ceiling, size_error
+from app.prompt_surface import ENTRY_TYPES, body, memory_ceiling, size_error, untyped_entry_count
 from app.data_root import vault_root
 # The directory `prompt_builder._load_memories` reads the two names from. The guard
 # fires on a path only when it resolves INTO this directory, which is what keeps a
@@ -825,9 +825,13 @@ def index_room_reserve_error(path: str | os.PathLike[str], filename: str,
 
     Returns None for anything that is not `MEMORY.md`, for a file already at or over its
     tight limit — `index_tight_limit_error` and `index_no_room_error` own those verdicts, and
-    their text is unchanged by this predicate, byte for byte — and for a write that leaves
-    `INDEX_ROOM_RESERVE_BYTES` or more. `room` is `tight_limit(filename) - size`: the space
-    the next typed index line would have to fit in.
+    their text is unchanged by this predicate, byte for byte — for a write that leaves
+    `INDEX_ROOM_RESERVE_BYTES` or more, and, since #3661, for a REPAIR write: one whose whole
+    difference from the file on disk is hook lines for topic files that exist there and are
+    unlinked (`index_repair_hook_slugs`). The exemption reaches this arm and no other — a
+    repair write over the tight limit or under the line floor is refused by those two with
+    their text unchanged, byte for byte, exactly as any other write is. `room` is
+    `tight_limit(filename) - size`: the space the next typed index line would have to fit in.
 
     Called by `memory_write_error` BEFORE its shrink escape, which is the whole reason it is
     a separate function placed where it is: a tightening pass shrinks the file, so a rule
@@ -843,6 +847,13 @@ def index_room_reserve_error(path: str | os.PathLike[str], filename: str,
     size = len(prospective.encode("utf-8"))
     room = limit - size
     if room < 0 or room >= INDEX_ROOM_RESERVE_BYTES:
+        return None
+    # #3661: a write that spends the room on a hook line and on nothing else is the write
+    # this room exists to fund, so it is not refused. The shape is measured against the file
+    # on disk by the callee and never handed in, for the reason `_on_disk_bytes` gives for
+    # the byte count (:248-259): which lines a write adds is not a fact the caller gets to
+    # assert, and an `is_repair` argument would be a bypass with a parameter.
+    if index_repair_hook_slugs(path, prospective):
         return None
     head = (
         f"{filename} would be {size:,} bytes, inside the {limit:,}-byte tight limit but "
@@ -891,3 +902,142 @@ def index_bounds_apply(filename: str) -> bool:
     moment the predicate would become the second definition it exists to avoid.
     """
     return filename == INDEX_MEMORY_FILE
+
+
+# ── #3661: a repair write may spend the reserve ────────────────────────────────
+#
+# `INDEX_ROOM_RESERVE_BYTES` and the reverse-link arm of `validate_memory_index.py` are two
+# individually-correct guardrails with no ordering between them, and #3661 is what that gap
+# costs. `lloyd/memory/a-vault-land-beaten-to-the-commit-by-the.md` was written into the vault
+# on 2026-10-31 by automod round #3417 and never indexed, so full mode reports
+# `topic_files_unlinked: 1` and `"ok": false`; Step 2.5 of the knowledge-write skill (#2173)
+# forbids the `nightly: knowledge write` commit while `ok` is false; and the remedy the
+# validator itself names — "add a line ending `→ topics/<slug>`" — is precisely the write the
+# reserve refuses, because the live index held 201 B of its 20,480 B tight limit and the hook
+# line costs ~184 B, leaving 17 B: 585 B short of the reserve. Two refusals, no route. The
+# night's writes stay uncommitted until the FOLLOWING night's `nightly-reflection: pre-flight
+# … (unattributed dirty state)` sweep commits them without attribution — the unattributed
+# commit Step 2.5 exists to prevent, and #3545's triage measured 6 of the 12 historical
+# unlinked-topic-file adds coming out of exactly those sweeps.
+#
+# What breaks the deadlock is that the two guardrails protect different things. The reserve
+# protects room, and room is only ever spent on a line that hooks a topic file: a write that
+# spends it on that is not depleting the resource for the next writer, it is spending it on
+# what the resource is for. Nothing loads an unlinked detail file and nothing prunes it, so
+# the rule that file carries is worth more loaded than the 17 B of room is worth kept. Hence
+# an exemption scoped to the one arm that prices room, and to one shape of write. It leaves
+# #3562's own case a refusal on the shape, not on luck: the curation pass that left 225 B
+# added no hook line, so `index_repair_hook_slugs` answers empty for it and the reserve
+# speaks with its old text.
+#
+# The item's option (a) — deciding ownership in the VALIDATOR, so an orphan the calling job
+# did not create is a warning with a named owner — is the bigger design and is NOT taken here.
+# Triage records why it cannot be built yet: the orphan is UNTRACKED in the vault
+# (`?? lloyd/memory/…`), so a "tracked in HEAD ⇒ not this job's file" test classifies it as
+# this job's and keeps blocking; ownership has to key on the commit that added the file or on
+# a disposition row, and that ruling is owed. The half that can ship without an ownership
+# answer is this one, because "this write adds only hook lines for files that are on disk and
+# unlinked" does not need to know who wrote the file.
+#
+# Appended below `memory_write_error` for the standing reason at :350-358: three lines above
+# it are quoted by number in `lloyd/reviews/2026-09-14-user-md-audit.md`, and
+# `tests/test_prompt_surface_budget.py::test_every_code_line_the_audit_cites_is_the_line_it_claims`
+# reddens any edit that shifts them.
+
+
+def unlinked_topic_slugs(index_text: str) -> set[str]:
+    """The topic files on disk that no top-level line of `index_text` links.
+
+    The same two collections the validator's reverse arm diffs, reached through
+    `linked_topic_files` so the guard and the instrument can never disagree about which lines
+    link a file — the reason `overlong_index_lines` is shared rather than copied (#1895). A
+    slug outside `TOPIC_SLUG_RE` is excluded rather than offered: no legal hook line can name
+    it, so a write that "hooked" it would repair nothing and must not be exempted for it. An
+    absent `memory/` directory is an empty set, not an error: a vault with no topic files has
+    nothing to repair, and this is a question about disk, asked of disk.
+    """
+    linked = {name[len(TOPIC_PREFIX):] for name in linked_topic_files(index_text)}
+    try:
+        present = {p.stem for p in (MEMORIES_DIR / TOPICS_SUBDIR).glob("*.md")}
+    except OSError:
+        return set()
+    return {slug for slug in present - linked if TOPIC_SLUG_RE.fullmatch(slug)}
+
+
+def index_repair_hook_slugs(path: str | os.PathLike[str],
+                            prospective: str) -> frozenset[str]:
+    """The slugs this prospective index write newly hooks — empty if it is not a repair write.
+
+    A repair write's WHOLE difference from the file on disk is added lines, and every added
+    line is a top-level index bullet every one of whose `→ topics/<slug>` pointers names a
+    topic file that is on disk and unhooked by the index on disk. Each excluded shape is a
+    leak this exemption must not open, which is why the answer is empty for all of them:
+
+    * a pointer to a slug with no file on disk is the dangling link the validator errors on,
+      not a repair — and the exemption must not be a way to buy a reserve-spending line;
+    * a pointer to a slug the on-disk index already links is a second line to a linked topic
+      spending reserve room to duplicate a link, #2613/#2649's shape;
+    * an INDENTED bullet: `linked_topic_files` reads top-level lines only, so an indented
+      pointer links nothing and the validator would still report the file unlinked — the
+      exemption would have spent the room and fixed nothing;
+    * any line added, changed or REMOVED besides those hook lines, including the trim that
+      would free the bytes for them. Tightening the index is `dream-consolidation`'s (#47)
+      decision and this arm's own refusal says so ("Do not trim or shorten an unrelated entry
+      to squeeze a line in"); an exemption reachable by swapping an entry for a line would
+      hand a writer #47's job paid for with the reserve's room.
+
+    The difference is taken over whole lines of the complete text — front matter, headings and
+    blank lines included, not `body()`'s bullets — because what is being waived is a price on
+    bytes, and only the whole difference is this write's price. A bumped `updated:` stamp is
+    therefore a changed line and a voided repair: the strict side of a rule whose strictness
+    has to be total to be checkable.
+
+    What is NOT checked here is the 300-character cap and the byte bounds: their owners
+    (`index_line_length_error`, `index_tight_limit_error`, `index_no_room_error`, the ceiling)
+    judge the whole prospective text and run right after this arm in `memory_write_error`, so a
+    repair write that breaks one is refused by that owner with that owner's text — a second copy
+    of a bound inside the one arm built to say yes is just two owners free to disagree. The type
+    tag is the exception, and it is not copied either: `untyped_entry_count` is asked, the same
+    owner the validator's `untyped_entries` arm calls. It belongs here because admitting an
+    untyped line would have this arm spend reserve room on a line that re-reddens the very
+    report it exists to clear — trading `no index line links it` for `top-level entries carry no
+    [type] tag` is a worse freeze, not a remedy.
+
+    A set rather than a bool, so a test or a future refusal can name WHICH file a write
+    hooked instead of re-deriving it from the diff. `bool(...)` is the answer the caller wants.
+    """
+    try:
+        current = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # No readable file is nobody's repair: with nothing on disk there is no difference to
+        # price, and the guard's default is always the refusal.
+        return frozenset()
+    unmatched = current.split("\n")
+    added: list[str] = []
+    for line in prospective.split("\n"):
+        if line in unmatched:
+            unmatched.remove(line)
+        else:
+            added.append(line)
+    if unmatched or not added:
+        return frozenset()
+    unlinked = unlinked_topic_slugs(current)
+    hooked: set[str] = set()
+    for line in added:
+        if not line.startswith(("- ", "* ")):
+            return frozenset()
+        # The added line has to be a line the index ACCEPTS, and its owner for that is
+        # `prompt_surface.untyped_entry_count`, which the validator's `untyped_entries` arm
+        # calls too (#2173's full mode). Not a second copy of a bound — a call to the one that
+        # exists — and the reason it belongs here rather than waiting for its owner is that an
+        # untyped line is an ERROR in the report this exemption exists to turn green: admitting
+        # one would trade the blocking `no index line links it` for `1 top-level entries carry
+        # no [type] tag`, which is a worse freeze, not a remedy.
+        if untyped_entry_count(line):
+            return frozenset()
+        slugs = {topic_slug(m.group(0)) for m in TOPIC_LINK_RE.finditer(line)}
+        slugs.discard(None)
+        if not slugs or not slugs <= unlinked:
+            return frozenset()
+        hooked |= slugs
+    return frozenset(hooked)
