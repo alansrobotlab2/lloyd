@@ -45,9 +45,10 @@ import pytest
 
 from scripts.autoresearch import bench_lint, bench_split, judge, promote, run_round
 from scripts.autoresearch.bench_lint import (
-    DIRECT_MODE_TRACE, MEMORY_BODY_MIN_CHARS, _memory_body, _vault_memories_dir,
-    coverage_findings, lazy_probe, lazy_result, lint_bench_dir, lint_task, main, render,
-    required_answer_strings, valid_task_ids, vacuity_findings,
+    DIRECT_MODE_TRACE, MEMORY_BODY_MIN_CHARS, MEMORY_READ_TOOL, _memory_body, _topic_dir,
+    _topic_tree_body, _vault_memories_dir, coverage_findings, lazy_probe, lazy_result,
+    lint_bench_dir, lint_task, main, render, required_answer_strings, valid_task_ids,
+    vacuity_findings,
 )
 from scripts.autoresearch.common import AutoresearchConfig, load_bench_tasks, load_config
 from scripts.automod import state as automod_state
@@ -2005,6 +2006,126 @@ def test_a_memory_that_cannot_be_read_flags_nothing(tmp_path, monkeypatch, capsy
     assert "--memory-body" in capsys.readouterr().out
 
 
+def test_a_task_that_grades_the_memory_read_may_answer_from_the_topic_file(
+    tmp_path, monkeypatch
+) -> None:
+    """#3676: which text the answer must be in is per task, and the graded check decides it.
+
+    Three fixtures in one directory, differing only in the thing the rule keys on. The
+    loaded stand-in carries neither figure below, so a green here is the topic tree being
+    read and a red is the widening leaking somewhere it should not:
+
+      * `wf_read_in_topic` demands the memory-read call AND `12.5 GiB`, which sits in a
+        topic file — NOT flagged. That is `bench_027_recall_user_fact_topic_read`'s shape,
+        and MEMORY.md's own preamble is the reason: "the line is the hook; the entry in
+        full — its numbers, proving commands and caveats — is in the topic file it ends
+        with". A hook line is byte-budgeted (`app/memory_ceiling.py`: `INDEX_LINE_MAX_CHARS
+        = 300`, `MEMORY_TIGHTNESS = 0.80`), so grading it as the only surface asks whether
+        the index is wordy, not whether the arm can answer.
+      * `wf_no_read` is that file minus the `tool_called` check — flagged. The delta
+        between the two fixtures is literally one check, which is the whole assertion: the
+        surface is keyed on what the objective layer DEMANDS, which is why the widening
+        cannot reach #2276's two address fixtures (neither has a `tool_called` check —
+        bench_024's body says it outright: "no retrieval tool required").
+      * `wf_read_unreachable` demands the call AND `sneaky77`, written down only in
+        `Bad_Slug.md` — a name outside the topic grammar, so no call can open it and its
+        text buys no coverage. Still flagged, and its message says the topic tree was
+        searched, so a reader is not sent to the wrong place.
+
+    `lazy_pass` surviving on the first fixture is the control that the row was linted at
+    all: an abstention would look identical to coverage on the assertion above alone.
+    """
+    bench = tmp_path / "bench"
+    bench.mkdir()
+    topics = tmp_path / "lloyd" / "memory"
+    topics.mkdir(parents=True)
+    (topics / "reachable-answer.md").write_text(
+        "The primary engine holds a 12.5 GiB n-gram table in host RAM.\n",
+        encoding="utf-8")
+    # A name the tool cannot open: `app.memory_ceiling.TOPIC_SLUG_RE` is `[a-z0-9-]{1,48}`,
+    # so `Bad_Slug` is refused by `topic_slug` and no `memory_read` call reaches this text.
+    (topics / "Bad_Slug.md").write_text("sneaky77 is written down here.\n",
+                                        encoding="utf-8")
+    monkeypatch.setattr(bench_lint, "_topic_dir", lambda: topics)
+    # The walk itself, before the lint reads it: the slug filter is the whole of the
+    # tool's traversal defence, so it is pinned here rather than only through a row.
+    walked = _topic_tree_body()
+    assert "12.5 GiB" in walked and "sneaky77" not in walked, (
+        "the surface is not the slug-filtered read it claims to be: "
+        f"{walked[:160]!r}")
+
+    def mr_task(task_id: str, answer: str, *, with_read: bool = True) -> None:
+        """One `user-facts` task: the read check, then the two value checks (#3676)."""
+        checks = (f"- type: contains\n  value: {answer}\n"
+                  f"- type: regex\n  value: '(?:{re.escape(answer)})'")
+        if with_read:
+            checks = (f"- type: tool_called\n"
+                      f"  value: mcp__lloyd-mcp__{MEMORY_READ_TOOL}\n" + checks)
+        _wf_task(bench, task_id, answer, checks=checks)
+
+    mr_task("wf_read_in_topic", "12.5 GiB")
+    mr_task("wf_no_read", "12.5 GiB", with_read=False)
+    mr_task("wf_read_unreachable", "sneaky77")
+
+    report = lint_bench_dir(bench, memory_body=_STAND_IN_MEMORY)
+
+    reached = _kinds(report, "wf_read_in_topic")
+    assert ABSENT_FROM_MEMORY not in reached, (
+        "a task whose own checks grade the memory-read call was still told its answer is "
+        f"unreadable although the topic file it opens carries it: {reached}")
+    assert "lazy_pass" in reached, (
+        "the fixture stopped being linted at all, so the assertion above proves nothing: "
+        f"{reached}")
+    assert ABSENT_FROM_MEMORY in _kinds(report, "wf_no_read"), (
+        "the same task WITHOUT the memory-read check went unflagged: the surface widened "
+        "with the tag instead of with the graded ask, which is the blanket #2276 exists "
+        f"to prevent: {_literal_messages(report, 'wf_no_read')}")
+    unreachable = _kinds(report, "wf_read_unreachable")
+    assert ABSENT_FROM_MEMORY in unreachable, (
+        f"coverage credited to a file no `memory_read` call can name: {unreachable}")
+    assert any("or in any topic file `memory_read` can open" in m
+               for m in _literal_messages(report, "wf_read_unreachable")), (
+        "the finding says only 'the memory body', sending the reader to look in the wrong "
+        f"place: {_literal_messages(report, 'wf_read_unreachable')}")
+
+
+def test_the_topic_surface_is_the_directory_the_memory_tool_itself_reads() -> None:
+    """The one seam #3676's widening crosses, pinned instead of assumed.
+
+    The lint now decides whether an arm can reach an answer by reading files, and that
+    decision is only as true as what `memory_read` can actually open. The tool's own
+    route is `agent_mcp/session.py::_resolve_file` → `topic_path(MEMORIES_ROOT, slug)`,
+    so the tool's root is the DEFINITION and this node asserts equality with it —
+    `resolve()`d because a round's home reaches the vault through the symlink
+    `scripts/automod/worktree.py::ensure_round_home` lays down — rather than spelling a
+    second literal path into the lint. A second definition of the ruler is how a pin
+    quietly stops defending the thing it is about; it is why `test_skill_lint_size.py`
+    reads its line count out of `skill_size` instead of copying the expression.
+
+    The account-home anchoring is this node's other half: `_topic_dir` must name the live
+    vault from a gate's emptied `HOME` too, because under `HOME=/nonexistent` a
+    home-anchored surface would name a directory that does not exist and silently retract
+    the widening exactly where the corpus stops being graded. That is what
+    `test_the_acceptance_check_survives_a_poisoned_home` exercises across the process;
+    this node pins the identity, and the two controls below make each a measurement
+    rather than an assertion about a path.
+    """
+    from app.memory_ceiling import TOPIC_PREFIX, TOPICS_SUBDIR, topic_slug
+    from agent_mcp import session
+
+    anchored = _topic_dir()
+    assert anchored.is_dir(), (
+        f"{anchored} is not a directory, so every topic-file answer would read as absent "
+        "and every memory-read task would come out unanswerable")
+    assert (session.MEMORIES_ROOT / TOPICS_SUBDIR).resolve() == anchored.resolve(), (
+        "the lint's topic root and `memory_read`'s have come apart, so the rule is now "
+        "crediting (or withholding) coverage from a directory no call can open")
+    assert any(topic_slug(f"{TOPIC_PREFIX}{p.stem}") for p in anchored.glob("*.md")), (
+        f"{anchored} holds no file whose name the tool can open: the walk would return "
+        "empty text and report 'not in the topic tree' from an empty directory rather "
+        "than as a fact about the corpus")
+
+
 def test_the_acceptance_check_survives_a_poisoned_home(tmp_path) -> None:
     """The memory read is a process boundary, so it is tested across the process.
 
@@ -2018,6 +2139,17 @@ def test_the_acceptance_check_survives_a_poisoned_home(tmp_path) -> None:
     directory, the worst environment it will meet, and the named pair must still be the
     two fixtures. The bench dir is passed by absolute path because the point of the run is
     that a moved `$HOME` does not move the corpus the lint grades against.
+
+    The same run is the process-boundary test for #3676's wider surface, and it is the
+    only node that can be: `bench_027`'s answer no longer exists in the loaded body at
+    all (vault `ee2a437dd`, 2026-11-01, took the figure off its index line), so its row
+    being clean under a poisoned `HOME` is evidence of exactly one thing — that
+    `_topic_dir`'s account-home anchoring reached the live topic tree from an environment
+    in which a `Path.home()`-anchored root would have named a directory that does not
+    exist. The in-process node
+    `test_the_topic_surface_is_the_directory_the_memory_tool_itself_reads` pins the
+    identity of that root; a monkeypatched `HOME` in-process would not cross the boundary
+    a gate actually crosses.
     """
     body = _memory_body()
     assert body, ("no memory body resolved from this tree at all, so the child run below "
@@ -2050,8 +2182,10 @@ def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
 
     Three assertions, each ruling out a different way the rule could be wrong: the two
     address fixtures must be named (the premise), `bench_027` must NOT be (the rule is
-    not "every user-facts task is broken" — its `95.37` is in the memory body), and the
-    invalid set must be the three known tasks plus those two and nothing else.
+    not "every user-facts task is broken" — since #3676 its `95.37` is reachable through
+    the topic tree its own `memory_read` check grades, and the control line below names
+    which of the two surfaces is holding that up), and the invalid set must be the three
+    known tasks plus those two and nothing else.
 
     The first three lines are the instrument check, and they are why this node no longer
     skips: the rule reports nothing at all when the memory body cannot be read, so an
@@ -2082,8 +2216,12 @@ def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
             "carries")
     # bench_027 WAS invalid on the live corpus before this rule existed — its objective
     # layer passed lazily — and #2457 is what moved it, not this rule. What clause 3
-    # requires of THIS rule is that it does not name bench_027: its `95.37` is in the
-    # memory body, so the answer IS reachable, and a rule that flagged it would be
+    # requires of THIS rule is that it does not name bench_027, and #3676 changed WHY it
+    # does not: vault ee2a437dd (2026-11-01) rewrote the task's index line, dropping the
+    # clause `— 95.37 GiB BF16 n-gram table in host RAM`, so the figure is no longer in
+    # the loaded body at all — it lives in the topic file the task's own `memory_read`
+    # check opens (MEMORY.md is byte-budgeted by `app/memory_ceiling.py::tight_limit`,
+    # which is why a summary line is the text that moves). A rule that flagged it either way would be
     # reading the wrong property. `uncovered_requirement` left
     # this row with #2280 because `table` appears only in its body — its prompt and its
     # objective name no output format — so the ask is a NOTE at most, which is why the

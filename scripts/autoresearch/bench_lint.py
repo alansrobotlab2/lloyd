@@ -54,7 +54,17 @@ Four questions, one report per task
    ``build_system_prompt`` falls back to and no bench path overrides
    (``bench_runner.py:206``). It is scoped to the tag rather than run over all 28 tasks
    because the answerability of a non-``user-facts`` task is not a claim this predicate
-   can make.
+   can make. Which text that is is per task (#3676): a task whose own checks demand the
+   ``memory_read`` call answers from the topic file its index line's hook points at, not
+   from the index line. Vault ``ee2a437dd`` (2026-11-01) removed ``95.37 GiB`` from
+   ``bench_027``'s index line — the figure is still in
+   ``lloyd/memory/extracted-from-lloyd-claude-md-2026-09.md``, the file that hook points
+   at — and the rule reported a reachable answer unreachable. Index lines are the text
+   that moves, because ``app/memory_ceiling.py`` byte-budgets the whole index
+   (``tight_limit``, ``MEMORY_TIGHTNESS = 0.80``) and caps each line at
+   ``INDEX_LINE_MAX_CHARS = 300``. For a memory-read task the surface is therefore the
+   loaded body *plus* every topic file ``memory_read`` can open; for every other task it
+   is the loaded body, unchanged.
 
 The lint flags; it does not fix, and it does not retire. Tightening a check or
 dropping a task changes what promotes on the live self-mod loop, so that call is
@@ -256,6 +266,22 @@ def lazy_result(task: dict[str, Any]) -> dict[str, Any]:
 #: ``bench_027_recall_user_fact_topic_read`` — and the check's false-positive risk is
 #: bounded by that list, which is why it is keyed on a tag rather than run over all 28.
 USER_FACTS_TAG = "user-facts"
+
+#: The last ``__``-separated segment of the memory-read tool's name, which is how a
+#: task's ``objective_checks`` spell it (``mcp__lloyd-mcp__memory_read``). A task with a
+#: ``tool_called`` check on it has already told the lint where its answer lives: the
+#: graded ask is the CALL that opens ``lloyd/memory/<slug>.md``, not a recital of the
+#: loaded index, so the index line's own preamble — "the line is the hook; the entry in
+#: full, its numbers, proving commands, is in the topic file it ends with" — is the
+#: promise the task holds the arm to. Such a task's answer is reachable through the
+#: topic tree (#3676): vault ``ee2a437dd`` (2026-11-01) rewrote that task's index line to
+#: ``**Never boot `agent-llm-primary` twice in quick succession** → topics/...``, dropping
+#: the clause ``— 95.37 GiB BF16 n-gram table in host RAM``; the figure is still in the
+#: topic file that hook points at, and the rule called a reachable answer unreachable. Matched on the trailing segment, not
+#: the whole name, so the rule does not have to know which harness prefix the check
+#: carries; ``memory_read`` and not a prefix, so a differently-named tool cannot be
+#: credited by accident.
+MEMORY_READ_TOOL = "memory_read"
 
 #: Below this many characters the body is a stand-in for a memory, not a memory. An
 #: empty body makes every fact-requiring task look unanswerable, so an absent file would
@@ -461,24 +487,109 @@ def _tags_of(task: dict[str, Any]) -> set[str]:
     return {str(t).strip() for t in raw if str(t).strip()}
 
 
-def missing_memory_facts(task: dict[str, Any], memory_body: str) -> list[str]:
-    """Objective literals `task` requires that `memory_body` does not contain.
+def _requires_memory_read(task: dict[str, Any]) -> bool:
+    """Does `task`'s own objective layer demand the memory-read call?
 
-    A ``user-facts`` task asks the model to say something it can only know from loaded
-    memory. ``objective_score`` then measures whether the model repeated a string the
-    prompt never contained: it cannot pass, and #2276's two fixtures have never scored
-    non-zero in 56 draws and 7 respectively because the email address their checks
-    require was consolidated out of ``MEMORY.md`` six weeks ago.
+    Read off the graded checks, not off ``tags`` or the rationale prose, for the reason
+    :func:`_spec_sources` gives for the same choice: what the arm is held to is what its
+    objective layer names, and prose is rationale. This is what keeps the two fixtures
+    #2276 exists to catch inside the rule: ``bench_002_recall_user_fact`` and
+    ``bench_024_recall_user_fact_incidental`` carry no ``tool_called`` check at all —
+    bench_024's body says the recall needs "no retrieval tool required" — so the wider
+    surface never reaches them. It is not a blanket either: a task that demands the call
+    *and* names a literal no topic file carries is still an error, because the surface
+    grew by files, not by permission.
+    """
+    for check in task.get("objective_checks") or []:
+        if isinstance(check, dict) and check.get("type") == "tool_called":
+            if str(check.get("value", "")).split("__")[-1] == MEMORY_READ_TOOL:
+                return True
+    return False
+
+
+def _topic_dir() -> Path:
+    """The directory ``memory_read(file="topics/<slug>")`` resolves a slug into.
+
+    Built from :func:`_vault_memories_dir`, which is ``ACCOUNT_HOME``-anchored for the
+    reason that function gives. The memory tools' own root
+    (``agent_mcp.session.MEMORIES_ROOT`` = ``vault_root() / "lloyd"``, itself
+    ``Path.home()``-derived) is *not* usable here: the gate runs candidate code with
+    ``HOME=<round>/home``, so a surface keyed on it moves with the environment — and
+    under the emptied ``HOME`` of ``test_the_acceptance_check_survives_a_poisoned_home``
+    it would name a directory that does not exist, silently retracting this rule's
+    widening exactly where the corpus stops being graded. ``ACCOUNT_HOME`` is the passwd
+    entry, so the answer is the live vault from any checkout and any ``$HOME``.
+    """
+    from app.memory_ceiling import TOPICS_SUBDIR
+
+    return _vault_memories_dir() / TOPICS_SUBDIR
+
+
+def _topic_tree_body() -> str:
+    """Every topic file the memory-read tool can open, concatenated.
+
+    Only a file whose stem passes ``app.memory_ceiling``'s slug grammar is read, because
+    only such a file can be named by a call: the grammar is the tool's whole traversal
+    defence (``agent_mcp/session.py::_resolve_file`` → ``topic_slug``), so crediting an
+    unreachable file would answer "is the string anywhere in this directory" instead of
+    "can the arm read it". A missing directory, or a file that cannot be read, yields
+    the empty string — every failure direction here is toward the finding still firing,
+    never toward dropping it.
+    """
+    from app.memory_ceiling import TOPIC_PREFIX, topic_slug
+
+    tdir = _topic_dir()
+    if not tdir.is_dir():
+        return ""
+    parts: list[str] = []
+    for path in sorted(tdir.glob("*.md")):
+        if topic_slug(f"{TOPIC_PREFIX}{path.stem}") is None:
+            continue
+        try:
+            parts.append(path.read_text(errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def missing_memory_facts(task: dict[str, Any], memory_body: str) -> list[str]:
+    """Objective literals `task` requires that its arm cannot read.
+
+    A ``user-facts`` task asks the model to say something it can only know from memory.
+    ``objective_score`` then measures whether the model repeated a string the prompt
+    never contained: it cannot pass, and #2276's two fixtures have never scored non-zero
+    in 56 draws and 7 respectively because the email address their checks require was
+    consolidated out of ``MEMORY.md`` six weeks ago.
 
     The predicate is substring presence, which is what the checks themselves use, so a
     task passes when at least one answer string its objective layer would accept is
-    readable in the body. It is deliberately not a claim about semantics: a regex with a
-    distractor branch could pass on the distractor, and the answer being *retrievable*
-    is not the same as the task being well-posed. Both belong to the disposition, which
-    this lint does not decide.
+    readable. It is deliberately not a claim about semantics: a regex with a distractor
+    branch could pass on the distractor, and the answer being *retrievable* is not the
+    same as the task being well-posed. Both belong to the disposition, which this lint
+    does not decide.
+
+    Which text counts as readable is per task, and #3676 is why: for a task whose own
+    objective layer demands the ``memory_read`` call (:func:`_requires_memory_read`), the
+    surface is the loaded body *plus* every topic file that call can open. The loaded
+    body is ``MEMORY.md`` and ``USER.md`` only — topic files are never rendered into a
+    prompt (``app/memory_ceiling.py``, TOPICS_SUBDIR block) — so an index-only surface
+    grades a topic-read task against the hook line alone, and a hook line is a
+    byte-budgeted summary: ``app/memory_ceiling.py`` budgets the whole index
+    (``tight_limit``) and every line at ``INDEX_LINE_MAX_CHARS``. Vault ``ee2a437dd``
+    (2026-11-01) removed ``— 95.37 GiB BF16 n-gram table in host RAM`` from
+    ``bench_027``'s line, the figure survived in the topic file that line points at, and
+    the rule reported the task unanswerable while its answer sat one graded tool call
+    away.
+    For every other task the surface is the loaded body, unchanged.
     """
     if USER_FACTS_TAG not in _tags_of(task):
         return []
+    surface = memory_body
+    where = "is in the memory body the bench arms read"
+    if _requires_memory_read(task):
+        surface = f"{memory_body}\n{_topic_tree_body()}"
+        where = ("is in the memory body the bench arms read, or in any topic file "
+                 "`memory_read` can open")
     out: list[str] = []
     for check in task.get("objective_checks") or []:
         if not isinstance(check, dict):
@@ -487,12 +598,12 @@ def missing_memory_facts(task: dict[str, Any], memory_body: str) -> list[str]:
         if required is None:
             continue
         answers, label = required
-        if any(answer in memory_body for answer in answers):
+        if any(answer in surface for answer in answers):
             continue
         sample = ", ".join(repr(a) for a in answers[:2])
         more = f" (+{len(answers) - 2} more)" if len(answers) > 2 else ""
         out.append(f"{USER_FACTS_TAG} task, but {label} — none of its answers "
-                   f"({sample}{more}) is in the memory body the bench arms read")
+                   f"({sample}{more}) {where}")
     return out
 
 
