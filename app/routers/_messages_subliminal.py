@@ -17,6 +17,8 @@ UI visibility. Pulled out of `messages.py` to keep the router slim.
 
 from __future__ import annotations
 
+import re
+
 from app.sessions_io import SessionTurn
 
 
@@ -118,8 +120,35 @@ def _classify_subliminal(prefix: str) -> str:
 
 
 def _detect_subliminal_sources(prefix: str) -> list[str]:
-    """Return the list of detected source-sections in this injection."""
-    return [name for name, marker in _SUBLIMINAL_SOURCE_TAGS if marker in prefix]
+    """Return the source-sections this injection actually carried, in order.
+
+    A badge is claimed only when the section's marker OPENS a line of `prefix`
+    (`(?m)^`), not merely when its characters appear somewhere in it. Every
+    section this names is emitted at column 0 — `prefetch._format_context` ends
+    with `"<context>\\n" + "\\n".join(parts) + "\\n</context>"`
+    (`app/prefetch.py:1387`) and the `<ide_state>` splice lands on text ending in
+    a newline (`app/prefetch.py:1712-1720`) — so a line-start test costs no real
+    section, while a bare `marker in prefix` charged the row for any tag a
+    producer merely QUOTED. Read back 2026-11-01 across every persisted session
+    transcript under `~/lloyd-data/sessions` (`*.json` + `*.json.gz`: 19,211 files,
+    15,544 subliminal rows — a growing corpus, so count it again rather than carry
+    it): 75 of those rows lose a badge under this rule, 183 badges in all (`facts`
+    52, `ambient` 45, `hint` 37, `sessions` 33, `notes` 14, `skills` 2), and for
+    every one of the 183 the marker appears at NO line start of that row's own text.
+    Shapes: a `<vault-context>` bullet whose text is about this very badge list
+    quoting `<next-session-notes>` in backticks, and a prose line enumerating
+    "`<facts>`, `<ambient-signals>`" as tag names. Same strip #3081 landed to make
+    truthful.
+
+    The property bought is "this marker opens a line", NOT "this section was
+    rendered": prose that quotes a tag at column 0 — a fenced code block in an
+    injected skill body, say — still mints that badge. It cannot be tightened
+    further from here: `prefetch._section_spans` builds its regex FROM
+    `CONTEXT_SECTION_TAGS` and so cannot see the two turn-tail extras `state` and
+    `memory_delta` (`tests/test_prefetch.py::test_the_renderer_cannot_emit_a_section_the_tuple_does_not_name`).
+    """
+    return [name for name, marker in _SUBLIMINAL_SOURCE_TAGS
+            if re.search(r"(?m)^" + re.escape(marker), prefix)]
 
 
 def _subliminal_text(prefix: str, tail: str = "") -> str:

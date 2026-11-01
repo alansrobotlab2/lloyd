@@ -933,6 +933,21 @@ with the genuinely correct answer, never an easier target.
   after it is written (both role filters, and the hard compaction that
   destroys it), the `role="thinking"` sibling, worker turns being prefetched
   exactly like chat turns, and why prefetch keeps qmd's per-collection path
+- **2026-11-01:** (#3471) the source-badge list above stayed eleven names in the
+  same order, but a name is now claimed only when its marker OPENS a line of the
+  row's text (`re.search(r"(?m)^" + re.escape(marker), …)`) instead of appearing
+  anywhere in it. Every section the list names is emitted at column 0 — the
+  renderer joins its parts with newlines inside `<context>`, and the
+  `<ide_state>` splice lands on text ending in a newline — so no rendered section
+  lost a badge, while a tag a producer merely QUOTED stopped charging the row for
+  a section that never arrived: 72 of 13,272 persisted rows over-reported on the
+  2026-10-27 corpus (`facts` 51, `ambient` 45, `hint` 37, `sessions` 33, `notes`
+  14, `skills` 1), one of them a `<vault-context>` bullet quoting
+  `<next-session-notes>` in backticks. The property is "the marker opens a line",
+  not "this section was rendered" — prose that quotes a tag at column 0 still
+  mints it, and the detector cannot be tightened further, because
+  `_section_spans` builds its regex from `CONTEXT_SECTION_TAGS` and so never sees
+  `state` or `memory_delta`
 
 ## Review log
 

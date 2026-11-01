@@ -147,6 +147,134 @@ def test_every_rendered_context_section_has_a_badge():
     assert unbadged == [], f"sections rendered with no subliminal badge: {unbadged}"
 
 
+def test_a_section_tag_quoted_in_injected_prose_mints_no_badge():
+    """#3471: the strip claims what the turn consumed, not what it mentioned.
+
+    `_detect_subliminal_sources` was a bare `marker in prefix` over the whole row
+    text, so a tag that merely appears INSIDE injected prose charged the row for a
+    section that never rendered. Read back 2026-11-01 across every persisted
+    session file under `~/lloyd-data/sessions` (19,211 files, 15,544 subliminal
+    rows): 75 rows lose a badge under the line-start rule — facts 52, ambient 45,
+    hint 37, sessions 33, notes 14, skills 2, 183 badges in all — and for every one
+    of those 183 the marker appears at no line start of that row's own text. Both
+    fixtures below are transcribed from rows the item names, and each is checked
+    against the OLD rule first: a fixture the old rule also declined would prove
+    nothing.
+    """
+    def old_rule(text: str) -> list[str]:
+        return [name for name, marker in _SUBLIMINAL_SOURCE_TAGS if marker in text]
+
+    # Shape 1 — sessions/20261025_093638_owedcheck_fcf3.json: `<next-session-notes>`
+    # quoted in backticks inside a `<vault-context>` bullet, at column 5 of line 3.
+    # That row persisted ['notes', 'vault', 'hint'] having consumed no brief.
+    quoted_in_a_bullet = (
+        "<context>\n<vault-context>\n- **`<next-session-notes>` is rendered into "
+        "the injected block but is invisible to the strip**\n</vault-context>\n"
+        "<skill-hint>No skills matched.</skill-hint>\n</context>")
+    assert old_rule(quoted_in_a_bullet) == ["notes", "vault", "hint"]
+    assert _detect_subliminal_sources(quoted_in_a_bullet) == ["vault", "hint"], \
+        "a quoted `<next-session-notes>` must not put `notes` on the strip"
+
+    # Shape 2 — sessions/20260926_234007_review_256e.json: an inline enumeration of
+    # tag names, every occurrence past column 0. That row persisted 6 badges; the
+    # line-start rule drops `ambient` and `facts` and keeps the three rendered ones.
+    enumeration = (
+        "<context>\n<vault-context>\n- counts the rendered prefetch block's "
+        "character/token count by section (`<vault-context>`, `<skill>`, `<facts>`, "
+        "`<recent-sessions>`, `<skill-hint>`, `<ambient-signals>`)\n</vault-context>\n"
+        "<recent-sessions>\n- [x] hit\n</recent-sessions>\n<skill-hint>No skills "
+        "matched.</skill-hint>\n</context>")
+    assert set(["facts", "ambient"]) <= set(old_rule(enumeration))
+    assert _detect_subliminal_sources(enumeration) == ["vault", "sessions", "hint"], \
+        "the enumeration names `facts` and `ambient`; the row rendered `vault`, " \
+        "`sessions` and `skill-hint`"
+
+
+def test_the_line_start_rule_loses_no_badge_the_renderer_can_emit():
+    """#3471 clause 4, the direction that could COST a badge: nothing can.
+
+    Every part `_format_context` emits opens its tag at column 0, because the
+    renderer ends with `"<context>\\n" + "\\n".join(parts) + "\\n</context>"`
+    (`app/prefetch.py:1387`), and the `<ide_state>` splice lands on text that ends
+    with a newline (`app/prefetch.py:1712-1720`), so the spliced tag opens a line
+    too. `<session_state>` and `<memory_delta>` ride the P1 turn tail joined by
+    `prompt_layout.TAIL_SEP` = "\\n\\n", so they open lines as well — which is why
+    this goes through the real row builder rather than a hand-glued string.
+
+    `<skill-hint>` cannot appear in the same block as the others: its branch is
+    `if show_skill_hint and not skills`, so the 11 badges exist only across the
+    two renders the renderer can actually produce. The union is the claim.
+    """
+    from app import prompt_builder as pb, prompt_layout
+    from app.memory_snapshot import memory_delta_note
+    from app.next_session_notes import NextSessionNote
+    from app.routers._messages_subliminal import _build_subliminal_entry
+    from app.sessions_io import AmbientPrefetchEntry, SessionTurn
+    from datetime import datetime
+
+    block = prefetch._format_context(
+        [(9.0, {"name": "tiny", "raw": "# Tiny\nNEVER do the thing.\n"})],
+        ["- **Lloyd** (score: 0.90): runs locally"],
+        vault_results=[{"title": "Note", "snippet": "a snippet", "score": 1.23,
+                        "file": "/home/alansrobotlab/obsidian/knowledge/note.md"}],
+        session_results=[{"created_at": "2026-10-30T08:00:00.123", "preview": "prev",
+                          "message_count": 3, "model": "gemini"}],
+        ambient_entries=[AmbientPrefetchEntry(source="autotriage", summary="Brief",
+                                              enqueued_at=1.0)],
+        backlog_refs=['- [Task #120] "simplify tts prompt" — done'],
+        notes=[NextSessionNote(source="nightly:reflection", summary="brief",
+                               content="body", enqueued_at=1.0, expires_at=2.0)])
+    spliced = (block.rsplit("</context>", 1)[0]
+               + "<ide_state>\n  visible_file: x.py\n</ide_state>\n</context>")
+    tail = prompt_layout.TAIL_SEP.join([
+        pb.build_session_state_block(
+            todos=[{"content": "do it", "status": "in_progress",
+                    "activeForm": "Doing it"}], plan=None, goal=None),
+        memory_delta_note("", "- [project] new line")])
+
+    turn = SessionTurn(turn_id="t471", source="user", payload={},
+                       enqueued_at=datetime.now())
+    row = _build_subliminal_entry(turn, spliced, "2026-11-01T16:00:00", tail=tail)
+    assert row["subliminal"]["sources"] == [
+        name for name, _ in _SUBLIMINAL_SOURCE_TAGS if name != "hint"], \
+        "the fully-populated block plus the ide_state splice plus the P1 tail lost " \
+        "a badge, or reordered them"
+
+    hint_row = _build_subliminal_entry(
+        turn, prefetch._format_context([], [], show_skill_hint=True),
+        "2026-11-01T16:00:00")
+    assert hint_row["subliminal"]["sources"] == ["hint"]
+
+    assert len(_SUBLIMINAL_SOURCE_TAGS) == 11
+    assert (set(row["subliminal"]["sources"])
+            | set(hint_row["subliminal"]["sources"])) == {
+        name for name, _ in _SUBLIMINAL_SOURCE_TAGS}, "a badge became unearnable"
+
+
+def test_the_quoted_tag_is_absent_from_the_row_mission_control_reads():
+    """#3471 clause 5: the fix is in the persisted row, not only the helper.
+
+    `web/src/components/ChatPanel.tsx` renders `msg.subliminal` — the strip a
+    human reads when they ask "what did the agent see" — so the badge has to be
+    gone from `subliminal.sources`, which is what `_build_subliminal_entry`
+    writes, not merely absent from a helper's return value.
+    """
+    from app.routers._messages_subliminal import _build_subliminal_entry
+    from app.sessions_io import SessionTurn
+    from datetime import datetime
+
+    prefix = ("<context>\n<vault-context>\n- the `<facts>` section is capped by "
+              "`FACT_RANK_CAP_SEED`\n</vault-context>\n<recent-sessions>\n- [x] hit\n"
+              "</recent-sessions>\n</context>")
+    row = _build_subliminal_entry(
+        SessionTurn(turn_id="t471b", source="user", payload={},
+                    enqueued_at=datetime.now()),
+        prefix, "2026-11-01T16:00:00")
+    assert row["subliminal"]["sources"] == ["vault", "sessions"]
+    assert "facts" not in row["subliminal"]["sources"]
+    assert row["subliminal"]["chars"] == len(prefix)
+
+
 def test_the_renderer_cannot_emit_a_section_the_tuple_does_not_name():
     """#3081 clause 3, second hop: `_format_context` emits only sections
     `prefetch.CONTEXT_SECTION_TAGS` names.
