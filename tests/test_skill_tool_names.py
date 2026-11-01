@@ -475,9 +475,9 @@ _ABSENCE_RECORD = re.compile(
 
 #: Where a generated document states its own subject rather than citing a
 #: location: the machine block
-#: `scripts/maintenance/referential_integrity.py:327` appends to the
+#: `scripts/maintenance/referential_integrity.py:466` appends to the
 #: referential-integrity report — `<!-- ri:dangling ["<citing> -> <target>", ...] -->`,
-#: the same block that script's own `_STATE_RE` (:236) reads back to diff one night's
+#: the same block that script's own `_STATE_RE` (:364) reads back to diff one night's
 #: report against the next. Read by `_dangling_subjects`. The report's entire content
 #: is a list of cites that do not resolve, so a target it enumerates is a path the
 #: document is ABOUT, not one it cites. Same polarity `_absence_record_sites` keys on
@@ -490,7 +490,8 @@ _RI_DANGLING = re.compile(r"<!--\s*ri:dangling\s*(\[.*?\])\s*-->", re.S)
 
 #: One line of that report's own enumeration: "- `<citing>:<line>` → `<target>` —
 #: <how it was checked>", emitted for both the Dangling and the Exempt sections
-#: (`referential_integrity.py:321` and `:325`). Read by `_dangling_subjects`, and only
+#: (`referential_integrity.py:454` and `:458`, plus the Swept section #3637 added at
+#: `:464`). Read by `_dangling_subjects`, and only
 #: in a document that also carries the block above — the block is what proves the
 #: bullet list is a generated sweep and not a hand-written doc full of arrows. The
 #: target is the right-hand side ONLY: the citing half is the other document's
@@ -992,8 +993,8 @@ def _dangling_targets(body: str) -> set[tuple[str, str]]:
     A document whose block is missing or unreadable gets nothing at all, so a
     hand-written note full of arrows changes nothing and a half-written report cannot
     exempt a path by being malformed: the block, emitted by
-    `scripts/maintenance/referential_integrity.py:327` and read back by that script's
-    own `_STATE_RE` (:236) to diff one night against the next, is what proves the bullet
+    `scripts/maintenance/referential_integrity.py:466` and read back by that script's
+    own `_STATE_RE` (:364) to diff one night against the next, is what proves the bullet
     list is a generated sweep rather than prose a reader follows. Inside such a document
     BOTH surfaces are its subject, because they are the same enumeration — the machine
     block carries only the day's dangling keys while the bullets also carry the Exempt
@@ -2607,7 +2608,7 @@ _PROSED_ROW = f"{_LEDGER_2354}::repo:{_PROSED_2354}"
 
 
 def _ledger_body(listed=(), prose=(), *, keys=None, bullets=True, raw_block=None):
-    """The shape `scripts/maintenance/referential_integrity.py:313-327` writes: a
+    """The shape `scripts/maintenance/referential_integrity.py:436-466` writes: a
     header naming the instrument that ran, one bullet per dangling cite, then the
     `ri:dangling` machine block that script appends for its own night-to-night diff.
 

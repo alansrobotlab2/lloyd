@@ -30,6 +30,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 _spec = importlib.util.spec_from_file_location(
@@ -662,3 +664,142 @@ def test_the_three_files_do_not_disagree_about_what_is_reportable():
         # would assert nothing about whether anyone else knows who reads the ledger.
         if not name.endswith(_JOB60):
             assert "#60" in text, f"{name} does not name #60 as the consumer"
+
+
+# ── #3637 clause 3: a swept run record is counted, and kept out of the delta ───
+
+#: The two run-record cites the resolver itself reported `dangling` in its 2026-10-30
+#: ledger: `memory/mental-models.md` lines 1171 and 1191, both past
+#: `RUN_RECORD_MAX_AGE_DAYS` with their directories still holding newer records. They
+#: are real rows, not a made-up shape, and their names are frozen because their age is
+#: the thing under test — a fixture that generated today's stamp would land inside the
+#: window and classify as nothing. The live population has moved since: this item's own
+#: vault edit took the `/74/` cite out of the file (clause 1), and `/83/run_83_20260919_115454.md`
+#: is the third row on that clock, still cited and still swept — `grep -o
+#: 'autonomy-runs/[0-9]*/run_[0-9_]*\.md' ~/obsidian/memory/mental-models.md` names the
+#: set, and only the `/53/` and `/83/` targets are absent from `~/lloyd-data`.
+_SWEPT_TARGETS = ["autonomy-runs/53/run_53_20260929_031704.md",
+                  "autonomy-runs/74/run_74_20260929_230732.md"]
+
+
+@pytest.fixture
+def swept_ledger_world(tmp_path):
+    """A corpus with two swept cites, one absence-prose exemption, one moved module and
+    one resolving cite, in a data root whose `autonomy-runs/<id>/` directories survive.
+    """
+    vault, home, repo = tmp_path / "vault", tmp_path / "home", tmp_path / "repo"
+    repo.mkdir()
+    (vault / "lloyd").mkdir(parents=True)
+    (vault / "memory").mkdir(parents=True)
+    (vault / "knowledge" / "software").mkdir(parents=True)
+    (vault / "knowledge" / "software" / "present.md").write_text("x\n", encoding="utf-8")
+    (vault / "lloyd" / "MEMORY.md").write_text(
+        "\n".join([
+            "# Memory",
+            "",
+            "- task 53 timed out: `autonomy-runs/53/run_53_20260929_031704.md`.",
+            "- task 74 timed out: `autonomy-runs/74/run_74_20260929_230732.md`.",
+            "- the old trim tool `scripts/gone_tool.py` no longer exists.",
+            "- the resolver used to be `scripts/maintenance/gone_module.py`.",
+            "- the probe lives at `knowledge/software/present.md`.",
+            "",
+        ]), encoding="utf-8")
+    (vault / "lloyd" / "USER.md").write_text("# User\n\n- nothing cited.\n", encoding="utf-8")
+    (vault / "memory" / "mental-models.md").write_text("\n- nothing cited.\n", encoding="utf-8")
+    for task in ("53", "74"):
+        keeps = home / "lloyd-data" / "autonomy-runs" / task
+        keeps.mkdir(parents=True)
+        (keeps / f"run_{task}_20261030_053511.md").write_text("kept\n", encoding="utf-8")
+    # `repo` is an empty stand-in, not this checkout: the two `scripts/**` cites here
+    # are supposed to be absent, and grading that against the live tree makes the
+    # `dangling: 1` / `exempt: 1` counts a fact about whatever is committed today.
+    return {"vault": vault, "repo": repo, "home": home}
+
+
+def _swept_night(ri, world, path, previous):
+    """Classify the fixture corpus with the resolver and render its ledger."""
+    records = ri.scan(vault=world["vault"], repo=world["repo"], home=world["home"])
+    path.write_text(ri.render_report(records, previous=previous), encoding="utf-8")
+    return records
+
+
+def test_a_swept_run_record_gets_its_own_count_line_outside_the_dangling_report(tmp_path,
+                                                                               swept_ledger_world):
+    """`swept` has to arrive as a fifth thing, not as a smaller `dangling`.
+
+    The ledger is the only surface #60 reads, so this is where the distinction either
+    survives or does not: the swept cites are counted on a line beside total cites /
+    dangling / exempt, appear under neither `## Dangling` nor `## Exempt`, and are
+    absent from the `ri:dangling` key blob that computes the delta. The absence-prose
+    exemption is in the same ledger and stays where it was — the new class is a
+    separate one, not the old exemption widened.
+    """
+    ri = _resolver_module()
+    path = tmp_path / "referential-integrity-latest.md"
+    _swept_night(ri, swept_ledger_world, path, previous=None)
+    text = path.read_text(encoding="utf-8")
+
+    counts = text.split("## Dangling", 1)[0]
+    assert re.search(r"^- total cites: 5$", counts, re.M), counts
+    assert re.search(r"^- dangling: 1$", counts, re.M), counts
+    assert re.search(r"^- exempt: 1$", counts, re.M), counts
+    assert re.search(r"^- swept run records: 2$", counts, re.M), counts
+
+    dangling_section = text.split("## Dangling", 1)[1].split("\n## ", 1)[0]
+    assert "gone_module.py" in dangling_section, dangling_section
+    for target in _SWEPT_TARGETS:
+        assert target not in dangling_section, f"{target} still reported as dangling"
+    exempt_section = text.split("## Exempt", 1)[1].split("\n## ", 1)[0]
+    assert "gone_tool.py" in exempt_section, exempt_section
+    for target in _SWEPT_TARGETS:
+        assert target not in exempt_section, f"{target} folded into the exemptions"
+    assert "run_53_20260929_031704" in text and "run_74_20260929_230732" in text, \
+        "a swept cite vanished from the ledger instead of being reported"
+
+
+def test_a_swept_cite_never_enters_the_newly_dangling_delta(tmp_path, swept_ledger_world):
+    """The delta is computed from the key blob, so exclusion there is the whole claim.
+
+    Night one has no swept rows in its blob; night two renders the same corpus with
+    the swept rows present and marked against night one. If a swept cite could reach
+    the delta it would print as a finding on the night the sweep took it — which is
+    exactly knowledge health report #60 on 2026-10-31, `NEWLY DANGLING: 1` over a
+    record nobody could repair.
+    """
+    ri = _resolver_module()
+    first = tmp_path / "night-one.md"
+    _swept_night(ri, swept_ledger_world, first, previous=None)
+    previous = ri.previous_dangling(first)
+    assert previous == {"lloyd/MEMORY.md -> scripts/maintenance/gone_module.py"}, previous
+
+    second = tmp_path / "referential-integrity-latest.md"
+    _swept_night(ri, swept_ledger_world, second, previous=previous)
+    text = second.read_text(encoding="utf-8")
+    assert re.search(r"^- newly dangling since the previous report: 0$", text, re.M), text
+    assert "**(new)**" not in text, text
+    assert ri.previous_dangling(second) == previous, "the blob gained a swept row"
+
+    got = khr.read_referential_ledger(second)
+    assert (got["state"], got["cites"], got["dangling"], got["exempt"], got["newly"]) == \
+        ("measured", 5, 1, 1, 0), got
+    assert "NEWLY DANGLING" not in _section(_report(second)), "a swept row surfaced as a finding"
+
+
+def test_the_swept_count_line_does_not_move_the_numbers_the_section_reads(tmp_path,
+                                                                          swept_ledger_world):
+    """A fifth count line must not be a sixth the consumer stumbles over.
+
+    #2821's reader treats an unparseable count as `ledger unreadable` and prints that
+    in words; a new line that shifted one of the four would turn every nightly section
+    into an error notice. This asserts the four the section reads are still the four it
+    gets, straight off the bytes that now also carry a swept line.
+    """
+    ri = _resolver_module()
+    path = tmp_path / "referential-integrity-latest.md"
+    _swept_night(ri, swept_ledger_world, path, previous=None)
+    got = khr.read_referential_ledger(path)
+    assert got["state"] == "measured", got
+    assert (got["cites"], got["dangling"], got["exempt"]) == (5, 1, 1), got
+    section = _section(_report(path))
+    assert _stated(section, "dangling") == "1"
+    assert _stated(section, "exempt") == "1"

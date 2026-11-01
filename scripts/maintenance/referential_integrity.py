@@ -18,7 +18,7 @@ Kinds and verdicts, one record per cite:
   roots    `~/` -> home; `/…` as is; otherwise repo root, vault root, data
            root (`~/lloyd-data`), the citing file's directory, and for a bare
            `name.py:N` the one tracked file of that name
-  verdict  resolves | dangling | exempt
+  verdict  resolves | dangling | swept | exempt
   how_checked names the check behind every verdict — a `resolves` without one
   would be a pass nobody can re-run.
 
@@ -33,6 +33,19 @@ its target is in `KNOWN_ABSENT` — the same shape as skill_lint's
 `KNOWN_ABSENT_SCRIPTS`: absent path -> why that is fine. Exempt cites do not
 count toward the exit code.
 
+A cite is `swept` when it names an autonomy run record (`autonomy-runs/<id>/
+run_*.md`) that the groundskeeper's retention sweep has already deleted: the file
+is missing, its own name-timestamp is past `RUN_RECORD_MAX_AGE_DAYS`, and the
+directory holding its newer records is still there. That is a third thing, not a
+fourth spelling of the two above — an exemption is a target that is *meant* to be
+gone, and `dangling` is a target a reader could still re-point. A swept record has
+no bytes to re-point at: `memory/mental-models.md` cited
+`autonomy-runs/74/run_74_20260929_230732.md` as a rule's evidence and the cite went
+dead on its own one night, arriving in knowledge health report #60 on 2026-10-31 as
+`NEWLY DANGLING: 1` beside cites a person can repair (#3637). Swept cites are
+reported and counted, but they leave the exit code and the newly-dangling delta,
+because both of those exist to say "a human can still fix this".
+
 Not covered yet: symbol, config-key and heading cites (a `path:N` beyond EOF is
 the only drift checked), and no nightly task runs it — arming one is a person's
 call (the item's human clause 2).
@@ -43,11 +56,16 @@ call (the item's human clause 2).
 
 Exit 0 clean, 1 at least one dangling cite, 2 an `--expect-dangling` target was
 not reported dangling (a self-check that has stopped catching its own fixture).
+`exempt` and `swept` cites never move the exit code — and narrowing it to
+`dangling` must not soften its purpose: a cite that is not a swept run record and
+does not resolve is still a red run, so classing swept records out can never mask a
+moved or renamed module (#3637 clause 4).
 """
 from __future__ import annotations
 
 import argparse
 import functools
+import importlib.util
 import json
 import re
 import subprocess
@@ -89,6 +107,102 @@ _CODE_EXTENSIONS = (".py", ".ts", ".tsx", ".js", ".mjs", ".sh", ".yaml", ".yml")
 # `/state` and `/v1/messages` share the leading slash and are not paths.
 _FS_ROOTS = ("/home/", "/tmp/", "/etc/", "/usr/", "/var/", "/opt/", "/run/", "/dev/")
 _TEMPLATE = re.compile(r"YYYY|MM-DD|\bDD\b|<|>|\{|\}|\*|\?|\$|\.\.\.|…|\bN\b|\bXXX|\bNNN")
+
+#: ── the retention-swept arm (#3637) ─────────────────────────────────────────────
+#: Where the horizon lives. `scripts/groundskeeper/retention-sweep.py` is the thing
+#: that deletes run records, so it is the only place the number may be read from; the
+#: file has a hyphen and cannot be imported by name, so it loads by path the way
+#: `scripts/maintenance/guard_vacuity.py` loads its own mutation targets.
+SWEEP_SOURCE = REPO_ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+
+#: A cite of an autonomy run record. `run_` is required, not any `.md`: the sweeper's
+#: own glob is `run_*.md`, and a cite whose name it would never have touched (a jsonl
+#: sidecar, a hand-written summary) has no sweep to blame.
+_RUN_RECORD_CITE = re.compile(r"(?:^|/)autonomy-runs/(\d{1,6})/(run_[^/]*\.md)$")
+
+#: The UTC instant the engine wrote into the name: `run_<task>_<YYYYMMDD>_<HHMMSS>.md`.
+#: Same clock the sweeper ages on — it reads a frontmatter stamp first and this file
+#: name's own digits are that stamp, so an age read off the name is the age the
+#: deletion was made at.
+_RUN_STAMP = re.compile(r"run_\d{1,6}_(\d{8}_\d{6})\.md$")
+
+
+@functools.lru_cache(maxsize=4)
+def _run_record_max_age_days(source: Path) -> int | None:
+    """`RUN_RECORD_MAX_AGE_DAYS` off the sweeper itself; `None` when it cannot be read.
+
+    Imported rather than restated: a copy of `30` here is a claim that goes false the
+    night the sweeper's window changes, which is the same failure #3637 is about — a
+    rule nobody checks against the rule it describes. `None` keeps every cite
+    `dangling`, so a load failure costs precision it had already, never a verdict the
+    resolver cannot support.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location("_ri_sweep_source", source)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        days = int(getattr(mod, "RUN_RECORD_MAX_AGE_DAYS"))
+    except (OSError, ValueError, TypeError, AttributeError, ImportError):
+        return None
+    return days if days > 0 else None
+
+
+def _source_name(source: Path) -> str:
+    """How `how_checked` names the sweeper: repo-relative when it is in the checkout,
+    the path as given otherwise — a verdict must not name a file it did not read.
+    """
+    try:
+        return str(source.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(source)
+
+
+def _record_age_days(name: str, now: datetime) -> float | None:
+    """How old the run record's own name says it is, in days; `None` when the name
+    carries no instant it could have been aged on — including digits that are not a
+    calendar date, which the sweeper could not age either.
+    """
+    m = _RUN_STAMP.search(name)
+    if m is None:
+        return None
+    try:
+        stamp = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (now - stamp).total_seconds() / 86400.0
+
+
+def _swept_run_record(target: str, missing: list[Path], *, now: datetime | None = None,
+                      source: Path | None = None) -> str | None:
+    """Why this missing cite is a record the retention sweep deleted; `None` if not.
+
+    Three conditions, each one the sweeper's behaviour and not a guess: the cite names
+    an `autonomy-runs/<id>/run_*.md` record, that record's name-timestamp is past the
+    horizon, and a candidate parent directory still exists — the sweep ages files out
+    of a task's directory and leaves the directory, so a directory that is itself gone
+    is some other loss (a wiped data root) and stays `dangling`. All three are needed:
+    inside the horizon the file went missing for a reason a reader can act on, and
+    without the parent it was not this sweep that did it.
+    """
+    m = _RUN_RECORD_CITE.search(target)
+    if m is None:
+        return None
+    days = _record_age_days(m.group(2), now or datetime.now(timezone.utc))
+    if days is None:
+        return None
+    horizon = _run_record_max_age_days(source or SWEEP_SOURCE)
+    if horizon is None or days < horizon:
+        return None
+    parent = next((p.parent for p in missing if p.parent.is_dir()), None)
+    if parent is None:
+        return None
+    return (f"retention sweep: {parent} still holds its newer records and the cited "
+            f"record's own name-timestamp is {int(days)} days old, past "
+            f"RUN_RECORD_MAX_AGE_DAYS = {horizon} read from "
+            f"{_source_name(source or SWEEP_SOURCE)} — deleted, not moved, so there is "
+            f"nothing here to re-point")
 
 
 def extract_target(span: str) -> tuple[str, int | None] | None:
@@ -159,9 +273,10 @@ def _candidates(target: str, citing: Path, *, vault: Path, repo: Path, home: Pat
 def resolve(target: str, line: int | None, citing: Path, *, vault: Path,
             repo: Path, home: Path, data: Path | None = None) -> tuple[str, str]:
     data = data or home / "lloyd-data"
+    candidates = _candidates(target, citing, vault=vault, repo=repo,
+                             home=home, data=data)
     tried = []
-    for root, path in _candidates(target, citing, vault=vault, repo=repo,
-                                  home=home, data=data):
+    for root, path in candidates:
         tried.append(root)
         if not path.exists():
             continue
@@ -186,6 +301,11 @@ def resolve(target: str, line: int | None, citing: Path, *, vault: Path,
         moved = data / target[len("~/lloyd/"):].rstrip("/")
         if moved.exists():
             how += f"; moved to {moved}"
+    # Last arm, so every check above still owns its own case: this one only fires for
+    # a cite the sweeper's own rule explains (#3637).
+    swept = _swept_run_record(target, [p for _, p in candidates])
+    if swept:
+        return "swept", swept
     return "dangling", how
 
 
@@ -309,6 +429,7 @@ def render_frontmatter(stamp: str, total: int, dangling: int) -> str:
 def render_report(records: list[dict], previous: set[str] | None) -> str:
     dangling = [r for r in records if r["verdict"] == "dangling"]
     exempt = [r for r in records if r["verdict"] == "exempt"]
+    swept = [r for r in records if r["verdict"] == "swept"]
     keys = sorted({_key(r) for r in dangling})
     new = keys if previous is None else [k for k in keys if k not in previous]
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -323,6 +444,7 @@ def render_report(records: list[dict], previous: set[str] | None) -> str:
         f"- total cites: {len(records)}",
         f"- dangling: {len(dangling)}",
         f"- exempt: {len(exempt)}",
+        f"- swept run records: {len(swept)}",
         f"- newly dangling since the previous report: "
         f"{len(new) if previous is not None else 'n/a (no previous report)'}",
         "",
@@ -335,6 +457,12 @@ def render_report(records: list[dict], previous: set[str] | None) -> str:
     lines += ["", "## Exempt", ""]
     lines += [f"- `{r['file']}:{r['line']}` → `{r['target']}` — {r['how_checked']}"
               for r in exempt] or ["- none"]
+    # Its own section, not a footnote on either of the two above: a swept cite is
+    # neither re-pointable (Dangling) nor absent on purpose (Exempt), and the row is
+    # the only surviving statement of what the rule cited before the window closed.
+    lines += ["", "## Swept by the retention sweep", ""]
+    lines += [f"- `{r['file']}:{r['line']}` → `{r['target']}` — {r['how_checked']}"
+              for r in swept] or ["- none"]
     lines += ["", f"<!-- ri:dangling {json.dumps(keys)} -->", ""]
     return "\n".join(lines)
 
@@ -367,7 +495,8 @@ def main(argv: list[str] | None = None) -> int:
                       f"  [{r['how_checked']}]")
         n = sum(r["verdict"] == "dangling" for r in records)
         print(f"{len(records)} cites, {n} dangling, "
-              f"{sum(r['verdict'] == 'exempt' for r in records)} exempt")
+              f"{sum(r['verdict'] == 'exempt' for r in records)} exempt, "
+              f"{sum(r['verdict'] == 'swept' for r in records)} swept run records")
 
     dangling_targets = {r["target"] for r in records if r["verdict"] == "dangling"}
     missed = [t for t in args.expect_dangling if t not in dangling_targets]
