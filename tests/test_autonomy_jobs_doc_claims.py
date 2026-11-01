@@ -210,6 +210,16 @@ WATCH_JOBS = {
     # `Reports only` beside #97 rather than with #94, whose ledger rewrite is a write.
     105: ("daily", "check_health_census", "check-health-census.jsonl",
           "retires, disables or weakens"),
+    # #3456: the four probes read off ~/obsidian/autonomy/106-published-maxima-probe-daily-record.md
+    # on 2026-11-01. `reads` is the recorder the task file exists to call — shipped in 621192c4 and
+    # never invoked outside a test until this cadence — `writes` the one journal that command
+    # appends unconditionally (there is no `--record` flag to pass, which is the difference from
+    # #101's entry above), and `prohibition` the bound the task file puts on its own verdict: a red
+    # row is the drift check working, and the job may report it but must not "re-publish" the
+    # paired-check constant it compared against — which is why the tier table has it in
+    # `Reports only` beside #101 rather than with #103, whose file write is a write.
+    106: ("daily", "published_maxima_probe.py", "published-maxima.jsonl",
+          "never re-publish"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -6756,3 +6766,117 @@ def test_the_24_gap_carries_the_shape_the_ordering_left_it():
     assert "still typed before #48 has seen their names" in para, (
         "the paragraph dropped the exposure that survives the reordering, and a reader "
         "would conclude the gap closed when only its width did")
+
+
+# ── #3456 — the published-maxima probe is rostered wherever its watch peers are ─
+#
+# `test_every_live_link_into_a_job_group_points_at_that_groups_current_slug` and
+# `test_every_live_task_file_is_named_once_in_each_membership_table` are the generic
+# reconcilers, and the second carries `@live_vault`, so the gate deselects it and a
+# job added to the vault stays invisible to the ladder. This node is the #3456 half
+# that the gate DOES run: it names the job id the cadence landed under and checks the
+# five places that id has to appear, each expectation derived from the document's own
+# heading and tables rather than from a typed roster — the design every node above
+# this line follows, and the only shape that catches the drift #1102, #2630/#2631,
+# #2813 and #2881 each paid a round for.
+
+_WATCH_SECTION = re.compile(r"^## Watch the machinery: (.+)$", re.M)
+_WATCH_COUNT = re.compile(r"\b(one|two|three|four|five|six|seven|eight|nine|ten|"
+                          r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+                          r"seventeen|eighteen|nineteen|twenty) ask a different question\b")
+_PROBE_ID = "#106"
+_PROBE_SCRIPT = "scripts/maintenance/published_maxima_probe.py"
+
+
+def test_the_published_maxima_probe_is_rostered_wherever_its_watch_peers_are():
+    """#3456 clause 5: job #106 named everywhere the group names its members.
+
+    The recorder shipped in `621192c4` (carried by `bc171709`) with no caller, so the
+    drift check existed only when someone remembered to run it; the cadence is a vault
+    task file, and #3456's clauses asked for the roster row under id #104. #104 has
+    since been taken twice — `104-artcraft-repo-sync.md` and
+    `104-scheduled-ceiling-flip-gate-daily-record.md` both carry `id: 104`, and
+    `_find_task_file` (`app/autonomy.py:166-173`) resolves an id by the FIRST glob hit
+    whose name starts `f"{task_id}-"` — and 105 went to the check-health census. So the
+    cadence is #106, and this node pins the id that actually exists rather than the one
+    the item was written against.
+    """
+    text = _text()
+    heading = _WATCH_SECTION.search(text)
+    assert heading, (
+        "§Watch the machinery no longer opens with a `## Watch the machinery:` id list, "
+        f"so {_PROBE_ID}'s membership is being read out of the wrong section")
+    ids = _ids(heading.group(1))
+    assert _PROBE_ID in ids, (
+        f"the §Watch the machinery heading lists {ids} — {_PROBE_ID} is not a member, so "
+        "the daily probe is a job with no roster entry and the `DOC_MEMBERSHIP` warning "
+        "stays filed against it")
+
+    # Site 1 + 2: the functions-table group row, and the anchor that shares its cell.
+    funcs = _table(FUNCTIONS_HEADER)
+    label = next((k for k in funcs if k.startswith("[Watch the machinery]")), None)
+    assert label, f"no Watch-the-machinery row in the function table; parsed {list(funcs)}"
+    assert funcs[label][0] == ids, (
+        f"the function table lists {funcs[label][0]} for the machinery group, its heading "
+        f"lists {ids} — adding a member to one and not the other is the symmetric-omission "
+        "blind spot that let #100/#101 through every node here")
+
+    # The heading's id list IS the anchor, so gaining a member rewrites every link
+    # into the section: two live sites name this group, and a stale one is invisible
+    # to a reader until they click it. Scoped to live prose exactly as the generic node
+    # scopes: §Review log keeps the short `…-96-97` slug its entry was written under,
+    # and rewriting dated prose would destroy the record that entry exists to keep.
+    want = _slug(heading.group(0)[3:])
+    anchors = re.findall(r"\]\(#(watch-the-machinery[^)]*)\)", _live_prose())
+    assert len(anchors) >= 2, (
+        f"only {len(anchors)} link(s) into the machinery group — positive control failed, "
+        "so the anchor set below proves nothing about the links a reader can follow")
+    assert set(anchors) == {want}, (
+        f"anchors point at {sorted(set(anchors) - {want})} while the heading's slug is "
+        f"{want!r}: the row reads correctly and every jump into it goes nowhere")
+
+    # Site 3: the write-authority tier table, and the count cell that row hand-types.
+    tiers = _table(TIERS_HEADER)
+    assert _PROBE_ID in tiers["Reports only"][0], (
+        f"{_PROBE_ID} is in no tier: the probe appends one journal row a day and takes no "
+        "action on what it finds, which is the Reports-only bound its own description "
+        f"states; listed ids are {tiers['Reports only'][0]}")
+    for name, (tids, count) in tiers.items():
+        if count is not None:
+            assert int(count) == len(tids), (
+                f"the tier row {name!r} states {count} jobs while listing {len(tids)} ids "
+                f"{tids} — the count is the number a reader trusts and never re-counts, so "
+                "a member admitted without it is a table that lies in the one way a "
+                "diff cannot show")
+
+    # Site 4: its own row, and what that row owes its reader.
+    section = text[heading.start():].split("\n## ", 1)[0]
+    rows = [ln for ln in section.splitlines()
+            if ln.startswith(f"| {_PROBE_ID} |")]
+    assert len(rows) == 1, (
+        f"§Watch the machinery holds {len(rows)} rows for {_PROBE_ID}; exactly one is owed, "
+        "and a second is how a roster gains two meanings for one id")
+    row = _flat(rows[0])
+    assert "daily" in row, f"the {_PROBE_ID} row does not state the `daily` cadence"
+    assert _PROBE_SCRIPT in row, (
+        f"the {_PROBE_ID} row does not name the recorder it runs ({_PROBE_SCRIPT}), so a "
+        "reader cannot tell which shipped script this cadence wires")
+    assert (ROOT / _PROBE_SCRIPT).exists(), (
+        f"the {_PROBE_ID} row names {_PROBE_SCRIPT}, which is not in this checkout — the "
+        "row points at a recorder that does not exist")
+    for token in ("published-maxima.jsonl", "never re-publish"):
+        assert token in row, (
+            f"the {_PROBE_ID} row never says {token!r}, so it omits one of the four things "
+            "a group row owes: the cadence, what it reads, what it leaves behind, and the "
+            "one thing it must not do")
+
+    # Site 5: the section's spelled count, derived from the heading and not typed.
+    spelled = _WATCH_COUNT.findall(section)
+    assert spelled, (
+        f"§Watch the machinery states no spelled member count, so {_PROBE_ID}'s admission "
+        "can outlive the number the prose gives — the count has to be in the section and "
+        "pinned here, not only in the heading")
+    assert {_WORDS[w.lower()] for w in spelled} == {len(ids)}, (
+        f"§Watch the machinery spells {sorted(set(spelled))} while its heading declares "
+        f"{len(ids)} ids {ids}; a member admitted and a count left stale is the move this "
+        "node exists to catch")

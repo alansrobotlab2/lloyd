@@ -39,8 +39,11 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 105 or beyond, with gaps where tasks were retired
-(2026-10-31). #105, the check-health census weekly record, is the newest — its
+ordered: ids run 24 through 106 or beyond, with gaps where tasks were retired
+(2026-11-01). #106, the published-maxima probe daily record, is the newest — its
+task file and its skill were written by #3456 on 2026-11-01 and named in both tables by
+the same commit, so the `DOC_MEMBERSHIP` warning it owed was closed before it was ever
+filed; #105, the check-health census weekly record, was the newest before it — its
 task file entered the directory at 01:05 on 2026-10-31 and the two tables below
 did not name it until #3633 that same day, which is how the `DOC_MEMBERSHIP`
 warning got filed; #104, the ArtCraft repo sync, was the newest before it, filed
@@ -79,7 +82,7 @@ promised.** The seven task files #91 nightly
 thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
-entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105).
+entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106).
 #99 supply-chain inventory regen has one in that same group — a watcher whose
 subject is the evidence the self-modification loop is judged on, and one that can
 file a backlog item, which is why it sits beside #92–#94 rather than with the six
@@ -122,7 +125,7 @@ other direction, for three.
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90-104) | #79 #81 #78 #80 · #90 · #104 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
-| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules — and report what it looks like |
+| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules, the published paired-check maxima — and report what it looks like |
 
 ### Write authority is the fault line
 
@@ -178,7 +181,7 @@ run reads what it wrote. The five rows, each with the count beside it:
 | Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 #103 | 27 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 #105 | 17 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 #105 #106 | 18 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -258,13 +261,13 @@ grouping those three jobs sat in one list and the alternation was invisible.
 29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
 parent, one each, and those ten are exactly the arrows drawn above. None of
 #91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together. Neither #100, #101, #102, #103, #104 nor #105 declares
+pair moved by seven together. Neither #100, #101, #102, #103, #104, #105 nor #106 declares
 a parent, so naming #102 (filed 2026-10-18), #103 (filed 2026-10-19), #104 (filed
-2026-10-29) and #105 (task file 2026-10-31) in the membership tables moves no arrow
+2026-10-29) and #105 (task file 2026-10-31) and #106 (task file 2026-11-01) in the membership tables move no arrow
 and no number in this paragraph — the 29 and the
 39 are the fleet the route parsed on the day
 the sentence was written, and a job entering these tables is not a job entering
-that count. #105 is the newest file and #104 and #103 sit beside it; #101 was the newest
+that count. #106 is the newest file and #105 and #104 sit beside it; #101 was the newest
 when that sentence was written, and #99 before it, and #98 before that — and #98 is still the only one
 that declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
 so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
@@ -1438,9 +1441,9 @@ name, and being one generation retired is not the same as being gone.
 
 ---
 
-## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105
+## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106
 
-Measure asks whether the fleet is working. These thirteen ask a different question —
+Measure asks whether the fleet is working. These fourteen ask a different question —
 whether the *machinery the fleet runs on* still looks like what its own
 documentation says — and they read it from outside: the engine's reasoning traces,
 the serving process's cache and KV window, other jobs' run records, the memory
@@ -1500,6 +1503,7 @@ tier. #3012 is where that reading was taken and where both rows were written.
 | #102 | weekly | Find-all arms run (`find-all-arms-run`, #2962): drive the retrieval-phrasing A/B to completion and publish its table | the engine lock `~/.local/state/lloyd-automod/primary.lock`, waited on with a bounded timeout instead of `flock -n`'s silent exit, plus the four gold counts it re-derives before spending any engine time | `eval/measurements/find-all-<UTC-date>/trials.jsonl` and the published `eval/measurements/find-all-<UTC-date>.md` — the only artefact in this group that lands inside the checkout, left uncommitted as every measurement under `eval/measurements/` is | report the run's result from the turn that launched it: the driver runs 1.5-2.5 h against the pool's 3570 s cap and is started with `setsid nohup` precisely so it outlives the session, so the table is read on the next fire and never promised by this one |
 | #103 | weekly | Code rules census (`code-rules-census-weekly`, #2995 from #2810): one whole-tree pass of the shipped content rules, through the one command the skill gives with nothing added to it | every tracked `.py` the census scans (1397 scanned of 1397 tracked on the 2026-10-19 dry run) against the rules in `scripts/automod/code_rules.toml`, with the allowlist, the suppression markers and each rule's own `covered X of Y` counted beside the hits — the denominators are the only thing a month-old row cannot reconstruct | one dated row `~/lloyd-data/_pipeline/code-rules-census/code-rules-census-<UTC-date>.json`, at most one per UTC day, **and one backlog item whenever the census has hits** — filing runs only after `write_row`'s `O_EXCL` claim is taken, so the day that writes the row is the day that files, and a run that cannot claim it files nothing and prints the filing the existing row already carries (#3257, which fixed the reverse order: `file_hits` used to run first and a same-day retry opened a second item for one signature) | pass `--no-file`, `--out`, `--tree`, `--rules-path` or `--backlog-dir`, each of which moves the measurement or the filing somewhere the next reader will not look; a second run in one UTC day is harmless now but never useful — it writes no row, so a signature the tree gained after the first run lands in no row and waits for the next pass |
 | #105 | daily | Check-health census weekly record (`check-health-census-weekly`, #3633) | the `--days 90 --record` command its own `command:` names, driving the `check_health_census` module over the automod ledger, its two monthly archives and the named eval arms, plus a caller census of the eval scripts naming their orphans | appends one dated row a day to `check-health-census.jsonl` outside the repo — a passes/fails-over-n and a mean/median rung duration per gate rung and per eval arm, and a vacuity verdict (alive / vacuous / not injectable) for every zero-fail check at or above its floor; report-only — it never retires, disables or weakens a check, which is the bound its own description states |
+| #106 | daily | Published-maxima probe daily record (`published-maxima-probe-daily-record`, #3456) | the ONE unflagged call `scripts/maintenance/published_maxima_probe.py` (#3037's recorder, shipped in `621192c4`, carried by `bc171709`, with no caller until now), which re-derives the era-D paired-check population from `promotions.jsonl` **and every `promotions-archive-*.jsonl.gz` beside it** and compares each arm's ledger max against the paired-check constant published in the repo | appends one dated row a day to `published-maxima.jsonl` outside the repo — `ts`, `n`, both medians, both maxima, `over_bound_count` and the two published constants — and its alarm is strict upward equality with **no margin**, because the 25 % #3304 asked for is the bug being refused: at publication `905.3` sat 21.97 % under the ledger's 1,035.3 and `401.3` 16.02 % under 477.9, so a 25 % rule reads GREEN across 283 ms of real drift; report-only — it never re-publishes a constant, never touches the promotion gate (the live guard stays `over_budget()` in `workers/sources/automod_regression.py`) and takes no action on a red row, because the row is appended before the alarm is evaluated so a non-zero exit *is* a landed row |
 
 #105 check-health census weekly record joined on 2026-10-31, and unlike every row above it
 it arrived because the two tables were *read* rather than because a job was filed: its

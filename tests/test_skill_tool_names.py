@@ -2912,3 +2912,112 @@ def test_the_live_dangling_report_loses_its_own_rows_and_nothing_else():
     assert ("repo", _INSTRUMENT_2354) not in swallowed, (
         "the rule is swallowing the report's own prose citation of the resolver, which "
         "is silencing the document rather than reading it as a subject")
+
+
+# ── #3456 — the published-maxima cadence: a prose contract against a CLI that
+#            takes no argument ────────────────────────────────────────────────
+
+_PROBE_TASK = "106-published-maxima-probe-daily-record.md"
+_PROBE_SKILL = "published-maxima-probe-daily-record"
+_PROBE_SCRIPT = "scripts/maintenance/published_maxima_probe.py"
+_PROBE_CMD = f"cd ~/lloyd && .venvs/lloyd/bin/python {_PROBE_SCRIPT}"
+_PROBE_JOURNAL = "/home/alansrobotlab/lloyd-data/_pipeline/automod/published-maxima.jsonl"
+_PROBE_SUMMARY = r"published-maxima: n=\d+ fresh_max=\S+ graded_max=\S+ alarm=(green|red)"
+
+
+def test_the_published_maxima_cadence_def_and_skill_say_what_the_recorder_does():
+    """#3456 clauses 1-4: the def's checks and the skill's steps, against the shipped code.
+
+    Deliberately unmarked, exactly like `test_no_active_skill_or_task_names_a_path_absent_from_the_checkout`
+    and the phantom-tool guard above — this file already reads the live vault, and the automod
+    gate deselects `live_vault` (`scripts/automod/gate.py:641`), so a marked node would pin
+    nothing the ladder can see. That is what round SM_20261101_132930's FIRST review spent: it
+    refused clauses 2, 3 and 4 as "verified by read, not by a test", naming the two vault-reading
+    nodes here as `@live_vault`-deselected and finding no gate-run node at all.
+
+    The seam is real: the recorder has been in the tree since `621192c4` (carried by `bc171709`)
+    with no caller, so nothing between the shipped script and the daily row is code — it is this
+    skill read by a worker on `agent-worker`. Hence every claim is derived from the script rather
+    than typed twice: a `--record` flag added later, or an append moved below the alarm, fails
+    here instead of silently in the schedule.
+
+    The file is `106-…`, not the `104-…` the item names: `104-artcraft-repo-sync.md` and
+    `104-scheduled-ceiling-flip-gate-daily-record.md` both declare `id: 104` and 105 is taken, and
+    `_find_task_file` (`app/autonomy.py:166-173`) resolves an id by the FIRST glob hit whose name
+    starts `f"{task_id}-"`. The uniqueness assertion below is the machine-readable half of that:
+    exactly one file may carry the id this cadence dispatches on.
+    """
+    import yaml  # module-scope would widen this file's import surface for one reader
+
+    task, skill = VAULT / "autonomy" / _PROBE_TASK, VAULT / "skills" / _PROBE_SKILL / "SKILL.md"
+    assert task.is_file(), f"no def at {task}: the daily cadence does not exist to dispatch"
+    assert skill.is_file(), f"no skill at {skill}: the worker would be told nothing about the call"
+    assert len(list((VAULT / "autonomy").glob("106-*.md"))) == 1, (
+        "more than one task file carries id 106, and `_find_task_file` answers an id from the "
+        "first glob hit — a second file makes every id-keyed route ambiguous")
+
+    fm = yaml.safe_load(task.read_text(encoding="utf-8").split("---\n")[1])
+    assert fm.get("frequency") == "daily", f"the def is {fm.get('frequency')!r}, not daily"
+    assert fm.get("agent_id") == "worker", f"the def runs on {fm.get('agent_id')!r}, not worker"
+    assert fm.get("status") == "up_next", (
+        f"the def is {fm.get('status')!r}: dispatch reads only `up_next` "
+        "(`app/autonomy.py:2559-2562`), so anything else is a cadence that never runs — and "
+        "this move is the first arm #724's create-rail forbids, permitted here by #3464's "
+        "`first_arm_allowed` and landed as its own commit")
+    assert fm.get("skill_name") == _PROBE_SKILL, (
+        f"the def points at skill {fm.get('skill_name')!r}, not the one this node grades")
+
+    checks = fm["acceptance"]["objective_checks"]
+    by_type: dict[str, list[str]] = {}
+    for c in checks:
+        by_type.setdefault(c["type"], []).append(str(c.get("value")))
+    assert _PROBE_SUMMARY in by_type.get("regex", []), (
+        f"no regex check pins the one summary line; graded regex values are "
+        f"{by_type.get('regex')}. The shape is derived, not preferred: the two maxima are "
+        "`round(x, 1)` floats printed bare (`1035.3`), so `\\d+` would refuse the real line")
+    assert "Bash" in by_type.get("tool_called", []), "Bash is not a required tool"
+    assert {"Edit", "Write"} <= set(by_type.get("tool_not_called", [])), (
+        f"a report-only cadence is not forbidden from editing: {by_type.get('tool_not_called')}")
+
+    src = (ROOT / _PROBE_SCRIPT).read_text(encoding="utf-8")
+    assert "add_argument" not in src, (
+        "the recorder gained an argparse option, so 'step 1 is ONE unmodified call' is no "
+        "longer the whole contract and this node is the place that has to be re-read")
+    assert "--record" not in src, (
+        "the recorder now takes --record; the skill says there is no such flag, and a worker "
+        "that trusts a stale skill would report the row as unwritten when it landed")
+    assert "--state-dir" in src, (
+        "the recorder no longer accepts --state-dir, so the skill's prohibition names a flag "
+        "that cannot be passed — a worker's 4-call budget spent on a hazard that is gone")
+    assert src.index("append_journal_row(root, row)") < src.index("problems = evaluate("), (
+        "the append moved below the alarm, and with it the ruling the skill states: a non-zero "
+        "exit would stop meaning 'row landed, alarm=red' and start meaning a broken run")
+    assert src.index("journal: appended 1 row to") < src.index("problems = evaluate("), (
+        "the receipt line is no longer printed before the alarm is evaluated, so exit 1 beside "
+        "it no longer proves a landed row")
+
+    body = skill.read_text(encoding="utf-8")
+    fences = re.findall(r"```[a-z]*\n(.*?)```", body, re.S)
+    probe_cmds = [ln.strip() for blk in fences for ln in blk.splitlines()
+                  if f"{_PROBE_SCRIPT}" in ln]
+    assert probe_cmds == [_PROBE_CMD], (
+        f"the skill shows {probe_cmds!r}; clause 2 is ONE command with nothing added — "
+        "a second form, or any flag on this one, is how the read moves off the live ledger")
+    # Scoped to the Do steps, not the whole file: `alarm=green` in literal form lives
+    # ONLY in the front-matter `description` (the steps compose `alarm=<green|red>`), so a
+    # token loop over `body` would stay green while the green half vanished from every
+    # instruction the worker actually reads — review advisory on `body` at attempt 2.
+    steps = body.split("---\n", 2)[-1]
+    for token in ("no `--record` flag", "always appends exactly one row",
+                  "journal: appended 1 row", "alarm=red", "alarm=<green|red>",
+                  "LLOYD_AUTOMOD_STATE", "era-D paired_check", "exactly one summary line",
+                  "--state-dir"):
+        assert token in steps, (
+            f"the skill's STEPS no longer say {token!r}, which clauses 2-4 depend on — a "
+            "claim carried only by the YAML `description` is metadata the worker never reads")
+    assert any("wc -l" in blk and "tail -1" in blk and "_pipeline/automod/published-maxima" in blk
+               or "wc -l" in blk and "tail -1" in blk and _PROBE_JOURNAL.split("/")[-1] in blk
+               for blk in fences), (
+        "no fenced step verifies the journal with `wc -l` plus `tail -1` on "
+        f"{_PROBE_JOURNAL}, which is clause 4's whole point: the exit code cannot tell a "
+        "landed red row from a run that died before the append")
