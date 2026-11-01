@@ -105,20 +105,26 @@ def below_floor(window: dict) -> tuple[bool, str]:
 
 
 def disagreement_rows(ids: list[int], moves: list[dict],
-                      expected: dict[int, tuple]) -> list[str]:
+                      sides: dict[int, tuple]) -> list[str]:
     """One body line per disagreeing item id, naming **both** sides.
 
-    The steward's side comes from its own parsed `moves` (what it asked for that
-    id), and the machine's side from `expected` — `desired_statuses`'
-    `{id: (status, why[, needs_human])}`, the same object the tick already
-    compared against at `board_steward.py:769`. Both halves are therefore in
-    scope at the trigger site, which is why this needs no new persistence.
+    The steward's side comes from its own parsed `moves` (what it asked for that id);
+    the machine's side from `sides` — `{id: (status, why[, needs_human])}` **as the
+    disagreeing tick recorded it**, which is `agreement()["disagree_sides"]` for this
+    tick and `_window_sides`' rebuild of earlier ticks' for the ids a merge names
+    (#3677). It is deliberately not a fresh `desired_statuses` read: the old call at
+    `_widen` answered abstention for ids whose own tick had scored a conflict, and
+    `agreement()` files an id as `disagree` only when the machine HAD an opinion
+    (`workers/sources/board_steward.py:920`, abstention being the separate `no_opinion`
+    bucket at `:921`) — so every one of those `(the machine abstains)` rows was a
+    sentence the classifier had already ruled impossible. #3677 counted 12 of its own 22
+    rows that way, and 2 more printed as agreement inside the disagreement list.
 
-    "No new persistence" is not "none of this was kept": the same tick's
-    `board_steward` ledger event already carries `moves`, each with its `item_id`,
-    `status` and the `note` the steward wrote for it, which is where a later reader
-    goes for the proposal and its reason. What the store genuinely never kept is the
-    model's raw reply — `response_json` is empty in every board-steward `runs` row.
+    "Recorded at the tick" is not "kept by luck": the same tick's `board_steward` ledger
+    event carries `moves`, each with its `item_id`, `status` and the `note` the steward
+    wrote, and now carries the machine's half in `agreement.disagree_sides`. What the
+    store genuinely never kept is the model's raw reply — `response_json` is empty in
+    every board-steward `runs` row.
     """
     proposed: dict[int, str] = {}
     for m in moves or []:
@@ -127,15 +133,51 @@ def disagreement_rows(ids: list[int], moves: list[dict],
             proposed[iid] = str(m["status"])
     out: list[str] = []
     for iid in list(ids)[:ROWS_MAX]:
-        want = expected.get(iid) if expected else None
-        machine = str(want[0]) if want else "(the machine abstains)"
+        want = sides.get(iid) if sides else None
+        if want is None:
+            # A tick predating `disagree_sides`. The honest reading is that the artifact
+            # does not say, which is not the same claim as "the machine abstained" — and
+            # an id this filer added from an old event may not have been a disagreement
+            # at all, so abstention here would be a guess wearing the shape of a fact.
+            out.append(f"- #{iid}: steward proposed `{proposed.get(iid, '(not in its moves)')}`"
+                       f"; the state machine's side for this tick was **not recorded**")
+            continue
+        machine = str(want[0])
         why = ""
-        if want and len(want) > 1 and want[1]:
+        if len(want) > 1 and want[1]:
             why = f" — {want[1]}"
-        if want and len(want) > 2 and want[2]:
+        if len(want) > 2 and want[2]:
             why += " (needs a human)"
         out.append(f"- #{iid}: steward proposed `{proposed.get(iid, '(not in its moves)')}`"
                    f"; the state machine wants `{machine}`{why}")
+    return out
+
+
+#: The phrase `disagreement_rows` writes when a tick recorded a machine side. Recognised
+#: by its exact text on purpose: the count that uses it is a claim about what the FILED
+#: ROWS SAY, so it must be the same string the renderer emits and nothing else.
+_RECORDED_SIDE = "; the state machine wants "
+
+
+def _recorded_row_ids(body: str) -> set[int]:
+    """Which ids a filed body already prints a recorded machine side for.
+
+    The merge needs this because the merged Coverage figure has to be counted over the
+    rows the body will hold, and half of those rows were written by an earlier filing
+    whose `expected` is long gone (#3680, the sentence the review rung refused #3677
+    for). The store is not consulted: an id's row in the file is the record of what that
+    filing knew, and re-deriving it now is the exact mistake clause 2 retired.
+
+    Only `_RECORDED_SIDE` counts. A legacy `(the machine abstains)` row and a
+    `**not recorded**` row both carry nothing a ruler can rule against — the first was a
+    filing-time recompute the tick never scored, the second says so out loud — so neither
+    may inflate the covered count.
+    """
+    out: set[int] = set()
+    for line in (body or "").splitlines():
+        m = _ROW_RE.match(line)
+        if m and _RECORDED_SIDE in line:
+            out.add(int(m.group(1)))
     return out
 
 
@@ -186,6 +228,60 @@ def _window_moves(window: dict, ledger: Path) -> dict[int, str]:
     return proposed
 
 
+def _window_sides(window: dict, ledger: Path) -> dict[int, tuple[str, str]]:
+    """Every machine side a window's ticks recorded, OLDEST tick winning.
+
+    The mirror of :func:`_window_moves`, and the reason the record goes into the
+    `board_steward` event rather than only into the tick's own arguments: a merge names
+    ids from earlier ticks, and the side a row must print is the one *that* tick scored
+    against, not the one a later read of the board happens to give.
+    `agreement()["disagree_sides"]` writes these records — dicts of JSON scalars — so an
+    id that comes back through `read_events` as the string `"3456"` is coerced here.
+
+    Forward order with `setdefault`, which is the OPPOSITE of `_window_moves`: a proposal
+    is the steward's latest word about an id, while a recorded side belongs to the one
+    tick that scored it, and letting a later tick overwrite an earlier one would silently
+    re-date a row that is already filed. An id the machine abstained about is never in
+    `disagree_sides` at all, so every entry here is a side it actually held — which is
+    what lets a row print one as fact instead of asserting abstention.
+
+    The read is the same cheap one `_window_moves` uses, including its failure mode: a
+    missing ledger or a bug in this function lands in `except`, warns, and returns an
+    empty record, which renders rows as **not recorded** rather than as a guess.
+    """
+    out: dict[int, tuple[str, str]] = {}
+    since = str(window.get("window_since") or "")
+    if not since:
+        return out
+    try:
+        from scripts.automod import state as S
+        events = S.read_events(ledger, 0)   # limit=0 is the whole file
+    except Exception:
+        logger.warning("disagreement widening read no machine sides from %s", ledger,
+                       exc_info=True)
+        return out
+    for ev in events:
+        if ev.get("event") != "board_steward":
+            continue
+        if str(ev.get("created_at") or "") < since:
+            continue            # rows are appended in order, but this window is the bound
+        agree = ev.get("agreement")
+        if not isinstance(agree, dict):
+            continue
+        for rec in agree.get("disagree_sides") or []:
+            if not isinstance(rec, dict):
+                continue
+            iid = rec.get("item_id")
+            try:
+                iid = int(iid) if not isinstance(iid, bool) else None
+            except (TypeError, ValueError):
+                continue
+            if iid is None or not rec.get("status"):
+                continue
+            out.setdefault(iid, (str(rec["status"]), str(rec.get("why") or "")))
+    return out
+
+
 def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
            window: dict, ledger: Path) -> tuple[list[int], list[dict], dict, dict]:
     """The rows a ruling can actually be made on: the window's, not the tick's.
@@ -198,6 +294,18 @@ def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
 
     `stats` carries what the widening could NOT do, for the Coverage bullet: how many named
     ids have no proposal in any ledger move, and how many ids the row cap dropped.
+
+    The machine's half used to be filled for those `missing` ids by re-running
+    `desired_statuses` over that ledger HERE, at filing time, and that is what made a row
+    lie (#3677). `agreement()` puts an id in `disagree` only when the machine had an
+    opinion at that tick (`workers/sources/board_steward.py:920`; an id absent from the
+    table lands in `no_opinion` at `:921`), yet the re-run answered abstention for 12 of
+    the 22 ids the window named and answered "the same status the steward asked for" for
+    2 more — 12 abstentions and 2 agreements inside rows the classifier had already
+    ruled conflicts. `desired_statuses` is the board's live state read at a later
+    instant, so it can only ever speak about that instant; the side a row must print is
+    the one the disagreeing tick scored, which is what `_window_sides` recovers from
+    that tick's own event.
     """
     tick_ids = [int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)]
     win_ids = [i for i in (window.get("disagree_ids") or []) if isinstance(i, int)]
@@ -216,13 +324,10 @@ def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
     wide_expected = dict(expected or {})
     missing = [i for i in ids if i not in wide_expected]
     if missing:
-        try:
-            wanted = _backlog().desired_statuses(Path(ledger))
-        except Exception:
-            wanted = {}
+        recorded = _window_sides(window, ledger)
         for iid in missing:
-            if iid in wanted:
-                wide_expected[iid] = wanted[iid]
+            if iid in recorded:
+                wide_expected[iid] = recorded[iid]
 
     rows = [{"item_id": i, "status": s} for i, s in wide_moves.items() if s]
     return ids, rows, wide_expected
@@ -272,8 +377,10 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     # the tick that happened to trip the trigger while the figure beside it (`judged`,
     # `rate`) was the seven-day one, so a ruler was handed 1 of 25 rows and told to judge a
     # week (#3651). `agree`/`moves`/`expected` in scope here are this tick's board subset
-    # only; `_widen` pulls the rest from the same two places the tick itself consulted —
-    # the window's `board_steward` ledger moves and `desired_statuses` over the same ledger.
+    # only; `_widen` pulls the rest from the store the tick wrote to: the window's
+    # `board_steward` ledger moves for the steward's half, and the same events' recorded
+    # machine sides for the other. NOT `desired_statuses` — that is the board's state NOW,
+    # and a row about a tick cannot be answered from a later instant (#3677).
     # This reads; it does not write, so widening cannot settle a disagreement by moving it.
     from scripts.automod import state as S
     ids, wide_moves, wide_expected = _widen(
@@ -281,6 +388,13 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     if not ids:
         return None
     stats = row_stats(ids, wide_moves, window)
+    # Of the rows this filing actually WRITES, how many carry the machine's side as the
+    # disagreeing tick recorded it. Ruleability needs both halves of a disagreement, and
+    # `unrecoverable` counts only the steward's: #3677's Coverage bullet claimed "every
+    # row here can be ruled from the item alone" on the strength of proposals alone,
+    # while 12 of its 22 rows had no machine side to rule against.
+    stats["recorded"] = sum(1 for i in ids[:min(len(ids), ROWS_MAX)]
+                            if i in wide_expected)
 
     B = _backlog()
     openers = [it for it in B.open_items((BOARD,), backlog_dir=backlog_dir)
@@ -298,14 +412,20 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
 
     stamp = _stamp()
     if openers:
+        # `recorded` is withheld: it counts `ids`, and the merge publishes it beside a
+        # denominator counting the whole file. `_merge` derives the merged figure from
+        # the rows the body will hold (#3680); the create path keeps this one, whose
+        # population and denominator are the same list by construction.
         return _merge(openers[0], B, ids, wide_moves, wide_expected, window, stamp,
-                      backlog_dir=backlog_dir, ledger=ledger, **stats)
+                      backlog_dir=backlog_dir, ledger=ledger,
+                      **{k: v for k, v in stats.items() if k != "recorded"})
     return _create(B, ids, wide_moves, wide_expected, window, stamp,
                    backlog_dir=backlog_dir, ledger=ledger, **stats)
 
 
 def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: int = 0,
-              dropped: int = 0, distinct: int | None = None, unruled: int = 0) -> str:
+              dropped: int = 0, distinct: int | None = None, unruled: int = 0,
+              recorded: int | None = None) -> str:
     """What these rows do NOT cover, in numbers.
 
     Before #3651 the ids were the CURRENT tick's (`file_or_update` took them from
@@ -350,9 +470,22 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
                   f"steward side is unrecoverable from the store and a ruling on those ids "
                   f"needs the tick's session, not this item.\n")
     else:
-        extra += ("- 0 of the named ids are unrecoverable: every one carries the status a "
-                  "`board_steward` event in this window proposed, so every row here can be "
-                  "ruled from the item alone.\n")
+        extra += ("- 0 of the named ids are unrecoverable: every one carries the status "
+                  "a `board_steward` event in this window proposed" +
+                  (" for its steward half" if recorded is not None else
+                   ", so every row here can be ruled from the item alone") + ".\n")
+    if recorded is not None:
+        # The other half of the same claim, named as its own number because the two are
+        # not the same count: an id can have its proposal in the window and still have no
+        # recorded machine side, which is the one state a row cannot be ruled in.
+        shortfall = int(named) - int(recorded)
+        extra += (f"- {int(recorded)} of the {int(named)} named rows carry the machine's "
+                  "side as its own tick recorded it" +
+                  (f", and {shortfall} do not: those ticks predate the record, so their "
+                   "rows say **not recorded** and only the steward's half of them can be "
+                   "ruled from the item." if shortfall else
+                   ". Both halves of every row are in the artifact, so every row here can "
+                   "be ruled from the item alone.") + "\n")
     if dropped:
         extra += (f"- **the rows are capped at {ROWS_MAX}, so {int(named)} of "
                   f"{int(named) + int(dropped)} named ids are written and {int(dropped)} "
@@ -370,7 +503,8 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
 def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple],
             window: dict, stamp: str, *, backlog_dir: Path | None,
             ledger: Path | None, unrecoverable: int = 0, dropped: int = 0,
-            distinct: int | None = None, unruled: int = 0) -> dict:
+            distinct: int | None = None, unruled: int = 0,
+            recorded: int | None = None) -> dict:
     rows = disagreement_rows(ids, moves, expected)
     body = (
         f"# {NAME}\n\n"
@@ -386,13 +520,15 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"(`scripts/automod/backlog.py`) wants, with its reason. Both sides outlive the "
         f"tick elsewhere: the proposal itself is in the ledger's `board_steward` event "
         f"for that tick, whose `moves` list carries the `item_id`, the `status` and the "
-        f"`note` the steward wrote for it, and the machine's side recomputes from "
-        f"`desired_statuses`. What is stored nowhere is the model's raw reply — "
+        f"`note` the steward wrote for it, and the machine's side is in that same event's "
+        f"`agreement.disagree_sides`, recorded by the tick that scored it (#3677). What "
+        f"is stored nowhere is the model's raw reply — "
         f"`response_json` is empty in every board-steward `runs` row (`source` is "
         f"hyphenated: `board_steward` matches no runs row at all).\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
         + _coverage(min(len(ids), ROWS_MAX), window, unrecoverable=unrecoverable,
-                    dropped=dropped, distinct=distinct, unruled=unruled) +
+                    dropped=dropped, distinct=distinct, unruled=unruled,
+                    recorded=recorded) +
         f"## What to decide\n\n"
         f"Per item, rule which side is wrong:\n\n"
         f"- the **steward's** prompt/grounding (`workers/sources/board_steward.py`) — then "
@@ -442,8 +578,17 @@ def _strip_coverage(body: str) -> str:
 def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            expected: dict[int, tuple], window: dict, stamp: str, *,
            backlog_dir: Path | None, ledger: Path | None, unrecoverable: int = 0,
-           dropped: int = 0, distinct: int | None = None, unruled: int = 0) -> dict | None:
-    """Add the ids this item does not name yet, into the same file."""
+           dropped: int = 0, distinct: int | None = None,
+           unruled: int = 0) -> dict | None:
+    """Add the ids this item does not name yet, into the same file.
+
+    `recorded` is deliberately NOT a parameter: the caller's figure counts the ids THIS
+    filing widened, and a merge publishes it beside a denominator that counts the whole
+    file. #3680 refused #3677's round on that mismatch — the bullet wrote "0 of the 6
+    named rows carry the machine's side" over a body whose five earlier rows each print
+    one — so the count is recomputed here, over `pop`, the same list the denominator is
+    measured from.
+    """
     try:
         text = Path(item.path).read_text(encoding="utf-8")
     except OSError:
@@ -455,17 +600,37 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
         logger.debug("disagreement item #%s already names %s", item.id, ids)
         return None
     rows = disagreement_rows(fresh, moves, expected)
-    # Coverage moves with the merge: `seen | fresh` is what the file names the
-    # moment this write lands, and the window's count is the denominator. Both
-    # sides of the subtraction moved, so the filed body's line is dropped rather
-    # than left beside this one — see `_strip_coverage`.
-    new_body = (_strip_coverage(body or "").rstrip("\n") + "\n\n"
-                f"### Added {stamp} (window `judged={window.get('judged')}`, "
+    # The population the merged body names, in the order it names it: the rows already
+    # filed, then this filing's. `len(pop) == len(seen | set(fresh))`, so the denominator
+    # is the number it always was — what changed is that the numerator is now measured
+    # over this same list (#3680).
+    pop: list[int] = []
+    for m in _ROW_RE.findall(body or ""):
+        if (iid := int(m)) not in pop:
+            pop.append(iid)
+    pop += [i for i in fresh if i not in pop]
+    named = min(len(pop), ROWS_MAX)
+    carry = _recorded_row_ids(body)
+    # Two disjoint sums because the two halves have two different sources of truth: a row
+    # already in the body is never re-rendered, so what it PRINTS is all the artifact will
+    # ever say about its side; a fresh row's side is `expected`, which is what renders it.
+    recorded = (sum(1 for i in pop[:named] if i in seen and i in carry)
+                + sum(1 for i in pop[:named] if i not in seen and i in expected))
+    # Coverage moves with the merge: `pop` is what the file names the moment this write
+    # lands, and the window's count is the denominator. Both sides of the subtraction
+    # moved, so the filed body's line is dropped rather than left beside this one —
+    # see `_strip_coverage`.
+    # Handed to `_write_body` UNCOMPOSED, because `body` here is what the file said
+    # BEFORE the widening — seconds of ledger reads ago — and this is the one place a
+    # human's ruling on a disagreement is ever rewritten. Composing it here is what made
+    # the "kept their text" claim false: `_write_body` re-reads under the lock and appends
+    # to THAT read instead. #3677.
+    appended = (f"### Added {stamp} (window `judged={window.get('judged')}`, "
                 f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n\n"
-                + _coverage(min(len(seen | set(fresh)), ROWS_MAX), window, merged=True,
+                + _coverage(named, window, merged=True,
                             unrecoverable=unrecoverable, dropped=dropped,
-                            distinct=distinct, unruled=unruled))
-    _write_body(Path(item.path), fm, new_body, B,
+                            distinct=distinct, unruled=unruled, recorded=recorded))
+    _write_body(Path(item.path), fm, appended, B,
                 activity=f"board-steward disagreement: {len(fresh)} row(s) added")
     _event(ledger, item_id=item.id, action="merged", ids=ids, window=window,
            stamp=stamp, new_ids=fresh)
@@ -473,8 +638,9 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
             "ids": ids, "new_ids": fresh, "rows": len(rows)}
 
 
-def _write_body(path: Path, fm: dict, body: str, B: Any, *, activity: str) -> None:
-    """Move the body and the front matter together, under one lock, one write.
+def _write_body(path: Path, fm: dict, appended: str, B: Any, *,
+                activity: str) -> None:
+    """Append this filing's text to the body AS THE FILE SAYS UNDER ITS OWN LOCK.
 
     `update_frontmatter` is the public writer but it re-writes the body it just
     read, so a caller that changed the body cannot use it; the alternative —
@@ -484,6 +650,17 @@ def _write_body(path: Path, fm: dict, body: str, B: Any, *, activity: str) -> No
     while we were computing is kept, not overwritten), refresh `updated`, append
     the activity line, write atomically. It never touches `status`, which is the
     invariant every backlog writer keeps.
+
+    The parameter is therefore the text to APPEND, not the body to write (#3677).
+    `commit_lock` is reentrant, so it excludes every OTHER writer and not the
+    caller's own earlier read: `_merge` read the body before widening it, and the
+    gap to this write is the whole widening — `_window_moves` over an 18,479-row
+    ledger plus the window read. A ruling posted inside that gap used to be replaced
+    by `_merge`'s stale string while the activity log claimed it was kept, and what
+    it erased was a judgment about which side of a disagreement was wrong — the one
+    thing on the item that cannot be regenerated. The stale `## Coverage` section is
+    stripped from the fresh read here, because it is this worker's own section to
+    replace and nobody else's, and `appended` carries the current one.
     """
     from app.atomic_io import commit_lock
     from app import backlog_write as BW
@@ -491,7 +668,7 @@ def _write_body(path: Path, fm: dict, body: str, B: Any, *, activity: str) -> No
 
     with commit_lock(path) as lock:
         current = path.read_text(encoding="utf-8")
-        fm_now, _body_now = B._split_frontmatter(current)
+        fm_now, body_now = B._split_frontmatter(current)
         # A front matter that will not parse is not rewritten by this reader:
         # `update_frontmatter` refuses the same case through `_unparsed_guard`
         # rather than write a file whose front matter it could not read, and a
@@ -507,12 +684,15 @@ def _write_body(path: Path, fm: dict, body: str, B: Any, *, activity: str) -> No
         log.append(f"**{stamp}** — {activity}")
         fm2["activity_log"] = log
         fm2["updated"] = stamp
-        # Whatever the file holds NOW is what our rows go on top of. The id-dedup
-        # ran against the read taken before the lock, and this lock excludes every
-        # other writer of it, so the only party that can have moved the body in
-        # between is a person editing the item — and for them, keeping their text
-        # and adding the rows is the safe answer.
-        BW.write_item(path, fm2, body, lock=lock)
+        # Whatever the file holds NOW is what our rows go on top of — read here, under
+        # the lock, not carried in from before it. The id-dedup ran against the earlier
+        # read, and this lock excludes every other writer of the file, so the only party
+        # that can have moved the body in between is a person editing the item, and for
+        # them keeping their text and adding the rows is the safe answer. Composing the
+        # two above this function is what made that sentence a comment and not a
+        # behaviour (#3677); the composition is here now.
+        BW.write_item(path, fm2, _strip_coverage(body_now).rstrip("\n") + "\n\n"
+                      + appended, lock=lock)
 
 
 def _file_quietly(agree: dict, moves: list[dict], expected: dict[int, tuple],

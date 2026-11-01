@@ -906,6 +906,16 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     separate because they mean different things: moves that agree, moves the
     machine would not make (the steward's own opinion — a human reads these),
     and machine moves the steward did not propose (misses).
+
+    `disagree_sides` records, for each id in `disagree`, the status `expected` wanted
+    and the reason it wanted it, so a row written later can name the machine's side as
+    the disagreeing tick held it (#3677). It is a REPORT field and stays one: built
+    after `judged` and `rate`, feeding neither, and the machine's target status stays out
+    of the prompt and the board line — the rate IS the measurement of the steward's
+    judgement, and rendering the answer into what the model reads would move the
+    instrument that decides the flip. #3547 rules the same rail for the board line;
+    `test_the_recorded_side_is_not_rendered_into_the_prompt_or_the_board_line` is what
+    holds the record to it now that this block carries the answer at all.
     """
     proposed = {m["item_id"]: m["status"] for m in moves}
     agree = [i for i, s in proposed.items() if i in expected and expected[i][0] == s]
@@ -918,6 +928,26 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     # stranded landings parked `in_progress`; 55789b6 removed that branch —
     # `in_progress` now means a round is in flight or under observation.)
     disagree = [i for i, s in proposed.items() if i in expected and expected[i][0] != s]
+    # The machine's side of each disagreement, AS THIS TICK SCORED IT, into the block that
+    # goes to the `board_steward` ledger event and to the run's `meta_json`. `disagree` is
+    # a list of ids, and an id is only half a disagreement: the filer that turns a row into
+    # something a person can rule needs the status `expected` wanted and the reason it
+    # wanted it, and `expected` is alive only for the length of this call —
+    # `desired_statuses` reads the board's LIVE state, so re-running it when the report is
+    # written answers about that later instant and not about the tick. #3677: 12 of the 22
+    # rows on that item printed `(the machine abstains)`, a sentence the two lines above
+    # make impossible for an id they put in `disagree`, and 2 more printed the machine
+    # agreeing with the steward.
+    #
+    # A list of dicts, not `{id: (status, why)}`: this block is `json.dumps`-ed into the
+    # ledger line and read back, and a JSON object keyed by an int id comes back keyed by
+    # the STRING "3456" — a lookup that misses silently and reads as "no record". The id is
+    # therefore a VALUE here. The record is keyed by `sorted(disagree)`, the same order the
+    # id list is published in, so the two line up row for row in the ledger and in
+    # `meta_json` — a reader comparing them index by index compares like with like.
+    disagree_sides = [{"item_id": i, "status": str(expected[i][0]),
+                       "why": str(expected[i][1]) if len(expected[i]) > 1 else ""}
+                      for i in sorted(disagree)]
     no_opinion = [i for i, s in proposed.items() if i not in expected]
     missed = [i for i, want in expected.items()
               if current.get(i) != want[0] and proposed.get(i) != want[0]]
@@ -932,6 +962,9 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     # `agree` on an item already at its wanted status is not a machine move).
     return {"agree": sorted(agree), "disagree": sorted(disagree),
             "no_opinion": sorted(no_opinion), "missed": sorted(missed),
+            # beside the id lists, so the machine's half of a disagreement reaches the
+            # `board_steward` event and `meta_json` with the tick's own numbers (#3677)
+            "disagree_sides": disagree_sides,
             "machine_moves": len(machine_moves), "proposed": len(proposed),
             "judged": len(judged),
             "rate": (len(agree) / len(judged)) if judged else None}

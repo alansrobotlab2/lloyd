@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.automod import backlog as B
+from workers import board_disagreement as D
 from workers.sources import board_steward as W
 
 
@@ -2944,38 +2945,491 @@ def test_the_architecture_page_says_the_ruling_can_be_answered_from_the_store():
         "of the 1,123 board-steward runs rows on this box carry a non-empty one")
 
 
-def test_widening_the_reader_still_writes_no_item_status(board, tmp_path,
-                                                                     monkeypatch):
-    """Clause 5. Reading the window puts ids in front of the filing that this tick never
-    proposed anything about — including an item the machine wants `done`. Filing is a
-    report on the disagreement, so the window's extra rows must not turn it into a
-    settlement: after a widened filing every item on the board is byte-for-byte the status
-    it had, and the only file written is the item being filed."""
-    from workers.board_disagreement import file_or_update
+async def test_the_reader_never_consults_the_machine_at_filing_time(board, tmp_path,
+                                                                   monkeypatch):
+    """The reader is a REPORTER, and now provably cannot consult the machine at all.
 
-    _ten_item_board(board)
-    led = tmp_path / "ledger.jsonl"
-    # #3 is an id THIS tick never saw; the machine wants it `done`, and the steward's
-    # older tick wanted `up_next`. The sharpest case for "the reader fixes it instead".
-    _steward_event(led, [3], status="up_next")
-    monkey_expected = {7: ("up_next", "confirmed with acceptance"),
-                       3: ("done", "gate passed and landed")}
-    monkeypatch.setattr(B, "desired_statuses", lambda ledger: monkey_expected)
+    `desired_statuses` computes the machine's moves; applying them is what a round does.
+    This node used to prove the READER only CALLS `desired_statuses` and never
+    `apply_moves`, and stubbed it to observe the call (#3602). #3677 retired that read:
+    `desired_statuses` is the board's LIVE state at filing time, and answering "what does
+    the machine want" about a disagreement scored up to seven days earlier produced 12
+    rows on that item printing `(the machine abstains)` — a sentence `agreement()` makes
+    impossible for an id it filed as `disagree` — plus 2 printing the machine agreeing
+    with the steward. A row's machine half now comes from the disagreeing tick's own
+    record, so the live table is not an input to this reader at all: the stub RAISES, and
+    a re-introduced read fails here naming itself instead of being silently obeyed. The
+    rest of the rail is unchanged — no `apply_moves`, no item status written, and the
+    widened read taken from the INJECTED ledger only.
+    """
+    from workers import board_disagreement as D
+    import scripts.automod.backlog as BL
 
-    def statuses():
-        return {i.id: i.status for i in B.all_items(("lloyd",), backlog_dir=board)}
+    fake_calls: list = []
+    live_reads: list = []
 
-    before = statuses()
-    out = file_or_update(_agree(7), [{"item_id": 7, "status": "draft", "note": "x"}],
-                         {7: ("up_next", "confirmed with acceptance")},
-                         window=_window7(disagree=2, judged=60, rate=0.8,
-                                         disagree_ids=[7, 3]),
-                         backlog_dir=board, ledger=led)
-    assert out is not None and out["action"] == "filed", out
-    after = statuses()
-    # Only the ten board items count: filing writes its OWN new item, which is the one
-    # write this path is allowed. The assertion is over the ids that were already there.
+    def boom(ledger):
+        fake_calls.append(ledger)
+        raise AssertionError(
+            "the disagreement reader consulted the machine's LIVE table at filing time;"
+            " #3677 removed that read because a row must name the side the disagreeing"
+            " tick scored, not the side the board happens to want now")
+
+    monkeypatch.setattr(BL, "desired_statuses", boom)
+    led = tmp_path / "led.jsonl"
+    _ten_item_board(board)                      # writes board/round events to S.LEDGER_PATH
+    monkeypatch.setattr(S, "LEDGER_PATH", led)  # the widened read must come from HERE
+    real_read, real_append = S.read_events, S.append_event
+
+    def spy_read(path=None, limit=100):
+        live_reads.append(path)
+        return real_read(path, limit)
+
+    monkeypatch.setattr(S, "read_events", spy_read)
+    monkeypatch.setattr(S, "append_event",
+                        lambda entry, path=None: real_append(entry, path or led))
+    # An id whose disagreement lives in this window's events: the proposal `draft` and the
+    # machine's side, both as that tick filed them. The only source a widened row may use.
+    S.append_event({"event": "board_steward",
+                    "agreement": {"disagree": [3], "disagree_sides": [
+                        {"item_id": 3, "status": "up_next",
+                         "why": "in the offered set, not started"}]},
+                    "moves": [{"item_id": 3, "status": "draft", "note": "its reason"}]},
+                   path=led)
+
+    want = {7: ("up_next", "ready by its acceptance")}
+    before = {it.id: it.status for it in B.all_items(("lloyd",), backlog_dir=board)}
+    out = D.file_or_update({"judged": 1, "rate": 0.0, "agree": [], "disagree": [7],
+                            "no_opinion": [], "missed": [], "machine_moves": 1,
+                            "proposed": 1},
+                           [{"item_id": 7, "status": "in_progress",
+                             "note": "the n-gram table memory guard"}],
+                           want, window=_window7(disagree_ids=[3]), backlog_dir=board,
+                           ledger=led)
+    assert out is not None, "the reader filed nothing"
+    assert not fake_calls, (
+        "the reader read the machine's live table; #3677's rows come from the ticks")
+    src = (Path(__file__).resolve().parents[1] / "workers" / "board_disagreement.py") \
+        .read_text(encoding="utf-8")
+    assert "apply_moves" not in src and "apply(" not in src, (
+        "the reporter grew a call into the machine's writer")
+    assert "desired_statuses(" not in src, (
+        "the disagreement reader calls `desired_statuses` again, which is the "
+        "filing-time read #3677 removed: it answers about the instant of the read, and "
+        "a row is about a tick")
+    ids = out["ids"]
+    assert ids[:2] == [7, 3], f"current tick first, then the window: {ids}"
+    after = {it.id: it.status for it in B.all_items(("lloyd",), backlog_dir=board)}
     moved = {i: (before[i], after[i]) for i in before if after.get(i) != before[i]}
     assert not moved, f"the reader moved an item: {moved}"
-    assert "#3" in _filed(board)[0].body, "the window's id must still be named"
-    assert "the state machine wants `done`" in _filed(board)[0].body
+    assert live_reads and all(pth == led for pth in live_reads), (
+        f"the widened read did not use the injected ledger: {live_reads}")
+    body = _filed(board)[0].body
+    assert "#3" in body, "the window's id must still be named"
+    assert "(the machine abstains)" not in body
+    row3 = [ln for ln in body.splitlines() if ln.startswith("- #3")][0]
+    assert "the state machine wants `up_next` — in the offered set, not started" in row3, (
+        f"the widened row did not print the side its own tick recorded: {row3}")
+
+
+# ── #3677: a row must name the machine's side as the disagreeing tick recorded it ──
+#
+# `agreement()` puts an id in `disagree` only when the machine HAD an opinion about it
+# (`workers/sources/board_steward.py:920`; abstention is the separate `no_opinion` bucket
+# at `:921`), but the block stored only id lists — key set
+# `('agree','disagree','judged','machine_moves','missed','no_opinion','proposed','rate')`,
+# no per-id status — so the filer re-ran `desired_statuses` at filing time
+# (`workers/board_disagreement.py:225`) and printed `(the machine abstains)` for ids whose
+# tick had one. Item #3677 measured 12 of its own 22 rows that way, and 2 more printed as
+# agreement inside the disagreement list. A ruler is told to judge the machine's side; the
+# side it was shown was a later read of a ledger the tick itself had moved.
+#
+# The four nodes below are the four clauses. Each is pinned at the seam the bug sat on:
+# the block the tick emits, the JSON the ledger stores, the renderer that prints a row,
+# and the lock that was supposed to protect a person's ruling.
+
+
+def _agree_with_sides(ids, sides):
+    """An agreement block carrying per-id recorded machine `sides` ({id: (status, why)}).
+
+    Built through `agreement()` rather than hand-typed where that is possible; this
+    hand-built form exists so a test can present a tick that predates the record (an
+    id in `disagree` with no side) without faking the classifier.
+    """
+    agree = _agree(*ids)
+    agree["disagree_sides"] = [{"item_id": i, "status": s, "why": w}
+                               for i, (s, w) in sides.items()]
+    return agree
+
+
+def test_a_tick_records_the_machine_side_for_every_id_it_called_a_disagreement():
+    """Clause 1, first half: the block that reaches the ledger event and `meta_json`."""
+    agree = W.agreement(moves=[{"item_id": 3456, "status": "in_progress"},
+                               {"item_id": 3433, "status": "draft"},
+                               {"item_id": 3024, "status": "up_next"},
+                               {"item_id": 3551, "status": "up_next"}],
+                        expected={3456: ("up_next", "offered again — clock ran out"),
+                                  3433: ("up_next", "triage confirmed it"),
+                                  3024: ("up_next", "triage confirmed it")},
+                        current={3456: "in_progress", 3433: "up_next",
+                                 3024: "up_next"})
+    assert agree["disagree"] == [3433, 3456], (
+        "the two conflicts, by construction, published sorted")
+    assert 3551 not in agree["disagree"], "the abstainer is `no_opinion`, not `disagree`"
+    recorded = {int(r["item_id"]): (r["status"], r["why"])
+                for r in agree["disagree_sides"]}
+    assert recorded == {3456: ("up_next", "offered again — clock ran out"),
+                        3433: ("up_next", "triage confirmed it")}, (
+        "the machine's side must be recorded for every id the tick itself put in "
+        f"`disagree`, and for no other: {recorded}")
+    assert [r["item_id"] for r in agree["disagree_sides"]] == agree["disagree"], (
+        "the record must line up with the published id list row for row, since both "
+        "reach the ledger side by side")
+    assert json.loads(json.dumps(agree["disagree_sides"])) == agree["disagree_sides"], (
+        "the record must survive the JSON of the ledger line and of `meta_json` "
+        "unchanged — a shape that changes across the write reads back as a different "
+        "side")
+
+    src = (Path(__file__).resolve().parents[1] / "workers" / "sources"
+           / "board_steward.py").read_text(encoding="utf-8")
+    handed = src.count('"agreement": agree')
+    assert handed == 2, (
+        f"the tick hands the agreement block to {handed} sink(s), not both: the "
+        "`board_steward` ledger event and the run's `meta_json` must each receive the "
+        "whole block, or the record reaches the reader that needs it and not the "
+        "dashboard that reports the rate")
+    assert 'S.append_event({"event": "board_steward"' in src and '"meta": {' in src, (
+        "one of the two sinks stopped existing under its own name, so the count above "
+        "would match two writes to the same place")
+
+
+def test_the_recorded_side_is_not_rendered_into_the_prompt_or_the_board_line(board):
+    """Clause 1, second half: recording the side must not hand it to the model.
+
+    #3547's own rail is that the steward's prompt and board line carry no machine
+    target status, because the disagreement rate IS the measurement of the steward's
+    judgement and printing the answer into its prompt would move the measurement it is
+    measured by. So the record lives in the block written after the turn, and the two
+    renderers that build what the model reads must stay unable to see it even now that
+    it exists — pinned both on their signatures (they cannot be *passed* the machine's
+    table) and on the rendered text (the reason string does not appear).
+
+    #3546's `round_state` argument is deliberately not in the forbidden set: it carries
+    the machine-derived FLAGS `in_flight`/`observing`, which is #3547's remedy, not a
+    target status.
+    """
+    import inspect
+
+    for fn in (W.build_prompt, W.board_view):
+        params = set(inspect.signature(fn).parameters)
+        assert not params & {"expected", "sides", "machine", "machine_sides"}, (
+            f"{fn.__name__} now takes the machine's table as an argument, which is how "
+            "the target status gets rendered into what the model reads")
+
+    _write(board, 3456, "in_progress", tags=("triage-confirmed",),
+           name="the n-gram table keeps being double-booted")
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    why = "offered again — clock ran out before a verdict"
+    prompt = W.build_prompt(events=[], items=W.board_view(items, set(), pending={3456}),
+                            n_open=len(items), since_ts=0.0)
+    assert why not in prompt, (
+        "the machine's reason for the status it wants reached the prompt the steward "
+        "reads before it forms a view — that is the answer to the question it is "
+        "measured on")
+    assert "#3456" in prompt, "the fixture stopped being in the rendered board"
+
+
+def test_the_recorded_side_survives_the_ledger_line_the_filer_reads(tmp_path):
+    """The process boundary: a later tick recovers an earlier tick's side from JSON.
+
+    This is the seam the record exists for. `S.append_event` writes one JSON line and
+    `S.read_events` hands back parsed objects, so a record keyed by an int item id would
+    come back keyed by the STRING "3456" and every lookup would miss — which is the
+    failure this node is really about, because it would look like an absent record and
+    the row would print `not recorded` for a side that was filed.
+    """
+    agree = W.agreement(moves=[{"item_id": 3456, "status": "in_progress"}],
+                        expected={3456: ("up_next", "offered again — clock ran out")},
+                        current={3456: "in_progress"})
+    path = tmp_path / "promotions.jsonl"
+    S.append_event({"event": "board_steward", "agreement": agree,
+                    "moves": [{"item_id": 3456, "status": "in_progress",
+                               "note": "its own reason"}]}, path=path)
+    events = S.read_events(path)
+    assert len(events) == 1, "the ledger line did not read back"
+    moves = D._window_moves(_window7(), path)
+    assert moves == {3456: "in_progress"}, "the steward's side still recovers"
+    sides = D._window_sides(_window7(), path)
+    assert sides == {3456: ("up_next", "offered again — clock ran out")}, (
+        f"a recorded side must survive the JSON round trip keyed by an int id: {sides}")
+    assert D._window_sides(_window7(), tmp_path / "absent.jsonl") == {}, (
+        "a missing ledger is an empty record, never a guess about the machine's side")
+    S.append_event({"event": "board_steward", "agreement": _agree(3456)}, path=path)
+    assert D._window_sides(_window7(), path) == {3456: ("up_next",
+                                                        "offered again — clock ran out")}, (
+        "a tick that predates the record must not overwrite one that has it")
+
+
+def test_no_disagreement_row_prints_an_abstention_and_a_row_without_a_record_says_so(
+        board, tmp_path):
+    """Clause 2: the row is rendered from the record, and an unrecorded side is admitted.
+
+    Both halves matter. The first is the bug: `desired_statuses` re-run at filing time
+    answers abstention for an id its tick scored as a conflict. The second is what stops
+    the fix from being a lie in the other direction — a row for a tick that predates the
+    record must say the side was NOT RECORDED, which is a fact about the artifact, and
+    must not assert the machine abstained, which was the claim that made 12 of #3677's
+    rows look ruleable-by-abstention when they were never judged that way.
+    """
+    unrecorded = 3551
+    out = D.file_or_update(
+        _agree(*DIS_AGREE, unrecorded), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+        backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert out is not None and out["action"] == "filed"
+    body = _filed(board)[0].body
+    assert "(the machine abstains)" not in body, (
+        "an id in `disagree` printed as an abstention — by construction the tick had a "
+        "machine side for it, so the row was rendered from a later read, not from the tick")
+    assert "#3551" in body
+    row = [ln for ln in body.splitlines() if ln.startswith("- #3551")]
+    assert len(row) == 1 and "not recorded" in row[0], (
+        f"a row with no tick record must state that: {row}")
+    assert "abstain" not in row[0].lower(), (
+        f"the row still asserts an abstention: {row[0]}")
+    for i in DIS_AGREE:
+        assert "not recorded" not in [ln for ln in body.splitlines()
+                                      if ln.startswith(f"- #{i}")][0], (
+            f"#{i} has a machine side in the tick's own table and must print it")
+
+
+def test_a_row_is_rendered_from_a_record_only_the_ledger_carries(board, tmp_path):
+    """Clause 2's widening half: an id THIS tick did not judge still gets its side.
+
+    The whole reason the record is in the ledger event and not only in the tick's
+    arguments is that a merge names ids from earlier ticks. With no record anywhere the
+    row admits it; with one in the window's events the row prints it, and no fresh
+    `desired_statuses` read is involved — which is what makes the row about the tick
+    rather than about the moment the file was written.
+    """
+    ledger = tmp_path / "promotions.jsonl"
+    S.append_event({"event": "board_steward",
+                    "agreement": _agree_with_sides(
+                        [3450], {3450: ("up_next", "triaged, no verdict yet")}),
+                    "moves": [{"item_id": 3450, "status": "up_next",
+                               "note": "its own reason"}]}, path=ledger)
+    # The tick scored only DIS_AGREE; 3450 enters the filing the way every widened row
+    # does — named by the window's `disagree_ids` — and its machine side is NOT in this
+    # tick's `expected` (it was not this tick's disagreement). It IS recorded in the
+    # window's events, which is the only place the row can get it from.
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(disagree_ids=list(DIS_AGREE) + [3450]),
+                           backlog_dir=board, ledger=ledger)
+    assert out is not None and 3450 in out["ids"], (
+        f"the window's id was not widened into the filing: {out}")
+    body = _filed(board)[0].body
+    assert "(the machine abstains)" not in body
+    assert "not recorded" not in [ln for ln in body.splitlines()
+                                  if ln.startswith("- #3450")][0], (
+        "#3450's machine side is recorded in the window's events and the row ignored it")
+
+
+def test_the_coverage_section_counts_the_rows_that_carry_a_recorded_machine_side(
+        board, tmp_path):
+    """Clause 3: Coverage may not say every row is ruleable while some rows are not.
+
+    #3677's own Coverage bullet read "0 of the named ids are unrecoverable: every one
+    carries the status a `board_steward` event in this window proposed, so every row here
+    can be ruled from the item alone." The first half is true and about the STEWARD's
+    side; the second was inferred from it, and the machine's half was missing for 12 of
+    the 22. So the count of rows carrying a recorded machine side is now its own published
+    number, and the ruleability sentence may only be made when both halves are there.
+    """
+    out = D.file_or_update(_agree(*DIS_AGREE, 3551), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board,
+                           ledger=tmp_path / "ledger.jsonl")
+    assert out is not None
+    body = _filed(board)[0].body
+    cov = body[body.index("## Coverage"):]
+    assert "5 of the 6 named rows carry the machine's side as its own tick recorded it" \
+        in cov, f"the recorded-side count is missing or wrong:\n{cov}"
+    assert "1" in cov and "not recorded" in cov, (
+        "the bullet must name the shortfall, not just the covered count")
+    assert "every row here can be ruled from the item alone" not in cov, (
+        "Coverage still claims full ruleability while one row has no machine side")
+
+    all_ruleable = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                                    window=_window7(), backlog_dir=tmp_path / "b2",
+                                    ledger=tmp_path / "l2.jsonl")
+    assert all_ruleable is not None
+    cov2 = (b := _filed(tmp_path / "b2")[0].body)[b.index("## Coverage"):]
+    assert "5 of the 5 named rows carry the machine's side as its own tick recorded it" \
+        in cov2, f"with every side recorded the count must say so:\n{cov2}"
+    assert "so every row here can be ruled from the item alone" in cov2, (
+        "the sentence is legitimate only when it is true, and here it is: both halves "
+        "of both sides are in the artifact")
+
+
+def test_a_merged_coverage_counts_the_rows_the_body_will_actually_hold(board, tmp_path):
+    """Clause 3's merge half: the recorded-side count is taken over the rows the
+    denominator printed beside it counts, not over the ids this filing widened.
+
+    The review rung sent #3677's round back on exactly this (clause 3 partial, blocking):
+    "in a merge the numerator counts this filing's ids while the denominator is the file's
+    total named rows, so the written bullet claims N rows have no recorded side while
+    those same rows in the body each print a machine side; no test covers the merged
+    figure". Here the first filing records all five sides and one row is then given the
+    legacy `(the machine abstains)` form, so four of the six rows the merged body will
+    hold carry a recorded side; the second filing widens to one id with no record at all.
+    The figure has to come from the same rows the bullet counts, so both numbers are read
+    out of the bullet and re-counted off the body rather than written as literals — and a
+    legacy abstention must NOT count, because an abstention a filing-time recompute
+    asserted is not a side its own tick recorded.
+    """
+    first = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(), backlog_dir=board,
+                             ledger=tmp_path / "ledger.jsonl")
+    assert first is not None and first["action"] == "filed"
+    path = _filed(board)[0].path
+
+    aged = f"- #{DIS_AGREE[0]}: steward proposed `draft`; the state machine wants "
+    legacy = f"- #{DIS_AGREE[0]}: steward proposed `draft`; (the machine abstains)"
+    lines = [legacy if ln.startswith(aged) else ln for ln in path.read_text().splitlines()]
+    assert sum(1 for ln in lines if ln == legacy) == 1, (
+        "the age had to land on exactly one filed row for the figure to mean anything")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    second = D.file_or_update(
+        _agree(3119),
+        DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                      "note": "the vec0 index needs a hand-side copy rebuild"}],
+        {}, window=_window7(), backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert second is not None and second["action"] == "merged"
+
+    body = path.read_text(encoding="utf-8")
+    cov = body[body.index("## Coverage"):]
+    row_lines = [ln for ln in body.splitlines() if D._ROW_RE.match(ln)]
+    named = len(row_lines)
+    with_side = sum(1 for ln in row_lines if "the state machine wants" in ln)
+    assert named == 6 and with_side == 4, (
+        f"the fixture itself moved: {named} rows, {with_side} naming a machine side")
+
+    m = re.search(r"(\d+) of the (\d+) named rows carry the machine's side", cov)
+    assert m is not None, f"the merged bullet lost its count:\n{cov}"
+    assert int(m.group(2)) == named, (
+        f"the denominator counts {m.group(2)} rows and the body holds {named}: "
+        "the two figures stopped describing the same population")
+    assert int(m.group(1)) == with_side, (
+        f"the bullet claims {m.group(1)} rows carry a recorded side while {with_side} "
+        f"of the body's rows print one — the numerator is being counted over this "
+        f"filing's ids instead of over the rows the file holds:\n{cov}")
+    assert "2 do not" in cov, "the shortfall must be the merged one, not this tick's"
+    assert "**not recorded**" in body, "the widened row has to say its side is absent"
+    assert "every row here can be ruled from the item alone" not in cov, (
+        "two of the six rows have no machine half, so the merge may not claim "
+        "full ruleability")
+
+
+def test_a_merge_counts_the_rows_an_earlier_filing_recorded(board, tmp_path):
+    """The other direction of the same figure: rows a PREVIOUS filing wrote count
+    towards the covered total, or the count is only ever pessimistic and the merged
+    item can never say it is whole.
+
+    Six ids, five recorded by the first filing and the sixth by this one, so the merged
+    bullet has to read six of six — which it can only do by carrying the earlier rows
+    over, since `expected` here holds the widened id alone.
+    """
+    first = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(), backlog_dir=board,
+                             ledger=tmp_path / "ledger.jsonl")
+    assert first is not None and first["action"] == "filed"
+
+    second = D.file_or_update(
+        _agree(3119),
+        DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                      "note": "the vec0 index needs a hand-side copy rebuild"}],
+        {3119: ("up_next", "open at `up_next`, no branch, never worked")},
+        window=_window7(), backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert second is not None and second["action"] == "merged"
+
+    cov = _filed(board)[0].path.read_text(encoding="utf-8")
+    cov = cov[cov.index("## Coverage"):]
+    assert "6 of the 6 named rows carry the machine's side" in cov, (
+        f"the five rows already in the body were not counted:\n{cov}")
+    assert ("as its own tick recorded it. Both halves of every row are in the artifact, "
+            "so every row here can be ruled from the item alone.") in cov, (
+        "every row the merged item names prints both halves, and the bullet has to say "
+        "so — that sentence is what a ruler reads to know the item needs no ledger")
+    assert "do not:" not in cov, "nothing is short, so no shortfall sentence may appear"
+
+
+def test_a_ruling_written_on_the_item_while_a_merge_computes_survives_it(board,
+                                                                        tmp_path,
+                                                                        monkeypatch):
+    """Clause 4: the merge appends to what the file said UNDER ITS LOCK.
+
+    `_write_body` re-reads the file under `commit_lock` into `fm_now, _body_now` and then
+    writes `body` — the text built from the read taken BEFORE the lock, across a window
+    long enough to matter (`S.read_events` over an 18,479-row ledger plus
+    `desired_statuses`). `_body_now` was assigned and never used, and the comment three
+    lines above the write said "keeping their text and adding the rows is the safe
+    answer". This node fires a human edit inside the lock, which is the exact instant the
+    pre-lock read goes stale: before the fix the ruling is erased while the commit claims
+    to have kept it, and the thing erased is a judgment about which side of a
+    disagreement was wrong — the one thing on this item that cannot be regenerated.
+    """
+    D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                     backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    it = _filed(board)[0]
+    ruling = ("## Ruling\n\n"
+              "- #3024: the steward is wrong. Its own note says \"no triage verdict in "
+              "its history\" and its history has one.\n")
+    real_lock = B.commit_lock
+
+    # `_write_body` imports `commit_lock` from `app.atomic_io` INSIDE the function
+    # (function-local imports are that module's rule), so the patch belongs on the
+    # module it comes from and not on `B`: patched on the wrong one the fake never
+    # runs, the ruling is never written at all, and the node fails for a reason that
+    # has nothing to do with the code under test.
+    from app import atomic_io
+
+    real_lock = atomic_io.commit_lock
+
+    def racy_commit_lock(target, timeout=None):
+        """The real lock, with a person's edit landing once it is held.
+
+        Yields the real lock's own token, because `_write_body` hands that token to
+        `BW.write_item(..., lock=...)` — substituting a stand-in would test a call the
+        code never makes.
+        """
+        inner = real_lock(target, timeout=timeout)
+
+        class _Racy:
+            def __enter__(self):
+                token = inner.__enter__()
+                it.path.write_text(it.path.read_text(encoding="utf-8").replace(
+                    "## What to decide", ruling + "\n## What to decide"),
+                    encoding="utf-8")
+                return token
+
+            def __exit__(self, *exc):
+                return inner.__exit__(*exc)
+
+        return _Racy()
+
+    monkeypatch.setattr(atomic_io, "commit_lock", racy_commit_lock)
+    moves = DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                          "note": "the vec0 index needs a hand-side copy rebuild"}]
+    want = dict(DIS_EXPECTED)
+    want[3119] = ("up_next", "in_progress by no round, ready by its acceptance")
+    assert D.file_or_update(_agree(3119), moves, want, window=_window7(),
+                            backlog_dir=board,
+                            ledger=tmp_path / "ledger.jsonl") is not None
+    after = it.path.read_text(encoding="utf-8")
+    assert "#3024: the steward is wrong" in after, (
+        "the merge overwrote a ruling written while it was computing — the item is the "
+        "record of who decided which side was wrong, and the overwrite is silent")
+    assert "#3119" in after, "keeping the ruling must not cost the merge its own row"
+    assert after.count("## Coverage") == 1, (
+        "the re-read re-introduced the stale Coverage section, so the file now carries "
+        "two and a reader cannot tell which is current")
+    assert "(the machine abstains)" not in after
