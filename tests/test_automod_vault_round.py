@@ -9333,6 +9333,14 @@ def test_a_round_may_land_the_first_arm_of_a_never_run_unparked_task(tmp_path, m
     """
     r = _never_armed_task_vault(tmp_path, monkeypatch)
     (r / TASK_REL).write_text(ARMED_TASK_BODY, encoding="utf-8")
+    # `GRADER` is None at import, and this node asks only whether the LANE lets the
+    # arm through — so the second reader must be the module's own default, not
+    # whatever a node earlier in this file left behind. `agent_mcp/automod.py:918`
+    # wires `RV.grade_vault` onto the shared module on the first `automod_vault_land`
+    # call and never unwinds it, so from that node on every later node in this file
+    # is graded by the real reader, which reaches for the live backend that
+    # conftest._review_grader_cannot_reach_the_live_backend exists to keep away.
+    monkeypatch.setattr(V, "GRADER", None)
 
     errors, _ = V.validate([TASK_REL])
     assert errors == [], errors
