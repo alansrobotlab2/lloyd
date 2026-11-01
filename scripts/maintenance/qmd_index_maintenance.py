@@ -712,6 +712,30 @@ def bak_series(index: Path | None = None) -> list[Path]:
     return sorted(mains, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
 
 
+def run_started(at: float | None = None) -> datetime:
+    """When a run began, in the shape its stamp is written: local clock WITH its offset.
+
+    #3665. This used to be a bare `datetime.now()`, and a naive stamp cannot be read
+    back as the instant it was written during the autumn repeated hour. America/
+    Los_Angeles fell back on 2026-11-01, so the local hour 01:00–01:59 occurred twice:
+    `datetime.fromtimestamp` carries the right `fold` for the second pass, but
+    `.isoformat()` does not serialise a fold, so the report on disk says only `01:30`
+    and `datetime.fromisoformat` resolves it to the *first* pass — one hour early. A
+    bound one hour early is the unsafe direction for #2119's hold: it releases a held
+    `-shm` sidecar an hour before the previous run started. Measured at the fold, the
+    naive round-trip is −3600 s and this expression's is 0.0 s, because the offset
+    (-08:00 on the second pass, -07:00 on the first) says which pass it was.
+
+    The local date is unchanged — `f"{naive:%Y-%m-%d}" == f"{aware:%Y-%m-%d}"` — so the
+    dated report name `_write_report` builds is the same file it always built.
+
+    `at` exists because the fold cannot be waited for. It happens once a year and lasts
+    one hour, so a check that only runs inside that window is a check that does not
+    run: passing an epoch asks this same expression what it would have stamped then.
+    """
+    return (datetime.now() if at is None else datetime.fromtimestamp(at)).astimezone()
+
+
 def previous_run_started(report_dir: Path | None = None) -> float | None:
     """When the run before this one began, in epoch seconds — or None for no bound.
 
@@ -719,7 +743,7 @@ def previous_run_started(report_dir: Path | None = None) -> float | None:
     is evidence somebody has it open *now*", and the job already writes the bound
     itself: `_write_report` lands one dated report per day, named
     `REPORT_PREFIX + "<YYYY-MM-DD>.json"`, whose `ran_at` is that run's own start —
-    `datetime.now()` taken before it touched anything. So the question is answerable
+    `run_started()` taken before it touched anything. So the question is answerable
     from artefacts this job produces, with no new state to keep in sync and no new
     clock to trust.
 
@@ -3013,7 +3037,7 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
     if swap and not _stdin_is_interactive():
         print(f"refused: {SWAP_NEEDS_TERMINAL}", file=sys.stderr)
         return 2
-    started = datetime.now()
+    started = run_started()
     # The swap half no longer implies the build half (#3314). With the copy already on
     # disk the run verifies that copy and swaps it — seconds, which is the whole point —
     # and with none present it builds first, because there is nothing to swap. Without
@@ -3044,7 +3068,9 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
         except SideCopyRefused as e:
             report["swap"] = {"refused": str(e), "swapped": False}
             rc = 1
-    report["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
+    # One clock expression on both sides of the minus: `datetime.now()` here against an
+    # offset-bearing `started` is a TypeError on every acting run (#3665).
+    report["elapsed_s"] = round((run_started() - started).total_seconds(), 1)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     out = REPORT_DIR / f"qmd-side-copy-{name}-{started:%Y-%m-%dT%H%M%S}.json"
     out.write_text(json.dumps(report, indent=2))
@@ -3108,7 +3134,7 @@ def main() -> int:
         return run_side_copy_route(args.rebuild_side_copy, swap=args.swap,
                                    dry_run=args.dry_run, as_json=args.json)
 
-    started = datetime.now()
+    started = run_started()
     report: dict = {"ran_at": started.isoformat(), "actions": []}
 
     before = inspect_index()
@@ -3354,7 +3380,9 @@ def main() -> int:
                                   "skipped. That is a no-work skip, not an "
                                   "embedding the report may claim."),
             }
-    report["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
+    # One clock expression on both sides of the minus: `datetime.now()` here against an
+    # offset-bearing `started` is a TypeError on every acting run (#3665).
+    report["elapsed_s"] = round((run_started() - started).total_seconds(), 1)
 
     _write_report(report, started)
 

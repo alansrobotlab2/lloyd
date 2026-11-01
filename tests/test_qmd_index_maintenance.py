@@ -41,8 +41,9 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
@@ -1630,7 +1631,11 @@ def _prior_report_at(report_dir: Path, at: int) -> Path:
     reproduce the instant says so here instead of in the arithmetic above it.
     """
     assert int(at) == at, f"a boundary must be whole seconds to survive the stamp: {at!r}"
-    when = datetime.fromtimestamp(at)
+    # `astimezone()` is the whole point of this helper: `datetime.fromtimestamp` carries
+    # the right `fold` for the second pass of the autumn repeated hour, but a naive stamp
+    # cannot carry it through `isoformat()`, so the case would plant an hour-early bound
+    # and read it back as the fixture's own bug (#3665). Offset-bearing on both sides.
+    when = datetime.fromtimestamp(at).astimezone()
     p = _prior_report(report_dir, when)
     assert datetime.fromisoformat(
         json.loads(p.read_text())["ran_at"]).timestamp() == at, (
@@ -1647,17 +1652,223 @@ def _prior_report(report_dir: Path, when: datetime, body: str | None = None) -> 
     put one on disk rather than patch a value: the reader, the glob and the `ran_at`
     key are all under test together. `body` overrides the JSON, for the cases that hand
     the reader something it cannot use.
+
+    The stamp is written offset-bearing, the shape `run_started()` emits (#3665). A
+    naive `when` is a local wall clock — which is what the readers have always assumed
+    of it — so `astimezone()` attaches that zone's offset without moving the instant,
+    and a case built inside the autumn repeated hour plants the bound it means to
+    rather than one an hour early.
     """
     report_dir.mkdir(parents=True, exist_ok=True)
     out = report_dir / f"{m.REPORT_PREFIX}{when:%Y-%m-%d}.json"
-    out.write_text(body if body is not None
-                   else json.dumps({"ran_at": when.isoformat()}))
+    out.write_text(body if body is not None else json.dumps(
+        {"ran_at": (when if when.tzinfo else when.astimezone()).isoformat()}))
     return out
+
+
+# ── #3665: the autumn repeated hour ─────────────────────────────────────────
+#
+# `run_started()` used to be a bare `datetime.now()`, and `_prior_report` used to
+# hand-roll the same naive stamp, so nothing in this file could tell a bound from the
+# hour it was written in. America/Los_Angeles repeats the local hour 01:00–01:59 once a
+# year: a stamp written in the second pass and read back without an offset resolves to
+# the FIRST pass, which puts the #2119 previous-run bound 3600 s EARLIER than the run
+# that started — the unsafe direction, because a held `-shm` sidecar is released an hour
+# soon. Both nodes below pin the zone for their own body only: a suite that always ran in
+# one fixed zone would hide every local-zone bug in the tree, and `pytest.ini` is not a
+# round's to touch.
+
+#: The zone this box runs in (`America/Los_Angeles`), named once. The nodes do not
+#: inherit it: on a box set to UTC there is no repeated hour at all, and a test that
+#: silently runs there passes for the wrong reason.
+FALL_BACK_ZONE = "America/Los_Angeles"
+
+
+@contextlib.contextmanager
+def _zone_pinned(zone: str):
+    """Run the body with the machine's local zone pinned, and put it back in a `finally`.
+
+    What is under test is `datetime.fromtimestamp(at)` with no `tz` — the naive local
+    clock `run_started()` reads — and that answer belongs to the machine's zone. So the
+    pin is scoped to one body and restored, the way `tests/test_backlog_stamp_clock.py`
+    does it, rather than set for the session.
+    """
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def _fall_back_instant(zone: str, at_or_before: float) -> int:
+    """The first instant of `zone`'s most recent repeated local hour, from its own table.
+
+    Walked backwards from `at_or_before` an hour at a time until the zone's offset
+    shrinks, then bisected to the second. Nothing here is a date typed in by hand: a
+    hand-typed date turns a fold test into a test of the calendar it was written
+    against, which goes quietly green the moment that date is behind it — the exact way
+    #3665's two nodes were green on 2026-11-01 with the cause untouched.
+
+    The instant returned is the first second of the SECOND pass of the repeated hour (the
+    offset below it is the winter one), so `+1 … +3599` is inside the ambiguity and the
+    same wall clock in the first pass lies exactly 3600 s earlier.
+    """
+    tz = ZoneInfo(zone)
+
+    def off(t: int) -> timedelta:
+        return datetime.fromtimestamp(t, tz).utcoffset()
+
+    step = 3600
+    earliest = int(at_or_before) - 420 * 86400        # one annual cycle, with slack
+    lo = int(at_or_before) - step
+    while lo > earliest:
+        if off(lo + step) < off(lo):                   # the offset shrinks in (lo, lo+step]
+            hi = lo + step
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if off(mid) < off(lo):
+                    hi = mid
+                else:
+                    lo = mid
+            return hi
+        lo -= step
+    raise AssertionError(
+        f"{zone} shows no fall-back transition in the 420 days before {at_or_before!r}")
+
+
+def test_a_report_stamped_at_the_fall_back_fold_round_trips_to_the_exact_epoch(
+        monkeypatch, tmp_path):
+    """A report written in the repeated hour bounds the hold at its own instant, to the second.
+
+    Clause 1 and 2 of #3665 together, because the second is what makes the first
+    meaningful: the planted zone-less stamp beside the real one is the proof that the
+    exact-epoch assertion is capable of failing. Both are read back through
+    `previous_run_started`, the only production reader of `ran_at`, out of a report
+    `_write_report` actually wrote.
+    """
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    with _zone_pinned(FALL_BACK_ZONE):
+        at = _fall_back_instant(FALL_BACK_ZONE, time.time() - 3600) + 1800
+        assert datetime.fromtimestamp(at).fold == 1, (
+            "the instant found is not in the second pass of a repeated local hour, so "
+            "this node has stopped testing the fold")
+        started = m.run_started(at)
+        assert started.utcoffset() is not None, "the run's own stamp carries no offset"
+
+        out = m._write_report({"ran_at": started.isoformat(), "actions": []}, started)
+        assert out.name == (
+            f"{m.REPORT_PREFIX}{datetime.fromtimestamp(at):%Y-%m-%d}.json"), (
+            "the offset changed the dated report name, which is a different day's file")
+        assert m.previous_run_started(m.REPORT_DIR) == float(at), (
+            f"`ran_at` {started.isoformat()!r} did not read back as the instant it was "
+            "written, so the #2119 hold is bounded at the wrong time")
+
+        naive = started.replace(tzinfo=None).isoformat()
+        assert naive != started.isoformat(), "nothing zone-less was planted to plant"
+        out.write_text(json.dumps({"ran_at": naive}))
+        assert m.previous_run_started(m.REPORT_DIR) == at - 3600, (
+            f"the zone-less stamp {naive!r} did not read back exactly 3600 s early, so "
+            "the assertion above this one could pass on a box with no fall-back")
+
+
+def test_both_routes_still_time_their_run_once_the_stamp_carries_an_offset(
+        monkeypatch, tmp_path, capsys):
+    """`started` became offset-bearing, and two `elapsed_s` lines subtract from it.
+
+    `run_side_copy_route` and `main` each close their report with
+    `round((datetime.now() - started).total_seconds(), 1)`. A naive `datetime.now()` on
+    one side of that minus and an aware `started` on the other is a `TypeError`, and both
+    lines are on the ACTING path — so the bug this node pins would have killed every
+    acting run on the box, fold hour or not. Nothing in the fold node above can show it:
+    that is a shape error, not a clock error.
+
+    All four ways through the two routes are run here for real — nightly rehearsal,
+    nightly acting, `--rebuild-side-copy`, and `--swap` of a copy already on disk — and
+    each must report an elapsed figure and land its report under the date the local clock
+    says, which is the date a naive stamp said too. The side-copy half stubs the rebuild
+    and swap machinery, which is another node's subject; what runs unstubbed is the stamp,
+    the subtraction and the file name.
+    """
+    def timed(report: dict) -> float:
+        elapsed = report["elapsed_s"]
+        assert isinstance(elapsed, (int, float)) and elapsed >= 0, (
+            f"`elapsed_s` came out as {elapsed!r}, so the run could not time itself "
+            "against its own stamp")
+        return float(elapsed)
+
+    # ── nightly route, rehearsal and acting ────────────────────────────────
+    base = float(int(time.time()))
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 40 * 86400)])
+    rehearsal = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                               dry_run=True, capsys=capsys)
+    assert datetime.fromisoformat(rehearsal["ran_at"]).utcoffset() is not None, (
+        f"the rehearsal's own `ran_at` {rehearsal['ran_at']!r} is still naive")
+    # A rehearsal with nothing to do exits inside its own no-work branch, above the
+    # timing line, so `elapsed_s` is a field only a run that reached the mutating
+    # section has. The assertion beside this one is what keeps the claim below honest:
+    # if a rehearsal ever grows the field, the acting case stops being the only proof.
+    assert "elapsed_s" not in rehearsal, (
+        "a rehearsal reported elapsed_s after all, so the acting-only claim below this "
+        "one is not the reason it is checked there")
+    acting = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                            dry_run=False, capsys=capsys, force=True)
+    timed(acting)
+    assert datetime.fromisoformat(acting["ran_at"]).utcoffset() is not None, (
+        f"the acting run's `ran_at` {acting['ran_at']!r} is still naive — the shape the "
+        "#2119 bound is read from")
+    # `_retention_run` reads its report back out of REPORT_DIR by the date
+    # `datetime.now()` gives, so the file it found IS the proof that an offset-bearing
+    # `started` still names the same dated report. Nothing here had to be retargeted.
+    assert (m.REPORT_DIR / f"{m.REPORT_PREFIX}{datetime.now():%Y-%m-%d}.json").exists()
+
+    # ── --rebuild-side-copy / --swap route ─────────────────────────────────
+    route_dir = tmp_path / "route"
+    monkeypatch.setattr(m, "REPORT_DIR", route_dir)
+    verification = {"passed": True, "side_live_rows": 32, "floor_vectors_live": 32,
+                    "pending_embeddings": 0, "vsearch_hits": 1, "failed": []}
+    monkeypatch.setattr(m, "rebuild_side_copy",
+                        lambda name: {"verification": dict(verification)})
+    monkeypatch.setattr(m, "verify_side_copy",
+                        lambda name: {"verification": dict(verification)})
+    monkeypatch.setattr(m, "swap_side_copy",
+                        lambda name, ver: {"swapped": True, "retrieval_ok": True})
+    monkeypatch.setattr(m, "side_copy_exists", lambda name: True)
+    monkeypatch.setattr(m, "_stdin_is_interactive", lambda: True)
+
+    for argv_swap in (False, True):
+        assert m.run_side_copy_route("rebuild-a", swap=argv_swap, dry_run=False,
+                                     as_json=True) == 0
+        # Read the report back by name rather than by "which file is new": both halves of
+        # this loop can land in the same second, and the dated name is only
+        # second-precise, so the swap run legitimately overwrites the build run's file.
+        wrote = sorted(route_dir.glob("qmd-side-copy-rebuild-a-*.json"))
+        assert wrote, f"the {'--swap' if argv_swap else 'build'} route wrote no report"
+        report = json.loads(wrote[-1].read_text())
+        if argv_swap:
+            assert report["swap"] == {"swapped": True, "retrieval_ok": True}, (
+                "the swap half did not run, so what was timed here was not a swap")
+        else:
+            assert "swap" not in report, "a build-only run reported a swap"
+        timed(report)
+        assert wrote[-1].name.startswith("qmd-side-copy-rebuild-a-") and \
+            wrote[-1].name.endswith(".json"), f"unexpected report name {wrote[-1].name!r}"
+        assert wrote[-1].name[len("qmd-side-copy-rebuild-a-"):-len(".json")][:10] == \
+            f"{datetime.now():%Y-%m-%d}", (
+            f"the route's report is named {wrote[-1].name!r}, whose date is not the local "
+            "date a naive stamp produced for the same run")
 
 
 def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
                    dry_run: bool, capsys=None,
-                   prior_reports: list[tuple[datetime, str | None]] = ()) -> dict:
+                   prior_reports: list[tuple[datetime, str | None]] = (),
+                   force: bool = False) -> dict:
     """Run `main()` over a fixture index directory and a fixture code tree.
 
     The index and the daemon are stubbed to "nothing to do" the way the helpers
@@ -1704,10 +1915,20 @@ def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
         "duplication_ratio": 1.0, "note": "stubbed index reader (#2180)"})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    if force:
+        # `--force` is the only way an acting run reaches the mutating section with the
+        # index stubbed quiet (`need_prune = args.force or …`), and that section is where
+        # the run times itself. `_sh` is the qmd/supervisorctl seam the rest of this file
+        # already replaces for exactly that reason (#3665 names it), so a forced case
+        # here spawns nothing real.
+        assert not dry_run, "--force past a rehearsal would reach the mutating section"
+        monkeypatch.setattr(m, "_sh", lambda cmd, timeout, env=None: (0, "done"))
     argv = ["qmd_index_maintenance.py"]
     if dry_run:
         assert capsys is not None, "a dry run has no dated file, so it needs --json"
         argv += ["--dry-run", "--json"]
+    if force:
+        argv += ["--force"]
     monkeypatch.setattr(sys, "argv", argv)
     rc = m.main()
     assert rc == 0, "measuring or retaining a backup never changes the exit code"

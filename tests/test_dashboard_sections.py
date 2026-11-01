@@ -664,13 +664,24 @@ def sessions(tmp_path, monkeypatch):
 
 
 def _session(sessions, session_id, last_active, *, mtime=None, **extra):
-    """Write one session file. `last_active` is naive local, as on disk."""
+    """Write one session file, stamping `last_active` in the shape production writes.
+
+    That shape is local wall clock WITH its UTC offset: `app.sessions_io.
+    session_now_iso()` emits `2026-09-24T09:15:02.123456-07:00` since #1154, and
+    `tests/test_session_platform_checks.py::test_no_session_body_writer_stamps_a_naive_now`
+    keeps every writer to it. What this line used to say — naive local, "as on disk" —
+    has not been the shape on disk since 2026-09-24, so the whole file was exercising the
+    reader against a writer that no longer exists, and it went green until the autumn
+    repeated hour made reading a naive stamp back as local wrong by an hour (#3665).
+    `.astimezone()` on a naive `last_active` attaches this host's offset without moving
+    the wall clock, which is exactly what `session_now_iso()` does to `datetime.now()`.
+    """
     import json
     import os
 
     data = {
         "session_id": session_id,
-        "last_active": last_active.replace(tzinfo=None).isoformat(),
+        "last_active": last_active.astimezone().isoformat(),
         "preview": "hello",
         "message_count": 2,
         "platform": "mission-control",
@@ -769,8 +780,13 @@ def test_scheduled_tasks_are_not_chats(sessions, no_live_turns):
 
 
 def test_last_active_is_serialised_as_explicit_utc(sessions, no_live_turns):
-    """`last_active` on disk is a naive *local* stamp. Handing that
-    straight to `new Date()` shifts every row by the box's offset."""
+    """A `last_active` stamped with a local offset must reach the browser as
+    explicit UTC. Handing the offset form straight to `new Date()` is a parse the
+    JavaScript engine may refuse outright, and shifting every row by the box's
+    offset is the failure this node was written against — so the panel converts to
+    `Z` whichever shape is on disk. Both assertions are the ones this node has
+    always made; only the docstring moved, because #3665 put the offset-bearing
+    shape it described into the fixture that feeds it."""
     _session(sessions, "chat", _local(minutes=-1))
 
     stamp = dash._recent_sessions()["sessions"][0]["last_active"]
