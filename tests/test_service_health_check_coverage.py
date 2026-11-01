@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -543,6 +544,108 @@ def test_an_undeclared_program_row_carries_no_probe_of_any_kind(monkeypatch):
             assert key not in row, f"{row['name']} gained a {key}"
 
 
+# ------------------------------------------------------------------ the port seam
+# #3653. A stand-in on PATH answers `supervisorctl` and `systemctl`, so this suite
+# already refuses to read the host's unit state; it could not answer a TCP connect, and
+# so the default CLI run dialled every declared port on the live box. That is how two
+# nodes grading the *report* came to be red for a fact no commit can cause or fix: with
+# `agent-djev` FATAL on a GPU 2 that cannot hold its model, 8011 is closed. The seam
+# lets a test say where a declared port may be dialled; these three nodes are the shape
+# of that permission — it exists under pytest only, it redirects a probe rather than
+# muting one, and the child has to honour it.
+
+def _loaded_with_env(monkeypatch, **env):
+    """Re-import the script with `env` applied; a `None` value removes that key.
+
+    The seam's guard runs at import, so a test that wants to see it decide has to run
+    the module again against the environment it would have met.
+    """
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    return _load()
+
+
+def test_the_probe_port_seam_cannot_fire_on_a_live_run(monkeypatch):
+    """`PROBE_PORTS` is inert unless pytest is running, exactly like `UNIT`.
+
+    This is the assertion that matters most, because the script is what a human runs
+    when the box is broken: a variable left in a shell profile, or set by the very
+    wrapper someone is debugging, must not be able to move which port the health check
+    dials. With `PYTEST_CURRENT_TEST` absent the map stays empty and `agent-djev` is
+    dialled on 8011, the declared number, however the variable is spelled.
+    """
+    mod = _loaded_with_env(monkeypatch, PROBE_PORTS="8011=41999",
+                           PYTEST_CURRENT_TEST=None)
+    assert mod.PROBE_PORT_MAP == {}, "the seam fired outside pytest"
+
+    monkeypatch.setattr(mod.subprocess, "run", _Answer("\n".join(FLEET_LINES)))
+    dialed = []
+    monkeypatch.setattr(mod, "http_check",
+                        lambda port, host="localhost": (dialed.append(port),
+                                                        (True, "ok"))[1])
+    row = mod.check_service("agent-djev", mod.SERVICES["agent-djev"])
+    assert dialed == [8011], "a live run must dial the declared port, not the mapped one"
+    assert row["healthy"] is True, row
+
+
+def test_the_probe_port_seam_retargets_the_dial_and_can_never_mute_a_fault(monkeypatch):
+    """Under pytest a declared port is looked up; an unmapped one reads closed.
+
+    Two halves, because closing the host read is only safe if the verdict survives it.
+    A mapped port that is not listening still yields an unhealthy row, so the seam is a
+    redirection and not a mute — and a declared port the map does not name is reported
+    closed *without dialling anything*, which is what stops a service added later from
+    being graded against whatever happens to be listening on this machine.
+    """
+    mod = _loaded_with_env(monkeypatch, PROBE_PORTS="8011=41999",
+                           PYTEST_CURRENT_TEST="seam")
+    assert mod.PROBE_PORT_MAP == {8011: 41999}
+    monkeypatch.setattr(mod.subprocess, "run", _Answer("\n".join(FLEET_LINES)))
+
+    dialed = []
+    monkeypatch.setattr(mod, "http_check",
+                        lambda port, host="localhost": (dialed.append(port),
+                                                        (False, "refused"))[1])
+    row = mod.check_service("agent-djev", mod.SERVICES["agent-djev"])
+    assert dialed == [41999], "the dial moves to the mapped port; the verdict does not"
+    assert row["healthy"] is False, "a closed mapped port is still an unhealthy row"
+    # The row is about the declared service, so it still names the declared port.
+    assert "(port 8011 FAIL: refused)" in row["status"], row["status"]
+
+    dialed.clear()
+    qmd = mod.check_service("agent-qmd-daemon", mod.SERVICES["agent-qmd-daemon"])
+    assert dialed == [], "an unmapped declared port must not be dialled on the host"
+    assert qmd["healthy"] is False, "unmapped reads closed, never healthy"
+    assert "no probe port mapped" in qmd["status"], qmd["status"]
+
+
+def test_a_cli_run_with_an_unmapped_port_reports_it_closed(tmp_path):
+    """The child honours the map, proved by a verdict the host could not produce.
+
+    `PROBE_PORTS` here carries 8011 alone, so `agent-qmd-daemon`'s 8181 is unmapped and
+    its row reads `no probe port mapped for this run` — a string only the seam emits,
+    which is the evidence the subprocess consulted the map rather than the box. And it
+    reads unhealthy: a port the suite declined to map is a fault, never a pass.
+    """
+    probe_map, listeners = _probe_listeners()
+    try:
+        env, _ = _stub(tmp_path, FLEET_LINES, None, {8011: probe_map[8011]})
+        r = subprocess.run([sys.executable, str(SCRIPT), "--format", "json"],
+                           capture_output=True, text=True, env=env, timeout=180)
+    finally:
+        for sock in listeners:
+            sock.close()
+    assert r.returncode in (0, 1), f"the run did not produce a verdict: {r.stderr[:300]}"
+    doc = json.loads(r.stdout)
+    qmd = [s for s in doc["services"] if s["name"] == "agent-qmd-daemon"]
+    assert qmd, f"qmd has no row: {[s['name'] for s in doc['services']]}"
+    assert qmd[0]["healthy"] is False, qmd[0]
+    assert "no probe port mapped" in qmd[0]["status"], qmd[0]
+
+
 # --------------------------------------------------------------------- end to end
 # The clause says "the default run yields", so the boundary that matters is a real
 # `python3 scripts/service_health_check.py` across a real `subprocess.run` to a real
@@ -570,13 +673,44 @@ sys.exit(3)
 """
 
 
-def _stub(tmp_path, lines, per_name=None):
+def _probe_listeners():
+    """A loopback listener for every port the script declares: `(mapping, sockets)`.
+
+    `mapping` is `{declared_port: actual_port}` for the child's `PROBE_PORTS`, and
+    `sockets` are the things holding those ports answerable for the run's duration; the
+    caller closes them. `listen()` is the entire requirement, because `http_check` only
+    ever does a `connect_ex` — a backlog is a reachable port, and no request is read.
+
+    Reading the script's own declaration instead of naming 8011 and 8181 here is the
+    point: a service that gains a `port` is mapped by this and cannot quietly re-arm the
+    host read the seam exists to close off (#3653).
+    """
+    mapping, sockets = {}, []
+    declared = sorted({d["port"] for d in _load().SERVICES.values() if d.get("port")})
+    for port in declared:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        mapping[port] = sock.getsockname()[1]
+        sockets.append(sock)
+    return mapping, sockets
+
+
+def _stub(tmp_path, lines, per_name=None, probe_map=None):
     """Write the stand-in supervisorctl and return (env, path).
 
     Two roles for one file, because the script reaches supervisor in two ways: by
     name on PATH, and by the conf path in `-c`. The UNIT seam points the second at
     this file, and the stub recognises its own path as the sentinel for "you are
     being used as the conf, shift argv".
+
+    `probe_map` adds the third role, for the third way the script reaches the box: a
+    TCP connect to a declared port. A stand-in on PATH cannot answer one, so the map
+    names where every declared port may be dialled instead — the test's own listeners,
+    from `_probe_listeners()` — and the seam in the script reports an unmapped port as
+    closed. Without it the default run reads the host's ports, and #3653 is what that
+    cost: two nodes that grade the report went red because GPU 2 could not load djev.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -592,13 +726,24 @@ def _stub(tmp_path, lines, per_name=None):
     systemctl.chmod(0o755)
     env = dict(PATH=f"{bin_dir}:/usr/bin:/bin", UNIT=str(stub.resolve()),
                PYTEST_CURRENT_TEST="seam")
+    if probe_map:
+        env["PROBE_PORTS"] = ",".join(f"{declared}={actual}"
+                                      for declared, actual in sorted(probe_map.items()))
     return env, stub
 
 
 def _cli(tmp_path, extra_args=(), lines=None, per_name=None):
-    env, _ = _stub(tmp_path, lines or FLEET_LINES, per_name)
-    r = subprocess.run([sys.executable, str(SCRIPT), "--format", "json", *extra_args],
-                       capture_output=True, text=True, env=env, timeout=180)
+    # No declared port of the child's is dialled on the host: it gets this process's
+    # own listeners, and the sockets have to stay open until the child has finished
+    # probing, so the run is wrapped rather than the map being built and dropped.
+    probe_map, listeners = _probe_listeners()
+    try:
+        env, _ = _stub(tmp_path, lines or FLEET_LINES, per_name, probe_map)
+        r = subprocess.run([sys.executable, str(SCRIPT), "--format", "json", *extra_args],
+                           capture_output=True, text=True, env=env, timeout=180)
+    finally:
+        for sock in listeners:
+            sock.close()
     assert r.returncode in (0, 1), f"the run did not produce a verdict: {r.stderr[:300]}"
     return r, json.loads(r.stdout)
 

@@ -1853,6 +1853,56 @@ def _supervisor_verdict(output: str) -> tuple:
     return ("RUNNING", True)
 
 
+#: Test seam (#3653), the sibling of the `UNIT` seam at the top of this file, for the
+#: one other fact about the host this script reads: a declared probe port. The coverage
+#: suite answers `supervisorctl` and `systemctl` from stand-ins precisely so that it
+#: "never reads the host's unit state", but a stand-in on PATH cannot answer a TCP
+#: connect, so a whole-fleet CLI run dialled every declared `port` on the live box. Two
+#: nodes that grade the *report* were therefore reading the machine: `agent-djev` sits
+#: FATAL on a box whose GPU 2 holds 15,213 MiB free against the 20,769 MiB its launcher
+#: asks for, so 8011 is closed, and
+#: `tests/test_service_health_check_coverage.py::test_the_cli_run_is_a_health_report_that_can_fail`
+#: and `::test_an_undeclared_program_in_fatal_reaches_the_verdict` went red on the
+#: fleet's memory instead of on the arithmetic each of them asks about.
+#:
+#: Same guard, same reason as `UNIT`: `PYTEST_CURRENT_TEST` must be set, because this
+#: script is the thing a human runs when the box is broken and an environment variable
+#: that silently moved which port it dials would make every row it prints a lie about a
+#: machine that is fine. Plus one rule `UNIT` does not need: a declared port this map
+#: does not name is reported CLOSED without dialling it. The seam can retarget a probe,
+#: never mute one — a run that maps nothing gets the same red row a service that is
+#: actually down gets, so closing off the host read cannot become a way to hide a fault.
+#:
+#: Placed beside its single call site rather than beside `UNIT` so the map, the dial and
+#: the row are one read. `_probe_declared_port` is the only thing here that consults it.
+PROBE_PORT_MAP: dict = {}
+
+if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("PROBE_PORTS"):
+    for _pair in os.environ["PROBE_PORTS"].split(","):
+        _declared, _sep, _actual = _pair.partition("=")
+        if not _sep or not _declared.strip().isdigit() or not _actual.strip().isdigit():
+            raise ValueError(
+                f"PROBE_PORTS wants `declared=actual` pairs, got {_pair!r}")
+        PROBE_PORT_MAP[int(_declared.strip())] = int(_actual.strip())
+
+
+def _probe_declared_port(declared_port: int) -> tuple:
+    """Dial a declared probe port, returning `(connected, error)` exactly like `http_check`.
+
+    `check_service` is this file's only call site, so the seam above has exactly one
+    place to land. With the map empty — which is every run a human makes, because the
+    guard needs `PYTEST_CURRENT_TEST` — this is `http_check(declared_port)` verbatim.
+    """
+    if PROBE_PORT_MAP:
+        actual = PROBE_PORT_MAP.get(declared_port)
+        if actual is None:
+            # Unmapped reads closed rather than skipped, so "the suite did not map me"
+            # is never a state a real fault can sit in.
+            return (False, "no probe port mapped for this run")
+        return http_check(actual)
+    return http_check(declared_port)
+
+
 def check_service(name: str, service_def: dict) -> dict:
     """Check a single service status."""
     command = service_def["command"]
@@ -1878,7 +1928,7 @@ def check_service(name: str, service_def: dict) -> dict:
         # If supervisor says running, also check port is reachable
         extra = ""
         if healthy and port:
-            connected, err = http_check(port)
+            connected, err = _probe_declared_port(port)
             if connected:
                 extra = f" (port {port} OK)"
             else:
