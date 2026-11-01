@@ -131,9 +131,22 @@ def test_backfill_writes_its_own_file_and_never_the_ledger(world):
 
 
 def test_the_shipped_fixture_for_544_expects_the_human_review():
+    """The #544 case still expects the human review's verdict on the two findings that
+    decide it: `retry`, and a test-honesty finding.
+
+    It no longer expects clause 4 unmet. #3510 read the charge behind that expectation —
+    'classification from `IDEMPOTENT`, skipped' — against the commit this case grades,
+    and `agent_mcp/_tool_effects.py:80` imports the annotations module while `:199`
+    returns `tool_annotations.side_effecting(name)`: the classification source the clause
+    asked for is the one the landing used. The 2026-10-27 calibrate run said the same
+    thing live — `[FAIL] 544-first-cut: clauses [4] expected unmet/partial, grader said
+    met` — and the case note carries the refutation.
+    """
     case = json.loads((RT.FIXTURE_DIR / "544-first-cut.json").read_text())
     assert case["commit"].startswith("0f019f90") and case["expect"]["kind"] == "retry"
-    assert 4 in case["expect"]["unmet_clauses"] and case["expect"]["honesty_finding"] is True
+    assert case["expect"]["unmet_clauses"] == [] and case["expect"]["honesty_finding"] is True, (
+        "the expected clause list is the 2026-09-10 review's charge, which #3510 records "
+        "as refuted by the code at 0f019f90; the test-honesty finding is not refuted")
     stripped = json.loads((RT.FIXTURE_DIR / "544-stripped-tests.json").read_text())
     assert stripped["strip_tests"] is True and stripped["expect"]["kind"] == "retry"
     names = {c["name"] for c in RT.load_fixtures()}
@@ -219,9 +232,14 @@ def test_no_shipped_case_loses_a_path_to_a_single_commit_reading():
         "self-consistent any more — re-derive the range before believing either number")
 
 
-def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
-    """#2822 clause 1: the two `pass` cases carry no `provisional` key, and each note
-    says which ruling confirmed it and when, instead of disclaiming itself.
+def test_the_two_diff_read_cases_are_validated_on_a_named_ruling_not_on_a_flag():
+    """#2822 clause 1: the two cases that rest on the 2026-10-16 diff read each say
+    which ruling confirmed their expectation and when, instead of disclaiming itself.
+
+    (This node was `test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag`
+    until #3510 re-marked 392 to the `retry` the live gradings answer: one of the two is
+    still a `pass` case and the other is not, so the name said `pass` about a case whose
+    `expect` no longer does.)
 
     Dropping the key is behaviour-neutral by design — `calibrate` reads it with
     `case.get("provisional", False)`, and the only other reader appends a
@@ -240,10 +258,21 @@ def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
     with the diff read this note rests on, which is exactly what the flag records.
     Both cases still name the 2026-10-16 ruling: a re-mark documents the new
     disagreement, it does not delete the provenance of the expectation.
+
+    **#3510 is the third ruling on the same two cases, and it moves 392's `expect`, not
+    its provenance.** 447 is still `pass`; 392 is now `retry`, which is what both live
+    gradings of `parent..commit` answered, and it stays `provisional` precisely because
+    an expectation set to the grader's own answer is agreement by construction rather
+    than a confirmed read. What this node holds across all three rulings is the part
+    none of them touched: the note has to name the ruling behind its `expect`, so a
+    reader can tell a re-mark from a silent edit.
     """
-    for name in ("392-small-met", "447-small-met"):
+    for name, kind in (("392-small-met", "retry"), ("447-small-met", "pass")):
         case = json.loads((RT.FIXTURE_DIR / f"{name}.json").read_text())
-        assert case["expect"]["kind"] == "pass"
+        assert case["expect"]["kind"] == kind, (
+            f"{name}'s expected kind moved: 447 has been `pass` since the 2026-10-16 "
+            "diff read and graded PASS on 2026-10-22 too, and 392 is `retry` because "
+            "#3510 re-marked it to what both live gradings answered")
         note = case["note"]
         assert "a human has not yet confirmed" not in note, f"{name}'s note still disclaims itself"
         assert "20261016_031621_owedcheck_e9d6" in note and "2026-10-16" in note, (
@@ -256,16 +285,17 @@ def test_the_two_pass_cases_are_validated_on_a_named_ruling_not_on_a_flag():
                 "drop stands for it: the disclaimer goes from the case, not set to false")
             continue
         assert case.get("provisional") is True, (
-            "392 is un-flagged while the 2026-10-22 run still disagrees with its "
-            "`expect.kind: pass` — an unvalidated case would read as validated")
+            "392 is un-flagged while its `expect` is what the 2026-10-22 and 2026-10-27 "
+            "runs answered — `compare()` never reads the flag, so that agreement is by "
+            "construction and only this key stops it reading as a confirmed read")
         assert "2026-10-22" in note and "20261022_213857_review_2794" in note, (
             "392's note does not name the run and grader session it now disagrees with")
 
 
 def test_the_calibration_readme_hedges_metric_2_and_still_documents_the_flag():
-    """#2822 clause 4: the two table rows read as validated, the file refuses to lend
-    four agreements to scorecard metric 2, and the field `fixture --provisional` writes
-    is still documented.
+    """#2822 clause 4: each table row says what validated its expectation, the file
+    refuses to lend four agreements to scorecard metric 2, and the field
+    `fixture --provisional` writes is still documented.
 
     Metric 2 is the audit delta, computed in `scripts/automod/scorecard.py` over
     `review` events from real landed rounds — never over these fixtures — so the caveat
@@ -273,6 +303,13 @@ def test_the_calibration_readme_hedges_metric_2_and_still_documents_the_flag():
     why the paragraph stays: the minting route still takes `--provisional`, so a
     freshly-minted case can still arrive unconfirmed, and a reader has to know what the
     field means when one does.
+
+    The `expected` column, by contrast, was unpinned by #2822 and #3510 found it
+    diverged: it still promised `pass` for 392 and a clause-4 miss for #544 while the
+    case files said `retry` and no unmet clause. Nothing here checked the column, so it
+    drifted silently — which is what the two new assertions at the end are for. A row
+    whose provenance phrase survives while its expectation rots is the exact failure
+    this table can have.
     """
     readme = (RT.FIXTURE_DIR / "README.md").read_text()
     assert "until a human confirms" not in readme, (
@@ -281,6 +318,16 @@ def test_the_calibration_readme_hedges_metric_2_and_still_documents_the_flag():
         rows = [ln for ln in readme.splitlines() if ln.startswith(f"| `{name}`")]
         assert len(rows) == 1 and "confirmed by a diff read on 2026-10-16" in rows[0], (
             f"the `{name}` row is missing or no longer says what validated it")
+    table = {n: [ln for ln in readme.splitlines() if ln.startswith(f"| `{n}`")]
+             for n in ("392-small-met", "544-first-cut")}
+    for name, rows in table.items():
+        assert len(rows) == 1, f"the `{name}` row is duplicated or gone from the table"
+    assert "`retry`" in table["392-small-met"][0], (
+        "392's expected column still says `pass`, the expectation #3510 re-marked — the "
+        "table is what a reader who never opens the JSON calibrates against")
+    assert "clause 4 not met" not in table["544-first-cut"][0], (
+        "544's expected column still promises a clause-4 miss the case no longer "
+        "expects, on the charge its note records as refuted by the code at 0f019f90")
     assert "do not license scorecard metric" in readme and "audit delta" in readme, (
         "the file no longer says that four agreements do not make a headline rate")
     assert "`provisional: true` marks an expectation nobody has confirmed" in readme, (
@@ -713,3 +760,183 @@ def test_the_remark_moved_one_provisional_flag_and_no_landing_identity(tmp_path)
             f"changed_paths so a flag edit cannot silently re-point a case at "
             f"another commit and keep its `expect`"
         )
+
+
+# ── #3510: the two re-marks, each pinned to the bytes and the runs it cites ─────────
+#
+# Two calibrate runs disagreed with two fixtures and both disagreements were left in
+# place: `~/lloyd-data/logs/calibrate-3179-postlanding-.log` (2026-10-27 15:28) prints
+# `[FAIL] 392-small-met (provisional): kind retry != pass` and `[FAIL] 544-first-cut:
+# clauses [4] expected unmet/partial, grader said met` over a footer of `2/4 agree`.
+# Re-marking them to the graded reality is only honest if the notes carry the evidence
+# for that reality, so this node reads the cited lines out of the commits they were
+# written against rather than trusting prose, and drives `compare` with the answers the
+# two runs recorded so the flip is visible in both directions.
+
+
+def _blob_lines(commit: str, path: str) -> dict[int, str]:
+    """`path` as it stands in `commit`, keyed by 1-based line number.
+
+    Both notes cite line numbers, and for #392's the number belongs to the GRADED tree:
+    `_live_buckets` is defined at line 964 of `tests/test_trajectory_extraction.py` at
+    `ce713bf3`, and at line 3099 of the same file at `4307f270`, the commit this re-mark
+    was cut from. A check that resolved the citation against whichever tree pytest
+    happens to run in would therefore pass while proving nothing about the landing the
+    case models, so every caller here names its commit explicitly.
+    """
+    r = git(RT.LIVE_ROOT, "show", f"{commit}:{path}")
+    assert r.returncode == 0, f"`git show {commit}:{path}` failed: {r.stderr[:200]}"
+    return dict(enumerate(r.stdout.splitlines(), start=1))
+
+
+def _recorded_392_grading() -> dict:
+    """What the grader answered for #392's landing, in the shape `compare` consumes.
+
+    A minimal witness carrying the three facts the two live runs recorded — `kind:
+    retry`, clause 1 short of met because the derivation shipped in `75ce62d` before the
+    round's parent, and one test-honesty string about `_live_buckets` — not a transcript
+    of a grader session. `compare` reads only these three fields, which is what makes a
+    hand-built result like this one a fair input to it.
+    """
+    return {
+        "kind": "retry",
+        "clauses": [{"clause": 1, "verdict": "partial"}],
+        "test_honesty": ["tests/test_trajectory_extraction.py:964: `_live_buckets()` "
+                         "reads `_ROOT / _pipeline`, absent both in this worktree and "
+                         "in the live checkout"],
+    }
+
+
+def _recorded_544_grading() -> dict:
+    """What the 2026-10-27 run answered for #544's landing: `retry`, every clause met,
+    and the `or True` assertion still reported as a test-honesty finding."""
+    return {
+        "kind": "retry",
+        "clauses": [{"clause": i, "verdict": "met"} for i in (1, 2, 3, 4, 5)],
+        "test_honesty": ["tests/test_tool_effects.py: `assert _rows(...) == [] or True`"],
+    }
+
+
+def test_the_remark_to_the_graded_reality_pins_both_cases_and_their_notes():
+    """#3510: the two fixtures say what the grader says, and their notes carry the
+    evidence for it — the cited code read out of the commits it names, the older ruling
+    kept as history, and `compare` flipping on the re-mark alone.
+
+    Clause by clause. (1) and (2): 392 expects `retry` with a honesty finding and stays
+    `provisional: true`, because what rests against it is a live grading and not a
+    confirmed read; its note names BOTH disagreements — the 2026-10-22 grader session
+    `20261022_213857_review_2794` with its clause-1 reason, and the 2026-10-27 run's
+    `:964` honesty finding — while still naming the 2026-10-16 diff read it rests on,
+    which the flag records rather than deletes. (3) and (4): 544-first-cut drops
+    `unmet_clauses: [4]` because the charge it rested on — that clause (d), classifying
+    effects from `IDEMPOTENT`, was skipped — is refuted by the code in its own graded
+    commit, and the note says so against the two lines that refute it. (5) is the README
+    row, in the node that owns that file.
+
+    The last block is the anti-tautology check. Setting `expect` to what the grader
+    answered makes those two cases agree BY CONSTRUCTION — `compare` never reads
+    `provisional`, so only the flag and the note stop a self-confirming fixture reading
+    as validated — so what has to be pinned is that the FLIP is the whole change: the
+    recorded answers still fail the old expectations, and the recorded FAIL strings are
+    the ones the log printed.
+    """
+    raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
+           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))}
+
+    c392 = raw["392-small-met"]
+    assert c392["expect"]["kind"] == "retry", (
+        "392 still expects `pass`, which every live grading of parent..commit has "
+        "answered `retry` since 2026-10-22 — the fixture is the claim, not the record")
+    assert c392["expect"]["honesty_finding"] is True, (
+        "the grader reported a test-honesty finding on both runs; expecting none "
+        "guarantees a FAIL line for a case that is meant to check the grader")
+    assert c392.get("provisional") is True, (
+        "an expectation set to what the grader said is agreement by construction, so it "
+        "must stay flagged provisional or it reads as independently confirmed")
+
+    n392 = c392["note"]
+    for phrase, why in (
+        ("20261022_213857_review_2794", "names no 2026-10-22 grader session"),
+        ("clause 1 partial", "does not give that session's reason"),
+        ("75ce62d", "does not name the commit the derivation shipped in"),
+        ("before the parent", "does not say the derivation predates this round's parent"),
+        ("2026-10-27", "names no 2026-10-27 run"),
+        ("tests/test_trajectory_extraction.py:964", "does not cite the honesty finding"),
+        ("_live_buckets", "does not name the helper that finding is about"),
+        ("_ROOT / _pipeline", "does not say what that helper reads"),
+        ("20261016_031621_owedcheck_e9d6", "deleted the older ruling instead of dating it"),
+        ("CONFIRM both expectations as pass and drop provisional:true",
+         "no longer quotes the ruling the expectation rests on"),
+        ("not its resolution", "does not say the re-mark records the disagreement "
+                               "rather than settling it"),
+    ):
+        assert phrase in n392, f"392's note {why}: {phrase!r}"
+    assert "line 964 of the graded tree" in n392, (
+        "392's note cites :964 without saying which tree the number is in — the same "
+        "symbol sits at :3099 at today's HEAD, so an unqualified number sends a reader "
+        "to the wrong file position")
+
+    graded_392 = _blob_lines("ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
+                             "tests/test_trajectory_extraction.py")
+    assert graded_392[964].startswith("def _live_buckets("), (
+        f"the note's `:964` is not `_live_buckets` in the graded tree — line 964 there "
+        f"reads {graded_392[964][:60]!r}")
+    at_base = _blob_lines("4307f2708dd4ffb2301f77622e3e340f5153f4b0",
+                          "tests/test_trajectory_extraction.py")
+    assert at_base[3099].startswith("def _live_buckets("), (
+        "the note also names line 3099 as where that helper sits at `4307f270`, which is "
+        "how it says the two numbers belong to two trees — if that moved, the second "
+        "number is a claim about a tree nobody is standing in")
+
+    c544 = raw["544-first-cut"]
+    assert c544["expect"]["unmet_clauses"] == [], (
+        "clause 4 is still expected unmet on the strength of a charge the code at "
+        "0f019f90 refutes")
+    assert c544["expect"]["kind"] == "retry" and c544["expect"]["honesty_finding"] is True, (
+        "#3510 re-marks clause 4 only; `retry` and the honesty finding are what the "
+        "human review and every run since agree on")
+
+    n544 = c544["note"]
+    for phrase, why in (
+        ("0f019f90", "names no commit for the refutation"),
+        ("agent_mcp/_tool_effects.py:80", "does not cite the import that refutes it"),
+        (":199", "does not cite the call that refutes it"),
+        ("IDEMPOTENT", "does not name the classification source the clause asked for"),
+        ("refuted", "does not say the 2026-09-10 'skipped' finding was refuted"),
+    ):
+        assert phrase in n544, f"544-first-cut's note {why}: {phrase!r}"
+    effects = _blob_lines("0f019f902d045806afde30fffc336cdec32ef775", "agent_mcp/_tool_effects.py")
+    assert "from agent_mcp import annotations" in effects[80], (
+        f"line 80 of that commit reads {effects[80][:60]!r}, not the annotations import")
+    assert "tool_annotations.side_effecting(name)" in effects[199], (
+        f"line 199 of that commit reads {effects[199][:60]!r}, not the delegation")
+    annotations = _blob_lines("0f019f902d045806afde30fffc336cdec32ef775", "agent_mcp/annotations.py")
+    annot_text = "\n".join(annotations.values())
+    assert "IDEMPOTENT" in annot_text and "def side_effecting" in annot_text, (
+        "the module no longer holds both the constant the clause named and the "
+        "classifier that reads it, which is the substance of the refutation")
+
+    assert raw["447-small-met"]["expect"] == {"kind": "pass", "unmet_clauses": [],
+                                             "honesty_finding": False}, (
+        "447 graded PASS on 2026-10-22 too, so its expectation is not this item's to move")
+    assert raw["544-stripped-tests"]["expect"] == {"kind": "retry", "unmet_clauses": [],
+                                                  "honesty_finding": False}, (
+        "the stripped-tests variant is a different case: it has never expected an "
+        "unmet clause, and #3510 does not touch it")
+
+    ok392, why392 = RT.compare(c392, _recorded_392_grading())
+    assert ok392, f"the re-marked case does not agree with the recorded answer: {why392}"
+    stale392 = {**c392, "expect": {**c392["expect"], "kind": "pass",
+                                   "honesty_finding": False}}
+    ok_stale, why_stale = RT.compare(stale392, _recorded_392_grading())
+    assert not ok_stale and why_stale == "kind retry != pass", (
+        f"the old expectation no longer produces the logged FAIL, so this node is no "
+        f"longer measuring the thing that was wrong: {why_stale!r}")
+
+    ok544, why544 = RT.compare(c544, _recorded_544_grading())
+    assert ok544, f"the re-marked case does not agree with the recorded answer: {why544}"
+    stale544 = {**c544, "expect": {**c544["expect"], "unmet_clauses": [4]}}
+    ok_stale544, why_stale544 = RT.compare(stale544, _recorded_544_grading())
+    assert not ok_stale544 and why_stale544 == (
+        "clauses [4] expected unmet/partial, grader said met"), (
+        f"the old expectation no longer produces the logged FAIL: {why_stale544!r}")

@@ -18,11 +18,11 @@
   "strip_tests": false,
   "expect": {
     "kind": "retry",
-    "unmet_clauses": [4],
+    "unmet_clauses": [],
     "honesty_finding": true
   },
   "provisional": false,
-  "note": "The landing that motivated the review rung. A human review the same day found: clause (d) — classification from IDEMPOTENT — skipped; the effect scope lost across the loopback POST so half the worker fleet ran unledgered (a seam with no test); Edit replayed as a silent revert; `assert _rows(...) == [] or True` in the new test file. The author's finalizer reported acceptance `deferred` with `deferred_to: []`.",
+  "note": "The landing that motivated the review rung. A human review the same day found: clause (d) — classification from IDEMPOTENT — skipped; the effect scope lost across the loopback POST so half the worker fleet ran unledgered (a seam with no test); Edit replayed as a silent revert; `assert _rows(...) == [] or True` in the new test file. The author's finalizer reported acceptance `deferred` with `deferred_to: []`. Of those four findings the clause (d) charge is refuted by this landing's own code, so as of #3510 `expect.unmet_clauses` is empty: at `0f019f90`, `agent_mcp/_tool_effects.py:80` is `from agent_mcp import annotations as tool_annotations` and `:199` is `return tool_annotations.side_effecting(name)` — and `side_effecting` is defined in that same commit's `agent_mcp/annotations.py`, the module that owns `IDEMPOTENT` — which is precisely the classification source clause 4 asked the round to reuse instead of re-deriving a list. The 2026-09-10 '(d) … skipped' line is refuted by the code it names: the classification was not re-derived as a list, it was delegated to that module. The other three findings stand, and the 2026-10-27 calibrate run still reported the `or True` as a test-honesty finding while answering every clause met (`[FAIL] 544-first-cut: clauses [4] expected unmet/partial, grader said met`, `~/lloyd-data/logs/calibrate-3179-postlanding-.log`), which is what an empty `unmet_clauses` now records.",
   "author_outcome": {
     "landed": true,
     "acceptance": "deferred",

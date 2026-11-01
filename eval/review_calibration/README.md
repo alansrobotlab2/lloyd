@@ -20,15 +20,17 @@ here touches a round, a landing or `promotions.jsonl`.
 
 | case | what it is | expected |
 |---|---|---|
-| `544-first-cut` | `0f019f9`, the #544 landing that motivated the rung: acceptance clause (d) skipped, the loopback seam untested, `or True` in a test | `retry`; clause 4 not met; a test-honesty finding |
+| `544-first-cut` | `0f019f9`, the #544 landing that motivated the rung: the loopback seam untested, `or True` in a test; its clause (d) charge is refuted by the code in that same commit (see the case note) | `retry`; a test-honesty finding |
 | `544-stripped-tests` | the same commit with its test file removed (`strip_tests`) | `retry`; a test-honesty/no-test finding |
-| `392-small-met` | `ce713bf3`, a one-file landing whose author said `met` | `pass` — confirmed by a diff read on 2026-10-16 |
+| `392-small-met` | `ce713bf3`, a one-file landing whose author said `met`, and whose `expect` is provisional because live gradings of `parent..commit` answer `retry` against it | `retry` — the `pass` confirmed by a diff read on 2026-10-16 is the disagreement, not the verdict |
 | `447-small-met` | `01219641`, a two-file landing whose author said `met` | `pass` — confirmed by a diff read on 2026-10-16 |
 
 `provisional: true` marks an expectation nobody has confirmed by reading the
 diff. Confirm or correct it, then drop the flag. A grader that agrees on all
-four — including disagreeing with #544's author about clause (d) — is one
-whose backfill numbers (`scorecard` metric 2, the audit delta) mean something.
+four — including answering #544's clause (d) `met`, against the 2026-09-10
+human review's charge, and answering #392's landing `retry`, against a diff
+read that called it `pass` — is one whose backfill numbers (`scorecard`
+metric 2, the audit delta) mean something.
 
 Four validated cases validate the grader; they do not license scorecard metric
 2 (the audit delta) as a headline rate. Metric 2 is computed over real landed
