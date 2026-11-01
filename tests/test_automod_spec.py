@@ -3131,3 +3131,538 @@ def test_the_turn1mini_grant_carries_its_reason_beside_the_entry(monkeypatch):
             "reaches it and this comment documents a refusal that is not in force")
     finally:
         monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+
+
+# ---------------------------------------------------------------------------
+# #3646: the two shipped side-panel worker paths — the admission that lets the
+# `canCheck` fix (#3598) be committed at all
+# ---------------------------------------------------------------------------
+#
+# The defect is live and user-visible: with the panel open on tab A, switching to an
+# already-loaded checkable tab B kills 'Check it out, Lloyd'.
+# `chrome.tabs.onActivated` (`chrome-extension/src/background/service-worker.ts:288-299`)
+# pushes a hand-built `focus-session` literal carrying `type/windowId/tabId/sessionKey/
+# url/title` and NO `canCheck`, while `pushFocus` (:80-99) is the only site that computes
+# it (`canCheck = canCheckUrl(tab.url)`). The panel reads an omitted flag as false
+# (`web/src/sidepanel/SidePanelApp.tsx:69` `canCheck: Boolean(msg.canCheck)`, button
+# `disabled` at :164), so a tab switch blanks the button. The tracked shipped artefact
+# agrees: the `onActivated` chunk of `chrome-extension/dist/service-worker.js` ends
+# `…title:n?.title})` with no `canCheck`, which is what Chrome loads.
+#
+# #3598's fix is three steps — route `onActivated` through `await pushFocus(windowId,
+# tabId)`, rebuild the tracked bundle, add the chunk-scoped pin. It cannot be committed,
+# because `ALLOWED_GLOBS` names no `chrome-extension` path and `spec.classify` answers
+# `unlisted` for both the source and the bundle, so rung 0 refuses the diff. This grant
+# is that admission and nothing more: two verbatim files — the worker's source, and the
+# one tracked build output whose shipped defect the item names. The fix rides a later
+# round, for the reason this file states at :1133-1140 inside
+# `test_the_scope_spec_stays_protected_though_scripts_is_allowed`: the gate's child is
+# spawned `cwd=LIVE_ROOT` and imports the live tree's module, so rung 0 grades a diff with
+# the LIVE tuple. Widening and fix in one round is refused by its own gate, so two rounds
+# is the only satisfiable route — and that is why no node below asserts that the
+# `focus-session` literal at :293 is gone.
+#
+# The directory is refused, not admitted: 18 other tracked files would come with it. The
+# loudest is `chrome-extension/manifest.json` — in Chrome that file IS the grant, the
+# `host_permissions` and `sidePanel` declarations that decide which origins the extension
+# may read, so it is the one `chrome-extension/` change whose blast radius is a browser
+# permission rather than a TypeScript type. This is #1376's decision a second time: name
+# the file, never the directory containing a permission surface, and let
+# `test_only_a_verbatised_path_under_chrome_extension_may_be_admitted` hold the line.
+# Measured against the pre-grant tuple, the blanket `chrome-extension/**` admits 21 paths
+# this grant does not name — 18 tracked files, two probes for files nobody has written,
+# and `chrome-extension/vite.chrome.config.ts`, a path #3646 clause 2 cites that is not
+# tracked at all — and every narrower spelling still smuggles: 10 for
+# `chrome-extension/dist/**`, 5 each for `chrome-extension/src/**` and
+# `chrome-extension/src/background/**`, and even the single-file wildcard
+# `chrome-extension/src/background/service-worker.*` admits one path this rail cannot
+# tell from a directory grant (`test_the_directory_spellings_...` prices all five).
+
+#: The two admitted paths: the worker's source, and the tracked build output Chrome
+#: actually loads. Both verbatim.
+CHROME_WORKER_SRC = "chrome-extension/src/background/service-worker.ts"
+CHROME_WORKER_BUNDLE = "chrome-extension/dist/service-worker.js"
+CHROME_EXTENSION_GRANT = (CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE)
+
+#: The diff the follow-on fix round carries: the two admitted paths plus the suite its
+#: clause names (`tests/test_sidepanel_spawn_guard.py`, tracked on `main`). Rung 0
+#: classifies the paths a diff touches, so what has to hold is the three's verdicts
+#: together — the same construction as `TTS_1878_DIFF`.
+CHROME_FIX_DIFF = [CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE,
+                   "tests/test_sidepanel_spawn_guard.py"]
+
+#: The four refused members clause 1's comment names by hand, so the comment's claim is
+#: checkable against `classify` rather than being a paragraph about intent.
+CHROME_REFUSED_NAMED = ("chrome-extension/manifest.json",
+                        "chrome-extension/src/background/url.ts",
+                        "chrome-extension/src/background/lloyd-client.ts",
+                        "chrome-extension/dist/sidepanel.html")
+
+#: #3646 clause 2 cites `chrome-extension/vite.chrome.config.ts`. Nothing is tracked at
+#: that path: the build config is `web/vite.chrome.config.ts`. Both spellings are pinned,
+#: because a rail keyed on the cited one asserts nothing about a file that is not there.
+CHROME_BUILD_CONFIG = "web/vite.chrome.config.ts"
+CHROME_BUILD_CONFIG_AS_CITED = "chrome-extension/vite.chrome.config.ts"
+
+#: Two paths under the granted directories that nothing has written yet. Named apart from
+#: the tracked siblings because they do not exist on disk: they are the case a directory
+#: grant would cover that no on-disk sample can.
+CHROME_WORKER_PROBE = "chrome-extension/src/background/probe.ts"
+CHROME_BUNDLE_PROBE = "chrome-extension/dist/probe.js"
+
+#: Every directory spelling of the grant that was considered and refused, with the count
+#: of not-named paths each admits. Measured, not reasoned: see the node that reads it.
+CHROME_DIRECTORY_SPELLINGS = {
+    "chrome-extension/**": 21,
+    "chrome-extension/dist/**": 10,
+    "chrome-extension/src/**": 5,
+    "chrome-extension/src/background/**": 5,
+    "chrome-extension/src/background/service-worker.*": 1,
+}
+
+
+def tracked_chrome_extension_paths() -> list[str]:
+    """Every path `git` tracks under `chrome-extension/`, from the index.
+
+    Read from the index and not the working tree for the standing reason in this file: a
+    working-tree listing under the gate's review snapshot and under a round worktree is
+    not the same listing as the live tree's, and the claim being made is about what the
+    repository ships.
+    """
+    out = subprocess.run(["git", "ls-files", "chrome-extension"], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return sorted(out.stdout.split())
+
+
+def chrome_universe() -> list[str]:
+    """The corpus the path-exactness property is checked over.
+
+    Every tracked `chrome-extension/` file, the two probes for files nobody has written,
+    the build config in both the real spelling and the one clause 2 cites, and — because
+    a directory grant's reach is a property of `_match`, not of the tree — the
+    already-granted worker paths themselves, which must never count as unnamed.
+    """
+    return sorted(set(tracked_chrome_extension_paths())
+                  | {CHROME_WORKER_PROBE, CHROME_BUNDLE_PROBE, CHROME_BUILD_CONFIG,
+                     CHROME_BUILD_CONFIG_AS_CITED})
+
+
+def chrome_admissions_beyond_the_grant(globs: tuple[str, ...]) -> list[str]:
+    """Paths `globs` let a round edit under the chrome-extension name-space.
+
+    Takes the tuple and reads `classify` through it — the hazard #3258 records at
+    :1722-1731: `classify` reads the module global, so a helper that took no tuple would
+    report the widening as a directory grant to itself and every caller that subtracted
+    an entry from `spec.ALLOWED_GLOBS` would be checking a verdict that was never the
+    widened one. The granted paths are excluded by name, not by verdict.
+    """
+    verbatised = {g for g in globs if "*" not in g}
+    with _temporarily_allowed(globs):
+        return sorted(p for p in chrome_universe()
+                      if p not in verbatised and spec.classify(p) == "allowed")
+
+
+class _temporarily_allowed:
+    """Point `spec`'s module global at `globs` for the duration of a block.
+
+    A context manager rather than `monkeypatch` because the callers that need it are
+    helpers, and a helper that took a `monkeypatch` argument would have to be passed one
+    by every node — the shape that let #3258's leak-prone patching reach a later node.
+    """
+
+    def __init__(self, globs: tuple[str, ...]):
+        self._new = globs
+        self._old: tuple[str, ...] | None = None
+
+    def __enter__(self):
+        self._old = spec.ALLOWED_GLOBS
+        spec.ALLOWED_GLOBS = self._new
+        return self
+
+    def __exit__(self, *exc):
+        spec.ALLOWED_GLOBS = self._old
+        return False
+
+
+def test_the_chrome_extension_grant_is_two_verbatim_entries_and_no_glob():
+    """#3646 clause 1: the tuple gained exactly these two strings, verbatim.
+
+    The predicate is set-valued, not positional (#3252's finding at :2901-2906 — an entry
+    that moved is not an entry that changed), and it asks two things of the shipped
+    tuple: the `chrome-extension` members are exactly the two paths, and no member
+    mentioning `chrome-extension` contains a `*`. That second half is what keeps the
+    grant from being widened later by someone adding `chrome-extension/dist/**` beside
+    these two lines, which would silently admit the tracked `dist/manifest.json` — the
+    build output of the very permission file that stays out.
+    """
+    shipped = tuple(spec.ALLOWED_GLOBS)
+    mine = tuple(g for g in shipped if g.startswith("chrome-extension/"))
+    assert mine == CHROME_EXTENSION_GRANT or set(mine) == set(CHROME_EXTENSION_GRANT), (
+        f"the tuple's `chrome-extension` members are {list(mine)}, which is not exactly "
+        f"{list(CHROME_EXTENSION_GRANT)}")
+    assert not [g for g in shipped if "chrome-extension" in g and "*" in g], (
+        "a wildcard mentioning chrome-extension reached the shipped tuple; the only "
+        "spellings that keep `chrome-extension/manifest.json` out are these two paths "
+        "written out in full")
+    gained = set(shipped) - set(ALLOWED_GLOBS_AS_SHIPPED)
+    assert not gained, (
+        f"{sorted(gained)} is in the live tuple but not in the snapshot this test file "
+        "imported, so something widened the tuple since the import — the follow-on "
+        "#3598 round must not also be this one")
+
+
+def test_the_chrome_extension_grant_comment_names_what_stays_out_and_why():
+    """#3646 clause 1's prose half: the comment says why the directory is refused.
+
+    Four things a later reader cannot reconstruct from two path strings: that the grant
+    is two files and not the directory; that `manifest.json` is the reason, because in
+    Chrome the manifest is itself the permission grant; that the build config and the
+    README and icons stay out; and that the build output is admitted for one file only,
+    which is what makes rebuilding it a reviewable diff. Each is checked in the comment
+    block this node locates immediately above the entry.
+    """
+    import re  # this file imports per-function; standing house style
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    first = next(i for i, l in enumerate(src) if CHROME_WORKER_SRC in l)
+    block: list[str] = []
+    for line in reversed(src[:first]):
+        if line.strip().startswith("#"):
+            block.append(line.strip())
+            continue
+        if not line.strip():
+            continue
+        break
+    prose = re.sub(r"\s+", " ", " ".join(reversed(block)))
+    assert "chrome-extension grant" in prose or "#3646" in prose, (
+        f"the comment above the entry names neither the grant nor the item: {prose}")
+    assert "not the directory" in prose.lower(), (
+        f"the comment does not say the grant is two files and not the directory: {prose}")
+    assert "manifest.json" in prose and "permission" in prose.lower(), (
+        f"the comment lost the reason the directory is refused — `manifest.json` is "
+        f"Chrome's permission grant, and a later round needs that to know why it may not "
+        f"add the folder: {prose}")
+    for named in ("vite.chrome.config.ts", "README.md", "icons"):
+        assert named in prose, (
+            f"the comment no longer names {named} as staying out, so nobody can check "
+            f"that it is still refused: {prose}")
+    # The comment's checkable claims must still be true of `classify`, both in the tree
+    # that carries the comment and in the pre-grant one reconstructed from the snapshot.
+    for path in CHROME_REFUSED_NAMED:
+        assert spec.classify(path) == "unlisted", path
+    with _temporarily_allowed(tuple(
+            g for g in ALLOWED_GLOBS_AS_SHIPPED if g not in CHROME_EXTENSION_GRANT)):
+        for path in CHROME_REFUSED_NAMED:
+            assert spec.classify(path) == "unlisted", (
+                "deleting the two entries leaves a refused sibling allowed, so some "
+                f"other entry reaches {path} and this comment documents a refusal that "
+                "is not in force")
+
+
+def test_only_a_verbatised_path_under_chrome_extension_may_be_admitted():
+    """#1376's path-exactness property (#1030), restated for this grant's corpus.
+
+    Over every tracked `chrome-extension/` file plus probes for files nobody has written
+    and the build config in both spellings, no path this grant does not name may classify
+    `allowed` — and the probes exist on purpose: `git ls-files` cannot contain a
+    `chrome-extension/src/background/something-new.ts`, which is precisely the file a
+    directory grant would hand a future round and no tracked-file assertion would notice.
+    The mechanism is general — `_match` is whole-path `fnmatch` — so this node holds for
+    any entry anyone adds later, not only for these two.
+    """
+    shipped = tuple(spec.ALLOWED_GLOBS)
+    assert chrome_admissions_beyond_the_grant(shipped) == [], (
+        f"{chrome_admissions_beyond_the_grant(shipped)} classifies `allowed` without "
+        "being one of the two paths #3646 named — that is a directory grant arrived as a "
+        "widening, and it would carry `chrome-extension/manifest.json` with it")
+    assert chrome_admissions_beyond_the_grant(
+        tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED
+              if g not in CHROME_EXTENSION_GRANT)) == [], (
+        "the chrome-extension name-space admits paths even with this grant subtracted "
+        "from the shipped tuple, so some entry outside these two reaches it and the "
+        "grant below is not the whole story about who may edit a browser extension")
+
+
+def test_the_directory_spellings_of_the_grant_price_at_the_paths_they_admit():
+    """Why two strings and not one directory: each refused spelling, measured.
+
+    #3646 as written offered `chrome-extension/**`; the item's own clause 1 then lists
+    what must stay out, so the alternative spellings are priced rather than asserted
+    away, against the pre-grant tuple so the numbers are the counterfactual and not a
+    tautology. All five admit at least one path the grant does not name — including the
+    one-file wildcard `chrome-extension/src/background/service-worker.*`, which reaches
+    exactly one path and still fails the rail above, because a `*` cannot be checked for
+    what it will reach next. The counts are the record of that measurement; if the tree
+    grows a tracked `chrome-extension/` file, the number moves and this node says by how
+    much the directory would have grown the grant.
+    """
+    pre_grant = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED
+                      if g not in CHROME_EXTENSION_GRANT)
+    for spelling, expected in CHROME_DIRECTORY_SPELLINGS.items():
+        unnamed = chrome_admissions_beyond_the_grant(pre_grant + (spelling,))
+        assert len(unnamed) == expected, (
+            f"{spelling} now admits {len(unnamed)} unnamed paths, not the {expected} "
+            f"this table recorded: {unnamed}")
+    # The claim that actually decides the design, stated separately because it is the
+    # one a later reader comes here for: the blanket spelling is the manifest.
+    blanket = chrome_admissions_beyond_the_grant(pre_grant + ("chrome-extension/**",))
+    assert "chrome-extension/manifest.json" in blanket, (
+        "chrome-extension/** no longer reaches the manifest, so either the manifest "
+        "stopped being tracked or `dist/manifest.json` is no longer what the blanket "
+        "admits — either way the reason the directory was refused needs re-reading")
+
+
+def test_the_grant_moves_exactly_two_of_the_eighteen_verdicts():
+    """Clause 2's positive half, per path, over the shipped tuple.
+
+    Eighteen files are tracked under `chrome-extension/`; two of them classify `allowed`
+    and are the two named here, and the other sixteen are still `unlisted`, including the
+    nine members of `chrome-extension/dist/` that are not the worker bundle. Asserting it
+    per path rather than as a count is what keeps a broadening from passing: a
+    `chrome-extension/dist/**` added beside these entries leaves sixteen unlisted and
+    would sail through a `== 16`, while naming the two tells the reader which files the
+    next round may edit.
+    """
+    tracked = tracked_chrome_extension_paths()
+    assert len(tracked) == 18, (
+        f"{len(tracked)} files are tracked under chrome-extension/, not the 18 this node "
+        "and the counts in this section were measured against — recount before editing "
+        "the expected numbers, and check whether the new file is one #3598 needs")
+    allowed = [p for p in tracked if spec.classify(p) == "allowed"]
+    assert sorted(allowed) == sorted(CHROME_EXTENSION_GRANT), allowed
+    assert spec.classify(CHROME_BUILD_CONFIG) == "unlisted", (
+        f"{CHROME_BUILD_CONFIG} — the config #3646 clause 2 cites as "
+        f"{CHROME_BUILD_CONFIG_AS_CITED}, which is not a tracked path — classifies "
+        f"{spec.classify(CHROME_BUILD_CONFIG)}; the build entry point staying refused is "
+        "half of why the rebuild is a human-visible step")
+    assert spec.classify(CHROME_BUILD_CONFIG_AS_CITED) == "unlisted"
+    for path in CHROME_REFUSED_NAMED:
+        assert spec.classify(path) == "unlisted", path
+    assert not spec.requires_drill(list(CHROME_EXTENSION_GRANT)), (
+        "the granted worker paths reached PROTECTED_GLOBS or DRILL_GLOBS, so the follow-on "
+        "#3598 round would pay a guardian drill to fix a tab-switch bug")
+
+
+def test_the_grant_is_immune_to_the_sibling_entry_shape():
+    """The #2664 trap, priced for this entry: a sibling prefix never fires.
+
+    `_match` splits patterns on `/` and matches component-wise, so a verbatim entry is a
+    whole-path equality — which is why no rule stops someone writing the grant as
+    `chrome-extension/src/background/service-worker.js` beside the real one and getting an
+    entry that matches nothing forever, silently. This node is the difference between
+    reading `_match` and reasoning from it: both spellings classify, and only the `.ts`
+    one is allowed.
+    """
+    assert spec.classify(CHROME_WORKER_SRC) == "allowed"
+    for wrong in ("chrome-extension/src/background/service-worker.js",
+                  "chrome-extension/dist/service-worker.ts",
+                  "chrome-extension/src/service-worker.ts"):
+        assert spec.classify(wrong) == "unlisted", (
+            f"{wrong} classifies allowed, so an entry is matching by prefix and not by "
+            "path, which is the failure mode #2664 records")
+
+
+# --- clause 3: what the admission buys, and that nothing else moves ----------------- #
+
+def test_the_fix_diff_clears_rung_0_under_the_grant():
+    """#3646's acceptance line: the follow-on diff must come back `in scope`.
+
+    The whole point of an admission is a verdict for a diff that does not exist yet —
+    #3598's three steps, whose files are the two granted paths plus the suite the fix's
+    clause names. Under the pre-grant reconstruction the same three paths are refused
+    with both worker paths sitting in the `unlisted` bucket, and the gate's refusal is
+    what the ledger shows for every prior attempt at this bug. Under the shipped tuple
+    they are `in scope`, nothing is unlisted, nothing is protected and no drill is
+    required. The pre-grant half is the node's power: an instrument that only ever sees a
+    widened tuple cannot distinguish an admission from an always-granted path, and a
+    grant that changed nothing would pass a one-sided check just as hard.
+    """
+    with _temporarily_allowed(tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED
+                                    if g not in CHROME_EXTENSION_GRANT)):
+        refused = spec.check_scope(list(CHROME_FIX_DIFF))
+    assert refused[0] is False and sorted(
+        refused[2].get("unlisted") or []) == sorted(CHROME_EXTENSION_GRANT), (
+        f"without these two entries the fix diff's verdict is {refused}, not a refusal "
+        "that names both worker paths — so the entry below is not what the next round "
+        "needs in order to commit at all")
+    assert refused[1].startswith("paths outside the writable set"), refused[1]
+
+    ok, reason, buckets = spec.check_scope(list(CHROME_FIX_DIFF))
+    assert ok is True and reason == "in scope", (ok, reason, buckets)
+    assert not buckets.get("unlisted") and not buckets.get("protected"), buckets
+    assert sorted(buckets["allowed"]) == sorted(CHROME_FIX_DIFF), buckets
+    assert spec.requires_drill(list(CHROME_FIX_DIFF)) is False
+    assert spec.touches_requirements(list(CHROME_FIX_DIFF)) is False
+
+
+def test_the_fix_diff_clears_scope_in_an_interpreter_that_imported_the_tuple():
+    """The process boundary this grant exists to cross: a verdict from a fresh import.
+
+    Every other node here runs inside the pytest process, whose `spec` arrived through
+    this file's `sys.path.insert` — so all of them would keep passing on an entry that
+    reached only an already-imported module. Rung 0 is the other kind of process: the
+    ladder is spawned detached and its preflight calls `spec.check_scope` on a `spec` it
+    imported itself. So ask a fresh interpreter the same question about the fix diff, and
+    require an equality with this process's reading rather than a hard-coded verdict, plus
+    one concrete pin (`in scope`, nothing unlisted, no drill), because an equality between
+    two readings of the same wrong tuple would otherwise be vacuously true.
+
+    The narrower claim is deliberate. The gate's own interpreter runs with
+    `cwd=LIVE_ROOT` and so reads the *live* tree's tuple, which cannot contain this entry
+    until it lands — the reason `scripts/automod/spec.py` is `protected` and drilled
+    rather than merely allowed, and the reason this node pins a checkout import instead of
+    pretending to grade the gate's own process.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "d = ['chrome-extension/src/background/service-worker.ts', "
+        "'chrome-extension/dist/service-worker.js', "
+        "'tests/test_sidepanel_spawn_guard.py']; "
+        "print(spec.check_scope(d)[0:2]); "
+        "print(sorted(spec.check_scope(d)[2]['allowed'])); "
+        "print(spec.requires_drill(d))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    parent = spec.check_scope(list(CHROME_FIX_DIFF))
+    assert lines[0] == repr(parent[0:2]) == "(True, 'in scope')", (lines[0], parent)
+    assert lines[1] == repr(sorted(parent[2]["allowed"])), lines[1]
+    assert lines[2] == "False", lines[2]
+    assert sorted(parent[2]["allowed"]) == sorted(CHROME_FIX_DIFF), parent
+
+
+def test_every_other_rail_in_this_file_stays_green_with_the_grant_in_place(monkeypatch):
+    """#1376's :1209 shape, for the entry #3646 adds: widen, then call the other rails.
+
+    A `protected` edit is one of the few changes that can invalidate a rail elsewhere in
+    this file, because the rails read the shipped tuple rather than a fixture. Three of
+    the file's own rails are parameterless and call directly, and the two that take
+    `monkeypatch` are re-run in the style #3162 set with the module-level snapshot as
+    their argument. Every assertion of this section is re-run last inside this node's
+    patch, so a future widening that breaks a sibling is reported while the widening is
+    still on the stack. The patch is applied and restored around the whole body even
+    though the shipped tuple already carries the grant: the point is that the verdicts
+    hold *with* it, which a bare call would also show but not say.
+    """
+    test_a_clean_ordinary_diff_needs_no_drill()
+    test_scope_accepts_a_diff_whose_fix_is_prompt_surface()
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    test_the_1878_diff_clears_rung_0_without_a_drill()
+    test_the_timeline_diff_clears_rung_0_without_a_drill()
+    test_the_scope_spec_stays_protected_though_scripts_is_allowed()
+    test_the_voice_grant_leaves_the_blanket_glob_simulation_firing(monkeypatch)
+    test_the_grant_is_immune_to_the_sibling_entry_shape()
+    test_the_grant_moves_exactly_two_of_the_eighteen_verdicts()
+    test_only_a_verbatised_path_under_chrome_extension_may_be_admitted()
+    test_the_fix_diff_clears_rung_0_under_the_grant()
+
+
+# --- clause 4: the admission is a verdict change and nothing else ------------------- #
+
+def test_the_admission_changes_no_verdict_but_the_two_paths_it_grants():
+    """Two things this round must not do, both read off the tree instead of asserted.
+
+    First, its blast radius, computed: subtract the two entries from the shipped tuple and
+    compare `classify` over the whole corpus this file can name — every tracked path in the
+    repository plus the chrome probes and both build-config spellings. The paths whose
+    verdict moved must be exactly the two granted ones: no sibling of the worker, no
+    `agent-services/` grant, no test path may shift, and in particular no
+    `chrome-extension/` sibling may pick up a verdict from a neighbouring entry. That is
+    what makes the two-entry shape load-bearing rather than stylistic.
+
+    Second, #3646 clause 4's claim about the diff — "no file under `chrome-extension/` is
+    touched, which keeps main green" — read through the same round-diff reader
+    `skip_inventory` uses, which is the helper that exists precisely because `git diff
+    HEAD` names nothing once a round commits. So the property fires wherever a round's
+    diff is actually on disk, including the gate's checkout and the review snapshot, and
+    degrades to the shipped-tree witness (asserted unconditionally below) where the tree
+    is simply `main` and there is no round diff to read.
+
+    The clause named two files and this diff carries a third: two pins in
+    `tests/test_backlog_unattended.py` used `chrome-extension/src/background/service-worker.ts`
+    as their positive sample for "a `human-only:` marker naming an unlisted path is a
+    guard", and admitting the path makes both wrong the moment the entry lands — a refusal
+    of a path that is now writable. So the assertion permits `scripts/automod/spec.py` and
+    test files only, and #3646's findings carry why that one extra test file is a
+    consequence of the grant rather than slack.
+    """
+    shipped = tuple(spec.ALLOWED_GLOBS)
+    without = tuple(g for g in shipped if g not in CHROME_EXTENSION_GRANT)
+    universe = chrome_universe() + [
+        pth for pth in subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                                      capture_output=True, text=True,
+                                      timeout=120).stdout.split()
+        if not pth.startswith("chrome-extension/")]
+    with _temporarily_allowed(without):
+        before = {pth: spec.classify(pth) for pth in universe}
+    after = {pth: spec.classify(pth) for pth in universe}
+    moved = sorted(pth for pth in universe if before[pth] != after[pth])
+    assert moved == sorted(CHROME_EXTENSION_GRANT), (
+        f"the entries moved {len(moved)} verdicts: {moved[:8]}")
+
+    # The node imports the reader lazily and off `tests/`, the way test_skip_inventory
+    # does: this file is collected with the repo root on sys.path, not its own directory.
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from skip_inventory import changed_paths  # noqa: E402
+    diff = set(changed_paths(REPO_ROOT))
+    if "scripts/automod/spec.py" in diff:
+        chrome = sorted(pth for pth in diff if pth.startswith("chrome-extension/"))
+        assert not chrome, (
+            "an admission round wrote a file under `chrome-extension/`, the one thing "
+            f"clause 4 forbids so that the admission cannot half-fix the defect: {chrome[:5]}")
+        non_test = sorted(pth for pth in diff if not pth.startswith("tests/"))
+        assert non_test == ["scripts/automod/spec.py"], (
+            "the only non-test file an admission may change is the scope module itself; "
+            f"this diff also changed {non_test}")
+    else:
+        # No round diff on disk (a plain checkout of main, or a snapshot whose base is
+        # HEAD). Say which arm ran rather than let the absence read as a pass.
+        assert "chrome-extension/src/background/service-worker.ts" in subprocess.run(
+            ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True,
+            timeout=120).stdout, (
+            "neither a round diff nor the granted path in the index: this tree is neither "
+            "a round nor a main with the admission landed, so the node checked nothing")
+def test_the_admission_left_the_shipped_defect_exactly_where_it_found_it():
+    """Clause 4's positive check: the tree this round merges still carries the bug.
+
+    Three readings, all of them the defect and none of them anything this round was asked
+    to remove. `grep -n 'focus-session'` over the worker source still returns four sites
+    — :32 the `FocusMessage` field, :78 `pushFocus`'s comment, :91 its construction, and
+    :293 the hand-built literal inside the `chrome.tabs.onActivated` listener — so the
+    listener still pushes without `canCheck`; and the tracked bundle's `onActivated` chunk
+    still ends in `title:…})` with no `canCheck` key, which is the byte Chrome loads. If
+    either reading changes in this round, the diff is not an admission. The node does not
+    ask the literal to be gone, because it cannot be: `#3598`'s fix round is the one that
+    routes the listener through `await pushFocus(windowId, tabId)`, and the same rung 0
+    that refused it before this entry landed will grade that diff once it has.
+    """
+    src_lines = (REPO_ROOT / "chrome-extension" / "src" / "background" /
+                 "service-worker.ts").read_text().splitlines()
+    sites = [i + 1 for i, line in enumerate(src_lines) if "focus-session" in line]
+    assert len(sites) == 4, (
+        f"`focus-session` now appears at {sites}, the four sites the defect is made of "
+        "at aed135c9 — a fifth is a second construction site and a fourth-to-lost means "
+        "the fix landed, and either way this node's claim about the shipped tree is "
+        "stale and must be re-measured, not edited to fit")
+    listener = next(i for i, line in enumerate(src_lines, 1)
+                    if "tabs.onActivated.addListener" in line)
+    chunk = src_lines[listener - 1:listener + 12]
+    assert any("focus-session" in line for line in chunk), (
+        f"the onActivated listener at :{listener} no longer builds a focus-session "
+        "literal, which is the fix rather than the admission")
+    assert not any("canCheck" in line for line in chunk), (
+        "the listener now computes canCheck itself, which is a second copy of pushFocus's "
+        "rule and the duplication #3598's clause 4 forbids")
+
+    bundle = (REPO_ROOT / "chrome-extension" / "dist" /
+              "service-worker.js").read_text()
+    at = bundle.index("onActivated.addListener(")
+    nxt = bundle.find("addListener(", at + len("onActivated.addListener("))
+    assert "canCheck" not in bundle[at:nxt], (
+        "the tracked bundle's onActivated chunk carries canCheck, so a rebuild rode into "
+        "this round — the bundle and the source move together in #3598's round or not at "
+        "all, since a bundle rebuilt without the source fix and a source fix without the "
+        "bundle both ship the same dead button through `web/src/sidepanel/"
+        "SidePanelApp.tsx:69`")

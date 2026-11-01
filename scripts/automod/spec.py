@@ -254,6 +254,33 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "web/src/**",
     "web/index.html",
     "web/public/**",
+    # #3646 (chrome-extension grant): the side-panel focus switch, not the directory.
+    # Two verbatim paths and no glob, on #1376's rule: a directory holding a permission
+    # surface is named file by file. `chrome-extension/manifest.json` is tracked here, and
+    # in Chrome that file IS the grant — its `host_permissions` decide which origins the
+    # extension may read — so editing it is a browser permission, not a TypeScript type.
+    # `chrome-extension/**` would also take `dist/manifest.json`, `dist/sidepanel.html`,
+    # `dist/assets/**`, every icon, the README and the other two background modules
+    # (`url.ts`, `lloyd-client.ts`); `web/vite.chrome.config.ts` stays out on its own
+    # merits — it lives under `web/`, and it sets `outDir` to `chrome-extension/dist` with
+    # `emptyOutDir: true`, so the build entry point is refused even though one file of
+    # that build's output is admitted. `chrome-extension/README.md` and the `icons/`
+    # directories go with the directory: the README is the build command a round could
+    # repoint at a different outDir, and the icons are the extension's identity.
+    # What is granted is a shipped defect's own path pair. The `chrome.tabs.onActivated`
+    # listener in `src/background/service-worker.ts` pushes a `focus-session` literal with
+    # no `canCheck` (:293) while `pushFocus` (:80-99) is the only site that computes it, and
+    # the tracked `dist/service-worker.js` carries the same omission into the bytes Chrome
+    # loads — so switching to an already-loaded checkable tab blanks 'Check it out, Lloyd'
+    # (`web/src/sidepanel/SidePanelApp.tsx:69` reads an omitted flag as false). #3598's fix
+    # is one line plus a rebuild, and it could not be committed because rung 0 called both
+    # paths `unlisted`. Admitting the build output is not a licence to author it: #3571 pins
+    # every other `dist/` file to a source, and the rebuild belongs to the round that
+    # changes the source — #3598's follow-on, not this entry, which changes no bytes under
+    # `chrome-extension/`. Pinned by tests/test_automod_spec.py's
+    # test_only_a_verbatised_path_under_chrome_extension_may_be_admitted.
+    "chrome-extension/src/background/service-worker.ts",
+    "chrome-extension/dist/service-worker.js",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (

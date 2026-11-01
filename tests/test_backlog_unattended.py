@@ -1048,7 +1048,14 @@ GUARDED_MARKERS = (
     "human-only: `.gitignore` — a person replaces line 92",
     "human-only: pytest.ini needs the marker",
     "human-only: qmd/src/cli/qmd.ts (the fork is a separate clone)",
-    "human-only: chrome-extension/src/background/service-worker.ts",
+    # `chrome-extension/src/background/service-worker.ts` was one of these until #3646
+    # admitted it, and the tracked `dist/service-worker.js` built from it, into
+    # ALLOWED_GLOBS as two verbatim entries: a marker naming it guards nothing any more,
+    # and it moved to LANDABLE_MARKERS below. These two are the siblings that admission
+    # refused, so what this list tests is still the directory — `manifest.json` holds the
+    # extension's host_permissions, which are a browser permission grant, not a type.
+    "human-only: chrome-extension/manifest.json",
+    "human-only: chrome-extension/src/background/url.ts",
     "human-only: `~/.cache/qmd/` (the live index a swap moves aside)",
     "human-only: the dispatch half of this item — `~/obsidian/autonomy/96-djev-name-prior-probe.md` `status`",
     "human-only: sudo on the host to raise the inode limit",
@@ -1070,6 +1077,15 @@ LANDABLE_MARKERS = (
     "human-only: eval/djev/name_prior_2026-10-04.json — the fix is `git add`",
     "human-only: ~/lloyd/app/autonomy.py", "human-only: CLAUDE.md",
     "human-only: ~/obsidian/skills/retention-sweep/SKILL.md",
+    # #3646 (2026-10-31), the fourth instance of the #1376/#3252/#3258 shape: the
+    # admission is two verbatim paths and `chrome-extension/**` was refused, so a
+    # marker naming the source stopped being a guard when the ADMISSION landed, one
+    # round before the fix it was written for. The two could not be one round: rung 0
+    # grades with the LIVE tree's spec (`gate_detached` spawns `cwd=LIVE_ROOT`), which
+    # is why #3598's fix is its own round and why a marker that guarded yesterday
+    # annotates today.
+    "human-only: chrome-extension/src/background/service-worker.ts",
+    "human-only: chrome-extension/dist/service-worker.js",
     "human-only: a ruling on the token budget",
     "human-only: Alan decides whether the weekly cadence is right",
 )
@@ -1341,15 +1357,21 @@ def test_a_relative_fragment_naming_no_file_is_read_as_prose():
 
     The skip is bounded to exactly that shape, so nothing else widens: a relative
     token that DOES name a file still goes to `spec.classify`, which is what keeps
-    the vendored clones guarded (`qmd/` and `chrome-extension/` are in neither the
-    allowed nor the denied set), and a `~`-leading directory stays outside the repo
-    and the vault, because the absolute branch is tested before the slash is."""
+    the vendored clones guarded, and a `~`-leading directory stays outside the repo
+    and the vault, because the absolute branch is tested before the slash is.
+
+    The positive sample was `chrome-extension/src/background/service-worker.ts` until
+    #3646 admitted that one file and its tracked build output — which is exactly what
+    this node is for: `classify` answered `unlisted` so the marker guarded, and it does
+    not answer that now. `chrome-extension/` as a relative token is still in neither
+    set, because the grant is two verbatim paths and no glob, so the sample is now a
+    sibling the grant refused. `qmd/` is untouched by any of this."""
     assert B.is_human_only("human-only: ~/lloyd-data/_pipeline/vault-derived/kg.sqlite "
                            "and its store-backups/ — the rest is round-landable") is False
     assert B.is_human_only(
         "human-only: qmd/src/cli/qmd.ts (the fork is a separate clone)") is True
     assert B.is_human_only(
-        "human-only: chrome-extension/src/background/service-worker.ts") is True
+        "human-only: chrome-extension/src/background/url.ts") is True
     assert B.is_human_only(
         "human-only: `~/.cache/qmd/` (the live index a swap moves aside)") is True
 
