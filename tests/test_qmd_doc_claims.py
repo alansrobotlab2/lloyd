@@ -537,10 +537,11 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
     is admission — root `.gitignore` ends `*.json`, and `git add` of a name no negation
     rescues exits 0 having staged nothing, which is the silent failure #2282 spent two
     review attempts on. So each new name goes through `_ignore_rule` with the control
-    sibling beside it, and the whole tracked family is counted, because "6" is the number
+    sibling beside it, and the whole tracked family is counted, because "7" is the number
     `git ls-files tests/fixtures | grep -c qmd` prints once the four #2302 witnesses,
-    #2119's nightly and #2539's loss report are all in the index — a family count, so a
-    round that commits a seventh witness widens this number and its own clause together.
+    #2119's nightly, #2539's loss report and #3508's walk-stamp extract are all in the
+    index — a family count, so a round that commits an eighth witness widens this number
+    and its own clause together.
     """
     exact = {  # name -> (lines, bytes), as `wc -l -c` of the runtime report prints them
         REHEARSAL_REPORT: (68, 1783),
@@ -582,11 +583,11 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
         ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
         capture_output=True, text=True)
     qmd = sorted(ln for ln in listed.stdout.split("\n") if "qmd" in ln)
-    assert len(qmd) == 6, (
-        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 6: "
-        "four cited reports plus #2119's nightly witness plus #2539's loss report is the "
-        "whole committed family, and one fewer means a figure some paragraph quotes is in "
-        "no repository")
+    assert len(qmd) == 7, (
+        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 7: "
+        "four cited reports plus #2119's nightly witness plus #2539's loss report plus "
+        "#3508's walk-stamp extract is the whole committed family, and one fewer means a "
+        "figure some paragraph quotes is in no repository")
 
     spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
     # Slice from the DECLARATION, not from the first mention of the name. Those were the

@@ -13,9 +13,12 @@ absent from every automod worktree, so the pins read tracked text only.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
+
+from app import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 FORK_JS = "lloyd/qmd/dist/cli/qmd.js"
@@ -573,3 +576,293 @@ def test_the_architecture_page_dates_the_walk_the_script_dates():
         f"the sentence split merged a standalone date into the figures' sentence "
         f"({control!r}), so the co-location asserts above are a bullet-wide substring "
         "test and nothing more")
+
+
+# ── #3508: the dated walk figures have a committed witness ────────────────────────
+#
+# `median 2 s, mean 1.8 s, max 39 s` in the cost block above and in architecture/qmd.md §5
+# were computed on 2026-10-22 off the watcher's own supervisor log, which supervisord
+# overwrites at 10 MB. #3165's owed entry found no committed copy of the sample behind
+# them, so those three numbers were re-derivable only while a rotation happened to still
+# hold the window they were cut from. The window is committed now: the verbatim stamp-line
+# projection of the 2026-10-15 09:27 -> 2026-10-26 15:51 span, with a header that states the
+# projection grep, the pairing rule and the commands that re-derive the figures.
+#
+# Why the bytes are mirrored in-tree: the gate runs this suite with `$HOME` pointed at the
+# round's own home, where the vault is not, so a node that opened ONLY the vault copy would
+# not fail on a hard gate rung -- it would skip, and a skipping node pins nothing. The same
+# trap and the same answer are documented for a promotions extract at
+# tests/test_automod_code_rules.py:2122. The copy is what makes the figures re-derivable on
+# a gate. Where a vault IS reachable the same bytes are compared against it, which is what
+# stops the two copies drifting -- but that comparison is an extra assert inside the node
+# below rather than its own node, because a node of its own would have to skip where no vault
+# is reachable, and this suite's skip count is read against a derived ceiling (`_skip_ceiling`
+# in scripts/automod/gate.py) that a new skip withdraws from. The precedent's byte-comparison
+# node does skip; this file buys the same protection without spending one.
+#
+# No path under the runtime data root is spelled anywhere in this file. That is the point:
+# the published figures are reachable from committed bytes alone.
+
+#: The witness's name in the vault's dated-witness store, and the copy this suite can read.
+WALK_EXTRACT_BASENAME = "2026-10-22.3165-services-agent-qmd-watcher.log"
+WALK_EXTRACT_VAULT_PATH = "backlog/data/" + WALK_EXTRACT_BASENAME
+WALK_EXTRACT_COPY = (ROOT / "tests" / "fixtures"
+                     / "qmd_watcher_walk_stamps_2026-10-22-item3508.log")
+
+#: The ceiling the witness was cut under -- `WITNESS_MAX_BYTES` in
+#: scripts/automod/backlog.py. Restated rather than imported, because that constant lives in
+#: a maintenance script this suite does not otherwise load, and because a raised ceiling
+#: should reach this file as a red node rather than as a silent import.
+WITNESS_MAX_BYTES = 1_048_576
+
+#: The projection's own size, as the extract's header quotes it: 8,357 stamp lines, 398,795
+#: bytes -- 38.0 % of the ceiling above.
+WALK_PROJECTION = (8357, 398795)
+
+#: What the pairing rule prints over these bytes. The median, mean and max are the three
+#: figures the cost block and §5 publish; n and p99 fall out of the same pass, and the
+#: extract's header states them because a reader re-running it will see them.
+WALK_DERIVED = {"n": 4170, "median": 2.0, "mean": 1.7583, "max": 39, "p99": 3}
+
+
+def _walk_header(text: str) -> list[str]:
+    """The extract's `#` header -- the lines its own re-derive commands skip.
+
+    Kept separate from the body on purpose: the header quotes figures, the body produces
+    them, and every statistic below runs on the body alone so the quoted figures cannot
+    confirm themselves.
+    """
+    header = [ln for ln in text.splitlines() if ln.startswith("#")]
+    assert len(header) > 40, (
+        f"the extract's header is down to {len(header)} lines; the source, the projection "
+        "grep, the window span, the pairing rule and the re-derive commands are what make "
+        "these bytes checkable, and this node reads nothing else")
+    return header
+
+
+def _walk_body(text: str) -> list[str]:
+    """The projection itself: every line that is not part of the `#` header.
+
+    `grep -v '^#'` in the header's own first re-derive command, so re-deriving here and
+    re-deriving by following the header are the same operation.
+    """
+    body = [ln for ln in text.splitlines() if not ln.startswith("#")]
+    assert body, "the extract has no body lines once its '#' header is removed"
+    return body
+
+
+def _walk_gaps(body: list[str]) -> list[int]:
+    """The pairing rule as the extract's header states it, over the extract's own lines.
+
+    One walk is the gap from an `HH:MM:SS Change detected` stamp to the NEXT `HH:MM:SS Index
+    updated`. A negative gap is a pair that crossed midnight and is dropped; a pending
+    `Change detected` is voided by a `Watching` restart banner, because a gap straddling a
+    banner belongs to two processes rather than one walk. Both drops are implemented even
+    though neither fires on these bytes (0 of each): the rule has to be the one the header
+    describes, not the one that happens to reproduce one particular window.
+    """
+    gaps: list[int] = []
+    pending: int | None = None
+    for line in body:
+        m = re.match(r"^(\d\d):(\d\d):(\d\d) (Change detected|Index updated|Watching )", line)
+        if not m:
+            continue
+        secs = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+        if m[4] == "Change detected":
+            pending = secs
+        elif m[4] == "Watching ":
+            pending = None
+        elif pending is not None:
+            gap, pending = secs - pending, None
+            if gap >= 0:
+                gaps.append(gap)
+    assert len(gaps) > 1000, (
+        f"the pairing produced {len(gaps)} gaps from {len(body)} stamp lines, which is not a "
+        "sample of a window any more -- check the stamp regex against the body's shape")
+    return gaps
+
+
+def _walk_stats(gaps: list[int]) -> dict:
+    """median / mean / max / p99, the way the header's `sort -n` pipeline computes them.
+
+    p99 is the value AT the 99th percentile position (round up), which is what the `sort -n`
+    + index the header prints selects -- not an interpolation, which would agree here and
+    disagree on a sparser window.
+    """
+    ordered = sorted(gaps)
+    n = len(ordered)
+    median = (ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0)
+    return {"n": n, "median": float(median), "mean": sum(ordered) / n,
+            "max": ordered[-1], "p99": ordered[int(-(-0.99 * n // 1)) - 1]}
+
+
+def test_the_committed_walk_extract_reproduces_the_published_walk_figures():
+    """#3508 clauses 1, 2 and 4: the witness is these bytes, and these bytes print the
+    figures the script and the architecture page state.
+
+    Read from the in-tree copy alone. Nothing here opens a log: that is the property #3165's
+    owed entry was after -- a number that survives only while a rotating file happens to hold
+    the window it was measured in is not a published figure, it is a rumour with a date.
+    """
+    # Built by concatenation, exactly as the path-rail nodes elsewhere in this suite build
+    # theirs: the marker has to survive appearing in the file it is scanning for.
+    runtime_root_marker = "lloyd" + "-data"
+    assert runtime_root_marker not in Path(__file__).read_text(encoding="utf-8"), (
+        "this file now names the runtime data root, so the node below can no longer be "
+        "trusted to be reading committed bytes rather than the live log")
+    assert WALK_EXTRACT_COPY.exists(), (
+        f"{WALK_EXTRACT_COPY.name} is gone, and it is the only copy of the 2026-10-22 walk "
+        "sample this suite can read")
+    raw = WALK_EXTRACT_COPY.read_bytes()
+    assert len(raw) <= WITNESS_MAX_BYTES, (
+        f"the extract is {len(raw):,} bytes, over the {WITNESS_MAX_BYTES:,} ceiling a witness "
+        "is cut to fit; the projection is 38.0 % of it, so this is growth, not a mis-set bound")
+    text = raw.decode("utf-8")
+    body = _walk_body(text)
+
+    # clause 2's bounds, which are the two rotation edges: the first stamp is the line the
+    # watcher printed as the 2026-10-15 rotation handed it the file, the last is the moment
+    # the 2026-10-26 rotation ended the window. They pin WHICH window these bytes are -- the
+    # figures themselves would survive a wrong window, and a wrong window is a different
+    # measurement wearing these numbers.
+    assert body[0] == "09:27:24 Index updated, embedding new documents...", (
+        f"the extract's first body line is {body[0]!r}, not the 2026-10-15 09:27 rotation edge")
+    assert body[-1] == "15:51:03 Change detected, updating index...", (
+        f"the extract's last body line is {body[-1]!r}, not the 2026-10-26 15:51 rotation edge")
+    assert (len(body), sum(len(ln) + 1 for ln in body)) == WALK_PROJECTION, (
+        f"the projection is {len(body):,} lines / "
+        f"{sum(len(ln) + 1 for ln in body):,} bytes, not the "
+        f"{WALK_PROJECTION[0]:,} / {WALK_PROJECTION[1]:,} its header quotes -- either the "
+        "window or the grep behind these bytes changed")
+
+    stats = _walk_stats(_walk_gaps(body))
+    assert stats["n"] == WALK_DERIVED["n"], (
+        f"the pairing yields n={stats['n']}, not {WALK_DERIVED['n']:,}: the published median "
+        "was computed over the old sample, so re-derive the cost block before quoting it")
+    assert stats["median"] == WALK_DERIVED["median"], (
+        f"median {stats['median']} from the committed witness, "
+        f"{WALK_DERIVED['median']} published")
+    assert abs(stats["mean"] - WALK_DERIVED["mean"]) <= 0.05, (
+        f"mean {stats['mean']:.4f} from the committed witness, "
+        f"{WALK_DERIVED['mean']} published (tolerance 0.05: the cost block rounds it to "
+        "1.8 s, and a mean that moved past a rounding step is a different sample)")
+    assert stats["max"] == WALK_DERIVED["max"], (
+        f"max {stats['max']} s from the committed witness, {WALK_DERIVED['max']} s published "
+        "-- and the cooldown's stated margin is argued against exactly this tail")
+    assert stats["p99"] == WALK_DERIVED["p99"], (
+        f"p99 {stats['p99']} s from the committed witness, {WALK_DERIVED['p99']} s in its "
+        "header; neither prose surface publishes p99, so a drift here says the window and "
+        "the header have parted rather than that a published figure is stale")
+
+    # Where the vault is reachable, the two copies must be the same bytes. Unconditional
+    # would be a skip in a round home (see the block above), so this is an extra assert on a
+    # node that already stood on its own: the copy in this tree is a mirror, and a mirror that
+    # drifts is how a green suite ends up vouching for sample nobody published.
+    vault_copy = Path(paths.VAULT_ROOT) / WALK_EXTRACT_VAULT_PATH
+    if vault_copy.exists():
+        assert vault_copy.read_bytes() == raw, (
+            f"the vault's {WALK_EXTRACT_VAULT_PATH} and this suite's "
+            f"{WALK_EXTRACT_COPY.name} have parted: one of them is no longer the 2026-10-22 "
+            "window, and the figures are pinned to whichever the header's `cmp` still passes")
+
+    # The tie back to the prose. A witness that reproduces a number nobody publishes, next to
+    # a script that publishes a number no witness reproduces, is two green tests and the same
+    # rot -- so the derived figures must equal the strings the cost block states.
+    block = _cooldown_cost_block(WATCHER.read_text(encoding="utf-8"))
+    line = _line_with(block, WALK_DATE, "the date-stamped line in the cost block")
+    assert f"median {int(round(stats['median']))} s" in line, (
+        f"the cost block states a median the committed witness does not print "
+        f"({stats['median']} s derived): {_flat(line)!r}")
+    assert f"mean {stats['mean']:.1f} s" in line, (
+        f"the cost block states a mean the committed witness does not print "
+        f"({stats['mean']:.4f} derived): {_flat(line)!r}")
+    assert f"max {stats['max']} s" in line, (
+        f"the cost block states a max the committed witness does not print "
+        f"({stats['max']} s derived): {_flat(line)!r}")
+
+
+def test_the_walk_extract_header_states_its_own_source_rule_and_rederive():
+    """#3508 clause 3: the header is a route back to the store, not a caption.
+
+    Bytes that cannot be traced to a source and re-derived from it are a second prose copy of
+    the same figures -- the thing #3165 owed. So the header must name the file it came out of
+    and WHEN that file was cut, the grep that produced the body verbatim, the span the window
+    covers, the pairing rule including what it drops, and both re-derive commands.
+    """
+    assert WALK_EXTRACT_COPY.exists(), f"{WALK_EXTRACT_COPY.name} is gone"
+    header = _walk_header(WALK_EXTRACT_COPY.read_bytes().decode("utf-8"))
+    joined = "\n".join(header)
+
+    assert re.search(r"^# Source store\s+: .*agent-qmd-watcher\.log\.1", joined, re.M), (
+        "the header stopped naming the store these lines came out of")
+    assert "mtime 2026-10-26 15:51" in joined and "2026-10-26T22:51:04Z" in joined, (
+        "the header no longer gives the source's mtime in BOTH the form `ls` prints and UTC; "
+        "this box is UTC-7/UTC-8, so a reader holding only the listing form is 7 hours wrong "
+        "about when the window was cut")
+    # The grep verbatim, so copying it out of the header is the operation rather than a
+    # paraphrase of it. It is the same string clause 2's cmp runs.
+    assert ("grep -E '^[0-9]{2}:[0-9]{2}:[0-9]{2} (Change detected|Index updated"
+            "|Watching )'") in joined, (
+        "the projection grep is no longer quoted verbatim, so a reader cannot reproduce the "
+        "body by copy-paste and will paraphrase it instead")
+    assert "2026-10-15 09:27:21" in joined and "2026-10-26 15:51:04" in joined, (
+        "the header lost one of the two rotation stamps that bound the window; the span is "
+        "inferred from the mtimes of the two .N files, and without both it is a guess")
+    assert "PAIRING RULE" in joined and "negative gap" in joined and "Watching" in joined, (
+        "the pairing rule is no longer stated with what it drops. It reports zero drops on "
+        "these bytes, which is exactly why the rule has to be written down: a reader on a "
+        "longer window WILL hit both drops, and a pairing that silently omits them is a "
+        "different statistic")
+    assert 'wc -l -c < "$EX"' in joined, "the header's size re-derive went missing"
+    assert "median=" in joined and "p99=" in joined, (
+        "the header no longer carries the pairing re-derive pipeline, so the figures in it "
+        "are assertions rather than commands")
+    # A header that quotes a figure is a claim; a header that prints the command is checkable.
+    # Positive control on the two commands above: they must be inside the header, which is
+    # what makes them re-derivable BY the header and not merely mentioned near it.
+    assert sum(1 for ln in header if ln.startswith("# ")) >= 40, "the header is not a header"
+
+
+def test_the_watcher_cost_block_names_the_walk_extract_below_its_date():
+    """#3508 clause 5: the cost block points at the witness, placed where the other nodes
+    can still read it, without losing the file's mode.
+
+    Placement is the whole node. The extract's name begins with the same date the figures
+    line carries, so a pointer inserted ABOVE it becomes the block's first `2026-10-22` -- and
+    the node that demands that line hold the figures would then read the pointer, fail, and
+    look like the witness had broken the script.
+    """
+    text = WATCHER.read_text(encoding="utf-8")
+    block = _cooldown_cost_block(text)
+    assert WALK_EXTRACT_BASENAME in block, (
+        "the cooldown's cost block no longer names the committed witness, so a reader at the "
+        f"figures has nowhere to go -- {WALK_EXTRACT_VAULT_PATH} is that witness")
+    at_date = block.find(WALK_DATE)
+    at_extract = block.find(WALK_EXTRACT_BASENAME)
+    assert at_date >= 0, f"the cost block lost {WALK_DATE} entirely"
+    assert at_date < at_extract, (
+        f"the extract pointer (offset {at_extract}) sits ABOVE the {WALK_DATE} figures line "
+        f"(offset {at_date}); `test_the_watcher_walk_figure_sits_on_one_line` reads the "
+        "block's FIRST 2026-10-22 and would then be handed a file name instead of the "
+        "figures")
+    assert (_line_with(block, WALK_DATE, "the date-stamped line")
+            == _line_with(block, "median 2 s", "the median line")), (
+        "the date-stamped line and the figures line drifted apart, so the node that pins "
+        "them together is pinning one line")
+    assert not re.findall(r"\d[\d,]*\s+(?:files?|documents?|collections?)\b",
+                          _line_with(block, WALK_EXTRACT_BASENAME,
+                                           "the extract pointer line")), (
+        "the pointer line quotes a corpus count, which is the class of number #3161 retired "
+        "from this file because the tree outgrows it")
+
+    # The exec bit. `git ls-files -s` is the mode that gets promoted, and an edit that
+    # silently drops it leaves a supervisor that can no longer start the program.
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s",
+                              str(WATCHER.relative_to(ROOT))],
+                             capture_output=True, text=True).stdout.strip()
+    assert tracked.split()[0] == "100755", (
+        f"the watcher is tracked as mode {tracked.split()[0] if tracked else 'NOT TRACKED'}; "
+        "supervisord execs it, so 100644 is a service that will not start")
+    assert os.access(WATCHER, os.X_OK), (
+        "the working copy is not executable even though the index says 100755 -- an Edit "
+        "that rewrote the file without restoring the bit")

@@ -49,6 +49,7 @@ DEBOUNCE_SEC=2
 # today's figure. What the floor below insures against is that 39 s tail, not the
 # 2 s median: at the median a minute is a 30x margin, and the window held exactly
 # one cycle of 39 s.
+# Retained derivation, committed: backlog/data/2026-10-22.3165-services-agent-qmd-watcher.log
 #
 # The debounce alone does not bound how often that runs -- it
 # only waits for a quiet gap, and with the automod loop at depth 4 writing
