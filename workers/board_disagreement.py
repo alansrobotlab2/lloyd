@@ -139,6 +139,113 @@ def disagreement_rows(ids: list[int], moves: list[dict],
     return out
 
 
+def _window_moves(window: dict, ledger: Path) -> dict[int, str]:
+    """Every proposal the window's own ticks wrote, newest first.
+
+    Each steward tick appends a `board_steward` event carrying `moves`, and each move is
+    keyed `item_id, status, note` — so the proposal side of a disagreement is in the store
+    for the whole window, not only for the tick that tripped the trigger. Read newest-first
+    with `setdefault` so the proposal kept for an id that disagreed twice is its most recent
+    one, matching the order `judgement_aggregate` lists `disagree_ids` in.
+
+    An id with no move anywhere is absent from the result, which is the honest answer: the
+    tick that judged it wrote no `moves` row for it (a parse dropping a malformed entry
+    still counts the item as judged-and-disagreed), so there is nothing to name as its
+    proposed side. `disagreement_rows` already renders those as `(not in its moves)`.
+    """
+    proposed: dict[int, str] = {}
+    since = str(window.get("window_since") or "")
+    if not since:
+        return proposed
+    try:
+        from scripts.automod import state as S
+        # The cheap stat first: on a box with no ledger there is nothing to widen with and
+        # no reason to pay for the decode, and `read_events(limit=0)` is the whole file.
+        events = S.read_events(ledger, 0)   # limit=0 is the whole file
+    except Exception:
+        # FileNotFoundError for a store that does not exist yet, and nothing here may
+        # break a tick. The cost of swallowing is that a READER BUG lands here too: a
+        # call into `state` for a function that was never there raises AttributeError,
+        # is caught, and the window silently has no moves — every row then reads
+        # `(not in its moves)` and the filing still files. It happened while writing
+        # this: `state.read_limit` does not exist, and only
+        # `test_the_filing_names_every_window_id_whose_move_is_in_the_window` caught
+        # the silent reader. Hence the warning rather than a bare `return`.
+        logger.warning("disagreement widening read no moves from %s", ledger,
+                       exc_info=True)
+        return proposed
+    for ev in reversed(events):
+        if ev.get("event") != "board_steward":
+            continue
+        if str(ev.get("created_at") or "") < since:
+            continue            # rows are appended in order, but this window is the bound
+        for m in (ev.get("moves") or []):
+            iid = m.get("item_id") if isinstance(m, dict) else None
+            if isinstance(iid, int) and not isinstance(iid, bool) and m.get("status"):
+                proposed.setdefault(iid, str(m["status"]))
+    return proposed
+
+
+def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
+           window: dict, ledger: Path) -> tuple[list[int], list[dict], dict, dict]:
+    """The rows a ruling can actually be made on: the window's, not the tick's.
+
+    Returns `(ids, moves, expected, stats)`. `ids` is the tick's disagree set (unchanged,
+    in order, first) followed by every other id the window's aggregate names. For those
+    extras the machine's side is recomputed from `desired_statuses` — the same function the
+    tick compared against, over the same ledger — because `agree`/`expected` in scope here
+    are only this tick's board subset. The tick's own values win wherever both exist.
+
+    `stats` carries what the widening could NOT do, for the Coverage bullet: how many named
+    ids have no proposal in any ledger move, and how many ids the row cap dropped.
+    """
+    tick_ids = [int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)]
+    win_ids = [i for i in (window.get("disagree_ids") or []) if isinstance(i, int)]
+    ids = tick_ids + [i for i in win_ids if i not in set(tick_ids)]
+
+    wide_moves: dict[int, Any] = dict.fromkeys(ids)   # None where nothing proposed it
+    for m in (moves or []):
+        iid = m.get("item_id") if isinstance(m, dict) else None
+        if isinstance(iid, int) and iid in wide_moves and m.get("status"):
+            wide_moves[iid] = str(m["status"])   # this tick's own moves are authoritative
+    if any(v is None for v in wide_moves.values()):
+        for iid, status in _window_moves(window, ledger).items():
+            if iid in wide_moves and wide_moves[iid] is None:
+                wide_moves[iid] = status
+
+    wide_expected = dict(expected or {})
+    missing = [i for i in ids if i not in wide_expected]
+    if missing:
+        try:
+            wanted = _backlog().desired_statuses(Path(ledger))
+        except Exception:
+            wanted = {}
+        for iid in missing:
+            if iid in wanted:
+                wide_expected[iid] = wanted[iid]
+
+    rows = [{"item_id": i, "status": s} for i, s in wide_moves.items() if s]
+    return ids, rows, wide_expected
+
+
+def row_stats(ids: list[int], rows: list[dict], window: dict) -> dict:
+    """What a set of rows could not say, in the three figures Coverage reports separately.
+
+    `unrecoverable` counts the NAMED ids with no proposal in any move; `unruled` counts the
+    same fault among the ids the row cap dropped, reported apart because those ids are not
+    in the body at all and an id counted in both figures would be reporting the same gap
+    twice. `distinct` is None whenever the window gives no id list — the count alone cannot
+    tell ids from rows, and a missing key is a missing key.
+    """
+    have = {m.get("item_id") for m in (rows or [])}
+    named = min(len(ids), ROWS_MAX)
+    win = [i for i in (window.get("disagree_ids") or []) if isinstance(i, int)]
+    return {"unrecoverable": sum(1 for i in ids[:named] if i not in have),
+            "unruled": sum(1 for i in ids[named:] if i not in have),
+            "dropped": len(ids) - named,
+            "distinct": len(win) if "disagree_ids" in window else None}
+
+
 def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *,
                    window: dict, backlog_dir: Path | None = None,
                    ledger: Path | None = None) -> dict | None:
@@ -153,13 +260,27 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     store; raises on a real write failure, and its caller swallows — see
     `_file_quietly`.
     """
-    ids = sorted({int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)})
-    if not ids:
+    tick_ids = sorted({int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)})
+    if not tick_ids:
         return None
     should, reason = below_floor(window)
     if not should:
         logger.debug("disagreement filing skipped: %s", reason)
         return None
+
+    # The window's ids, not this tick's. A filing that named one tick's rows was a report on
+    # the tick that happened to trip the trigger while the figure beside it (`judged`,
+    # `rate`) was the seven-day one, so a ruler was handed 1 of 25 rows and told to judge a
+    # week (#3651). `agree`/`moves`/`expected` in scope here are this tick's board subset
+    # only; `_widen` pulls the rest from the same two places the tick itself consulted —
+    # the window's `board_steward` ledger moves and `desired_statuses` over the same ledger.
+    # This reads; it does not write, so widening cannot settle a disagreement by moving it.
+    from scripts.automod import state as S
+    ids, wide_moves, wide_expected = _widen(
+        agree, moves, expected, window, Path(ledger) if ledger else S.LEDGER_PATH)
+    if not ids:
+        return None
+    stats = row_stats(ids, wide_moves, window)
 
     B = _backlog()
     openers = [it for it in B.open_items((BOARD,), backlog_dir=backlog_dir)
@@ -177,25 +298,33 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
 
     stamp = _stamp()
     if openers:
-        return _merge(openers[0], B, ids, moves, expected, window,
-                      stamp, backlog_dir=backlog_dir, ledger=ledger)
-    return _create(B, ids, moves, expected, window, stamp,
-                   backlog_dir=backlog_dir, ledger=ledger)
+        return _merge(openers[0], B, ids, wide_moves, wide_expected, window, stamp,
+                      backlog_dir=backlog_dir, ledger=ledger, **stats)
+    return _create(B, ids, wide_moves, wide_expected, window, stamp,
+                   backlog_dir=backlog_dir, ledger=ledger, **stats)
 
 
-def _coverage(named: int, window: dict, *, merged: bool = False) -> str:
+def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: int = 0,
+              dropped: int = 0, distinct: int | None = None, unruled: int = 0) -> str:
     """What these rows do NOT cover, in numbers.
 
-    The ids are the CURRENT tick's (`file_or_update` takes them from
-    `agreement()["disagree"]`, one tick), while every figure the body otherwise
-    cites is the rolling window's. The item filed at 2026-10-29T17:27:13Z named 2
-    rows against a window holding 28 disagreements over 25 distinct items: a ruler
-    reading it saw a two-row case and was never told the rest sat in the same
-    window whose numbers it was being asked to judge (#3546).
+    Before #3651 the ids were the CURRENT tick's (`file_or_update` took them from
+    `agreement()["disagree"]`, one tick) while every figure the body otherwise cites is
+    the rolling window's: the item filed at 2026-10-29T17:27:13Z named 2 rows against a
+    window holding 28 disagreements over 25 distinct items. The ids are the window's now,
+    so what is left unreported is a different set of things, and each gets its own figure
+    rather than one subtraction that would blur them:
 
-    State the zero too. An item that does cover its window has to say so, or a
-    reader cannot tell a genuinely small case from an unstated large one — and a
-    merge moves both sides of the subtraction, so it is re-derived, not kept.
+    * **rows vs ids** — `disagree` is a sum of per-tick lengths, so one item that
+      disagreed in three ticks is three rows and one ruling; `distinct` says how many
+      items the window actually names.
+    * **unrecoverable** — ids whose proposed side is in no ledger move, so no row can say
+      what the steward asked for and no ruling can be made from the item alone.
+    * **dropped** — ids past `ROWS_MAX`, named nowhere in the body at all.
+
+    State the zero for each. An item that covers its window has to say so, or a reader
+    cannot tell a genuinely small case from an unstated large one — and a merge moves both
+    sides of every subtraction, so all of it is re-derived, never kept.
     """
     total = int(window.get("disagree") or 0)
     un = max(0, total - int(named))
@@ -204,12 +333,35 @@ def _coverage(named: int, window: dict, *, merged: bool = False) -> str:
                  f"rows; {un} are not represented here.")
     elif un:
         first = (f"- **{un} of the window's {total} disagreement rows are not "
-                 f"represented here**: the ids above are one tick's, the window is "
-                 f"seven days, and no ruling made on this item reaches them.")
+                 f"represented here** (rows and ids differ: `disagree` counts one item "
+                 f"once per tick it disagreed in, and a ruling is per item).")
     else:
         first = (f"- all {named} of the window's {total} disagreement rows are "
                  f"represented here; nothing in the window is unruled by omission.")
-    return ("## Coverage\n\n" + first + "\n"
+    extra = ""
+    if distinct is not None:
+        extra += (f"- the window's {total} disagreement rows are {distinct} distinct "
+                  f"items, and this item names {int(named)} of them: a row is a tick's "
+                  f"disagreement and a ruling is per item, so one item disagreeing in two "
+                  f"ticks is two rows and one decision.\n")
+    if unrecoverable:
+        extra += (f"- {int(unrecoverable)} of the named ids carry `(not in its moves)`: no "
+                  f"`board_steward` event in the window proposed a status for them, so their "
+                  f"steward side is unrecoverable from the store and a ruling on those ids "
+                  f"needs the tick's session, not this item.\n")
+    else:
+        extra += ("- 0 of the named ids are unrecoverable: every one carries the status a "
+                  "`board_steward` event in this window proposed, so every row here can be "
+                  "ruled from the item alone.\n")
+    if dropped:
+        extra += (f"- **the rows are capped at {ROWS_MAX}, so {int(named)} of "
+                  f"{int(named) + int(dropped)} named ids are written and {int(dropped)} "
+                  f"are not**: {int(unruled)} of those {int(dropped)} are also unrecoverable "
+                  f"from the store. The cap is what keeps one merge cycle from writing a body "
+                  f"nobody reads; the truncation is stated here with both figures rather than "
+                  f"the ids being silently dropped, and the next tick re-derives the whole "
+                  f"window, so nothing is lost permanently.\n")
+    return ("## Coverage\n\n" + first + "\n" + extra +
             f"- the window itself: {window.get('judged')} judged, `rate="
             f"{window.get('rate')}` against owed-check's {FLIP_MIN_RATE} floor, since "
             f"{window.get('window_since')}.\n\n")
@@ -217,7 +369,8 @@ def _coverage(named: int, window: dict, *, merged: bool = False) -> str:
 
 def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple],
             window: dict, stamp: str, *, backlog_dir: Path | None,
-            ledger: Path | None) -> dict:
+            ledger: Path | None, unrecoverable: int = 0, dropped: int = 0,
+            distinct: int | None = None, unruled: int = 0) -> dict:
     rows = disagreement_rows(ids, moves, expected)
     body = (
         f"# {NAME}\n\n"
@@ -228,7 +381,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"{FLIP_MIN_RATE}, over the window since {window.get('window_since')}. The volume "
         f"leg is cleared, so this is a measured disagreement and not an unmeasured one — "
         f"which is the case nothing used to read.\n\n"
-        f"Each row names BOTH sides, from the same comparison the tick made: what the "
+        f"Each row names BOTH sides of one disagreement: what the "
         f"steward proposed for that item, and what `desired_statuses` "
         f"(`scripts/automod/backlog.py`) wants, with its reason. Both sides outlive the "
         f"tick elsewhere: the proposal itself is in the ledger's `board_steward` event "
@@ -238,7 +391,8 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"`response_json` is empty in every board-steward `runs` row (`source` is "
         f"hyphenated: `board_steward` matches no runs row at all).\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
-        + _coverage(len(ids), window) +
+        + _coverage(min(len(ids), ROWS_MAX), window, unrecoverable=unrecoverable,
+                    dropped=dropped, distinct=distinct, unruled=unruled) +
         f"## What to decide\n\n"
         f"Per item, rule which side is wrong:\n\n"
         f"- the **steward's** prompt/grounding (`workers/sources/board_steward.py`) — then "
@@ -287,7 +441,8 @@ def _strip_coverage(body: str) -> str:
 
 def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            expected: dict[int, tuple], window: dict, stamp: str, *,
-           backlog_dir: Path | None, ledger: Path | None) -> dict | None:
+           backlog_dir: Path | None, ledger: Path | None, unrecoverable: int = 0,
+           dropped: int = 0, distinct: int | None = None, unruled: int = 0) -> dict | None:
     """Add the ids this item does not name yet, into the same file."""
     try:
         text = Path(item.path).read_text(encoding="utf-8")
@@ -307,7 +462,9 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
     new_body = (_strip_coverage(body or "").rstrip("\n") + "\n\n"
                 f"### Added {stamp} (window `judged={window.get('judged')}`, "
                 f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n\n"
-                + _coverage(len(seen | set(fresh)), window, merged=True))
+                + _coverage(min(len(seen | set(fresh)), ROWS_MAX), window, merged=True,
+                            unrecoverable=unrecoverable, dropped=dropped,
+                            distinct=distinct, unruled=unruled))
     _write_body(Path(item.path), fm, new_body, B,
                 activity=f"board-steward disagreement: {len(fresh)} row(s) added")
     _event(ledger, item_id=item.id, action="merged", ids=ids, window=window,

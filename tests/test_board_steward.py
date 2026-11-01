@@ -2813,3 +2813,169 @@ def test_the_disagreement_body_names_the_ledger_event_as_where_the_move_lives(bo
         assert want in body, f"{want!r} missing: the ledger's own field names are the way back"
     assert "`response_json` is empty in every board-steward `runs` row" in body, body
     assert "`desired_statuses`" in body, "the machine's side must still be named"
+
+
+# ─────────── #3651: the filing reads the WINDOW, not the tick that tripped it ───────────
+#
+# The figures are the ones this item was filed on. At 2026-11-01T02:46Z the published
+# judgement was `judged 122, agree 96, disagree 25, rate 0.7869` over seven days, and the
+# item it filed named exactly ONE row (#3418), because `file_or_update` took its ids from
+# the current tick's `agreement()["disagree"]`. A recount over the same window's `runs`
+# rows names 23 distinct ids, and every one of them has its proposed status in a
+# `board_steward` ledger event of that window (361 events, 45 carrying non-empty `moves`,
+# 23 of 23 recovered) — so the one row was never a limit of the store, only of the reader.
+
+#: `_window7()`'s five, plus two ids an earlier tick disagreed about.
+DIS_WINDOW = DIS_AGREE + [3310, 3355]
+#: Inside `_window7()["window_since"]` = 2026-10-20T23:49:13+00:00, so the window filter
+#: must keep it; a `created_at` is what `state.append_event` writes, and passing one here
+#: is what makes an "older tick" reproducible instead of always-now.
+DIS_OLDER_STAMP = "2026-10-26T01:02:03Z"
+
+
+def _row_count(body: str) -> int:
+    """How many rows the `## Rows` section holds — the section, not every `- ` line in the
+    body, because `## Coverage` opens its bullets the same way."""
+    return sum(1 for line in body.split("## Rows\n\n")[-1].split("## Coverage")[0]
+               .splitlines() if line.startswith("- #"))
+
+
+def _steward_event(led: Path, ids: list[int], *, status: str = "up_next",
+                   created_at: str = DIS_OLDER_STAMP, moves: bool = True) -> None:
+    """One tick's own `board_steward` ledger row — where its proposals live.
+
+    `moves=False` is the shape of a tick whose recorded move list is empty: the ids in the
+    window then have no proposal anywhere, which is the only genuinely unrecoverable case.
+    """
+    _led(led, event="board_steward", apply=False, created_at=created_at,
+         moves=[{"item_id": i, "status": status, "note": "unspent, offered again"}
+                for i in ids] if moves else [])
+
+
+def test_the_filing_names_every_window_id_whose_move_is_in_the_window(board, tmp_path,
+                                                                       monkeypatch):
+    """Clause 1. This tick disagreed about five items; seven disagreed across the window,
+    and the two older ones' proposals are sitting in an earlier tick's ledger event. A
+    filing that names five and cites `rate=0.7869` over 25 is a report on its own tick:
+    the ruler was handed one row and asked to judge a week, and never told the rest of
+    the window existed (#3651)."""
+    from workers.board_disagreement import file_or_update
+
+    led = tmp_path / "ledger.jsonl"
+    _steward_event(led, DIS_WINDOW[5:])          # the older tick, ids this tick never saw
+    monkey_expected = {i: ("up_next", "has a confirmed triage with acceptance text")
+                       for i in DIS_WINDOW}
+    monkeypatch.setattr(B, "desired_statuses", lambda ledger: monkey_expected)
+    out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                         window=_window7(disagree_ids=DIS_WINDOW),
+                         backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    it = _filed(board)[0]
+    for i in DIS_WINDOW:
+        assert f"#{i}" in it.body, f"#{i} is in the window's disagree set and not in the rows"
+    assert _row_count(it.body) == len(DIS_WINDOW), (
+        f"the Rows section must hold the window's ids and only those: {it.body}")
+    assert "- 0 of the named ids are unrecoverable" in it.body, it.body
+    assert "steward proposed `up_next`" in it.body, (
+        "the two older ids' side comes from the earlier tick's move, and that move was "
+        "`up_next` — if it reads `(not in its moves)` the ledger read is not happening")
+
+
+def test_an_id_no_move_proposed_is_named_and_counted_as_unrecoverable(board, tmp_path,
+                                                                        monkeypatch):
+    """Clause 2. A disagreeing id with no proposal in ANY move of the window is still
+    named — the machine's half is the half a reader can act on — and Coverage says how
+    many named ids are ruled blind, so the gap is visible instead of silent."""
+    from workers.board_disagreement import file_or_update
+
+    led = tmp_path / "ledger.jsonl"
+    _steward_event(led, [], moves=False)         # the older tick recorded no moves at all
+    monkey_expected = {i: ("up_next", "has a confirmed triage with acceptance text")
+                       for i in DIS_WINDOW}
+    monkeypatch.setattr(B, "desired_statuses", lambda ledger: monkey_expected)
+    out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                         window=_window7(disagree_ids=DIS_WINDOW),
+                         backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    it = _filed(board)[0]
+    for i in DIS_WINDOW[5:]:
+        assert f"#{i}: steward proposed `(not in its moves)`" in it.body, it.body
+    assert "2 of the named ids carry `(not in its moves)`" in it.body, it.body
+
+
+def test_rows_stay_capped_at_forty_and_the_body_states_the_truncation(board, tmp_path):
+    """Clause 3. 45 window ids is more than ROWS_MAX can write, and the cap is the only
+    thing between this item and a body nobody reads. Dropping five ids silently would be
+    the same failure as naming one tick's rows and citing the window: the reader would
+    not know how much it was not being shown."""
+    from workers.board_disagreement import ROWS_MAX, file_or_update
+
+    many = list(range(4000, 4000 + ROWS_MAX + 5))
+    expected = {i: ("up_next", "has a confirmed triage with acceptance text")
+                for i in many}
+    moves = [{"item_id": i, "status": "draft", "note": "no triage verdict"} for i in many]
+    out = file_or_update(_agree(*many), moves, expected,
+                         window=_window7(disagree=len(many), disagree_ids=many),
+                         backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
+    assert out is not None and out["action"] == "filed", out
+    it = _filed(board)[0]
+    assert out["rows"] == ROWS_MAX, out
+    assert _row_count(it.body) == ROWS_MAX, (
+        f"{it.body.count(chr(10) + '- #')} rows written against a cap of {ROWS_MAX}")
+    assert (f"the rows are capped at {ROWS_MAX}, so {ROWS_MAX} of {len(many)} named ids "
+            f"are written and {len(many) - ROWS_MAX} are not") in it.body, it.body
+
+
+def test_the_architecture_page_says_the_ruling_can_be_answered_from_the_store():
+    """Clause 4. The page told a reader not to bother: the proposed move was "stored
+    nowhere else" and the question "which side is wrong" "cannot be answered from the
+    store". Both halves are false — 23 of the window's 23 disagreeing ids have their
+    proposal in that window's `board_steward` events — and a claim that the evidence does
+    not exist is what stops anyone going to look for it (#3651)."""
+    doc = " ".join((Path(__file__).resolve().parents[1] / "architecture"
+                    / "workers-jobs.md").read_text(encoding="utf-8").split())
+    assert "stored nowhere else" not in doc, doc[-900:]
+    assert "cannot be answered from the store" not in doc
+    assert "answerable from the store" in doc, (
+        "the replacement has to state the positive, or a later reader re-derives the "
+        "doubt the sentence it replaced was built on")
+    assert "response_json` is empty in every board-steward `runs` row" in doc, (
+        "the raw reply is genuinely still not kept, and the page must keep saying so: 0 "
+        "of the 1,123 board-steward runs rows on this box carry a non-empty one")
+
+
+def test_widening_the_reader_still_writes_no_item_status(board, tmp_path,
+                                                                     monkeypatch):
+    """Clause 5. Reading the window puts ids in front of the filing that this tick never
+    proposed anything about — including an item the machine wants `done`. Filing is a
+    report on the disagreement, so the window's extra rows must not turn it into a
+    settlement: after a widened filing every item on the board is byte-for-byte the status
+    it had, and the only file written is the item being filed."""
+    from workers.board_disagreement import file_or_update
+
+    _ten_item_board(board)
+    led = tmp_path / "ledger.jsonl"
+    # #3 is an id THIS tick never saw; the machine wants it `done`, and the steward's
+    # older tick wanted `up_next`. The sharpest case for "the reader fixes it instead".
+    _steward_event(led, [3], status="up_next")
+    monkey_expected = {7: ("up_next", "confirmed with acceptance"),
+                       3: ("done", "gate passed and landed")}
+    monkeypatch.setattr(B, "desired_statuses", lambda ledger: monkey_expected)
+
+    def statuses():
+        return {i.id: i.status for i in B.all_items(("lloyd",), backlog_dir=board)}
+
+    before = statuses()
+    out = file_or_update(_agree(7), [{"item_id": 7, "status": "draft", "note": "x"}],
+                         {7: ("up_next", "confirmed with acceptance")},
+                         window=_window7(disagree=2, judged=60, rate=0.8,
+                                         disagree_ids=[7, 3]),
+                         backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    after = statuses()
+    # Only the ten board items count: filing writes its OWN new item, which is the one
+    # write this path is allowed. The assertion is over the ids that were already there.
+    moved = {i: (before[i], after[i]) for i in before if after.get(i) != before[i]}
+    assert not moved, f"the reader moved an item: {moved}"
+    assert "#3" in _filed(board)[0].body, "the window's id must still be named"
+    assert "the state machine wants `done`" in _filed(board)[0].body

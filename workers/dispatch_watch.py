@@ -575,7 +575,16 @@ def judgement_aggregate(queue: Any, window_days: int = JUDGEMENT_WINDOW_DAYS,
     agg = {"window_days": int(window_days), "window_since": since,
            "ticks_in_window": 0, "ticks_with_judged": 0,
            "judged": 0, "agree": 0, "disagree": 0, "rate": None,
-           "scanned_limit": JUDGEMENT_SCAN_LIMIT, "truncated": False}
+           "scanned_limit": JUDGEMENT_SCAN_LIMIT, "truncated": False,
+           # The ids, not just the count. `disagree` has always been a sum of lengths, so a
+           # reader that needs to know WHICH items disagreed could not get it from here and
+           # fell back to the tick that happened to trip the trigger — one tick's ids against
+           # a seven-day window's figure (#3651). A list of [id, reason] pairs in first-seen
+           # order — newest tick first, as `list_runs_joined` returns rows — so an item that
+           # disagreed in two ticks of one week appears once, carrying the first reason
+           # counted. `disagree` stays the sum of per-tick lengths it always was, which is
+           # why this key exists beside it and not in its place.
+           "disagree_ids": []}
     rows = queue.list_runs_joined(source=BOARD_STEWARD_SOURCE, since_iso=since,
                                   limit=JUDGEMENT_SCAN_LIMIT)
     # Filling the SELECT's own ceiling is the only signal that more rows exist, and
@@ -584,6 +593,7 @@ def judgement_aggregate(queue: Any, window_days: int = JUDGEMENT_WINDOW_DAYS,
     # `LIMIT ?` — a NULL there is a `datatype mismatch` — so the ceiling is real and
     # has to be visible.
     agg["truncated"] = len(rows) >= JUDGEMENT_SCAN_LIMIT
+    named: set[int] = set()          # dedupe only; `disagree` above never sees it
     for row in rows:
         agg["ticks_in_window"] += 1
         meta = row.get("meta_json")
@@ -602,6 +612,16 @@ def judgement_aggregate(queue: Any, window_days: int = JUDGEMENT_WINDOW_DAYS,
         agg["judged"] += judged
         agg["agree"] += len(block.get("agree") or [])
         agg["disagree"] += len(block.get("disagree") or [])
+        # `agreement()` writes `disagree` as a sorted list of BARE ITEM IDS
+        # (`workers/sources/board_steward.py:920`), so the names are already here and no
+        # parsing of a pair is needed. An entry that is not an int is not an id this
+        # reader can name: it is left out of the list and still counted in `disagree`
+        # above, so the two can differ only by malformed entries.
+        for iid in (block.get("disagree") or []):
+            if not isinstance(iid, int) or isinstance(iid, bool) or iid in named:
+                continue
+            named.add(iid)
+            agg["disagree_ids"].append(iid)
     if agg["judged"]:
         agg["rate"] = round(agg["agree"] / agg["judged"], 4)
     return agg

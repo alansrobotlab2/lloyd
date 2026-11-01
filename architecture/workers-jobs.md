@@ -519,9 +519,16 @@ figures come from — and only when the window is **measured and under the floor
 **one** draft item on the `lloyd` board, tagged `board-steward-disagreement`. Its
 rows name both sides of each disagreement — the status the steward proposed, from
 its parsed moves, and the status `desired_statuses` wants, with that rule's
-`why` — because the proposed move is stored nowhere else (every board-steward
-`runs` row has an empty `response_json`) and the question "which side is wrong"
-cannot be answered from the store. A later below-floor tick **adds its new ids to
+`why` — and it names **the whole window's** disagreeing ids, not the ones this
+tick happened to propose. The two sides survive the tick: the machine's recomputes
+from `desired_statuses`, and the steward's is in the window's `board_steward`
+ledger events, each `moves` entry carrying `item_id`, `status` and the `note` the
+steward wrote, so the question "which side is wrong" IS answerable
+from the store (#3651). What is genuinely not kept is the model's raw reply —
+`response_json` is
+empty in every board-steward `runs` row — so a row whose id appears in no move in
+the window is filed with `(not in its moves)` and counted in the item's Coverage
+bullet as unrecoverable. A later below-floor tick **adds its new ids to
 the same item** rather than filing a second one, and an item a round is already
 working (`in_progress`) is left unrewritten. Each file-or-merge appends one
 `board_steward_disagreement` row to the promotions ledger carrying that window's
