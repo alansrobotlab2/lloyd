@@ -1170,15 +1170,16 @@ has still not been run as of 2026-09-11.
   explanation**, one event on one day, and the **third counted day on which the condition
   is met** after 2026-09-29 and 2026-09-27. What a third day adds is the shape of the gap,
   because a gap is the one quantity on this page thin enough for a reader to mistake a
-  day's distribution for an event's. The seven chat miss events now meeting the condition are
+  day's distribution for an event's. The eight chat miss events now meeting the condition are
   2026-09-27's four at 0.1, 0.7, 0.1 and 0.1 s, 2026-09-29's one at 0.2 s,
-  2026-10-01's one at 0.1 s and 2026-10-15's one at 126.5 s: none of the six before
+  2026-10-01's one at 0.1 s, 2026-10-15's one at 126.5 s and 2026-10-25's one at 0.1 s:
+  none of the six before
   2026-10-15 exceeds 0.7 s, and each one is spanned by a single engine status line, while
   2026-10-15's 126.5 s gap spans 14 status lines. Those are the qualifying events' gaps, not
-  the days' — the same four windows' overall gap p50s are 0.5, 100.1, 24.8 and 100.2 s,
-  medians over every miss event of a day, and the largest of them, 100.2 s, is
-  2026-10-15's, a day whose longest qualifying gap is 126.5 s. So the four days do not agree
-  on one shape: the three this paragraph counted are a prefix dropped between two
+  the days' — the same five windows' overall gap p50s are 0.5, 100.1, 24.8, 100.2 and 205.1 s,
+  medians over every miss event of a day, and the largest of them, 205.1 s, is
+  2026-10-25's, while the longest qualifying gap of all is 2026-10-15's 126.5 s. So the five
+  days do not agree on one shape: the three this paragraph counted are a prefix dropped between two
   consecutive requests inside one status line, and 2026-10-15's is a prefix dropped across a
   two-minute idle stretch, on a pool that neither churned nor reached the gate. A third
   qualifying day adds evidence, not stance: owed-check
@@ -1187,10 +1188,10 @@ has still not been run as of 2026-09-11.
   ruling and its consequence stand as written for every non-churn miss. The ask that
   consequence left open is a separate matter, and it is closed below.
   What the third day does change is the report's evidence set — and that set has since
-  grown, because 2026-10-15 below is the **fourth counted day on which the condition is
-  met**. What this paragraph's ruling now points at is therefore the four extracts
-  2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15, each committed because the engine
-  lines behind it expire the way every other day's do. What those four support is the
+  grown, because 2026-10-25 below is the **fifth counted day on which the condition is
+  met**. What this paragraph's ruling now points at is therefore the five extracts
+  2026-09-27, 2026-09-29, 2026-10-01, 2026-10-15 and 2026-10-25, each committed because the engine
+  lines behind it expire the way every other day's do. What those five support is the
   exclusion they measure and not a write: the escalation they were assembled for is
   **DROPPED, not owed** — **Alan ruled by hand on 2026-10-12**, on #2250, that the
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
@@ -1334,6 +1335,69 @@ has still not been run as of 2026-09-11.
   on GPU 1 is not set** (§2.3), and the unit now clamps the card at 450 W, not
   that configuration's 400 W.
 
+- **The 2026-10-25 count: the filing condition is met on a fifth counted day, and its
+  qualifying event clears the gate by 0.002.**
+  **2026-10-25 00:00 → 2026-10-26 00:00 UTC**, gate **0.60**, the eleventh extract —
+  `tests/fixtures/vllm_prefix_miss_2026-10-25.json`, committed byte-for-byte as the daily job
+  wrote it (#3692). **463 turns, all 463 measured, 46 of them carrying misses gives 104 misses /
+  11,891,022 tokens** (worst turn 1,012,048): **1.07x and 1.15x** of §6.1's per-day 97 / 10.3M,
+  so **trigger (ii) fires**, and **1 of the day's 4 chat turns** carries misses, so **trigger (i)
+  fires too** — and §10's only published exemption covers a day that fires (ii) *and not* (i), so
+  this day is not exempt and the paragraph below is the record. Load mix, which must be read
+  before (ii) carries any weight: autocode takes **85 of the 104 misses and 9,709,548 of the
+  11,891,022 tokens — 81.7%**, autonomy 12, chat 5, deepresearch 1, owedcheck 1. That is nearer
+  2026-09-27's 80% than the 09-28 exemplar's ~95%, so (ii) is one autonomous kind's volume on
+  this day too, but at four-fifths rather than nineteen-twentieths. **(c) holds** with room:
+  **KV p50 0.178 / p90 0.411 / max 0.870** over **6,371** in-window status lines, Running
+  requests at **1** for the median sample, and the day's 104 misses join a status line behind
+  them at **gap p50 205.1 s** with **KV peak in the gap p50 0.402 / p90 0.634, max 0.870** —
+  **14 of 107** at or over the **0.60** gate and **0** over 0.90, so the misses are not admission
+  pressure either. Criterion **(d) holds** on its own rule: **2,781** two-request windows,
+  **2060.5 tok/s** at the median, slowest **8.5**, and **all 7** under the 15 tok/s bar are cold
+  admissions in flight rather than an idle engine — **0 not-cold**.
+  At that pool the day's **107** gap-joined misses split **46 churned / 14 at or over the gate / 7 both / 54 neither** — a churn-to-pressure ratio of **3.3** where 2026-09-28's was **6.8**, so this day leans on gate-level pressure far harder than the exemplar it is shaped like, and the five chat misses of its one chat turn split **2 churned / 3 at or over / 1 both / 1 neither**.
+  One chat turn, `2026-10-25T03:32:33`, holds all **five** of the day's chat misses, and unlike
+  every chat-miss day before it this one has to be walked event by event rather than characterised
+  once, because its five misses are not one shape: **iteration 17** (a **124,848-token** prompt,
+  **cache_read 0**) waited **499.9 s** across **50 status lines** peaking at **0.517**, under the
+  gate, and **750,604 tokens computed in the gap** against the **408,120 free blocks** that peak
+  implies on the **844,969-token pool** is 184% of what the walk could evict — **free-pool churn**,
+  the drop this engine admits to on purpose. **Iteration 19** (**127,774 tokens**, gap **0.1 s**)
+  sits behind a gap peaking at **0.656** and **iteration 29** (**142,578 tokens**, gap **0.1 s**)
+  behind **0.616** — both **at or over the 0.60 gate**, which is the second explanation §10
+  recognises. **Iteration 24** (**136,670 tokens**) is both at once: **502.8 s** across **51
+  status lines** peaking at **0.792**, over the gate, with **1,975,393 tokens computed** against
+  **175,754 free blocks**, so 11.2 times what could be evicted — churn and pressure together.
+  That leaves **iteration 25** (**137,817 tokens**, **cache_read 0**, gap **0.1 s**, one status
+  line, gap KV peak **0.598**, **634 tokens computed** against the **339,678 free blocks** that
+  peak implies): neither free-pool churn nor a gate-level KV explanation covers it, so by the
+  standing rule it is the day's one qualifying event, and **2026-10-25 is the fifth counted day
+  on which the condition is met** — the report's evidence set is **the five extracts
+  2026-09-27 (four events), 2026-09-29 (one event), 2026-10-01 (one event), 2026-10-15 (one
+  event) and 2026-10-25 (one event)**.
+  Say what kind of qualifying event it is, because the margin is the finding. **0.598 clears the
+  0.60 gate by 0.002**, the same class the page already sets aside on 2026-09-27, where the
+  second event "clears the gate by 0.005 and is not the load-mix shape at all — but the margin is
+  thin, so it is named here rather than counted silently". A status line rounds to three decimals
+  and a one-line gap samples the engine at exactly one instant, so whether 0.598 is a real
+  sub-gate peak or a rounding artefact is not decidable from this extract; it is recorded as
+  marginal on the 0.595 precedent, and whether a 0.002 margin enters the qualifying set at all is
+  a ruling, not a reading. The day's own aggregate gives the join its context: **46 of 107**
+  gap-joined misses churned the free pool and **14** sat at or over the gate, so on a day where
+  gate-level KV was common it was the likelier outcome that this turn's five misses were already
+  explained — and four of the five were.
+  Like 2026-10-23 and unlike the September days, this window never measured its own denominator:
+  the extract ships `pool_tokens: []` (#2665's windowing — no boot inside the window or its
+  lookback), and the pool above is read from the committed boot-line extract
+  `backlog/data/agent-llm-primary.log`, whose last boot record is `(EngineCore pid=7382) INFO
+  10-19 17:59:37 [kv_cache_utils.py:2320] GPU KV cache size: 844,969 tokens` — the same boot
+  2026-10-23 names, still not the one 2026-10-15 divides by, and it predates this window by six
+  days. The witness holds no boot later than it and the day's own extract shows no restart, so
+  2026-10-25 was served start to finish by the 10-19 engine, and the pin is recorded so
+  `_gap_events` runs for this day at all instead of raising. Nothing here asks for anything: this
+  event joins the five-extract evidence set rather than an ask — the escalation is
+  **DROPPED, not owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the vLLM#57032
+  comment is not to be posted, and no counted day re-opens it.
 ## 11. Found on the way
 
 - **Direct worker turns ignore every `harness.*` key.**
@@ -1357,6 +1421,6 @@ has still not been run as of 2026-09-11.
 - 2026-09-27 — **§10's counted reading re-pointed (#1627).** Replaced by one full UTC day of real chat (2026-09-25), now naming chat turns as part of the shape and marking (a)-(d) pass/fail; criterion (d) became a derivation (`two_request_throughput`: a per-status-line combined tok/s reading, and a cold-admission exclusion that separates a re-admission in flight from a chunked prefill climbing across the line), so the page can be wrong about throughput without anyone deciding it was a stall. Corrected: the eviction bullet's shape (this day is gate-level KV in 26 of 46 gaps and free-pool churn in 3, not the reverse), (b)'s verdict against §6.1's per-day budget, the draft-group partial count, §6.3's cross-reference, and rotation's true horizon (about five days of engine status lines, not "two"). `tests/test_vllm_doc_claims.py` now derives every counted figure, both history paragraphs labelled, plus a round-trip against `usage.db`.
 - 2026-09-30 — **§10 counts 2026-09-29 (#1921).** The day the accepted-loss ruling's own filing condition was first met is now a derived reading of its own: `tests/fixtures/vllm_prefix_miss_2026-09-29.json` is committed as a THIRD extract (09-25 stays the counted reading, 09-28 the first re-open), and `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it at the `workers.kv_gate.max_kv_usage` gate — trigger figures, the (b) ratio against §6.1's budget, the load-mix caveat, (c)/(d), the churn split, and the one chat miss's attribution down to its gap's KV peak against the gate and its tokens against the free pool. The paragraph carries no pass/fail mark and no second population query, so `_verdict`'s one-mark rule and the one-query rule are pinned against it rather than merely left unbroken. Change 5 (whether 2026-09-27 replicates the condition, which decides if the upstream report follows) and Change 6 (a scheduled job, so a day stops needing a human `git add`) stay owed.
 - 2026-10-01 — **§10 counts 2026-09-27 (#2005).** The earlier day the 09-29 paragraph left uncounted is committed as `tests/fixtures/vllm_prefix_miss_2026-09-27.json`, a fifth extract, while its engine status lines were still in the rotation (7,039 of them in `.log.4`/`.log.5`). `tests/test_vllm_doc_claims.py` recomputes every figure in the new paragraph and walks the day's 17 chat miss events one by one: 6 churned, 7 sat at or over the gate, 4 had neither, 3 of them clear of the gate by a wide margin. The filing condition is therefore met on two independent counted days, and the accepted-loss paragraph and the 09-29 paragraph now say so and name both extracts. The upstream report itself, a write to a third-party repository, was at this date Alan's to make: **2026-10-20 — superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250**, posting the vLLM#57032 comment being **DROPPED, not owed**.
-- 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events then on the record are 4 + 1 + 1 at 0.1–0.7 s, every one of those six spanned by a single status line — the seventh, 2026-10-15's, added below by #2852, is not (126.5 s over 14 lines) — while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the ruling's published consequence did not move and its evidence set was then the three extracts 2026-09-27, 2026-09-29 and 2026-10-01; the comment body itself, a write to a third-party repository, then belonged to #2250 (Alan), which is the ask the 2026-10-20 note at the end of this entry records as dropped. **2026-10-16: superseded on the evidence set by #2852** — 2026-10-15 is the **fourth counted day on which the condition is met**, so the set is now **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**, and the stance moved no further than it moved for the third: the evidence set grew and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**, so the four-extract evidence set this entry grew carries no upstream ask and no counted day re-opens one.
+- 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events then on the record are 4 + 1 + 1 at 0.1–0.7 s, every one of those six spanned by a single status line — the seventh, 2026-10-15's, added below by #2852, is not (126.5 s over 14 lines) — while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the ruling's published consequence did not move and its evidence set was then the three extracts 2026-09-27, 2026-09-29 and 2026-10-01; the comment body itself, a write to a third-party repository, then belonged to #2250 (Alan), which is the ask the 2026-10-20 note at the end of this entry records as dropped. **2026-10-16: superseded on the evidence set by #2852** — 2026-10-15 is the **fourth counted day on which the condition is met**, so the set is now **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**, and the stance moved no further than it moved for the third: the evidence set grew and no comment had been written. **2026-11-01: superseded on the evidence set by #3692** — 2026-10-25 is the **fifth counted day on which the condition is met**, so the set is now **the five extracts 2026-09-27, 2026-09-29, 2026-10-01, 2026-10-15 and 2026-10-25**, and the stance moved no further than it moved for the third and the fourth: the evidence set grew, the day that grew it had both triggers firing, and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**, so the four-extract evidence set this entry grew carries no upstream ask and no counted day re-opens one.
 - 2026-10-16 — **§10 counts 2026-10-15 (#2852).** The fourth counted day on which the accepted-loss filing condition is met, committed as `tests/fixtures/vllm_prefix_miss_2026-10-15.json` byte-identical to the daily job's copy (`test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte` compares the two files, because the 10-15 status lines leave the rotation with the same turn the 10-01 ones did). `test_the_seventh_day_figures_are_the_derivation` recomputes every figure in the new §10 paragraph from the fixture at the config gate, and `test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool` attributes its one chat miss (`2026-10-15T15:54:11`, iteration 17, 112,821 tokens cold, 126.5 s over 14 status lines, gap KV peak 0.511 against the 0.60 gate, 408,165 tokens computed against 413,190 free blocks). Two things this day cost the page, both paid here rather than carried. **One:** it is the first counted day whose window contains no engine boot, so #2665's windowing leaves `pool_tokens` empty and the churn join unmeasured; the free-block figure is computed on 844,969 tokens read from the rotation's last boot before the window (`INFO 10-12 16:21:06`), the paragraph says so, and `_with_pool` pins it so `_gap_events` can walk a day `derive` cannot — at that pool the day's churn split is 44 of 109. The margin is thin and the entry says so: not-churned holds only above an 834,693-token pool (98.8% of the walk's need), so this is the weakest of the four qualifying days. **Two:** the gap-shape generalisation the 2026-10-05 entry above records as settled — every qualifying gap sub-second and spanned by a single status line — is true of the six events then on the record and false of this seventh, and no rail would have caught it, because the two asserts that held it walked only the three older fixtures. They now scan all four, the sub-second claim is scoped to the six it covers, and the derived negative half fails any future re-widening. Stance unchanged: a fourth qualifying day adds evidence, not stance, and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**; this day's event stands in the four-extract evidence set as the weakest of the four and answers to no upstream ask.
 - 2026-10-21 — **stale, corrected.** §1's verbatim command line still carried `--language-model-only` and no `--limit-mm-per-prompt`, a month after `7c7d6d69` (2026-09-23) loaded the vision tower: the live argv now runs `--limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0} --mm-processor-kwargs {"max_pixels": 2119936}`, because `agent-llm-primary.conf` sets `LANGUAGE_MODEL_ONLY=0` over the launcher's `1` — a knob §5's table did not list, and the only conf-set value that fails *silently* (a text-only engine that still passes the model-identity check), which is what §3.1's #1420 assert exists for. The §1 paragraph telling a human which `VLLM_VENV` to switch for a rollback named `.venvs/vllm-flash-next-main-0910`, and the launcher's fallback default names `.venvs/vllm-qwen38-flash-next`; both directories are gone (`ls -d ~/lloyd/.venvs/*vllm*` → `-djev`, `-flash-next-main`, `-flash-next-main-1012`, `-omni`), so the fallback this page relied on to turn a lost conf line into a quietly-wrong boot is now a dead venv check — #3136. §2.4's index map was still a three-card table from before `2e08e6d3`: index 2 given as `61:00.0` (it is `42:00.0`, and djev runs on it) serving "the llama.cpp secondary", off since 2026-09-20, no rows for indices 3 and 4, and both `/dev/nvidiaN` minors wrong — the one §2 table `tests/test_infrastructure_gpu_inventory.py` deliberately excludes from its harvester, hence #3137. Two §10 line citations are stale — `scripts/vllm_prefix_miss_window.py` for `derive`'s `by_kind` loop (really 287-291) and `:61-66` for `session_kind` (really 84-89) — and are **left as they stand**: both sit inside the 2026-09-25 counted reading, which `test_the_ninth_extract_moves_no_graded_reading` pins by sha256 pending a round that re-derives every figure in it, and `test_criterion_a_names_the_population_it_counted` requires the classifier be cited **by line**, so the symbol-for-number substitution this page's §8 lesson would otherwise recommend fails both rails. #3139 carries the corrected numbers and the two rails a fix has to satisfy; the test file's copy of the same range is in the same item, and the `nvidia-power-limit.service` `Documentation=` path that has never resolved is #3138. What held, re-measured rather than assumed: the five clamp values and their ranges against the unit's environment, the 844,969-token fp8 pool and 4096 batched tokens, `DEFAULT_MM_MAX_POS: 262144`, YaRN off with `context_length` absent, the `:8096` boot-probe route (`/v1/tokenize` 404 on the live engine), `PREFIX_CACHE_TOK_S = 6000.0`, the ram-gate floors and their clone in `round restart --only`, `app/prefix_miss.py`'s six trigger constants, `app/engine_pressure.py`'s 300 s ring, the `app/routers/sessions.py` / `app/routers/messages.py` / `app/sessions_io.py` cites, `app/engine_pressure.py` in §6.2's writer list, and the argv's `--scheduling-policy priority --async-scheduling --enable-prefix-caching`. Filed #3136 #3137 #3138 #3139.
