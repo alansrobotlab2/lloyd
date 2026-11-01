@@ -1224,8 +1224,9 @@ has still not been run as of 2026-09-11.
   reading: this is the first counted day with **no boot line** inside it, because #2665
   bounds a `GPU KV cache size:` line to its own window and a day the engine was not restart
   for legitimately ships none — which is why the extract's own churn join is unmeasured
-  rather than zero. The **844,969** above is therefore the size read from the rotation: the
-  last boot before the window is `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`,
+  rather than zero. The **844,969** above is therefore the size read from the committed
+  boot-line extract `backlog/data/agent-llm-primary.log`: the last boot before the window is
+  `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`,
   and the file spanning the whole day holds no boot line at all, so the engine that served
   2026-10-15 ran on the pool it booted with at **2026-10-12 16:21**. At that pool the day's
   churn join is **44 of 109** gap-joined misses churning the free pool. The margin on THIS

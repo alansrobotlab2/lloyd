@@ -5058,6 +5058,81 @@ def test_the_pool_provenance_no_longer_cites_a_rotating_log():
         "look like one to this regex")
 
 
+#: §10's 2026-10-15 provenance sentence as #2852 landed it, quoted out of the paragraph as
+#: `_seventh_bullet` returns it (emphasis markers stripped, wrapped lines collapsed). The ban
+#: below is graded against this text, for the reason `_PRE_3191_PROVENANCE` gives: a scan that
+#: had stopped matching a real instance of the phrase would otherwise read as a clean page.
+_PRE_3405_PROVENANCE = (
+    "The 844,969 above is therefore the size read from the rotation: the last boot before the "
+    "window is `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`, and the file spanning "
+    "the whole day holds no boot line at all, so the engine that served 2026-10-15 ran on the "
+    "pool it booted with at 2026-10-12 16:21")
+
+_READ_FROM_ROTATION = re.compile(r"read from the rotation")
+
+#: The 2026-10-16 changelog entry's own words for the same act, which #3405 leaves as written.
+#: Apostrophe-free on purpose: the line's next word carries one, and a quote that depends on
+#: which glyph landed is a quote that fails on an editor's keystroke rather than on a change.
+_CHANGELOG_2026_10_16_PHRASE = "844,969 tokens read from the rotation"
+
+
+def _changelog_2026_10_16() -> str:
+    """The 2026-10-16 #2852 changelog line, whole and whitespace-collapsed, or a failure.
+
+    Bounded to its own line for the reason `_seventh_bullet` is bounded at the next bullet: a
+    phrase demanded of the changelog must not be answered by §10's paragraph, and the two now
+    say different things deliberately — one is the reading, the other is what a round did.
+    """
+    for ln in DOC.read_text(encoding="utf-8").splitlines():
+        if ln.startswith("- 2026-10-16 — **§10 counts 2026-10-15"):
+            return " ".join(ln.split())
+    pytest.fail("there is no longer a changelog line starting `- 2026-10-16 — **§10 counts "
+                "2026-10-15`, so the half of the page #3405 declared out of scope has been "
+                "rewritten rather than left alone")
+
+
+def test_the_seventh_day_provenance_names_the_committed_extract():
+    """#3405 clause 1 and clause 3: §10's 2026-10-15 paragraph sources its 844,969 to the
+    committed boot-line extract and says "read from the rotation" nowhere inside it, while the
+    2026-10-16 changelog entry keeps the historical phrase it earned.
+
+    Why the paragraph and not the changelog: the paragraph states a reading a reader can go and
+    re-check, and the store it pointed at deletes itself. `logs/services/agent-llm-primary.log*`
+    is a byte rotation — a 10 MB cap and supervisord's default 10 backups, which is the 11 files
+    #3191's witness header counts — and `INFO 10-12 16:21:06 … GPU KV cache size: 844,969 tokens`
+    stood in `.log.8` when that witness was cut on 2026-10-23 and in `.log.10`, the oldest file
+    the rotation then held, at #3405's triage on 2026-10-26. The next shift deletes it, after
+    which the sentence cites bytes that are on no disk and in no tree but the vault's. Naming the
+    file the bytes are IN is what makes a citation outlive the store: the same fix #3191 applied
+    to the comment above `NO_BOOT_POOL`, and the 2026-10-23 paragraph below already reads that
+    way, so this paragraph was the last §10 provenance still pointing at the live rotation.
+
+    The ban is scoped to `_seventh_bullet()` — that paragraph alone — and graded against the
+    sentence it replaces, so a regex that stopped matching the real prose fails rather than
+    passing quietly. The changelog assert is the control in the other direction: the phrase must
+    still be live on the page somewhere, and its loss there means either the ban stopped
+    matching or a later round re-pointed the historical record too, in which case this constant,
+    the scope of the ban, and #3405's ruling on that line all move together.
+    """
+    bullet = _seventh_bullet()
+    assert f"backlog/data/{_ROTATION_WITNESS}" in bullet, (
+        "§10's 2026-10-15 paragraph no longer names the committed extract its 844,969 comes "
+        "from, so the page is back to citing a store that deletes the line it quotes")
+    assert not _READ_FROM_ROTATION.search(bullet), (
+        f"'read from the rotation' ({_READ_FROM_ROTATION.findall(bullet)}) is back in the "
+        "2026-10-15 paragraph: a rotation is a set of files that overwrites itself, so the "
+        "phrase is a citation with an expiry date rather than a source")
+    control = _READ_FROM_ROTATION.findall(_PRE_3405_PROVENANCE)
+    assert control == ["read from the rotation"], (
+        f"positive control: the ban matched {control} in the sentence it replaced, so the check "
+        "above is not reading the prose it was written against")
+    assert _CHANGELOG_2026_10_16_PHRASE in _changelog_2026_10_16(), (
+        "the 2026-10-16 entry no longer carries its own words for how the pool was obtained. "
+        "#3405 scoped that line out as a record of what the round did on 2026-10-16, so it is "
+        "rewritten rather than left alone — and if a later ruling re-points it as well, this "
+        "constant and the scope of the ban above move with it")
+
+
 def test_the_witness_header_carries_what_the_extract_cannot():
     """#3191 clause 5: the companion page names the source store, the capture instant and the
     per-file boot census with `stat` byte sizes, and says which half of that is capture metadata
