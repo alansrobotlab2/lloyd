@@ -14,6 +14,14 @@
   "scheduled-task",
   "youtube-digest"
  ],
+ "durable_bash_shapes_covered": [
+  "HTTP write to a non-loopback host (a POST to someone else's API)",
+  "automod round restart (restarts a live service)",
+  "git push (publishes to a remote other people clone)",
+  "supervisorctl state change (restart/stop a service)",
+  "systemctl --now enable/disable (starts or stops a unit)",
+  "systemctl state change (restart/stop a unit)"
+ ],
  "durable_write_definition": "side_effecting(name) \u222a {Write, Edit, vault_write, automod_vault_land} minus READ_ONLY and the turn-state names (Scratchpad, recall_observation); NOT tool_tier(name) >= 1, which is true for all 147 pool names and would report every source, and NOT durable_external() = TIER2 \u222a TIER3, which excludes Write and vault_write and so cannot see the pilot's own pair. Bash is excluded by name: its tier is the command string, so this definition cannot see it and does not pretend to \u2014 where that question is answered is the published `bash_held` field on every row, and for the most-protected fleet the named list `untrusted_ingest_sources_with_unmeasured_bash` below. A row's `co_present` is NOT a statement about Bash (#3202, owed entry 3 of #2932).",
  "pool": 147,
  "sources": {
