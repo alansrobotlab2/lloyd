@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time
 from datetime import date, datetime
 import yaml
 from fastapi import APIRouter, HTTPException, Request
@@ -114,7 +115,7 @@ _VAULT = vault_root()
 # numbers the Memory tab actually renders — are answered straight from
 # `_stats_signature()`'s per-segment counts, so they cost the stat walk and open no
 # note file (#3503). This dict holds the one figure that genuinely needs the note
-# contents, plus the two fields that keep its rebuild single and unreaped.
+# contents, plus the fields that keep its rebuild single, unreaped and rate-bounded.
 #
 # Measured 2026-10-27 over the live vault: a cold `/api/memory/stats` on the
 # running backend was 21.7s, the same build out of process 17.6s, of which 17.1s is
@@ -130,9 +131,23 @@ _VAULT = vault_root()
 # before those readings. Hence the hand-off below — a stale signature serves the
 # LAST completed tally and queues the rebuild behind the response, rather than
 # making whoever happened to open the tab wait 17.6s for it.
+#
+# #3682: that hand-off alone does not bound the WORK, only the latency. The kick
+# captured `sig` at kick time and stored it on completion, but the vault moves during
+# a ~17-20s parse, so every finished build came back already stale and the next
+# request re-kicked it — measured 2026-11-01, 20s of polling `/api/memory/stats`
+# burned 2143 CPU ticks (~1.07 cores pinned) against 72 idle, and a GET concurrent
+# with a rebuild took 12.19s against a 0.070s baseline. What bounds the work is the
+# floor below: while a COMPLETED tally is younger than it, a stale signature is
+# served as stale and no rebuild starts. The product ruling on #3682 accepts the lag,
+# which is why there is no invalidation path — `docCount` and `types` are untouched by
+# any of this because they never come off the tally.
+TAG_TALLY_FLOOR_SECONDS = 300.0
+
 _STATS_CACHE: dict = {
     "sig": None,          # signature last built, or last attempted and not retried until the vault moves
     "tally": None,        # {"tagCount", "topTags", "lastRefresh"}; None before the first build lands
+    "tally_built_at": None,  # monotonic instant the last tally COMPLETED; None until one lands — see the floor above
     "in_flight": False,   # one rebuild at a time; cleared in a `finally` — see `_rebuild_tag_tally`
     "task": None,         # strong ref: the loop may garbage-collect a task nothing holds
 }
@@ -252,6 +267,36 @@ def _empty_tally() -> dict:
     return {"tagCount": 0, "topTags": [], "lastRefresh": ""}
 
 
+def _tag_tally_is_rate_limited() -> bool:
+    """True while the last COMPLETED tally is younger than `TAG_TALLY_FLOOR_SECONDS`.
+
+    #3682. The floor is a floor on the RATE of parses, and it is keyed on completion
+    rather than on the signature because the signature can never be satisfied while the
+    vault moves during a ~17-20s parse: notes are being written the whole time (91 of
+    them across 66 distinct 20-second buckets in the 6h before triage), so the `sig` a
+    build captured at kick time is already older than the vault by the moment it
+    publishes, and every following request re-kicks. Keyed on completion, one build
+    answers a whole burst.
+
+    A tally that has never completed (`tally` is None) is never rate-limited, and that
+    exemption is load-bearing twice over: rate-limiting it would serve `tagCount: 0`
+    for five minutes on a freshly started backend, and it would swallow the retry of a
+    build that raised while nothing had ever published — the case
+    `_rebuild_tag_tally`'s `finally` exists for. The stamp is written on the success
+    path only, which is what keeps a FAILURE from arming the floor: a parse that raised
+    leaves the stamp where it was, so the next request is judged against the last tally
+    that actually published.
+
+    The stamp is `time.monotonic()`, not a wall-clock timestamp: a resume from suspend
+    or an NTP step backwards would otherwise park the tally for the length of the
+    jump.
+    """
+    built_at = _STATS_CACHE["tally_built_at"]
+    if _STATS_CACHE["tally"] is None or built_at is None:
+        return False
+    return (time.monotonic() - built_at) < TAG_TALLY_FLOOR_SECONDS
+
+
 def _kick_tag_tally_rebuild(sig: tuple) -> None:
     """Queue the tag build on a worker thread and return to the requester.
 
@@ -287,6 +332,10 @@ async def _rebuild_tag_tally(sig: tuple) -> None:
     that is known to fail, and a 17.6s YAML walk burning CPU in the background of a
     live chat stream is not something to repeat per tab-open. So a failed signature
     is retried when the vault moves next, which is when it may well succeed.
+
+    `tally_built_at` is written on THIS path only (#3682). It is a completion stamp,
+    and the floor that reads it is only safe being a floor because a build that raised
+    leaves it where it was and stays retryable on the next signature change.
     """
     try:
         payload = await asyncio.to_thread(_build_stats_payload)
@@ -295,6 +344,7 @@ async def _rebuild_tag_tally(sig: tuple) -> None:
             "topTags": payload["topTags"],
             "lastRefresh": payload["lastRefresh"],
         }
+        _STATS_CACHE["tally_built_at"] = time.monotonic()
         _STATS_CACHE["sig"] = sig
     except Exception:
         _STATS_CACHE["sig"] = sig
@@ -317,7 +367,13 @@ async def memory_stats():
     sig = _stats_signature()
     doc_count, types = _counts_from_signature(sig)
     tally = _STATS_CACHE["tally"]
-    if tally is None or _STATS_CACHE["sig"] != sig:
+    # The `not _tag_tally_is_rate_limited()` half is #3682: a stale signature whose
+    # tally completed less than TAG_TALLY_FLOOR_SECONDS ago is served as stale with no
+    # rebuild queued, because a rebuild is stale the moment it publishes anyway (the
+    # vault moves during its own ~17-20s parse) and one per request measured at ~1.07
+    # pinned cores per 20s of polling. A tally that has never landed is never
+    # rate-limited — see `_tag_tally_is_rate_limited`.
+    if tally is None or (_STATS_CACHE["sig"] != sig and not _tag_tally_is_rate_limited()):
         # Deliberately not awaited: the counts above are already this vault's truth,
         # and the tag tally the parse produces is served from the last completed
         # build while the new one runs behind the response.

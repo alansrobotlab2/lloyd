@@ -105,15 +105,23 @@ TABLE_ROW_NOTE = (
 
 
 def _fresh_stats_cache() -> dict:
-    """An untouched `_STATS_CACHE`, shaped by #3503 and by nothing else.
+    """An untouched `_STATS_CACHE`, shaped by #3503, by #3682, and by nothing else.
 
     `_STATS_CACHE` is module state: without the reset a tally cached by an earlier
     test answers the assertion instead of the file just written. Since #3503 the
     cache holds the last completed tag TALLY rather than a whole payload — the
     counts are recomputed per request — so the reset names `tally`, the `in_flight`
-    rebuild flag and the task reference.
+    rebuild flag, the task reference, and since #3682 the `tally_built_at` completion
+    stamp that floor is keyed on.
+
+    The copy has to be complete, not merely plausible: this fixture installs it IN
+    PLACE of the module's dict, so a key the module reads and this literal lacks is a
+    `KeyError` inside the handler on every node in this file. That is pinned from the
+    other side by
+    `tests/test_memory_router_stats.py::test_the_cache_reset_helpers_carry_every_key_the_module_ships`,
+    which imports this helper rather than restating its contents.
     """
-    return {"sig": None, "tally": None, "in_flight": False, "task": None}
+    return {"sig": None, "tally": None, "tally_built_at": None, "in_flight": False, "task": None}
 
 
 @pytest.fixture

@@ -28,6 +28,7 @@ import {
 import { Streamdown } from "streamdown";
 import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
 import { KIND_COLOR } from "../../lib/entityKinds";
+import { scheduleStatsRefetch } from "./memoryStatsRefresh";
 
 // three.js + react-force-graph-3d is ~1MB and only this page needs it. Split
 // out so it loads alongside the page instead of inside the app's entry bundle
@@ -858,6 +859,9 @@ export default function MemoryPage() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("entities");
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Handle for the one cold-start re-fetch of the tag tally (#3682 clause 5), kept so
+  // an unmount inside its 20s cancels it instead of firing at a gone component.
+  const statsRefetchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Right panel state
   const [rightPanel, setRightPanel] = useState<RightPanelMode>({ kind: "empty" });
@@ -882,7 +886,28 @@ export default function MemoryPage() {
   // the EntityGraph component and surfaced here via onGraphLoaded so we don't
   // pay for a second 1.1MB round-trip + parse.
   useEffect(() => {
-    api.memoryStats().then(setStats).catch(console.error);
+    api
+      .memoryStats()
+      .then((data) => {
+        setStats(data);
+        // `lastRefresh: ""` is the tag build not having landed, so this response is
+        // what drew `0 tags` — the one figure on this page that is not live. The
+        // request started the build behind its own response and the build costs ~20s;
+        // and since #3682 a stale tally inside the floor starts NO rebuild, so nothing
+        // else is going to move this number. Hence exactly one re-fetch, after the
+        // parse's own cost. See memoryStatsRefresh.ts for the delay's arithmetic.
+        statsRefetchRef.current = scheduleStatsRefetch(data, setTimeout, setStats);
+      })
+      .catch((err) => {
+        console.error(err);
+        // A failed fetch is a tally that has not landed, and it retried on the same
+        // clock: a tab whose first request errored must not sit on a blank header.
+        statsRefetchRef.current = scheduleStatsRefetch(null, setTimeout, setStats);
+      });
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      if (statsRefetchRef.current !== null) clearTimeout(statsRefetchRef.current);
+    };
   }, []);
 
   // Mount the graph a beat after the page. It used to mount in the same commit
