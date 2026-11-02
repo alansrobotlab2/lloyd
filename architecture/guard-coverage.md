@@ -104,6 +104,15 @@ from a hook. A union page has to enumerate the **refusal sites**, not the
 directory that smells like guards; that is the difference between §3 and §8
 being true and being almost true.
 
+One surface that answers the table's own question is out of this table **by axis**
+rather than missing from it: `app/harness/capabilities.py`'s `envelope_for`
+(`git grep -n "def envelope_for" -- app/harness/capabilities.py`) is an availability
+surface, not a content guard — it removes every tool name the source has not declared
+from the turn's catalog before dispatch and reads no content (no command string, no
+argument value, no result text), so there is nothing for the table's `Sees` column to
+hold and the exclusions in §1–§8 do not reach it; the mechanism is written up once, in
+the capability-ceiling row of `architecture/authority-surfaces.md` (#3611).
+
 ```
 git grep -n "install_default_safety_hook\|install_policy_hook\|install_outbound_content_gate\|_install_action_review" \
   -- app/routers/turn_options.py app/harness/safety.py app/autonomy.py \

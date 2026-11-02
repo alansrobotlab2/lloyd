@@ -11023,3 +11023,352 @@ def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_repl
     assert len(findings) == 10, (
         f"expected exactly the ten seeded anchors to be reported, got "
         f"{len(findings)}: {sorted(findings)}")
+
+
+# --------------------------------------------------------------------------- #
+# guard-coverage.md — the capability ceiling is an availability surface, and the
+# page now says so (#3611, 2026-11-02). Its table is keyed on what a guard SEES;
+# `envelope_for` sees nothing, so its silence read as "nothing stands here".
+# --------------------------------------------------------------------------- #
+
+#: The two symbols the note must name, and the doc that owns the mechanism.
+CEILING_MODULE = "app/harness/capabilities.py"
+CEILING_FUNCTION = "envelope_for"
+CEILING_OWNER_DOC = "authority-surfaces.md"
+
+#: The guard table and its row count as of #3611. Counting the rows is what makes
+#: the wrong shape of fix — a new table row for the ceiling — a red rather than a
+#: silently wider table: the table's axis is what a guard sees.
+GUARD_TABLE_HEADING = "## The guards, and where each one is wired"
+GUARD_TABLE_ROWS = 7
+
+#: The page's fenced command blocks as of #3611. Clause 4 is "collateral-free", and
+#: the #2391 stamp node pairs these blocks byte-for-byte against the stamped tree,
+#: so a command block written to justify this one sentence would have cost a
+#: re-stamp to add a line of prose. An inline backticked command costs nothing.
+GUARD_COVERAGE_BLOCKS = 20
+
+#: What the note has to say, each with what its absence would mean. These are the
+#: observables, not adjectives: a sentence saying only that the ceiling is "different"
+#: would satisfy a word like "different" and still leave a reader unable to tell
+#: whether §1–§8's content-axis exclusions reach it.
+_CEILING_NOTE_FACTS: tuple[tuple[str, str], ...] = (
+    ("catalog",
+     "stopped saying what it removes names from, so it reads as a runtime refusal "
+     "rather than a catalog that never offered the call"),
+    ("before dispatch",
+     "stopped saying when it acts, which is the half that puts it outside the hook "
+     "layer this table's rows are wired in"),
+    ("reads no content",
+     "stopped saying the reason it has no row: a table keyed on what a guard sees "
+     "has no cell for a surface that sees nothing"),
+    ("rather than missing",
+     "stopped separating an axis exclusion from a gap, which is the exact misreading "
+     "the sentence exists to kill"),
+    ("§1–§8",
+     "stopped saying the content-axis exclusions do not apply to it, so a reader "
+     "carries them onto a surface they do not describe"),
+    ("capability-ceiling",
+     "stopped pointing at the owning row by its subject, which is the only spelling "
+     "that survives the next row being inserted above it"),
+    (CEILING_OWNER_DOC,
+     "stopped sending the reader to the doc that owns the mechanism"),
+)
+
+#: The three docs that triage settled need no note of their own: `harness.md` carries
+#: the ceiling in its module map and `autonomy-jobs.md` cites the module for the
+#: scheduled-task base set, while `workers.md`'s four "ceiling" hits are the
+#: output-token ceiling, another mechanism its own text says so about. None of the
+#: three names the envelope function, and pinning THAT is the checkable form of
+#: "no other architecture file was edited": it reds if a later round spreads this
+#: line sideways instead of leaving each page's own axis alone.
+CEILING_SILENT_DOCS = ("harness.md", "autonomy-jobs.md", "workers.md")
+
+
+def _prose_sentences(text: str) -> list[str]:
+    """The page's sentences, split on sentence-final punctuation.
+
+    Every `.` inside a code span is masked before the split and restored after,
+    because `app/harness/capabilities.py` is a filename and not the end of a
+    sentence. Without the mask this splitter reads one citation of one module as
+    three sentences, and "exactly one sentence names both symbols" would then be
+    grading backticks instead of prose.
+    """
+    masked = _CODE_SPAN.sub(lambda m: m.group(0).replace(".", "\x00"), text)
+    return [s.replace("\x00", ".")
+            for s in re.split(r"(?<=[.!?])\s+", masked) if s.strip()]
+
+
+def _guard_table_rows(text: str) -> list[str]:
+    """The guard table's DATA rows: `|` lines under that heading, header and
+    separator out. Asserted non-empty because a table that stopped parsing would
+    otherwise pass every "no row was added" check on an empty set."""
+    i = text.index(GUARD_TABLE_HEADING)
+    nxt = text.find("\n## ", i + len(GUARD_TABLE_HEADING))
+    body = text[i:] if nxt < 0 else text[i:nxt]
+    kept = [ln for ln in body.splitlines()
+            if ln.startswith("|") and not re.fullmatch(r"\|[\s|:-]+\|", ln)]
+    header = [n for n, ln in enumerate(kept) if ln.startswith("| Guard |")]
+    assert header, f"{GUARD_TABLE_HEADING}: no `| Guard |` header line — the extractor " \
+                   "found a table it could not anchor, not a table with no rows"
+    rows = kept[header[0] + 1:]
+    assert rows, f"{GUARD_TABLE_HEADING}: header found, zero rows under it"
+    return rows
+
+
+def _authority_ceiling_row() -> str:
+    """The capability-ceiling row of `authority-surfaces.md`, located by its own cells.
+
+    Located by subject and module cell rather than by a row number on purpose: #3560's
+    own log records that inserting this row moved every number below it, so a test that
+    pinned "row 7" would be the next thing the next row breaks — the same reason #3292
+    retired the spelling from the docs. The MODULE cell, not a substring of the line:
+    row 6 (`app/tool_bans.py`, the deny floor) cites this same module inside its own
+    prose, and a substring match would grade the floor's row as the ceiling's.
+    """
+    want = f"`{CEILING_MODULE}`"
+    rows = [ln for ln in _text(CEILING_OWNER_DOC).splitlines()
+            if ln.startswith("| ") and want in
+            [cell.strip() for cell in ln.split("|")]]
+    assert len(rows) == 1, (
+        f"{CEILING_MODULE} is the module cell of {len(rows)} rows of "
+        f"{CEILING_OWNER_DOC}, so the note's pointer has no single target to be graded "
+        "against")
+    return rows[0]
+
+
+def _note_words(s: str) -> list[str]:
+    """Lowercase word list with code spans dropped and hyphens broken.
+
+    Code spans go because the shared-run rule is about copied PROSE; the module path
+    has to appear in both texts for the note to name it at all, and counting it as a
+    copied run would fail the sentence for naming the symbol clause 1 requires.
+    """
+    s = _CODE_SPAN.sub(" ", s).lower()
+    return re.sub(r"[^a-z0-9 ]+", " ", s).replace("-", " ").split()
+
+
+def _shared_word_run(a: str, b: str, max_n: int = 8) -> tuple[int, str]:
+    """(length, text) of the longest word run both texts contain."""
+    aw, bw = _note_words(a), _note_words(b)
+    grams = {" ".join(bw[i:i + n])
+             for n in range(1, min(max_n, len(bw)) + 1)
+             for i in range(len(bw) - n + 1)}
+    for n in range(min(max_n, len(aw)), 0, -1):
+        for i in range(len(aw) - n + 1):
+            g = " ".join(aw[i:i + n])
+            if g in grams:
+                return n, g
+    return 0, ""
+
+
+def _ceiling_note(text: str) -> list[str]:
+    """Every sentence naming both the module and the function."""
+    return [s for s in _prose_sentences(text)
+            if CEILING_MODULE in s and CEILING_FUNCTION in s]
+
+
+def _ceiling_note_gaps(text: str) -> list[str]:
+    """What is wrong with THIS text as the home of the availability note."""
+    gaps: list[str] = []
+    table_rows = _guard_table_rows(text)
+    ceiling_rows = [r for r in table_rows
+                    if CEILING_FUNCTION in r or CEILING_MODULE in r]
+    if ceiling_rows:
+        gaps.append(
+            "the guard table gained a row for the ceiling "
+            f"({ceiling_rows[0][:70]!r}) — the note is prose: the table's axis is "
+            "what a guard sees, and a surface that sees nothing has no cell there")
+    notes = _ceiling_note(text)
+    if not notes:
+        gaps.append(
+            f"nothing on the page names both {CEILING_MODULE} and {CEILING_FUNCTION}, "
+            "so a reader asking what stops an unattended turn calling X meets seven "
+            "rows keyed on content and concludes nothing else stands there")
+        return gaps
+    if len(notes) > 1:
+        gaps.append(f"{len(notes)} sentences name both symbols; the page asks for one")
+    s = notes[0]
+    # The page wraps at ~80 columns, so a required phrase can straddle a newline.
+    # Comparing against the raw sentence would report "reads no content" as missing
+    # from a sentence that says it on two lines, and the next person to re-wrap the
+    # paragraph would watch a fact they did not change go red.
+    flat = " ".join(s.split())
+    for phrase, why in _CEILING_NOTE_FACTS:
+        if phrase not in flat:
+            gaps.append(f"the note {why} — {phrase!r} missing")
+    if re.search(r":\d", s):
+        gaps.append("the note cites a line number, which is the spelling no rail reads "
+                    "and nothing here needs: the claim is about a module, not a place "
+                    "in it")
+    if re.search(r"\b(?:row|layer)\s+\d+\b", s):
+        gaps.append("the note points at the owning row by NUMBER: a number is a "
+                    "position, and #3560 inserting a row moved every number below it")
+    n, run = _shared_word_run(s, _authority_ceiling_row())
+    if n >= 6:
+        gaps.append(f"the note shares a {n}-word run with the row it points at "
+                    f"({run!r}) — it is meant to send the reader there, not to keep a "
+                    "second copy of the mechanism to rot")
+    return gaps
+
+
+def test_guard_coverage_says_the_ceiling_is_out_of_the_guard_table_by_axis():
+    """source: architecture/guard-coverage.md, the prose block under the guard table.
+    claim: one sentence names `app/harness/capabilities.py` and `envelope_for`, says
+           the ceiling removes names from the turn's catalog before dispatch and reads
+           no content, is out of the table **by axis** rather than missing, keeps §1–§8
+           off it, and sends the reader to the capability-ceiling row of
+           `architecture/authority-surfaces.md` — in prose, with no line number.
+    verdict: #3611. The page answers "what stops an unattended turn calling X" and
+             carried nothing on either availability filter (measured 2026-10-31: zero
+             hits for `capabilit`, `envelope_for`, `ceiling`, `availability`,
+             `catalog`, against `policy.py` at 7), while its own table already has a
+             row keyed on tool name + tier + grant scope rather than on content.
+
+    The symbols are pinned against the tree, not just the page: a note that outlives
+    a rename of `envelope_for` is the exact drift this file exists to catch.
+    """
+    text = _text("guard-coverage.md")
+    assert _ceiling_note_gaps(text) == [], _ceiling_note_gaps(text)
+
+    assert len(_ceiling_note(text)) == 1, (
+        "the live page stopped carrying exactly one sentence naming both symbols")
+    assert (ROOT / CEILING_MODULE).read_text(encoding="utf-8").count(
+        f"def {CEILING_FUNCTION}(") == 1, (
+        f"{CEILING_MODULE} no longer defines {CEILING_FUNCTION} exactly once, so the "
+        "note names a function the tree does not have")
+    assert "The capability ceiling" in _authority_ceiling_row(), (
+        "the row the note points at is no longer the capability ceiling's — the "
+        "pointer was verified against a row that has since changed subject")
+
+    # Location: the note belongs where a reader meets the table, or in §8, which is
+    # already about the content axis. Nowhere else: a note buried under §5's
+    # exclusions would be graded and would answer nobody.
+    note = _ceiling_note(text)[0]
+    pos = text.index(note[:60])
+    table_at = text.index(GUARD_TABLE_HEADING)
+    sec1 = text.index("\n## 1. ")
+    sec8 = text.index("\n## 8. ")
+    sec8_end = text.index("\n## ", sec8 + 5)
+    assert table_at < pos < sec1 or sec8 < pos < sec8_end, (
+        "the availability note is neither in the prose block under the guard table "
+        "nor in §8, so it is no longer where the question it answers is asked")
+
+    # The splitter must be able to find a sentence at all, or every gap above is the
+    # silence of an extractor that matched nothing.
+    assert len(_prose_sentences(text)) > 60, (
+        "the sentence splitter found almost nothing on a page of this length")
+    assert len(_guard_table_rows(text)) == GUARD_TABLE_ROWS, (
+        f"the guard table carries {len(_guard_table_rows(text))} rows, not "
+        f"{GUARD_TABLE_ROWS}: this node's row-count control is measuring a "
+        "different table than the one #3611 left")
+
+
+def test_the_ceiling_note_control_fails_when_it_is_deleted_rowed_or_hedged():
+    """Controls for the node above: every failure this note could fall into is
+    seeded in text this file writes, so a green live run cannot be an extractor that
+    found nothing to complain about (#3611 clauses 1–3 and 5).
+
+    The row-shaped control is the one the clause names: adding the ceiling as an
+    eighth table row is the fix a reader of that table would naturally make, and it
+    is wrong — it would put a surface that sees nothing on an axis of what is seen,
+    and quietly move the table's meaning.
+    """
+    text = _text("guard-coverage.md")
+    notes = _ceiling_note(text)
+    assert len(notes) == 1, "no live note to mutate, so no control below is real"
+    note = notes[0]
+    assert _ceiling_note_gaps(text) == [], "the live page already reports findings"
+
+    # Clause 5, half one: the sentence deleted.
+    deleted = text.replace(note + "\n", "", 1)
+    assert deleted != text, "the seed did not remove the note"
+    gaps = _ceiling_note_gaps(deleted)
+    assert any("nothing on the page names both" in g for g in gaps), gaps
+
+    # Clause 5, half two: the ceiling expressed as a table row instead of prose.
+    sep = "|---|---|---|---|"
+    row = ("| `app/harness/capabilities.py` | which tools the turn was ever offered "
+           "| nothing; the envelope is cut before dispatch | `envelope_for` |\n")
+    rowed = deleted.replace(sep + "\n", sep + "\n" + row, 1)
+    assert rowed != deleted, "the seed did not add the row"
+    gaps = _ceiling_note_gaps(rowed)
+    assert any("the guard table gained a row" in g for g in gaps), gaps
+    assert len(_guard_table_rows(rowed)) == GUARD_TABLE_ROWS + 1, (
+        "the seeded row did not parse as a table row, so the row-form control above "
+        "would have passed on a malformed line rather than on a real eighth row")
+
+    # Clause 2: each observable fact, dropped one at a time. The phrase is matched
+    # across whitespace because the page wraps at ~80 columns and several of these
+    # phrases straddle a line break; a plain str.replace would silently seed nothing
+    # for those and the control would pass on an untouched page.
+    for phrase, _why in _CEILING_NOTE_FACTS:
+        pattern = re.compile(r"\s+".join(map(re.escape, phrase.split())))
+        cut, n = pattern.subn("", note, count=1)
+        assert n == 1, f"the phrase {phrase!r} is not in the live note to drop"
+        hedged = text.replace(note, cut, 1)
+        assert hedged != text, f"the seed could not drop {phrase!r} from the note"
+        gaps = _ceiling_note_gaps(hedged)
+        assert any(phrase in g for g in gaps), (
+            f"dropping {phrase!r} reds nothing: {gaps}")
+
+    # Clause 1: a line citation on the sentence.
+    numbered = text.replace(
+        note, note.replace("not a content guard —",
+                           "not a content guard (`app/harness/capabilities.py:524`) —"), 1)
+    assert numbered != text, "the line-citation seed did not apply"
+    assert any("line number" in g for g in _ceiling_note_gaps(numbered)), (
+        "a line citation in the note reds nothing")
+
+    # Clause 3: pointing at the owning row by number, and copying its mechanism.
+    numbered_row = text.replace(
+        note, note.replace("capability-ceiling row", "row 7"), 1)
+    assert any("by NUMBER" in g for g in _ceiling_note_gaps(numbered_row)), (
+        "citing the owning row by number reds nothing")
+    copied = text.replace(
+        note, note.rstrip(". ") + ", and a source listed in is dispatched under, so a "
+        "name is unreachable because no one declared it rather than because someone "
+        "listed it.", 1)
+    gaps = _ceiling_note_gaps(copied)
+    assert any("shares a" in g for g in gaps), (
+        f"copying the owning row's mechanism into the note reds nothing: {gaps}")
+    assert _shared_word_run(note, _authority_ceiling_row())[0] < 6, (
+        "the live note already shares a long run with the row it points at — the "
+        "control above would be grading a copy that already exists")
+
+
+def test_the_ceiling_note_cost_no_other_page_and_no_new_command_block():
+    """source: the page as a whole, and the three docs #3611 ruled need no note.
+    claim: the note is collateral-free — the guard table still parses to
+           `GUARD_TABLE_ROWS` rows, the page still carries `GUARD_COVERAGE_BLOCKS`
+           fenced command blocks, and `harness.md`, `autonomy-jobs.md` and
+           `workers.md` still never name the envelope function.
+    verdict: #3611 clause 4. The two counts are the ones the page's own rails read:
+             the #2391 node pairs this page's blocks byte-identically against the
+             stamped tree, so justifying one sentence with a new command block would
+             have cost a re-stamp — the sentence carries an inline command instead,
+             and an inline span is not a block and is not executed by those nodes.
+
+    The three-doc half is the checkable reading of "no other architecture file was
+    edited": `harness.md` carries the ceiling in its module map and
+    `autonomy-jobs.md` cites the module for the scheduled-task base set, so neither
+    needed this line, and `workers.md`'s four "ceiling" hits are the output-token
+    ceiling — a different mechanism that page says so about. If a later round spreads
+    the envelope wording into any of them, this reds and the axis question gets asked
+    again rather than answered by copy-paste. (`architecture/workers-jobs.md` is
+    excluded on fact, not by favouritism: it already discusses `envelope_for` and owns
+    the envelope from the worker side.)
+    """
+    text = _text("guard-coverage.md")
+    assert len(_guard_table_rows(text)) == GUARD_TABLE_ROWS, (
+        "the guard table is no longer the table the note explains an absence from")
+    blocks = _fenced_blocks(text)
+    assert len(blocks) == GUARD_COVERAGE_BLOCKS, (
+        f"the page carries {len(blocks)} fenced blocks, not "
+        f"{GUARD_COVERAGE_BLOCKS} — the stamp-pairing node compares this page against "
+        "a stamped tree, so a new block is a re-stamp, not an addition")
+    for slug in CEILING_SILENT_DOCS:
+        assert CEILING_FUNCTION not in _text(slug), (
+            f"{slug} now names {CEILING_FUNCTION}: #3611 ruled that page needs no "
+            "availability note, so either that ruling changed and this list changed "
+            "with it, or the line spread by copy instead of by decision")
