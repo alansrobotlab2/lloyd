@@ -183,12 +183,39 @@ def test_verifying_a_refresh_describes_the_mirror_that_is_on_the_box_now():
         "healthy mirror invites a refresh that nobody needs")
 
 
+def _artifact() -> dict:
+    """The committed artifact's bytes, read beside this file and nowhere else.
+
+    `supply_chain.baseline_path()` takes its root from `_repo_root()`, whose only fallback
+    is `app.paths.LLOYD_HOME` — `app/paths.py`'s own parent — so the answer follows
+    whichever `app` package the importing process loaded: this tree under the gate, the
+    production checkout when a running backend imports it. That is the right behaviour for
+    the shipped loader and the wrong shape for a witness, because a node comparing one
+    tree's artifact against a vault page cannot say afterwards which tree it read; #2593's
+    defect was exactly a baseline read against the wrong tree. So the path comes from
+    `__file__`. (`_live_checkout()` is a separate helper, the write guard's root, and is
+    not on this read path.)
+    """
+    import yaml
+
+    path = (Path(__file__).resolve().parents[1]
+            / "eval" / "supply-chain" / "baseline.yaml")
+    assert path.is_file(), f"{path} is unreadable, so clause 3 of #3613 is ungraded"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
 def test_the_reference_tables_newest_row_is_the_number_that_is_true_today():
     """The table is what a run with no previous report compares against; 150 was a floor.
 
-    Read as a row, not as a substring: `150` is still correct on the artifact row and stays
-    there, and `358` must be on the newest-dated-report row. A `assert "150" not in table` test
-    would pass on the wrong table and fail on the right one, which is the opposite of helpful.
+    Read as a row, not as a substring: `358` must be on the newest-dated-report row, and
+    the stale `150` must be gone from it. A `assert "150" not in table` test would pass on
+    the wrong table and fail on the right one, which is the opposite of helpful.
+
+    This node used to pin the other row against the literal `150` as well, because that is
+    what `eval/supply-chain/baseline.yaml` held. #3613 regenerates the artifact, so the
+    artifact row is now derived from the artifact itself —
+    `test_the_reference_tables_artifact_row_copies_the_committed_artifact` — and a literal
+    in this file would be a second witness nobody re-measures.
     """
     text = _skill()
     rows = _table_rows(_section(text, "## Reporting contract"))
@@ -205,14 +232,160 @@ def test_the_reference_tables_newest_row_is_the_number_that_is_true_today():
     assert re.search(r"\b906\b", newest[-1][1]), (
         "the component_count cell moved off 906, or the row is not the row this node reads")
 
-    artifact = [r for r in rows if "baseline.yaml" in " ".join(r)]
-    assert artifact and "150" in artifact[-1][-1], (
-        "the committed artifact's row must still read 150: it is the number the file holds, "
-        "and the fix is not to make the artifact row tell today's story")
-
     assert "database_freshness" in text, (
         "the skill never names the key that lets two dated reports be compared, which is the "
         "other half of what #3544 added")
+
+
+def test_the_reference_tables_artifact_row_copies_the_committed_artifact():
+    """Clause 3 (#3613): the artifact row is a transcription, so it is graded as one.
+
+    Up to this node's rewrite the assertion was `assert "150" in artifact[-1][-1]`, a
+    literal that outlived the number it described. Nothing else in `tests/` reads the
+    artifact's counts — `git grep -n "eval/supply-chain/baseline.yaml" -- tests` reaches
+    four files and none of them asserts a count — so a regeneration that forgot the row
+    landed green while the skill went on quoting a 20-day-old reading to every weekly
+    run of autonomy task #99. Deriving all three facts the row states — both cells and the
+    reading's timestamp — from the artifact's own bytes removes the copy nobody re-measured, and
+    the same derivation catches the opposite error: an artifact row edited up to today's dated
+    report, which would tell a reader with no previous report that the committed artifact already
+    holds today.
+
+    Read as a row against the repo's own bytes: `_artifact()` resolves beside this file
+    rather than through `baseline_path()`, whose root follows whichever `app` package the
+    importing process loaded — `_artifact()`'s docstring says why that is the wrong shape
+    for a witness. The skill is the vault's, the artifact is this diff's, so the node
+    crosses that surface pair on purpose.
+    """
+    text = _skill()
+    rows = _table_rows(_section(text, "## Reporting contract"))
+    artifact_rows = [r for r in rows if "baseline.yaml" in " ".join(r)]
+    assert len(artifact_rows) == 1, (
+        f"the reference table must carry exactly one artifact row to compare, got "
+        f"{len(artifact_rows)}")
+    row = artifact_rows[-1]
+
+    doc = _artifact()
+    obs = doc["observed"]
+    components = obs["component_count"]
+    missed = obs["advisories_in_observed_set_that_declared_lockfiles_missed"]
+    assert (components, missed) != (698, 150), (
+        "the artifact still holds the 2026-10-11 reading, so there is nothing to "
+        "transcribe and this node is checking a number it was told to reject")
+
+    assert row[1] == str(components), (
+        f"the artifact row's component_count cell reads {row[1]!r} while the committed "
+        f"artifact's observed.component_count is {components}. The row is a transcription "
+        "of the file, not a remembered figure.")
+    assert re.fullmatch(rf"{missed}\*?", row[-1].strip()), (
+        f"the artifact row's missed-advisory cell reads {row[-1]!r} while the committed "
+        f"artifact's observed.advisories_in_observed_set_that_declared_lockfiles_missed "
+        f"is {missed}")
+    # Compared to the artifact's stamp TRUNCATED TO THE SECOND, not to the day: the row
+    # quotes a reading, and `[:10]` passed on a row saying only `2026-10-31` while the
+    # file recorded `2026-10-31T22:22:49.743282Z` — the day right, the reading unnamed.
+    # That is the half the review rung sent the first commit back for.
+    stamp_full = str(doc["observed_generated_at"])
+    stamp = stamp_full.split(".")[0]        # …T22:22:49.743282Z -> …T22:22:49
+    assert stamp in row[0], (
+        f"the artifact row names no reading a reader can check: its source cell is "
+        f"{row[0]!r} while eval/supply-chain/baseline.yaml records observed_generated_at "
+        f"{doc['observed_generated_at']!r}. {stamp!r} has to appear in the row for it to be "
+        "about that regeneration rather than about a day — a date alone is the half of the "
+        "row that went stale once already")
+    assert "inventory-<date>.json" not in " ".join(row), (
+        "the artifact row cites a dated report; the artifact is the other witness")
+
+
+#: The readings the 7-day-rail section still carries from the era it supersedes: the line the
+#: superseded artifact's `verdict` sat on, the mirror stamp that condemned it, and the verdict
+#: word itself. They stay in the page on purpose — remove them and the rails read as machinery
+#: that never fired — so what is pinned below is their *framing*, never their absence.
+RETAINED_HISTORY_READINGS = ("eval/supply-chain/baseline.yaml:11", "2026-09-30", "verdict: stale")
+
+#: Prose that places one of those readings in the past: either the tense that says so, or the
+#: date after which it stopped being the present.
+HISTORY_FRAMING = re.compile(
+    r"(?i)\bbefore\b|\bwas\b|\bthen\b|\bmeant\b|\bstood\b|\bfrozen\b|history|superseded"
+    r"|no longer|until 2026-10-31")
+
+#: Prose that says the verdict in the same sentence is the state of the file, not of some
+#: artifact it is comparing against.
+PRESENT_FRAMING = re.compile(r"(?i)\bnow\b|\bregenerated\b|committed artifact")
+
+#: The bounded window a reading's framing must sit inside: the sentence holding it. A
+#: paragraph-level gesture is not enough — the failure this pins is a citation whose own
+#: sentence stopped saying when it was true while a "this is history" survived two
+#: paragraphs away, and the only window narrow enough to catch that is the sentence itself.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentence_containing(text: str, pos: int) -> str:
+    """The sentence of `text` holding offset `pos`, split on the page's own sentence breaks."""
+    start = max((m.end() for m in _SENTENCE_BREAK.finditer(text, 0, pos)), default=0)
+    tail = _SENTENCE_BREAK.search(text, pos)
+    return text[start:tail.end() if tail else len(text)]
+
+
+def test_the_seven_day_rail_section_describes_the_artifact_that_is_committed():
+    """Clause 4: the section that explains staleness has to describe the file that exists.
+
+    *What one refresh buys against the 7-day rail* is the section a reader consults to
+    decide whether an artifact's verdict is a finding or an aged stamp, and it was written
+    while the tracked artifact still read `stale` on a frozen mirror. Two ways it goes wrong
+    and both are invisible to a grep of the page: it keeps describing the superseded reading
+    as the present — the misreading that cost #2593 twenty days — or it swaps the readings and
+    states today's verdict while leaving the old citations framed as current fact. So the node
+    reads the section as a section (`_section` stops at the next heading) and asks two
+    questions of it, with the expected verdict derived from the artifact rather than repeated
+    from the page:
+
+    1. the artifact's own `verdict`, spelled as the artifact spells it, appears exactly once and
+       its sentence marks it as the committed file's present state — which also means an artifact
+       that went stale cannot have this section vouch for it, because the same section is
+       required to frame `verdict: stale` as history;
+    2. every occurrence of every reading in `RETAINED_HISTORY_READINGS` sits in a sentence that
+       marks it as dated, so moving one citation out of its "what it meant before" sentence
+       reddens the node rather than quietly re-dating it.
+    """
+    doc = _artifact()
+    present = f"verdict: {doc['verdict']}"
+    flat = " ".join(
+        _section(_skill(), "### What one refresh buys against the 7-day rail").split())
+
+    hits = [m.start() for m in re.finditer(re.escape(present), flat)]
+    assert len(hits) == 1, (
+        f"the section states {present!r} {len(hits)} times; the artifact carries exactly one "
+        "verdict, so either the page is describing two states of it or the reading is quoted "
+        "somewhere a reader cannot tell present from history")
+    here = _sentence_containing(flat, hits[0])
+    assert PRESENT_FRAMING.search(here), (
+        f"the sentence stating {present!r} says nothing about it being the committed artifact "
+        f"now — {here!r}")
+    assert f"stale: {doc['stale']}" in here, (
+        f"the sentence giving the verdict does not carry the artifact's own `stale: "
+        f"{doc['stale']}`, and the verdict without the staleness list is the half a reader "
+        "cannot check")
+
+    for reading in RETAINED_HISTORY_READINGS:
+        found = [m.start() for m in re.finditer(re.escape(reading), flat)]
+        assert found, (
+            f"the retained reading {reading!r} has left the section, so a reader cannot see "
+            "what the staleness rails did before this artifact and takes the present reading "
+            "for the only one the machinery ever produced")
+        for at in found:
+            here = _sentence_containing(flat, at)
+            assert HISTORY_FRAMING.search(here), (
+                f"the sentence holding {reading!r} carries nothing placing it in the past, so "
+                f"the reading states the artifact's present state — {here!r}")
+
+    # A framing rule that matches anything is a rule that passes anything, so the marker set is
+    # checked against a sentence that states the same reading with no history marker in it.
+    bare = ("`database.freshness` recorded `2026-09-30` 23.8 days past the rail, so the "
+            "verdict here is decayed.")
+    assert not HISTORY_FRAMING.search(bare) and not PRESENT_FRAMING.search(bare), (
+        f"HISTORY_FRAMING matches {bare!r}, a sentence placing its reading nowhere in time, "
+        "which means the framing checks above pass whatever the page says")
 
 
 def test_the_popped_advisories_key_is_described_where_the_code_still_pops_it():

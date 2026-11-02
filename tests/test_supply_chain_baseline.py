@@ -31,6 +31,30 @@ def baseline() -> dict:
     return sc.read_baseline(path)
 
 
+#: The tree these nodes read, named by this file's own location rather than by
+#: `sc.baseline_path()`. That helper's root is `_repo_root()`, whose only fallback is
+#: `app.paths.LLOYD_HOME` — `app/paths.py`'s own parent — so the answer follows
+#: whichever `app` package the importing process loaded: the round's worktree under the
+#: gate, the production checkout when the backend imports it. (`_live_checkout()` is a
+#: different helper, the write guard's root, and is not on this read path.) A root that
+#: depends on the import shape is exactly right for the shipped loader; it is the wrong
+#: shape for a node whose job is to redden on this diff's bytes, because a node that
+#: happens to resolve to production cannot see the artifact the round actually wrote.
+#: #2593's defect was an artifact read against the wrong tree, so the #3613 nodes below
+#: read the bytes beside this file and nothing else.
+REPO_UNDER_TEST = Path(__file__).resolve().parents[1]
+ARTIFACT = REPO_UNDER_TEST / "eval" / "supply-chain" / "baseline.yaml"
+
+
+@pytest.fixture(scope="module")
+def artifact() -> dict:
+    """The committed artifact's own bytes, parsed straight — no loader opinion, no
+    root resolution, so the assertions are about what a reviewer can `git show`."""
+    assert ARTIFACT.is_file(), (
+        f"{ARTIFACT} is not readable, so the #3613 clauses below are ungraded")
+    return yaml.safe_load(ARTIFACT.read_text(encoding="utf-8"))
+
+
 def test_the_baseline_lives_under_eval_supply_chain_not_pipeline(baseline):
     """`_pipeline/` is gitignored (`.gitignore:25`), so a baseline written there is
     a file that exists only on one machine and can never be reviewed."""
@@ -155,13 +179,198 @@ def test_the_committed_baseline_is_a_scan_of_the_lock_now_in_the_tree(baseline):
             "regenerate with `python -m app.harness.supply_chain scan --write-baseline`")
 
 
-def test_the_baseline_reports_no_advisory_naming_torch_or_setuptools(baseline):
+def test_the_baseline_carries_none_of_the_advisories_1914_cleared(baseline):
+    """#1914's promise, restated over the ids it cleared rather than over package names.
+
+    This node used to assert that no advisory in the artifact named `torch` **or**
+    `setuptools`. That held of the 2026-10-11 scan only because that scan ran against a
+    mirror frozen at `2026-09-30T14:27:46.692030Z`: the refreshed mirror reports a
+    *different* setuptools advisory — `GHSA-xmj3-9gf7-h52w`, "Windows path escape via
+    namespace_packages.txt during legacy wheel installation", against `setuptools`
+    `83.0.0`, which is verbatim what `requirements.lock:154` pins. #3613's own
+    acceptance is that the declared half reports what the current mirror finds, so a
+    blanket name-ban and the acceptance cannot both survive.
+
+    What the body below enforces, and all of it: the three ids in `ADVISED_BEFORE_1914`
+    are absent, no advisory names `torch`, and `advisory_count` equals the list's length.
+    No advisory id or package is *allowed* by id, so a second setuptools finding would
+    pass here too — stated rather than implied, because the ruling on which setuptools
+    advisory this tree accepts is #3613's owed entry (upgrade it in the lock, or record
+    the accepted floor beside #3614's model-serving one) and a test may not make that
+    ruling in advance. The setuptools advisory the refresh surfaced is therefore not a
+    regression of #1914, and this node is not the instrument that would clear it.
+    """
     assert baseline["scan_status"] == "completed", baseline["scan_status"]
-    named = {rec["package"].lower() for rec in baseline["advisories"]}
-    assert not (named & {"torch", "setuptools"}), f"still flagged: {sorted(named)}"
     ids = {rec["id"] for rec in baseline["advisories"]}
     assert not (ids & set(ADVISED_BEFORE_1914)), sorted(ids & set(ADVISED_BEFORE_1914))
+    named = {rec["package"].lower() for rec in baseline["advisories"]}
+    assert "torch" not in named, f"torch is flagged again: {sorted(named)}"
     assert baseline["advisory_count"] == len(baseline["advisories"])
+
+
+# ── #3613: each half of the artifact has to name the reading that produced it ─────
+
+def test_the_observed_half_names_the_reading_it_came_from(artifact):
+    """Clause 1: the observed half was numbers without a provenance, so it aged out loud.
+
+    `observed_generated_at` is the top-level stamp `write_merged_baseline` records for
+    the observed half (`app/harness/supply_chain_inventory.py:903`) and the mirror stamp
+    is a key of the `observed:` block itself — `attach_to_baseline` (`:862`) copies every
+    observed key except `schema` and `generated_at`, so `observed_scan`'s own
+    `database_freshness` (`:573`) arrives beside the counts rather than overwriting the
+    declared `database.freshness`. The 2026-10-11 artifact carried neither next to its
+    698 components and 150 missed advisories, which is how a reading of a different box
+    passed as a current one for 20 days.
+
+    The load-bearing assertion is relational, not a date: both halves came out of one
+    process against one mirror, so they must agree on the mirror's stamp and be stamped
+    minutes apart. An artifact that re-stamps one half and reuses the other is the shape
+    this item was filed over, and no count in it is current.
+    """
+    obs = artifact.get("observed")
+    assert isinstance(obs, dict), (
+        "the artifact has no observed: half, so there is nothing to name")
+    assert obs["scan_status"] == "completed", obs["scan_status"]
+
+    stamp = artifact.get("observed_generated_at")
+    assert stamp, (
+        "observed_generated_at is absent: the observed numbers say nothing about when "
+        "they were taken")
+    observed_at = dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    assert observed_at.utcoffset() == dt.timedelta(0), f"{stamp} is not offset-bearing UTC"
+    declared_at = dt.datetime.fromisoformat(
+        artifact["generated_at"].replace("Z", "+00:00"))
+    assert abs(observed_at - declared_at) <= dt.timedelta(hours=1), (
+        f"the halves were stamped {observed_at} and {declared_at} — over an hour apart, "
+        "so one half is a reused reading rather than this run's")
+
+    mirror = obs.get("database_freshness")
+    assert mirror, (
+        "observed.database_freshness is null or absent: the missed-advisory count "
+        "cannot be attributed to a mirror, which is the whole comparison #3544 added "
+        "the key for")
+    assert mirror == artifact["database"]["freshness"], (
+        f"the observed half scanned mirror {mirror} while the declared half scanned "
+        f"{artifact['database']['freshness']} — two eras stitched into one artifact")
+
+    for key in ("component_count",
+                "advisories_in_observed_set_that_declared_lockfiles_missed"):
+        value = obs.get(key)
+        assert isinstance(value, int) and not isinstance(value, bool), (
+            f"observed.{key} is {value!r}, not an integer count")
+    assert (obs["component_count"],
+            obs["advisories_in_observed_set_that_declared_lockfiles_missed"]) != (698, 150), (
+        "the observed half still carries the 2026-10-11 reading of 698 components and "
+        "150 missed advisories, which is the pair this item was filed to replace")
+
+
+def _declared_half_violations(doc: dict) -> list[str]:
+    """Every way a declared half can attest a tree it did not measure, as plain messages.
+
+    One measurement, two directions: the node over the committed artifact and the node over
+    seeded bytes both call this, so "it would catch that" and "it does not catch a clean
+    rescan" are statements about one code path rather than about a docstring. Violations are
+    returned rather than raised so a caller can ask the negative question.
+
+    What counts as dishonest here is self-contradiction inside the artifact: a verdict the
+    bytes do not carry, a count the list does not fill, a scan that did not finish while
+    reporting findings. How many advisories the mirror finds is a fact about the box and
+    never a violation — nothing in this function requires `advisory_count > 0`. That is
+    clause 5 of #3613, and precisely the assertion the review rung refused twice: it made a
+    future lock upgrade that clears the current findings redden a permanent witness.
+    """
+    problems: list[str] = []
+    if doc.get("scan_status") != "completed":
+        problems.append(f"scan_status is {doc.get('scan_status')!r}: a declared half "
+                        "reports findings only if the scan finished")
+    advisories = doc.get("advisories")
+    if not isinstance(advisories, list):
+        problems.append(f"advisories is {advisories!r}, not a list of findings")
+        advisories = []
+    count = doc.get("advisory_count")
+    if count != len(advisories):
+        problems.append(f"advisory_count {count!r} disagrees with the "
+                        f"{len(advisories)} advisories the artifact itself carries")
+    verdict = doc.get("verdict")
+    if verdict == "stale":
+        problems.append(f"verdict is 'stale' with stale: {doc.get('stale')!r} — the artifact "
+                        "is condemning its own stamps, so neither its counts nor its "
+                        "emptiness describe anything current")
+    elif doc.get("stale") != []:
+        problems.append(f"verdict {verdict!r} is paired with a non-empty stale: "
+                        f"{doc.get('stale')!r}")
+    if verdict == "advisories_found" and not advisories:
+        problems.append("verdict is 'advisories_found' beside an empty advisories list: the "
+                        "finding the verdict names is not in the file, and `verdict_label` "
+                        "sets that verdict only from advisories it was handed")
+    return problems
+
+
+def test_the_declared_half_attests_only_the_advisories_the_mirror_found(artifact):
+    """Clause 2: `advisory_count: 0` was a clean-tree claim the scan never made.
+
+    The 2026-10-11 artifact recorded `advisory_count: 0` / `advisories: []` against a mirror
+    frozen at 2026-09-30 and read `verdict: stale` — stale *because* the mirror was too old
+    to trust the zero, which is what its `stale:` list said. Scanning the same three tracked
+    files against the refreshed mirror finds advisories, so `verdict_label` returns that
+    finding rather than a staleness verdict — it reaches `stale_stamps` only for a scan that
+    came back clean — and the `stale:` list comes back empty. The regenerated half is
+    therefore recomputed and not hand-edited: every assert here reads the bytes, so the only
+    route to green is a scan whose verdict the bytes support.
+
+    What this node deliberately does not assert: any count. The 30 advisories this box
+    currently finds are stated in the skill and ruled on by #3613's owed entry (upgrade in
+    the lock, or record the accepted floor); freezing them here as a floor is what
+    `test_a_clean_rescan_and_a_hollow_one_divide_at_the_declared_half_node` exists to refuse.
+    """
+    assert artifact["scan_status"] == "completed", artifact["scan_status"]
+    assert artifact["coverage_gap"] is False, (
+        "coverage_gap is true: the declared half is counting a set it did not cover")
+    problems = _declared_half_violations(artifact)
+    assert not problems, f"the declared half does not attest what it measured: {'; '.join(problems)}"
+
+
+def test_a_clean_rescan_and_a_hollow_one_divide_at_the_declared_half_node():
+    """Clause 5: the declared-half rule has to be able to say "honest, and empty".
+
+    The refused version of `test_the_declared_half_attests_only_the_advisories_the_mirror_found`
+    ended in an unconditional `assert artifact["advisory_count"] > 0 and advisories` while its
+    docstring promised "an honestly clean future rescan still passes" — a witness that goes red
+    for good the day somebody upgrades the pins the mirror is advising against, and whose prose
+    said the opposite of its body. Clause 5 closes that by moving the question into a rule over
+    four seeded artifacts, three of which must be refused and one accepted.
+
+    Seeded rather than read from disk because the accepted case has to be true of a rule while
+    it is not true of the box: today's mirror does find advisories.
+    """
+    def seed(**over) -> dict:
+        doc = {"scan_status": "completed", "verdict": "advisories_found",
+               "advisory_count": 1, "advisories": [{"id": "GHSA-seeded-example"}],
+               "stale": []}
+        doc.update(over)
+        return doc
+
+    assert _declared_half_violations(seed()) == [], (
+        "the rule refuses an artifact carrying one advisory in a list of one")
+
+    clean = seed(verdict="no_advisories", advisory_count=0, advisories=[])
+    assert _declared_half_violations(clean) == [], (
+        "an honestly clean rescan is being refused — the brittleness clause 5 removes, and "
+        "what a lock upgrade that clears every finding would hit")
+
+    hollow = seed(verdict="advisories_found", advisory_count=0, advisories=[])
+    assert _declared_half_violations(hollow), (
+        "a verdict of advisories_found beside an empty advisories list passed the rule")
+
+    aged = seed(verdict="stale", advisory_count=0, advisories=[],
+                stale=["database.freshness 2026-09-30T14:27:46.692030Z is past its rail"])
+    assert _declared_half_violations(aged), (
+        "the 2026-10-11 shape — a zero its own staleness list had already condemned — now "
+        "satisfies the rule this item was filed to write")
+
+    unfinished = seed(scan_status="failed")
+    assert any("scan_status" in p for p in _declared_half_violations(unfinished)), (
+        "a scan that did not complete is invisible to the rule")
 
 
 # ── #2593 clause 1 — the baseline may only describe a tree a reader can open ──

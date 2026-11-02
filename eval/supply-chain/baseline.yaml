@@ -6,9 +6,9 @@
 # database.freshness > 7): the tree was clean *then*, and this file is not a present-tense
 # claim until it is regenerated.
 schema: lloyd-supply-chain-baseline/1
-generated_at: '2026-10-11T23:16:00.912748Z'
+generated_at: '2026-10-31T22:23:07.397554Z'
 scan_status: completed
-verdict: stale
+verdict: advisories_found
 scanner:
   name: osv-scanner
   version: 2.6.0
@@ -28,10 +28,166 @@ offline: true
 coverage_gap: false
 database:
   directory: /home/alansrobotlab/lloyd-data/supply-chain/osv-db
-  freshness: '2026-09-30T14:27:46.692030Z'
-duration_seconds: 1.685
-advisory_count: 0
-advisories: []
+  freshness: '2026-10-26T05:28:33.578617Z'
+duration_seconds: 2.428
+advisory_count: 30
+advisories:
+- id: PYSEC-2026-4141
+  package: pyjwt
+  version: 2.14.0
+  ecosystem: PyPI
+  summary: 'PyJWT: Unauthenticated RecursionError DoS in pre-verification payload parse (PyJWKClient.get_signing_key_from_jwt
+    / verify_signature=False)'
+- id: PYSEC-2026-4183
+  package: pyjwt
+  version: 2.14.0
+  ecosystem: PyPI
+  summary: ''
+- id: GHSA-42vr-xj54-vc7v
+  package: pyjwt
+  version: 2.14.0
+  ecosystem: PyPI
+  summary: 'PyJWT: Unauthenticated RecursionError DoS in pre-verification payload parse (PyJWKClient.get_signing_key_from_jwt
+    / verify_signature=False)'
+- id: GHSA-x33g-cr3x-6449
+  package: pyjwt
+  version: 2.14.0
+  ecosystem: PyPI
+  summary: PyJWT accepts inconsistent OKP x/d JWKs, causing public/private key identity confusion
+- id: GHSA-2g87-pp6c-29x5
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'aiohttp: Multiple instances of excessive or unbounded memory/CPU use'
+- id: GHSA-494j-54xm-rwp3
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: Secure attribute not enforced for shared cookie'
+- id: GHSA-5wr8-gcqf-gqf3
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: aiohttp server lacks an initial request/header timeout
+- id: GHSA-6cjc-53gc-5rqm
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: Connector pool exhaustion via Max-Age overflow'
+- id: GHSA-9xw5-w5jj-pvcg
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: File descriptor exhaustion in multipart requests'
+- id: GHSA-f9xw-jh8m-3mwq
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: Absolute-form request targets can spoof Request.scheme'
+- id: GHSA-gx76-c99x-2c96
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: Cookie from subdomain can remove Host-Only Scope from existing cookies'
+- id: GHSA-pqxq-w44r-73xw
+  package: aiohttp
+  version: 3.14.3
+  ecosystem: PyPI
+  summary: 'AIOHTTP: Pure-Python parser request smuggling'
+- id: PYSEC-2026-4320
+  package: certifi
+  version: 2026.2.25
+  ecosystem: PyPI
+  summary: certifi bundles emSign root CAs with compromised intermediate CA keys
+- id: GHSA-6q48-6c7w-9gw2
+  package: certifi
+  version: 2026.2.25
+  ecosystem: PyPI
+  summary: certifi bundles emSign root CAs with compromised intermediate CA keys
+- id: GHSA-567q-5qvw-pf92
+  package: filelock
+  version: 3.29.0
+  ecosystem: PyPI
+  summary: 'filelock: On Windows an oplock on a soft lock''s marker holds SoftFileLock.acquire() past
+    its timeout and blocks the stale break'
+- id: GHSA-9vhv-jxww-xfm5
+  package: filelock
+  version: 3.29.0
+  ecosystem: PyPI
+  summary: 'filelock: ReadWriteLock on Windows acts on SQLite side files another local user places beside
+    its database'
+- id: GHSA-v4x8-3wr5-3wq8
+  package: filelock
+  version: 3.29.0
+  ecosystem: PyPI
+  summary: 'filelock ReadWriteLock: SQLite reopens the lock database by name, so a planted symlink or
+    journal file makes the lock user''s process overwrite or unlink its own files'
+- id: PYSEC-2026-4217
+  package: fsspec
+  version: 2026.4.0
+  ecosystem: PyPI
+  summary: 'fsspec: Server-Side Template Injection in ReferenceFileSystem leads to Remote Code Execution'
+- id: GHSA-27vj-qcqg-25rc
+  package: fsspec
+  version: 2026.4.0
+  ecosystem: PyPI
+  summary: 'fsspec: Server-Side Template Injection in ReferenceFileSystem leads to Remote Code Execution'
+- id: GHSA-84m7-p3x7-pcfv
+  package: mcp
+  version: 2.1.1
+  ecosystem: PyPI
+  summary: 'MCP Python SDK: Unbounded Session Accumulation in StreamableHTTP Transport Enables Resource
+    Exhaustion'
+- id: PYSEC-2026-4244
+  package: multidict
+  version: 6.7.1
+  ecosystem: PyPI
+  summary: 'Multidict: Reference leak in CIMultiDict/MultiDict items-view union and subtraction'
+- id: GHSA-54p9-h82j-f925
+  package: multidict
+  version: 6.7.1
+  ecosystem: PyPI
+  summary: 'Multidict: Reference leak in CIMultiDict/MultiDict items-view union and subtraction'
+- id: GHSA-xcq7-p3pf-p88h
+  package: opentelemetry-api
+  version: 1.41.0
+  ecosystem: PyPI
+  summary: 'OpenTelemetry Python: Unbounded tracestate parsing in opentelemetry-api'
+- id: GHSA-xmj3-9gf7-h52w
+  package: setuptools
+  version: 83.0.0
+  ecosystem: PyPI
+  summary: 'setuptools: Windows path escape via namespace_packages.txt during legacy wheel installation  Description'
+- id: PYSEC-2026-4175
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: HTTPS proxy TLS configuration may be ignored or overridden'
+- id: PYSEC-2026-4176
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: Chunked Deflate streaming can enter an infinite loop'
+- id: PYSEC-2026-4177
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: HTTPResponse.stream()/read_chunked() buffers an unbounded chunk-size line into memory'
+- id: GHSA-8988-9cw3-xx77
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: HTTPS proxy TLS configuration may be ignored or overridden'
+- id: GHSA-gh4c-6fx4-qh6g
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: Chunked Deflate streaming can enter an infinite loop'
+- id: GHSA-vxq7-64xx-v4gw
+  package: urllib3
+  version: 2.7.0
+  ecosystem: PyPI
+  summary: 'urllib3: HTTPResponse.stream()/read_chunked() buffers an unbounded chunk-size line into memory'
 dependency_set:
 - path: requirements.txt
   packages: 13
@@ -45,15 +201,14 @@ dependency_set:
 reason: ''
 tree:
   root: /home/alansrobotlab/lloyd
-  commit: afb273813bbe631d6fb94bda2940d6e85c16b81f
+  commit: 8e57926104d40a083ac5105d6784a34ca1c348ef
   branch: main
   worktree: false
   files:
   - requirements.txt
   - requirements.lock
   - requirements-dev.txt
-stale:
-- '`database.freshness` is 11.4 days old, past the 7 days an OSV mirror stays worth scanning against'
+stale: []
 observed:
   scope:
     derived_from:
@@ -68,7 +223,7 @@ observed:
     - qwen3-tts
     - vllm-djev
     - vllm-flash-next-main
-    - vllm-flash-next-main-0910
+    - vllm-flash-next-main-1012
     - vllm-qwen38-flash-next
     user_site_glob: .local/lib/python3.*/site-packages
     roots:
@@ -92,13 +247,17 @@ observed:
       interpreter: python3.12
       origin: agent-services/bin/start-qwen38-flash-next.sh
       exists: true
+    - label: vllm-flash-next-main-1012
+      path: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+      interpreter: python3.12
+      origin: agent-services/bin/start-qwen38-flash-next.sh
+      exists: true
     - label: user-site
       path: /home/alansrobotlab/.local/lib/python3.14/site-packages
       interpreter: python3.14
       origin: user-site
       exists: true
     gaps:
-    - 'vllm-flash-next-main-0910: named by a launcher, no site-packages under /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-0910/lib/python3*/site-packages'
     - 'vllm-qwen38-flash-next: named by a launcher, no site-packages under /home/alansrobotlab/lloyd/.venvs/vllm-qwen38-flash-next/lib/python3*/site-packages'
     - "agent-services/bin/bench-122b-multigpu.sh: names venv(s) ['vllm'] from a file `scope` does not\
       \ list, so the claim is narrower than the launchers \u2014 either the launcher belongs in SCOPE_FILES\
@@ -170,8 +329,9 @@ observed:
     resolved_path: osv-scanner
     resolved: true
     reason: ''
-  component_count: 698
-  distinct_component_versions: 405
+  database_freshness: '2026-10-26T05:28:33.578617Z'
+  component_count: 906
+  distinct_component_versions: 470
   components:
   - component: Jinja2==3.1.6@lloyd
     name: Jinja2
@@ -5059,43 +5219,1500 @@ observed:
     interpreter: python3.12
     site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main/lib/python3.12/site-packages
     component_kind: python-distribution
+  - component: Jinja2==3.1.6@vllm-flash-next-main-1012
+    name: Jinja2
+    version: 3.1.6
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: MarkupSafe==3.0.4@vllm-flash-next-main-1012
+    name: MarkupSafe
+    version: 3.0.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: PyJWT==2.15.1@vllm-flash-next-main-1012
+    name: PyJWT
+    version: 2.15.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: PyYAML==6.0.3@vllm-flash-next-main-1012
+    name: PyYAML
+    version: 6.0.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: Pygments==2.21.0@vllm-flash-next-main-1012
+    name: Pygments
+    version: 2.21.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: agent-detector==2.0.0@vllm-flash-next-main-1012
+    name: agent-detector
+    version: 2.0.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: aiohappyeyeballs==2.7.1@vllm-flash-next-main-1012
+    name: aiohappyeyeballs
+    version: 2.7.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: aiohttp==3.14.5@vllm-flash-next-main-1012
+    name: aiohttp
+    version: 3.14.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: aiosignal==1.4.0@vllm-flash-next-main-1012
+    name: aiosignal
+    version: 1.4.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: annotated-doc==0.0.5@vllm-flash-next-main-1012
+    name: annotated-doc
+    version: 0.0.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: annotated-types==0.8.0@vllm-flash-next-main-1012
+    name: annotated-types
+    version: 0.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: anthropic==1.13.0@vllm-flash-next-main-1012
+    name: anthropic
+    version: 1.13.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: anyio==4.15.1@vllm-flash-next-main-1012
+    name: anyio
+    version: 4.15.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: apache-tvm-ffi==0.1.11@vllm-flash-next-main-1012
+    name: apache-tvm-ffi
+    version: 0.1.11
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: astor==0.8.1@vllm-flash-next-main-1012
+    name: astor
+    version: 0.8.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: attrs==26.1.0@vllm-flash-next-main-1012
+    name: attrs
+    version: 26.1.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: blake3==1.0.11@vllm-flash-next-main-1012
+    name: blake3
+    version: 1.0.11
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cachetools==7.2.1@vllm-flash-next-main-1012
+    name: cachetools
+    version: 7.2.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cbor2==6.1.5@vllm-flash-next-main-1012
+    name: cbor2
+    version: 6.1.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: certifi==2026.7.22@vllm-flash-next-main-1012
+    name: certifi
+    version: 2026.7.22
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cffi==2.1.1@vllm-flash-next-main-1012
+    name: cffi
+    version: 2.1.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: charset-normalizer==3.5.2@vllm-flash-next-main-1012
+    name: charset-normalizer
+    version: 3.5.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: click==8.5.0@vllm-flash-next-main-1012
+    name: click
+    version: 8.5.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cloudpickle==3.1.2@vllm-flash-next-main-1012
+    name: cloudpickle
+    version: 3.1.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: compressed-tensors==0.17.0@vllm-flash-next-main-1012
+    name: compressed-tensors
+    version: 0.17.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cryptography==50.0.2@vllm-flash-next-main-1012
+    name: cryptography
+    version: 50.0.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-bindings==13.4.3@vllm-flash-next-main-1012
+    name: cuda-bindings
+    version: 13.4.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-core==1.2.1@vllm-flash-next-main-1012
+    name: cuda-core
+    version: 1.2.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-pathfinder==1.8.3@vllm-flash-next-main-1012
+    name: cuda-pathfinder
+    version: 1.8.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-python==13.4.1@vllm-flash-next-main-1012
+    name: cuda-python
+    version: 13.4.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-tile==1.6.0@vllm-flash-next-main-1012
+    name: cuda-tile
+    version: 1.6.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: cuda-toolkit==13.0.3.0@vllm-flash-next-main-1012
+    name: cuda-toolkit
+    version: 13.0.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: depyf==0.20.0@vllm-flash-next-main-1012
+    name: depyf
+    version: 0.20.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: detect-installer==0.2.1@vllm-flash-next-main-1012
+    name: detect-installer
+    version: 0.2.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: dill==0.4.1@vllm-flash-next-main-1012
+    name: dill
+    version: 0.4.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: dnspython==2.9.0@vllm-flash-next-main-1012
+    name: dnspython
+    version: 2.9.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: docstring_parser==0.18.0@vllm-flash-next-main-1012
+    name: docstring_parser
+    version: 0.18.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: einops==0.9.0.dev0@vllm-flash-next-main-1012
+    name: einops
+    version: 0.9.0.dev0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: email-validator==2.3.0@vllm-flash-next-main-1012
+    name: email-validator
+    version: 2.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fastapi==0.136.3@vllm-flash-next-main-1012
+    name: fastapi
+    version: 0.136.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fastapi-cli==0.0.32@vllm-flash-next-main-1012
+    name: fastapi-cli
+    version: 0.0.32
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fastapi-cloud-cli==0.26.0@vllm-flash-next-main-1012
+    name: fastapi-cloud-cli
+    version: 0.26.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fastar==0.12.0@vllm-flash-next-main-1012
+    name: fastar
+    version: 0.12.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fastsafetensors==0.4.0@vllm-flash-next-main-1012
+    name: fastsafetensors
+    version: 0.4.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: filelock==4.1.1@vllm-flash-next-main-1012
+    name: filelock
+    version: 4.1.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-cubin==0.7.0.post1@vllm-flash-next-main-1012
+    name: flashinfer-cubin
+    version: 0.7.0.post1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm100a==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm100a
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm103a==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm103a
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm120f==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm120f
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm80==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm80
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm89==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm89
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-jit-cache-sm90a==0.7.0.post1+cu130@vllm-flash-next-main-1012
+    name: flashinfer-jit-cache-sm90a
+    version: 0.7.0.post1+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: flashinfer-python==0.7.0.post1@vllm-flash-next-main-1012
+    name: flashinfer-python
+    version: 0.7.0.post1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: frozenlist==1.8.0@vllm-flash-next-main-1012
+    name: frozenlist
+    version: 1.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: fsspec==2026.9.0@vllm-flash-next-main-1012
+    name: fsspec
+    version: 2026.9.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: googleapis-common-protos==1.75.5@vllm-flash-next-main-1012
+    name: googleapis-common-protos
+    version: 1.75.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: grpcio==1.85.0rc1@vllm-flash-next-main-1012
+    name: grpcio
+    version: 1.85.0rc1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: h11==0.16.0@vllm-flash-next-main-1012
+    name: h11
+    version: 0.16.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: hf-xet==1.7.0@vllm-flash-next-main-1012
+    name: hf-xet
+    version: 1.7.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: hf_transfer==0.1.9@vllm-flash-next-main-1012
+    name: hf_transfer
+    version: 0.1.9
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: httpcore==1.0.9@vllm-flash-next-main-1012
+    name: httpcore
+    version: 1.0.9
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: httpcore2==2.13.1@vllm-flash-next-main-1012
+    name: httpcore2
+    version: 2.13.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: httptools==0.9.0@vllm-flash-next-main-1012
+    name: httptools
+    version: 0.9.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: httpx==0.28.1@vllm-flash-next-main-1012
+    name: httpx
+    version: 0.28.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: httpx2==2.13.1@vllm-flash-next-main-1012
+    name: httpx2
+    version: 2.13.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: huggingface_hub==2.2.0@vllm-flash-next-main-1012
+    name: huggingface_hub
+    version: 2.2.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: humming-kernels==0.1.16@vllm-flash-next-main-1012
+    name: humming-kernels
+    version: 0.1.16
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: idna==3.20@vllm-flash-next-main-1012
+    name: idna
+    version: '3.20'
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: ijson==3.5.1@vllm-flash-next-main-1012
+    name: ijson
+    version: 3.5.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: instanttensor==0.2.1@vllm-flash-next-main-1012
+    name: instanttensor
+    version: 0.2.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: interegular==0.3.3@vllm-flash-next-main-1012
+    name: interegular
+    version: 0.3.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: jiter==0.17.0@vllm-flash-next-main-1012
+    name: jiter
+    version: 0.17.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: jmespath==1.1.0@vllm-flash-next-main-1012
+    name: jmespath
+    version: 1.1.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: jsonschema==4.26.0@vllm-flash-next-main-1012
+    name: jsonschema
+    version: 4.26.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: jsonschema-specifications==2025.9.1@vllm-flash-next-main-1012
+    name: jsonschema-specifications
+    version: 2025.9.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: lark==1.2.2@vllm-flash-next-main-1012
+    name: lark
+    version: 1.2.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: llguidance==1.7.6@vllm-flash-next-main-1012
+    name: llguidance
+    version: 1.7.6
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: llvmlite==0.47.0@vllm-flash-next-main-1012
+    name: llvmlite
+    version: 0.47.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: lm-format-enforcer==0.11.3@vllm-flash-next-main-1012
+    name: lm-format-enforcer
+    version: 0.11.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: loguru==0.7.3@vllm-flash-next-main-1012
+    name: loguru
+    version: 0.7.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: markdown-it-py==4.2.0@vllm-flash-next-main-1012
+    name: markdown-it-py
+    version: 4.2.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: mcp==2.3.0@vllm-flash-next-main-1012
+    name: mcp
+    version: 2.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: mcp-types==2.3.0@vllm-flash-next-main-1012
+    name: mcp-types
+    version: 2.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: mdurl==0.1.2@vllm-flash-next-main-1012
+    name: mdurl
+    version: 0.1.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: mistral_common==1.12.0@vllm-flash-next-main-1012
+    name: mistral_common
+    version: 1.12.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: ml_dtypes==0.6.0@vllm-flash-next-main-1012
+    name: ml_dtypes
+    version: 0.6.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: model-hosting-container-standards==0.1.16@vllm-flash-next-main-1012
+    name: model-hosting-container-standards
+    version: 0.1.16
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: mpmath==1.3.0@vllm-flash-next-main-1012
+    name: mpmath
+    version: 1.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: msgspec==0.22.0@vllm-flash-next-main-1012
+    name: msgspec
+    version: 0.22.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: multidict==7.1.0@vllm-flash-next-main-1012
+    name: multidict
+    version: 7.1.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nccl-extensions==0.1.0@vllm-flash-next-main-1012
+    name: nccl-extensions
+    version: 0.1.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nccl4py==0.6.0@vllm-flash-next-main-1012
+    name: nccl4py
+    version: 0.6.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: networkx==3.7@vllm-flash-next-main-1012
+    name: networkx
+    version: '3.7'
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: ninja==1.13.2@vllm-flash-next-main-1012
+    name: ninja
+    version: 1.13.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: numba==0.65.0@vllm-flash-next-main-1012
+    name: numba
+    version: 0.65.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: numpy==2.3.5@vllm-flash-next-main-1012
+    name: numpy
+    version: 2.3.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cublas==13.1.1.3@vllm-flash-next-main-1012
+    name: nvidia-cublas
+    version: 13.1.1.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-cccl==13.3.4.3.1@vllm-flash-next-main-1012
+    name: nvidia-cuda-cccl
+    version: 13.3.4.3.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-crt==13.4.92@vllm-flash-next-main-1012
+    name: nvidia-cuda-crt
+    version: 13.4.92
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-cupti==13.0.85@vllm-flash-next-main-1012
+    name: nvidia-cuda-cupti
+    version: 13.0.85
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-nvcc==13.4.92@vllm-flash-next-main-1012
+    name: nvidia-cuda-nvcc
+    version: 13.4.92
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-nvrtc==13.0.88@vllm-flash-next-main-1012
+    name: nvidia-cuda-nvrtc
+    version: 13.0.88
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cuda-runtime==13.0.96@vllm-flash-next-main-1012
+    name: nvidia-cuda-runtime
+    version: 13.0.96
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cudnn-cu13==9.20.0.48@vllm-flash-next-main-1012
+    name: nvidia-cudnn-cu13
+    version: 9.20.0.48
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cudnn-frontend==1.31.0@vllm-flash-next-main-1012
+    name: nvidia-cudnn-frontend
+    version: 1.31.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cufft==12.0.0.61@vllm-flash-next-main-1012
+    name: nvidia-cufft
+    version: 12.0.0.61
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cufile==1.15.1.6@vllm-flash-next-main-1012
+    name: nvidia-cufile
+    version: 1.15.1.6
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-curand==10.4.0.35@vllm-flash-next-main-1012
+    name: nvidia-curand
+    version: 10.4.0.35
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cusolver==12.0.4.66@vllm-flash-next-main-1012
+    name: nvidia-cusolver
+    version: 12.0.4.66
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cusparse==12.6.3.3@vllm-flash-next-main-1012
+    name: nvidia-cusparse
+    version: 12.6.3.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cusparselt-cu13==0.8.1@vllm-flash-next-main-1012
+    name: nvidia-cusparselt-cu13
+    version: 0.8.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cutlass-dsl==4.8.0@vllm-flash-next-main-1012
+    name: nvidia-cutlass-dsl
+    version: 4.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cutlass-dsl-libs-base==4.8.0@vllm-flash-next-main-1012
+    name: nvidia-cutlass-dsl-libs-base
+    version: 4.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cutlass-dsl-libs-core==4.8.0@vllm-flash-next-main-1012
+    name: nvidia-cutlass-dsl-libs-core
+    version: 4.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cutlass-dsl-libs-cu12==4.8.0@vllm-flash-next-main-1012
+    name: nvidia-cutlass-dsl-libs-cu12
+    version: 4.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-cutlass-dsl-libs-cu13==4.8.0@vllm-flash-next-main-1012
+    name: nvidia-cutlass-dsl-libs-cu13
+    version: 4.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-ml-py==13.615.71@vllm-flash-next-main-1012
+    name: nvidia-ml-py
+    version: 13.615.71
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-nccl-cu13==2.29.7@vllm-flash-next-main-1012
+    name: nvidia-nccl-cu13
+    version: 2.29.7
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-nvjitlink==13.4.92@vllm-flash-next-main-1012
+    name: nvidia-nvjitlink
+    version: 13.4.92
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-nvshmem-cu13==3.4.5@vllm-flash-next-main-1012
+    name: nvidia-nvshmem-cu13
+    version: 3.4.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-nvtx==13.0.85@vllm-flash-next-main-1012
+    name: nvidia-nvtx
+    version: 13.0.85
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvidia-nvvm==13.4.92@vllm-flash-next-main-1012
+    name: nvidia-nvvm
+    version: 13.4.92
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: nvtx==0.2.15@vllm-flash-next-main-1012
+    name: nvtx
+    version: 0.2.15
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: openai==3.29.0@vllm-flash-next-main-1012
+    name: openai
+    version: 3.29.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opencv-python-headless==5.0.0.93@vllm-flash-next-main-1012
+    name: opencv-python-headless
+    version: 5.0.0.93
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-api==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-api
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-http-transport==0.66b1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-http-transport
+    version: 0.66b1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-otlp==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-otlp
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-otlp-common==0.66b1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-otlp-common
+    version: 0.66b1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-otlp-proto-common==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-otlp-proto-common
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-otlp-proto-grpc==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-otlp-proto-grpc
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-exporter-otlp-proto-http==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-exporter-otlp-proto-http
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-proto==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-proto
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-sdk==1.45.1@vllm-flash-next-main-1012
+    name: opentelemetry-sdk
+    version: 1.45.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-semantic-conventions==0.66b1@vllm-flash-next-main-1012
+    name: opentelemetry-semantic-conventions
+    version: 0.66b1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: opentelemetry-semantic-conventions-ai==0.5.1@vllm-flash-next-main-1012
+    name: opentelemetry-semantic-conventions-ai
+    version: 0.5.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: oss-harmony==0.0.11@vllm-flash-next-main-1012
+    name: oss-harmony
+    version: 0.0.11
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: outlines_core==0.2.14@vllm-flash-next-main-1012
+    name: outlines_core
+    version: 0.2.14
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: packaging==26.3@vllm-flash-next-main-1012
+    name: packaging
+    version: '26.3'
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: partial-json-parser==0.2.1.1.post7@vllm-flash-next-main-1012
+    name: partial-json-parser
+    version: 0.2.1.1.post7
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pillow==12.3.0@vllm-flash-next-main-1012
+    name: pillow
+    version: 12.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pip==26.2.1@vllm-flash-next-main-1012
+    name: pip
+    version: 26.2.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: prometheus-fastapi-instrumentator==8.1.0@vllm-flash-next-main-1012
+    name: prometheus-fastapi-instrumentator
+    version: 8.1.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: prometheus_client==0.26.0@vllm-flash-next-main-1012
+    name: prometheus_client
+    version: 0.26.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: propcache==0.5.4@vllm-flash-next-main-1012
+    name: propcache
+    version: 0.5.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: protobuf==7.36.2@vllm-flash-next-main-1012
+    name: protobuf
+    version: 7.36.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: psutil==7.2.2@vllm-flash-next-main-1012
+    name: psutil
+    version: 7.2.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: py-cpuinfo==9.0.0@vllm-flash-next-main-1012
+    name: py-cpuinfo
+    version: 9.0.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pybase64==1.5.1@vllm-flash-next-main-1012
+    name: pybase64
+    version: 1.5.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pycountry==26.2.16@vllm-flash-next-main-1012
+    name: pycountry
+    version: 26.2.16
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pycparser==3.11@vllm-flash-next-main-1012
+    name: pycparser
+    version: '3.11'
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pydantic==2.14.1@vllm-flash-next-main-1012
+    name: pydantic
+    version: 2.14.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pydantic-extra-types==2.11.1@vllm-flash-next-main-1012
+    name: pydantic-extra-types
+    version: 2.11.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pydantic-settings==2.15.0@vllm-flash-next-main-1012
+    name: pydantic-settings
+    version: 2.15.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pydantic_core==2.50.1@vllm-flash-next-main-1012
+    name: pydantic_core
+    version: 2.50.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pynvvideocodec==2.0.4@vllm-flash-next-main-1012
+    name: pynvvideocodec
+    version: 2.0.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: python-dotenv==1.2.4@vllm-flash-next-main-1012
+    name: python-dotenv
+    version: 1.2.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: python-json-logger==4.2.0@vllm-flash-next-main-1012
+    name: python-json-logger
+    version: 4.2.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: python-multipart==0.0.32@vllm-flash-next-main-1012
+    name: python-multipart
+    version: 0.0.32
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: pyzmq==27.2.0@vllm-flash-next-main-1012
+    name: pyzmq
+    version: 27.2.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: quack-kernels==0.6.5@vllm-flash-next-main-1012
+    name: quack-kernels
+    version: 0.6.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: referencing==0.37.0@vllm-flash-next-main-1012
+    name: referencing
+    version: 0.37.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: regex==2026.9.29@vllm-flash-next-main-1012
+    name: regex
+    version: 2026.9.29
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: requests==2.34.2@vllm-flash-next-main-1012
+    name: requests
+    version: 2.34.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: rich==15.0.0@vllm-flash-next-main-1012
+    name: rich
+    version: 15.0.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: rich-toolkit==0.20.6@vllm-flash-next-main-1012
+    name: rich-toolkit
+    version: 0.20.6
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: rignore==0.8.1@vllm-flash-next-main-1012
+    name: rignore
+    version: 0.8.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: rpds-py==2026.9.1@vllm-flash-next-main-1012
+    name: rpds-py
+    version: 2026.9.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: safetensors==0.9.0rc1@vllm-flash-next-main-1012
+    name: safetensors
+    version: 0.9.0rc1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: sentencepiece==0.2.2@vllm-flash-next-main-1012
+    name: sentencepiece
+    version: 0.2.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: sentry-sdk==3.0.0a7@vllm-flash-next-main-1012
+    name: sentry-sdk
+    version: 3.0.0a7
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: setproctitle==1.3.8@vllm-flash-next-main-1012
+    name: setproctitle
+    version: 1.3.8
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: setuptools==80.10.2@vllm-flash-next-main-1012
+    name: setuptools
+    version: 80.10.2
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: shellingham==1.5.4@vllm-flash-next-main-1012
+    name: shellingham
+    version: 1.5.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: six==1.17.0@vllm-flash-next-main-1012
+    name: six
+    version: 1.17.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: sniffio==1.3.1@vllm-flash-next-main-1012
+    name: sniffio
+    version: 1.3.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: sse-starlette==3.5.0@vllm-flash-next-main-1012
+    name: sse-starlette
+    version: 3.5.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: starlette==1.7.0@vllm-flash-next-main-1012
+    name: starlette
+    version: 1.7.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: supervisor==4.3.0@vllm-flash-next-main-1012
+    name: supervisor
+    version: 4.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: sympy==1.14.0@vllm-flash-next-main-1012
+    name: sympy
+    version: 1.14.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tabulate==0.10.0@vllm-flash-next-main-1012
+    name: tabulate
+    version: 0.10.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tiktoken==0.14.0@vllm-flash-next-main-1012
+    name: tiktoken
+    version: 0.14.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tilelang==0.1.12@vllm-flash-next-main-1012
+    name: tilelang
+    version: 0.1.12
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tokenizers==0.23.3@vllm-flash-next-main-1012
+    name: tokenizers
+    version: 0.23.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tokenspeed-mla==0.2.15@vllm-flash-next-main-1012
+    name: tokenspeed-mla
+    version: 0.2.15
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tokenspeed-triton==3.9.10.post20261008@vllm-flash-next-main-1012
+    name: tokenspeed-triton
+    version: 3.9.10.post20261008
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: torch==2.13.0+cu130@vllm-flash-next-main-1012
+    name: torch
+    version: 2.13.0+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: torch_c_dlpack_ext==0.1.5@vllm-flash-next-main-1012
+    name: torch_c_dlpack_ext
+    version: 0.1.5
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: torchaudio==2.11.0+cu130@vllm-flash-next-main-1012
+    name: torchaudio
+    version: 2.11.0+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: torchcodec==0.17.0+cu130@vllm-flash-next-main-1012
+    name: torchcodec
+    version: 0.17.0+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: torchvision==0.28.0+cu130@vllm-flash-next-main-1012
+    name: torchvision
+    version: 0.28.0+cu130
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: tqdm==4.70.1@vllm-flash-next-main-1012
+    name: tqdm
+    version: 4.70.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: transformers==5.19.0@vllm-flash-next-main-1012
+    name: transformers
+    version: 5.19.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: triton==3.7.1@vllm-flash-next-main-1012
+    name: triton
+    version: 3.7.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: truststore==0.10.4@vllm-flash-next-main-1012
+    name: truststore
+    version: 0.10.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: typer==0.27.3@vllm-flash-next-main-1012
+    name: typer
+    version: 0.27.3
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: typing-inspection==0.4.4@vllm-flash-next-main-1012
+    name: typing-inspection
+    version: 0.4.4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: typing_extensions==4.16.0@vllm-flash-next-main-1012
+    name: typing_extensions
+    version: 4.16.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: urllib3==2.8.0@vllm-flash-next-main-1012
+    name: urllib3
+    version: 2.8.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: uvicorn==0.54.0@vllm-flash-next-main-1012
+    name: uvicorn
+    version: 0.54.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: uvloop==0.23.0@vllm-flash-next-main-1012
+    name: uvloop
+    version: 0.23.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: vllm==0.31.1rc1.dev260+ga98247ab4@vllm-flash-next-main-1012
+    name: vllm
+    version: 0.31.1rc1.dev260+ga98247ab4
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: watchfiles==1.3.0@vllm-flash-next-main-1012
+    name: watchfiles
+    version: 1.3.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: websockets==17.2@vllm-flash-next-main-1012
+    name: websockets
+    version: '17.2'
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: xgrammar==0.2.8@vllm-flash-next-main-1012
+    name: xgrammar
+    version: 0.2.8
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: yarl==1.25.1@vllm-flash-next-main-1012
+    name: yarl
+    version: 1.25.1
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
+  - component: z3-solver==4.15.4.0@vllm-flash-next-main-1012
+    name: z3-solver
+    version: 4.15.4.0
+    site: vllm-flash-next-main-1012
+    interpreter: python3.12
+    site_packages: /home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012/lib/python3.12/site-packages
+    component_kind: python-distribution
   sites:
   - site: lloyd
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/lloyd/requirements.txt
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/lloyd/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/lloyd/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/lloyd/requirements.txt
     scan_status: completed
     packages_scanned: 181
-    advisory_count: 12
+    advisory_count: 42
     reason: ''
-    advisories_total: 12
+    advisories_total: 42
     missed_advisories: 12
     missed_packages:
     - pip
     components_declared_in_target: 181
     parse_count_matches_inventory: true
   - site: qwen3-tts
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/qwen3-tts/requirements.txt
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/qwen3-tts/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/qwen3-tts/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/qwen3-tts/requirements.txt
     scan_status: completed
     packages_scanned: 116
-    advisory_count: 105
+    advisory_count: 163
     reason: ''
-    advisories_total: 105
-    missed_advisories: 64
+    advisories_total: 163
+    missed_advisories: 110
     missed_packages:
     - accelerate
+    - brotli
     - gradio
     - pillow
     - pip
@@ -5103,14 +6720,14 @@ observed:
     components_declared_in_target: 116
     parse_count_matches_inventory: true
   - site: user-site
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/user-site/requirements.txt
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/user-site/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/user-site/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/user-site/requirements.txt
     scan_status: completed
     packages_scanned: 1
     advisory_count: 0
@@ -5121,62 +6738,85 @@ observed:
     components_declared_in_target: 1
     parse_count_matches_inventory: true
   - site: vllm-djev
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/vllm-djev/requirements.txt
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-djev/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/vllm-djev/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-djev/requirements.txt
     scan_status: completed
     packages_scanned: 200
-    advisory_count: 10
+    advisory_count: 85
     reason: ''
-    advisories_total: 10
-    missed_advisories: 8
+    advisories_total: 85
+    missed_advisories: 68
     missed_packages:
+    - pillow
     - vllm
     components_declared_in_target: 200
     parse_count_matches_inventory: true
   - site: vllm-flash-next-main
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/vllm-flash-next-main/requirements.txt
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-flash-next-main/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/vllm-flash-next-main/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-flash-next-main/requirements.txt
     scan_status: completed
     packages_scanned: 200
-    advisory_count: 68
+    advisory_count: 143
     reason: ''
-    advisories_total: 68
-    missed_advisories: 66
+    advisories_total: 143
+    missed_advisories: 126
     missed_packages:
+    - pillow
     - vllm
     components_declared_in_target: 200
     parse_count_matches_inventory: true
-  merged_scan:
-    site: all-sites
-    lockfile: /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/all-sites/requirements.txt
+  - site: vllm-flash-next-main-1012
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-flash-next-main-1012/requirements.txt
     argv:
     - scan
     - --offline
     - --format
     - json
     - --lockfile
-    - /home/alansrobotlab/lloyd-work/SM_20261011_224406/home/lloyd/.lloyd-data/supply-chain/observed/all-sites/requirements.txt
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/vllm-flash-next-main-1012/requirements.txt
     scan_status: completed
-    packages_scanned: 405
-    advisory_count: 181
+    packages_scanned: 208
+    advisory_count: 53
     reason: ''
-    advisories_in_observed_set: 181
-    advisories_in_observed_set_that_declared_lockfiles_missed: 138
-    distinct_missed_packages: 7
+    advisories_total: 53
+    missed_advisories: 42
+    missed_packages:
+    - pillow
+    - vllm
+    components_declared_in_target: 208
+    parse_count_matches_inventory: true
+  merged_scan:
+    site: all-sites
+    lockfile: /home/alansrobotlab/lloyd-data/supply-chain/observed/all-sites/requirements.txt
+    argv:
+    - scan
+    - --offline
+    - --format
+    - json
+    - --lockfile
+    - /home/alansrobotlab/lloyd-data/supply-chain/observed/all-sites/requirements.txt
+    scan_status: completed
+    packages_scanned: 470
+    advisory_count: 360
+    reason: ''
+    advisories_in_observed_set: 360
+    advisories_in_observed_set_that_declared_lockfiles_missed: 264
+    distinct_missed_packages: 10
     distinct_missed_package_names:
     - accelerate
+    - brotli
     - gradio
     - pillow
     - pip
@@ -5185,8 +6825,8 @@ observed:
   scan_status: completed
   sites_not_scanned: []
   target_parse_mismatches: []
-  advisories_in_observed_set_total: 195
-  advisories_in_observed_set_that_declared_lockfiles_missed: 150
+  advisories_in_observed_set_total: 486
+  advisories_in_observed_set_that_declared_lockfiles_missed: 358
   non_advisory_components:
   - component: weight:agent-services/models/campplus/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx
     component_kind: vendored-weight
@@ -5465,6 +7105,17 @@ observed:
     sha256: 789dc7d931dbcf0d
     bytes_hashed: whole-file
     advisory_source: none
+  - component: skill:artcraft-repo-sync
+    component_kind: skill
+    name: artcraft-repo-sync
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/artcraft-repo-sync/SKILL.md
+    size_bytes: 5785
+    sha256: d63ad8d734268e5d
+    bytes_hashed: whole-file
+    advisory_source: none
   - component: skill:arxiv
     component_kind: skill
     name: arxiv
@@ -5472,8 +7123,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/arxiv/SKILL.md
-    size_bytes: 10858
-    sha256: e05bd5a3736801f6
+    size_bytes: 12060
+    sha256: cee497b7b3fd5e7b
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:ascii-art
@@ -5516,8 +7167,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/automod-change-own-code/SKILL.md
-    size_bytes: 27726
-    sha256: 8eac34e272c30fb1
+    size_bytes: 28731
+    sha256: 282cb5fded620362
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:automod-guardian-triage
@@ -5527,8 +7178,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/automod-guardian-triage/SKILL.md
-    size_bytes: 10428
-    sha256: 18d620475b069dd7
+    size_bytes: 12792
+    sha256: 25a33e59bde5b6cf
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:automod-landability-triage
@@ -5560,8 +7211,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/autonomy-data-pipeline/SKILL.md
-    size_bytes: 70023
-    sha256: 211dc3c6d7aa1ba2
+    size_bytes: 119796
+    sha256: 465c6531496c8a04
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:autonomy-pipeline-yaml-fix
@@ -5703,8 +7354,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/bash-timeout/SKILL.md
-    size_bytes: 9729
-    sha256: 8cba62da7eccf903
+    size_bytes: 10548
+    sha256: e1f303126f6c27db
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:bash-transient-error-handling
@@ -5784,6 +7435,17 @@ observed:
     sha256: c5c42cfb4af66101
     bytes_hashed: whole-file
     advisory_source: none
+  - component: skill:check-health-census-weekly
+    component_kind: skill
+    name: check-health-census-weekly
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/check-health-census-weekly/SKILL.md
+    size_bytes: 2788
+    sha256: 503c6eaa70e880ea
+    bytes_hashed: whole-file
+    advisory_source: none
   - component: skill:cited-identifier-verification
     component_kind: skill
     name: cited-identifier-verification
@@ -5791,8 +7453,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/cited-identifier-verification/SKILL.md
-    size_bytes: 7063
-    sha256: dac2010da584c370
+    size_bytes: 8393
+    sha256: e30a4b91f8a6071c
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:claude-code
@@ -5815,6 +7477,17 @@ observed:
     path: skills/code-review/SKILL.md
     size_bytes: 2305
     sha256: e0bfc378e5ff94e6
+    bytes_hashed: whole-file
+    advisory_source: none
+  - component: skill:code-rules-census-weekly
+    component_kind: skill
+    name: code-rules-census-weekly
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/code-rules-census-weekly/SKILL.md
+    size_bytes: 4035
+    sha256: 1cefe93bc316a1d2
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:codebase-inspection
@@ -5868,8 +7541,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/conversation-relation-linking/SKILL.md
-    size_bytes: 11587
-    sha256: 8aad968feb070b57
+    size_bytes: 11975
+    sha256: a58929f121761b2a
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:corpus-shape-trend
@@ -5978,8 +7651,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/djev-name-prior-probe/SKILL.md
-    size_bytes: 5113
-    sha256: 91b4cee448daef88
+    size_bytes: 5351
+    sha256: 0da4618b5f44cdb1
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:documentation-digester
@@ -6022,8 +7695,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/email-calendar-monitoring/SKILL.md
-    size_bytes: 6118
-    sha256: 2a9f302ac609b26f
+    size_bytes: 8561
+    sha256: 102f46b6d3dd4c05
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:entity-name-normalization
@@ -6046,6 +7719,17 @@ observed:
     path: skills/entity-resolution-sweep/SKILL.md
     size_bytes: 8544
     sha256: b9a80ebdd144db93
+    bytes_hashed: whole-file
+    advisory_source: none
+  - component: skill:eval-instrument-index-daily
+    component_kind: skill
+    name: eval-instrument-index-daily
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/eval-instrument-index-daily/SKILL.md
+    size_bytes: 8160
+    sha256: bc41f088cd684579
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:excalidraw
@@ -6099,8 +7783,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/file-path-resolution/SKILL.md
-    size_bytes: 6473
-    sha256: d4442448fc1f4514
+    size_bytes: 6914
+    sha256: 6a878307408429bd
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:file-read-error-handling
@@ -6121,8 +7805,19 @@ observed:
     site: skills
     interpreter: null
     path: skills/file-read-resilience/SKILL.md
-    size_bytes: 4507
-    sha256: 0be2b436fe9f5116
+    size_bytes: 5599
+    sha256: 7d1bbf74866e8476
+    bytes_hashed: whole-file
+    advisory_source: none
+  - component: skill:find-all-arms-run
+    component_kind: skill
+    name: find-all-arms-run
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/find-all-arms-run/SKILL.md
+    size_bytes: 3916
+    sha256: 3c1a05ca46b7e54d
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:find-nearby
@@ -6145,6 +7840,17 @@ observed:
     path: skills/findmy/SKILL.md
     size_bytes: 3871
     sha256: e75102a0e3792489
+    bytes_hashed: whole-file
+    advisory_source: none
+  - component: skill:gate-to-land-lag-daily-record
+    component_kind: skill
+    name: gate-to-land-lag-daily-record
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/gate-to-land-lag-daily-record/SKILL.md
+    size_bytes: 8213
+    sha256: 6102cdc60753956d
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:gif-search
@@ -6275,8 +7981,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/groundskeeper-survey/SKILL.md
-    size_bytes: 3611
-    sha256: 9aca61f3f0ae3794
+    size_bytes: 5615
+    sha256: e751bad99310c88b
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:hardware-inventory-without-sudo
@@ -6363,8 +8069,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/intelligence-pipeline/SKILL.md
-    size_bytes: 16241
-    sha256: 2eab81a41100ee06
+    size_bytes: 18501
+    sha256: 03c51a618d069799
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:iv-metrics-series
@@ -6374,8 +8080,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/iv-metrics-series/SKILL.md
-    size_bytes: 10295
-    sha256: a205bce52d48fe0b
+    size_bytes: 12063
+    sha256: a03257a2fc5d61d0
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:iv-plan-review
@@ -6418,8 +8124,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/kg-mention-classifier/SKILL.md
-    size_bytes: 57437
-    sha256: 621074875577b5b5
+    size_bytes: 186337
+    sha256: 0180d5f75d62d760
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:knowledge-health-report
@@ -6429,8 +8135,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/knowledge-health-report/SKILL.md
-    size_bytes: 2726
-    sha256: 0f7b2c1f2b60eacf
+    size_bytes: 5748
+    sha256: 324694e645250c81
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:landed-outcomes-daily-record
@@ -6440,8 +8146,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/landed-outcomes-daily-record/SKILL.md
-    size_bytes: 10489
-    sha256: 6a75c1c2725e6776
+    size_bytes: 11557
+    sha256: d2046fa6a545ee31
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:linear
@@ -6638,8 +8344,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-reflection-config/SKILL.md
-    size_bytes: 19588
-    sha256: abd026507c736211
+    size_bytes: 37375
+    sha256: 6168481671cf67c0
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-reflection-knowledge-analysis
@@ -6649,8 +8355,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-reflection-knowledge-analysis/SKILL.md
-    size_bytes: 28750
-    sha256: 757c1589d49d08e1
+    size_bytes: 38341
+    sha256: b185a73839922651
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-reflection-knowledge-write
@@ -6660,8 +8366,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-reflection-knowledge-write/SKILL.md
-    size_bytes: 29054
-    sha256: ac6280da7a0cb2a8
+    size_bytes: 31488
+    sha256: 02ca82e038397b88
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-reflection-signals
@@ -6671,8 +8377,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-reflection-signals/SKILL.md
-    size_bytes: 65989
-    sha256: 1ad5a0030bf0be0b
+    size_bytes: 110873
+    sha256: 9f0c8986c2dd9d83
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-skill-consolidation
@@ -6682,8 +8388,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-skill-consolidation/SKILL.md
-    size_bytes: 43161
-    sha256: e88ae83639cef3be
+    size_bytes: 48780
+    sha256: cec111d6c35c043c
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-skills-management
@@ -6693,8 +8399,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/nightly-skills-management/SKILL.md
-    size_bytes: 58378
-    sha256: d09c16f54859a771
+    size_bytes: 81928
+    sha256: 54de31b820a80384
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:nightly-vault-maintenance
@@ -6748,8 +8454,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/okf-conformance-check/SKILL.md
-    size_bytes: 5681
-    sha256: f59bbcedf5ff2d2f
+    size_bytes: 9230
+    sha256: bca6660b5dba3d77
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:opencode
@@ -6781,8 +8487,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/orphaned-reference-cleanup/SKILL.md
-    size_bytes: 4434
-    sha256: 5e51f8982b22db3b
+    size_bytes: 12088
+    sha256: 3c7f0f83b9859d01
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:paper-digest
@@ -6792,8 +8498,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/paper-digest/SKILL.md
-    size_bytes: 4810
-    sha256: 7ce7b4abd0297a3b
+    size_bytes: 6531
+    sha256: 592848d9aa1519a2
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:periodic-memory-capture-lloyd
@@ -6935,8 +8641,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/queue-health-check/SKILL.md
-    size_bytes: 19804
-    sha256: 063fcbecaa25b05d
+    size_bytes: 25931
+    sha256: 32b42d4973a30d43
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:quick-research
@@ -6968,8 +8674,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/referential-integrity-ledger/SKILL.md
-    size_bytes: 6713
-    sha256: f0438eba82f8d16e
+    size_bytes: 7539
+    sha256: a22fbe673b122812
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:requesting-code-review
@@ -7038,6 +8744,17 @@ observed:
     sha256: 98f3473fb27433cf
     bytes_hashed: whole-file
     advisory_source: none
+  - component: skill:retag-untagged-facts
+    component_kind: skill
+    name: retag-untagged-facts
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/retag-untagged-facts/SKILL.md
+    size_bytes: 6864
+    sha256: 1b870fcf6d6c04c1
+    bytes_hashed: whole-file
+    advisory_source: none
   - component: skill:retention-sweep
     component_kind: skill
     name: retention-sweep
@@ -7045,8 +8762,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/retention-sweep/SKILL.md
-    size_bytes: 22131
-    sha256: 2c8759892b5fb3d7
+    size_bytes: 31479
+    sha256: 8e7fe25de6d9c118
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:retrieval-eval
@@ -7056,8 +8773,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/retrieval-eval/SKILL.md
-    size_bytes: 50785
-    sha256: fd4fe01b082fc7dc
+    size_bytes: 62278
+    sha256: 9fdd2288261eefdb
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:rssc-youtube-upload
@@ -7100,8 +8817,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/runtime-store-schema-probe/SKILL.md
-    size_bytes: 3798
-    sha256: da2e0f3691ab436c
+    size_bytes: 9020
+    sha256: 18ec96944281dcbc
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:sandbox-permission-errors
@@ -7155,8 +8872,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/semantic-entity-resolution/SKILL.md
-    size_bytes: 13124
-    sha256: c6b90466735cb681
+    size_bytes: 14928
+    sha256: a5b9e297893b5e93
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:service-health-check
@@ -7166,8 +8883,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/service-health-check/SKILL.md
-    size_bytes: 32763
-    sha256: caa9f68ee293b3fa
+    size_bytes: 35593
+    sha256: 21c128d5082afc97
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:setup-llama-cpp-python-cuda
@@ -7302,6 +9019,17 @@ observed:
     sha256: 95e13cf940332d7b
     bytes_hashed: whole-file
     advisory_source: none
+  - component: skill:supply-chain-inventory-regen
+    component_kind: skill
+    name: supply-chain-inventory-regen
+    version: null
+    site: skills
+    interpreter: null
+    path: skills/supply-chain-inventory-regen/SKILL.md
+    size_bytes: 24624
+    sha256: ad23c7a0340d14c3
+    bytes_hashed: whole-file
+    advisory_source: none
   - component: skill:system-health-check
     component_kind: skill
     name: system-health-check
@@ -7309,8 +9037,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/system-health-check/SKILL.md
-    size_bytes: 14138
-    sha256: 0c9d6cbd48b3b4b4
+    size_bytes: 16386
+    sha256: 85962789b778b46d
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:systematic-debugging
@@ -7430,8 +9158,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/trajectory-skill-mining/SKILL.md
-    size_bytes: 15943
-    sha256: 40278cb35004e510
+    size_bytes: 29960
+    sha256: 5d65ecf247e637e9
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:turn-end-todo-bookkeeping
@@ -7518,8 +9246,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/voice-mode/SKILL.md
-    size_bytes: 14829
-    sha256: acb7448b4dfbc431
+    size_bytes: 16501
+    sha256: 8b831d9fd808d983
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:web-search-and-fetch
@@ -7529,8 +9257,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/web-search-and-fetch/SKILL.md
-    size_bytes: 6003
-    sha256: b372293ed8011dfc
+    size_bytes: 7240
+    sha256: 200b5582ce83311c
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:weekly-backlog-hygiene
@@ -7540,8 +9268,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/weekly-backlog-hygiene/SKILL.md
-    size_bytes: 4915
-    sha256: d833ab806b13eb57
+    size_bytes: 5604
+    sha256: 598241397013c00e
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:wiki-compile-sweep
@@ -7617,8 +9345,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/youtube-content/SKILL.md
-    size_bytes: 8510
-    sha256: d3d8cb987f00b467
+    size_bytes: 10496
+    sha256: 6359a8fde8b9df53
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:youtube-digest
@@ -7639,8 +9367,8 @@ observed:
     site: skills
     interpreter: null
     path: skills/youtube-transcript/SKILL.md
-    size_bytes: 15543
-    sha256: 2497558ed539ecc2
+    size_bytes: 16496
+    sha256: aa7eaf93e9095b42
     bytes_hashed: whole-file
     advisory_source: none
   - component: skill:youtube-transcript-error-handling
@@ -7665,7 +9393,7 @@ observed:
     sha256: cae9805c2417bd5b
     bytes_hashed: whole-file
     advisory_source: none
-  non_advisory_component_count: 225
+  non_advisory_component_count: 233
   non_advisory_gaps:
   - "no Hugging Face cache snapshots under /home/alansrobotlab/huggingface/hub \u2014 this box's model\
     \ artifacts are the vendored weights above plus whatever an engine loads from a path no inventory\
@@ -7673,4 +9401,4 @@ observed:
   non_advisory_advisory_count: 0
   reason: ''
 observed_schema: lloyd-supply-chain-observed/1
-observed_generated_at: '2026-10-11T23:16:00.914604Z'
+observed_generated_at: '2026-10-31T22:22:49.743282Z'
