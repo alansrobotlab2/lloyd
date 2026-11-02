@@ -81,35 +81,32 @@ Bounding the file would have fixed that and left the real problems:
 
 The 314 unique topics were imported as `archived` rows. They were the dedup
 corpus and nothing else: `archived` never counts toward a daily budget and
-never appears in `recent()`. **That corpus is still not in the registry that
-runs today, and `stats()` now says so as a number: `archived: 0`.** It reported
-`archived: 314` on 2026-09-20; the store measured on 2026-10-20 held 117 rows
-whose ids ran 1..117 — a restarted `AUTOINCREMENT` sequence, so the file the
-2026-09-22 data-home move carried across was replaced by an empty one within a
-day (first live proposal 2026-09-23). For the four weeks between those readings
-the payload said nothing either way: `by_status` was a bare `GROUP BY`, so a
-status with no rows emitted no key at all and an emptied corpus was
+never appears in `recent()`. **That corpus is in the registry that runs today,
+and `stats()` says so as a number: `archived: 314` (474 rows total).** It
+reported `archived: 314` on 2026-09-20; the store measured on 2026-10-20 held
+117 rows whose ids ran 1..117 — a restarted `AUTOINCREMENT` sequence, so the
+file the 2026-09-22 data-home move carried across was replaced by an empty one
+within a day (first live proposal 2026-09-23). For the four weeks between those
+readings the payload said nothing either way: `by_status` was a bare `GROUP BY`,
+so a status with no rows emitted no key at all and an emptied corpus was
 indistinguishable from a never-imported one. #3085 ended both halves of that
-silence — `stats()` names the corpus count at zero (`DEDUP_CORPUS_STATUS`), and
-`import_legacy` with `dry_run=True` measures `existing` against the rows in the
-store instead of printing its initialiser, which is what makes the dry run below
-worth reading. Nothing deletes `topics` rows, and `import_legacy` is idempotent
-against the archive that is still in the vault, so the corpus is one command
-from back. Running it is an operator's call, not a round's: it writes production
-`research.db`, which is outside this repo. The command is
-`python -m app.research_store import ~/obsidian/lloyd/research-queue-archive.md`,
-`--dry-run` first, and the read-only check after it is
-`python -m app.research_store stats` reporting `archived` at 314 or more. It has
-no owner rather than a dead one, deliberately: the payload halves above shipped,
-the item that shipped them is closed, and a closed item cannot run a command, so
-naming one here would only rot again. What the question carries instead is a
-date — **2026-11-08**. If `stats()` still reports `archived: 0` on that date,
-the corpus is ruled dropped, that ruling is recorded in this section, and the
-role this paragraph plays retires with it. Nothing here claims the corpus came
-back: the number this section quotes is `archived: 0`, and §2's `archived` row
-still says zero rows. Until it is back (or ruled dropped), `similar()` has no
-legacy side to match against and a retired checklist topic can be proposed and
-re-researched (#3046).
+silence — `stats()` always names the corpus count, zero included
+(`DEDUP_CORPUS_STATUS`), and `import_legacy` with `dry_run=True` measures
+`existing` against the rows in the store instead of printing its initialiser.
+The two zero readings above are now the record of an absence that has been
+closed, not a current state: the import ran again against the archive named
+above, `import_legacy` is idempotent against it, and the second run measured
+every one of the 314 as already `existing`. Nothing deletes `topics` rows. That
+import is an operator's act rather than a round's — it writes production
+`research.db`, which is outside this repo — and this section names no item as
+the one that ran it: the payload halves above shipped, the items behind them are
+closed, and a closed item cannot be the owner of an act that already happened,
+which is the rot that made this paragraph untrustworthy once. It quotes no date
+either, because the date it carried bounded a ruling whose condition the restored
+count can never satisfy again. What the restored corpus changes for a reader is
+the other half of #3046: `similar()` scores `archived` rows, since its `SELECT`
+carries no status filter, so a retired checklist topic has its legacy side to
+match against now instead of being proposed and re-researched.
 
 ---
 
@@ -130,7 +127,7 @@ from the lock, which only one process holds.
 | `written` | a note exists on disk, verified by `finish` itself: `_require_real_note` refuses any `artifact_path` that is not a file holding at least `MIN_NOTE_BYTES` (400) bytes, raising `ValueError` before the `UPDATE` so the row stays `researching` and `reclaim_stale` can retry it. The worker's `deep_research._note_is_real` applies the same bar and is now belt-and-braces (#1276) |
 | `nothing_found` | searched, found nothing — a real answer, and the one that stops it coming back |
 | `duplicate` | the vault already covers it; names what does |
-| `archived` | imported from the retired checklist; dedup corpus only — zero rows since the 2026-09-22/23 reset (§1) |
+| `archived` | imported from the retired checklist; dedup corpus only — the 314 restored rows (§1) |
 | `rejected` | should not have been proposed |
 
 Two statements carry the concurrency, and both were written the naive way

@@ -1157,16 +1157,19 @@ def test_the_doc_names_the_states_the_store_has():
 
 
 def test_section_1_reports_the_corpus_as_a_number_not_as_an_absent_key():
-    """§1 asserted that `stats()` "returns no `archived` key at all". That was
-    true on 2026-10-20 and became false with #3085, which put the dedup-corpus
-    count in the payload at zero — so the sentence, not the store, is now the
-    defect: a reader who trusted it would take today's `archived: 0` for a
-    second and fresher loss.
+    """§1 asserted that `stats()` "returns no `archived` key at all" (false since
+    #3085) and then, once the key shipped, that the corpus was absent as a
+    number: ``archived: 0``. The restore made that second sentence the defect —
+    `stats()` reports `archived: 314` (474 rows total) on the tree that runs, so
+    a reader who trusted the body would go looking for a third loss.
 
     Pinned in both directions, the way `test_the_written_row_names_finish_as_the_
-    verifier` does it: the omission-assertion may not come back, §1 states the
-    at-zero reading, and the constant it names is still the corpus status. The
-    scan stops at `## Review log`, which is a record of what a past pass saw.
+    verifier` does it: the omission-assertion may not come back, the at-zero
+    literal may not come back either, §1 states the restored reading in the
+    present tense, and the constant it names is still the corpus status. The two
+    zero readings survive only as dated record, which is what the 2026-09-20 and
+    2026-10-20 dates are for. The scan stops at `## Review log`, which is a
+    record of what a past pass saw and still says `archived: 0`.
     """
     from app import research_store
 
@@ -1178,12 +1181,23 @@ def test_section_1_reports_the_corpus_as_a_number_not_as_an_absent_key():
             raise AssertionError(
                 "§1 still asserts stats() omits the dedup-corpus key; #3085 "
                 "made the payload carry it at zero")
-    assert "`archived: 0`" in body, "§1 must state the at-zero reading"
+    assert "`archived: 0`" not in body, (
+        "§1 quotes the at-zero reading again; the restored corpus is 314 rows, "
+        "so that number is record now and belongs below `## Review log`")
+    assert "`archived: 314`" in body, "§1 must state the restored reading"
+    assert "corpus is in the registry that runs today" in body, (
+        "and state it in the present tense — the past-tense framing is what let ' "
+        "the corpus is one command from back' stand next to a full store")
     assert "DEDUP_CORPUS_STATUS" in body, (
         "§1 names the constant that decides which key is always present")
     assert research_store.DEDUP_CORPUS_STATUS == "archived", (
         "and that constant is still the status §1 describes as the corpus")
     assert "3085" in body, "§1 names the item that landed the payload key"
+    assert "2026-09-20" in body and "2026-10-20" in body, (
+        "the two zero readings are kept as dated record, not edited out")
+    assert "no legacy side to match against" not in body, (
+        "§1 must not keep the limitation the restore removed: `similar()`'s "
+        "SELECT carries no status filter, so archived rows are scored")
 
 
 def test_the_written_row_names_finish_as_the_verifier():
@@ -1779,25 +1793,40 @@ CLOSED_ITEM_POINTER = re.compile(r"owed on #\d+")
 RETIRED_RESTORE_OWNERSHIP = (
     "`research.db`, which is outside this repo, and it is owed on #3085.")
 
-#: What §1 carries instead: the operator's own command and the date the fallback ruling
-#: fires (#3085's owed-check of 2026-10-25T16:48:09: if `archived` is still 0 on that date,
-#: rule the corpus dropped and record it here).
+#: What §1 carried while the restore was still owed: the operator's own command, the
+#: dry-run that guarded it, the read-back that closed it, and the date the fallback
+#: ruling would have fired (#3085's owed-check of 2026-10-25T16:48:09: if `archived` was
+#: still 0 on that date, rule the corpus dropped and record it here). The corpus is back,
+#: so all four are absence-pinned below — and a date whose condition can never be true is
+#: worse than no date, because it reads as an open question about a settled matter.
 RESTORE_IMPORT_COMMAND = ("python -m app.research_store import "
                           "~/obsidian/lloyd/research-queue-archive.md")
 RESTORE_READ_BACK_COMMAND = "python -m app.research_store stats"
 DROP_RULING_DATE = "2026-11-08"
 
+#: The paragraph those four pinned, verbatim from the page until #3711 retired it. The
+#: absence checks below are only evidence if this text really carries each of them, so it
+#: is asserted to — the same shape as `RETIRED_RESTORE_OWNERSHIP` above.
+RETIRED_OPERATOR_CLAUSE = (
+    "The command is " + RESTORE_IMPORT_COMMAND + ", `--dry-run` first, and the read-only "
+    "check after it is " + RESTORE_READ_BACK_COMMAND + "` reporting `archived` at 314 or "
+    "more. It has no owner rather than a dead one, deliberately … It quotes no date — "
+    "**" + DROP_RULING_DATE + "**. If `stats()` still reports `archived: 0` on that date, "
+    "the corpus is ruled dropped")
 
-def test_section_1_carries_the_restore_obligation_without_a_closed_item_as_owner():
-    """#3622 clauses 4 and 5: the obligation survives, the dead number does not, and every
-    pin the sibling nodes hold stays where they reach it.
 
-    The paragraph is kept because the work is not done: `stats()` reports `archived: 0`, so
-    `similar()` still has no legacy side and a retired checklist topic can still be
-    re-proposed (#3046). What goes is the promise that a closed item will run it. No other
-    item number is substituted — #3320, the standing hand-run carrier for this import, is
-    `status: done` with its receipt exiting 1 (`ARCHIVED=0 TOTAL=140`), so naming it would
-    be the same rot filed one number later; the date is what a reader can act on.
+def test_section_1_names_no_restore_owner_and_no_operator_machinery():
+    """The obligation is discharged, so the machinery that carried it is retired with it:
+    no closed item owns the restore, and §1 no longer instructs anyone to run anything.
+
+    #3622 retired the closed-item pointer; #3711 retires what remained — the import
+    command, the dry-run guard, the `stats` read-back and the 2026-11-08 fallback date —
+    because the reading they were written against is gone: `stats()` reports `archived` at
+    314, so the condition the date bounded can no longer be satisfied and a reader of this
+    section would be told to write production `research.db` for a corpus that is already
+    there. Naming an owner is not substituted for either: #3046, #3085 and #3320 are all
+    `status: done`, and a closed item as owner is precisely the rot #3622 removed — one
+    more number would be the same defect filed one number later.
 
     The id set is pinned closed rather than the one number: a substituted id is exactly as
     dead as a kept one, and §1's three numbers are the only ones this section has ever had.
@@ -1806,7 +1835,7 @@ def test_section_1_carries_the_restore_obligation_without_a_closed_item_as_owner
     section and the page header above it names items this section does not own. A pointer
     re-added anywhere else on the page is what
     `test_architecture_coverage_doc_claims.py`'s corpus-wide node is for; this node is the
-    close read of the paragraph whose obligation is still live.
+    close read of the paragraph whose obligation is now closed.
     """
     from app import research_store
 
@@ -1821,30 +1850,60 @@ def test_section_1_carries_the_restore_obligation_without_a_closed_item_as_owner
         "§1 defers the restore to an item number again — a closed item cannot run the "
         "command, which is the rot #3622 retired")
 
-    assert RESTORE_IMPORT_COMMAND in flat, (
-        "§1 no longer names the command the operator runs, so the obligation it keeps has "
-        "nothing to act on")
-    assert "--dry-run" in flat, (
-        "§1 no longer says to dry-run first, which is the half that keeps the operator's "
-        "first reading of a month-old receipt from writing production `research.db`")
-    assert RESTORE_READ_BACK_COMMAND in flat, (
-        f"§1 no longer names {RESTORE_READ_BACK_COMMAND!r} as the read-back, so the "
-        "obligation has no test of its own completion")
-    assert DROP_RULING_DATE in flat, (
-        f"§1 no longer carries {DROP_RULING_DATE}, the date the corpus is ruled dropped if "
-        "`archived` is still 0 — without it the obligation has no end")
+    for probe in (RESTORE_IMPORT_COMMAND, "--dry-run",
+                  RESTORE_READ_BACK_COMMAND, DROP_RULING_DATE):
+        assert probe in RETIRED_OPERATOR_CLAUSE, (
+            f"the retired clause does not actually carry {probe!r}, so pinning its "
+            "absence below is a green light fixed on a text that can never violate it")
+    for probe, why in (
+        (RESTORE_IMPORT_COMMAND,
+         "§1 tells the operator to run the import again, writing production `research.db` "
+         "for a corpus `stats()` already counts at 314"),
+        ("--dry-run",
+         "§1 still carries the dry-run guard of an instruction nobody is being given"),
+        (RESTORE_READ_BACK_COMMAND,
+         "§1 still prescribes the read-back that closed an obligation now closed"),
+        (DROP_RULING_DATE,
+         "§1 still bounds a ruling whose condition the restored count can never satisfy"),
+    ):
+        assert probe not in flat, why
 
     assert flat.count("#3085") == 1 and "#3085 ended both halves of that silence" in flat, (
-        "§1's one remaining `#3085` is no longer the attribution of what that item shipped: "
-        "the attribution is a record and stays, the ownership clause is the rot, and a node "
-        "of the §1 pins above asserts `3085` is present in this section")
+        "§1's one remaining `#3085` is the attribution of what that item shipped: the "
+        "attribution is a record and stays, an ownership clause is the rot, and a node of "
+        "the §1 pins above asserts `3085` is present in this section")
     ids = sorted(set(re.findall(r"#(\d+)", flat)))
     assert ids == ["1278", "3046", "3085"], (
         f"§1 names {ids}, not the set it held when #3622 retired the pointer "
         "['1278', '3046', '3085'] — a substituted id is as dead as a kept one, and nothing "
         "here may invent an owner for a command no open item holds")
 
-    assert "`archived: 0`" in flat, (
-        "§1 no longer states the reading the obligation rests on, so the section would read "
-        "as though the corpus were back")
+    assert "`archived: 0`" not in flat, (
+        "§1 states the at-zero reading as current again, which is the sentence the restore "
+        "made false and this node's sibling now forbids in the whole body")
     assert research_store.DEDUP_CORPUS_STATUS == "archived" and "DEDUP_CORPUS_STATUS" in flat
+
+
+def test_section_2s_archived_row_states_the_restored_reading():
+    """§2's `archived` row read "zero rows since the 2026-09-22/23 reset (§1)" while §1
+    carried the same zero. Re-tensing §1 alone would have left the table contradicting both
+    the store and the section one line above it, so the row is pinned to the restored
+    reading here — and to the cross-reference, because the row's whole job is to send a
+    reader to the section that owns the number.
+
+    `test_archived_rows_never_enter_the_budget_or_recent` already reads this row for what
+    `archived` MEANS ("dedup corpus only") and for what it never does; it deliberately
+    never looked at the count column, which is why a stale zero could sit there.
+    """
+    body = DOC.read_text(encoding="utf-8").split("## Review log", 1)[0]
+    section = body.split("## 2. ", 1)[1]
+    row = next((ln for ln in section.splitlines()
+                if ln.strip().startswith("| `archived`")), None)
+    assert row is not None, "§2's status table has no `archived` row any more"
+    assert "zero rows since the 2026-09-22/23 reset" not in row, (
+        "§2 still reports the corpus as zero rows; `stats()` counts 314 of them today")
+    assert "314" in row, (
+        "§2's `archived` row states neither the restore nor its size: "
+        + row.strip()[len('| `archived` |'):][:90])
+    assert "§1" in row, (
+        "and it still cross-references §1, the section that owns the reading")
