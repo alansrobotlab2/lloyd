@@ -53,7 +53,7 @@ the header is missing.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -601,6 +601,19 @@ def _newest_matching(names: list[str], rx: re.Pattern[str]) -> tuple[str | None,
     return newest_name, newest_key
 
 
+def _dated_copy_rx(stem: str) -> re.Pattern[str]:
+    """The name shape of one dated archive copy of `stem`.
+
+    One parser, two readers: `pattern_staleness` asks whether the newest copy is behind
+    the newest report, and `pointer_mtime_lag` asks whether the stem wrote any copy at all
+    inside the live-production window (#3636). Those are different questions about the same
+    filenames, and the time groups are optional in both because §2e's stamp shape carries
+    an hour and minute but its `date -u +%Y-%m-%d` variant does not.
+    """
+    return re.compile(
+        r"^%s-(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2}))?\.md$" % re.escape(stem))
+
+
 def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
     """One finding per governed pattern file whose archive fell behind the cycles.
 
@@ -633,8 +646,7 @@ def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
     reports = sum(1 for n in names if KNOWLEDGE_WRITE_REPORT.match(n))
     out: list[PatternStaleness] = []
     for stem in PATTERN_STEMS:
-        copy_rx = re.compile(
-            r"^%s-(\d{4})-(\d{2})-(\d{2})(?:-(\d{2})(\d{2}))?\.md$" % re.escape(stem))
+        copy_rx = _dated_copy_rx(stem)
         if f"{stem}.md" not in names:
             continue
         copy, copy_key = _newest_matching(names, copy_rx)
@@ -651,9 +663,21 @@ def pattern_staleness(reflection_dir: Path) -> list[PatternStaleness]:
 #: cannot be the enumeration here: it holds `tool-patterns-latest` and
 #: `conversation-patterns-latest` only, and the one pointer measured stale on the live
 #: tree (#2832, five days behind on 2026-10-18) is `tool-failure-patterns-latest.md`,
-#: which is not in that tuple. Whether that file is §2e-governed is a separate ruling;
-#: this check reports what the filesystem says about every pointer of the shape.
+#: which is not in that tuple — so the shape stays. The ruling that comment deferred is
+#: now settled, by #3636 and from the directory itself: that same stem is the pointer a
+#: producer RETIRED (the cycle renamed it to `tool-patterns-latest`), so a pointer of
+#: this shape is governed while its stem keeps writing dated copies and is reported as a
+#: retired pointer once it stops. Shape stays the enumeration; production decides the row.
 _POINTER_LATEST = re.compile(r"^(.+-patterns-latest)\.md$")
+
+#: How far back a stem's dated archive copies must reach for its pointer to count as a
+#: live producer (#3636). A nightly pointer's copies are dated the day they are written,
+#: so seven days is a week of missed cycles — generous enough that a producer on a
+#: weekend-plus-holiday gap still reads as live, tight enough that the 18-day-silent
+#: `tool-failure-patterns` reads as retired. Derived from the listing, never from a stem
+#: list: an allowlist of retired names could not know about the next retirement, and
+#: three stems have already been retired in this one directory.
+RETIRED_COPY_WINDOW_DAYS = 7
 
 #: A completed cycle's note prints one of these per pointer it advanced (§2e). The
 #: count is the witness that the pointer write happened; the pointers' mtimes are the
@@ -711,14 +735,25 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
     2026-10-30 stub made its own day the bar, so two pointers that were current against
     the last real report read as lag because a run that wrote nothing had stamped the
     directory with a new note.
+
+    A lagging pointer is a finding only while its stem is still being produced. The
+    return is a `PointerLagRows`: the list itself stays the lag rows #2832 asked for, and
+    `.retired` carries one `RetiredPointerLag` per stale pointer whose stem wrote no dated
+    archive copy within `RETIRED_COPY_WINDOW_DAYS` before the report's day — a producer
+    that stopped, not a cycle that failed (#3636). Without that split, the check's only
+    finding on the live tree was `tool-failure-patterns-latest`, a name no producer owns
+    any more, which trained the reader past the one row that can carry a real failure.
     """
     reflection_dir = Path(reflection_dir)
     names = _listing(reflection_dir)
     report, report_key, _body, unmeasured = _newest_complete_note(names, reflection_dir)
     if report is None or report_key is None:
-        return Unmeasured(unmeasured) if unmeasured else []
+        return Unmeasured(unmeasured) if unmeasured else PointerLagRows()
     report_day = "%04d-%02d-%02d" % report_key[:3]
+    window_start = (date(*report_key[:3])
+                    - timedelta(days=RETIRED_COPY_WINDOW_DAYS)).isoformat()
     out: list[PointerMtimeLag] = []
+    retired: list[RetiredPointerLag] = []
     for name in names:
         m = _POINTER_LATEST.match(name)
         if not m:
@@ -728,9 +763,15 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
         except OSError:
             continue
         mtime_day = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d")
-        if mtime_day < report_day:
-            out.append(PointerMtimeLag(m.group(1), mtime_day, report, report_day))
-    return out
+        if mtime_day >= report_day:
+            continue
+        stem = m.group(1)
+        live, newest_copy = _stem_producing(names, stem, window_start, mtime_day)
+        if live:
+            out.append(PointerMtimeLag(stem, mtime_day, report, report_day))
+        else:
+            retired.append(RetiredPointerLag(stem, mtime_day, newest_copy))
+    return PointerLagRows(out, retired)
 
 
 def mtime_witness(reflection_dir: Path) -> MtimeWitness:
@@ -751,3 +792,69 @@ def mtime_witness(reflection_dir: Path) -> MtimeWitness:
     if report is None:
         return MtimeWitness(None, 0)
     return MtimeWitness(report, body.count(MTIME_WITNESS_MARKER))
+
+
+@dataclass(frozen=True)
+class RetiredPointerLag:
+    """A pattern pointer that is behind its newest note and whose stem has stopped producing.
+
+    `stem` and `mtime_date` are the two facts a human needs to file the retirement;
+    `newest_copy` is the day of the stem's most recent dated archive copy, or None when
+    the directory holds none at all — the evidence that the classification is
+    `retired` and not `lag`. It is deliberately absent for the lag rows: a live producer
+    keeps its row identical to what #2832 specified.
+
+    Not a subclass of `PointerMtimeLag`. A retired pointer has no `report` to be behind
+    in the actionable sense, and sharing a type is what would let a caller's `lag.report`
+    format string keep working on a row that means something else.
+    """
+    stem: str
+    mtime_date: str
+    newest_copy: str | None = None
+
+
+class PointerLagRows(list):
+    """The lag rows `pointer_mtime_lag` found, plus the pointers it classified retired.
+
+    A `list` subclass rather than a tuple of two lists because every consumer of this
+    function as shipped iterates it, indexes it, or tests it for emptiness: `len()` and
+    `if not pointer_lag:` must keep meaning "the lag rows", and a §2e that silently
+    changed its shape would be a second defect wearing this round's commit message.
+    `.retired` is additive, and the one construction site that could forget to populate
+    it is the empty return above, which is empty in both halves by definition.
+    """
+
+    def __init__(self, rows: list | None = None, retired: list | None = None) -> None:
+        super().__init__(rows or [])
+        self.retired = list(retired or [])
+
+
+def _stem_producing(names: list[str], stem: str, window_start: str,
+                    mtime_day: str) -> tuple[bool, str | None]:
+    """Whether `stem` is still producing, judged only from this directory's file names.
+
+    Answers from `names` — the listing of the directory the check was handed — and nothing
+    else: no stem tuple, no skill corpus, no allowlist of retired names. That is the whole
+    design. #2832 refused to narrow the pointer enumeration to its stem tuple because the
+    stale pointer it caught was outside it, and an allowlist of *retired* stems fails the
+    same way in the other direction: three stems have already been retired in this one
+    directory, and the next one is not knowable from here. A dated copy is the producer's
+    own signature — §2e `cp`s the pointer to `<stem>-YYYY-MM-DD-HHMM.md` before overwriting
+    it — so a full window with no copy is the retirement.
+
+    Live when either half says so: the stem wrote a dated copy on or after `window_start`,
+    or `mtime_day` — the pointer's own last write — is at least that recent. The second arm
+    keeps the rule conservative in #2832's direction: a pointer that is new and has no
+    copies yet (a first cycle, or a producer whose `cp` step broke) stays in the lag set
+    rather than being written off, because the one state that must never be silenced is a
+    live pointer that stopped being written.
+
+    Returns `(live, newest_copy_day)`, the copy day being None when the directory holds no
+    dated copy of `stem` at all. Copy names are read through `_dated_copy_rx`, the parser
+    `pattern_staleness` uses for the same filenames, so the two §2e checks cannot disagree
+    about which names count as dated copies of which stem.
+    """
+    _, newest = _newest_matching(names, _dated_copy_rx(stem))
+    day = ("%04d-%02d-%02d" % newest[:3]) if newest is not None else None
+    return (mtime_day >= window_start
+            or (day is not None and day >= window_start)), day

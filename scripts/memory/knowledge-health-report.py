@@ -30,6 +30,7 @@ from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
 from scripts.reflection_archive import (EXPECTED_MTIME_WITNESSES,
+                                        RETIRED_COPY_WINDOW_DAYS,
                                         copy_gaps as _copy_gaps,
                                         mtime_witness as _mtime_witness,
                                         pattern_staleness as _pattern_staleness,
@@ -1399,6 +1400,17 @@ def _referential_integrity_lines(ledger: dict) -> list[str]:
     return out
 
 
+def _retired_of(pointer_lag) -> list:
+    """The pointers `pointer_lag` classified retired, or [] for anything that has none.
+
+    A helper because the section needs the same reading twice: once to decide what its
+    zero sentence is allowed to claim, once to print the rows. Plain `getattr` on a bare
+    list — the shape every pre-#3632 caller and test passes — is the fallback, and
+    `Unmeasured` has no `.retired` either, so both read as none.
+    """
+    return list(getattr(pointer_lag, "retired", []) or [])
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
@@ -1838,7 +1850,14 @@ def generate_report(
         lines.append(f"*Not measured: {pointer_lag.reason} — so no note on disk sets the day "
                      "the pattern pointers are compared against.*")
     elif not pointer_lag:
+        # The two zeros are different claims. "No lag" is not "nothing is behind": a
+        # retired pointer IS behind, and printing "every pointer in the directory is
+        # current" above a file dated 2026-10-13 is the false sentence #3636 exists to
+        # stop, so the qualifying clause is only earned when there is none.
         lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
+                     "pointer whose stem is still producing was written on or after the "
+                     "newest completion note's day." if _retired_of(pointer_lag) else
+                     "Pattern pointers behind their newest report (by mtime): 0 — every "
                      "`*-patterns-latest.md` in the directory was written on or after "
                      "the newest completion note's day.")
     else:
@@ -1855,6 +1874,23 @@ def generate_report(
         lines.append("*A dated copy's name can be current while the pointer behind it is "
                      "not: `pattern_staleness` above reads name stamps and never stats "
                      "the pointer (#2832).*")
+    # Retired pointers print below the count, never inside it. A pointer whose stem has
+    # written no dated archive copy for `RETIRED_COPY_WINDOW_DAYS` days is the residue of a
+    # rename, not a cycle that failed to archive — the distinction #3636 established after
+    # this section's ONLY finding on the live tree was `tool-failure-patterns-latest`, a
+    # name no producer owns since the cycle moved to `tool-patterns-latest.md`. Counting it
+    # as lag trained the reader past the row that can carry a real failure; hiding it
+    # outright would be the other wrong answer, because the file is still on disk and the
+    # day it stopped is what lets a human retire it.
+    retired = _retired_of(pointer_lag)
+    if retired:
+        lines.append("")
+        lines.append(f"Retired pattern pointers, not counted above: {len(retired)} — each "
+                     f"wrote no dated archive copy within {RETIRED_COPY_WINDOW_DAYS} days "
+                     "of the newest report, so its stem has stopped producing")
+        for rp in retired[:SECTION_ROW_CAP]:
+            lines.append(f"- `{rp.stem}.md` — pointer stopped at `{rp.mtime_date}`, last "
+                         f"dated copy: {rp.newest_copy or 'none at all'}")
     lines.append("")
 
     # Separate from the row above on purpose. Pointer mtimes measure the corpus; this

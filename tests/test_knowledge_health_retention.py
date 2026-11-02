@@ -6,6 +6,7 @@ a check that never ran.
 """
 import importlib
 import importlib.util
+import inspect
 import os
 import re
 import sys
@@ -495,3 +496,269 @@ def test_every_completion_note_this_file_writes_is_a_report(tmp_path):
     assert ra.mtime_witness(m).note == f"knowledge-write-{today:%Y-%m-%d}.md"
     assert [r.stem for r in ra.pointer_mtime_lag(m)] == ["tool-patterns-latest"]
     assert not getattr(pattern_staleness(m), "reason", "")
+
+
+# ── #3636: a pointer whose stem stopped producing is residue, not lag ───────────────
+#
+# The live tree gives `pointer_mtime_lag` exactly one finding, and it is
+# `tool-failure-patterns-latest` — mtime 2026-10-13 against a 2026-10-31 note, 0 dated
+# copies of that stem anywhere in the directory against 24 under `tool-patterns-latest`,
+# the name the nightly producer renamed itself to. So §2e's sole signal every night is a
+# file nobody owns, which trains the reader past the row #2832 exists to catch. The split
+# below is made from the directory listing alone: a stem with a dated `<stem>-<stamp>.md`
+# copy inside `RETIRED_COPY_WINDOW_DAYS` of the newest note is producing, one without is
+# retired. `PATTERN_STEMS` stays two-wide — #2832 refused to narrow the pointer
+# enumeration to it precisely because of this file — and no allowlist of retired stems
+# exists, because the next retirement cannot be known from here. Three stems have already
+# been retired in this one directory.
+
+
+def _split_tree(tmp, *, pointer_day: datetime, report_day: datetime,
+                stems: dict[str, datetime | None]) -> Path:
+    """A reflection directory holding several stale pointers, each with its own copy day.
+
+    `_mtime_tree` writes the two governed stems and cannot express a stem that stopped
+    producing, which is the whole variable here. `stems` maps a pointer's name (minus
+    `.md`) to the day of its newest dated copy, or None for "no copy of this stem exists".
+    Every pointer's mtime is `pointer_day`, so all of them lag; only production differs.
+    A copy's own mtime is deliberately NOT what classifies it — the day is read from the
+    copy's NAME, because `_newest_matching`'s rule is that a copy restored by hand carries
+    an mtime describing the restoring, and `cp`-ing a copy must not forge a producer.
+    """
+    d = tmp / "refl-split"
+    d.mkdir()
+    note = d / f"knowledge-write-{report_day:%Y-%m-%d}.md"
+    note.write_text(_complete_note("cycle complete, §2e archived\n"), encoding="utf-8")
+    os.utime(note, (_utc_day(report_day),) * 2)
+    for stem, copy_day in stems.items():
+        p = d / f"{stem}.md"
+        p.write_text("patterns\n", encoding="utf-8")
+        os.utime(p, (_utc_day(pointer_day),) * 2)
+        if copy_day is not None:
+            c = d / f"{stem}-{copy_day:%Y-%m-%d}-0800.md"
+            c.write_text("archived copy\n", encoding="utf-8")
+            os.utime(c, (_utc_day(copy_day),) * 2)
+    return d
+
+
+def test_a_stale_pointer_whose_stem_writes_no_copies_is_retired_not_lagging(tmp_path):
+    """Clause 1: no lag row for a stem with no dated copy in the window, and the retired
+    set names its stem and the day its pointer stopped on.
+
+    `tool-failure-patterns` is the live shape transplanted into a fixture: 18 days behind,
+    no dated copy of its stem anywhere. The window is pinned from both sides in the same
+    node by `gadget-patterns`, whose newest copy falls exactly on the boundary the
+    constant defines, so "within 7 days" is a number the test states rather than one only
+    the implementation knows.
+    """
+    today, eighteen = _days(0), _days(18)
+    edge = today - timedelta(days=ra.RETIRED_COPY_WINDOW_DAYS)
+    d = _split_tree(tmp_path, pointer_day=eighteen, report_day=today, stems={
+        "tool-failure-patterns-latest": None, "gadget-patterns-latest": edge})
+    rows = ra.pointer_mtime_lag(d)
+    assert [r.stem for r in rows] == ["gadget-patterns-latest"], (
+        f"a stem whose newest copy is exactly {ra.RETIRED_COPY_WINDOW_DAYS} days old "
+        f"stopped counting as a live producer, so the window is not the span its name "
+        f"claims: {[r.stem for r in rows]}")
+    assert not any("tool-failure" in r.stem for r in rows), (
+        f"a pointer no producer owns is reported as lag again: {[r.stem for r in rows]}")
+
+    retired = list(rows.retired)
+    assert [r.stem for r in retired] == ["tool-failure-patterns-latest"], retired
+    assert retired[0].mtime_date == f"{eighteen:%Y-%m-%d}", retired
+    assert retired[0].newest_copy is None, (
+        "a stem with no dated copy at all must not claim one in the row that says so")
+
+
+def test_the_copy_window_boundary_is_the_constant_and_an_older_copy_is_retired(tmp_path):
+    """One day past the window, the same fixture reads as retired.
+
+    The pair this node forms with the boundary case in the node above is what makes
+    `RETIRED_COPY_WINDOW_DAYS` a tested number: with only the boundary case, doubling the
+    constant would keep both pointers live and nothing would redden.
+    """
+    today, ten = _days(0), _days(10)
+    d = _split_tree(tmp_path, pointer_day=ten, report_day=today, stems={
+        "widget-patterns-latest": today - timedelta(days=ra.RETIRED_COPY_WINDOW_DAYS + 1)})
+    rows = ra.pointer_mtime_lag(d)
+    assert list(rows) == [], (
+        f"a stem whose last copy is {ra.RETIRED_COPY_WINDOW_DAYS + 1} days old is still "
+        f"reported as a failed cycle: {[r.stem for r in rows]}")
+    assert [(r.stem, r.mtime_date) for r in rows.retired] == [
+        ("widget-patterns-latest", f"{ten:%Y-%m-%d}")], list(rows.retired)
+
+
+def test_a_lagging_pointer_whose_stem_has_a_copy_in_the_window_keeps_its_lag_row(
+        tmp_path):
+    """Clause 2: #2832's case is untouched — same rows, same fields, same type.
+
+    The stale-pointer shape that item caught is a bare `cp` of the dated copy with no
+    pointer write: the copy carries the report's day so `pattern_staleness` sees nothing,
+    and only the pointer's mtime betrays it. That must keep returning the row it returns
+    today, field for field, because §2e's table and every existing reader index it by name
+    and a fix that swallowed it would be the worse half of this change.
+    """
+    today, five = _days(0), _days(5)
+    d = _mtime_tree(tmp_path, pointer_day=five, report_day=today, copy_day=today)
+    assert pattern_staleness(d) == [], "the #2832 control lost its meaning: names lag too"
+    rows = ra.pointer_mtime_lag(d)
+    assert [(r.stem, r.mtime_date, r.report, r.report_day) for r in rows] == [
+        ("tool-patterns-latest", f"{five:%Y-%m-%d}",
+         f"knowledge-write-{today:%Y-%m-%d}.md", f"{today:%Y-%m-%d}")], rows
+    assert all(isinstance(r, ra.PointerMtimeLag) for r in rows), type(rows[0])
+    assert list(rows.retired) == [], (
+        "a pointer whose stem has today's dated copy was classified retired, which would "
+        "hide the exact failure #2832 was filed for")
+
+
+def test_the_live_or_retired_split_is_made_from_the_listing_and_no_stem_list(tmp_path):
+    """Clause 3: two stems named nowhere in the code are told apart correctly.
+
+    `widget-patterns` and `gadget-patterns` exist in no tuple, skill or allowlist, so a
+    correct split here cannot have come from a lookup. The source assertions are the other
+    half of the clause and are not decoration: `PATTERN_STEMS` is the enumeration #2832
+    declined to widen, and a round that added the dead stem to it — or read it inside this
+    check — would satisfy every behavioural node above while re-narrowing the instrument.
+    """
+    assert ra.PATTERN_STEMS == ("tool-patterns-latest",
+                               "conversation-patterns-latest"), ra.PATTERN_STEMS
+    src = inspect.getsource(ra.pointer_mtime_lag) + inspect.getsource(ra._stem_producing)
+    assert "PATTERN_STEMS" not in src, (
+        "the pointer check now reads the stem tuple #2832 refused to enumerate with")
+    consts = [c for c in ra._stem_producing.__code__.co_consts if isinstance(c, str)]
+    assert not [c for c in consts if "patterns" in c], (
+        f"a stem name is hard-coded into the live/retired test, which is an allowlist: "
+        f"{consts}")
+
+    today, ten = _days(0), _days(10)
+    d = _split_tree(tmp_path, pointer_day=ten, report_day=today, stems={
+        "widget-patterns-latest": None,
+        "gadget-patterns-latest": today - timedelta(days=1)})
+    rows = ra.pointer_mtime_lag(d)
+    assert [r.stem for r in rows] == ["gadget-patterns-latest"], list(rows)
+    assert [(r.stem, r.newest_copy) for r in rows.retired] == [
+        ("widget-patterns-latest", None)], list(rows.retired)
+
+
+def test_the_2e_section_prints_zero_lag_and_names_a_retired_pointer_separately(tmp_path):
+    """Clause 4: the rendered §2e, both ways round.
+
+    A tree whose only stale pointer is a retired one prints a lag count of 0 and never
+    puts the dead file in the lag table — that table is where a reader looks for lag — and
+    grows a separate line naming the stem with the day its pointer stopped. The live case
+    is asserted in the same node because the fix must not buy its silence by suppressing
+    lag: with a current dated copy the row has to reach the table exactly as it does today.
+    """
+    today, eighteen = _days(0), _days(18)
+    dead = _split_tree(tmp_path, pointer_day=eighteen, report_day=today,
+                       stems={"tool-failure-patterns-latest": None})
+    section = _section(_report([], [], pointer_lag=ra.pointer_mtime_lag(dead)))
+    assert "Pattern pointers behind their newest report (by mtime): 0" in section, section
+    assert "| `tool-failure-patterns-latest.md`" not in section, (
+        "the retired pointer was rendered as lag, where #2832's readers look")
+    assert "Retired pattern pointers, not counted above: 1" in section, section
+    # The count may be 0 while something IS behind, so the sentence that carries it may
+    # not claim the directory is current — that claim is earned only with nothing retired.
+    assert "every pointer whose stem is still producing" in section, section
+    assert "every `*-patterns-latest.md` in the directory" not in section, section
+    assert (f"`tool-failure-patterns-latest.md` — pointer stopped at "
+            f"`{eighteen:%Y-%m-%d}`") in section, section
+    # The #2832 footnote closes the lag TABLE, so a tree that renders no table must not
+    # grow one. It sat inside the retired branch for a revision of this round, at which
+    # point a retired-only directory printed prose about a table it did not have.
+    assert "`pattern_staleness` above reads name stamps" not in section, (
+        "the #2832 footnote printed on a tree with no lag table")
+
+    live = _mtime_tree(tmp_path / "live", pointer_day=eighteen, report_day=today,
+                       copy_day=today)
+    live_section = _section(_report([], [], pointer_lag=ra.pointer_mtime_lag(live)))
+    assert "Pattern pointers behind their newest report (by mtime): 1" in live_section
+    assert (f"| `tool-patterns-latest.md` | `{eighteen:%Y-%m-%d}` "
+            f"| `{today:%Y-%m-%d}` |") in live_section
+    assert "Retired pattern pointers" not in live_section, live_section
+    # The footnote is what tells a reader that a current NAME stamp is not a current
+    # POINTER: #2832's whole finding. One revision of this round indented those two lines
+    # into the retired branch, and the table row above still passed — so this assertion,
+    # not the row, is what pins clause 4's "the same table row it prints today".
+    assert "`pattern_staleness` above reads name stamps" in live_section, (
+        "a live lag lost the #2832 footnote that closes its table")
+
+    clean = _section(_report([], [], pointer_lag=[]))
+    assert "Retired pattern pointers" not in clean, (
+        "a directory with nothing retired grew a retired-pointer line anyway")
+    assert "every `*-patterns-latest.md` in the directory" in clean, (
+        "with nothing retired the section lost its unqualified all-current sentence, so "
+        "the qualification is being applied to the wrong zero")
+
+
+def test_the_retired_half_stays_empty_wherever_the_check_declines_to_measure(tmp_path):
+    """Clause 5: the new `.retired` half cannot out-vote an unmeasured check.
+
+    `PointerLagRows` is a `list` subclass so every reader of this function as shipped
+    keeps working: `len()`, iteration, `not rows` and `== []` must go on meaning the LAG
+    rows, and the first case below exercises all four on a measured tree. What is new is
+    the second half, and the failure it rules out is asymmetric: a directory whose only
+    dated note is #3596's 68-byte `in-progress` stub has no report day, so nothing is
+    behind anything, and a retired half populated there would have §2e naming a file as
+    residue on the same night it says it could not measure. The dead pointer is in that
+    fixture on purpose — 18 days old with no dated copy, the exact shape the retired half
+    exists to classify — so this goes red if the classification is ever moved above the
+    report-day bar. Read through `khr._retired_of`, the renderer's own reader, because the
+    declined case answers with `Unmeasured`, which carries a reason and no `retired` at
+    all. The absent-tree case is the same rail from the other side: empty rows, empty
+    retired, no invented name.
+    """
+    today, one = _days(0), _days(1)
+    live = _split_tree(tmp_path, pointer_day=one, report_day=today,
+                       stems={"tool-patterns-latest": today})
+    rows = ra.pointer_mtime_lag(live)
+    assert len(rows) == 1 and [r.stem for r in rows] == ["tool-patterns-latest"], list(rows)
+    assert rows != [] and bool(rows) and rows[0].mtime_date == f"{one:%Y-%m-%d}", rows
+    assert rows.retired == [], (
+        f"a stem with a copy inside the window was written off as retired: "
+        f"{[(r.stem, r.mtime_date) for r in rows.retired]}")
+
+    d = tmp_path / "stub-only"
+    _stub_note(d, _STUB_NAME)
+    dead = d / "tool-failure-patterns-latest.md"
+    dead.write_text("# Tool Failure Patterns\n\nresidue\n", encoding="utf-8")
+    old = _days(18).timestamp()
+    os.utime(dead, (old, old))
+
+    declined = ra.pointer_mtime_lag(d)
+    assert len(declined) == 0 and list(declined) == [] and declined == [] \
+        and not declined, f"an unmeasured check reported lag rows: {list(declined)}"
+    assert khr._retired_of(declined) == [], (
+        f"the retired half named residue the check never measured against: "
+        f"{[(r.stem, r.mtime_date) for r in khr._retired_of(declined)]}")
+    assert _STUB_NAME in getattr(declined, "reason", ""), (
+        f"the decline named no note, so §2e falls through to its confident zero: "
+        f"{getattr(declined, 'reason', '')!r}")
+    assert "Pattern pointers behind their newest report (by mtime): 0" not in _section(
+        _report([], [], pointer_lag=declined)), (
+        "the rendered section printed a zero over a directory that was never measured")
+
+    missing = ra.pointer_mtime_lag(tmp_path / "absent-reflection-tree")
+    assert missing == [] and list(missing) == [] and khr._retired_of(missing) == [], (
+        "an absent directory grew rows or retired names")
+
+
+def test_the_deferral_about_the_dead_stem_no_longer_survives_in_the_prose(tmp_path):
+    """The comment that parked this decision may not keep parking it.
+
+    `#_POINTER_LATEST`'s comment ended "Whether that file is §2e-governed is a separate
+    ruling", and #2996 — the item that shipped the check — is `done`, so no other pass
+    would ever revisit it: the deferral is what let one dead file own §2e for weeks. The
+    prose is graded as a surface because it is what the next reader of this file reads
+    before touching the shape match, so it has to carry both halves of the settled answer:
+    the shape stays (that is #2832's finding), and a stem that stopped writing dated
+    copies is residue rather than lag.
+    """
+    src = inspect.getsource(ra)
+    head = src[src.index("#: A governed pattern pointer"):]
+    block = head[:head.index("_POINTER_LATEST = re.compile")]
+    assert "separate ruling" not in block, block
+    assert "retired" in block.lower(), block
+    assert "#2832" in block, "the reason the shape match stays must stay beside it"
+    assert "separate ruling" not in (ra.pointer_mtime_lag.__doc__ or "")
+    assert "retired" in (ra.pointer_mtime_lag.__doc__ or "").lower()
