@@ -159,7 +159,52 @@ queries:
     category: multi-hop
     expect_entities: ["Entity Resolution Sweep", "Conversation Relation Linking", "KG Mention Classifier", "Semantic Entity Resolution", "Data Pipeline"]
     expect_docs: ["autonomy/48-", "autonomy/51-", "autonomy/67-", "autonomy/74-", "autonomy/24-"]
-    notes: "Should surface ≥3 of the 5 KG-chain tasks. Pure semantic search may miss some."
+    # The bar stays "3 of the 5" (#3485, 2026-11-02). What was missing was not the bar but
+    # every measurement about it, so #1129, #1237 and #3369 each cited this line as an unmet
+    # contract while the route to closing it had already been priced out. The readings below
+    # are RECORDINGS with their own windows, not this query's state: a window is closed, so a
+    # later reader re-derives it over the same dates and gets the same numbers. Each is
+    # pinned as text by a node in tests/test_doc_candidate_pool.py.
+    notes: >-
+      Should surface ≥3 of the 5 KG-chain tasks. Pure semantic search may miss some.
+      Measured reading recorded 2026-10-27, and the bar has never been met: max doc_recall
+      0.4 (two of the five) over the 117 baseline artifacts dated 2026-09-22..2026-10-26 in
+      ~/lloyd-data/eval/baselines, distribution 0.0 x36 / 0.2 x44 / 0.4 x37, nothing at 0.6
+      or above. Over the nightly leg of that same window - the 34 nightly-*.json artifacts
+      from nightly-20260923-20260923-073952 to nightly-20261026-20261026-060320 - the split
+      is 0.2 x13 / 0.4 x21. docs_matched never carried autonomy/48-, autonomy/51- or
+      autonomy/67- in any of those artifacts, only the 24- and 74- labels (recorded as
+      autonomy/24_ 80x and autonomy/74_ 38x, because _score normalizes '-' to '_' before it
+      writes them). That is a statement about the scored answer, not about findability: the
+      same corpus put autonomy/48- and autonomy/67- inside the 240-row pre-rank pool at ranks
+      45 and 132 on 2026-10-26, and autonomy/51- absent from that pool while still findable
+      for its own name at rank 1. The routes to a third matched document are closed by
+      measurement, not by ruling. A wider reranked chain costs this metric: #1336's paired
+      bootstrap over djev-160 against collection-240 + cross-encoder measured doc_recall
+      -0.081 [-0.154, -0.010] against MRR +0.083 [+0.011, +0.154] - it ranks better and
+      loses hits - and production's doc leg hands that chain a 32-row djev canvas, whose
+      ceiling agent_mcp/vault.py states as "the ceiling is the pool, not djev: no ~32-row
+      pool holds as many findable documents as collection-240 did". Depth is separately
+      expensive, and these are two different figures: #1129 read the nightly latency_ms_avg
+      series going 707.8 ms (2026-09-13) to 4,226 ms (2026-09-15) once #504 set
+      candidateLimit to the 240-row pool, and re-priced that arm fresh at 3,672-4,027 ms at
+      pool 240 against 2,161-2,291 ms at 40 rows, noting a ~16x cold/warm spread on the
+      probe. Asking deeper was measured 2026-10-27 at 9f0d5e6d as no help: limits 40/60/120
+      answered 28 rows and the matched documents were still only the 24- and 74- labels. What
+      that leaves as the contract already holds and is asserted live:
+      test_the_eval_scorer_itself_reports_the_target_query_hitting scores this entry through
+      eval/run_eval.py's own _score against the live corpus, and its binding witness -
+      doc_hit true - was recorded 2026-10-27 on 34 of 34 nightly production-config
+      artifacts, nights 2026-09-23 to 2026-10-26. Re-derive that count over exactly those
+      nights, and do not let a newer night overwrite the window: cd ~/lloyd &&
+      ~/lloyd/.venvs/lloyd/bin/python -c "import glob,json,re;f=[x for x in
+      sorted(glob.glob('/home/alansrobotlab/lloyd-data/eval/baselines/nightly-*.json')) if
+      '20260923'<=re.search(r'nightly-(\d{8})',x).group(1)<='20261026'];s=[next(r['scoring']
+      for r in json.load(open(x))['records'] if r['id']=='kg-maintenance-tasks') for x
+      in f];print(len(f),sum(1 for k in s if k['doc_hit']))" which printed 34 34 on
+      2026-11-02 - nights counted, nights that hit. doc_hit sits at scoring.doc_hit on the
+      record whose id is this one, so a flat read of a record answers None for every night
+      and reads as the opposite of the truth.
 
   - id: lloyd-vllm-rel
     query: "how does Lloyd use vLLM?"

@@ -1136,6 +1136,272 @@ def test_the_widenings_price_is_stated_as_a_fresh_query_not_a_cached_repeat():
     assert set(R.LATENCY_BUDGET_MS) == {R.CONTEXT_NIGHTLY, R.CONTEXT_PAIRED_CHECK}
 
 
+# ── #3485: the yaml's own note has to carry the measurements, not only the bar ──
+#
+# Every node above reads two facts out of the eval entry: its five gold documents and its
+# "3 of the 5" bar. Nothing read the rest of the note, which is how #1129, #1237 and #3369
+# could each cite that bar as an unmet contract with no figure beside it — and how the two
+# routes for closing it stayed priced-out-but-uncited. The nodes below read the rest of the
+# note out of `eval/vault_recall_queries.yaml` itself, never a transcription into a test,
+# and each one fails when its own reading is dropped, re-dated, or conflated with somebody
+# else's number.
+
+#: Every key the `kg-maintenance-tasks` entry has ever had. `notes` is the only one prose
+#: may move: `id` is what a trend audit joins on and the two label lists are what
+#: `labels_sha256` hashes, so those three decide whether a night is comparable at all.
+KG_ENTRY_KEYS = frozenset({"id", "query", "category", "expect_entities", "expect_docs",
+                           "notes"})
+
+
+def _eval_root():
+    """The tree under test, with it on `sys.path` so its `eval/` package imports.
+
+    Derived from `vault.__file__`, the same anchor `test_the_entry_…` nodes above use, so a
+    gate run inside a worktree reads that worktree's yaml and never the live checkout's.
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(vault.__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    return root
+
+
+def _kg_eval_entry():
+    """The live `kg-maintenance-tasks` entry, from the file that owns the contract.
+
+    The note nodes ask this instead of carrying a copy. That is what lets a legitimate gold
+    re-point move the measurement set without red-ing a note node — the bar and its readings
+    stay the eval's own sentences, and only the set equality at
+    `test_the_eval_entry_asks_for_three_of_the_five_gold_documents_not_all_five` is entitled
+    to notice the gold itself moved.
+    """
+    import yaml
+
+    queries = yaml.safe_load(
+        (_eval_root() / "eval" / "vault_recall_queries.yaml").read_text())["queries"]
+    return next(q for q in queries if q.get("id") == "kg-maintenance-tasks")
+
+
+def test_the_note_carries_the_measured_doc_recall_ceiling_as_a_dated_reading():
+    """The bar was never met, and the note now says so with its window and its spread.
+
+    #1129, #1237 and #3369 each cited "≥3 of the 5" as unmet; none carried the figure,
+    because nothing in the repo did. Recorded 2026-10-27 over the 117 baseline artifacts
+    dated 2026-09-22..2026-10-26 in `~/lloyd-data/eval/baselines` — walk that directory,
+    select the record whose `id` is this query's, print `scoring.doc_recall` — the ceiling
+    is 0.4, two of the five, with the distribution 0.0 x36 / 0.2 x44 / 0.4 x37 and nothing
+    at 0.6 or above. The note carries the figure, the artifact count it was measured over,
+    the closed window it is bounded by and the spread, because a bare 0.4 reads as tonight's
+    score and a count without a window is the claim no later pass can re-derive.
+    """
+    notes = _kg_eval_entry()["notes"]
+
+    assert "3 of the 5" in notes, "the eval's bar itself has gone missing from its own note"
+    # The ceiling as a collocation, not the digit: `0.4` also appears in the nightly split and
+    # in the distribution, so a note that lost the measurement while keeping its arithmetic
+    # would satisfy a bare `"0.4" in notes` and leave a reader with no ceiling to cite.
+    assert "max doc_recall 0.4" in notes, (
+        f"the note no longer states the measured ceiling beside the metric it measures: "
+        f"{notes[:400]}…")
+    assert "two of the five" in notes, "the ceiling has lost what 0.4 is two OF"
+    assert "117" in notes, "the reading states no artifact count"
+    assert "recorded 2026-10-27" in notes, "the reading is undated"
+
+    i = notes.find("max doc_recall 0.4")
+    window = notes[max(0, i - 260):i + 320]
+    assert "2026-09-22" in window and "2026-10-26" in window, (
+        "the ceiling is not bounded by the dates it was measured over, so it reads as this "
+        f"query's current state: …{window}…")
+    for rung in ("0.0 x36", "0.2 x44", "0.4 x37"):
+        assert rung in notes, f"the stated distribution lost a rung ({rung})"
+
+
+def test_the_note_states_the_nightly_split_as_a_recording_and_keeps_it_a_scoring_reading():
+    """The nightly half: bounded by count and by its two artifact names, and scoped to scoring.
+
+    `~/lloyd-data/eval/baselines/` gains one `nightly-*.json` per nightly run and nothing
+    prunes it — 34 as of 2026-10-27, 41 by 2026-11-02 — so the split (0.2 x13 / 0.4 x21) is
+    a recording of nights 2026-09-23 to 2026-10-26, never a property of the store. The note
+    names the count, both endpoint artifacts and the window for the same reason the header's
+    23-of-23 figure does: a count with no window goes red tomorrow with nothing broken.
+
+    The scoping matters as much as the numbers. `docs_matched` never carried `autonomy/48-`,
+    `autonomy/51-` or `autonomy/67-` in any artifact of that window, while the 2026-10-26
+    pool-containment recording above put 48- and 67- INSIDE the 240-row pre-rank pool at
+    ranks 45 and 132, and 51- absent from that pool yet findable for its own name at rank 1.
+    Both are true of one corpus, so the note says "never in docs_matched" and keeps saying
+    what the pool did. A note that called the three prefixes unfindable would contradict the
+    evidence this module's own narrowing rests on and re-open a retrieval question nobody
+    asked.
+    """
+    notes = _kg_eval_entry()["notes"]
+
+    assert "34 nightly-*.json" in notes, "the nightly reading states no artifact count"
+    assert "0.2 x13" in notes and "0.4 x21" in notes, "the nightly split is missing"
+    assert "nightly-20260923-20260923-073952" in notes, "the window's first night is unnamed"
+    assert "nightly-20261026-20261026-060320" in notes, "the window's newest night is unnamed"
+
+    i = notes.find("docs_matched")
+    assert i > 0, "the note never says which gold documents the scorer matched"
+    span = notes[max(0, i - 40):i + 320]
+    assert "never carried" in span, (
+        "the absence has to stay an absence of a MATCHED row: "
+        f"…{span}…")
+    for prefix in ("autonomy/48-", "autonomy/51-", "autonomy/67-"):
+        assert prefix in span, f"the note no longer names {prefix} as never matched"
+    assert "autonomy/24_ 80x" in span and "autonomy/74_ 38x" in span, (
+        "the two labels that DID match have to be named with their counts, or 'never' reads "
+        "as 'nothing ever matched'")
+
+    for overstatement in ("unfindable", "cannot be found", "not findable"):
+        assert overstatement not in notes, (
+            f"{overstatement!r} contradicts this file: the same corpus reached 48- and 67- "
+            "inside the 240-row pre-rank pool on 2026-10-26")
+    assert "240-row pre-rank pool at ranks 45 and 132 on 2026-10-26" in notes, (
+        "the pool-containment side of the same reading has gone, so the scoring absence "
+        "stands alone and looks like a findability claim")
+
+
+def test_only_the_note_of_the_entry_is_prose_and_a_note_edit_cannot_move_the_labels():
+    """What the note may NOT do: touch a key, or move the fingerprint the trend audit joins.
+
+    `gold_label_fingerprint` (`eval/run_eval.py`) is `labels_sha256` over the scored
+    queries, and `labels_sha256` (`eval/label_agreement_ceiling.py`) hashes exactly
+    `[id, expect_entities, expect_docs]`. So a notes-only edit provably cannot invalidate a
+    ceiling artifact or split a trend pair — and that is checked here as an equality over a
+    rewritten note, not as a hard-coded hex, because a legitimate gold re-point must red the
+    set-equality node above and never a note node.
+    """
+    from eval.label_agreement_ceiling import labels_sha256
+    from eval.run_eval import gold_label_fingerprint
+    import yaml
+
+    root = _eval_root()
+    queries = yaml.safe_load(
+        (root / "eval" / "vault_recall_queries.yaml").read_text())["queries"]
+    spec = next(q for q in queries if q.get("id") == "kg-maintenance-tasks")
+
+    assert set(spec) == set(KG_ENTRY_KEYS), (
+        f"the entry's key set moved ({sorted(set(spec) ^ set(KG_ENTRY_KEYS))}); the gold "
+        "fingerprint is id plus the two label lists, and a renamed or added key is not a "
+        "note edit")
+    assert set(spec["expect_docs"]) == set(EVAL_DOC_PREFIXES), (
+        f"the five gold documents moved: {sorted(spec['expect_docs'])}")
+    assert spec["query"] == KG_QUERY, "the note's entry is no longer the query this file is about"
+
+    rewritten = [{**q, "notes": (q.get("notes") or "") + " appended reading"}
+                 for q in queries]
+    ids = [q["id"] for q in queries]
+    assert gold_label_fingerprint(rewritten, ids) == gold_label_fingerprint(queries, ids), (
+        "rewriting a note moved the gold fingerprint, so the trend audit and the ceiling "
+        "divisor would refuse every pair from here on — a note is not label surface")
+    assert labels_sha256([dict(spec, notes="")]) == labels_sha256([spec]), (
+        "labels_sha256 now hashes something beside id and the two label lists, so the "
+        "notes-only guarantee every reading above rests on is gone")
+
+
+def test_the_note_attributes_each_closed_route_figure_to_the_measurement_that_closed_it():
+    """Both routes to a third matched document, each with its own number and its own source.
+
+    They are four different readings and the whole defect history of this line is conflating
+    them, so the note keeps them apart and this node fails if they merge again:
+
+      * a wider reranked chain costs THIS metric — #1336's paired bootstrap over djev-160
+        against collection-240 + cross-encoder, doc_recall -0.081 [-0.154, -0.010] against
+        MRR +0.083 [+0.011, +0.154]: it ranks better and loses hits. Production's doc leg
+        hands that chain a 32-row canvas, whose ceiling `agent_mcp/vault.py` owns.
+      * depth is separately expensive: #1129's nightly `latency_ms_avg` series 707.8 ms
+        (2026-09-13) → 4,226 ms (2026-09-15), the 240-row `candidateLimit` #504 introduced.
+      * and the fresh re-price of that same arm, 3,672-4,027 ms at pool 240 against
+        2,161-2,291 ms at 40 rows — read from `_qmd_daemon_search`'s own docstring below
+        rather than transcribed, so the note cannot cite a retired figure.
+      * asking deeper was measured 2026-10-27 at 9f0d5e6d as no help: limits 40/60/120
+        answered 28 rows and the matched documents were still only the 24- and 74- labels.
+
+    The one phrasing this node refuses is the conflation the item was filed about: a single
+    "4,226 ms = 6x" claim, which fuses a nightly average with per-query rerank work and can
+    be checked against neither. (The ~16x that IS in the note is #1129's cold/warm spread on
+    its own probe, which it states as that.)
+    """
+    notes = _kg_eval_entry()["notes"]
+
+    assert "-0.081 [-0.154, -0.010]" in notes and "+0.083 [+0.011, +0.154]" in notes, (
+        "the cost of the wider chain is no longer stated with both of its bootstrap figures")
+    assert "djev-160 against collection-240 + cross-encoder" in notes, (
+        "the arm is unnamed, and the number reads as if production's own leg was measured twice")
+    assert "#1336" in notes, "the closed chain's route names no source"
+    assert "32-row djev canvas" in notes and "agent_mcp/vault.py" in notes, (
+        "the note has to name the ceiling production actually runs and who owns it")
+
+    assert "707.8 ms (2026-09-13) to 4,226 ms (2026-09-15)" in notes, (
+        "the nightly latency series is gone or lost its dates")
+    assert "504" in notes and "1129" in notes, "the latency route names no source"
+    doc = inspect.getsource(vault._qmd_daemon_search)
+    for price in ("3,672-4,027", "2,161-2,291"):
+        assert f"{price} ms" in doc, (
+            f"the owning seam no longer prices that arm at {price} ms — re-measure it before "
+            "the note repeats it")
+        assert f"{price} ms" in notes, f"the note lost its {price} ms re-price"
+    assert "at pool 240 against" in notes, (
+        "the two re-prices have to name their pool widths, or they are two numbers and no claim")
+
+    assert "measured 2026-10-27" in notes and "no help" in notes, (
+        "the deeper-ask measurement is gone, so 'widen the ask' looks untried")
+    assert "limits 40/60/120" in notes and "28 rows" in notes, (
+        "the deeper-ask reading lost its ask and its answer")
+
+    for conflated in ("4,226 ms = 6x", "4,226 ms 6x", "6x, 40"):
+        assert conflated not in notes, (
+            f"{conflated!r} fuses the nightly latency average with per-query rerank work")
+
+
+def test_the_note_names_the_binding_live_witness_and_the_command_that_re_counts_it():
+    """The contract this entry still has is already held, and the note has to say where.
+
+    A wider chain costs hits and depth costs latency, so what is left to hold is the thing
+    `test_the_eval_scorer_itself_reports_the_target_query_hitting` asserts: the eval's own
+    `_score` over this entry against the live corpus. Its binding witness — `doc_hit` true —
+    was recorded 2026-10-27 on 34 of 34 nightly production-config artifacts, nights
+    2026-09-23 to 2026-10-26. Before this note nobody reading the yaml could find that, so
+    #3369 booked an absence of a witness that has never been absent.
+
+    Like the header's 23-of-23 recording, the count is pinned as text with its window and a
+    command that re-derives it, never as a live count of the store — that store gains a file
+    every nightly run and is never pruned. This node itself reads only the yaml, so it is not
+    `live_vault` marked and the gate does run it: the claim under test is that the note names
+    the witness, not that the witness is currently green.
+    """
+    notes = _kg_eval_entry()["notes"]
+
+    assert "test_the_eval_scorer_itself_reports_the_target_query_hitting" in notes, (
+        "the note no longer names the node that holds this entry's contract, so the next "
+        "owed-check pass books an absence again")
+    assert "34 of 34" in notes and "doc_hit" in notes, (
+        "the witness is no longer stated as a dated count")
+    i = notes.find("34 of 34")
+    window = notes[max(0, i - 120):i + 240]
+    assert "2026-09-23" in window and "2026-10-26" in window, (
+        f"the count is not bounded by its nights, so it reads as the store's state: …{window}…")
+    assert "run_eval.py" in notes, "the witness has to name that it scores through the eval's scorer"
+
+    cmd_at = notes.find("python -c")
+    assert cmd_at > 0, "the note names no command that re-counts the nightly store"
+    cmd = notes[cmd_at:]
+    assert "lloyd-data/eval/baselines" in cmd, (
+        "the command must name the store it walks, or a reader cannot run it")
+    assert "kg-maintenance-tasks" in cmd and "records" in cmd and "scoring" in cmd \
+            and "doc_hit" in cmd, (
+        "the re-derivation command must select this query's record and descend records -> "
+        "scoring -> doc_hit; any shallower read prints None for every night and reads as "
+        "the opposite of the truth")
+    assert "20261026" in cmd and "20260923" in cmd, (
+        "the command has to filter to the window it claims, or a newer night silently "
+        "overwrites the recording")
+    assert "printed 34 34 on 2026-11-02" in notes, "the command states no witness output"
+
+
 if __name__ == "__main__":
     # The command the header names, runnable as the header says it (#2571). Prints only:
     # every claim in this file stays a node, so a readable line here is never a pass —
