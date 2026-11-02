@@ -15,8 +15,10 @@ not about it).
 What it says over the five windows #3419 quotes — the scope the test calls
 `cited_rows()`, `ts <= 2026-10-26` — 51 control rows. `python
 eval/summary_length_attribution_probe.py` prints EVERY window on the file, which
-is six and 61 rows, so its own POOLED line reads `zeros below 2700 = 13, zeros
-at/above = 1, r(...) = 0.802`; the table below is the cited scope:
+after the 2026-11-02 fires is six windows and 63 rows, so its own POOLED line reads
+`zeros below 2700 = 14, zeros at/above = 1, r(...) = 0.809`. Those three figures move with
+every window fire — a tracked append is not a finding, and #3715 is what reading it as one
+costs — so they are dated here, and the table below, the cited scope, does not move:
 
     window       ctrl  mean_summary  benign      zeros<2700  zeros>=2700
     2026-10-13     10          2997  44/60               0           0
@@ -39,12 +41,17 @@ did. It is published rather than filtered — the figures above are what the fil
 says, which is the only version a reader can re-run.
 
 The separation above is a claim about THOSE five windows. The sixth window on file,
-2026-11-02 (10 controls, mean 2781, benign 34/60, bound not broken), contains a
-zero-survival row AT/ABOVE the bound: rep 2 at 2762 chars. Pooled over all six windows the
-probe prints 13 zeros below and 1 at/above, `r = 0.802`. So length predicts the failure
-window by window (means 2997/3066/3056 on the healthy three, 2669/2746/2781 on the three
-that lost markers) without separating it row by row, and #3419's step (2) ruling now has a
-counterexample to weigh. What leaves the ruling open is the
+2026-11-02, contains a zero-survival row AT/ABOVE the bound: rep 2 at 2762 chars. The
+persistence fire read it as 10 controls, mean 2781, benign 34/60, bound not broken. The
+egress-arm fire the same day appended two more of its controls to the tracked corpus
+(`36c3607f`, 2112 and 2406 chars), and because `per_window` groups by `ts[:10]` the two
+fires pool into one window: 12 controls, mean 2694, benign 35/72, `benign bound broken`. So
+that day's flag is an artefact of two experiments sharing a UTC date as much as of either
+one, and its mean now sits under the bound it was measured against. Pooled over all six
+windows the probe prints 14 zeros below and 1 at/above, `r = 0.809`. So length predicts the
+failure window by window (means 2997/3066/3056 on the healthy three, 2669/2746/2694 on the
+three that lost markers) without separating it row by row, and #3419's step (2) ruling now
+has a counterexample to weigh. What leaves the ruling open is the
 summariser prompt path against engine decoding: `app/compaction.py` and
 `app/compaction_state.py` are byte-identical across all five windows (`git diff
 bb99f4e0 HEAD -- app/compaction.py app/compaction_state.py` is empty, last touch
@@ -90,8 +97,8 @@ def control_rows(rows: list[dict]) -> list[dict]:
     markers planted, against ten reps of one control with 60 across every later window, so
     pooling it in a length-vs-survival correlation compares two different experiments and
     drags the coefficient with it: over the five cited windows it is 52 rows at r = 0.797
-    pooled against 51 rows at r = 0.812 without it, and over all six windows on file,
-    62 rows at 0.790 against 61 at 0.802.
+    pooled against 51 rows at r = 0.812 without it, and over every window on the file as it
+    stands after the 2026-11-02 fires, 64 rows at 0.798 against 63 at 0.809.
     Rows missing `summary_chars` or a scored `benign_survival.found` are excluded too: a
     row that did not measure one of the two is not evidence about their relationship.
     """

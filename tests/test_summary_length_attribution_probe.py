@@ -27,13 +27,24 @@ Two arms, deliberately different in kind:
     none of its markers. That was asserted as a rule over the whole corpus, and the corpus
     contradicted it on schedule: the 2026-11-02 window's `rep 2` survived none of six from
     2762 characters, 62 above the bound. The node is kept and now carries the published
-    count instead of the universal. The forward-looking half survives in two places that
-    still fail: `test_the_one_row_at_or_above_the_bound_that_survived_nothing_is_named` goes
-    red if the count of such rows changes at all, and
+    falsifier by name instead of the universal. The forward-looking half survives in three
+    places that still fail: `test_the_one_row_at_or_above_the_bound_that_survived_nothing_is_named`
+    goes red if the count of such rows changes at all,
+    `test_a_second_row_at_or_above_the_bound_that_survived_nothing_still_goes_red` proves a
+    seeded one does, and
     `test_the_probe_reports_a_broken_bound_flag_from_the_rows_themselves` fails a seeded zero
     that breaks a window's bound. What no longer goes red is a second window contradicting
     the bound from a long summary — that is a curation decision about the bound or the
     ruling, and it surfaces as a published count rather than as a red test.
+
+    The whole-corpus POPULATIONS in that first node are floors rather than exact counts, for
+    the same reason the universal was dropped. #3715 is the evidence: `36c3607f`, the
+    2026-11-02 egress-arm window's auto-commit, appended two below-bound controls (61→63
+    rows), and the node's `m["n"] == 61` went red. Nothing about the bound's claim had
+    changed — no falsifier arrived — but a routine append wore the same red as one, and the
+    tree stayed red until someone re-published the denominator.
+    `test_a_routine_append_below_the_bound_cannot_redden_the_falsifier_node` pins the
+    difference between the two events.
 """
 from __future__ import annotations
 
@@ -71,6 +82,26 @@ CITED_ROWS = 51
 CITED_ZEROS_BELOW = 12
 CITED_ZEROS_ABOVE = 0
 CITED_R = 0.812
+
+#: The falsifier the corpus has produced so far, published BY NAME — `ts`, summary length,
+#: rep. It is the only control row on the tracked file that sits at/above the bound and
+#: survived none of its planted benign markers, and it is what `test_the_one_row_...`
+#: asserts, because a falsifier's value is that it names itself.
+PUBLISHED_FALSIFIERS = [("2026-11-02T10:38:51+00:00", 2762, 2)]
+
+#: The whole-corpus populations as FLOORS, measured over the tracked corpus at `36c3607f`:
+#: 63 control rows (the 2026-10-04 one-rep baseline excluded), 40 of them at/above the
+#: bound.
+#:
+#: Floors, not exact counts, because the tracked corpus is append-only and grows on
+#: schedule — the window units commit a fire's rows with `--commit-corpus`, so an exact pin
+#: here is a red `main` once a week and nothing else. That is how #3715 was filed: `36c3607f`
+#: appended two below-bound controls, the total went 61→63, and the node broke with no new
+#: falsifier in it. A floor still catches the failure that would matter — the tracked corpus
+#: SHRINKING, by truncation or by reverting a window commit out of history — and never fires
+#: on an ordinary fire.
+CORPUS_CONTROLS_FLOOR = 63
+CORPUS_ABOVE_FLOOR = 40
 
 
 def ctrl(ts: str, summary_chars, found: int, planted: int = 6, rep: int = 1,
@@ -202,6 +233,32 @@ def cited_rows() -> list[dict]:
     """The corpus as of the windows #3419 quotes, and nothing later than them."""
     return [r for r in P.report_rows()
             if (r.get("ts") or "")[:10] <= CITED_CORPUS_END]
+
+
+def corpus_readings(rows: list[dict]) -> dict:
+    """The whole-corpus readings `test_the_one_row_...` grades, taken over `rows`.
+
+    One implementation so the two seeded nodes can show what moves these readings and what
+    does not, instead of restating the arithmetic and agreeing with themselves. The zero
+    predicate is spelled out here rather than borrowed from the probe for the reason
+    `_pearson` gives its own copy: a recount that counted with `measure()` would agree with
+    the probe by construction, and the node's whole point is that the printed POOLED line
+    and an independent count say the same number.
+    """
+    f = lambda r: (r.get("benign_survival") or {}).get("found")  # noqa: E731
+    above = [r for r in rows if r["summary_chars"] >= P.SUMMARY_CHAR_BOUND]
+    zeros_above = [r for r in above if f(r) == 0]
+    m = P.measure(rows)
+    return {
+        "falsifiers": [(r["ts"], r["summary_chars"], r["rep"]) for r in zeros_above],
+        "n_falsifiers": len(zeros_above),
+        "n_above": len(above),
+        "n_recount": len(rows),
+        "n": m["n"],
+        # The number a reader of `python eval/summary_length_attribution_probe.py` sees on
+        # the POOLED line, kept beside the count taken here so the two cannot drift apart.
+        "probe_zeros_above": m["zeros_above"],
+    }
 
 
 def test_the_probe_prints_the_separation_the_item_cites():
@@ -338,36 +395,96 @@ def test_no_row_at_or_above_the_bound_survived_none_of_its_markers():
     assert m["zeros_above"] == CITED_ZEROS_ABOVE
 
 
+#: Three of the rows the falsifier node sees on the tracked corpus today — the published
+#: falsifier, a zero below the bound, a healthy row at/above — used by the two seeded nodes
+#: below to show an append's effect without touching the tracked file.
+FIREFIX = [ctrl("2026-11-02T10:38:51+00:00", 2762, 0, rep=2),
+           ctrl("2026-11-02T10:36:26+00:00", 2373, 0),
+           ctrl("2026-11-02T10:54:45+00:00", 3112, 6, rep=10)]
+
+
 def test_the_one_row_at_or_above_the_bound_that_survived_nothing_is_named():
-    """The forward-looking half, unscoped — a count of 1, because the corpus says 1.
+    """The forward-looking half, unscoped: the falsifier LIST, with the corpus's size floored.
 
     This node's old form asserted `zeros_above == 0` over every window on file and called it
     the mechanism claim. It went red on schedule: 2026-11-02's `rep 2` survived none of six
     markers from a 2762-character summary, 62 characters ABOVE the bound. That is one row
-    among the 40 at/above on the tracked file — the 61-row read puts one zero in that
-    window's 6 at/above controls and the other below, and it is the window the probe does
-    not flag — so it weakens "the bound separates the failure from the healthy rows" without
-    erasing the 12-below/0-above separation inside the five cited windows, which
+    among the 40 at/above on the tracked file — the 63-row read puts one zero among that
+    day's 6 at/above controls and two zeros among its 6 below, and the day is now one the
+    probe DOES flag (`benign bound broken`, 35 of 72 survived), because the 2026-11-02
+    egress-arm append pooled two more controls into the same UTC window — so it weakens "the
+    bound separates the failure from the healthy rows" without erasing the 12-below/0-above
+    separation inside the five cited windows, which
     `test_the_probe_prints_the_separation_the_item_cites` still pins at 12 and 0.
 
-    The node is kept rather than dropped, and it still goes red on a new at/above zero — but
-    a red here now means "a falsifier arrived, go publish it". The instrument's job is to
-    report the corpus, not to hold a claim the corpus has left. #3419's step (2) is waiting
-    on this measurement, not on the old assertion.
+    What this node holds is the falsifier list and the probe's agreement with the recount;
+    the two population totals are floors. The exact total was this node's second way of going
+    red for no reason: `36c3607f`, the egress-arm window's auto-commit, appended two
+    below-bound controls, 61→63, #3715 was filed off the failure, and no falsifier had
+    arrived — a routine fire was wearing the red that belongs to a falsifier alone.
+    `test_a_routine_append_below_the_bound_cannot_redden_the_falsifier_node` now pins that a
+    fire cannot redden it and `test_a_second_row_at_or_above_the_bound_that_survived_nothing_still_goes_red`
+    pins that a falsifier still can. The instrument's job is to report the corpus, not to
+    hold a claim the corpus has left; #3419's step (2) is waiting on this measurement, not on
+    the old assertion.
     """
-    rows = P.control_rows(P.report_rows())
-    f = lambda r: (r.get("benign_survival") or {}).get("found")  # noqa: E731
-    above = [r for r in rows if r["summary_chars"] >= P.SUMMARY_CHAR_BOUND]
-    zeros_above = [r for r in above if f(r) == 0]
+    rd = corpus_readings(P.control_rows(P.report_rows()))
 
-    assert [(r["ts"], r["summary_chars"], r["rep"]) for r in zeros_above] == [
-        ("2026-11-02T10:38:51+00:00", 2762, 2)], zeros_above
-    assert len(above) == 40, len(above)
-    # The probe's own count agrees with the one taken here — and it is the number a reader
-    # of `python eval/summary_length_attribution_probe.py` sees on the POOLED line.
-    m = P.measure(rows)
-    assert m["zeros_above"] == len(zeros_above) == 1, m["zeros_above"]
-    assert m["n"] == 61, m["n"]
+    assert rd["falsifiers"] == PUBLISHED_FALSIFIERS, rd["falsifiers"]
+    # The probe's own count agrees with the one taken here, and both are the published one.
+    assert rd["n_falsifiers"] == rd["probe_zeros_above"] == len(PUBLISHED_FALSIFIERS), rd
+    # Floors, not counts: the corpus only ever gains a fire's rows. See CORPUS_*_FLOOR.
+    assert rd["n"] == rd["n_recount"] >= CORPUS_CONTROLS_FLOOR, rd
+    assert rd["n_above"] >= CORPUS_ABOVE_FLOOR, rd
     # The separation the bound was chosen for still holds where it was measured.
     cited = P.measure(cited_rows())
     assert (cited["zeros_below"], cited["zeros_above"]) == (CITED_ZEROS_BELOW, CITED_ZEROS_ABOVE)
+
+
+def test_a_routine_append_below_the_bound_cannot_redden_the_falsifier_node(corpus):
+    """#3715's regression: a window fire appends rows, and that is not a red test.
+
+    Seeded rather than read from the live file: the three rows the falsifier node reports
+    today, then the same corpus with a second fire's two controls appended — both below the
+    bound, which is the shape `36c3607f` actually landed (2112 and 2406 characters). The
+    falsifier list, its count and the probe's agreement with that count are unchanged across
+    the append; only the population grows, and it grows UP past a floor instead of breaking
+    an exact equality. Under the assertion this replaces — `m["n"] == 61` — the second
+    reading below was a failure, `after["n"] == before["n"] + 2` is the whole difference
+    between the two readings, and the item this round closes exists because nothing
+    distinguished them.
+
+    The appended rows go in through `RC.append_rows`, the one writer the window fires use
+    (#2154), aimed at the scratch file so #3419's guard is not even consulted — so this is
+    the real write-then-read round trip over the JSONL format, not two dicts hand-serialised
+    into a file the fire's own writer would not have produced.
+    """
+    f = corpus(FIREFIX)
+    before = corpus_readings(P.control_rows(P.report_rows()))
+    RC.append_rows([ctrl("2026-11-09T10:36:00+00:00", 2406, 0),
+                    ctrl("2026-11-09T14:44:00+00:00", 2112, 1)], path=f, arm={})
+    after = corpus_readings(P.control_rows(P.report_rows()))
+
+    assert before["falsifiers"] == after["falsifiers"] == PUBLISHED_FALSIFIERS
+    assert before["n_falsifiers"] == after["n_falsifiers"] == 1
+    assert after["probe_zeros_above"] == after["n_falsifiers"], after
+    # The population moved — an exact pin on it is what #3715 was — and nothing else did.
+    assert after["n"] == before["n"] + 2 == 5, (before, after)
+    assert after["n_above"] == before["n_above"] == 2, (before, after)
+
+
+def test_a_second_row_at_or_above_the_bound_that_survived_nothing_still_goes_red(corpus):
+    """What the floors must not cost: a new falsifier still breaks the published list.
+
+    One appended control at 2900 characters that survived zero of its six markers — the shape
+    of the row that broke the original universal assertion. The published list no longer
+    matches, so `test_the_one_row_...` fails and names both rows, and the probe's POOLED
+    count moves to 2 beside it. A falsifier is loud; an append is not.
+    """
+    f = corpus(FIREFIX)
+    RC.append_rows([ctrl("2026-11-09T10:36:00+00:00", 2900, 0, rep=11)], path=f, arm={})
+    rd = corpus_readings(P.control_rows(P.report_rows()))
+
+    assert rd["n_falsifiers"] == 2 == rd["probe_zeros_above"], rd
+    assert rd["falsifiers"] != PUBLISHED_FALSIFIERS, rd["falsifiers"]
+    assert ("2026-11-09T10:36:00+00:00", 2900, 11) in rd["falsifiers"], rd["falsifiers"]
