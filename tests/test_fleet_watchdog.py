@@ -4100,3 +4100,101 @@ def test_watch_fleet_names_every_step_and_no_longer_closes_the_roster():
     assert "fleet_watchdog" in doc, (
         "the seat's docstring no longer says whose roster it is calling, which is the "
         "half that tells a reader where the authoritative list is")
+
+
+# ── #3713: a held lane is not a stalled pool ─────────────────────────────────
+
+def _seed_lane(q, source, *, count, **age):
+    """Enqueue `count` rows of `source` and age them all to the same instant."""
+    stamp = _ago(**age)
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.executemany(
+            "INSERT INTO queue (source, kind, payload_json, priority, state, "
+            "enqueued_at) VALUES (?,?,?,?,?,?)",
+            [(source, f"{source}:clause", '{"item_id": 3713}', 72, "queued", stamp)]
+            * count)
+        conn.commit()
+
+
+def test_rows_behind_an_engaged_gate_do_not_fire_the_starving_clause(tmp_path, monkeypatch):
+    """The same six rows, only the gate named: the alarm goes quiet, and comes back.
+
+    Measured 2026-11-02: `pool.round_hold.engaged` true from 12:40:24Z holding 11
+    lanes, `pool.paused` false, 2 of 6 slots in flight, and `owed-check` publishing
+    33,428 s of wait. `_queue_starving` took `max()` over every source's wait, so those
+    six rows — which the pool had deliberately excluded from the claim query in SQL —
+    were 3x-`max_duration` evidence that the pool was failing to claim work. It was not:
+    it was holding that work on purpose.
+
+    One store, read twice, is the whole node, because the alarm and the panel must
+    move together: with `held_sources` naming the lane the figure is 0.0, and with no
+    gate named the same rows are a stall again. A change that suppressed the figure
+    everywhere would pass the first assertion and fail the second, and that second
+    half is #1526's four-day outage — rows past every bound with nothing holding them.
+    """
+    q = WorkQueue(tmp_path / "held-starve.db")
+    _seed_lane(q, "owed-check", count=6, hours=9)
+
+    assert fw._queue_starving(q, 3600, ["owed-check"]) == 0.0, (
+        "a round hold that took owed-check out of the claim query was reported as a "
+        "starving pool; a lane a gate is holding cannot be a pool failing to claim")
+    age = fw._queue_starving(q, 3600, [])
+    assert age > 3 * 3600 and pytest.approx(age, abs=120) == 9 * 3600, (
+        "with no gate engaged the same six rows are starvation again, which is the "
+        "shape #1526's four days had and the split must not silence")
+
+    # The default asks the running pool, which is the same function the health route
+    # calls — so the alert and the Mission Control figure are one read, not two that
+    # happen to agree. Asserted on the call's own kwargs, not on the returned number,
+    # because two call sites can return the same figure from different inputs.
+    seen = []
+    real_read = q.pending_wait_by_source
+
+    def spy(**kwargs):
+        seen.append(kwargs)
+        return real_read(**kwargs)
+
+    monkeypatch.setattr(q, "pending_wait_by_source", spy)
+    monkeypatch.setattr(fw, "current_held_source_names", lambda: ["owed-check"])
+    assert fw._queue_starving(q, 3600) == 0.0
+    assert fw._oldest_wait(q) == (0.0, None)
+    assert [s["held_sources"] for s in seen] == [["owed-check"], ["owed-check"]], (
+        "the two detectors did not pass the same set of held names to the same read, "
+        "so the alert's figure and the payload's can still disagree")
+
+
+async def test_an_unheld_lane_still_alerts_and_the_alert_names_no_held_source(
+        tmp_path, monkeypatch):
+    """Held rows out of the figure, unheld rows still in the alert, one source named.
+
+    The clause's other half measured on the same payload: `youtube-digest` waited
+    12,188 s and `board-steward` 6,259 s with NOTHING holding either, and a fix that
+    silenced those too would be a way to stop the alarm rather than a way to read the
+    queue. The seed below therefore holds `owed-check` (6 rows, 9 h) and leaves
+    `scheduled-task` alone at 20 h, then runs a full tick — the detector and the alert
+    that prints its figure in the same sentence (`#2692`'s `oldest claimable queue item
+    is …`), which is the line the item says cannot be allowed to disagree.
+
+    Expected: one stall alert, its figure the 20 h of the UNHELD lane (1200 min), and
+    no held age in it at all.
+    """
+    q = WorkQueue(tmp_path / "mixed-starve.db")
+    _seed_lane(q, "owed-check", count=6, hours=9)
+    _seed_lane(q, "scheduled-task", count=1, hours=20)
+    monkeypatch.setattr(fw, "current_held_source_names", lambda: ["owed-check"])
+
+    assert fw._queue_starving(q, 3600) > 3 * 3600, (
+        "a 20 h row of a source no gate is holding must cross the threshold with a "
+        "held 9 h lane in the same queue")
+    age, source = fw._oldest_wait(q)
+    assert pytest.approx(age, abs=120) == 20 * 3600, (
+        "the age the alert prints is not the age of the oldest CLAIMABLE row")
+    assert source == "scheduled-task", (
+        f"the alert blamed a lane that was not starving: {source}")
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+    stall = [a for a in alerts if "claimable" in a]
+    assert len(stall) == 1, f"expected the one starving-queue alert: {alerts}"
+    assert "oldest claimable queue item is 1200 min old" in stall[0], stall[0]

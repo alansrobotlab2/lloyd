@@ -2647,8 +2647,8 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     source's `last_sweep` unconditionally after `sweep_and_dispatch` returns, so it
     is the sweep's clock and says nothing about dispatch — 0 `failure_dispatches` rows
     sat against it at 2026-10-30T00:28Z. The pool's `last_enqueue_check`
-    (`workers/pool.py:1636`) is stamped on every ask and `last_enqueue_ok`
-    (`workers/pool.py:1647`) on a clean return only; `enqueue_if_due` returns early
+    (`workers/pool.py:1720`) is stamped on every ask and `last_enqueue_ok`
+    (`workers/pool.py:1731`) on a clean return only; `enqueue_if_due` returns early
     inside `min_interval_seconds` (`workers/sources/failure_ledger.py:250`) and that
     early return is clean, so the pair advances once per hourly ask whether or not the
     source swept. The retired paragraph quoted `last_enqueue_ok` as 'a pass completes
@@ -2671,7 +2671,7 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # a completed pass. `The stamp `last_enqueue_ok` read 2026-11-01T04:59Z, so the
     # source is keeping up.` walked through it — and that sentence is the misreading
     # clause 5 names: `last_enqueue_check` is stamped on every ask, clean return or not
-    # (`workers/pool.py:1636`), so neither key says anything about this source unless
+    # (`workers/pool.py:1720`), so neither key says anything about this source unless
     # the sentence carrying it says so.
     pair_says = [s for s in sentences if _WM_PAIR.search(s)]
     assert pair_says, (
@@ -2734,11 +2734,11 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # claims about the tree, and a doc-claims file that only greps the doc grades
     # prose against prose.
     pool = (ROOT / "workers" / "pool.py").read_text(encoding="utf-8").splitlines()
-    assert "last_enqueue_check" in pool[1635], (
-        f"workers/pool.py:1636 no longer stamps the pool's attempt key ({pool[1635]!r}) "
+    assert "last_enqueue_check" in pool[1719], (
+        f"workers/pool.py:1720 no longer stamps the pool's attempt key ({pool[1719]!r}) "
         "while §6 cites that line for it")
-    assert "OK_WM_KEY" in pool[1646], (
-        f"workers/pool.py:1647 no longer stamps the clean-return key ({pool[1646]!r})")
+    assert "OK_WM_KEY" in pool[1730], (
+        f"workers/pool.py:1731 no longer stamps the clean-return key ({pool[1730]!r})")
     src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
         encoding="utf-8").splitlines()
     assert "WATERMARK_LAST_SWEEP" in src[273], (

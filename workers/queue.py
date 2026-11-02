@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 logger = logging.getLogger("lloyd-workers.queue")
 
@@ -149,6 +149,47 @@ CREATE TABLE IF NOT EXISTS pause_journal (
   hold_id      INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_pause_journal_at ON pause_journal(at DESC);
+
+-- Every engage and release of a CLAIM GATE — the round hold, the KV gate and the
+-- primary reachability hold (#3713). This is NOT the pause journal above, and a
+-- separate table is the point: `pause_journal` records a fleet that claims
+-- NOTHING, while a gate holds named sources back and keeps claiming the rest, and
+-- `pause_journal_holds` counts every `value='1'` row with no `holder_kind` filter,
+-- so writing a gate's take there would inflate "how many times was the fleet held"
+-- for every reader of that count (the queue-health skill's read, the retention
+-- sweep, tests/test_workers_pool.py). The history this table exists for is the one
+-- `server.err` could not keep: `pool.py` logs "Round hold engaged"/"KV gate
+-- engaged" at INFO and the file rotates at 10 MB, so on 2026-11-02 the span on disk
+-- was 41 minutes and a lane held for 8 h 53 m had no reconstructable engagement
+-- history at all — every one of pause_journal's 36 rows was a machine pause.
+--   gate          'round_hold' | 'kv_gate' | 'primary_hold', the three names
+--                 `WorkerPool._claim_holds` unions.
+--   value         'engage' or 'release' — a gate's own two transitions, matching
+--                 the two `logger.info` lines it replaces as the record.
+--   held_sources  JSON list of the source names the gate decided to hold: on an
+--                 engage the set it took at that instant, on a release the set as it
+--                 stood when it let go. Those two differ when the round hold's
+--                 `exempt_bound` takes an exempt source back mid-engagement (see
+--                 `_exempt_bound_held`), which is why an engage row is the record of
+--                 ONE decision and this table does not try to journal every later
+--                 change to the set. It is the list that made rows of those sources
+--                 unclaimable, so it is what a later reader needs to tell a held lane
+--                 from a starving one. NULL only when the gate held nothing.
+--   detail        the gate's own reason, verbatim from the log line: 'kv 72% > 60%',
+--                 'autocode', the probe's words. Attribution, never a restatement.
+--   hold_id       on a release, the id of the engage row this closes; NULL on an
+--                 engage, so one engagement is one pair of rows and an engage with
+--                 no release is a gate that was still holding when the process died.
+CREATE TABLE IF NOT EXISTS hold_journal (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at            TEXT NOT NULL,
+  gate          TEXT NOT NULL,
+  value         TEXT NOT NULL,
+  held_sources  TEXT,
+  detail        TEXT,
+  hold_id       INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_hold_journal_at ON hold_journal(at DESC);
 """ + GRANT_DDL
 
 
@@ -314,6 +355,14 @@ def _iso_or_none(raw: Any) -> Optional[datetime]:
 #: row 515 is 2026-09-25, and 09-26 was still 1.33 h — the tail of the same
 #: outage). A count above zero is the exception speaking, not the pool breathing.
 PENDING_WAIT_BOUND_SECONDS = 3600
+
+#: How much `hold_journal` keeps, enforced by `WorkQueue.hold_journal_append` on
+#: every write. Thirty days is the horizon the other three `workers.db` stores in
+#: `scripts/groundskeeper/retention-sweep.py` already use (`runs`, `queue`,
+#: `pause_journal`), so "what held this lane last month" answers the same way
+#: whichever table a reader starts from — and it is more than four times the 7 days
+#: #3713's clause asks a hold's history to be readable for.
+HOLD_JOURNAL_MAX_AGE_DAYS = 30
 
 #: Width of the `runs.summary` column's contract (#642 follow-up, #1606).
 SUMMARY_MAX_CHARS = 500
@@ -1265,9 +1314,11 @@ class WorkQueue:
         *,
         bound_seconds: int = PENDING_WAIT_BOUND_SECONDS,
         now: Optional[datetime] = None,
+        held_sources: Optional[Iterable[str]] = None,
     ) -> dict[str, dict[str, float]]:
         """Per source: how long the oldest row still in state 'queued' has been
-        waiting, and how many of those rows are past `bound_seconds`.
+        waiting, and how many of those rows are past `bound_seconds`, split by
+        whether a claim gate is holding that source back.
 
         This is the observation #1526's four-day outage lacked. Row 515 of the live
         queue sat from `enqueued_at` 2026-09-25T08:00:33Z to `claimed_at`
@@ -1297,17 +1348,46 @@ class WorkQueue:
         * Source is reported only for sources that HAVE a queued row. Absence means
           nothing is waiting; the caller renders that as zeros rather than null, so a
           dashboard reading a healthy pool never divides by a missing field.
+        * `held_sources` — the names a claim gate is holding back right now, which
+          `WorkerPool.held_source_names()` answers — splits each source's figures in
+          two. A row whose source is in that set counts into
+          `held_max_wait_seconds`/`held_over_bound_count`; every other row counts into
+          `max_wait_seconds`/`over_bound_count`. With no names passed (or an empty
+          set) nothing is held, the `held_*` pair is 0.0/0 on every source, and the
+          unheld pair is exactly the figure this read returned before #3713 — so
+          #1526's shape, rows past the bound with nothing holding them, still lands in
+          `over_bound_count` and still reads as starvation.
+
+          Why the split belongs HERE rather than at a call site: a hold removes a
+          source from the claim query in SQL (`WorkerPool._claim_holds` ->
+          `claim_next(exclude_sources=...)`), so a held lane can never be claimed and
+          aging can never reach it, while this read excluded nothing about a hold and
+          published a by-design hold as pool starvation. The read is the one place all
+          three of its consumers meet — the health route, `fleet_watchdog`'s stall
+          alarm, and `web/src/api.ts`'s panel — and #3713's own findings are that
+          splitting it at one of those call sites leaves the other two posting the old
+          number. Splitting here is also why a held lane still gets a key: its rows are
+          real rows in `state='queued'`, and dropping the key would make "held" and
+          "idle" the same payload again.
         """
         moment = now or datetime.now(timezone.utc)
+        held = set(held_sources or ())
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT source, enqueued_at, not_before FROM queue WHERE state='queued'"
             ).fetchall()
         out: dict[str, dict[str, float]] = {}
         for r in rows:
-            source = r["source"]
-            entry = out.setdefault(str(source), {"max_wait_seconds": 0.0,
-                                                 "over_bound_count": 0})
+            source = str(r["source"])
+            entry = out.setdefault(source, {"max_wait_seconds": 0.0,
+                                            "over_bound_count": 0,
+                                            "held_max_wait_seconds": 0.0,
+                                            "held_over_bound_count": 0})
+            # One source, one verdict: a gate holds a NAME, never a single row, so
+            # every queued row of a held source is a held row. `held` therefore picks
+            # which pair of the four figures below this row counts into, and never
+            # splits one source's rows across both pairs.
+            key = "held_" if source in held else ""
             enqueued = _iso_or_none(r["enqueued_at"])
             if enqueued is None:
                 # The only exclusion that is not about the row's state. A stamp this
@@ -1330,10 +1410,10 @@ class WorkQueue:
             if parked_until is not None and parked_until > moment:
                 continue
             wait = (moment - enqueued).total_seconds()
-            if wait > entry["max_wait_seconds"]:
-                entry["max_wait_seconds"] = round(wait, 3)
+            if wait > entry[key + "max_wait_seconds"]:
+                entry[key + "max_wait_seconds"] = round(wait, 3)
             if wait > bound_seconds:
-                entry["over_bound_count"] += 1
+                entry[key + "over_bound_count"] += 1
         return out
 
     def claims_by_source(
@@ -2036,6 +2116,108 @@ class WorkQueue:
                                if started and ended else None),
                 "holder_kind": row["holder_kind"],
                 "actor": row["actor"],
+            })
+        return out
+
+    def hold_journal_append(self, *, gate: str, value: str,
+                            held_sources: Optional[Sequence[str]] = None,
+                            detail: str = "",
+                            at: str | None = None) -> int:
+        """Append one gate engage/release row, and prune the window on the way past.
+
+        Exactly one row per gate transition — the same event `workers/pool.py` logs
+        at INFO — so an engagement is a pair of rows and a duration is a subtraction.
+        A release names the engage it closes in `hold_id`, the newest engage for THAT
+        gate with no release pointing at it; pairing is per gate, because two gates
+        can be engaged at once and a release from one must not close the other's
+        open row and leave both looking ended.
+
+        **The prune is what bounds this store, and it is in the writer on purpose.**
+        `scripts/groundskeeper/retention-sweep.py` bounds the other growing stores of
+        this database, including `pause_journal`, and a store missing from its table
+        is a store nothing bounds. This one is not: a gate's transitions are a
+        handful of rows a day at the most (the round hold engaged 3 times on
+        2026-11-02), so the writer keeping HOLD_JOURNAL_MAX_AGE_DAYS of history is
+        the whole rule, and a sweep would be a second reader of a horizon that only
+        ever needs one. Rows older than the window are deleted in the same
+        transaction as the insert, so a process that appends forever cannot grow
+        this table without limit; a process that stops appending leaves at most the
+        window it last wrote.
+        """
+        stamp = at or _now_iso()
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=HOLD_JOURNAL_MAX_AGE_DAYS)).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            hold_id = None
+            if value == "release":
+                # The newest engage of THIS gate that no release points at yet. An
+                # engage row's own `hold_id` is always NULL — the key lives on the
+                # release, one direction only — so "open" cannot be read off the
+                # engage's columns and must be asked as a NOT EXISTS over the releases.
+                # Selecting on `hold_id IS NULL` here instead would pair a second
+                # release with the first engagement it already closed and leave the
+                # real open one open forever.
+                row = conn.execute(
+                    "SELECT e.id FROM hold_journal e "
+                    "WHERE e.gate = ? AND e.value = 'engage' "
+                    "  AND NOT EXISTS (SELECT 1 FROM hold_journal r "
+                    "                  WHERE r.hold_id = e.id) "
+                    "ORDER BY e.id DESC LIMIT 1",
+                    (gate,),
+                ).fetchone()
+                hold_id = row["id"] if row else None
+            cur = conn.execute(
+                "INSERT INTO hold_journal (at, gate, value, held_sources, detail, "
+                " hold_id) VALUES (?,?,?,?,?,?)",
+                (stamp, gate, value,
+                 json.dumps(list(held_sources)) if held_sources is not None else None,
+                 detail or None, hold_id),
+            )
+            conn.execute("DELETE FROM hold_journal WHERE at < ?", (cutoff,))
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def hold_journal_window(self, *, since: str,
+                            gate: Optional[str] = None) -> list[dict]:
+        """Every gate transition at or after `since`, oldest first.
+
+        The read that answers "what held this lane, when did it engage, and is it
+        still holding" for a window `server.err` cannot cover — the file rotates at
+        10 MB and spanned 41 minutes on 2026-11-02, while a round hold had a lane
+        waiting 8 h 53 m. `held_sources` is decoded back to a list (an engage
+        carrying `[]` means a gate that was engaged over nothing, which is a
+        different fact from `None` on a release). `open` says this engage has no
+        release yet, which is how a reader tells a gate that is still holding from
+        one that released and pruned nothing.
+        """
+        sql = ("SELECT id, at, gate, value, held_sources, detail, hold_id, "
+               "  (SELECT COUNT(*) FROM hold_journal r WHERE r.hold_id = h.id) "
+               "  AS closed "
+               "FROM hold_journal h WHERE h.at >= ?")
+        params: list[str] = [since]
+        if gate is not None:
+            sql += " AND h.gate = ?"
+            params.append(gate)
+        sql += " ORDER BY h.id"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        out = []
+        for row in rows:
+            raw = row["held_sources"]
+            out.append({
+                "id": int(row["id"]),
+                "at": row["at"],
+                "gate": row["gate"],
+                "value": row["value"],
+                "held_sources": (json.loads(raw) if raw is not None else None),
+                "detail": row["detail"],
+                "hold_id": row["hold_id"],
+                # An engage is open while nothing points at it. Read as a count over
+                # the releases rather than off this row's own `hold_id`, which is NULL
+                # on every engage — a version that tested THAT would report every past
+                # engagement as still holding, which is the opposite of the question.
+                "open": (row["value"] == "engage" and not row["closed"]),
             })
         return out
 

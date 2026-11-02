@@ -127,11 +127,22 @@ WORKERS_HEALTH_KEYS = {"initialized", "days", "oldest_input",
 #: read by hand-running `enqueued_at` against `claimed_at`; it is a field now, and
 #: `pending_wait_bound_seconds` travels with the count so a reader cannot weigh it
 #: against a threshold other than the one it was counted against.
+#:
+#: #3713 grows them by ONE more, `pending_wait_held_over_bound_count`, and the split
+#: is why the count itself changed meaning while keeping its name: on 2026-11-02 a
+#: round hold had `owed-check` waiting 8 h 53 m and this row published it as pool
+#: starvation on a pool that was neither paused nor saturated. `pending_wait_over_bound_count`
+#: is now the rows nothing is holding back — the number the health skill's `jq`
+#: filter and the stall alarm act on — and the held key is the rows an engaged claim
+#: gate took out of the claim query, which is a decision rather than a fault. Held
+#: rows stay published because a held backlog is still a backlog: dropping the key
+#: would make "held" and "idle" one payload again, which is the defect #3713 is about.
 WORKER_SOURCE_HEALTH_KEYS = {"name", "configured", "enabled", "inner_voice",
                              "interval_seconds", "max_inflight", "priority",
                              "depth", "health", "dispatch", "recent",
                              "pending_wait_max_seconds",
                              "pending_wait_over_bound_count",
+                             "pending_wait_held_over_bound_count",
                              "pending_wait_bound_seconds"}
 #: #3089 adds ONE key to ONE source's row: `judgement`, the summed 7-day figure the
 #: board-steward `apply` flip is gated on. Deliberately not in the base set — every
@@ -288,7 +299,13 @@ def test_the_web_client_declares_every_field_the_route_returns():
     assert len(declared) >= 8, \
         f"positive control: only {sorted(declared)} parsed out of the interface"
     for key in ("pending_wait_max_seconds", "pending_wait_over_bound_count",
-                "pending_wait_bound_seconds"):
+                "pending_wait_bound_seconds",
+                # #3713's split of the count. Asserted present here because the
+                # whole point of the new key is that a held backlog STAYS
+                # publishable: if the client did not declare it, the figure would
+                # exist on the wire and be unreachable from the panel, which is how
+                # "held" becomes "idle" a second time.
+                "pending_wait_held_over_bound_count"):
         assert key in declared, f"#2185's {key} is missing from WorkerSourceHealth"
     # #3089's `judgement` joins the declared set, and `dispatch` is subtracted as
     # before rather than this pair being widened to swallow it: the key is optional
@@ -1389,3 +1406,103 @@ def test_the_web_client_declares_the_pending_hand_run_row_the_board_emits():
     assert fields == set(O.HAND_RUN_FIELDS), \
         f"api.ts declares {sorted(fields)}; owed.hand_runs() emits " \
         f"{sorted(O.HAND_RUN_FIELDS)}"
+
+
+# ── /api/workers/health — #3713's held / unheld split of the wait ─────────────
+
+def _aged_hold_probe_queue(path):
+    """A queue seeded with the 2026-11-02 14:25Z reading, in two lanes.
+
+    Six `owed-check` rows 9 h 1 m old (the oldest of the real six had waited 8 h 53 m
+    by the time the watchdog posted, and they were 6 distinct backlog items, not one
+    row re-offered), and two `youtube-digest` rows 3 h 23 m old. Both lanes are past
+    the 3600 s bound; only one of them is held back by a gate — that difference is the
+    whole clause, so both lanes are seeded rather than one.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(path)
+    now = datetime.now(timezone.utc)
+    for age_seconds, source, count in ((32460, "owed-check", 6), (12180, "youtube-digest", 2)):
+        stamp = (now - timedelta(seconds=age_seconds)).isoformat()
+        for i in range(count):
+            row_id = q.enqueue(source, f"{source}:probe", payload={"i": i})
+            with q._connect() as conn:
+                conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?",
+                             (stamp, row_id))
+                conn.commit()
+    return q
+
+
+def _gate_engaged_probe_pool(held_sources):
+    """A pool with a round hold holding `held_sources` and no other gate engaged.
+
+    The `__new__`-built shape the gate tests use: `held_source_names()` needs the
+    three gate dicts and nothing else, so no queue, no loopback interface and no
+    `workers.round_hold` config block is entangled in a payload contract test.
+    """
+    from workers.pool import WorkerPool
+
+    pool = WorkerPool.__new__(WorkerPool)
+    pool._round_hold = {"engaged": True, "engagements": 1,
+                        "engaged_since": "2026-11-02T12:40:24.728138+00:00",
+                        "held_sources": list(held_sources), "exempt_refused": {}}
+    pool._kv_gate = {"engaged": False, "engagements": 0, "engaged_since": None,
+                     "reading": None, "last_reading_at": None,
+                     "consecutive_reads": 0, "held_sources": []}
+    pool._primary_hold = {"engaged": False, "engagements": 0, "answering": None,
+                          "engaged_since": None, "held_sources": [],
+                          "last_probe_at": None, "last_detail": "never probed",
+                          "probes": 0, "unreachable_streak": 0}
+    pool._primary_hold_held_sources = ["vision-guard"]
+    pool.registry = lambda: {"owed-check": {}, "youtube-digest": {}}
+    return pool
+
+
+async def test_the_health_row_publishes_a_held_backlog_without_calling_it_starvation(
+        client, monkeypatch, tmp_path):
+    """`pending_wait_over_bound_count` counts claimable rows; the new key counts held ones.
+
+    The 2026-11-02 payload that started this published `owed-check` as
+    `pending_wait_over_bound_count: 6` while `pool.round_hold.engaged` was true and
+    `held_sources` named owed-check, and the health skill's documented `jq` filter —
+    `select(.pending_wait_over_bound_count > 0)` — printed it as pool starvation on a
+    pool that was neither paused nor saturated. One figure had three readers (this
+    route, `skills/queue-health-check`, the fleet watchdog's stall alarm), so the
+    split had to go at the shared read rather than at one of them, and the shape that
+    keeps the panel from going quiet is this: the held rows move to
+    `pending_wait_held_over_bound_count` instead of disappearing.
+
+    So both counts are pinned here with EXACT numbers, in both directions: the held
+    lane reads 0 unheld / 6 held, and the unheld lane reads 2 unheld / 0 held. The
+    second half is the clause's safety property — a row of a source nothing is
+    holding still publishes, which is what keeps #1526's four-day outage detectable —
+    and a filter selecting the fleet's only real problem is worth more than a filter
+    that stops printing.
+    """
+    from app.routers import workers as workers_router
+
+    q = _aged_hold_probe_queue(tmp_path / "held-health.db")
+    monkeypatch.setattr(workers_router, "get_queue", lambda: q)
+    monkeypatch.setattr(
+        "workers.pool._pool_instance",
+        _gate_engaged_probe_pool(["owed-check"]))
+
+    rows = {r["name"]: r for r in (await client.get(
+        "/api/workers/health?days=7&runs=0")).json()["sources"]}
+    held, unheld = rows["owed-check"], rows["youtube-digest"]
+
+    assert (held["pending_wait_over_bound_count"],
+            held["pending_wait_held_over_bound_count"]) == (0, 6), (
+        "the six rows a round hold cannot claim stop being reported as starvation, "
+        "and all six are still published — a held lane must not read as an idle one")
+    assert (unheld["pending_wait_over_bound_count"],
+            unheld["pending_wait_held_over_bound_count"]) == (2, 0), (
+        "youtube-digest is past the 3600 s bound with NOTHING holding it, and the "
+        "payload still says so: that is #1526's shape, unchanged by this split")
+    assert held["pending_wait_max_seconds"] > 32400 and unheld["pending_wait_max_seconds"] > 12000, (
+        "the age key spans BOTH pairs on purpose, so no held lane can render as a "
+        "source with nothing waiting")
+    assert held["pending_wait_bound_seconds"] == 3600

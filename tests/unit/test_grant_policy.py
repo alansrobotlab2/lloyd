@@ -329,8 +329,17 @@ def test_an_existing_database_gets_the_table_on_next_init(tmp_path):
     # `pause_journal` is #2615's operator-hold history, created by the same `_SCHEMA`
     # this node drives; a store in the file but not in this set would read as init
     # dropping a table, which is what the exact equality is here to catch.
+    #
+    # `hold_journal` is #3713's claim-gate history, and it is a NEW table rather than
+    # rows in `pause_journal` because of that item's own clause 4: the record has to
+    # "leave pause_journal_holds()'s hold count unchanged", and that read is
+    # `WHERE value = '1'` with no `holder_kind` filter (`workers/queue.py`,
+    # `pause_journal_holds`), so a gate's engage written there would inflate "how many
+    # times was the fleet held" for every existing reader. The exact equality is doing
+    # its job here — it caught the new store instead of letting it land unnamed.
     assert kept == {"queue", "sqlite_sequence", "runs", "watermarks",
-                    "authority_grants", "grant_dispatch", "pause_journal"}
+                    "authority_grants", "grant_dispatch", "pause_journal",
+                    "hold_journal"}
 
 
 # ── Hook wiring: the non-interactive dispatch paths ────────────────────────

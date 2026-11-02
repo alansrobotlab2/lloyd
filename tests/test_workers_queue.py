@@ -2436,3 +2436,108 @@ def test_the_failure_age_keys_move_no_existing_rollup_number(q):
     assert r["last_completed"] == "2026-10-20T04:00:00+00:00", r
     assert r["last_failure"] == "2026-10-20T01:00:00+00:00", r
     assert r["consecutive_failures"] == 0, r
+
+
+# ── #3713: a claim gate is not a stalled pool ────────────────────────────────
+
+
+def _stamp_enqueued_at(q: WorkQueue, item_id: int, *, stamp: str) -> None:
+    """Put one queued row's `enqueued_at` at exactly `stamp`.
+
+    `_backdate_enqueued_at` moves an age by a duration from the caller's clock, which
+    is the right fixture for a threshold. The two nodes below assert EXACT figures out
+    of `pending_wait_by_source(now=...)`, and that needs a row whose age is the
+    difference of two instants this file wrote, not of two clock readings.
+    """
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (stamp, item_id))
+        conn.commit()
+
+
+def test_a_held_lane_splits_its_wait_away_from_the_starvation_figure(tmp_path):
+    """A source a claim gate is holding back stops being the pool's fault.
+
+    Measured on this box 2026-11-02: `GET /api/workers/health?days=7&runs=0` printed
+    `owed-check: 33428s, 6 over 3600s` while `/api/workers/status` said
+    `pool.paused: false`, `in_flight_count: 2` of `slots: 6`, and
+    `pool.round_hold.engaged: true` with `held_sources` naming owed-check. Six queued
+    rows, six distinct backlog items, no pool failure anywhere: the round hold takes a
+    held source out of the claim query in SQL (`WorkerPool._claim_holds` ->
+    `claim_next(exclude_sources=...)`), so those rows could not be claimed at all and
+    #2496's aging (`AGING_PERIOD_HOURS = 6`) could not reach them either. The seed
+    below is that reading — six `owed-check` rows 9 h old, two `youtube-digest` rows
+    2 h old with nothing holding youtube-digest — and the assertion is the split: the
+    held lane's rows leave `over_bound_count` for `held_over_bound_count`, while the
+    unheld lane keeps its own count exactly as it had it.
+
+    The two figures are asserted in ONE dict comparison because a row must move, not
+    be duplicated: a version that counted a held row into both pairs would pass a
+    per-key assertion and double the fleet's waiting total.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import WorkQueue
+
+    moment = datetime(2026, 11, 2, 14, 25, 0, tzinfo=timezone.utc)
+    nine_hours = (moment - timedelta(seconds=32400)).isoformat()
+    two_hours = (moment - timedelta(seconds=7200)).isoformat()
+    q = WorkQueue(tmp_path / "held-split.db")
+    held_ids = [q.enqueue("owed-check", "owed-check:clause",
+                          payload={"item_id": 3700 + i}, priority=72)
+                for i in range(6)]
+    unheld_ids = [q.enqueue("youtube-digest", "youtube-digest:video",
+                            payload={"v": i}) for i in range(2)]
+    for row_id in held_ids:
+        _stamp_enqueued_at(q, row_id, stamp=nine_hours)
+    for row_id in unheld_ids:
+        _stamp_enqueued_at(q, row_id, stamp=two_hours)
+
+    assert q.pending_wait_by_source(now=moment, held_sources=["owed-check"]) == {
+        "owed-check": {"max_wait_seconds": 0.0, "over_bound_count": 0,
+                       "held_max_wait_seconds": 32400.0, "held_over_bound_count": 6},
+        "youtube-digest": {"max_wait_seconds": 7200.0, "over_bound_count": 2,
+                           "held_max_wait_seconds": 0.0, "held_over_bound_count": 0},
+    }, ("the held lane's six rows moved out of the starvation figure and none of them "
+        "was dropped or counted twice; the unheld lane is untouched")
+
+
+def test_no_names_passed_leaves_every_waiting_row_counted_as_starvation(tmp_path):
+    """The same seed with no gate named reads as it did before #3713 — all of it.
+
+    This is the half that keeps the fix from becoming a way to hide an outage. #1526's
+    four days of `scheduled-task` rows never claimed, and #24's two lost 6x-daily
+    slots, had NOTHING holding them: with no names passed, those rows are starvation
+    and must stay starvation. So the same store is read twice — once attributed, once
+    not — and the unheld pair of the attributed read plus the held pair equals the
+    plain read's figures for both lanes, row for row. An empty set is asserted
+    alongside `None` because `held_sources=()` is what a caller that has a pool and
+    finds no gate engaged sends, and `set(())` must not read as "no information".
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import WorkQueue
+
+    moment = datetime(2026, 11, 2, 14, 25, 0, tzinfo=timezone.utc)
+    nine_hours = (moment - timedelta(seconds=32400)).isoformat()
+    q = WorkQueue(tmp_path / "unheld.db")
+    ids = [q.enqueue("owed-check", "owed-check:clause",
+                     payload={"item_id": 3700 + i}) for i in range(6)]
+    for row_id in ids:
+        _stamp_enqueued_at(q, row_id, stamp=nine_hours)
+
+    plain = q.pending_wait_by_source(now=moment)
+    assert plain == {
+        "owed-check": {"max_wait_seconds": 32400.0, "over_bound_count": 6,
+                       "held_max_wait_seconds": 0.0, "held_over_bound_count": 0},
+    }, ("with no names the read is the figure #2185 published and #1526 needs: every "
+        "waiting row past the bound, and zeros in the held pair")
+    empty = q.pending_wait_by_source(now=moment, held_sources=[])
+
+    assert empty == plain, "an explicitly empty gate set is the same read as no set"
+    split = q.pending_wait_by_source(now=moment, held_sources=["owed-check"])
+    entry, held_entry = split["owed-check"], plain["owed-check"]
+    assert (entry["over_bound_count"], entry["held_over_bound_count"]) == (0, 6)
+    assert entry["over_bound_count"] + entry["held_over_bound_count"] == \
+        held_entry["over_bound_count"] == 6, (
+        "the two counts partition the same six rows; neither is the whole story alone")
+    assert entry["max_wait_seconds"] == 0.0 and entry["held_max_wait_seconds"] == 32400.0

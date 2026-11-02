@@ -88,16 +88,26 @@ two definitions of a table whose NOT-NULL `expires_at` is the whole safety
 property is how one of them stops being true; `pause_journal` (#2615) is in the
 same `_SCHEMA`, one row per take and per lift of the durable pool hold with its
 `holder_kind`, its `actor` and the `hold_id` of the take it lifts, which is the
-history §7's overwritten-in-place `watermarks` pair cannot carry; and
+history §7's overwritten-in-place `watermarks` pair cannot carry; `hold_journal`
+(#3713) is in that `_SCHEMA` too, one row per engage and per release of the three
+CLAIM GATES — the round hold, the KV gate, the primary hold — with the `held_sources`
+each decision covered and the `hold_id` of the engage a release closes, which is the
+record that lets a reader say days later that a lane's wait was a gate holding it
+rather than a pool failing to claim (a gate's log lines are not that record:
+`server.err` rotates at 10 MB and spanned 41 minutes on 2026-11-02, the day a round
+hold had `owed-check` waiting 8 h 53 m); and
 `tool_effects` (#544) is created by `agent_mcp/_tool_effects.py` against
 `configured_db_path()`. One more shares the file without being *owned* here:
 `egress_events` (#628), created by `agent_mcp/egress.py`, the egress guard's
-record of every destination it saw. So `.tables` shows eight (`queue`, `runs`,
-`watermarks`, `authority_grants`, `grant_dispatch`, `pause_journal`,
+record of every destination it saw. So `.tables` shows nine (`queue`, `runs`,
+`watermarks`, `authority_grants`, `grant_dispatch`, `pause_journal`, `hold_journal`,
 `tool_effects`, `egress_events`), and only the first three are the work the pool
-runs: `pause_journal` is the pool's own state
-rather than a unit of work — and the sweep that bounds it is the groundskeeper's
-(`PAUSE_JOURNAL_MAX_AGE_DAYS`), not the pool's.
+runs: `pause_journal` and `hold_journal` are the pool's own state
+rather than a unit of work — and what bounds each differs, because `pause_journal`'s
+horizon is enforced by the groundskeeper's sweep (`PAUSE_JOURNAL_MAX_AGE_DAYS`) while
+`hold_journal`'s is enforced by its own writer (`HOLD_JOURNAL_MAX_AGE_DAYS`, applied
+by `WorkQueue.hold_journal_append` on every row), so the sweep's 24-store list names
+`pause_journal` and does not need to name `hold_journal`.
 
 An item walks one path:
 

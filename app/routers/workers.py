@@ -36,7 +36,12 @@ from app import mitigation_state
 from app.config import CONFIG, save_tool_overrides
 from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import PENDING_WAIT_BOUND_SECONDS, get_queue
-from workers.pool import HOLDER_MACHINE, HOLDER_PERSON, get_pool
+from workers.pool import (
+    HOLDER_MACHINE,
+    HOLDER_PERSON,
+    current_held_source_names as _current_held_source_names,
+    get_pool,
+)
 # The review lane and the producer's `max_staged_pending` bound decide what counts as
 # a pending note by ONE read: this parser, this status literal, this count (#3548).
 from workers.sources._common import (
@@ -298,7 +303,17 @@ async def workers_health(days: int = 7, runs: int = 10):
     # this page: the router keeps no query of its own, because two readers of one
     # table drift into meaning different things by `queued`.
     try:
-        pending = await loop.run_in_executor(None, q.pending_wait_by_source)
+        # #3713: the wait is attributed BEFORE it is published. A claim gate takes a
+        # source out of the claim query in SQL (`WorkerPool._claim_holds` ->
+        # `claim_next(exclude_sources=...)`), so a held lane cannot be claimed and no
+        # aging can reach it — and this read used to know nothing about a hold, which
+        # is how a round hold that had `owed-check` waiting 8 h 53 m got published as
+        # pool starvation on a pool that was neither paused nor saturated. The names
+        # come from `current_held_source_names()`, the same list the fleet watchdog
+        # passes to the same read, so this payload and the stall alarm cannot disagree.
+        held_sources = _current_held_source_names()
+        pending = await loop.run_in_executor(
+            None, partial(q.pending_wait_by_source, held_sources=held_sources))
     except Exception as e:  # noqa: BLE001 - a section, not the page
         logger.warning("workers health pending-wait read failed: %s", e)
         pending = {}
@@ -413,21 +428,36 @@ async def workers_health(days: int = 7, runs: int = 10):
             # and "the pile could not be counted" stay two different payloads.
             **({"staged_pending": (staged_readings or {}).get(name)}
                if name in staged_defaults else {}),
-            # #2185: the queue's WAIT, as two plain numbers and the bound stated
-            # beside them. Zeros for a source with nothing queued — never null —
-            # because a missing field renders as a gap a human has to go diagnose by
-            # hand, which is the thing this field exists to remove. Its two readers
-            # today are the health skill's documented `jq` filter and
-            # `web/src/api.ts`'s `WorkerSourceHealth`, which declares all three keys;
-            # no panel RENDERs them yet, and this comment is not the place that
-            # claims otherwise. `bound_seconds` travels
-            # with the count rather than living only in the code so a reader can tell
-            # "one row over an hour" from "one row over an hour" measured against some
-            # other threshold later.
-            "pending_wait_max_seconds": float(
-                (pending.get(name) or {}).get("max_wait_seconds", 0) or 0),
+            # #2185: the queue's WAIT, as plain numbers and the bound stated beside
+            # them. Zeros for a source with nothing queued — never null — because a
+            # missing field renders as a gap a human has to go diagnose by hand,
+            # which is the thing this field exists to remove. Its two readers today
+            # are the health skill's documented `jq` filter and `web/src/api.ts`'s
+            # `WorkerSourceHealth`, which declares all four keys; no panel RENDERs
+            # them yet, and this comment is not the place that claims otherwise.
+            # `bound_seconds` travels with the count rather than living only in the
+            # code so a reader can tell "one row over an hour" from "one row over an
+            # hour" measured against some other threshold later.
+            #
+            # #3713 splits the COUNT by attribution and leaves the AGE alone:
+            # `pending_wait_over_bound_count` is the rows that are starving — waiting
+            # with no gate holding their lane — and `pending_wait_held_over_bound_count`
+            # is the rows a round hold / KV gate / primary hold has taken out of the
+            # claim query, which is a decision, not a fault. The skill's filter
+            # (`select(.pending_wait_over_bound_count > 0)`) therefore goes quiet
+            # during a hold, which is what "the healthy answer prints nothing" means,
+            # while #1526's shape still prints because nothing was holding ITS rows.
+            # The AGE stays the oldest wait over every queued row of the source, held
+            # or not: a lane sitting on six rows for nine hours has an age, and zeroing
+            # it would make the held count the only evidence left that anything is
+            # waiting at all — a held backlog must stay visible, not become a gap.
+            "pending_wait_max_seconds": max(
+                float((pending.get(name) or {}).get("max_wait_seconds", 0) or 0),
+                float((pending.get(name) or {}).get("held_max_wait_seconds", 0) or 0)),
             "pending_wait_over_bound_count": int(
                 (pending.get(name) or {}).get("over_bound_count", 0) or 0),
+            "pending_wait_held_over_bound_count": int(
+                (pending.get(name) or {}).get("held_over_bound_count", 0) or 0),
             "pending_wait_bound_seconds": PENDING_WAIT_BOUND_SECONDS,
             "health": rollup.get(name),
             # `null` for a source the config does not name: no interval to judge

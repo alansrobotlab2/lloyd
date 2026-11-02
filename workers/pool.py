@@ -1347,6 +1347,8 @@ class WorkerPool:
                 "Round hold engaged: an %s round is in flight — holding %s",
                 ROUND_SOURCE, ", ".join(held) or "nothing",
             )
+            self._journal_gate(gate="round_hold", value="engage",
+                               held_sources=held, detail=ROUND_SOURCE)
         else:
             hold["held_sources"] = held
         return held
@@ -1414,7 +1416,78 @@ class WorkerPool:
         hold["bound_held"] = []
         if hold["engaged"]:
             logger.info("Round hold released")
+            self._journal_gate(gate="round_hold", value="release",
+                               held_sources=hold["held_sources"],
+                               detail="round no longer in flight")
             hold.update(engaged=False, engaged_since=None, held_sources=[])
+
+    def _journal_gate(self, *, gate: str, value: str, held_sources: Any = None,
+                      detail: str = "") -> None:
+        """Append one gate transition to `workers.db`'s hold journal, loudly failing.
+
+        The log line beside this call is not the record. `server.err` rotates at
+        10 MB — 41 minutes of history on 2026-11-02, the day a round hold had
+        `owed-check` waiting 8 h 53 m — so after the fact nobody could say when a
+        gate engaged, which lanes it covered, or whether the age they were being
+        alarmed about was the gate's doing. This table is that record, and it is
+        deliberately NOT `pause_journal`: a gate holds named sources while the pool
+        keeps claiming the rest, and `pause_journal_holds` counts every take row
+        whatever its kind, so writing a gate there would inflate the one number
+        that answers "how many times was the fleet held".
+
+        A failed write costs history, never the hold, so it gets its own `except`
+        and its own words — the same split `_journal_pause` makes. A pool built
+        without a queue (a unit-test fixture assembled with `__new__`, which is how
+        half of tests/test_round_hold.py builds one) has nowhere to write; that is
+        a warning, not an exception, because `WorkerPool.__init__` always supplies
+        the queue and the only thing missing is the fixture's history.
+        """
+        queue = getattr(self, "queue", None)
+        if queue is None:
+            logger.warning("Hold journal: no queue on this pool; %s %s is log-only",
+                           gate, value)
+            return
+        try:
+            # No id is threaded through from the engage: `hold_journal_append` pairs a
+            # release to its own gate's open engage inside the same transaction, so the
+            # pairing cannot be broken by a caller, and nothing extra has to be carried
+            # in the gate's state dict — which `status()` SPREADS into the published
+            # payload that tests/test_api_contracts.py pins by set-equality.
+            queue.hold_journal_append(
+                gate=gate, value=value,
+                held_sources=(sorted(held_sources) if held_sources is not None
+                              else None),
+                detail=detail)
+        except Exception:
+            logger.exception(
+                "Hold journal: write FAILED (gate=%s value=%s); this transition is "
+                "log-only — the gate itself behaved correctly, but after "
+                "`server.err` rotates nobody will be able to say it happened",
+                gate, value)
+
+    def held_source_names(self) -> list[str]:
+        """Every source a claim gate is holding back right now, unioned.
+
+        The read the health route and the fleet watchdog share, so the figure a
+        person reads in Mission Control and the figure the stall alarm weighs
+        cannot come from different conventions — #3713's whole defect is that one
+        number had three readers and none of them knew a gate was holding it.
+
+        A pure read of the last decision each gate made, like `status()`, and the
+        same three lists `_claim_holds` unions before it hands them to
+        `claim_next(exclude_sources=...)`: what this returns is by construction the
+        set the claim query is skipping. It never probes the engine and never
+        recomputes a verdict, because the route that answers a dashboard must not
+        become the reason a claim waited.
+
+        Freshness is a claim poll's, which is honest and bounded: while the pool is
+        not paused the idle slots poll every couple of seconds, so a gate that let
+        go is off this list within a poll; while the pool IS paused nothing is
+        claimed at all and `_operator_pause_clause` is the clause that speaks.
+        """
+        return sorted(set(self._round_hold["held_sources"])
+                      | set(self._kv_gate["held_sources"])
+                      | set(self._primary_hold["held_sources"]))
 
     def primary_hold_status(self) -> dict[str, Any]:
         """What the primary reachability hold reports, and what a claim costs.
@@ -1489,8 +1562,13 @@ class WorkerPool:
                           engaged_since=datetime.now(timezone.utc).isoformat())
                 logger.warning("Primary hold engaged: the engine is not answering (%s) — holding %s",
                                st["last_detail"], ", ".join(held) or "nothing")
+                self._journal_gate(gate="primary_hold", value="engage",
+                                   held_sources=held, detail=str(st["last_detail"]))
         elif st["engaged"]:
             logger.info("Primary hold released: the engine answers again (%s)", st["last_detail"])
+            self._journal_gate(gate="primary_hold", value="release",
+                               held_sources=st["held_sources"],
+                               detail=str(st["last_detail"]))
             st.update(engaged=False, engaged_since=None, held_sources=[])
         return held
 
@@ -1533,9 +1611,15 @@ class WorkerPool:
                         held_sources=held)
             logger.info("KV gate engaged: primary KV %.0f%% > %.0f%% — holding %s",
                         100 * kv, 100 * limit, ", ".join(held) or "nothing")
+            self._journal_gate(
+                gate="kv_gate", value="engage", held_sources=held,
+                detail=f"kv {100 * kv:.0f}% > {100 * limit:.0f}%")
         elif not engaged and gate["engaged"]:
             logger.info("KV gate released: primary KV %s",
                         "unknown" if kv is None else f"{100 * kv:.0f}%")
+            self._journal_gate(
+                gate="kv_gate", value="release", held_sources=gate["held_sources"],
+                detail="kv unknown" if kv is None else f"kv {100 * kv:.0f}%")
             gate.update(engaged=False, engaged_since=None, held_sources=[])
         return held
 
@@ -2146,6 +2230,28 @@ _pool_instance: Optional[WorkerPool] = None
 
 def get_pool() -> Optional[WorkerPool]:
     return _pool_instance
+
+
+def current_held_source_names() -> list[str]:
+    """The sources the running pool's gates hold back now; empty if no pool.
+
+    The one way a reader outside the pool asks the question #3713 is about. It
+    returns `[]` — nothing held, every waiting row counts as starvation — when no
+    pool exists in this process or the read raises, and that is the side it fails
+    toward on purpose: a health payload that over-reports starvation gets argued
+    with, while one that under-reports is how #1526's four-day outage stayed
+    invisible. The aggregator process has no pool at all, so `[]` is also simply
+    the right answer there.
+    """
+    pool = get_pool()
+    if pool is None:
+        return []
+    try:
+        return pool.held_source_names()
+    except Exception:  # noqa: BLE001 — an unreadable gate is not "nothing is held"
+        logger.exception("hold attribution: held_source_names failed; "
+                         "reporting every waiting row as unheld")
+        return []
 
 
 async def start_pool(queue: WorkQueue, slots: int, max_attempts: int = 3) -> WorkerPool:

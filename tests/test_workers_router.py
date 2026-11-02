@@ -1941,7 +1941,7 @@ def test_the_clamp_arrives_without_renaming_anything_else(
     """Clause 4 at the route: the envelope grew by exactly two keys.
 
     Top-level set-equality is the pin — an additive change may add, and the
-    per-source rows must come back with the eleven keys `web/src/api.ts` types
+    per-source rows must come back with the twelve keys `web/src/api.ts` types
     and the Background tab reads, unchanged.
     """
     client, q = _clamp_client(monkeypatch, tmp_path)
@@ -1952,17 +1952,19 @@ def test_the_clamp_arrives_without_renaming_anything_else(
     assert set(body) == {"initialized", "days", "oldest_input",
                          "window_clamped_to_hours", "sources"}, sorted(body)
     row = body["sources"][0]
-    # #2185 grew this row by exactly three keys, additively: the queue's wait, the
-    # count over the bound, and the bound the count was taken against so the number
-    # cannot be read against a different threshold later. The eleven keys
+    # #2185 grew this row by three keys and #3713 by a fourth, both additively: the
+    # queue's wait, the count of claimable rows over the bound, the bound the count
+    # was taken against so the number cannot be read against a different threshold
+    # later, and #3713's count of rows a claim gate is holding. The twelve keys
     # `web/src/api.ts` types and the Background tab reads are otherwise untouched —
-    # that is what set-equality here is for, and a fourth key appearing is a rename
+    # that is what set-equality here is for, and a fifth key appearing is a rename
     # or a drop wearing an addition's clothes.
     assert set(row) == {"name", "configured", "enabled", "inner_voice",
                         "interval_seconds", "max_inflight", "priority", "depth",
                         "health", "dispatch", "recent",
                         "pending_wait_max_seconds",
                         "pending_wait_over_bound_count",
+                        "pending_wait_held_over_bound_count",
                         "pending_wait_bound_seconds"}, sorted(row)
     assert row["name"] == "probe" and row["configured"] is True
     health = row["health"]
@@ -2352,9 +2354,17 @@ def test_the_now_keyword_is_what_makes_a_wait_reproducible(tmp_path):
     _park(q, 1, seconds_ahead=-60)
     _park(q, 2, seconds_ahead=60)
 
+    # #3713's two held keys are asserted here as exact zeros in the same dict, not
+    # skipped: with no names passed, every row lands in the unheld pair and the held
+    # pair is 0.0 / 0, which is what makes the unheld figures equal the ones this read
+    # returned before the split. A version that omitted the held keys from a
+    # no-names call would leave a caller summing the two counts against a KeyError,
+    # and a version that put a row in both pairs would read the same backlog twice.
     assert q.pending_wait_by_source(now=moment) == {
-        "counted": {"max_wait_seconds": 4000.0, "over_bound_count": 1},
-        "parked": {"max_wait_seconds": 0.0, "over_bound_count": 0},
+        "counted": {"max_wait_seconds": 4000.0, "over_bound_count": 1,
+                    "held_max_wait_seconds": 0.0, "held_over_bound_count": 0},
+        "parked": {"max_wait_seconds": 0.0, "over_bound_count": 0,
+                   "held_max_wait_seconds": 0.0, "held_over_bound_count": 0},
     }, "one instant in, one exact figure out — and the exclusion read that instant too"
 
     wall = q.pending_wait_by_source()
@@ -2504,8 +2514,11 @@ def test_an_unparseable_enqueued_at_gives_the_row_no_age_at_all(tmp_path):
     q = WorkQueue(tmp_path / "garbage.db")
     q.enqueue("probe", "task", payload={})
     _restamp(q, 1, epoch_seconds_as_text)
+    # The held pair is part of the zeros a skipped row contributes (#3713): the
+    # source keeps its entry, and all four figures say "nothing counted".
     assert q.pending_wait_by_source() == {
-        "probe": {"max_wait_seconds": 0.0, "over_bound_count": 0}}
+        "probe": {"max_wait_seconds": 0.0, "over_bound_count": 0,
+                  "held_max_wait_seconds": 0.0, "held_over_bound_count": 0}}
 
     # The row that CAN be parsed decides the figure, and the source keeps its entry.
     # A window, not equality: the stamp is written by `_backdate`'s clock and the age

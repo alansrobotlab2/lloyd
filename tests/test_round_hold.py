@@ -896,3 +896,192 @@ def test_only_a_live_marker_counts(tmp_path, monkeypatch):
     S.write_land_marker("SM_DEAD", pid=778, by="round.land")
     (tmp_path / "SM_NONE").mkdir()
     assert S.rounds_landing() == ["SM_LIVE"]
+
+
+# ── #3713: an engagement is a record, not a log line ─────────────────────────
+
+@pytest.fixture
+def journaled(pool, tmp_path):
+    """The gate-test pool with a real `workers.db` behind it.
+
+    `_journal_gate` reads `self.queue` and writes nothing when there is none, which is
+    what keeps the other nodes in this file — and every gate test that never wired a
+    queue — unaffected by the journal.
+    """
+    from workers.queue import WorkQueue
+
+    db = tmp_path / "journal.db"
+    pool.queue = WorkQueue(db)
+    pool.db_path = db
+    return pool
+
+
+def _seed_machine_pause_take(q):
+    """One row of the journal gate history must NOT be written to: `pause_journal`.
+
+    The real shape of it on this box is 36 rows, every one `holder_kind='machine',
+    actor='eval-window'` — the eval-window machine pauses of 2026-11-02. Seeded so the
+    assertion below is a count that can be wrong: an empty result would pass no matter
+    where the gate's rows went.
+    """
+    return q.pause_journal_append(value="1", holder_kind="machine",
+                                  actor="eval-window")
+
+
+def _journal_rows(pool, gate):
+    """The gate's whole history, read the way a later reader would: by window."""
+    from datetime import datetime, timedelta, timezone
+
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    return [r for r in pool.queue.hold_journal_window(since=since)
+            if r["gate"] == gate]
+
+
+def test_a_round_hold_engagement_can_be_read_back_after_the_log_rotated_away(
+        journaled):
+    """Every engage and release of the round hold is in durable storage for 7 days.
+
+    The incident: `/api/workers/status` reported `round_hold.engaged_since` 12:40:24Z
+    as the THIRD engagement of the day, while `owed-check`'s oldest row had been
+    waiting since 05:08:46Z — so ~7.5 h of that age belonged to an engagement the
+    payload no longer showed. The transitions ARE logged (`pool.py`'s `Round hold
+    engaged` / `Round hold released` INFO lines, into `~/lloyd-data/logs/server.err`),
+    but that file rotates at 10 MB and the copy on disk spanned 41 minutes, so the
+    history was unreconstructable — which is what made a held lane and a starved one
+    indistinguishable after the fact to anyone not reading the live payload.
+
+    The read below is therefore deliberately the 7-day window read, over a reopened
+    `WorkQueue`, not the in-process dict: `engaged_since` in memory is the thing that
+    was already there. And `pause_journal_holds()` is asserted UNCHANGED in the same
+    node, because that is the trap in this destination —
+    `WorkQueue.pause_journal_holds` selects `WHERE t.value = '1'` with no `holder_kind`
+    filter, so a round-hold row written into `pause_journal` would have inflated "how
+    many times was the fleet held" for every existing reader, including the queue-health
+    skill and the retention sweep.
+    """
+    from workers.queue import WorkQueue
+
+    _seed_machine_pause_take(journaled.queue)
+    _run_round(journaled)
+    assert "youtube-digest" in journaled._round_hold_held(REGISTRY)
+    assert "youtube-digest" in journaled._round_hold_held(REGISTRY), (
+        "re-ticking an engagement must not re-write it; a tick cadence would otherwise "
+        "bury the one question the journal answers")
+
+    journaled._release_round_hold()
+
+    rows = _journal_rows(journaled, "round_hold")
+    assert [r["value"] for r in rows] == ["engage", "release"], rows
+    assert rows[0]["hold_id"] is None, (
+        "an engage opens a hold and so carries no key; a non-NULL here means the "
+        "pairing is not what `hold_journal_holds` reads")
+    assert rows[1]["hold_id"] == rows[0]["id"], (
+        "the release is not paired to the engage it closes, so a reader cannot tell "
+        "which engagement ended")
+    assert "youtube-digest" in rows[0]["held_sources"], (
+        "an engage row without the held list cannot attribute the wait it covers to "
+        "the gate — that list is the whole point of #3713")
+    assert rows[1]["held_sources"] == rows[0]["held_sources"]
+    assert [r["detail"] for r in rows] == ["autocode", "round no longer in flight"], rows
+    assert rows[0]["open"] is False and rows[1]["open"] is False, (
+        "a released engagement still reads as open, so a reader cannot tell a gate "
+        "that let go from one still holding")
+
+    # Durability is a file property, so it is checked through a second connection.
+    reread = [r for r in WorkQueue(journaled.db_path).hold_journal_window(
+        since=rows[0]["at"]) if r["gate"] == "round_hold"]
+    assert [r["value"] for r in reread] == ["engage", "release"], (
+        "the journal did not survive the process that wrote it, which is the same "
+        "failure mode as the log rotation it replaces")
+
+    # `pause_journal_holds` selects `WHERE t.value = '1'` with NO `holder_kind`
+    # filter, so a gate row written there with value '1' would be counted as a hold of
+    # the whole fleet by every reader — this test, the retention sweep, the
+    # queue-health skill's read. One eval-window take is seeded, so the count that has
+    # to stay at 1 is a count that is demonstrably being read.
+    holds = journaled.queue.pause_journal_holds()
+    assert [h["actor"] for h in holds] == ["eval-window"], (
+        f"the round hold's transition reached `pause_journal`, whose hold count every "
+        f"existing reader already treats as the number of times the fleet was held: {holds}")
+
+
+def test_the_kv_gate_is_journalled_and_adds_nothing_to_the_fleet_hold_count(
+        journaled, monkeypatch):
+    """The KV gate's engages and releases are recorded, and none of them is a "hold".
+
+    Same clause, second gate, because the KV gate is the one that holds the long-lived
+    lanes on memory pressure rather than on a round, and the item names both. It also
+    pins the count that must NOT move from the other side: two engagements of the gate
+    are two journal rows and ZERO takes on the fleet.
+    """
+    monkeypatch.setattr(P, "kv_gate_config", lambda: {"enabled": True})
+    _seed_machine_pause_take(journaled.queue)
+    monkeypatch.setattr(P.WorkerPool, "_gate_reading",
+                        staticmethod(lambda window: 0.72))
+
+    assert "deep-research" in journaled._kv_gate_held(REGISTRY)
+    assert "deep-research" in journaled._kv_gate_held(REGISTRY)
+    monkeypatch.setattr(P.WorkerPool, "_gate_reading",
+                        staticmethod(lambda window: 0.10))
+    journaled._kv_gate_held(REGISTRY)
+
+    rows = _journal_rows(journaled, "kv_gate")
+    assert [r["value"] for r in rows] == ["engage", "release"], rows
+    assert rows[0]["hold_id"] is None and rows[1]["hold_id"] == rows[0]["id"]
+    assert rows[0]["open"] is False and rows[1]["open"] is False, rows
+    assert "deep-research" in rows[0]["held_sources"]
+    assert rows[0]["detail"].startswith("kv 72%") and rows[1]["detail"] == "kv 10%", rows
+    assert [r["value"] for r in _journal_rows(journaled, "kv_gate")
+            if r["value"] == "engage"] == ["engage"], (
+        "the gate engaged twice on the journal, which is the count a reader would "
+        "read as two periods of memory pressure")
+    assert [h["actor"] for h in journaled.queue.pause_journal_holds()] == \
+        ["eval-window"], (
+        "a KV-gate take landed in `pause_journal`, whose hold count every existing "
+        "reader already treats as the number of times the fleet was held")
+
+def test_held_source_names_is_the_same_union_the_claim_query_is_handed(pool, monkeypatch):
+    """Every gate `_claim_holds` excludes is a gate this read names, and no others.
+
+    `held_source_names()` is the single function the health route and the fleet
+    watchdog call to ask who is being held, and it is a SECOND reading of the gate
+    state — the first is `_claim_holds`, which builds the `exclude_sources` argument the
+    claim query actually uses. The two must agree or the attribution is fiction: a gate
+    the claim query honours and this read forgets has its rows published as pool
+    starvation, which is #3713's defect arriving by omission. So all three gates are
+    engaged here, each over a different set, and the answer is asserted equal to
+    `_claim_holds`'s own result rather than to a list chosen by hand — with the primary
+    hold's contribution arriving the way it does in production, through the probe's
+    last answer about `workers.primary_hold.sources` (`vision-guard`), which is a set
+    no other gate holds.
+
+    Both reads are pure reads of the same three state lists, so this node is the pin
+    that keeps them that way: `held_source_names` must not probe the engine or
+    recompute a verdict, because the route that answers a dashboard must not become the
+    reason a claim waited on HTTP.
+    """
+    pool.registry = lambda: REGISTRY
+    monkeypatch.setattr(P, "round_hold_config", lambda: {})
+    monkeypatch.setattr(P, "kv_gate_config",
+                        lambda: {"enabled": True, "max_kv_usage": 0.1,
+                                 "window_seconds": 60})
+    monkeypatch.setattr(P.WorkerPool, "_gate_reading",
+                        staticmethod(lambda window: 0.72))
+    monkeypatch.setattr(P, "primary_engine_answering",
+                        lambda: (False, "primary unreachable: refused connection"))
+    _run_round(pool)
+    import asyncio as _asyncio
+
+    _asyncio.run(pool._primary_hold_held(REGISTRY))
+
+    # REGISTRY, not `{}`: `_claim_holds` DECIDES the round hold on the registry it is
+    # handed, so an empty one releases the engagement this node exists to attribute and
+    # the comparison below would be two empty sets agreeing.
+    claim_excludes = set(_asyncio.run(pool._claim_holds(REGISTRY)))
+    assert len(claim_excludes) > 3, (
+        f"the union is {sorted(claim_excludes)}; a comparison against a near-empty set "
+        f"is a pin that cannot fail, so at least one gate did not engage as intended")
+    assert set(pool.held_source_names()) == claim_excludes, (
+        f"the attribution read names {sorted(pool.held_source_names())} while the claim "
+        f"query excludes {sorted(claim_excludes)} — a gate in the second set and not the "
+        f"first has its waiting rows published as starvation")

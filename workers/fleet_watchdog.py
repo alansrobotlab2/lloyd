@@ -65,6 +65,13 @@ import asyncio
 import logging
 
 from workers.queue import WorkQueue
+# #3713: the stall alarm and the Mission Control figure attribute a wait the same
+# way or not at all, so they share the one function that answers which lanes a claim
+# gate is holding back. `workers.pool` imports this module only inside
+# `WorkerPool._watch_fleet`, never at module scope, so importing it here is not a
+# cycle; a box with no pool in this process gets `[]` and every waiting row counts as
+# starvation, which is the side that cannot hide an outage.
+from workers.pool import current_held_source_names
 
 logger = logging.getLogger("lloyd-workers.fleet_watchdog")
 
@@ -1006,9 +1013,15 @@ def _blocked_note(entry: dict) -> str:
             f"{late_tail}")
 
 
-def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
+def _queue_starving(queue: WorkQueue, max_duration: int,
+                    held_sources=None) -> float:
     """Age in seconds of the oldest claimable queued item, if it is older than
     3x max_duration. Catches the opposite failure: dispatch fine, workers dead.
+
+    `held_sources` names the lanes a claim gate is holding back. `None` — the
+    argument `tick()` leaves it at — asks the running pool, so the answer comes from
+    the same read the health route answers with; an explicit sequence pins it, which
+    is what a test needs to say "this row was held" without a pool.
 
     **Every source, and the oldest row rather than the newest 500.** This read used
     to be `queue.list_items(source=NAME, limit=500)`, and asking one question about
@@ -1036,9 +1049,29 @@ def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
     streak logic in `tick()` both depend on. A read that raises still returns 0.0 —
     an unreadable queue is not evidence of a stall, and a watchdog that alarmed on its
     own exception would spend a person's cooldown on a lock.
+
+    #3713 is why the read is passed `held_sources`. A claim gate takes a source out of
+    the claim query in SQL (`WorkerPool._claim_holds` -> `claim_next(exclude_sources=
+    ...)`), so a held lane is NOT a pool failing to claim: on 2026-11-02 a round hold
+    engaged at 12:40:24Z held 11 lanes, and this detector was posting the age of rows
+    the pool had deliberately skipped as a stall. The fix is `entry["max_wait_seconds"]`
+    — the UNHELD max of the split `pending_wait_by_source` now returns — which is why
+    the max below does not name a held row and does not need to subtract one. The
+    attribution is read at the shared read rather than here: this function and the
+    Mission Control figure call the same method with the same set of names, so the
+    alert and the panel cannot disagree about whose fault a wait is. With no gate
+    engaged the set is empty and the figure is today's, which is what keeps #1526's
+    four-day outage — rows past every bound with nothing holding them — alarming.
     """
+    # Outside the try, because a gate this cannot see is NOT evidence of a healthy
+    # pool: `current_held_source_names` already swallows its own failure and answers
+    # `[]`, which counts every waiting row as starvation, while routing it through
+    # the `except` below would answer 0.0 and silence the alarm on a read that merely
+    # went wrong.
+    held = (current_held_source_names() if held_sources is None
+            else list(held_sources))
     try:
-        waits = queue.pending_wait_by_source()
+        waits = queue.pending_wait_by_source(held_sources=held)
     except Exception:
         return 0.0
     oldest = max((entry["max_wait_seconds"] for entry in waits.values()),
@@ -1046,8 +1079,8 @@ def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
     return oldest if oldest > 3 * max_duration else 0.0
 
 
-def _oldest_wait(queue: WorkQueue) -> tuple[float, str | None]:
-    """The longest wait on the queue, and WHICH SOURCE is serving it.
+def _oldest_wait(queue: WorkQueue, held_sources=None) -> tuple[float, str | None]:
+    """The longest CLAIMABLE wait on the queue, and WHICH SOURCE is serving it.
 
     The same read `_queue_starving` makes, with the key it discards. `waits` is keyed by
     source, so carrying the name costs nothing, and one line of the produced alert is the
@@ -1056,15 +1089,30 @@ def _oldest_wait(queue: WorkQueue) -> tuple[float, str | None]:
     low-priority stream sitting behind a busy high-priority one — and those two want
     opposite actions. Same exception rule: an unreadable queue is `(0.0, None)`, which
     never crosses the threshold, so a watchdog never alarms on its own failure to read.
+
+    `held_sources` is the same argument `_queue_starving` takes, and it is taken from the
+    same read for the same reason: this figure is printed in the SAME sentence as the age
+    `_queue_starving` weighed (#2692), so if one named a held lane and the other skipped
+    it the alert would attribute a gate's wait to a source and then name a different
+    source as starving. `entry["max_wait_seconds"]` is the unheld figure since #3713, so
+    a held lane contributes 0.0 here and can never win the `max`.
     """
+    held = (current_held_source_names() if held_sources is None
+            else list(held_sources))
     try:
-        waits = queue.pending_wait_by_source()
+        waits = queue.pending_wait_by_source(held_sources=held)
     except Exception:
         return 0.0, None
     if not waits:
         return 0.0, None
     source, entry = max(waits.items(), key=lambda kv: kv[1]["max_wait_seconds"])
-    return float(entry["max_wait_seconds"]), source
+    best = float(entry["max_wait_seconds"])
+    # A held-only queue has no claimable wait to name, and answering `(0.0, "owed-check")`
+    # would print a source beside a zero age — the shape that reads as "this lane is
+    # starving at 0 min". `(0.0, None)` is the same answer the empty queue gets.
+    if best <= 0.0:
+        return 0.0, None
+    return best, source
 
 
 def _outranked_clause(

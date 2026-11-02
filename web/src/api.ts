@@ -313,13 +313,23 @@ export interface WorkerSourceHealth {
   staged_pending?: { pending_count: number; cap: number; over_cap: boolean } | null
   // The queue's WAIT, not only its depth: how old the oldest row sitting in
   // state 'queued' is (from enqueued_at; a row parked by retry back-off does not
-  // count), how many of that source's waiting rows are past the bound, and the
-  // bound itself — 3600 s. Nothing queued is 0 and 0, never null. Both of the
+  // count; held or not), how many of that source's waiting rows are past the bound
+  // AND CLAIMABLE, how many more are past it behind an engaged claim gate, and the
+  // bound itself — 3600 s. Nothing queued is 0, 0 and 0, never null. Both of the
   // outages this exists for (#1526's four days, #24's two lost 6x-daily slots)
   // were diagnosed by hand-running this over workers.db; the age of a claim that
   // never came is a field now, so a recurrence is a reading.
+  //
+  // #3713 splits the two counts because one number had three readers: a round hold
+  // takes a source out of the claim query in SQL, so on 2026-11-02 `owed-check` was
+  // published as 8 h 53 m of pool starvation while the pool was neither paused nor
+  // saturated, and the thing causing the wait was the pool's own gate. Read
+  // `pending_wait_over_bound_count` to ask "is the pool failing to claim work"; read
+  // the held key to ask "how much of this wait is a gate we opened on purpose". The
+  // age spans both, so a held lane never renders as an idle one.
   pending_wait_max_seconds: number
   pending_wait_over_bound_count: number
+  pending_wait_held_over_bound_count: number
   pending_wait_bound_seconds: number
   // null when the source has no runs in the window. A rate over zero runs is
   // unknown, not 0% — rendering "0% failing" for a source that has never run
