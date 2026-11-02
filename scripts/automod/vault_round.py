@@ -1384,6 +1384,12 @@ def _guards_row(guards: dict) -> dict:
     same reason. And each serial draw now carries the `seconds` it ran, which is the
     measurement `vault_guards.probe_budget` reads back off these very rows — no row ever
     wrote it, so no budget could be derived from measured cost before this.
+
+    `heavy_rung_verdict` (#3718) is the marker for the skip that a green result used to
+    hide entirely: a proposed-vault draw that ran zero tests, so nothing about the land
+    was checked by the heavy rung and the commit went out anyway. It is written by this
+    one projection, which is why it reaches BOTH surfaces at once — the ledger row and
+    the dict `land()` returns, the latter being what the MCP tool serialises whole.
     """
     out: dict = {"state": guards.get("state", "skipped"),
                  "refuse": bool(guards.get("refuse"))}
@@ -1479,6 +1485,16 @@ def _guards_row(guards: dict) -> dict:
                     "workers": retry.get("workers") or 1}
         if retry.get("seconds") is not None:
             out[key]["seconds"] = retry["seconds"]
+    if guards.get("heavy_rung_verdict"):
+        # #3718 clause 4. The row this key lands on is a SUCCESS row: `ok: true`, a
+        # commit sha, and a heavy rung that ran zero tests — the shape that committed 85
+        # times by 2026-11-02 while the caller got nothing but `ok`. It goes on the row
+        # and into `land()`'s return (both are this one projection) because the
+        # alternative was a refusal, which the ruling above forbids. A row that ran its
+        # draw and could not attribute a failure has no key here: it has `unadjudicated`
+        # and a non-zero `candidate.ran`, and saying "no verdict" about a draw that
+        # judged 12,000 nodes would make the key worth less than it is.
+        out["heavy_rung_verdict"] = str(guards["heavy_rung_verdict"])[:400]
     if guards.get("unadjudicated") is not None:
         # #2383 clause 1. The probe reached a completed run, saw failures in it, and is
         # about to land anyway because it could not adjudicate them — which the row

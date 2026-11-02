@@ -6774,6 +6774,12 @@ def test_the_budget_is_derived_from_measured_draw_cost_and_falls_back_to_exactly
     ever measured. A missing, unreadable or draw-less ledger must yield EXACTLY
     `PROBE_TIMEOUT_SECONDS`, because the fallback's whole job is to leave the probe
     behaving as it did before this shipped.
+
+    This node is also #3718 clause 2: the fallback survives the widening of the branch
+    above it, in every shape a missing input takes, and the ceiling that bounds the
+    widened figure stays inside `Gate.SERIAL_MAX_WAIT` — the probe holds the gate's
+    tests lock, and no fix to a too-small budget may buy a gate that times out on its
+    own rung.
     """
     from scripts.automod.gate import Gate
 
@@ -6811,19 +6817,21 @@ def test_the_budget_is_derived_from_measured_draw_cost_and_falls_back_to_exactly
     absent, why = VG.probe_budget(ledger=tmp_path / "absent.jsonl")
     assert absent == float(VG.PROBE_TIMEOUT_SECONDS) == 300.0, absent
     assert why.startswith(f"fallback `PROBE_TIMEOUT_SECONDS` ({VG.PROBE_TIMEOUT_SECONDS:.0f}s)"), why
-    # Which side was missing is the useful half of the sentence. Between this landing and
-    # the first row that carries a re-ask's seconds, the ledger measures the parallel
-    # draw and not the serial one; naming the SERIAL side says the derivation is working
-    # and waiting on its own first output, where "no measured draw cost" would read as an
-    # empty ledger.
+    # Which side was missing is the useful half of the sentence, and on a ledger with
+    # nothing on it BOTH names appear.
     assert "parallel" in why and "serial re-ask" in why, why
-    # The gap this landing itself creates: the first rows after it measure the parallel
-    # draw (which `candidate.seconds` has always carried) but not a re-ask, whose seconds
-    # only #2383 clause 5 puts on the row. Naming the SERIAL side says the derivation is
-    # working and waiting on its own first output.
+    # A ledger that measured the parallel draw and never a re-ask is NO LONGER this
+    # branch (#3718 clause 1). The assertion here used to read
+    # `assert "serial re-ask" in half_why and "parallel +" not in half_why`, pinning the
+    # half-measured ledger to the fallback, and that pin is exactly what the item names
+    # as the defect: the fallback sustained itself, because the 300 s it forced killed
+    # the parallel draw at `ran: 0` and a dead draw reports no failures to re-ask, so
+    # the serial cost whose absence justified the 300 s could never be measured again.
     half = _budget_ledger(tmp_path, [_drawn_row(235.9, None)], name="half.jsonl")
-    half_why = VG.probe_budget(ledger=half)[1]
-    assert "serial re-ask" in half_why and "parallel +" not in half_why, half_why
+    half_budget, half_why = VG.probe_budget(ledger=half)
+    assert not half_why.startswith("fallback"), half_why
+    assert half_budget > VG.PROBE_TIMEOUT_SECONDS, half_why
+    assert "parallel draw 235.9s" in half_why, half_why
     a_dir = tmp_path / "as-a-directory.jsonl"
     a_dir.mkdir()
     assert VG.probe_budget(ledger=a_dir)[0] == 300.0
@@ -6837,6 +6845,135 @@ def test_the_budget_is_derived_from_measured_draw_cost_and_falls_back_to_exactly
 
     # A caller that names a timeout outranks the measurement, and says which it is.
     assert VG.probe_budget(120.0, ledger=led) == (120.0, "caller-supplied `timeout=`")
+
+
+def test_a_measured_parallel_draw_with_no_re_ask_cost_derives_above_the_fallback(tmp_path):
+    """#3718 clause 1: the parallel side alone IS a measured cost, and is now used.
+
+    The live control is the ledger row at 2026-11-01T19:22Z (commit `f49029208`,
+    `skills/kg-mention-classifier/SKILL.md`): a parallel draw of 475.1 s that completed
+    12,376 nodes inside a derived budget of 571.3 s. The next day that same path drew the
+    301-file selection at `budget: 300.0` and reported `candidate.ran: 0` — because with
+    no re-ask row inside the trailing 4 MB the derivation returned the constant, and the
+    constant sits BELOW the cost of the run it budgets. Falling back on a missing serial
+    side was therefore self-sustaining: a draw killed at 300 s reports no failures, a
+    re-ask only happens for failures, and the serial cost whose absence set the 300 s
+    could never be recorded again.
+
+    The derived figure is the one cost the box measured, charged once per draw the A/B
+    owes (`1 + PROPOSED_DRAWS + BASELINE_DRAWS`). The re-ask side is the unknown, and a
+    re-ask draws ONE failing file where the parallel figure is the WHOLE selection, so
+    this is the wide direction of error — and wide is the safe direction for a budget:
+    too wide costs wall clock, too narrow answers nothing. The cap is untouched, so the
+    probe still cannot hold the gate's tests lock past `PROBE_BUDGET_CEILING_S`.
+    """
+    led = _budget_ledger(tmp_path, [_drawn_row(475.1, None)])
+    budget, source = VG.probe_budget(ledger=led)
+    assert source.startswith("measured from"), source
+    assert "parallel draw 475.1s" in source, source
+    assert budget > VG.PROBE_TIMEOUT_SECONDS, budget
+    assert budget >= 475.1, "not less than the draw it exists to fit"
+    assert budget == VG.PROBE_BUDGET_CEILING_S, budget      # 5 x 475.1 s is past the cap
+    assert "capped at 900s" in source, source
+
+    # The narrow end of the same branch. A cheap measured day must not come back tighter
+    # than the standing constant — and must not come back AS it: `PARALLEL_ONLY_FLOOR_S`
+    # is the constant plus the two reap terms `probe_wall_bound` already commits to, which
+    # is what keeps a measured figure distinguishable from the fallback on the row that
+    # carries it. The two were indistinguishable on 85 committed `ran: 0` rows.
+    narrow, why = VG.probe_budget(ledger=_budget_ledger(tmp_path, [_drawn_row(10.0, None)],
+                                                        name="narrow.jsonl"))
+    assert VG.PARALLEL_ONLY_FLOOR_S == (VG.PROBE_TIMEOUT_SECONDS + VG.GROUP_TERM_GRACE_S
+                                        + VG.REAP_DRAIN_S), VG.PARALLEL_ONLY_FLOOR_S
+    assert narrow == VG.PARALLEL_ONLY_FLOOR_S > VG.PROBE_TIMEOUT_SECONDS, narrow
+    assert narrow >= 10.0 and why.startswith("measured from"), why
+    assert "parallel draw 10.0s" in why, why
+
+
+def test_a_zero_test_proposed_draw_marks_the_heavy_rung_as_having_given_no_verdict(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#3718 clause 3: `ran: 0` still never refuses, and now says so in its own key.
+
+    `vault_round.py:1969-1973` is a standing ruling — "A probe that cannot judge does NOT
+    refuse: it records why and proceeds … Silence is what is not allowed" — so this is a
+    marker and not a block. It is also what that ruling was never honoured WITH: 85
+    `vault_land` rows had committed with `state: skipped`, `candidate.ran: 0` and
+    `ok: true` by 2026-11-02, each of them a land the heavy rung never judged.
+    """
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    _budget_runs(monkeypatch, parallel={"ran": 0, "seconds": 296.2,
+                                        "note": "timed out after 296.2s"})
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert rep["candidate"]["ran"] == 0, rep["candidate"]
+    assert rep["budget"] == 300.0 and str(rep["budget_source"]).startswith("fallback"), rep
+    assert rep["heavy_rung_verdict"].startswith("no heavy-rung verdict"), rep
+    assert "ran 0 tests" in rep["heavy_rung_verdict"], rep["heavy_rung_verdict"]
+
+
+def test_a_draw_that_ran_but_could_not_attribute_its_failures_is_not_the_zero_test_shape(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#3718 clause 3's other half: the two skips stay two different keys.
+
+    The item's own correction is that what the caller lacked was "a key separating 'the
+    heavy rung ran nothing' from 'it ran and could not attribute'". Here the draw DID
+    run — 4 s short of a re-ask, with two failures seen — so the row has a real
+    denominator and `unadjudicated` ids, and it must not borrow the zero-test marker:
+    saying "no verdict" about a draw that judged 12,000 nodes would make the marker worth
+    less than it says.
+    """
+    _disagreement_vault(vault)
+    re_asked = _budget_runs(monkeypatch, parallel={"seconds": 296.0,
+                                                   "failed": [SEEN_A, SEEN_B]})
+
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert re_asked == [], "the re-ask ran, so this is not the budget-short shape"
+    assert rep["candidate"]["ran"] >= 1 and rep["unadjudicated"] == [SEEN_A, SEEN_B], rep
+    assert "heavy_rung_verdict" not in rep, rep
+
+
+def test_the_no_heavy_verdict_marker_reaches_the_land_row_and_the_land_result(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """#3718 clause 4, across both surfaces the clause names.
+
+    One projection (`_guards_row`) feeds both, and this is a whole `land()`: the real
+    guard path, the real vault commit, the real row on a real ledger, with only the pytest
+    child stood in. The row is the shape the owed-check job scans with
+    `grep vault_land ~/.local/state/lloyd-automod/promotions.jsonl`; the dict is what
+    `agent_mcp/automod.py:949-950` serialises into the tool answer, and the JSON
+    round-trip below is only that dict's own shape — the hop through the real handler is
+    crossed by
+    `tests/test_automod_hardening.py::test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing`,
+    which dispatches `automod_vault_land` and reads the marker off the payload that comes
+    back.
+    """
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _budget_runs(monkeypatch, parallel={"ran": 0, "seconds": 296.2,
+                                        "note": "timed out after 296.2s"},
+                 real_clock=True)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+
+    out = V.land(["skills/foo/SKILL.md"], "#3718 a land over a draw that ran nothing",
+                 item_id=None)
+
+    assert out["ok"] is True, "the ruling is that a non-judging probe still commits"
+    g = out["guards"]
+    assert g["state"] == "skipped" and g["refuse"] is False, g
+    assert g["candidate"]["ran"] == 0, g
+    assert g["heavy_rung_verdict"].startswith("no heavy-rung verdict"), g
+    assert json.loads(json.dumps(out))["guards"]["heavy_rung_verdict"] == \
+        g["heavy_rung_verdict"], "the tool result is a JSON dump of this dict"
+    row = _events("vault_land")[-1]
+    assert row["ok"] is True and row["commit"] == out["commit"], row
+    assert row["guards"]["heavy_rung_verdict"] == g["heavy_rung_verdict"], row["guards"]
 
 
 def test_the_row_shows_the_budget_and_the_cost_of_every_draw_side_by_side(

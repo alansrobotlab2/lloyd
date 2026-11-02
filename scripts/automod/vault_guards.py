@@ -1000,6 +1000,23 @@ BASELINE_DRAWS = 2
 #: inside the queue the rung already tolerates.
 PROBE_BUDGET_CEILING_S = 900.0
 
+#: The floor for a budget derived from the PARALLEL side alone (#3718), and the reason
+#: the fallback below cannot simply be widened. A ledger that measured a parallel draw
+#: and never a serial re-ask used to answer exactly `PROBE_TIMEOUT_SECONDS`, and that is
+#: what made the fallback permanent rather than cold: the proposed-vault draw over the
+#: live 301-file selection costs 385-475 s on this box (475.1 s completing 12,376 nodes
+#: at 2026-11-01T19:22Z, commit `f49029208`), so a 300 s budget killed it at `ran: 0`, a
+#: draw that reports nothing produces no failures to re-ask, and the serial cost whose
+#: absence was holding the budget at 300 s therefore could never be recorded again. 85
+#: `vault_land` rows had committed over that non-answer by 2026-11-02.
+#:
+#: The floor is the standing constant PLUS the two terms this module already commits to
+#: for a killed run (`GROUP_TERM_GRACE_S` + `REAP_DRAIN_S`, the tail of
+#: `probe_wall_bound`), which is what keeps a derived answer strictly ABOVE the fallback
+#: figure: a row whose budget was measured can then never read as one that fell back,
+#: and the two were indistinguishable on 85 rows of the ledger.
+PARALLEL_ONLY_FLOOR_S = float(PROBE_TIMEOUT_SECONDS) + GROUP_TERM_GRACE_S + REAP_DRAIN_S
+
 #: The ceiling on the QUEUE for the gate's tests lock, charged SEPARATELY from the
 #: probe's working budget (#2743). Until this the two shared one deadline: `agreement`
 #: fixed `started + budget` before it queued and handed every child run what was left
@@ -1143,12 +1160,29 @@ def probe_budget(explicit: float | None = None,
     cost is what makes the second draw fit; the cap is what keeps it off the gate's lock
     queue.
 
-    Two branches, both pinned in `tests/test_automod_vault_round.py`: with a readable
-    ledger carrying a measured parallel draw and a measured serial draw the answer is
-    the derived figure; with the ledger missing, unreadable, empty, or carrying only
-    draws that never reported, it is exactly `PROBE_TIMEOUT_SECONDS` — 300.0 — because
-    the fallback has to be the number every earlier row was measured against, not a
-    new guess. `explicit` (a caller's `timeout=`) wins over both, and the only
+    Three branches, all pinned in `tests/test_automod_vault_round.py`:
+    a readable ledger carrying BOTH a measured parallel draw and a measured serial
+    re-ask derives `parallel + (PROPOSED_DRAWS + BASELINE_DRAWS) x serial`; a ledger
+    carrying the parallel draw and NOT a re-ask derives the parallel draw times
+    `1 + PROPOSED_DRAWS + BASELINE_DRAWS` — the one draw the box measured, charged for
+    every draw the A/B owes, floored at `PARALLEL_ONLY_FLOOR_S` and capped at the
+    ceiling; and a ledger that is missing, unreadable, empty, carries only draws that
+    never reported, or carries a re-ask cost with no parallel draw beside it, is exactly
+    `PROBE_TIMEOUT_SECONDS` — 300.0.
+    #3718 is why the middle branch exists and why the second one used to be the third.
+    Falling back on a missing SERIAL side held the budget under the cost of the very run
+    it budgets, and the run it killed was the only thing that could ever have measured
+    the missing side. The parallel draw alone is a measured cost, so it is used: a
+    serial re-ask draws ONE failing file while the parallel figure is the WHOLE
+    selection, so charging the unmeasured side at the measured one is the wide direction
+    of error, and wide is the safe direction for a budget — too wide costs wall clock,
+    too narrow answers nothing and sustains itself. Only the case with no measured
+    PARALLEL draw keeps the constant, because with nothing to size the run that has to
+    fit, there is nothing to derive from. (The older sentence here claimed the constant
+    was "the number every earlier row was measured against": false. 212 rows carry a
+    derived budget between 436.2 s and 900.0 s; the constant is what the derivation
+    degraded to, not what the box was running on.)
+    `explicit` (a caller's `timeout=`) wins over all three, and the only
     production caller (`vault_round.py`) passes none.
     """
     if explicit is not None:
@@ -1163,22 +1197,39 @@ def probe_budget(explicit: float | None = None,
             parallel = par if parallel is None else max(parallel, par)
         if ser is not None:
             serial = ser if serial is None else max(serial, ser)
-    if parallel is None or serial is None:
-        # Which side was missing is the useful half of this sentence. The state between
-        # landing this code and landing the first row that carries a re-ask's seconds is
-        # exactly "parallel measured, serial not": a `budget` of 300.0 with a source
-        # naming the SERIAL side says the derivation is working and waiting on its own
-        # first output, where "no measured draw cost" would read as a ledger with nothing
-        # on it at all.
-        missing: list[str] = []
-        if parallel is None:
-            missing.append("parallel")
+    if parallel is None:
+        # No measured PARALLEL draw: whatever the re-ask side says, there is nothing here
+        # to size the one run that must fit against, so the standing constant stands.
+        # Which side was missing is the useful half of the sentence — "parallel" alone
+        # names a ledger whose rows never got a draw off the ground, "parallel + serial
+        # re-ask" names one with nothing measured on it at all.
+        missing: list[str] = ["parallel"]
         if serial is None:
             missing.append("serial re-ask")
         return (float(PROBE_TIMEOUT_SECONDS),
                 f"fallback `PROBE_TIMEOUT_SECONDS` ({PROBE_TIMEOUT_SECONDS:.0f}s): no "
                 f"measured {' + '.join(missing)} draw cost on the trailing "
                 f"{LEDGER_TAIL_BYTES / 1_048_576:g} MB of {path}")
+    if serial is None:
+        # #3718. The parallel side is measured and the serial side is not — the shape
+        # this box has been in permanently since 2026-10-31, because the only event that
+        # records a re-ask's cost is a re-ask, and a re-ask happens only when a parallel
+        # draw finishes and reports failures. Returning the constant here killed the
+        # draw at `ran: 0` (300 s against a 385-475 s run), so the failures never
+        # existed to re-ask, so the serial cost stayed missing. Charging every draw the
+        # A/B owes at the one cost the box HAS measured breaks that loop and keeps the
+        # figure an estimate of the thing the budget is for.
+        derived = float(parallel) * (1 + PROPOSED_DRAWS + BASELINE_DRAWS)
+        budget = min(max(derived, PARALLEL_ONLY_FLOOR_S), PROBE_BUDGET_CEILING_S)
+        return budget, (f"measured from {path}: parallel draw {parallel:.1f}s x "
+                        f"{1 + PROPOSED_DRAWS + BASELINE_DRAWS} draws (the "
+                        f"{PROPOSED_DRAWS + BASELINE_DRAWS} serial draws the A/B owes are "
+                        f"charged at the parallel figure: no serial re-ask cost is "
+                        f"measured on the trailing "
+                        f"{LEDGER_TAIL_BYTES / 1_048_576:g} MB, and a re-ask draws one "
+                        f"failing file, never the whole selection) = {derived:.1f}s, "
+                        f"floored at {PARALLEL_ONLY_FLOOR_S:.0f}s and capped at "
+                        f"{PROBE_BUDGET_CEILING_S:.0f}s")
     derived = float(parallel) + (PROPOSED_DRAWS + BASELINE_DRAWS) * float(serial)
     budget = min(max(derived, float(PROBE_TIMEOUT_SECONDS)), PROBE_BUDGET_CEILING_S)
     return budget, (f"measured from {path}: parallel draw {parallel:.1f}s + "
@@ -1297,7 +1348,11 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     failed the pre-land side too is pre-existing rather than this land's.
     `reason` says which of the non-answers it was whenever `state` is `skipped`,
     and each run's own `seconds`, `files` and captured `excerpt` ride along so a
-    non-answer explains itself.
+    non-answer explains itself. `heavy_rung_verdict` is #3718's marker for the one
+    non-answer that a green result hid: a proposed-vault draw that ran ZERO tests, so
+    the heavy rung issued no verdict about this land and the land committed anyway. It
+    never appears on the other non-answer — a draw that ran, saw failures, and could not
+    attribute them — which carries `unadjudicated` beside a non-zero `candidate.ran`.
     """
     # The budget is settled before anything else, including the nesting guard below,
     # because a row that carried no `budget` would leave "what was this probe allowed"
@@ -1533,6 +1588,20 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                                "files": cand["files"], "workers": cand["workers"]}
         report["excerpt"] = cand["excerpt"]
         if not cand["ran"]:
+            # #3718. This is the shape that committed 85 lands over no verdict at all:
+            # `refuse` stays False by the standing ruling at `vault_round.py:1969-1973`
+            # ("a probe that cannot judge does NOT refuse … Silence is what is not
+            # allowed"), and `candidate.ran: 0` did say it — but only to a reader who
+            # already knew to ask, and `land()` still handed back `ok: true` with a
+            # commit sha. The key is the refusal-shaped signal that ruling forbids
+            # being a refusal. It is present ONLY where the heavy rung never issued a
+            # verdict because its draw ran nothing; a draw that RAN and could not
+            # attribute what it saw carries `unadjudicated` with `candidate.ran > 0`
+            # beside it, and never this key.
+            report["heavy_rung_verdict"] = (
+                "no heavy-rung verdict: the proposed-vault draw ran 0 tests, so the "
+                "code-agreement rung judged nothing about this land beyond the cheap "
+                "validators")
             return done(state="skipped",
                         reason=f"the proposed-vault run answered nothing: {cand['note']}")
         if not cand["failed"]:

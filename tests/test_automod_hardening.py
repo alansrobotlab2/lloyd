@@ -2184,6 +2184,57 @@ async def test_a_same_turn_retry_of_the_vault_route_is_refused_and_writes_nothin
     assert AM.IV_REFUSAL_KEY in _iv_session(tmp_path, "s-vault")
 
 
+async def test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing(
+        monkeypatch, tmp_path):
+    """#3718 clause 4, on the hop `land()`'s own dict does not cross.
+
+    The vault-round nodes prove the producer and the row: a zero-test draw puts
+    `heavy_rung_verdict` on the probe report, `_guards_row` copies it, and `land()` hands
+    the same projection back in its return. What no node crossed is the last hop — the
+    answer an agent reads is `text_result(json.dumps(out, indent=2))`
+    (`agent_mcp/automod.py:949-950`), so a key that survives a Python dict but not the
+    serialised text, or one the handler rebuilds without, never reaches the caller clause
+    4 names. Hence the aggregator dispatch with a real session `_meta`, and assertions on
+    the JSON that comes back out, not on the dict on its way in.
+
+    The lander is stood in and the projection is not: the stub returns
+    `VR._guards_row(report)` over a report shaped as `vault_guards.agreement` builds one
+    when the proposed-vault draw answers nothing — 301 files, `ran: 0`, a 296.2 s timeout
+    inside the 300 s fallback budget, the live shape of 85 committed rows. And the gate
+    still has to be satisfied the way the loop satisfies it: refused on the first turn,
+    retried on a later one.
+    """
+    from scripts.automod import vault_round as VR
+
+    def fake_land(paths, message, **kw):
+        return {"ok": True, "commit": "a15aa2ebf", "paths": list(paths),
+                "guards": VR._guards_row({
+                    "state": "skipped", "refuse": False, "seconds": 296.9,
+                    "budget": 300.0,
+                    "candidate": {"ran": 0, "failed": [], "workers": 8,
+                                  "seconds": 296.2, "files": 301,
+                                  "note": "timed out after 296.2s"},
+                    "heavy_rung_verdict": (
+                        "no heavy-rung verdict: the proposed-vault draw ran 0 tests, so "
+                        "the code-agreement rung judged nothing about this land beyond "
+                        "the cheap validators")})}
+
+    monkeypatch.setattr(VR, "land", fake_land)
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-noverdict")
+    args = {"paths": ["skills/kg-mention-classifier/SKILL.md"], "message": "m"}
+
+    refused, is_error = await call("automod_vault_land", args, "turn-1")
+    assert is_error, "the unobserved turn landed a vault commit"
+
+    out, is_error = await call("automod_vault_land", args, "turn-2")
+    assert not is_error, out
+    g = out["guards"]
+    assert g["state"] == "skipped" and g["refuse"] is False, g
+    assert g["candidate"]["ran"] == 0, g
+    assert g["heavy_rung_verdict"].startswith("no heavy-rung verdict"), g
+    assert "ran 0 tests" in g["heavy_rung_verdict"], g["heavy_rung_verdict"]
+
+
 def test_the_gate_is_actually_wired_into_automod_start():
     """A gate nothing calls is the failure this whole review keeps finding."""
     src = (ROOT / "agent_mcp" / "automod.py").read_text()
