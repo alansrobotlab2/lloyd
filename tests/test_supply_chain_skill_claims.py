@@ -405,3 +405,171 @@ def test_the_popped_advisories_key_is_described_where_the_code_still_pops_it():
     skill = _skill()
     assert "counts and" in skill and "rows do not" in skill, (
         "the skill no longer says what travels in a dated report and what does not")
+
+
+# ── #3614: the accepted pillow/brotli floor ─────────────────────────────────
+
+#: Lead-in of the floor bullet. A named marker rather than a search for the word "floor",
+#: because this file already discusses "a floor" elsewhere (`150 was a floor` above), and a
+#: prose-word probe would pass on that sentence and fail on the bullet.
+FLOOR_MARKER = re.compile(r"^\s*-+\s*\*\*The accepted pillow/brotli floor")
+
+#: The whole of `merged_scan.distinct_missed_package_names` in `inventory-2026-10-29.json`
+#: and `inventory-2026-10-31.json` (measured 2026-11-02 by reading both files). All seven are
+#: accepted: a bullet naming only pillow and brotli would be void the day it landed, because
+#: the other five sit in that same field — `brotli` is the only name the 2026-10-29 reading
+#: newly entered, since `pillow` was already in the 2026-10-22 set and what the mirror refresh
+#: changed was which *sites* missed it, not which names were known.
+ACCEPTED_MISSED_NAMES = ("accelerate", "brotli", "gradio", "pillow", "pip",
+                         "transformers", "vllm")
+
+#: The accepted versions and the sites they are accepted at, as one fact per row: the ruling
+#: covers the model-serving venvs only, so a version is only the floor *at that site*.
+FLOOR_VERSIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("pillow", "12.1.1", ("qwen3-tts",)),
+    ("pillow", "12.3.0", ("vllm-djev", "vllm-flash-next-main",
+                          "vllm-flash-next-main-1012")),
+    ("brotli", "1.2.0", ("qwen3-tts",)),
+)
+
+
+def _floor_bullet(contract: str) -> str:
+    """The accepted-floor bullet, flattened: marker line to the next top-level bullet.
+
+    Flattening is what makes the windowed assertions below meaningful: the file wraps
+    mid-sentence, so a claim stated over four lines is one claim, and a physical-line check
+    would fail on text that is correct.
+    """
+    lines = contract.splitlines()
+    start = next((i for i, ln in enumerate(lines) if FLOOR_MARKER.match(ln)), None)
+    assert start is not None, (
+        "the Reporting contract carries no accepted-floor bullet, so a weekly run has no "
+        "name set to compare against and re-files the same 208 every week")
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        if re.match(r"^- \S", ln) or re.match(r"^#{2,4} ", ln):
+            break
+        out.append(ln)
+    return " ".join(" ".join(out).split())
+
+
+def _near(bullet: str, needle: str, *must: str, window: int = 200) -> None:
+    """Every occurrence of `needle` has all of `must` within `window` characters."""
+    for m in re.finditer(re.escape(needle), bullet):
+        span = bullet[max(0, m.start() - window):m.end() + window]
+        for word in must:
+            assert word in span, (
+                f"{needle!r} appears with no {word!r} within {window} characters, so a "
+                f"reader cannot tell which {needle!r} this is or what it was accepted at")
+
+
+def _void_condition(bullet: str, number: int) -> str:
+    """One numbered void condition: its label to the next sub-bullet, not the whole floor.
+
+    A slice rather than a `in bullet` check, because a forward reference from the NAMES
+    sub-bullet ("only a name outside the seven is news (void condition 2)") mentions the
+    label without stating the condition: the label and its own field have to be in the same
+    condition for a run to be able to act on either.
+    """
+    marker = f"**Void condition {number}"
+    start = bullet.find(marker)
+    assert start >= 0, (
+        f"void condition {number} is not labelled in the floor bullet, so the bullet offers a "
+        "floor with no named way back into an upgrade")
+    nxt = bullet.find(" - **", start + len(marker))
+    return bullet[start:nxt if nxt > 0 else len(bullet)]
+
+
+def test_the_reporting_contract_records_the_accepted_pillow_brotli_floor():
+    """#3614: the 208-row rise the mirror refresh made visible is a ruled floor, not a weekly item.
+
+    Autonomy task #99 compares its headline missed-advisory count against the previous dated
+    report and files an item on a delta. The 2026-10-29 reading rose `150 → 358` (+208) purely
+    because the frozen OSV mirror was refreshed and could see advisories it had never seen, and
+    the owed-check pass on #3544 ruled on 2026-10-31: "Accept as a documented floor for the
+    model-serving venvs; do NOT upgrade pillow/brotli." Without that ruling recorded *in the
+    procedure a run follows*, the next weekly run re-files the same 208 — which is what the item
+    was filed for. So this node pins the five things a run has to be able to read off the page:
+    the accepted versions per site, the seven names a run compares NAMES against, both void
+    conditions, the attribution rule for a moving mirror, and the one number that must never be
+    described as pillow/brotli rows.
+    """
+    bullet = _floor_bullet(_section(_skill(), "## Reporting contract"))
+
+    # ── clause 1: what is accepted, where, on whose authority ────────────────
+    for name, version, sites in FLOOR_VERSIONS:
+        assert version in bullet, f"the accepted version {version} of {name} is not stated"
+        _near(bullet, version, name, *sites)
+    assert re.search(r"2026-10-31", bullet), (
+        "the floor is undated, so a reader cannot tell it predates a new advisory and has no "
+        "reason to re-open it")
+    assert "#3544" in bullet and re.search(r"(?i)owed-check", bullet), (
+        "the bullet does not name the ruling that authorised it, so the next pass treats the "
+        "floor as this skill inventing an exemption rather than a decision someone took")
+    assert re.search(r"(?i)do ?NOT upgrade|not upgrade", bullet), (
+        "the bullet never says the ruling refused the upgrade, which is the half a future run "
+        "is most likely to override")
+
+    # The 208 is a row delta and nothing else. `packages_scanned` for site
+    # `vllm-flash-next-main-1012` is also 208 and the reference-table prose quotes it as a
+    # package count, so an unframed 208 in this section is ambiguous by construction — and no
+    # per-package row count exists at all, because the writer pops the rows that hold them.
+    assert re.search(r"208\s+rows?\s+(of|attributed)\s+(to\s+)?(pillow|brotli)", bullet, re.I) is None, (
+        "the bullet attributes rows to pillow or brotli; a dated report cannot show that — the "
+        "writer pops `advisories` per site and from the merged scan before the file lands")
+    assert re.search(r"150\s*(→|->)\s*358", bullet), (
+        "the 208 is not framed as the 150→358 row delta between the 2026-10-22 and "
+        "2026-10-29 readings, so it reads as a package count")
+    for m in re.finditer(r"\b208\b", bullet):
+        span = bullet[max(0, m.start() - 220):m.end() + 220]
+        assert "150" in span and "358" in span, (
+            "a bare 208 in the floor bullet is the other 208 — `packages_scanned` at site "
+            "vllm-flash-next-main-1012 — not the missed-advisory delta")
+
+    # ── clause 2: the name set a weekly run compares against ─────────────────
+    assert re.search(r"(?i)\bseven\b", bullet), (
+        "the accepted set is not stated as a count of seven, so 'a name outside the set' has "
+        "no size and a run cannot tell an addition from a re-format")
+    for name in ACCEPTED_MISSED_NAMES:
+        assert re.search(rf"`{name}`", bullet), (
+            f"{name} is in merged_scan.distinct_missed_package_names today and is not on the "
+            "floor, so the bullet would be void the day it landed")
+    assert re.search(r"(?i)compare\b.{0,80}(package )?names?", bullet), (
+        "the bullet does not tell a run to compare package NAMES, which is the only thing a "
+        "dated report can carry — the rows are popped before the file exists")
+    assert re.search(r"(?i)file (nothing|no item|no backlog item)", bullet), (
+        "the bullet never says what to do with a name already on the floor, so the run falls "
+        "back on its own delta rule and files the item again")
+
+    # ── clause 3: both void conditions, each labelled beside its own field ───
+    cond1 = _void_condition(bullet, 1)
+    for word in ("missed_packages", "pillow", "brotli", "lloyd", "user-site"):
+        assert word in cond1, (
+            f"void condition 1 does not name {word!r}: it has to name the field "
+            "(`sites[].missed_packages`), both packages, and the two sites whose exposure the "
+            "ruling never accepted — a condition naming only one of them is not decidable")
+    cond2 = _void_condition(bullet, 2)
+    for word in ("distinct_missed_package_names", "outside"):
+        assert word in cond2, (
+            f"void condition 2 does not name {word!r}: it has to name the field "
+            "(`merged_scan.distinct_missed_package_names`) and say the trigger is a name "
+            "OUTSIDE the seven, not any movement in that list")
+    for cond in (cond1, cond2):
+        assert re.search(r"(?i)(is void|becomes? an upgrade|void and the package|upgrade)", cond), (
+            "a void condition names its trigger but not its consequence: the floor stops being "
+            "accepted and that package becomes an upgrade")
+
+    # ── clause 4: a rising count, and when it is not an exposure ─────────────
+    assert "database_freshness" in bullet, (
+        "the attribution rule does not name the field that distinguishes a wider mirror from a "
+        "worse tree")
+    assert re.search(r"(?i)(differs|moved|changed).{0,160}visibility", bullet, re.S) or \
+        re.search(r"(?i)visibility.{0,160}(not|never) (an )?exposure", bullet, re.S), (
+        "the rule does not say that a differing stamp makes a rise visibility rather than "
+        "exposure — the whole reason the 208 was not an incident")
+    assert re.search(r"(?i)has (no|not) [`']?database_freshness[`']? key", bullet), (
+        "the absent-stamp arm is missing: every dated report before inventory-2026-10-31.json "
+        "has no such key, so a first comparison is None against a stamp, not a stamp change")
+    assert re.search(r"(?i)unattributed", bullet), (
+        "the absent-stamp arm does not name the third reading, so a run picks one of the two "
+        "it was not given")
