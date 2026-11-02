@@ -1607,3 +1607,82 @@ def test_a_deadline_cut_member_still_shows_as_an_unexplained_miss(round_env, mon
     assert unscored == set(cut), (
         f"the coverage line lists {sorted(unscored)} as unexplained, not the {cut} the "
         f"deadline actually cut:\n{joined}")
+
+# ── #3553: the re-open note states the command, not a snapshot of one run ──────
+#
+# The note is what a reader holding a coverage line decides from, so both of its
+# ledger figures have to be re-measurable from the page. One half (`composite_score`
+# nulls and tasks with no scored row) is a live census of `cfg.paths.ledger_path` and
+# is now stated as the command plus a dated reading; the other half is the FROZEN
+# witness in the vault and stays frozen and attributed — replacing those with a live
+# count would have swapped the data source mid-paragraph, which is the misreading
+# #3553's clause 5 exists to forbid.
+
+_RUN_ROUND_SRC = Path(__file__).resolve().parents[1] / "scripts" / "autoresearch" / "run_round.py"
+
+
+def _reopen_note_block() -> str:
+    """The `#:` block that defines the re-open condition, up to its first constant.
+
+    Whitespace-collapsed: the comment is hand-wrapped, so a phrase like
+    "180 scored rows over 35 rounds" straddles a line break in the source, and a pin
+    that required the break to fall where it does would test the wrapping.
+    """
+    src = _RUN_ROUND_SRC.read_text(encoding="utf-8")
+    block = src[src.index("#: Which field the spread is taken over"):
+                src.index("REOPEN_SCORE_FIELD")]
+    return " ".join(block.replace("#:", " ").split())
+
+
+def test_the_reopen_note_states_the_command_and_a_date_not_a_bare_census():
+    """No `869 of 2109` / `8 of the 22` survives, and the command to re-measure does."""
+    import re
+    block = _reopen_note_block()
+    for gone in ("869 of 2109", "8 of the 22", "22 benched", "the live ledger"):
+        assert gone not in block, f"bare census {gone!r} is back"
+    assert "cfg.paths.ledger_path" in block, "the ledger the figures come from is unnamed"
+    assert "composite_score" in block and "task_id" in block
+    assert re.search(r"20\d\d-\d\d-\d\d", block), "the reading carries no date"
+
+
+def test_the_reopen_note_names_which_row_set_each_census_reading_counted():
+    """A ledger figure with no stated row set cannot be re-measured by anyone else.
+
+    `cfg.paths.ledger_path` holds every trial row the harness has ever written, while the
+    re-open condition weighs only rows whose `task_id` names a bench task, and on
+    2026-11-02 those were two different sets — 20684 rows against 19279 — so one number
+    with no scope is a number a reader has to guess at. The values are deliberately NOT
+    pinned here (the ledger gains rows every round, and pinning them would turn a nightly
+    round into a red test); the shape is: a reading per row set, two distinct
+    denominators, and the words that say which set each one counted.
+    """
+    import re
+    block = _reopen_note_block()
+    pairs = re.findall(r"\b(\d+) of (\d+)\b", block)
+    assert len(pairs) >= 2, f"expected one reading per row set, found {pairs}"
+    assert len({m for _n, m in pairs}) >= 2, \
+        f"both row sets have to be counted, not one denominator twice: {pairs}"
+    assert "ALL trial rows" in block, "the all-rows reading lost its scope"
+    assert "names a bench task" in block, "the bench-task reading lost its scope"
+
+
+def test_the_frozen_witness_figures_are_intact_and_still_attributed():
+    """The vault witness keeps its own numbers: bench_014 28/7, bench_009 180/35,
+    bench_015 8 scored rows, over the 3,082 rows of the snapshot file."""
+    block = _reopen_note_block()
+    assert "backlog/data/2026-10-01.1953-ledger-witness.jsonl" in block
+    assert "28 scored rows over 7 rounds" in block
+    assert "180 scored rows over 35 rounds" in block
+    assert "has 8 scored rows" in block
+    assert "3,082 rows" in block
+
+
+def test_no_count_of_rounds_was_added_to_either_file():
+    """The only `over N rounds` claims in the note are the two witness sentences, and
+    bench_split.py carries none at all — a dated reading of slices is not a round count."""
+    import collections
+    import re
+    assert collections.Counter(re.findall(r"over (\d+) rounds", _reopen_note_block())) \
+        == {"7": 1, "35": 1}
+    bs = (_RUN_ROUND_SRC.parent / "bench_split.py").read_text(encoding="utf-8")
+    assert not re.search(r"over \d+ rounds", bs), "a round count appeared in bench_split.py"

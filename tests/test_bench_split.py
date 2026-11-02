@@ -779,3 +779,173 @@ def test_the_only_write_split_call_sits_inside_record_split():
     assert "bench_split.write_split(" in body
     assert "event" in body and '"split"' in body, (
         "record_split no longer appends the split event the replay reads back")
+
+
+# ── #3553: this module's prose documents a derivation, not a census ────────────
+#
+# Every number the docstring used to carry was a live count of `cfg.paths.bench_dir`,
+# and no test read the prose, so the corpus outgrew the sentences in one nightly bench
+# addition and they kept asserting the old shape as fact. These nodes do not restate
+# the corpus — `LIVE_BENCH_CATEGORIES` above already fails when the category lists
+# drift from the files on disk — they pin the two properties that make prose safe to
+# keep: no undated count, and the measurement named where a figure used to sit.
+
+_BENCH_SPLIT_SRC = (Path(__file__).resolve().parents[1]
+                    / "scripts" / "autoresearch" / "bench_split.py")
+
+#: Each of these was true of the corpus the day it was written and false ever after.
+#: None may come back as a bare fact: the census belongs in `load_bench_tasks`, a
+#: round's slices in its `bench_split.json`.
+STALE_CENSUS_STRINGS = (
+    "11 tasks", "(8 tasks)", "(3 tasks)", "4/4/2/1", "between 3/8", "9/2",
+    "6 targeted", "6-vote", "4 replay + 4 synthetic", "5-task held-out slice",
+)
+
+
+@pytest.mark.parametrize("stale", STALE_CENSUS_STRINGS)
+def test_no_bench_size_or_slice_size_is_stated_as_fact(stale):
+    """The strings #3553 removed stay removed (prose in `scripts/autoresearch/bench_split.py`)."""
+    assert stale not in _BENCH_SPLIT_SRC.read_text(encoding="utf-8"), \
+        f"{stale!r} is a corpus census stated as fact"
+
+
+def test_the_prose_names_the_measurement_in_place_of_each_figure():
+    """Each removed figure now names its measurement, and the field names are the real
+    ones.
+
+    Pointing a reader at a key the writer never emits is worse than the stale number it
+    replaced — `held_out` reads naturally and is not what `_payload` writes — so the keys
+    the prose cites are taken from `_payload`'s own output rather than typed in here, and
+    a drift between the writer and the pointer is a failure, not a typo.
+    """
+    src = _BENCH_SPLIT_SRC.read_text(encoding="utf-8")
+    for source in ("load_bench_tasks(cfg.paths.bench_dir)", "bench_split.json",
+                   "heldout_ids()"):
+        assert source in src, \
+            f"the prose no longer names {source!r} as where that figure is measured"
+    written = set(bench_split._payload("R_probe", ["t1"], ["h1"], ["t1"]))
+    for key in ("targeted", "heldout", "rotation_size", "rotated_into_heldout"):
+        assert key in written, f"{key!r} is not a field bench_split writes"
+        assert f"`{key}`" in src, f"the prose never names the real key {key!r}"
+
+
+#: The one corpus reading the module may keep, and the shape it must be stated in:
+#: the figure, the day it was read, and the round report it was read from. Pinned as a
+#: pattern rather than as literals because the corpus moves nightly — pinning `28` would
+#: turn a bench addition into a docstring failure.
+QUOTED_READING = re.compile(
+    r"(\d+) targeted / (\d+) held-out of (\d+) tasks "
+    r"\((\d+) replay \+ (\d+) synthetic \+ (\d+) adversarial \+ (\d+) safety\), "
+    r"read (20\d\d-\d\d-\d\d) from `rounds/(R_\d{8}_\d{6}\.md)` `## Bench split`")
+
+
+def test_the_one_quoted_reading_is_dated_attributed_and_self_consistent():
+    """The reading the prose keeps names its date, its artifact, and its own arithmetic.
+
+    A dated reading is what #3553 leaves in place of a bare census; an attributed one is
+    what lets the next reader re-measure instead of trusting the line. The numbers are
+    then checked against each other and against `ROTATION_SIZE` — targeted is
+    replay + synthetic minus the rotation, held-out is adversarial + safety plus it, and
+    the two slices sum to the stated total — so a mistyped or half-updated reading fails
+    here rather than in the prose it was supposed to protect.
+    """
+    src = " ".join(_BENCH_SPLIT_SRC.read_text(encoding="utf-8").split())
+    m = QUOTED_READING.search(src)
+    assert m, (
+        "the quoted corpus figure lost the shape that makes it quotable: "
+        "'N targeted / N held-out of N tasks (N replay + N synthetic + N adversarial + "
+        "N safety), read YYYY-MM-DD from `rounds/R_*.md` `## Bench split`'")
+    targeted, held_out, total = (int(m.group(i)) for i in (1, 2, 3))
+    replay, synthetic, adversarial, safety = (int(m.group(i)) for i in (4, 5, 6, 7))
+    assert replay + synthetic + adversarial + safety == total, \
+        "the category census does not sum to the stated corpus size"
+    assert targeted == replay + synthetic - bench_split.ROTATION_SIZE, \
+        "targeted is not (replay + synthetic) - ROTATION_SIZE"
+    assert held_out == adversarial + safety + bench_split.ROTATION_SIZE, \
+        "held-out is not (adversarial + safety) + ROTATION_SIZE"
+    assert targeted + held_out == total, "the two slices do not partition the corpus"
+
+
+def test_every_count_in_the_file_carries_a_date():
+    """A count that outlives its reading is the bug; a dated one is a reading.
+
+    Every docstring paragraph or `#:` comment that states a corpus count (`N tasks`), a slice
+    (`N targeted` / `N held-out`), a per-category count, or a slice fraction of the kind
+    the removed prose carried (`3/8`, `9/2`) must also carry the day it was read — and
+    exactly one paragraph may carry such a reading at all, which is what the module's own
+    docstring claims.
+    """
+    src = _BENCH_SPLIT_SRC.read_text(encoding="utf-8")
+    shape = re.compile(
+        r"\b\d+\s+tasks\b|\b\d+\s+(?:targeted|held-out)\b"
+        r"|\b\d+\s+(?:replay|synthetic|adversarial|safety)\b"
+        r"|\b\d+\s*/\s*\d+\b", re.I)
+    doc = src.split('"""')[1]
+    quoting = [p for p in doc.split("\n\n") if shape.search(" ".join(p.split()))]
+    for para in quoting:
+        flat = " ".join(para.split())
+        assert re.search(r"read 20\d\d-\d\d-\d\d", flat), \
+            f"undated count in the docstring: {flat[:90]!r}"
+    assert len(quoting) == 1, (
+        f"{len(quoting)} docstring paragraphs quote a corpus reading; #3553 leaves "
+        "exactly one dated one, and a second is the same bug wearing a date")
+
+    # The same rule for the comments, because the `ROTATION_SIZE` comment is exactly
+    # where a slice size used to be stated as fact. Contiguous `#` runs are collapsed
+    # so a comment wrapped over four lines is judged as one claim.
+    comments, run = [], []
+    for line in src.splitlines():
+        if line.lstrip().startswith("#"):
+            run.append(line.lstrip("# ").rstrip())
+        elif run:
+            comments.append(" ".join(run))
+            run = []
+    if run:
+        comments.append(" ".join(run))
+    for cmt in comments:
+        assert not shape.search(cmt), f"undated count in a comment: {cmt[:90]!r}"
+
+
+def test_the_split_anti_tamper_invariant_is_pinned_behaviourally():
+    """#3553 clause 5: the hash invariant stays a behaviour under test, not a string.
+
+    An earlier attempt at this round added a node asserting `_digest(` and `split_hash`
+    appear inside `load_split`'s body. That is false on `main` as well as after this
+    change — `load_split` ends `return split if verify(split) else None` and the
+    recomputation lives in `verify()` — so the node could never have passed. The
+    invariant it meant to guard (a split cannot be re-picked after seeing scores) is
+    pinned by the two behavioural nodes named here, which run the code; this node fails
+    if either of them is deleted, and the docstring still states the behaviour in prose.
+    """
+    test_src = Path(__file__).read_text(encoding="utf-8")
+    for pin in ("def test_verify_refuses_a_pool_edited_after_the_hash(",
+                "def test_load_split_returns_nothing_for_a_tampered_file("):
+        assert pin in test_src, f"{pin!r} is the node that pins the split hash"
+    src = _BENCH_SPLIT_SRC.read_text(encoding="utf-8")
+    assert "recomputes the hash" in src and "split_hash" in src, \
+        "the docstring no longer states the anti-picking mechanism this module exists for"
+
+
+def test_rotation_size_is_still_two_and_its_comment_states_the_arithmetic():
+    """ROTATION_SIZE unchanged at 2, and its comment derives the slices instead of
+    quoting them: targeted = (replay + synthetic) - ROTATION_SIZE, held-out =
+    (adversarial + safety) + ROTATION_SIZE, read from the round's split file."""
+    import re
+    src = _BENCH_SPLIT_SRC.read_text(encoding="utf-8")
+    assert re.search(r"^ROTATION_SIZE = 2$", src, re.M), "ROTATION_SIZE changed"
+    comment = " ".join(src[src.index("# Tasks pulled from the targeted pool"):
+                           src.index("ROTATION_SIZE = 2")].split())
+    assert "minus ROTATION_SIZE" in comment and "plus it" in comment, \
+        "the comment states slice sizes again instead of how they are computed"
+    assert "4 replay" not in comment and "6-vote" not in comment
+
+
+# `test_load_split_still_recomputes_the_hash_it_reads` lived here in the refused round
+# SM_20261102_025250 and was deleted, not fixed: it asserted `_digest(` sits inside
+# `load_split`'s body, which fails on `main` too — `load_split` ends
+# `return split if verify(split) else None` and the recomputation is in `verify()` — so
+# it was an unpassable self-written test, not a regression. #3553 clause 5 forbids that
+# shape; `test_the_split_anti_tamper_invariant_is_pinned_behaviourally` above is the
+# version that holds, and the behaviour itself stays pinned by
+# `test_verify_refuses_a_pool_edited_after_the_hash` and
+# `test_load_split_returns_nothing_for_a_tampered_file`.

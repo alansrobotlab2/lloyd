@@ -865,11 +865,22 @@ def _projection_text(proj: dict[str, Any]) -> str:
 #: Which field the spread is taken over, and how many rows make it mean something,
 #: are definitional choices this round states rather than measures, and #1828 owes
 #: them to the owed-check ruling. `composite_score` is chosen because it is what a
-#: round's verdict is computed from, and its cost is stated rather than hidden: on
-#: the live ledger 869 of 2109 trial rows carry it null (an unrankable trial, which
-#: `trial_ledger_row` nulls rather than zeroing), and 8 of the 22 benched tasks have
-#: no scored row at all — those tasks cannot support the condition on either side,
-#: which is the honest answer, not a reason to pick a softer column.
+#: round's verdict is computed from, and its cost is stated rather than hidden — by
+#: the command that measures it, not by a snapshot of one. Read `cfg.paths.ledger_path`
+#: line by line: count the rows, count the rows whose `composite_score` is null (an
+#: unrankable trial, which `trial_ledger_row` nulls rather than zeroing), and group by
+#: `task_id` to find the benched tasks carrying no scored row at all. Say which row set
+#: was counted, or the figure cannot be compared with anyone else's, and the two sets
+#: are not interchangeable — on the reading below, 1405 of the rows belong to the wider
+#: one and not the narrower. Over ALL trial rows, 6171 of 20684 carry the field null;
+#: over only the rows whose `task_id` names a bench task — the set this condition
+#: actually weighs — 5369 of 19279, across 28 distinct bench tasks, the thinnest of which
+#: still holds 3 scored rows, so no benched task is in the no-scored-row position today.
+#: Read 2026-11-02 on this box's ledger. #3553: the two figures this line carried were
+#: exactly such a snapshot — undated, unmeasurable from the page, and stated with no
+#: scope — and the ledger had moved past both. A task in that position cannot support the
+#: condition on either side, which is the honest answer, not a reason to pick a softer
+#: column.
 #: #1953: the direction was the wrong way round, and so the trigger fired on the
 #: evidence AGAINST a raise. The note asked for the delta to land INSIDE the spread,
 #: which is the very no-gain case its own closing sentence disqualifies — inside the
