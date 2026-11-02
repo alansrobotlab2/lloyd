@@ -6203,3 +6203,235 @@ def test_the_orphan_reap_loop_moves_an_item_with_no_other_live_round(isolated, m
     board = _board_notes(1202, isolated)
     assert not any("was LEFT UNCHANGED" in n for n in board), \
         f"the guard wrote a hold note on a clean reap: {board}"
+
+
+# ===========================================================================
+# #3683 — a re-offer must not contradict the round state the machine wrote itself
+#
+# On 2026-11-01 three items had their implement turn die at `turn_timeout` (3540 s)
+# with the round's worktree still standing, and `desired_statuses` handed each back
+# to the pool 2-3 seconds later as `offered again — incomplete` while its own board
+# line carried `round_state=worktree` / `worktree+gate`: #3418 turn ended 02:12:41Z →
+# `status_moved … offered again — incomplete` 02:12:43Z → moved BACK to
+# `in_progress` by the reconciler's own landing-marker read 02:16:13Z → `item_landed`
+# 02:32:10Z; #3456 14:26:11Z → 14:26:16Z → landed 14:56:46Z; #3508 19:23:35Z →
+# 19:23:38Z → landed 20:04:27Z. Each was re-offered for work its OWN round finished
+# minutes later. The unfinished-round guard sat only in the `spent` branch, so every
+# other verdict — `incomplete`, `external`, `review_retry`, `reopened` — fell through
+# to the re-offer with no liveness question asked at all. The board steward, shown
+# that contradiction and holding an unconditional rule (while any round state holds
+# the item stays `in_progress` and is NEVER proposed `up_next`), recorded the
+# disagreement: those 4 are all of the instances after `36bb4aac`, and the whole of
+# the 0.7851-vs-0.90 gap this class can move — clearing all four of the window's 121
+# judged leaves 99/121 = 0.8182, still UNDER the floor, which is why no node here
+# claims the floor is crossed.
+# ===========================================================================
+
+TIMEOUT_STOP = "turn_timeout"
+
+
+def _turn_ran_out_of_clock(item, rid):
+    """One implement turn that died at the wall clock without reaching a verdict —
+    #3418's `stop_reason=turn_timeout` at 3540 s. No promotion, no gate row, no landing
+    marker: `implement_outcomes` therefore reads `incomplete`, the verdict whose re-offer
+    this item is about, and the only thing making the round unfinished is its state on
+    disk. `num_turns` 250 is the round's real iteration budget, not a cap the rule reads.
+    """
+    _started(item, 2_000.0)
+    S.append_event({"event": "backlog_implement", "item_id": item, "phase": "finished",
+                    "round_id": rid, "session_id": f"s-{item}",
+                    "stop_reason": TIMEOUT_STOP, "num_turns": 250}, path=S.LEDGER_PATH)
+
+
+def _round_state(monkeypatch, tmp_path, *, standing=True, gate_live=False):
+    """The round's live state, on the ONE surface `items_with_unfinished_rounds` reads.
+
+    `standing=True` is the round's worktree on disk — the state the reaper takes away
+    when it closes the round (`round.abort` is `W.remove(rid, keep_branch=True)`), which
+    is why a hold keyed on it decays instead of pinning an item for good.
+    `standing=False` removes the directory, so the same call answers "no tree".
+    `gate_live` is the other half of #3508's `round_state=worktree+gate`.
+    `read_current` is pinned to None so the pass cannot see the live round this very
+    session opened.
+    """
+    import shutil
+    from scripts.automod import worktree as W
+    wt = tmp_path / "wt"
+    if standing:
+        wt.mkdir(exist_ok=True)
+    else:
+        shutil.rmtree(wt, ignore_errors=True)
+    monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "gate_in_progress",
+                        lambda rid: gate_live and rid.startswith("SM_"))
+    return wt
+
+
+def test_an_item_whose_turn_ran_out_of_clock_is_not_re_offered_while_its_tree_stands(
+        isolated, monkeypatch, tmp_path):
+    """Clause 1 — #3418's shape on the machine's side. The turn timed out, its worktree
+    stands, so `items_with_unfinished_rounds` counts the item mid-round; the pass that
+    wrote the `offered again — incomplete` move at 02:12:43Z must write no such thing.
+    Asserting the reconcile writes NO move at all is the point of the node: the item was
+    already `in_progress`, so the row the loop is fixed for is a row that stops existing
+    rather than one that gets corrected a few minutes later."""
+    write_item(isolated, 3418, status="in_progress")
+    _confirm(3418)
+    # AFTER `_confirm`, which ends by moving the item to `up_next`: the board state at
+    # 02:12:41Z was `in_progress`, because the round was running. Setting it in the
+    # `write_item` call would leave the item `up_next` and the reconcile's own move back
+    # to `in_progress` would read as the defect this node is about.
+    B.set_status(3418, "in_progress", "round SM_20261101_011407 running")
+    _turn_ran_out_of_clock(3418, "SM_20261101_011407")
+    _round_state(monkeypatch, tmp_path)
+
+    assert B.implement_outcomes(S.LEDGER_PATH)[3418][0] == "incomplete", \
+        "the fixture must be the incident's own verdict — the re-offer is what was written"
+    assert 3418 in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "the worktree stands: the shared predicate calls this round unfinished"
+
+    want = B.desired_statuses(S.LEDGER_PATH)[3418]
+    assert want[0] == "in_progress", f"the machine still wants {want[0]!r}: {want}"
+    assert len(want) == 2, f"a hold is not an owed decision: {want}"
+    assert not want[1].startswith("offered again"), want
+
+    assert B.reconcile_statuses(S.LEDGER_PATH) == [], \
+        "the pass that moved #3418 to up_next two seconds after its turn died still moves it"
+    assert not [e for e in S.read_events(path=S.LEDGER_PATH)
+                if e.get("event") == "status_moved"], "a status_moved row was written anyway"
+
+
+def test_the_re_offer_hold_is_the_shared_predicate_s_decision_and_no_liveness_rule_of_its_own(
+        isolated, monkeypatch, tmp_path):
+    """Clause 2 — the decision belongs to `items_with_unfinished_rounds` and to nothing
+    else in this function. Stubbing that ONE function is enough to produce the hold and,
+    in the control, enough to produce the re-offer WHILE THE WORKTREE IS STILL STANDING:
+    if `desired_statuses` tested the tree for itself, the control would hold and this node
+    would fail. That is the pair #3600's reaper guard uses for the same reason — a local
+    re-derivation would keep passing the stub nodes while the two answers disagreed, and
+    the two answers drifting apart is the incident class.
+
+    The scan covers `desired_statuses`' own body and bans the two signals a re-offer
+    could have re-derived (worktree existence, the gate marker) plus the promotion helper.
+    It deliberately does NOT ban `land_in_progress` or `_reverted_commits`: both were
+    already read here before this item existed — the landing-marker gap closed #1197 and
+    #1199 on 2026-09-17, the revert set feeds the `observing` branch — and a guard that
+    fails on somebody else's line is a guard somebody deletes."""
+    from scripts.automod import backlog as BL
+    write_item(isolated, 3508, status="in_progress")
+    _confirm(3508)
+    _turn_ran_out_of_clock(3508, "SM_20261101_182616")
+    _round_state(monkeypatch, tmp_path, gate_live=True)
+
+    monkeypatch.setattr(BL, "items_with_unfinished_rounds",
+                        lambda ledger, *, history=None: {3508})
+    assert B.desired_statuses(S.LEDGER_PATH)[3508][0] == "in_progress", \
+        "the predicate is not what decides the hold"
+
+    monkeypatch.setattr(BL, "items_with_unfinished_rounds",
+                        lambda ledger, *, history=None: set())
+    want = B.desired_statuses(S.LEDGER_PATH)[3508]
+    assert want[0] == "up_next" and want[1].startswith("offered again — incomplete"), \
+        f"the stub is holding by something besides itself: {want}"
+
+    import ast
+    src = (_REPO_ROOT / "scripts" / "automod" / "backlog.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+              and n.name == "desired_statuses")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "items_with_unfinished_rounds" in body, \
+        "the pass stopped asking #3546's predicate, so the hold is somebody else's arithmetic"
+    for mine in ("worktree_path", "gate_in_progress", "_live_promoted_rounds"):
+        assert mine not in body, (
+            f"`{mine}` is read inside `desired_statuses`: a second liveness test there is a "
+            "second answer to `is this round over`, and the drift between two such answers is "
+            "the incident this item closes (`68425af5` and `36bb4aac` both name that drift)")
+
+
+def test_the_hold_releases_the_moment_the_round_is_over_and_the_re_offer_reads_as_before(
+        isolated, monkeypatch, tmp_path):
+    """Clause 3 — the release edge, #3456's shape. The same fixture with the tree removed
+    (what `round.abort` = `W.remove(rid, keep_branch=True)` does when the reaper closes the
+    round) has to read `up_next` again with `offered again — incomplete` in its reason and
+    have the reconcile WRITE that move. Without this half, a worktree an abort failed to
+    remove would hold the item out of the pool for good — the exact objection
+    `items_being_gated_or_landed`'s own docstring raises against a bare worktree, and the
+    reason that predicate stays narrow while this hold leans on the shared one."""
+    write_item(isolated, 3456, status="in_progress")
+    _confirm(3456)
+    # `in_progress` again after `_confirm` moved it (see the #3418 node): the release
+    # edge is only worth having if the item is sitting where the hold leaves it, so the
+    # `up_next` move below has to be earned back.
+    B.set_status(3456, "in_progress", "round SM_20261101_132930 running")
+    _turn_ran_out_of_clock(3456, "SM_20261101_132930")
+    _round_state(monkeypatch, tmp_path)
+    assert B.desired_statuses(S.LEDGER_PATH)[3456][0] == "in_progress", "the fixture holds"
+    assert B.reconcile_statuses(S.LEDGER_PATH) == [], "the hold writes no move either"
+
+    _round_state(monkeypatch, tmp_path, standing=False)
+    assert 3456 not in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "tree, gate and landing all gone, yet the shared predicate still counts the round"
+    want = B.desired_statuses(S.LEDGER_PATH)[3456]
+    assert want[0] == "up_next", f"a hold outlived its round: {want}"
+    assert "offered again — incomplete" in want[1], want
+    moved = B.reconcile_statuses(S.LEDGER_PATH)
+    assert [m["to"] for m in moved] == ["up_next"], moved
+
+
+def test_an_ended_round_keeps_every_re_offer_it_already_had(isolated, monkeypatch, tmp_path):
+    """Clause 4, first half — the two other re-offer verdicts, on a round that IS over.
+    `external` (the gate refused it on pre-existing breakage) and `review_retry` (the
+    review rung sent the implementation back with the premise sound) must keep exactly the
+    status and the reason text they have today: the branch this item adds fires only when
+    the shared predicate counts the round, so a verdict on a dead round is untouched."""
+    write_item(isolated, 446, status="in_progress")
+    _confirm(446)
+    _blocked_round(446, "SM_446", external=True, stop_reason="stop")
+    write_item(isolated, 487, status="in_progress")
+    _confirm(487)
+    _started(487, 1_000.0)
+    S.append_event({"event": "backlog_implement", "item_id": 487, "phase": "finished",
+                    "round_id": "SM_487", "session_id": "s487", "stop_reason": "stop",
+                    "num_turns": 60}, path=S.LEDGER_PATH)
+    S.append_event({"event": "gate", "round_id": "SM_487", "rung": "review", "ok": False,
+                    "review_retry": True, "review_findings": "clause 2 has no node"},
+                   path=S.LEDGER_PATH)
+    _round_state(monkeypatch, tmp_path, standing=False)
+
+    outcomes = B.implement_outcomes(S.LEDGER_PATH)
+    assert (outcomes[446][0], outcomes[487][0]) == ("external", "review_retry"), outcomes
+    for iid, verdict in ((446, "external"), (487, "review_retry")):
+        want = B.desired_statuses(S.LEDGER_PATH)[iid]
+        assert want[0] == "up_next", (iid, want)
+        assert want[1].startswith(f"offered again — {verdict}"), (iid, want)
+
+
+def test_the_hold_changes_no_dispatch_decision_for_the_item_the_pool_already_refused(
+        isolated, monkeypatch, tmp_path):
+    """Clause 4, second half — #3508's shape (`round_state=worktree+gate`), and the claim
+    the risk bound rests on read as a measurement rather than as prose. Both columns are
+    run against the SAME code: the first takes the status the OLD branch wrote (`up_next`,
+    set here by hand) and shows the pool refused the item anyway, because
+    `ready_confirmed` reads `items_being_gated_or_landed` — a predicate this diff does not
+    touch. The second takes the status the hold writes. Same pick, both times, so no round
+    that was going to run stops running and none that was refused starts.
+
+    Scope of the claim, stated because the item states it and a later reader re-runs it:
+    the pool already refused the item while a GATE or LANDING marker was live. In the bare
+    `round_state=worktree` shape (#3418, between its turn ending and the landing marker
+    appearing) the pre-existing `busy` set did not hold it, so there the hold closes a real
+    — if brief — offerable window rather than changing nothing. See the round's findings."""
+    write_item(isolated, 3508, status="in_progress")
+    _confirm(3508)
+    _turn_ran_out_of_clock(3508, "SM_20261101_182616")
+    _round_state(monkeypatch, tmp_path, gate_live=True)
+    write_item(isolated, 3509, status="up_next")
+    _confirm(3509)
+    assert 3508 in B.items_being_gated_or_landed(S.LEDGER_PATH), \
+        "this node is about the gate-live shape; without the marker the pool never refused it"
+
+    for status in ("up_next", "in_progress"):
+        B.set_status(3508, status, f"dispatch column: {status}")
+        assert [i.id for i, _ in B.ready_confirmed(S.LEDGER_PATH)] == [3509], status
+        assert B.select_confirmed(S.LEDGER_PATH)[0].id == 3509, status

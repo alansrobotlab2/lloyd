@@ -6092,11 +6092,34 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     landed_outcome: dict[int, dict] = {}
     for d in _ledger_events(ledger, "item_landed"):
         landed_outcome[int(d["item_id"])] = d
-    # Read only when a spent item is met: they touch the round state on disk.
+    # Read only when a verdict needs them: they touch the round state on disk.
+    # #3683: this lazy set used to answer ONE reader — a `spent` attempt — and now
+    # answers two, because a RE-OFFER issued while the round is still live is the same
+    # contradiction the spend guard exists to avoid (see `_unfinished_rounds`, and the
+    # branch that reads it below). Computed once per pass either way.
     unfinished: set[int] | None = None
     retriages: dict[int, int] = {}
     history: dict[int, list[dict]] = {}
     open_ids: set[int] = set()
+
+    def _unfinished_rounds() -> set[int]:
+        """#3546's predicate, asked once per pass: which items are mid-round whatever
+        their latest `backlog_implement` row says.
+
+        The ONE liveness answer. `items_with_unfinished_rounds` is what reads the
+        worktree, the gate and landing markers, `current.json` and the unsettled
+        promotion, and the same call is what the reaper guard (`68425af5`, #3600) and
+        the re-triage pass consult; restating any of it here would be a second answer
+        to `is this round over`, and those two commits both name the drift between two
+        such answers as the failure mode. Nothing in this function tests liveness.
+        """
+        nonlocal unfinished, history, retriages, open_ids
+        if unfinished is None:
+            history = implement_history(ledger)
+            unfinished = items_with_unfinished_rounds(ledger, history=history)
+            retriages = retriage_counts(ledger)
+            open_ids = {i.id for i in open_items(None)}
+        return unfinished
     out: dict[int, tuple[str, str]] = {}
     for item in open_items(boards):
         iid = item.id
@@ -6251,12 +6274,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # is often a person's — a `human_paths` blocker, or a cycle
                 # (#1342 and #731 deferred to each other on 09-21, and both
                 # hand-offs were closed by Alan's review). Those keep the tag.
-                if unfinished is None:
-                    history = implement_history(ledger)
-                    unfinished = items_with_unfinished_rounds(ledger, history=history)
-                    retriages = retriage_counts(ledger)
-                    open_ids = {i.id for i in open_items(None)}
-                if iid in unfinished:
+                if iid in _unfinished_rounds():
                     out[iid] = ("in_progress", "its round is not over (a gate, landing, worktree "
                                                "or observation is still live), whatever spent reads")
                 elif second_life_owed(item, ledger, retriage_enabled=retriage_enabled,
@@ -6277,6 +6295,43 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                                 True)
             elif _awaits_triage(iid):
                 out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
+            elif not landed and iid in _unfinished_rounds():
+                # #3683: a re-offer is not a clean start either, and the spend guard
+                # beside it was the only reader of the one liveness answer. Measured on
+                # 2026-11-01, three items whose implement turn died at
+                # `stop_reason=turn_timeout` with the round's worktree still standing
+                # were handed back to the pool 2-3 s later — #3418 at 02:12:43Z, #3456 at
+                # 14:26:16Z, #3508 at 19:23:38Z — and in every case that same round then
+                # LANDED the work minutes later (#3418 `item_landed` 02:32:10Z), the
+                # reconciler having already walked its own move back at 02:16:13Z once the
+                # detached landing's marker appeared. So the machine moved an item to a
+                # status that contradicted the `round_state=worktree+gate` field it had
+                # written itself, and the board steward — whose rule is unconditional
+                # while any of those states holds (`workers/sources/board_steward.py`) —
+                # recorded the conflict. Those 4 are every disagreement instance after
+                # `36bb4aac`; clearing all 4 of the window's 121 judged leaves 99/121 =
+                # 0.8182, still under the 0.90 floor, so this branch is a partial move and
+                # is not sold as crossing it. It costs no dispatch decision: `ready_confirmed`
+                # was already refusing the item while a gate or landing marker was live
+                # (`items_being_gated_or_landed`), and the hold releases as soon as
+                # `_unfinished_rounds` stops counting the round, which is the reaper's
+                # `round.abort` = `W.remove(rid, keep_branch=True)` — so a stale worktree
+                # cannot pin an item for good.
+                #
+                # `not landed` is the one condition that is not the shared predicate's, and
+                # it is not a liveness test either: it is the item's own landed marker, read
+                # ten lines above. It has to be here because the predicate also counts a
+                # promotion that has not been swept yet as mid-round — failing closed is
+                # right for the umbrella and re-triage guards that were its only readers —
+                # while an item whose landing left it open must NOT sit `in_progress`:
+                # Alan's ruling of 2026-09-13 removed seventeen of those from the board
+                # ("in_progress means a round is running and nothing else"), and
+                # `test_in_progress_means_a_round_is_running_and_nothing_else` pins it. So a
+                # `not_met` or `deferred` landing keeps its re-offer; only a round that has
+                # not landed at all can hold.
+                out[iid] = ("in_progress", "its round is not over (a gate, landing, worktree "
+                                           "or observation is still live), whatever the "
+                                           "re-offer reads")
             else:
                 out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):

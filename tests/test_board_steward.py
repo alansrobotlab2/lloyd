@@ -3433,3 +3433,68 @@ def test_a_ruling_written_on_the_item_while_a_merge_computes_survives_it(board,
         "the re-read re-introduced the stale Coverage section, so the file now carries "
         "two and a reader cannot tell which is current")
     assert "(the machine abstains)" not in after
+
+
+# ---------------------------------------------------------------------------
+# #3683 — a tick that held the item its own re-offer had just returned is not a
+# disagreement: the state machine now agrees with the round state it rendered
+# ---------------------------------------------------------------------------
+
+def test_a_tick_holding_an_item_with_a_live_round_records_no_disagreement(board, monkeypatch,
+                                                                         tmp_path):
+    """Clause 5. The steward's half of the #3683 class, run through the SAME
+    `agreement()` that scored the four 2026-11-01 ticks and wrote their `disagree` rows
+    (#3418 02:16:27Z, #3456 14:29:42Z, #3508 19:25:00Z and 19:29:20Z).
+
+    The fixture is the machine's own shape: an implement turn that died at
+    `turn_timeout` with its round's worktree standing, no promotion and no gate row, so
+    `implement_outcomes` reads `incomplete` and the board line renders
+    `round_state=worktree`. The steward, following the unconditional rule in its prompt
+    (while any round state holds, the item stays `in_progress` and is NEVER proposed
+    `up_next`), proposes `in_progress`. Before the machine-side fix `expected` answered
+    `up_next` / `offered again — incomplete`, and that is what was scored — the control
+    below hands `agreement()` exactly that `expected` and shows the row was real, so this
+    node cannot pass by the metric having been edited.
+
+    `rate` and `judged` are asserted to be `agreement()`'s own arithmetic
+    (`len(agree) / judged`, asserted below). Neither that function nor
+    `workers.dispatch_watch.judgement_aggregate` is touched by this change: the fix moves
+    the number only by changing what the state machine answers, never how the answer is
+    measured. And the ceiling stays what the item says it is — clearing those 4 of the
+    window's 121 judged gives 99/121 = 0.8182, still under the 0.90 floor — so a passing
+    node here is a partial move, not a crossing.
+    """
+    from scripts.automod import worktree as WT
+    _write(board, 3418, "in_progress")
+    _ev(event="backlog_implement", item_id=3418, phase="started", ts=2_000.0)
+    _ev(event="backlog_implement", item_id=3418, phase="finished",
+        round_id="SM_20261101_011407", session_id="s-3418",
+        stop_reason="turn_timeout", num_turns=250)
+    wt = tmp_path / "wt"
+    wt.mkdir(exist_ok=True)
+    monkeypatch.setattr(WT, "worktree_path", lambda rid: wt)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "gate_in_progress", lambda rid: False)
+
+    assert B.implement_outcomes(S.LEDGER_PATH)[3418][0] == "incomplete"
+    expected = B.desired_statuses(S.LEDGER_PATH)
+    assert expected[3418][0] == "in_progress", \
+        f"the machine re-offered a round the board line calls live: {expected[3418]}"
+
+    a = W.agreement(moves=[{"item_id": 3418, "status": "in_progress"}],
+                    expected=expected, current={3418: "in_progress"})
+    assert a["disagree"] == [] and a["disagree_sides"] == [], \
+        f"the tick still records the machine contradicting its own round_state: {a}"
+    assert a["agree"] == [3418] and a["missed"] == []
+    assert a["judged"] == 1 and a["rate"] == pytest.approx(len(a["agree"]) / a["judged"]), \
+        "the tick's rate stopped being agreement()'s own arithmetic"
+
+    pre_fix = {3418: ("up_next", "offered again — incomplete: the turn ran out of clock "
+                                "before reaching a verdict; its work is on branch "
+                                "`automod/SM_20261101_011407`")}
+    scored = W.agreement(moves=[{"item_id": 3418, "status": "in_progress"}],
+                         expected=pre_fix, current={3418: "in_progress"})
+    assert scored["disagree"] == [3418] and scored["rate"] == 0.0, \
+        "the pre-fix table does not even reproduce the row this node closes"
+    assert scored["disagree_sides"] == [{"item_id": 3418, "status": "up_next",
+                                        "why": pre_fix[3418][1]}]
