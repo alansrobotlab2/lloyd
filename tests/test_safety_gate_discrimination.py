@@ -961,6 +961,223 @@ def test_the_empty_expansion_lane_refuses_measurements_and_nothing_else():
     print("test_the_empty_expansion_lane_refuses_measurements_and_nothing_else: OK")
 
 
+# ── #3707: the same lane on the arm with no braces ────────────────────────────
+# Bash reads a name as the longest run of [A-Za-z0-9_] after the `$`, so `$d_` is the
+# name `d_`, not `d` plus a literal underscore. Upstream blanks `${d}` — which is what
+# #3630 is for — but `$d_` survives the pass untouched and is expanded by bash itself
+# against a name that has no value, so the pattern the shell acts on is the one with
+# nothing in the middle. Measured 2026-11-02 in `~/lloyd-data/autonomy-runs`: the
+# lengthened arm returned the WHOLE corpus (1089 of 1089 files, and 1129 of 1089 for the
+# `for`-variable spelling) while the literal arm `run_*_20261031_*.md` returned 38, and
+# the braced spelling of the same command was refused twice. The population is therefore
+# NOT "any bare name bash cannot see" — `find . -name "run_*$d*.md"` with `d` assigned in
+# the same call measures the right 38 files, because bash resolves a same-call
+# assignment the pass never touches. It is the name-lengthening arm, and only that one.
+
+#: Refused, and the refusal has to name the scanned reference, not a braced guess.
+_BARE_REF_REFUSE = [
+    ("a find -name pattern in a command carrying no `${` at all",
+     'cd /home/alansrobotlab/lloyd-data/autonomy-runs && d=20261031; '
+     'find . -name "run_*$d_*.md" | wc -l', "d_", "the `find -name` pattern"),
+    ("the same reference in a glob word",
+     'ls -1 /tmp/*_$d_*/x.md', "d_", "the glob word"),
+    ("a for-loop control variable read with a trailing underscore",
+     'for x in run; do find . -name "$x_*.md"; done', "x_", "the `find -name` pattern"),
+    ("the arm inside single quotes, on a program that matches the word itself",
+     "grep -rl 'a_$Q_*.md' /tmp", "Q_", "the glob word"),
+]
+
+#: The lane under test. Imported here rather than at module scope because the harness
+#: safety chain is assembled lazily and this file's other lane node imports it the same way.
+from app.harness.env_expansion import check_empty_expansion_measurement as _EE
+
+#: Left alone, each one adjacent to a row above.
+_BARE_REF_ALLOW = [
+    ("a bare reference bash resolves, its name not lengthened",
+     'cd /home/alansrobotlab/lloyd-data/autonomy-runs && d=20261031; '
+     'find . -name "run_*$d*.md" | wc -l'),
+    ("a path built from a name the tool's environment defines",
+     'wc -l < $HOME/lloyd/notes.md'),
+    ("a name the command binds itself, lengthened and all",
+     'd_=20261031; find . -name "run_*$d_*.md" | wc -l'),
+    ("an underscore in the MIDDLE of a name is not the arm",
+     'find . -name "a_$a_b.md" | wc -l'),
+    ("bash's own last-argument parameter, in a find pattern",
+     'find . -name "*$_.md" | wc -l'),
+    ("bash's own last-argument parameter, in a glob word",
+     'ls -1 /tmp/*_$_/x.md'),
+]
+
+
+def test_the_unbraced_name_lengthening_arm_is_refused_in_a_find_pattern():
+    """Clause 1: `$d_` in a `find -name` pattern, in a command with no `${` anywhere.
+
+    The command is the item's reproduction verbatim. It used to reach the shell because
+    of two braced-only assumptions, and BOTH had to change: `_BRACED_REF` matched only
+    `${NAME}`, and `check_empty_expansion_measurement` opened with
+    `if "${" not in command: return None` — a short-circuit in FRONT of the scanner, so a
+    patch that widened only the regex would still have returned None here. The refusal
+    names `$d_` as written and carries `expands to nothing inside`; it also says bash read
+    the trailing `_` as part of the name, because the fix for `$d_` is not the fix for
+    `${d}`.
+    """
+    for label, cmd, ref, position in _BARE_REF_REFUSE:
+        msg = _EE(cmd)
+        assert msg is not None, f"{label}: the unbraced arm reached the shell"
+        assert "expands to nothing inside" in msg, f"{label}: {msg[:120]}"
+        assert "$" + ref in msg, f"{label}: refusal does not name ${ref}: {msg[:120]}"
+        if position:
+            assert position in msg, f"{label}: {msg[:120]}"
+        # The two cosmetic repairs #3707's triage asked for while this site was being
+        # touched. Both were defects the braced arm already had, and a patch that only
+        # widened the grammar would have inherited them verbatim into the new arm: the
+        # quoted literal carried the CALLER'S PUNCTUATION (`... the glob word
+        # `"run_*_${d}_*.md"', ` — a quote and a comma from the command's own syntax,
+        # presented as part of the pattern), and #3707's added clause ended inside a
+        # sentence that already ended in one, printing `..`.
+        quoted = msg.split("`")[1::2]
+        bad = [q for q in quoted if q[-1:] in ",;" or q[:1] in ",;"]
+        assert not bad, f"refusal quoting the caller's syntax, not the pattern: {bad} | {msg}"
+        assert ".." not in msg and " ." not in msg, msg
+        print(f"refused ({ref}): {msg.splitlines()[0][:150]}")
+
+
+def test_the_unbraced_arm_is_refused_in_a_glob_word_and_names_it():
+    """Clause 2: the second position, with the same lane and the same reason.
+
+    A `find -name` argument is matched by `find`; a word carrying `*` is expanded by bash
+    against the filesystem before the command even starts. They are the two ways a
+    measurement position is built, and the braced arm covers both — so the unbraced arm
+    had to, or #3707's `ls -1 /tmp/*_$d_*/x.md` would have kept listing a directory the
+    operator never named while looking like a filtered listing.
+
+    Asserted as a pair: the refusal must name THIS position (`the glob word`), not just
+    fire, because a message that says "the `find -name` pattern" for an `ls` command
+    tells the operator to fix a predicate that is not in their command. The same
+    reference in the same word shape under `find` must name the other position.
+    """
+    glob = _EE('ls -1 /tmp/*_$d_*/x.md')
+    assert glob is not None, "the unbraced arm reached the shell in a glob word"
+    assert "expands to nothing inside the glob word" in glob, glob
+    assert "$d_" in glob, glob
+    assert "find" not in glob, f"a glob refusal blaming a find predicate: {glob}"
+
+    find = _EE('find . -name "run_*$d_*.md"')
+    assert "expands to nothing inside the `find -name` pattern" in find, find
+    print("glob arm:", glob.split(", so ")[0])
+
+
+def test_the_unbraced_arm_is_allowed_where_bash_itself_resolves_the_name():
+    """Clause 3: the lane must not become a ban on bare variables.
+
+    The two rows that make this a discrimination test rather than a widening are the
+    second and the fourth: `$HOME` is defined in this process, and `$a_b` has its
+    underscore in the middle, where bash's own name scan and the writer's intent agree.
+    The first is the load-bearing one — `d` assigned in the same command, name not
+    lengthened, the measurement CORRECT at 38 files — and it is why the population is the
+    trailing-`_` arm and not "every bare name os.environ lacks". The third row is the arm
+    the same rule has to spare for the opposite reason: `d_=…` binds the very name the
+    pattern uses, so the value exists at execution time even though `os.environ` cannot
+    see it, and the braced arm's "the pass consumes it anyway" argument does not apply.
+    """
+    for label, cmd in _BARE_REF_ALLOW:
+        msg = _EE(cmd)
+        assert msg is None, f"{label}: refused — {msg[:130]}"
+        print(f"allowed: {label}")
+
+
+def test_underscore_is_shell_owned_so_the_last_argument_parameter_survives():
+    """Clause 4: `_` is the one shell-owned name the bare grammar actually consults.
+
+    Its name is a single underscore, so it ENDS in `_` — a trailing-underscore rule that
+    exempted nothing would refuse `$_` in measurement position, which is an ordinary
+    shell idiom and not a typo. `_SHELL_OWN_NAMES` carried it inertly before (nobody
+    writes `${_}`), and the first row here is the case where that stops being decorative.
+    The second is the same parameter in the other measurement position. Both words are in
+    position on purpose: `echo "$_.md"` would pass this test for the wrong reason, because
+    `echo` is not a measurement position at all and the lane never looks at it.
+    """
+    from app.harness.env_expansion import _SHELL_OWN_NAMES
+
+    assert "_" in _SHELL_OWN_NAMES, "_ is not exempted from the population"
+    for label, cmd in _BARE_REF_ALLOW[-2:]:
+        msg = _EE(cmd)
+        assert msg is None, f"{label}: refused — {msg[:130]}"
+        print(f"allowed: {label}")
+
+
+def test_the_refusal_quotes_the_pattern_without_the_caller_s_delimiters():
+    """The cosmetic defect triage recorded, fixed while the site was being touched.
+
+    The quoted literal is recovered from the caller's own string with a whitespace-bounded
+    search, then stripped of shell punctuation. The strip set #3630 shipped — `;&|()<>` —
+    left the surrounding QUOTES and a trailing comma inside it, so the refusal in this
+    item's own triage read: ``inside the glob word `"run_*_${d}_*.md"', `` — a quote and a
+    comma from the caller's syntax, presented to the operator as if they were part of the
+    pattern they were being told to spell out. Pinned on both grammars, since the site is
+    shared.
+    """
+    for cmd in ('ls -1 /tmp/*_$d_*/x.md',
+                'cd /tmp && find . -name "run_*_${d}_*.md" | wc -l'):
+        msg = _EE(cmd)
+        assert msg is not None, cmd
+        quoted = [seg for seg in msg.split("`") if "run_*" in seg or "*_*/" in seg
+                  or "*_$d_*/" in seg or "*_${d}_*" in seg]
+        assert quoted, f"no quoted literal in: {msg[:160]}"
+        for q in quoted:
+            assert not q.startswith(("\"", "'", ",")), f"caller's delimiter in literal: {q!r}"
+            assert not q.endswith(("\"", "'", ",")), f"caller's delimiter in literal: {q!r}"
+        print(f"literal quoted clean: {quoted[0][:70]}")
+
+
+def test_the_unbraced_refusal_is_the_dispatch_gates_answer_not_just_the_lanes():
+    """The new arm answers at `check_bash_command`, not only inside its own module.
+
+    Clauses 1 and 2 say the command is refused *before the shell spawns*, which is a
+    claim about the aggregator: `safety.check_bash_command` has to be the thing that
+    turns the command away, and it has to attribute the refusal to the `empty-expansion`
+    lane, because that label is what the operator reads in a `refused Bash` line and
+    what #3630's and #3707's owed live-traffic count greps for in mcp.err. The five
+    nodes above call the lane function directly, which pins the grammar but would still
+    pass if the aggregator never asked the lane, so this one crosses the seam the way
+    `test_the_empty_expansion_lane_refuses_measurements_and_nothing_else` does for the
+    braced arm — through `corpus.check_bash_command` and `corpus._deciding_gate`.
+
+    No row carries a leading `cd`: lane 1 runs before this lane and answers first with
+    its own label, which would test lane 1's matcher and report it as this one's.
+    """
+    # `corpus` is the sibling safety suite loaded as a module: it carries
+    # `check_bash_command`, `_deciding_gate`, and the scratch-home helpers, so the call
+    # below is the aggregator's real entry with a throwaway cwd, exactly as
+    # `test_the_empty_expansion_lane_refuses_measurements_and_nothing_else` drives it.
+    # No reload is wanted: the aggregator resolves the lane by importing it INSIDE the
+    # function body (app/harness/safety.py:403), so it asks this module's current
+    # grammar on the call itself.
+    def gate(cmd):
+        with corpus._scratch_tree() as home:
+            return corpus.check_bash_command(cmd, str(home / "lloyd"),
+                                             session_id=corpus._CHAT_SESSION,
+                                             parent_of=corpus._parent_of)
+
+    for c in (
+        'd=20261031; find . -name "run_*$d_*.md"',
+        "ls -1 /tmp/*_$d_*/x.md",
+    ):
+        match = gate(c)
+        assert match is not None, f"the dispatch gate let the unbraced arm through: {c}"
+        reason = match[0]
+        assert "expands to nothing inside" in reason, reason[:140]
+        assert "$d_" in reason, reason[:140]
+        assert corpus._deciding_gate(match) == "empty-expansion", (c, reason[:140])
+
+    # …and the arm bash resolves is not refused *at the gate either*, not merely by this
+    # lane: a false block is attributed to whichever lane answered, and the item's
+    # false-block count counts gate-level refusals, not lane-level ones.
+    assert gate('d=20261031; find . -name "run_*$d*.md"') is None, (
+        "the gate blocks a command whose day count bash computes correctly"
+    )
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
@@ -975,6 +1192,17 @@ TESTS = [
     test_a_worktree_path_held_in_a_variable_the_same_command_assigns_is_not_live,
     test_the_canary_commit_step_leaves_the_lane_refusing_the_raw_verbs_it_replaces,
     test_the_empty_expansion_lane_refuses_measurements_and_nothing_else,
+    # #3707. Registered because this list is how the file runs itself
+    # (`python tests/test_safety_gate_discrimination.py`): pytest collects every
+    # `test_` function whether or not it is listed here, so an omission is invisible
+    # to the gate and total to the runner — the whole unbraced arm would have printed
+    # "All 13 tests passed" while never once being asked.
+    test_the_unbraced_name_lengthening_arm_is_refused_in_a_find_pattern,
+    test_the_unbraced_arm_is_refused_in_a_glob_word_and_names_it,
+    test_the_unbraced_arm_is_allowed_where_bash_itself_resolves_the_name,
+    test_underscore_is_shell_owned_so_the_last_argument_parameter_survives,
+    test_the_refusal_quotes_the_pattern_without_the_caller_s_delimiters,
+    test_the_unbraced_refusal_is_the_dispatch_gates_answer_not_just_the_lanes,
 ]
 
 

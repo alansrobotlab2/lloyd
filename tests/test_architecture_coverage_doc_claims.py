@@ -11506,7 +11506,12 @@ def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_repl
         "`:435`": "`:413`",
         "`:549`": "`:523`",
         "`agent_mcp/browser.py:723`": "`agent_mcp/browser.py:694`",
-        "`app/harness/safety.py:643`": "`app/harness/safety.py:526`",
+        # The KEY is the line the doc cites today, so it moves with `safety.py`: #3707
+        # added twelve lines to `check_bash_command`'s docstring and its empty-expansion
+        # comment, which pushed the outbound arm from `:643` to `:655` and the doc with
+        # it. The seeded VALUE stays `:526` — the historical number, still not a line any
+        # witness block prints, so the finding this test exists to prove still fires.
+        "`app/harness/safety.py:655`": "`app/harness/safety.py:526`",
         "`app/routers/turn_options.py:259`": "`app/routers/turn_options.py:249`",
         "`:257`": "`:247`",
         "`agent_mcp/main.py:532`": "`agent_mcp/main.py:529`",

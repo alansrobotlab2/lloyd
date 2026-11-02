@@ -463,14 +463,18 @@ def check_bash_command(command: str, cwd: str | None = None, *,
          checkout the running system boots from, from an unattended session
          (#2604).
       8. `check_empty_expansion_measurement` — refuses a command in which a
-         braced reference this tool's own environment does not define expands to
+         reference this tool's own environment does not define expands to
          nothing inside a measurement position: a `find` `-name`/`-path`
          predicate, a word carrying `*` or `?`, or a path argument. Whatever
          blanks the reference runs downstream of this gate, so the refusal lands
          on the text as written — and the command it would have run measures the
          set the empty string matches, which is a plausible answer to a question
-         nobody asked (#3630). A bare `${UNSET}` in text output and any
-         `${UNSET:-fallback}` keep today's warn-and-run behaviour.
+         nobody asked (#3630). Both spellings are scanned: `${NAME}`, which the
+         upstream pass blanks (#3630), and `$NAME` when bash's own name scan makes
+         it a different, unset name — a trailing `_`, as in `$d_` (#3707). A bare
+         `${UNSET}` in text output and any `${UNSET:-fallback}` keep today's
+         warn-and-run behaviour, and so does any unbraced name bash resolves —
+         including one the command assigns itself on the same line.
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
@@ -572,6 +576,14 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     # got (#3630). Refusing is sound here and only here: the pass consumes every
     # braced reference before the shell parses, so a command this lane turns away
     # could not have done the thing its text reads as doing.
+    #
+    # The unbraced arm #3707 added is refused for a DIFFERENT reason, and the
+    # sentence above does not extend to it: nothing upstream blanks `$d_`, bash
+    # expands it at execution time against a name its own greedy `[A-Za-z0-9_]`
+    # scan built (`d_`, not `d`), and that name has no value. Soundness there
+    # rests on bash's grammar, not on the pass — which is exactly why the
+    # population is the trailing-`_` form only, and why a name the command
+    # assigns on the same line is left alone: bash will resolve that one.
     from app.harness.env_expansion import check_empty_expansion_measurement
     empty_expansion = check_empty_expansion_measurement(command)
     if empty_expansion:

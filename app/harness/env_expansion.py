@@ -1,6 +1,12 @@
-"""A braced reference the Bash tool's own environment does not define expands to
-nothing **before the shell parses the command** — and in a measurement position
-that empty string is a different measurement, not a failed one. (#3630)
+"""A reference the Bash tool's own environment does not define expands to nothing —
+and in a measurement position that empty string is a different measurement, not a
+failed one. (#3630 braced, #3707 the name-lengthening unbraced arm)
+
+Two grammars, because there are two distinct mechanisms and only one of them is
+this tool's blanking pass. `${NAME}` is rewritten before bash ever sees the text;
+`$NAME` is expanded by bash itself, so it is refused only when bash's own greedy
+`[A-Za-z0-9_]` name scan makes it a name that does not exist — a trailing `_`,
+`$d_` for `d` — and only when the command never binds that name.
 
 Something upstream of every Bash spawn rewrites `${NAME}` for a name that is not
 in the tool's environment to the empty string, and it does so inside single
@@ -73,6 +79,36 @@ import re
 #: silently becomes nothing.
 _BRACED_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+#: A reference in the shell's own form: `$NAME`, no braces. Bash reads a name as the
+#: LONGEST run of `[A-Za-z0-9_]` after the `$`, so `$d_` is the name `d_` and not `d`
+#: followed by a literal underscore — which is the difference between #3707's
+#: `find . -name "run_*$d_*.md"` returning the day's 38 files and returning the whole
+#: corpus (measured 2026-11-02: 1089 of 1089, then 1129 of 1089 for the loop-variable
+#: spelling). A braced reference has an explicit end, so `_BRACED_REF` cannot express
+#: the mistake: this is a second grammar, not a wider version of the first, and a patch
+#: that widened only `_BRACED_REF` would scan tokens that never match.
+_BARE_REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+#: A bare reference whose scanned name ends in `_`, i.e. the only bare spelling this lane
+#: refuses. It exists so the cheap exit in `check_empty_expansion_measurement` can stay
+#: cheap: without it, widening that test from `${` to `$` would put the shared shell parse
+#: on every command that mentions any variable, for an arm that is rare.
+_LENGTHENING_REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*_)(?![A-Za-z0-9_])")
+
+#: Names a command binds for itself. The braced arm does not consult these — the
+#: upstream pass consumes `${NAME}` whatever the command says, which is #3630's whole
+#: point — but a BARE reference is expanded by bash at execution time, so a name the
+#: command assigns really does have a value: `d_=20261031; find . -name "run_*$d_*.md"`
+#: prints the day's files (measured), and refusing it would be the false block this lane
+#: exists not to be. A `for`/`select` control variable and a `read` target bind the same
+#: way; `for x in …; do … "$x_*"` still binds `x`, not `x_`, and stays refused.
+_NAME_ASSIGNMENT = re.compile(
+    r"(?:^|[;&|\n(]|\s)(?:export\s+|local\s+|declare\s+(?:-\S+\s+)*|readonly\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)=")
+_NAME_BINDER = re.compile(
+    r"(?:^|[;&|\n(]|\bdo\s+)(?:for|select)\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b"
+    r"|(?:^|[;&|\n(]|\bdo\s+)read\s+(?:-\S+\s+)*([A-Za-z_][A-Za-z0-9_]*)\b")
+
 #: Names bash itself gives a value, measured 2026-10-31 by running each through
 #: `bash -c 'printf "[%s]" "${NAME}"'` and comparing against this process's own
 #: `os.environ`. On this box the pass blanks them too (`echo "[${RANDOM}]"`
@@ -86,6 +122,15 @@ _SHELL_OWN_NAMES = frozenset({
     "RANDOM", "SECONDS", "LINENO", "OPTIND", "OPTERR", "BASHPID", "PPID",
     "UID", "EUID", "HOSTNAME", "BASH_VERSION", "OSTYPE", "MACHTYPE",
     "DIRSTACK", "GROUPS", "SHELLOPTS", "BASHOPTS",
+    # Bash's last-argument parameter, and the ONLY name in this set that matters to the
+    # bare grammar: its name is a single `_`, so it ENDS in `_` and a name-lengthening
+    # rule that exempted nothing would refuse `$_` in measurement position — clause 4 of
+    # #3707. Not a guess about it having a value: `bash -c 'printf "[%s]" "$_"'` prints
+    # `[/usr/bin/bash]` on this box (the shell's own argv0 is the previous "argument"),
+    # and after one command it is that command's last argument. It was inert under the
+    # braced grammar because `${_}` is a spelling nobody writes; under the bare one,
+    # `$_` is ordinary.
+    "_",
 })
 
 #: The `find` tests whose argument is a pattern the tool matches, not the shell.
@@ -103,11 +148,44 @@ _GLOB_METACHARS = "*?"
 _PATH_SIGILS = ("/", "~", "./", "../", "${")
 
 
-def _undefined_names(word: str) -> list[str]:
-    """Braced references in `word` that this process's environment does not
-    define and no shell built-in owns."""
-    return [n for n in _BRACED_REF.findall(word)
-            if n not in os.environ and n not in _SHELL_OWN_NAMES]
+def _bound_names(command: str) -> frozenset[str]:
+    """Names this command binds for itself: `NAME=`, `for NAME in`, `read NAME`."""
+    out = set(_NAME_ASSIGNMENT.findall(command))
+    for pair in _NAME_BINDER.findall(command):
+        out.update(n for n in pair if n)
+    return frozenset(out)
+
+
+def _undefined_refs(word: str, bound: frozenset[str]) -> list[tuple[str, bool]]:
+    """References in `word` that expand to the empty string, as `(name, braced)`.
+
+    Two grammars, two populations, deliberately unequal:
+
+    * **braced** — every `${NAME}` this process's environment does not define and no
+      shell built-in owns. `bound` is not consulted: the upstream pass consumes the
+      reference before the shell parses, so `d=20261031; echo "[${d}]"` prints `[]`
+      (measured) and the empty expansion is real however the command reads.
+    * **bare** — only `$NAME` references whose SCANNED name ends in `_`. Refusing every
+      bare name undefined in `os.environ` would deny commands that measure the right
+      thing: bash resolves `find . -name "run_*$d*.md"` against a `d` the same call
+      assigns (measured 38 = the real day), so that arm stays warn-and-run. The
+      name-lengthening arm is the one bash cannot rescue, because `$d_` is a different
+      name from the `d` the command assigned — and it is exempted when the command
+      assigns the lengthened name itself, which bash does resolve (`d_=x; …"$d_*"` runs).
+
+    `_` is in `_SHELL_OWN_NAMES` and so never reaches here: its name ends in `_`, so a
+    trailing-underscore rule that exempted nothing would start refusing bash's own
+    last-argument parameter in measurement position.
+    """
+    out: list[tuple[str, bool]] = [
+        (n, True) for n in _BRACED_REF.findall(word)
+        if n not in os.environ and n not in _SHELL_OWN_NAMES]
+    seen = {n for n, _ in out}
+    for n in _BARE_REF.findall(word):
+        if (n.endswith("_") and n not in seen and n not in bound
+                and n not in os.environ and n not in _SHELL_OWN_NAMES):
+            out.append((n, False))
+    return out
 
 
 def _measurement_position(argv: list[str], i: int) -> str | None:
@@ -131,32 +209,51 @@ def check_empty_expansion_measurement(command: str) -> str | None:
     rewrites references inside quotes too and `find -name "*pat*"` matches exactly
     as wrongly quoted as unquoted.
     """
-    if "${" not in command:
+    # The cheap exit has to cover BOTH grammars. It used to read `"${" not in command`,
+    # which is the braced-only assumption sitting in front of the scanner: #3707's
+    # reproduction contains no `${`, so it returned ALLOW here and never reached a token.
+    # Scanning every command that merely contains a `$` would put a line parse on nearly
+    # every Bash call for an arm that is rare, so the second test is the one thing the
+    # bare grammar can be refused for — a name whose scanned form ends in `_`.
+    if "${" not in command and not _LENGTHENING_REF.search(command):
         return None
     from app.harness.protected_paths import _segments, _tokens
 
+    bound = _bound_names(command)
     for argv in _segments(_tokens(command)):
         for i, word in enumerate(argv):
-            names = _undefined_names(word)
-            if not names:
+            refs = _undefined_refs(word, bound)
+            if not refs:
                 continue
             position = _measurement_position(argv, i)
             if position is None:
                 continue
-            name = names[0]
+            name, braced = refs[0]
+            # The reference as the caller wrote it. `d` and `d_` are different names to
+            # bash and the two spellings have different fixes, so the message that names
+            # `${d}` for a command that wrote `$d_` sends the operator to the wrong one.
+            spelling = "${%s}" % name if braced else "$%s" % name
             # Quote what the caller typed, not the token this check matched: the
             # shared parse rewrites `$(` to a command boundary, so inside a
             # `$( … )` the tokenized word reads `n= ; ls -1 /tmp/*_…`, which is not
             # anything the reader can find in their own command. Whitespace-bounded
             # against the original string is the literal that contains the
             # reference — `/tmp/*_${RUNDATE}_*`, `"*_${RUNDATE}*"`.
-            around = re.search(r"\S*" + re.escape("${" + name + "}") + r"\S*",
-                               command)
-            literal = around.group(0).strip(";&|()<>") if around else word
+            around = re.search(r"\S*" + re.escape(spelling) + r"\S*", command)
+            # Operators AND the quoting/punctuation that sits against a word: the old set
+            # left `"` and `,` inside the quoted literal, so the refusal triage recorded
+            # for #3630 reads ``inside the glob word `"run_*_${d}_*.md"', `` — a quote
+            # and a comma from the CALLER'S SYNTAX, presented as part of the pattern.
+            literal = (around.group(0).strip(";&|()<>\"'`, ")
+                       if around else word.strip(";&|()<>\"'`, "))
             return (
-                f"`${{{name}}}` expands to nothing inside {position} "
+                f"`{spelling}` expands to nothing inside {position} "
                 f"`{literal}`, so the command measures what the empty string "
                 f"matches rather than what you wrote — `{name}` is not in this "
-                f"tool's environment. Spell the value, or write "
+                f"tool's environment"
+                + (" — and bash reads the trailing `_` as part of the name, so the "
+                   "variable you meant to write is not this one"
+                   if not braced else "")
+                + f". Spell the value, or write "
                 f"`${{{name}:-something}}` to say what the fallback is.")
     return None
