@@ -52,7 +52,9 @@ the header is missing.
 
 from __future__ import annotations
 
+import os
 import re
+import stat as _stat
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -519,9 +521,15 @@ class Unmeasured(list):
     reader and test compares against.
     """
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, non_regular: list | None = None) -> None:
         super().__init__()
         self.reason = reason
+        # The one finding this object may still carry, because a file's type is not a
+        # fact about dates: a directory whose only completion note is a stub has no
+        # measurable lag, and a symlinked pointer in it is still a symlinked pointer
+        # (#3626). Empty for every other caller, so `pattern_staleness`'s declines are
+        # unchanged and stay empty here too.
+        self.non_regular = list(non_regular or [])
 
 
 def _stub_reason(name: str, body: str) -> str | None:
@@ -702,6 +710,94 @@ class PointerMtimeLag:
 
 
 @dataclass(frozen=True)
+class NonRegularPointer:
+    """A governed pattern pointer that is not a regular file (#3626).
+
+    `stem` is the pointer's name without `.md`, the same shape the lag and retired rows
+    carry, so one pointer's rows can be matched across the three findings; `name` is the
+    file as it appears in the listing. `kind` is what `os.lstat` said, in words, and
+    `target` is what a link points at — `os.readlink`, unresolved on purpose, because a
+    DANGLING link is one of the shapes this reports and resolving it would fail on the
+    very entry being named. None for a non-link, which has no target.
+
+    This is a fact about the file type, not about a date, which is why it exists as its
+    own row rather than as a `PointerMtimeLag`: the entire defect is that the type behind
+    a link is invisible to every date read in this directory. `Path.stat()` follows links
+    (measured on a /tmp link: `Path.stat() mtime follows link: True` against
+    `is_symlink: True`), so before #3626 a symlinked pointer printed as current, the
+    Knowledge Health Report printed zero pointer findings over it, and §2e's own
+    `date -u -r` self-check — which also follows links — agreed with it.
+    """
+    stem: str
+    kind: str
+    target: str | None = None
+
+    @property
+    def name(self) -> str:
+        return f"{self.stem}.md"
+
+
+#: `stat.S_IFMT` values in the words a human reading a report expects. Every entry here
+#: is a type a pointer can actually be: a symlink is the one that happened, a directory
+#: is what `mkdir` leaves behind, and a fifo is what a stray redirection creates. The
+#: fallback names the raw mode bits rather than calling an unfamiliar type `other`,
+#: because "other" is the word that made the symlink invisible.
+_POINTER_TYPES: dict[int, str] = {
+    _stat.S_IFLNK: "symbolic link",
+    _stat.S_IFDIR: "directory",
+    _stat.S_IFIFO: "fifo",
+    _stat.S_IFSOCK: "socket",
+    _stat.S_IFBLK: "block device",
+    _stat.S_IFCHR: "character device",
+}
+
+
+def _non_regular_pointers(reflection_dir: Path) -> list[NonRegularPointer]:
+    """Every `*-patterns-latest.md` entry in `reflection_dir` that `os.lstat` says is not
+    a regular file, in name order.
+
+    `os.lstat`, never `stat` and never `Path.is_file()`. `stat` follows the link that *is*
+    the finding — that one line, `(reflection_dir / name).stat().st_mtime`, is what read
+    two symlinked governed pointers as current for three days (#3626). `is_file()` is
+    worse still: it follows too, and answers False for a **dangling** link.
+
+    Which is why this walks the directory itself rather than accepting `_listing`'s list.
+    `_listing` builds that list with `p.is_file()`, so a dangling pointer link is not in
+    it at all and a finding read out of `names` would report nothing for the one shape
+    with no date to misread — the pointer a §2e `Write` leaves when it writes "through" a
+    link whose archive copy had never been made. The name test is still the same
+    `_POINTER_LATEST` the lag loop uses, so "named as a finding" and "skipped as a
+    measurement" stay one decision made over one walk.
+    """
+    out: list[NonRegularPointer] = []
+    try:
+        entries = sorted(reflection_dir.iterdir())
+    except OSError:
+        return out                        # no readable directory owes no finding
+    for entry in entries:
+        m = _POINTER_LATEST.match(entry.name)
+        if not m:
+            continue
+        try:
+            st = entry.lstat()
+        except OSError:
+            continue                      # vanished mid-listing; nothing to name
+        if _stat.S_ISREG(st.st_mode):
+            continue
+        target = None
+        if _stat.S_ISLNK(st.st_mode):
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                pass                      # named by its type even unreadable that much
+        mode = _stat.S_IFMT(st.st_mode)
+        out.append(NonRegularPointer(m.group(1),
+                                     _POINTER_TYPES.get(mode, f"mode {oct(mode)}"),
+                                     target))
+    return out
+
+
+@dataclass(frozen=True)
 class MtimeWitness:
     """How many `mtime=` lines the newest completion note carries.
 
@@ -743,12 +839,32 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
     that stopped, not a cycle that failed (#3636). Without that split, the check's only
     finding on the live tree was `tool-failure-patterns-latest`, a name no producer owns
     any more, which trained the reader past the one row that can carry a real failure.
+
+    `.non_regular` is the third half, and it is the half that made the other two
+    unreadable on the live tree (#3626): a `*-patterns-latest.md` that `os.lstat` says is
+    not a regular file, named with the type it has and, for a link, the target it names.
+    Both governed pointers were symlinks from 2026-10-28 08:09 UTC until repaired by hand
+    on 2026-10-31, and this row printed zero findings the whole time because
+    `(reflection_dir / name).stat()` — the line that measured them — follows a link and
+    answered with the archive copy's date. Such an entry is therefore named and then
+    skipped: its mtime is never read, so a pointer that is a link can neither pass as
+    current nor be reported as lag on a date that is not its own.
     """
     reflection_dir = Path(reflection_dir)
     names = _listing(reflection_dir)
+    # Read before the completion-note bar is even looked for, and from the same
+    # classification the loop below skips on: a file's type does not depend on whether
+    # some cycle wrote a note, and one walk feeding both the finding and the skip is what
+    # makes "named, and its mtime not read" true by construction rather than by two
+    # conditions that happen to agree. It is a walk of its own, not `names`, because
+    # `names` comes from `_listing`'s `is_file()` and therefore cannot contain a dangling
+    # link at all (#3626).
+    non_regular = _non_regular_pointers(reflection_dir)
+    skipped = {f.name for f in non_regular}
     report, report_key, _body, unmeasured = _newest_complete_note(names, reflection_dir)
     if report is None or report_key is None:
-        return Unmeasured(unmeasured) if unmeasured else PointerLagRows()
+        return (Unmeasured(unmeasured, non_regular) if unmeasured
+                else PointerLagRows(non_regular=non_regular))
     report_day = "%04d-%02d-%02d" % report_key[:3]
     window_start = (date(*report_key[:3])
                     - timedelta(days=RETIRED_COPY_WINDOW_DAYS)).isoformat()
@@ -757,6 +873,12 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
     for name in names:
         m = _POINTER_LATEST.match(name)
         if not m:
+            continue
+        if name in skipped:
+            # Named above, and this is where its followed mtime stops being a
+            # measurement: `stat()` on a link answers with the TARGET's date, which on
+            # the 2026-10-28 pointers was the date the archive copy was written —
+            # current-looking, and nothing to do with the pointer.
             continue
         try:
             stamp = (reflection_dir / name).stat().st_mtime
@@ -771,7 +893,7 @@ def pointer_mtime_lag(reflection_dir: Path) -> list[PointerMtimeLag]:
             out.append(PointerMtimeLag(stem, mtime_day, report, report_day))
         else:
             retired.append(RetiredPointerLag(stem, mtime_day, newest_copy))
-    return PointerLagRows(out, retired)
+    return PointerLagRows(out, retired, non_regular)
 
 
 def mtime_witness(reflection_dir: Path) -> MtimeWitness:
@@ -824,9 +946,15 @@ class PointerLagRows(list):
     it is the empty return above, which is empty in both halves by definition.
     """
 
-    def __init__(self, rows: list | None = None, retired: list | None = None) -> None:
+    def __init__(self, rows: list | None = None, retired: list | None = None,
+                 non_regular: list | None = None) -> None:
         super().__init__(rows or [])
         self.retired = list(retired or [])
+        # `.non_regular`: the same three-way split as `.retired`, and for the same reason
+        # — it must not join the list every consumer iterates. A non-regular pointer is
+        # not lag and has no `mtime_date`, and mixing it in would let `len(pointer_lag)`
+        # print "1 pointer behind" about a file whose date was never read (#3626).
+        self.non_regular = list(non_regular or [])
 
 
 def _stem_producing(names: list[str], stem: str, window_start: str,

@@ -8,7 +8,9 @@ import importlib
 import importlib.util
 import inspect
 import os
+import pytest
 import re
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -762,3 +764,425 @@ def test_the_deferral_about_the_dead_stem_no_longer_survives_in_the_prose(tmp_pa
     assert "#2832" in block, "the reason the shape match stays must stay beside it"
     assert "separate ruling" not in (ra.pointer_mtime_lag.__doc__ or "")
     assert "retired" in (ra.pointer_mtime_lag.__doc__ or "").lower()
+
+
+# ── #3626: a pointer that is not a regular file has no date of its own ────────
+#
+# Both governed pointers were symlinks on the live tree from 2026-10-28 08:09 UTC until
+# the 2026-10-31 hand repair, and this section printed zero findings for the whole time:
+# `(reflection_dir / name).stat()` — the line that measured them — follows the link, so
+# the pointer "was written" on the day the archive copy beside it was. The findings below
+# are the type, read with `lstat`, and the rule that the followed date is never reported.
+
+def _pointer_as_link(d: Path, *, target_day: datetime, stem: str = "tool-patterns",
+                     dangling: bool = False, as_dir: bool = False) -> Path:
+    """Replace `<stem>-latest.md` in `d` with a non-regular entry of the same name.
+
+    The replacement is made *after* `_mtime_tree` builds the directory so the link
+    overlays the exact path the check enumerates. `target_day` is the mtime of the dated
+    archive copy the link names — deliberately a different file's date, because the whole
+    defect is that a date read through the link belongs to that copy and not to the
+    pointer. `dangling=True` leaves the copy unwritten (the shape a §2e `Write` creates
+    when it writes "through" a link whose archive was never made), and `as_dir=True`
+    leaves a directory instead, so the type is proven read rather than hard-coded.
+    """
+    pointer = d / f"{stem}-latest.md"
+    pointer.unlink()
+    if as_dir:
+        pointer.mkdir()
+        return pointer
+    archive = d / f"{stem}-latest-{target_day:%Y-%m-%d}-0800.md"
+    if not dangling:
+        archive.write_text("the archive the pointer was replaced by\n", encoding="utf-8")
+        os.utime(archive, (_utc_day(target_day), _utc_day(target_day)))
+    pointer.symlink_to(archive.name)
+    return pointer
+
+
+def _lstat_tree(d: Path) -> dict:
+    """`_stat_tree`'s read-only witness, in the one form that survives a dangling link."""
+    return {p.name: os.lstat(p).st_mtime_ns for p in sorted(d.iterdir())}
+
+
+def test_a_symlinked_pointer_is_a_named_finding_of_its_own_type(tmp_path):
+    """Clause 1 of this half: the enumeration names a non-regular pointer it can see.
+
+    The tree is otherwise current — report and archive copy both today — so before #3626
+    there was nothing for the check to report at all: the followed mtime read as current,
+    the section printed its confident zero, and the pointer had been a link for three
+    days. That is the false green, and it is why the finding has to come from `lstat`.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    _pointer_as_link(d, target_day=today)
+    before = _lstat_tree(d)
+    rows = ra.pointer_mtime_lag(d)
+    found = rows.non_regular
+    assert [(f.stem, f.kind, f.name) for f in found] == [
+        ("tool-patterns-latest", "symbolic link", "tool-patterns-latest.md")], found
+    assert found[0].target == f"tool-patterns-latest-{today:%Y-%m-%d}-0800.md", (
+        "the link's own target is the fact a repairer needs: it names the copy to "
+        "`cp -L --remove-destination` back into the pointer")
+    assert _lstat_tree(d) == before, "the check is read-only, and `lstat` keeps that true"
+
+
+def test_a_non_regular_pointer_is_never_given_a_date_it_does_not_have(tmp_path):
+    """Clause 1's second half: the followed mtime is not reported, in either direction.
+
+    Here the copy behind the link is a day older than the newest note, so the pre-#3626
+    code would have emitted a LAG row — a row whose "Pointer mtime (UTC)" column names a
+    date the pointer does not have, in a table the §2e run reads as an instruction about
+    its own pointer. The type finding replaces the date row; it does not add to it.
+    """
+    today, behind = _days(0), _days(1)
+    d = _mtime_tree(tmp_path, pointer_day=behind, report_day=today)
+    _pointer_as_link(d, target_day=behind)
+    rows = ra.pointer_mtime_lag(d)
+    assert [f.stem for f in rows.non_regular] == ["tool-patterns-latest"], rows.non_regular
+    assert list(rows) == [], (
+        f"a symlink's followed mtime was still measured as the pointer's own: {list(rows)}")
+    assert rows.retired == [], rows.retired
+
+
+def test_a_dangling_pointer_link_is_still_a_named_finding(tmp_path):
+    """The enumeration may not use anything that resolves the link, not even to exist.
+
+    `Path.is_file()` answers False for a dangling link and would drop the entry, which is
+    the one shape with no date to misread and the one a §2e `Write` produces when the
+    archive copy it wrote through had never been made. `os.lstat` sees it; the target is
+    reported as written, unresolved, because resolving it is exactly what fails.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    missing = f"tool-patterns-latest-{today:%Y-%m-%d}-0800.md"
+    _pointer_as_link(d, target_day=today, dangling=True)
+    rows = ra.pointer_mtime_lag(d)
+    assert [(f.stem, f.kind, f.target) for f in rows.non_regular] == [
+        ("tool-patterns-latest", "symbolic link", missing)], rows.non_regular
+    assert list(rows) == [] and rows.retired == []
+
+
+def test_a_directory_wearing_a_pointer_name_is_named_by_its_type(tmp_path):
+    """The kind is read from the filesystem, so the row cannot say `symbolic link` always.
+
+    A refusal or a report that hard-codes the type it expects is the same blindness one
+    level down: it would describe a `mkdir`-shaped pointer as a link and be wrong in the
+    sentence that exists to be exact.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    _pointer_as_link(d, target_day=today, as_dir=True)
+    found = ra.pointer_mtime_lag(d).non_regular
+    assert [(f.kind, f.target) for f in found] == [("directory", None)], found
+
+
+def test_regular_pointers_yield_no_non_regular_finding(tmp_path):
+    """The other side of the clause: a healthy directory stays a zero, with no new noise.
+
+    Two current regular pointers, one complete note. If a non-regular finding could fire
+    on a regular file, §2e's own self-check would report a defect on every good night and
+    the row would be trained away the way the retired pointer trained the reader past the
+    lag row (#3636).
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    other = d / "conversation-patterns-latest.md"
+    other.write_text("conversation patterns\n", encoding="utf-8")
+    os.utime(other, (_utc_day(today), _utc_day(today)))
+    rows = ra.pointer_mtime_lag(d)
+    assert rows.non_regular == [], rows.non_regular
+    assert list(rows) == [] and rows.retired == []
+
+
+def test_the_report_names_a_non_regular_pointer_instead_of_claiming_the_directory_is_current(
+        tmp_path):
+    """Clause 1's last mile: the printed section, because a collected finding nobody
+    prints is the same invisibility this item starts from.
+
+    Two sentences are asserted against. The confident zero — "every `*-patterns-latest.md`
+    in the directory was written on or after the newest completion note's day" — is the
+    line the symlinked pointers bought for three days, and the retired-pointer qualifier
+    is not enough either: it still says the pointers that ARE producing were written.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    _pointer_as_link(d, target_day=today)
+    section = _section(_report([], [], pointer_lag=ra.pointer_mtime_lag(d)))
+    assert "Pattern pointers that are NOT regular files: 1" in section, section
+    assert "`tool-patterns-latest.md` is a symbolic link" in section, section
+    assert "every `*-patterns-latest.md` in the directory was written on or after" not in \
+        section, "the section still claims the pointer was written on the copy's date"
+    assert "every pointer whose stem is still producing was written on or after" not in \
+        section, section
+
+
+def test_a_stub_only_directory_still_names_a_non_regular_pointer(tmp_path):
+    """The type is not a fact about dates, so the completion-note bar does not hide it.
+
+    A directory whose newest note is a 68-byte stub is correctly *not measured* for lag
+    (#3596) — and the same directory can hold a pointer that is a link, which is a state
+    no note has anything to say about. The section must print both: the decline, and the
+    finding. This is the 2026-10-30 shape, where the run that stubbed out also left the
+    pointers as links.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    _pointer_as_link(d, target_day=today)
+    _stub_note(d, f"knowledge-write-{today:%Y-%m-%d}-extra.md")
+    stub = d / f"knowledge-write-{today:%Y-%m-%d}.md"
+    stub.write_text("# Knowledge Write \n\nstatus: in-progress\n\n## Files written\n",
+                    encoding="utf-8")
+    rows = ra.pointer_mtime_lag(d)
+    assert getattr(rows, "reason", ""), "the stub did not make this a decline after all"
+    assert [f.stem for f in rows.non_regular] == ["tool-patterns-latest"], rows.non_regular
+    section = _section(_report([], [], pointer_lag=rows))
+    assert "Pattern pointers that are NOT regular files: 1" in section, section
+    assert "Not measured" in section, section
+
+
+def test_the_type_is_read_with_lstat_because_stat_follows_the_link(tmp_path):
+    """The mechanism as a counterfactual over outcomes, not as a spelling.
+
+    The first version of this node asserted `"lstat(" in inspect.getsource(...)` and that
+    `.stat()` and `is_file` were absent from that source. The review rung was right to
+    flag it: that pins three identifiers rather than the behaviour, so a refactor that
+    renamed a local, reworded the docstring the exclusion had to strip out, or reached the
+    same answer through `os.stat(..., follow_symlinks=False)` would go red for a reason
+    unrelated to behaviour -- and a `stat()` reached by some other spelling would have
+    stayed green while reintroducing the bug. What has to be true is a property of the
+    OUTCOME, so this node runs both classifiers over one tree and compares what each finds.
+
+    Two foils, both the pre-#3626 classifier run over a tree rather than described: take
+    `_listing`'s names and ask `Path.stat()` whether each is a regular file.
+
+    On a pointer whose target EXISTS that foil classifies the link as regular and finds
+    nothing -- the false green the item was written about -- while the shipped enumeration
+    names it and gives it no date row.
+
+    The decisive half is the DANGLING pointer. There the foil cannot see the entry at all,
+    on both counts: `_listing`'s `p.is_file()` follows the link, finds nothing behind it and
+    drops the name, and `Path.stat()` on that name raises. So any implementation that asks
+    a following `stat()` what the type is necessarily reports nothing for a dangling pointer,
+    whatever it is spelled as, while an `lstat` read names it as a symbolic link. That is an
+    outcome the two mechanisms cannot both produce, which is why this node can catch the
+    regression without naming `lstat`, `.stat()` or `is_file` in an assertion -- a control
+    run for this node found that the exists-target half alone does NOT separate them (a
+    foiled classifier hand-fed the shipped finding still passed it), so the dangling half is
+    doing the work and is stated as such rather than the whole node being credited with it.
+    """
+    today = _days(0)
+    d = _mtime_tree(tmp_path, pointer_day=today, report_day=today)
+    _pointer_as_link(d, target_day=today)
+
+    # Foil one, run: over an existing target the old classifier saw a regular file.
+    pre_fix = [n for n in ra._listing(d)
+               if ra._POINTER_LATEST.match(n)
+               and not stat.S_ISREG((d / n).stat().st_mode)]
+    assert pre_fix == [], (
+        "the foil found a non-regular pointer, so `Path.stat()` no longer follows the link "
+        "and this comparison is no longer the pre-#3626 premise")
+    rows = ra.pointer_mtime_lag(d)
+    assert [(f.name, f.kind) for f in rows.non_regular] == [
+        ("tool-patterns-latest.md", "symbolic link")], rows.non_regular
+    assert list(rows) == [], (
+        "the named pointer also got a date row, so its followed mtime is being reported")
+
+    # Foil two, run: over a DANGLING pointer the old classifier is blind twice over.
+    g = _mtime_tree(tmp_path / "dangling", pointer_day=today, report_day=today)
+    _pointer_as_link(g, target_day=today, dangling=True)
+    assert "tool-patterns-latest.md" not in ra._listing(g), (
+        "the control broke: `_listing` now reports a dangling pointer link, so it is no "
+        "longer the pre-#3626 reader and this half proves nothing")
+    with pytest.raises(OSError):
+        (g / "tool-patterns-latest.md").stat()
+    dangling = ra.pointer_mtime_lag(g)
+    assert [(f.name, f.kind, f.target) for f in dangling.non_regular] == [
+        ("tool-patterns-latest.md", "symbolic link",
+         f"tool-patterns-latest-{today:%Y-%m-%d}-0800.md")], dangling.non_regular
+    assert list(dangling) == [], (
+        "a dangling pointer was given a date row, and the only date it could carry belongs "
+        "to a file that does not exist")
+
+
+def test_the_pointer_producer_set_is_exactly_the_two_stems_the_vault_check_is_scoped_to():
+    """Clause 5's boundary as a code fact, so a candidate commit can be graded on it.
+
+    The clause is prose in `steps-2b-2f.md` and its node reads the live vault, which the
+    gate's grader cannot see while judging a candidate -- the review rung's advisory named
+    exactly that. This node holds the part of the boundary that needs no vault.
+
+    `PATTERN_STEMS` is the producer set, the stems a §2e cycle actually writes, and it is
+    exactly the two names the vault-side `find` is scoped to; the two `autonomous-systems-*`
+    files are not in it, which is what "outside this contract" means mechanically. The half
+    that makes the scoping load-bearing rather than tidy: their names still MATCH
+    `_POINTER_LATEST`, the pattern the governed-root check keys on. A wildcard `find` over
+    the vault therefore cannot tell a governed pointer from a knowledge note wearing a
+    pointer-shaped name by name alone -- the stem set is the only thing that can, and a
+    check that skipped it would order the deletion of two files no producer owns.
+    """
+    assert set(ra.PATTERN_STEMS) == {"tool-patterns-latest", "conversation-patterns-latest"}, (
+        "the §2e producer set moved, and skills/nightly-reflection-knowledge-write/"
+        "steps-2b-2f.md's vault-side `find` is scoped to exactly these two stems")
+
+    for name in ("autonomous-systems-failure-patterns-latest.md",
+                 "autonomous-systems-success-patterns-latest.md"):
+        stem = name[: -len("-latest.md")]
+        assert stem not in set(ra.PATTERN_STEMS), (
+            f"{stem} is now a §2e producer, so the bullet naming it out-of-contract is stale")
+        assert ra._POINTER_LATEST.match(name), (
+            f"{name} no longer matches the pointer name pattern, so the wildcard `find` "
+            "would not sweep it up and the scoping this clause added guards nothing -- "
+            "update the bullet instead of leaving it warning of nothing")
+
+
+# ── the §2e prose these two checks read, pinned from the node that runs the check ──
+#
+# The §2e prose these two checks read, pinned from the node that runs the check.
+#
+# Clauses 4 and 5 of #3626 are changes to a skill file, so their evidence is prose and the
+# live tree rather than a function. The previous round cited a node in
+# `tests/test_skill_reflection_archive.py`, a file its diff did not touch, and the review
+# rung returned "no test in this diff pins the prose" -- so every node here is in THIS file,
+# beside the `pointer_mtime_lag` code whose behaviour the prose describes. That pairing is
+# the point: a §2e run reads the bullet, then calls the tool these checks measure.
+#
+# Three nodes, and which of them carry `live_vault` is the decision, taken against two
+# house rulings that point in opposite directions:
+#   - `pytest.ini:14-19` reserves the mark for a node reading live `~/obsidian` STATE,
+#     which "no round under test controls" and an hourly promotion "can rewrite between
+#     rounds"; `scripts/automod/gate.py:727` runs `-m "not live_vault and not
+#     fault_injection"`, so a marked node is deselected on a hard rung and, per
+#     `tests/test_automod_doc_claims.py:311-313`, "certifies nothing" about a candidate.
+#   - `tests/test_archived_skill_artifacts.py:30-40` rules the other way for a claim that
+#     holds for "Any version of the tree" (:32): unmarked by design, because marking it
+#     away is how "the checkout was red while every hard rung reported the suite clean"
+#     (:14-15).
+# A skill's RULE text is the structural kind, and the precedent for parsing it is
+# unmarked -- `tests/test_skill_reflection_archive.py:3354`
+# (`test_2e_prints_the_archive_names_it_governs_and_states_the_pointer_rule`) reads this
+# same file with no mark. So the two prose nodes and the code-fact node below run on the
+# hard rung, where the grader can see them; only the node asserting that the deleted stray
+# is absent from the live tree is marked, because that is the one claim an unrelated commit
+# can falsify.
+#
+# Every prose assertion goes through `_flat_prose`: the step file is hand-wrapped at ~80
+# columns, so a phrase worth asserting is split across a newline in the source, and
+# matching it literally would pin the column it happens to break at instead of the rule.
+
+
+def _flat_prose(text: str) -> str:
+    """`text` with every run of whitespace collapsed to one space.
+
+    The step file is hand-wrapped at ~80 columns, so any phrase long enough to matter is
+    split across a newline in the source and cannot be matched literally. Collapsing is
+    the only way to assert a rule's wording without pinning the column it happens to
+    break at — a re-wrap of the file is an edit to its formatting, not to the rule.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def _kw_step(rel: str = "steps-2b-2f.md") -> str:
+    """The live §2b-2f step text, or a raised FileNotFoundError — never an empty string.
+
+    A node reading `""` finds no violation to flag and passes, which for a prose check is
+    the whole failure mode: the bullet it is guarding could be deleted and the node would
+    still be green. The vault's skills tree is what the nightly run loads.
+    """
+    p = Path.home() / "obsidian" / "skills" / "nightly-reflection-knowledge-write" / rel
+    if not p.is_file():
+        raise FileNotFoundError(f"{p} is missing — the §2e step this node reads is gone, "
+                                "which is not the same as the rule being satisfied")
+    return p.read_text(encoding="utf-8")
+
+
+def test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root():
+    """Clause 4, prose half: the fourth stray is named, dated, and tied to its commit.
+
+    Unmarked, and that is deliberate rather than an oversight: the precedent for reading
+    this file is `tests/test_skill_reflection_archive.py:3354`
+    (`test_2e_prints_the_archive_names_it_governs_and_states_the_pointer_rule`), which
+    parses the same §2e step text and carries no mark, so it runs on the gate's hard rung.
+    A skill's RULE is a structural claim about a surface this item changed, and
+    `tests/test_archived_skill_artifacts.py:30-40` is explicit that marking that kind of
+    node away is how a checkout goes red while every hard rung says clean. What IS marked
+    is the node below, which reads the tree STATE.
+
+    The provenance is what a reader cannot re-derive: `7c0fd930` wrote that whole cycle's
+    §2e output into `~/obsidian` instead of
+    `~/lloyd-data/_pipeline/reflection/`, and the governed directory holds no dated copy
+    stamped 2026-10-21 for either governed stem (the listing jumps `-2026-10-20-0807` to
+    `-2026-10-22-0804`). That is why this stray is deleted rather than folded back in.
+    """
+    body = _flat_prose(_kw_step())
+    stray = "projects/ai/research/conversation-patterns-latest.md"
+
+    assert stray in body, "§2e no longer names the 2026-10-21 governed-stem stray at all"
+    assert "7c0fd930" in body, "the bullet no longer names the commit that mis-rooted it"
+    assert "2026-10-21 mis-root" in body, "the bullet no longer dates the mis-root"
+    assert "Four governed-stem strays" in body, (
+        "the bullet is supposed to record this stray ALONGSIDE the three #2832 lists, "
+        "not in place of them — a removed count is a lost precedent")
+    for earlier in ("#2832", "#2502"):
+        assert earlier in body, f"the bullet no longer cites {earlier}, the prior instance"
+
+
+
+@pytest.mark.live_vault
+def test_the_2026_10_21_governed_stem_stray_is_out_of_the_live_vault():
+    """Clause 4, state half: the file #3626 removed is neither on disk nor tracked.
+
+    Marked, and marked alone: this is the assertion about live vault STATE, which is what
+    `pytest.ini:14-19` reserves the mark for -- "no round under test controls" it, and an
+    hourly promotion or a nightly job can rewrite it between rounds. Left unmarked it would
+    fail the next author for a previous writer's commit, which is the failure
+    `tests/test_archived_skill_artifacts.py:14-15` records happening in the other direction.
+
+    Read live rather than inferred from the bullet above, because prose and tree disagree
+    in either direction: the bullet can claim a removal that never happened, or the file can
+    be gone with no record of why it was ever there. The second is how a later cycle
+    re-creates it -- #2832's lesson was that a strayed pointer gets folded back in by the
+    next run that finds one -- which is why both halves are needed and neither is enough.
+    """
+    stray = "projects/ai/research/conversation-patterns-latest.md"
+    vault = Path.home() / "obsidian"
+    assert not (vault / stray).exists(), (
+        f"~/obsidian/{stray} is back on disk — it was #3626's deletion target")
+    tracked = [ln for ln in os.popen(
+        f"cd {vault} && git ls-files {stray} 2>/dev/null").read().splitlines() if ln.strip()]
+    assert tracked == [], f"~/obsidian/{stray} is still tracked by git: {tracked}"
+
+
+def test_the_2e_vault_check_is_scoped_to_the_two_governed_stems_and_shields_the_other_two():
+    """Clause 5: the vault-side check can be satisfied, and cannot order a deletion.
+
+    The item's own wording demanded `find ~/obsidian -name '*-patterns-latest.md'` print
+    nothing. That is not satisfiable and obeying it literally deletes two files the same
+    item names as out of scope, so the check is the two governed stems with a `-latest*`
+    tail — which still catches a governed-stem pointer written anywhere under the vault,
+    the defect the check exists for, and additionally catches a dated copy a mis-rooted
+    cycle archived into the vault.
+
+    The shield is as load-bearing as the scoping. Both `autonomous-systems-*` files came
+    from the same `7c0fd930`, and whether they are another contract's governed pointers
+    or knowledge notes with a pointer-shaped name is a ruling no round can make; a §2e
+    run that read only "a -latest.md in the vault is a defect" would delete them.
+    """
+    body = _flat_prose(_kw_step())
+
+    scoped = ("find ~/obsidian -name 'tool-patterns-latest*.md' "
+              "-o -name 'conversation-patterns-latest*.md'")
+    assert scoped in body, "§2e's vault check is no longer the two governed stems"
+    assert "Do **not** run `find ~/obsidian -name '*-patterns-latest.md'` as this check" in body, (
+        "the unsatisfiable wildcard check is not explicitly forbidden, so a run that "
+        "remembers the item's wording instead of this file will run it")
+
+    for stem in ("autonomous-systems-failure-patterns-latest.md",
+                 "autonomous-systems-success-patterns-latest.md"):
+        assert stem in body, f"§2e no longer names {stem} as outside this contract"
+    assert "never a §2e run's deletion targets" in body, (
+        "the two out-of-contract files are no longer shielded from deletion")
+    assert "stems absent from `PATTERN_STEMS`" in body, (
+        "the reason those stems are out of contract is no longer stated, so a later "
+        "reader cannot tell shielded from overlooked")
+    assert "names it in its completion note" in body, (
+        "the run is left without a what-to-do-instead: name it, do not delete it")

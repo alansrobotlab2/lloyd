@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pathlib
+import stat
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -1012,6 +1013,79 @@ def _read(args: dict, session_id: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
+def _governed_pointer_refusal(mut: "_Mutation", op: str) -> str | None:
+    """Refuse a write onto a governed §2e pattern pointer that is not a regular file.
+
+    `_write_target` below is built to follow a link, deliberately and for every other
+    path on the box. On these two names that behaviour is the defect: §2e writes the
+    pointer in place, so given a link the cycle's bytes land in the dated archive copy the
+    link names — the file whose entire job is to preserve the previous night — and the
+    link is left standing for the next cycle. Both governed pointers were in that state
+    from 2026-10-28 08:09 UTC until repaired by hand on 2026-10-31, and nothing could see
+    it: `find … ! -type l` skips the entry, `date -u -r` prints the target's date, and
+    `Path.stat()` in the health report follows the link too (#3626).
+
+    Scoped on three axes, because a guard that refused symlinks generally would undo
+    `test_write_through_a_dangling_symlink_is_a_create` and refuse ordinary files: the
+    NAME (the pointer shape this lane shares with the health report rather than
+    restating), the DIRECTORY (exactly the reflection root, matching §2e's own
+    `find -maxdepth 1`), and the TYPE (only entries `lstat` says are not regular files).
+    A regular pointer, an archive copy in the same directory, and a governed-looking name
+    under any other root all keep today's behaviour.
+    """
+    from app.paths import PIPELINE_DIR         # data-root resolver, never a literal
+    from scripts.reflection_archive import _POINTER_LATEST
+    # Imported, not restated: two definitions of "which names are governed pointers" is
+    # the drift this item is about, and this one has to agree with the check that reports
+    # the same state. Stem lists are not the enumeration either way — #2832 established
+    # that the shape is, because the stale pointer it caught was outside `PATTERN_STEMS`.
+    if not _POINTER_LATEST.match(os.path.basename(mut.path)):
+        return None
+    if PIPELINE_DIR is None:                   # unresolvable data root: nothing governed
+        return None
+    try:
+        # Both sides resolved, so a root reached through a symlinked `lloyd-data` is still
+        # recognised and an unrelated directory that merely shares the spelling is not.
+        if os.path.realpath(os.path.dirname(mut.path)) != os.path.realpath(str(PIPELINE_DIR / "reflection")):
+            return None
+        st = os.lstat(mut.path)
+    except OSError:
+        return None                            # unresolvable or vanished: not our call
+    if stat.S_ISREG(st.st_mode):
+        return None
+    kind = _NON_REGULAR_TYPES.get(stat.S_IFMT(st.st_mode),
+                                 f"file type {oct(stat.S_IFMT(st.st_mode))}")
+    target = None
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            target = os.readlink(mut.path)
+        except OSError:
+            pass
+    return json.dumps({"error": (
+        f"{op} refused: {mut.path} is a governed §2e pattern pointer and is a {kind}, not "
+        f"a regular file, so these bytes would land somewhere other than that name."
+        + (f" It points at {target!r}; writing through the link would replace that file — "
+           "the dated archive copy §2e wrote to preserve the previous night — and leave the "
+           "link standing, which is the shape that ate the 2026-10-29 archive. "
+           if target is not None else " ")
+        + "Put the pointer back to a regular file holding what the link resolves to "
+          "(`cp -L --remove-destination <dated copy> <pointer>`), then write it again. See "
+          "`skills/nightly-reflection-knowledge-write/steps-2b-2f.md` §2e (#3626).")})
+
+
+#: `stat.S_IFMT` values in words, for the refusal above. A symlink is the type that
+#: actually happened; the fallback names the mode bits rather than calling an unknown
+#: type "other", because an uninformative name is how a pointer became invisible.
+_NON_REGULAR_TYPES: "dict[int, str]" = {
+    stat.S_IFLNK: "symbolic link",
+    stat.S_IFDIR: "directory",
+    stat.S_IFIFO: "fifo",
+    stat.S_IFSOCK: "socket",
+    stat.S_IFBLK: "block device",
+    stat.S_IFCHR: "character device",
+}
+
+
 def _write_target(mut: "_Mutation", p: Path) -> Path:
     """Where an atomic replace of `p` actually has to land.
 
@@ -1053,6 +1127,16 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     # `exists()` follows symlinks, so a dangling symlink counts as absent and
     # writing through it is a create.
     mut.existed = p.exists()
+
+    # Ahead of the gate rather than inside it. `_gate_check` short-circuits for a caller
+    # with no bound session and returns early on a create — and a DANGLING link reports
+    # `existed=False`, so one of the two shapes this rule exists for skips the gate
+    # entirely. The rule is about where bytes may land, so it holds whoever is calling
+    # (#3626). Refuses before `_ledger_begin`, like the ceiling and vocabulary checks
+    # below: a write that never happened enters no undo record.
+    refusal = _governed_pointer_refusal(mut, "Write")
+    if refusal is not None:
+        return refusal
 
     refusal = _gate_check(mut)
     if refusal is not None:
@@ -1174,6 +1258,16 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     mut.path = file_path
     mut.real = os.path.realpath(file_path)
     mut.existed = True
+
+    # The same rule on the other write surface, before the gate and for the same reason as
+    # in `_write`: `_edit` resolves through `_write_target` exactly as `Write` does, so a
+    # targeted edit of a symlinked governed pointer replaces the dated archive copy's body
+    # and leaves the pointer a link — a guard that lived on `Write` alone would leave this
+    # lane open, which is the class #3626 is named for. A dangling pointer link never
+    # reaches here: `p.exists()` above already refuses it as a missing file (#3626).
+    refusal = _governed_pointer_refusal(mut, "Edit")
+    if refusal is not None:
+        return refusal
 
     refusal = _gate_check(mut)
     if refusal is not None:

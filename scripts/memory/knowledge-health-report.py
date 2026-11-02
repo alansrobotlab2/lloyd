@@ -1411,6 +1411,19 @@ def _retired_of(pointer_lag) -> list:
     return list(getattr(pointer_lag, "retired", []) or [])
 
 
+def _non_regular_of(pointer_lag) -> list:
+    """The pointers `pointer_lag` found that are not regular files, or [] for none.
+
+    The same `getattr` shape as `_retired_of`, for the same two reasons: a caller passing
+    a bare list — every pre-#3632 caller and test — must read as "no findings" rather than
+    raise, and `Unmeasured` carries this attribute while `pattern_staleness`'s declines
+    do not, so both must fall back quietly. The fallback matters more here than for
+    `.retired`: this section's whole failure before #3626 was printing a confident zero
+    over a directory it had measured with `Path.stat()`, which follows the link.
+    """
+    return list(getattr(pointer_lag, "non_regular", []) or [])
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
@@ -1854,12 +1867,25 @@ def generate_report(
         # retired pointer IS behind, and printing "every pointer in the directory is
         # current" above a file dated 2026-10-13 is the false sentence #3636 exists to
         # stop, so the qualifying clause is only earned when there is none.
-        lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
-                     "pointer whose stem is still producing was written on or after the "
-                     "newest completion note's day." if _retired_of(pointer_lag) else
-                     "Pattern pointers behind their newest report (by mtime): 0 — every "
-                     "`*-patterns-latest.md` in the directory was written on or after "
-                     "the newest completion note's day.")
+        #
+        # A third state voids the sentence outright. Zero lag over a symlinked pointer is
+        # not "no lag" at all — the count is empty because the one line that could see the
+        # file refused to read a date belonging to something else, which is exactly what
+        # happened to both governed pointers from 2026-10-28 08:09 UTC until the 2026-10-31
+        # hand repair (#3626). So when any pointer has a type finding, this row says the
+        # measurement was not taken rather than claiming the corpus is current.
+        if _non_regular_of(pointer_lag):
+            lines.append("Pattern pointers behind their newest report (by mtime): 0 — NOT "
+                         "measured for every pointer: the type findings below name entries "
+                         "whose date a link would have answered for them.")
+        elif _retired_of(pointer_lag):
+            lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
+                         "pointer whose stem is still producing was written on or after the "
+                         "newest completion note's day.")
+        else:
+            lines.append("Pattern pointers behind their newest report (by mtime): 0 — every "
+                         "`*-patterns-latest.md` in the directory was written on or after "
+                         "the newest completion note's day.")
     else:
         lines.append(f"Pattern pointers behind their newest report (by mtime): "
                      f"{len(pointer_lag)}")
@@ -1891,6 +1917,28 @@ def generate_report(
         for rp in retired[:SECTION_ROW_CAP]:
             lines.append(f"- `{rp.stem}.md` — pointer stopped at `{rp.mtime_date}`, last "
                          f"dated copy: {rp.newest_copy or 'none at all'}")
+    # A pointer that is not a regular file prints below the count too, never inside it: it
+    # is not lag and it has no `mtime_date` for the table. It is also the only finding in
+    # this section that neither check above can produce, because both read a date and the
+    # date behind a link belongs to the file the link names — which is why this row printed
+    # zero over two symlinked governed pointers for three days (#3626). The finding names
+    # the defect; repairing it is `cp -L --remove-destination <dated copy> <pointer>`, the
+    # §2e prose's own instruction, and this report never moves a file.
+    non_regular = _non_regular_of(pointer_lag)
+    if non_regular:
+        lines.append("")
+        lines.append(f"Pattern pointers that are NOT regular files: {len(non_regular)} — an "
+                     "entry with a pointer's name whose type `stat()` follows, so no date "
+                     "read anywhere in this directory describes the pointer itself")
+        for nr in non_regular[:SECTION_ROW_CAP]:
+            lines.append(f"- `{nr.name}` is a {nr.kind}"
+                         + (f", pointing at `{nr.target}`" if nr.target else ""))
+        if len(non_regular) > SECTION_ROW_CAP:
+            lines.append(f"- … *{len(non_regular) - SECTION_ROW_CAP:,} more*")
+        lines.append("")
+        lines.append("*A symlinked pointer is the §2e archive-eating shape: the cycle's "
+                     "`Write` travels through the link into the dated copy meant to "
+                     "preserve the previous night, and the link is left standing (#3626).*")
     lines.append("")
 
     # Separate from the row above on purpose. Pointer mtimes measure the corpus; this
