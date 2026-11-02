@@ -376,13 +376,53 @@ on this page so the page is the record: same-session next-turn `reprefill_tokens
 freeing turn runs mean 261,400 / median 164,514 (55 obs), after a noop turn mean 188,094 /
 median 114,092 (58 obs), and the within-session deltas over n=54 pairs come to mean +61,009
 against a **median of exactly 0** — the signs are 26 up / 21 down, with 7 pairs unchanged.
-That is the whole result of the pairing, and it is a negative one: the mean gap is carried
-by a few large sessions, so
+That is the whole result of the **2026-10-02** pairing, and for that window it is a
+negative one: the mean gap is carried by a few large sessions, so
 the pairing did not separate the size effect from the edit cost, and no size-controlled
-ratio can be quoted from it. Nothing is owed on it and no ratio is quoted; the 51.8× above
-stands as the un-controlled figure it is labelled as. Re-separating size from cost needs a
-different design than same-session pairing — refreshing these figures over a later window
-is a re-measurement, not a missing one.
+ratio can be quoted from it. No ratio is quoted from
+it and the 51.8× above stands as the un-controlled figure it is labelled as. **That is the
+result of one dated window, not of the design.** The design — take the two next-turn
+re-prefills a single session produced under each arm and difference them — controls for
+session size by construction, and nothing about it expires with the week it first ran.
+
+The design was then re-run over two later windows, each named by its own absolute bounds,
+over a read-only connection to `~/lloyd-data/usage.db` — the same store
+`usage_store.read_rows_readonly` reads, and the same arms: a turn is in the freeing arm when
+its record's `turn_start.tokens_freed` or top-level `relief_tokens_freed` is above 0, and a
+pair is one session holding both arms, differenced on the next turn's `reprefill_tokens`.
+Before quoting the later numbers, the identical query was re-run over the 2026-10-02
+window's own bounds and reproduced that paragraph's paired-session figures — pair count,
+delta median, delta mean and sign split — to the digit. That is the control that lets the
+later numbers be read as the same measurement rather than a different one; the paragraph's
+per-arm means and its session-hold counts were not re-derived here. The design separates:
+
+- `2026-10-24T09:47:08` → `2026-10-31T09:47:08`: **18 pairs**, median delta **+36,461**,
+  signs 11 up / 7 down. Eighteen is **below this page's own ~30-session bar**, so that block
+  is directional and not powered.
+- `2026-10-03T09:47:08` → `2026-10-31T09:47:08` (672 h): **112 pairs**, median delta
+  **+84,474**, signs **73 up / 33 down / 6 unchanged** — above the bar, and roughly 2:1.
+
+Every consecutive 168 h window measured since the 2026-10-02 one has come back with a
+positive median: +164,725 (`2026-10-02T01:32:11` → `2026-10-09T01:32:11`, 29 pairs), +53,332
+(`2026-10-09T01:32:11` → `2026-10-16T01:32:11`, 31 pairs), +84,474
+(`2026-10-16T01:32:11` → `2026-10-23T01:32:11`, 32 pairs) and +36,461
+(`2026-10-23T01:32:11` → `2026-10-30T01:32:11`, 16 pairs). The 2026-10-02 week is the only
+window measured so far whose median landed on 0, and the page offers no explanation for it:
+a later window measured a *higher* share of exactly-zero next-turn observations than this one
+and still returned a positive median, so the honest statement is that the 2026-10-02 week
+happened to sit on 0, not that something about it kept the pairing from separating.
+
+These figures are quoted on this page as measurements with their bounds, and no node
+recomputes them: `tests/conftest.py` refuses the suite against the live data tree and a
+gate worktree's own data root is empty, so a re-computing node would fail for a reason
+that is not this page's. Re-running the pairing over a further window is owed-check work.
+Both windows above are single-regime knob-off, like the 60.6% table: counting rows whose
+record carries `turn_start.microcompact_sidecar`, through the same two keys
+`usage_store._sidecar_flags` reads, finds 0 knob-on rows of 2,899 in the 168 h block and 0
+of 13,114 in the 672 h block — which is what it has to find, because both windows close
+before #3641 flipped `RunOptions.microcompact_reduction_sidecar` to True on 2026-10-31.
+Nothing here therefore mixes the sidecar regime with the inert one, and the on-versus-off
+pair, which needs a knob-on row, is a different measurement this page does not hold.
 
 Per mechanism, `usage_store.reprefill_attribution(hours=168)` (its `["report"]` is
 the text to print; `python -m pytest tests/test_reprefill_attribution.py` runs it in

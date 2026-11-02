@@ -10483,6 +10483,300 @@ def test_the_rewrite_cost_page_says_the_pairing_did_not_control_for_size():
         "'not', so it was never going to catch a re-write")
 
 
+# --------------------------------------------------------------------------- #
+# context-window.md §What a rewrite costs — the pairing read as two dated
+# measurements rather than one design verdict (measured, not owed; #3631,
+# 2026-11-02). Same shape as `MEASURED_PERSISTENCE_WINDOWS` above and as
+# `SETTLED_PAIRING`: the figures are the artefact, they are quoted as prose,
+# and no node opens `usage.db` to recompute them.
+# --------------------------------------------------------------------------- #
+
+#: The two sentences #3631 re-tenses. They generalised ONE window's median — the
+#: 2026-09-25T01:32:11→2026-10-02T01:32:11 week, whose per-session deltas came back at
+#: exactly 0 — into a verdict on the design, and a later re-measure of the identical
+#: query over four consecutive 168 h windows and a 672 h one returned positive medians
+#: on every one. A page that publishes "needs a different design" while the same design
+#: is separating on every window measured since is a page steering readers away from a
+#: working measurement, so the shape is pinned as a pattern over the section rather
+#: than as these two sentences: the next window that disagrees with a generalised
+#: verdict will carry different words.
+STALE_VERDICT_GENERALISATION = re.compile(
+    r"(?:needs a different design|is a re-measurement, not a missing"
+    r"(?: one)?|the whole result of the pairing)")
+
+#: The retired sentences verbatim (the section's `:379-385` before #3631), so the
+#: absence below is proven to fire on the text it retires — a live section carrying no
+#: generalisation is green today with or without a working pattern, and this item was
+#: filed BY the measurement that refuted the verdict, so a green light fixed on a text
+#: that can never violate it would be the exact failure mode #3574's
+#: `test_the_rewrite_cost_page_no_longer_owes_a_measurement_it_published` was built for.
+RETIRED_VERDICT_PROSE = (
+    "That is the whole result of the pairing, and it is a negative one: the mean gap is "
+    "carried by a few large sessions, so the pairing did not separate the size effect "
+    "from the edit cost, and no size-controlled ratio can be quoted from it. Nothing is "
+    "owed on it and no ratio is quoted; the 51.8× above stands as the un-controlled "
+    "figure it is labelled as. Re-separating size from cost needs a different design "
+    "than same-session pairing — refreshing these figures over a later window is a "
+    "re-measurement, not a missing one.")
+
+
+def _stale_verdict_gaps(text: str) -> list[str]:
+    """Which un-scoped design verdicts this text generalises, in the order it says them.
+
+    One function reads the live section and the fixture below, so the two cannot
+    disagree about what the pattern is; the page is hand-wrapped, so a prose span never
+    meets raw bytes (see `_flat`). The generalisation is scoped by SENTENCE, not by
+    substring: the section still has to say what the 2026-10-02 run did — the median
+    stayed at 0, the mean gap was carried by a few large sessions — so a ban on the
+    words would ban the record. What is not allowed is a sentence that draws a
+    conclusion about the design or about the completeness of the measurement rather
+    than about a dated window: those are the halves that generalise, and each is
+    matched here with its own verdict wording attached.
+    """
+    flat = _flat(text)
+    hits = []
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        if STALE_VERDICT_GENERALISATION.search(sentence):
+            hits.append(sentence)
+    return hits
+
+
+def test_the_rewrite_cost_page_scopes_the_negative_result_to_its_own_window():
+    """Clauses 1 and 3: the 2026-10-02 figures are kept as a dated measurement, and the
+    verdict that generalised them is gone.
+
+    The fixture arm runs FIRST, for the reason `MEASURED_PERSISTENCE_WINDOWS` gives: the
+    live section is already free of the generalisation the moment this lands, so the
+    absence alone cannot tell a retired verdict from a pattern that never matched
+    anything. Then the re-tense is pinned positively, because clause 3's real ask is that
+    the page say WHY 2026-10-02 came back unseparated — and the honest answer, measured,
+    is that the page does not know: the share of exactly-zero next-turn observations does
+    not separate the windows (one later window measured a higher share and still returned
+    a positive median), so the section has to refuse the causal story as well as drop the
+    verdict. The zero-share figures the item proposed for that explanation
+    ("vs 12-16% since") did not reproduce and are published nowhere on the page.
+
+    Every pinned figure survives untouched by this: `SETTLED_PAIRING` is asserted by its
+    own node above, and the three phrasings that node refuses — `NEGATED`, the two
+    negative phrases — are re-checked here byte-identical, because the re-tense had to be
+    written AROUND them, not inside them.
+    """
+    sec = _rewrite_cost_section()
+    flat = _flat(sec)
+
+    assert _stale_verdict_gaps(RETIRED_VERDICT_PROSE), (
+        "the retired verdict prose did not fire the pattern, so the absence below is a "
+        "green light permanently fixed on a text that can never violate it")
+    assert not _stale_verdict_gaps(sec), (
+        f"the section generalises a measurement into a design verdict again: "
+        f"{_stale_verdict_gaps(sec)} — the same design separated on every window measured "
+        "after 2026-10-02, so a general verdict here is now a false claim")
+
+    for phrase in ("That is the result of one dated window, not of the design.",
+                   "controls for session size by construction",
+                   "re-run over two later windows, each named by its own absolute bounds",
+                   "the page offers no explanation for it"):
+        assert phrase in flat, (
+            f"the section no longer says {phrase!r}, which is the sentence that keeps the "
+            "2026-10-02 numbers from being read as the design's last word")
+
+    assert NEGATED_HEADLINE in sec, (
+        f"{NEGATED_HEADLINE!r} is no longer byte-identical on the page. It is the one "
+        "place the 51.8× headline carries its own caveat, and clause 3 requires it "
+        "unchanged — the re-tense goes around it")
+    # The two findings the 2026-10-02 run returned stay on the page in the same words,
+    # read the way the sibling node reads them (`_flat`, because the page hand-wraps).
+    # What makes this more than a restatement of that node is the tamper below: it edits
+    # one of the two phrases in a copy of the page and requires the copy to differ.
+    for phrase in ("the pairing did not separate the size effect from the edit cost",
+                   "no size-controlled ratio can be quoted"):
+        assert _flat(phrase) in flat, (
+            f"{phrase!r} is no longer on the page: it is what the 2026-10-02 run "
+            "returned and stays true of that window however later windows read")
+    tampered = " ".join(flat.replace(
+        _flat("the pairing did not separate the size effect from the edit cost"),
+        "the pairing measured the size effect against the edit cost").split())
+    assert _flat("the pairing did not separate the size effect from the edit cost") \
+        not in tampered and tampered != flat, (
+        "the seeded rewrite of the 2026-10-02 finding did not take, so the two phrase "
+        "assertions above are reading a constant rather than the page")
+
+    assert "`2026-09-25T01:32:11`" in flat and "`2026-10-02T01:32:11`" in flat, (
+        "the 2026-10-02 run lost its absolute bounds, which is what makes it a dated "
+        "measurement rather than a verdict — `SETTLED_PAIRING` pins the figures and this "
+        "pins that they are labelled with the window they belong to")
+
+
+#: The one figure the tamper below edits: the 672 h sign split, the number the "~2:1"
+#: reading rests on and the figure most likely to be re-stated from a later window.
+REMEASURED_FIGURE_SEEDED = "73 up / 33 down / 6 unchanged"
+
+#: The re-measurement #3631 publishes: the identical pairing query re-run over two
+#: windows with their bounds named absolutely. `sqlite3` in read-only mode over
+#: `~/lloyd-data/usage.db`, arm from `turn_start.tokens_freed` /
+#: `relief_tokens_freed`, next turn by `lead()` over `(partition by session_id order by
+#: id)`, one delta per session holding both arms, median over sessions, ISO-string window
+#: bounds — the same query that reproduces the 2026-10-02 row to the digit, which is the
+#: control that makes these numbers worth publishing.
+REMEASURED_PAIRING = {
+    "168 h window, lower bound": "`2026-10-24T09:47:08`",
+    "168 h window, upper bound": "`2026-10-31T09:47:08`",
+    "168 h pairs": "18 pairs",
+    "168 h median delta": "+36,461",
+    "168 h sign split": "11 up / 7 down",
+    "the 18-pair window's own verdict on its power":
+        "**below this page's own ~30-session bar**",
+    "what the underpowered block is therefore good for": "directional and not powered",
+    "672 h window, lower bound": "`2026-10-03T09:47:08`",
+    "672 h pairs": "112 pairs",
+    "672 h median delta": "+84,474",
+    "672 h sign split": "73 up / 33 down / 6 unchanged",
+    "the ratio the 672 h split is": "2:1",
+    "first later 168 h median": "+164,725",
+    "second later 168 h median": "+53,332",
+    "fourth later 168 h median": "+36,461",
+    "the later-window count the claim is about": "16 pairs",
+    "knob-on rows over the 168 h block": "0 knob-on rows of 2,899",
+    "knob-on rows over the 672 h block": "0 of 13,114",
+    "the key the regime count reads": "`turn_start.microcompact_sidecar`",
+    "the reader the regime count is taken through": "usage_store._sidecar_flags",
+}
+
+
+def test_the_rewrite_cost_page_publishes_the_re_measured_pairing_as_prose():
+    """Clauses 2, 4 and 5: the later windows are on the page with their bounds, the
+    regime they were measured under is stated, and no figure is left unpinned.
+
+    The loop reads the page, and the seeded tamper after it is what proves that: change
+    one figure in a copy and exactly one membership must drop, or the loop is reading the
+    dict rather than the doc. That is also clause 2's real requirement — an edited figure
+    has to go red, since a constant no page is checked against is a second opinion
+    nobody consults. The 18-pair window is labelled below the section's own ~30-session
+    bar beside it, so the weaker block cannot be quoted as the stronger one.
+
+    Clause 4's shape: the new prose says the pairing controls for session size BY
+    CONSTRUCTION (each pair is one session, so size is held by the design of the
+    comparison rather than by a ratio), never that a quoted ratio IS size-controlled.
+    That wording is not a hedge to satisfy a regex — it is the accurate statement, and it
+    is what lets the two section-wide refusals stay whole. `SIZE_CONTROLLED_REFUSAL`
+    below re-runs the pattern the two refusing nodes use and asserts it still appears
+    exactly twice in this file, so narrowing either of them to one sentence would trip
+    this node instead of quietly weakening both.
+    """
+    sec = _rewrite_cost_section()
+    flat = _flat(sec)
+
+    for what, figure in REMEASURED_PAIRING.items():
+        assert _flat(figure) in flat, (
+            f"the section no longer states {what} as {figure!r}. These are the numbers a "
+            "reader acts on instead of re-running the pairing, so a silent edit is a "
+            "silent misstatement")
+
+    tampered = flat.replace(_flat(REMEASURED_FIGURE_SEEDED),
+                            "73 up / 34 down / 5 unchanged", 1)
+    assert tampered != flat, (
+        "the seeded tamper did not take, so the figure loop above is untested — the "
+        "string it edits is no longer on the page")
+    dropped = sorted({figure for figure in REMEASURED_PAIRING.values()
+                      if _flat(figure) in flat and _flat(figure) not in tampered})
+    assert dropped == [_flat(REMEASURED_FIGURE_SEEDED)], (
+        f"the seeded tamper dropped {dropped}, not exactly the one figure it edited "
+        f"({REMEASURED_FIGURE_SEEDED!r}) — either the loop is not reading the page, or the "
+        "tamper string is no longer the figure a reader would act on")
+
+    assert _flat("Every consecutive 168 h window measured since the 2026-10-02 one has "
+                 "come back with a positive median") in flat, (
+        "the section no longer states the generalisation clause 3 asks for: that the same "
+        "design separates on every window measured after the one it first ran on. The four "
+        "medians above are the evidence; without this sentence a reader has to do the "
+        "arithmetic and can conclude the opposite")
+    # ── clause 5: the regime the two windows were measured in ────────────────
+    assert _flat("Both windows above are single-regime knob-off") in flat, (
+        "the section no longer states which sidecar regime its paired figures sit in, so a "
+        "reader cannot tell them apart from a window straddling the flip")
+
+    assert "by construction" in flat, (
+        "the section no longer says what the pairing controls for by construction, which "
+        "is the accurate wording that keeps the affirmative refusal whole")
+    affirmative = SIZE_CONTROLLED_REFUSAL
+    assert affirmative.search(sec) is None, (
+        "the section states something AS size-controlled: the refusal is the whole point "
+        "of the pairing's record, and both refusing nodes search the section as a whole")
+    assert len(SIZE_CONTROLLED_REFUSAL_SITES) == 2, (
+        f"the section-wide refusal appears {len(SIZE_CONTROLLED_REFUSAL_SITES)} time(s) "
+        "in this file, not the two the #3631 clauses inherited — narrowing either regex "
+        "to a single sentence is a weakening that has to be argued, not slipped in")
+
+
+#: The section's own caveat on the headline figure, spelled the way the two nodes above
+#: spell it locally. Module-level here so this round's node can demand it byte-identical
+#: without restating the sentence a third time and letting the copies disagree.
+NEGATED_HEADLINE = "That 51.8× is not size-controlled, and is stated as such."
+
+#: The affirmative claim both refusing nodes ban, kept as one constant so this file has
+#: one spelling of the refusal rather than two regex literals that can drift apart. It is
+#: ALSO the pattern the two nodes use, and this literal is how the count below finds
+#: them: a node that narrows its SEARCH to one sentence still holds this line, and a node
+#: that narrows the PATTERN changes it and drops the count.
+SIZE_CONTROLLED_REFUSAL = re.compile(r"\bis\s+size-controlled")
+SIZE_CONTROLLED_REFUSAL_SRC = 're.compile(r"\\bis\\s+size-controlled")'
+
+#: Every place in this file carrying that refusal, read from this module's own source.
+SIZE_CONTROLLED_REFUSAL_SITES = [
+    ln for ln in Path(__file__).read_text(encoding="utf-8").splitlines()
+    if SIZE_CONTROLLED_REFUSAL_SRC in ln and "affirmative =" in ln]
+
+#: What a node that RE-COMPUTED the pairing would have to write: a read-only open of the
+#: store, the window function the arms are read from, and the driver call that opens
+#: either. Built by concatenation because this module's own source is what the check
+#: reads — a marker written literally would be the thing the node bans, and the node would
+#: stay green until somebody edited the comment. The store's own name is deliberately NOT
+#: a marker: this file legitimately names `usage.db` when it replays a committed extract
+#: into a temporary database, and a ban on the word would be a ban on working.
+PAIRING_RECOMPUTE_MARKERS = ("mode=" + "ro",
+                             "lead(" + "reprefill_tokens",
+                             "sqlite3." + "connect(")
+
+
+def _pairing_recompute_fixture() -> str:
+    """The planted re-computing node, assembled FROM the markers so it cannot self-match."""
+    read_only, window_fn, connect = PAIRING_RECOMPUTE_MARKERS
+    return (f'conn = {connect}"file:" + DB + "?{read_only}", uri=True)\n'
+            f'sql = f"select {window_fn}) over (partition by sess order by id) as nxt"')
+
+
+def test_no_node_recomputes_the_pairing_this_section_publishes():
+    """Clause 2's other half: the figures above are prose, and nothing opens the store.
+
+    `tests/conftest.py` refuses the suite against the production tree and a gate worktree's
+    data root is empty, so a node that re-ran the pairing would fail in a round for a
+    reason that is not this page's — or, worse, pass while measuring an empty directory and
+    certify figures nobody checked. This is the `MEASURED_PERSISTENCE_WINDOWS` and
+    `SETTLED_PAIRING` precedent applied to the section that cites it: the ban is on the
+    pairing's own machinery (a `lead()` over `reprefill_tokens`, a read-only open of the
+    store, a driver connection), not on the word `usage.db`, which this file legitimately
+    names when it replays a committed extract into a temporary database.
+
+    Scoped to this module and `test_research_doc_claims.py`, the two doc-claim files that
+    quote figures from a runtime store as prose. A future node elsewhere could still query
+    the store for its own reasons; it could not quietly make THESE figures recomputed,
+    because the section says in prose that they are not.
+    """
+    for mod in (Path(__file__), Path(__file__).with_name("test_research_doc_claims.py")):
+        source = mod.read_text(encoding="utf-8")
+        hits = [m for m in PAIRING_RECOMPUTE_MARKERS if m in source]
+        assert not hits, (
+            f"{mod.name} now carries {hits}: the pairing figures this file quotes are a "
+            "settled owed-check reading, and a re-computing node fails in a gate worktree "
+            "for a reason that is not the doc's")
+
+    planted = _pairing_recompute_fixture()
+    assert [m for m in PAIRING_RECOMPUTE_MARKERS if m in planted] == list(
+        PAIRING_RECOMPUTE_MARKERS), (
+        "a planted pairing query tripped none of the markers, so the absences above assert "
+        "nothing")
+
+
 def test_the_rewrite_cost_page_records_the_rearm_ruling_as_ruled():
     """Clause 4: the ladder's re-arm level is recorded as ruled on 2026-10-02, and the
     number the ruling turned on is still the number `config.yaml` carries.
