@@ -370,6 +370,30 @@ the transcript scratch home from backlog #566:
     newest ledger row). A dry run prints the candidate count and the inode total and unlinks
     nothing; `--apply` is the only route to `shutil.rmtree` (#3379).
 
+23. `~/lloyd-data/_pipeline/memory-graph/semantic-*-<YYYY-MM-DD>.jsonl` — the dated
+    recording families the weekly semantic entity-resolution job writes (#3499), numbered
+    twenty-third here because this list's numbers are its own order and this one PRINTS LAST
+    (the 25th store line). Three families, each named with its date shape:
+    `semantic-entity-candidates-`, `semantic-entity-judgments-` and `semantic-proposals-`.
+    The candidates file is the growth: 7.2 MB on 2026-09-23, 13.5 MB by 2026-10-21 across the
+    weekly runs, ~55-60 MB a month, in a directory nothing in `scripts/groundskeeper/` ever
+    named before this store. DELETE a dated file past MEMORY_GRAPH_MAX_AGE_DAYS on its own
+    mtime — the instant the job finished writing it, the only age a whole-file delete has —
+    and leave one inside the horizon. Two things this store deliberately does NOT age. The
+    five live names (MEMORY_GRAPH_HELD_NAMES): the cumulative record #1410 was filed over the
+    loss of, the symlink standing on it, the seen ledger and the two verdict caches, each held
+    by NAME however old its mtime and each named on the line. And the .bak rotation of
+    `semantic-verdicts-pairs.jsonl`, which its own writer already caps at five
+    (`compact_verdict_cache(..., keep=5)`); two owners for one rotation is a bug. THE FLOOR IS
+    A COUNT, NOT THE WINDOW: stale `semantic-proposals-<date>.jsonl` files with a byte in them
+    are deleted oldest-first down to MEMORY_GRAPH_PROPOSALS_KEEP (2), because
+    `accumulated_record_lost` (`scripts/memory/semantic-entity-resolution.py:1114-1130`)
+    globs those same files to prove the accumulated record is reproducible, and a bare 30-day
+    window would leave that guard one witness the moment the weekly job skips two runs —
+    silently disarming the check that exists because a wipe once went unnoticed. An absent
+    directory prints `no memory-graph store yet` and is never created: the resolution job owns
+    that mkdir, exactly as store 20's probe owns its capture directory (#3499).
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -4381,6 +4405,164 @@ def _session_scratch_line(p: dict) -> str:
     return f"{label}: {head} — {n} {verb}, {p['bytes'] / 1024:.0f} KiB {unit}{tail}"
 
 
+# ---------------------------------------------------------------------------
+# Store 23: ~/lloyd-data/_pipeline/memory-graph/semantic-*-<date>.jsonl — the dated
+# recording families the weekly semantic entity-resolution job writes (#3499).
+# ---------------------------------------------------------------------------
+MEMORY_GRAPH_DIR = DATA_ROOT / "_pipeline" / "memory-graph"
+
+#: Days after which one dated recording file is stale. The store's uniform horizon, quoted
+#: by `sweep_memory_graph`'s docstring rather than restated there, so the number lives once.
+#: 30, the same horizon as the other mtime-bounded file stores in this file (task logs,
+#: session scratch). It is a retention floor and NOT the interval the witness guard below
+#: depends on: that guard's witness set is bounded by `MEMORY_GRAPH_PROPOSALS_KEEP`, never
+#: by this window, so two skipped weekly runs cannot disarm it.
+MEMORY_GRAPH_MAX_AGE_DAYS = 30
+
+#: The three dated families, each named with its date shape so a file that does not carry
+#: one is matched by no rule here. `semantic-verdicts-pairs.jsonl.<stamp>.bak` is
+#: deliberately absent: its own writer already caps it at five
+#: (`compact_verdict_cache(..., keep=5)` in `scripts/memory/semantic-entity-resolution.py`,
+#: which copies then prunes through `prune_old_backups`), and two owners for one rotation is
+#: a bug rather than belt-and-braces. The other dated siblings of this directory
+#: (`entity-merges-*`, `entity-ambiguous-*.md`, `classify74-*.log`,
+#: `classified-v4-preflight-*.jsonl.bak`) are out of this store's scope, not overlooked:
+#: whether they join it is owed-check's ruling on #3499. And `classified-v4-batch.jsonl`
+#: (45.8 MB, read by `eval/djev/replay.py`) is held outright by matching no pattern here.
+MEMORY_GRAPH_DATED_GLOBS = (
+    "semantic-entity-candidates-????-??-??.jsonl",
+    "semantic-entity-judgments-????-??-??.jsonl",
+    "semantic-proposals-????-??-??.jsonl",
+)
+
+#: Names this store never ages, however old their mtime. Four are live state read every
+#: weekly run: `semantic-verdicts.jsonl` is `entity_semantic_gate.py`'s DEFAULT_CACHE,
+#: `semantic-proposals-cumulative.jsonl` is the record #1410 was filed over the loss of,
+#: `semantic-proposals-seen.jsonl` the dedup ledger, and
+#: `semantic-proposals-latest.jsonl` is a SYMLINK onto the cumulative file (store 7's rule:
+#: a link is held, never followed or unlinked). `semantic-verdicts-pairs.jsonl` is the live
+#: pairs cache whose .bak rotation its own writer already bounds.
+MEMORY_GRAPH_HELD_NAMES = (
+    "semantic-proposals-cumulative.jsonl",
+    "semantic-proposals-latest.jsonl",
+    "semantic-proposals-seen.jsonl",
+    "semantic-verdicts.jsonl",
+    "semantic-verdicts-pairs.jsonl",
+)
+
+#: Dated proposal recordings that must survive any pass, however stale. The floor is a
+#: COUNT and not a side effect of the horizon: `accumulated_record_lost`
+#: (`scripts/memory/semantic-entity-resolution.py:1114-1130`) globs these same files and
+#: refuses a run whose accumulated record cannot be reproduced from them, and a plain
+#: 30-day window would leave it one witness the moment the weekly job skips two runs —
+#: silently disarming the guard that exists because a wipe once went unnoticed. Stale files
+#: are deleted oldest-first down to this many, so the freshest stale recordings are the ones
+#: held: they are the likeliest to still describe the current entity set.
+MEMORY_GRAPH_PROPOSALS_KEEP = 2
+
+
+def sweep_memory_graph(apply: bool, now: float, *,
+                       root: "Path | None" = None,
+                       max_age_days: "int | None" = None) -> dict:
+    """Age the dated semantic-* recording families in the memory-graph directory (#3499).
+
+    Deletes a dated file matched by `MEMORY_GRAPH_DATED_GLOBS` whose OWN mtime is older
+    than `MEMORY_GRAPH_MAX_AGE_DAYS` days, and leaves one inside that horizon in place —
+    mtime because a whole-file delete has no other age: it is the instant the job finished
+    writing the recording. Every file this pass leaves alone is counted as kept, and every
+    name in `MEMORY_GRAPH_HELD_NAMES` is held by name however old it is (the cumulative
+    record, the symlink onto it, the seen ledger, and the two live verdict caches). Dated
+    proposal recordings are deleted oldest-first only down to
+    `MEMORY_GRAPH_PROPOSALS_KEEP` surviving size>0 files, so #1410's witness glob still
+    has something to read.
+    """
+    store = root if root is not None else MEMORY_GRAPH_DIR
+    horizon = MEMORY_GRAPH_MAX_AGE_DAYS if max_age_days is None else max_age_days
+    out = {"apply": apply, "present": False, "horizon_days": horizon,
+           "files": 0, "stale": 0, "deleted": 0, "kept": 0, "bytes": 0,
+           "witness_held": 0, "held_link": 0, "held_live": 0, "held_names": [],
+           "refused": 0}
+    if not store.is_dir():
+        return out
+    out["present"] = True
+    cutoff = now - horizon * 86400.0
+
+    dated: list = []
+    seen: set = set()
+    for pattern in MEMORY_GRAPH_DATED_GLOBS:
+        for path in sorted(store.glob(pattern)):
+            if path in seen or not path.is_file() or path.is_symlink():
+                continue
+            seen.add(path)
+            dated.append(path)
+    out["files"] = len(dated)
+
+    for name in MEMORY_GRAPH_HELD_NAMES:
+        held = store / name
+        if not (held.is_symlink() or held.exists()):
+            continue
+        out["held_live"] += 1
+        out["held_names"].append(name)
+        if held.is_symlink():
+            out["held_link"] += 1
+
+    # The floor is measured on the files #1410's guard actually reads: dated proposals with
+    # a byte in them. An empty one is not a witness, so holding it buys nothing.
+    proposals = [p for p in dated
+                 if p.name.startswith("semantic-proposals-") and p.stat().st_size > 0]
+    live_witnesses = [p for p in proposals if p.stat().st_mtime >= cutoff]
+    stale_proposals = sorted((p for p in proposals if p.stat().st_mtime < cutoff),
+                             key=lambda p: p.stat().st_mtime)
+    must_hold = max(0, MEMORY_GRAPH_PROPOSALS_KEEP - len(live_witnesses))
+    out["witness_held"] = min(must_hold, len(stale_proposals))
+    held_by_floor = set(stale_proposals[len(stale_proposals) - out["witness_held"]:]) \
+        if out["witness_held"] else set()
+
+    stale = sorted((p for p in dated if p.stat().st_mtime < cutoff
+                    and p not in held_by_floor), key=lambda p: p.stat().st_mtime)
+
+    if not apply:
+        out["stale"] = len(stale)
+        out["bytes"] = sum(p.stat().st_size for p in stale)
+    else:
+        for path in stale:
+            # Sized BEFORE the unlink: `stat()` on a path that is already gone raises
+            # `FileNotFoundError`, which the `except OSError` below would swallow as a
+            # refusal — the pass would then report every deletion it made as one that
+            # "would not unlink", and the KiB figure the line exists to carry would be 0.
+            size = path.stat().st_size
+            try:
+                path.unlink()
+                out["deleted"] += 1
+                out["bytes"] += size
+            except OSError:
+                out["refused"] += 1
+    out["kept"] = out["files"] - (out["stale"] if not apply else out["deleted"]) - out["refused"]
+    return out
+
+
+def _memory_graph_line(p: dict) -> str:
+    """The report line for store 23, in the shape store 21's line uses so the census and
+    task 79's enumeration both find it: `<name> >Nd: of N file(s), … — X <verb>, Y KiB`."""
+    label = f"  memory-graph semantic-* jsonl >{p['horizon_days']}d"
+    if not p["present"]:
+        return f"{label}: no memory-graph store yet"
+    head = f"of {p['files']} dated file(s), {p['kept']} kept"
+    if p["witness_held"]:
+        head += (f", {p['witness_held']} stale proposal(s) held (never below "
+                 f"{MEMORY_GRAPH_PROPOSALS_KEEP} for the #1410 witness)")
+    if p["held_link"]:
+        head += f", {p['held_link']} symlink held (never followed)"
+    if p["held_names"]:
+        head += (f", {p['held_live']} live file(s) never aged "
+                 f"({', '.join(p['held_names'])})")
+    tail = f" ({p['refused']} would not unlink, left in place)" if p["refused"] else ""
+    n = p["deleted"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    return f"{label}: {head} — {n} {verb}, {p['bytes'] / 1024:.0f} KiB {unit}{tail}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -4463,6 +4645,10 @@ def main() -> int:
     # unbounded forever — which is precisely the state that made five items ask a human to
     # `rm` one directory by name. Store 16 prints under the same reasoning.
     tmp_scratch = sweep_tmp_scratch(args.apply, now)
+    # Store 23 (#3499): a data-root store like the tmp-scratch rung above it, so it runs
+    # outside the automod refusal guard — the memory-graph recordings are written by the
+    # weekly semantic entity-resolution job and nothing about them is checkout-relative.
+    memory_graph = sweep_memory_graph(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -4589,6 +4775,11 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188 and
     # #3209 — and this line is the 24th.
     print(_tmp_scratch_line(tmp_scratch))
+    # Store 23 (#3499), printed LAST and outside the refusal guard like the five lines above
+    # it. Appending rather than inserting keeps items 1-24 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209 and
+    # #3379 — and this line is the 25th.
+    print(_memory_graph_line(memory_graph))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

@@ -1170,7 +1170,7 @@ leave unread. #36's queue held 31,291 items and nothing read it back (below).
 The retention sweep has since deleted it: store 10 unlinks `groundskeeper-queue.json`
 and `groundskeeper-writes.jsonl` from the `_pipeline` store directory past
 `GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`
-(`scripts/groundskeeper/retention-sweep.py:591`), added by `d24c7ecd` (#1574) —
+(`scripts/groundskeeper/retention-sweep.py:615`), added by `d24c7ecd` (#1574) —
 measured 2026-10-26 and again 2026-10-29, `ls ~/lloyd-data/_pipeline/groundskeeper*`
 returns no such file, so #36 no longer produces anything at all and the group's
 no-consumer case is one member deep. #70's findings are advisory and reach #83

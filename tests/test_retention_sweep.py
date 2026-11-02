@@ -219,6 +219,14 @@ def rs(tmp_path, monkeypatch):
         # node `rmtree` its neighbour's root mid-test. The nested-root hold against the real
         # topology is exercised by passing `root=` explicitly.
         ("TMP_SCRATCH_ROOT", "tmp-scratch", True),
+        # Store 23 (#3499), the dated semantic-* recordings the weekly entity-resolution job
+        # writes. Created, because this is a directory store the sweep globs and unlinks from:
+        # an EMPTY root is the bounded state every `_store_report` comparison below reads, and
+        # the absent-root case (`no memory-graph store yet`) belongs to its own node. Single
+        # segment for the same reason as `CANARY_TOOLCALLS_DIR` two entries above — the mkdir
+        # below has no `parents=True`, and the production path
+        # (`<data root>/_pipeline/memory-graph`) is two segments deep.
+        ("MEMORY_GRAPH_DIR", "memory-graph", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1071,7 +1079,15 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # "session-cwd"`, imported rather than restated — which is exactly
                           # the drift this set exists to catch, since the two modules can
                           # disagree without either line looking wrong.
-                          "SESSION_CWD_DIR"}, \
+                          "SESSION_CWD_DIR",
+                          # #3499's memory-graph store joins for CANARY_TOOLCALLS_DIR's reason
+                          # two entries above: it is a writable DATA_ROOT directory this sweep
+                          # UNLINKS files from, so a `MEMORY_GRAPH_DIR = Path.home() / ...`
+                          # spelled beside the others would have an `--apply` deleting the
+                          # weekly resolution job's recordings from outside every root this
+                          # file holds it to. The hazard is a wrongly-resolved PATH, not a
+                          # wrongly-chosen pattern, so the five held names do not exempt it.
+                          "MEMORY_GRAPH_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         if name == "INJECTION_CANARY_DIR":
@@ -1939,11 +1955,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 24, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 25, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "24 unbounded-growth stores" in text, (
+    assert "25 unbounded-growth stores" in text, (
         "the skill's description states a store count other than 22")
-    assert "24 in all" in text, "the skill's body states a store count other than 24"
+    assert "25 in all" in text, "the skill's body states a store count other than 25"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2032,8 +2048,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twenty-one store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty-one stores by design")
+    assert "twenty-two store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty-two stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2153,6 +2169,11 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # graded against the 24 lines the sweep prints rather than raising
                       # `unrecognised store-count numeral`.
                       "twenty": 20, "21": 21, "22": 22, "23": 23, "24": 24,
+                      # #3499 added the twenty-fifth store (the dated semantic-*
+                      # recordings under `_pipeline/memory-graph/`), so a vault file saying
+                      # "25 unbounded-growth stores" is graded against the 25 lines the sweep
+                      # prints rather than raising `unrecognised store-count numeral`.
+                      "25": 25,
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
@@ -2208,9 +2229,11 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 24, (
-        f"the sweep prints {len(_store_report)} store lines, not the 24 its report "
-        f"has had since #3209 added the session scratch dirs: {_store_report}")
+    # #3499 added the twenty-fifth store line (the dated semantic-* recordings), so the
+    # census this guard compares prose against moved from 24 to 25.
+    assert len(_store_report) == 25, (
+        f"the sweep prints {len(_store_report)} store lines, not the 25 its report "
+        f"has had since #3499 added the memory-graph recordings: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2320,13 +2343,13 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_twenty_two_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-one store
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-two store
     lines while the skill says 22 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
     (just "22", which makes every sandbox run look like it lost three stores) or the
@@ -2338,7 +2361,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_ref
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twenty-one store lines plus one refusal
+    the rule. A refused run therefore still prints twenty-two store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2349,7 +2372,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_stores_and_one_ref
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 21, f"a refusal run should report twenty-one stores: {report}"
+    assert len(report) == 22, f"a refusal run should report twenty-two stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2485,7 +2508,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the twenty-four lines below be
+    branch delete it never asked about — which is what lets the twenty-five lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2561,7 +2584,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 24, (
+    assert len(items) == len(_store_report) == 25, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2605,6 +2628,23 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert items[22][0] == 23, items[22]
     assert "session" in items[22][1] and "dirs" in items[22][1], items[22]
     assert items[23][0] == 24, items[23]
+    # #3499's memory-graph store is the new append point: item 25, printed last, named by
+    # the printed label's first and last word (`memory-graph`, `jsonl`) as every append
+    # since #2862 has been.
+    # #3499's memory-graph store is the new append point: item 25, printed last, named by
+    # the printed label's first and last word (`memory-graph`, `jsonl`) as every append
+    # since #2862 has been. `items` holds only each item's FIRST comma segment (that is the
+    # half the matcher compares to the report), so the window and the hold are asserted
+    # against the item's full text, which `_assert_description_names_the_reported_stores`
+    # above has already flattened.
+    assert items[24][0] == 25, items[24]
+    assert "memory-graph" in items[24][1] and "jsonl" in items[24][1], items[24]
+    item25 = re.sub(r"\s+", " ", description[description.index("25 memory-graph"):
+                                             description.index("Report all")])
+    assert "MEMORY_GRAPH_MAX_AGE_DAYS" in item25, (
+        "the item names no window, so a reader of the prompt cannot tell what ages")
+    assert "MEMORY_GRAPH_PROPOSALS_KEEP" in item25 and "semantic-verdicts-pairs.jsonl" in item25, (
+        f"the item states neither the witness floor nor the five held names: {item25}")
     # #3379's temp-scratch store: the item must name its own window constant, the same
     # rule item 21 and item 22 above take. "/tmp" is the FIRST word of the printed label,
     # so it is one of the two words the positional matcher requires — the item cannot be
@@ -7580,8 +7620,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "24 unbounded-growth stores" in front, front[:200]
-    assert "24 in all" in text, "the skill's body states a count other than 24"
+    assert "25 unbounded-growth stores" in front, front[:200]
+    assert "25 in all" in text, "the skill's body states a count other than 25"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8670,7 +8710,7 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_fifth_last_and_the_refused_run_prints_twenty_one(
+def test_the_injection_canary_store_prints_sixth_last_and_the_refused_run_prints_twenty_two(
         rs, monkeypatch, capsys):
     """#2862 clause 4, re-pointed by #2924, #3188 and #3209: a refused run prints twenty
     lines and a production run prints 24, with the canary line FOURTH-LAST in both.
@@ -8696,14 +8736,15 @@ def test_the_injection_canary_store_prints_fifth_last_and_the_refused_run_prints
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 24, f"a production run prints 24 store lines: {lines}"
-    assert lines[-5].split(":")[0].strip().startswith("injection-canary corpus"), lines[-5]
+    assert len(lines) == 25, f"a production run prints 25 store lines: {lines}"
+    # #3499 appended the memory-graph store below it, so every position below moves by one.
+    assert lines[-6].split(":")[0].strip().startswith("injection-canary corpus"), lines[-6]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 21, (
-        f"a refused run prints twenty-one store lines plus the refusal: {refused}")
-    assert refused[-5].split(":")[0].strip().startswith("injection-canary corpus"), refused[-5]
+    assert len(refused) == 22, (
+        f"a refused run prints twenty-two store lines plus the refusal: {refused}")
+    assert refused[-6].split(":")[0].strip().startswith("injection-canary corpus"), refused[-6]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -8915,11 +8956,11 @@ def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, mo
     assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
 
 
-def test_the_ceiling_sample_store_prints_fourth_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_ceiling_sample_store_prints_fifth_last_and_survives_the_refusal(rs, monkeypatch,
                                                                        capsys):
     """Where the line prints, in both kinds of run.
 
-    Fourth-last since #3379 appended a store below it, third-last since #3209 did, and
+    Fifth-last since #3499 appended a store below it, fourth-last since #3379 did, and
     last before that: task 79's enumeration is matched to the printed lines POSITIONALLY, so
     appending keeps items 1-20 on their own rules — #2862's reason, #2924's, #3188's and now
     #3209's.
@@ -8932,12 +8973,12 @@ def test_the_ceiling_sample_store_prints_fourth_last_and_survives_the_refusal(rs
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
-    assert report[-4].split(":")[0].strip().startswith("ceiling sample rows"), report[-4]
+    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
+    assert report[-5].split(":")[0].strip().startswith("ceiling sample rows"), report[-5]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
-    assert refused[-4].split(":")[0].strip().startswith("ceiling sample rows"), refused[-4]
+    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
+    assert refused[-5].split(":")[0].strip().startswith("ceiling sample rows"), refused[-5]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -9114,8 +9155,9 @@ def test_the_capture_store_horizon_is_the_shortest_window_in_the_file(rs):
         "behind 14 — the shortest delete window in this file — is stale")
 
 
-def test_the_capture_store_prints_third_last_and_survives_the_refusal(rs, monkeypatch, capsys):
-    """Clause 5's report-half: the 22nd line, printed SECOND-TO-LAST, in both kinds of run.
+def test_the_capture_store_prints_fourth_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+    """Clause 5's report-half: the 22nd line, printed THIRD-TO-LAST since #3499 appended the
+    memory-graph store below it, in both kinds of run.
 
     Second-to-last since #3209 appended the session scratch store below it, and last before
     that, because task 79's enumeration is matched to the printed lines POSITIONALLY:
@@ -9129,12 +9171,12 @@ def test_the_capture_store_prints_third_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
-    assert report[-3].split(":")[0].strip().startswith("canary tool-call captures"), report[-3]
+    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
+    assert report[-4].split(":")[0].strip().startswith("canary tool-call captures"), report[-4]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
-    assert refused[-3].split(":")[0].strip().startswith("canary tool-call captures"), refused[-3]
+    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
+    assert refused[-4].split(":")[0].strip().startswith("canary tool-call captures"), refused[-4]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -9913,9 +9955,10 @@ def test_the_temp_store_counts_only_the_uid_it_runs_as(rs, tmp_path, monkeypatch
     assert aged2.is_dir(), "the uid gate did not hold"
 
 
-def test_the_temp_store_line_prints_last_and_survives_the_refusal(rs, monkeypatch, capsys,
-                                                                  tmp_path):
-    """Clause 1 and clause 5's report-half: the 24th line, printed LAST, in both kinds of run.
+def test_the_temp_store_line_prints_second_last_and_survives_the_refusal(rs, monkeypatch,
+                                                                          capsys, tmp_path):
+    """Clause 1 and clause 5's report-half: the 24th line, printed SECOND-TO-LAST since #3499
+    appended the memory-graph store below it, in both kinds of run.
 
     Last, appending rather than inserting, because task 79's enumeration is matched to the
     printed lines POSITIONALLY — #2862's reason, inherited through #2924, #3188 and #3209, so
@@ -9937,16 +9980,16 @@ def test_the_temp_store_line_prints_last_and_survives_the_refusal(rs, monkeypatc
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 24, f"a production run prints 24 store lines: {report}"
-    last = report[-1]
+    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
+    last = report[-2]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 21, f"a refused run prints twenty-one store lines: {refused}"
-    assert refused[-1].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-1]
+    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
+    assert refused[-2].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-2]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -9979,3 +10022,309 @@ def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp
     assert Path(rs.TMP_SCRATCH_ROOT) == tmp_path / "tmp-scratch", (
         "the fixture no longer redirects the store to a directory of its own, which is what "
         "keeps it from being the parent of the other stores' fixture roots")
+
+
+# ---------------------------------------------------------------------------
+# Store 23 (#3499) — the dated `semantic-*` recordings under
+# ~/lloyd-data/_pipeline/memory-graph/, written by the weekly semantic
+# entity-resolution job and named by no rule in this file until now.
+#
+# Every node here seeds its own root through `root=`: the fixture's
+# `MEMORY_GRAPH_DIR` is the sandbox copy, and a store this sizeable must be
+# exercised on a directory the node built, so the numbers asserted below are
+# the node's own and not whatever the last weekly run left on the box.
+# ---------------------------------------------------------------------------
+
+MG_CANDIDATES = "semantic-entity-candidates-{}.jsonl"
+MG_JUDGMENTS = "semantic-entity-judgments-{}.jsonl"
+MG_PROPOSALS = "semantic-proposals-{}.jsonl"
+#: The #1410 guard's own glob, spelled the way `accumulated_record_lost` spells it
+#: (`scripts/memory/semantic-entity-resolution.py:1128`), so the witness count below is
+#: read with the same expression the production guard uses rather than a looser one.
+MG_PROPOSALS_GLOB = "semantic-proposals-????-??-??.jsonl"
+
+
+def _mg_seed(root: Path, name: str, *, days_old: float,
+             size: int = 2048) -> Path:
+    """One dated recording, its mtime the instant the job is meant to have written it."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    path.write_bytes(b"x" * size)
+    _backdate(path, days_old)
+    return path
+
+
+def test_a_semantic_recording_past_the_horizon_is_deleted_and_one_inside_it_is_not(rs):
+    """#3499 clause 1: the horizon is the file's own mtime, and the two verbs agree.
+
+    The candidates file is why the store exists — 7,244,479 bytes on 2026-09-23 growing to
+    13.5 MB by 2026-10-21 across the weekly runs, ~55-60 MB a month, in a directory no rule
+    in this file named. Its mtime is the instant the job finished writing it, which is the
+    only age a whole-file delete has here.
+
+    The dry run is the number an operator approves, so it is pinned to delete nothing AND to
+    name the same files `--apply` then removes: `stale` and `deleted` are read out of the two
+    passes over one identical seed, not assumed equal.
+    """
+    horizon = rs.MEMORY_GRAPH_MAX_AGE_DAYS
+    assert horizon == 30, "the store's horizon moved off the file's uniform 30 days"
+    root = Path(rs.MEMORY_GRAPH_DIR)
+    stale_two = [_mg_seed(root, MG_CANDIDATES.format("2026-08-15"), days_old=horizon + 30),
+                 _mg_seed(root, MG_JUDGMENTS.format("2026-08-20"), days_old=horizon + 25)]
+    fresh = _mg_seed(root, MG_CANDIDATES.format("2026-10-20"), days_old=5)
+    want_bytes = sum(p.stat().st_size for p in stale_two)
+
+    dry = rs.sweep_memory_graph(False, time.time(), root=root)
+    assert dry["present"] is True and dry["horizon_days"] == horizon, dry
+    assert dry["stale"] == 2, f"the dry run saw {dry['stale']} stale of 3, expected 2"
+    assert dry["deleted"] == 0 and dry["bytes"] == want_bytes, (
+        f"a dry run that counts {dry['bytes']} B against the {want_bytes} B it named has "
+        "no number an operator can approve against")
+    assert all(p.exists() for p in stale_two + [fresh]), "a dry run unlinked something"
+
+    swept = rs.sweep_memory_graph(True, time.time(), root=root)
+    assert swept["deleted"] == dry["stale"] == 2, (
+        f"--apply removed {swept['deleted']} files where the dry run promised "
+        f"{dry['stale']} — the approved run is not the run that happened")
+    assert swept["bytes"] == want_bytes and swept["bytes"] > 0, (
+        "the apply pass reclaimed no bytes, which is what sizing a file AFTER unlinking it "
+        "looks like: the KiB figure the line exists to carry would be 0")
+    assert not any(p.exists() for p in stale_two), "a stale recording survived --apply"
+    assert fresh.exists(), "a recording inside the horizon was deleted"
+    assert swept["kept"] == 1, f"the pass counted {swept['kept']} fresh file(s) inside the horizon"
+
+
+def test_the_sweep_dry_run_and_apply_line_agree_on_the_memory_graph_count(rs, capsys,
+                                                                         monkeypatch):
+    """#3499 clause 1's reporting half: the line counts what the pass did, in both modes.
+
+    `main()` is what task #79 and cron invoke, so the pair is pinned through it: the dry run
+    says `would delete` with `KiB candidate`, `--apply` says `deleted` with `KiB freed`, and
+    the count is the same 2 in both because they walk one seed twice.
+    """
+    root = Path(rs.MEMORY_GRAPH_DIR)
+    _mg_seed(root, MG_CANDIDATES.format("2026-07-01"), days_old=120)
+    _mg_seed(root, MG_JUDGMENTS.format("2026-07-05"), days_old=116)
+    _mg_seed(root, MG_CANDIDATES.format("2026-10-25"), days_old=1)
+
+    def mg_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "memory-graph" in ln]
+        assert len(lines) == 1, f"expected exactly one memory-graph line, got {lines}"
+        return lines[0]
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "dry run must exit 0"
+    dry = mg_line()
+    assert f">{rs.MEMORY_GRAPH_MAX_AGE_DAYS}d" in dry, dry
+    assert "2 would delete" in dry and "KiB candidate" in dry, dry
+    assert "deleted," not in dry and "freed" not in dry, (
+        f"the dry run used an apply verb: {dry}")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = mg_line()
+    assert "2 deleted" in applied and "KiB freed" in applied, applied
+    assert "would delete" not in applied and "candidate" not in applied, applied
+    assert not (root / MG_CANDIDATES.format("2026-07-01")).exists()
+    assert (root / MG_CANDIDATES.format("2026-10-25")).exists()
+
+
+def test_the_dated_proposals_floor_holds_two_recordings_so_1410_keeps_its_witness(rs):
+    """#3499 clause 2: the witness floor is a COUNT, and the sweep cannot drop below it.
+
+    `accumulated_record_lost` (`scripts/memory/semantic-entity-resolution.py:1114-1130`)
+    globs `semantic-proposals-????-??-??.jsonl` and refuses a run whose accumulated record
+    cannot be reproduced from those files — the guard that exists because a wipe once went
+    unnoticed (#1410). A bare 30-day window would leave it one witness the moment the weekly
+    job skips two runs, since the store gains one dated file a week and prunes on the same
+    clock it fills.
+
+    Four stale recordings, no fresh ones: the pass must take the two oldest and hold the two
+    newest stale ones. The floor is then re-read with the GUARD's own glob and size predicate
+    — that is the seam between the two files, and it is the only way this node can say
+    something the sweep's own counters cannot.
+    """
+    horizon = rs.MEMORY_GRAPH_MAX_AGE_DAYS
+    root = Path(rs.MEMORY_GRAPH_DIR)
+    stale = [_mg_seed(root, MG_PROPOSALS.format(d), days_old=horizon + age, size=1000 + i)
+             for i, (d, age) in enumerate((("2026-07-01", 120), ("2026-07-08", 113),
+                                           ("2026-07-15", 106), ("2026-07-22", 99)))]
+
+    dry = rs.sweep_memory_graph(False, time.time(), root=root)
+    assert dry["witness_held"] == 2, f"the floor held {dry['witness_held']}, not 2"
+    assert dry["stale"] == 2, f"the dry run would take {dry['stale']} of 4 stale proposals"
+
+    swept = rs.sweep_memory_graph(True, time.time(), root=root)
+    assert swept["deleted"] == 2, swept
+    survivors = sorted(p.name for p in root.glob(MG_PROPOSALS_GLOB))
+    assert len(survivors) == rs.MEMORY_GRAPH_PROPOSALS_KEEP == 2, survivors
+    assert survivors == sorted(p.name for p in stale[-2:]), (
+        f"the floor kept {survivors}; holding the FRESHEST stale recordings is what keeps "
+        "them likely to still describe the current entity set")
+
+    # The guard's own expression, read across the process boundary it lives behind.
+    witnesses = [p for p in sorted(root.glob(MG_PROPOSALS_GLOB))
+                 if p.name != "semantic-proposals-cumulative.jsonl" and p.stat().st_size > 0]
+    assert len(witnesses) >= rs.MEMORY_GRAPH_PROPOSALS_KEEP, (
+        f"after a sweep the #1410 guard's glob finds {len(witnesses)} recording(s); at 0 or "
+        "1 the guard has nothing to compare and disarms silently")
+
+
+def test_the_proposals_floor_counts_survivors_so_no_shape_of_the_store_disarms_1410(rs):
+    """#3499 clause 2's other half: the floor is on SURVIVORS, whichever side they sit on.
+
+    The pinned four-stale case exercises the floor when nothing inside the horizon can be a
+    witness. Two shapes still have to hold, and both are what the live directory is actually
+    shaped like as the weekly job ages:
+
+    * the fresh set already covers the floor (3 inside 30 days, 2 past) — here the floor must
+      NOT veto an honest age delete, because the survivors are the fresh recordings and the
+      guard still finds at least `MEMORY_GRAPH_PROPOSALS_KEEP` of them;
+    * the whole store is below the floor (1 stale recording, nothing fresh) — here age alone
+      must never take it, or the sweep itself becomes the wipe #1410 was filed over.
+
+    Reading a floor as "hold N out of the stale group" gets the first shape right and the
+    second wrong, and reading it as "delete what is old" gets the second wrong outright; this
+    node is what the difference between those two readings costs. Both survivors are counted
+    with the guard's own glob and size predicate, not this file's counters.
+    """
+    horizon = rs.MEMORY_GRAPH_MAX_AGE_DAYS
+    keep = rs.MEMORY_GRAPH_PROPOSALS_KEEP
+    root = Path(rs.MEMORY_GRAPH_DIR)
+
+    def witnesses() -> "list[Path]":
+        return [p for p in sorted(root.glob(MG_PROPOSALS_GLOB))
+                if p.name != "semantic-proposals-cumulative.jsonl" and p.stat().st_size > 0]
+
+    fresh = [_mg_seed(root, MG_PROPOSALS.format(d), days_old=age, size=900 + i)
+             for i, (d, age) in enumerate((("2026-10-25", 2), ("2026-10-18", 9),
+                                           ("2026-10-11", 16)))]
+    stale = [_mg_seed(root, MG_PROPOSALS.format(d), days_old=age, size=700 + i)
+             for i, (d, age) in enumerate((("2026-08-05", 90), ("2026-08-12", 83)))]
+
+    dry = rs.sweep_memory_graph(False, time.time(), root=root)
+    assert dry["witness_held"] == 0, (
+        f"the floor held {dry['witness_held']} stale recording(s) although "
+        f"{len(fresh)} fresh ones already cover the floor of {keep}")
+    assert dry["stale"] == len(stale), (
+        f"a pass that must hold nothing still declined {len(stale) - dry['stale']} honest "
+        "age delete(s)")
+
+    swept = rs.sweep_memory_graph(True, time.time(), root=root)
+    assert swept["deleted"] == len(stale), swept
+    survivors = witnesses()
+    assert len(survivors) == len(fresh) >= keep, (
+        f"after taking every stale recording the guard's glob finds {len(survivors)} "
+        f"witness(es) against a floor of {keep}")
+    assert {p.name for p in survivors} == {p.name for p in fresh}, survivors
+
+    for p in survivors:
+        p.unlink()
+    last = _mg_seed(root, MG_PROPOSALS.format("2026-08-19"), days_old=horizon + 75, size=880)
+    assert len(witnesses()) == 1 < keep, "the sub-floor shape was not seeded"
+
+    swept_two = rs.sweep_memory_graph(True, time.time(), root=root)
+    assert swept_two["deleted"] == 0 and swept_two["witness_held"] == 1, swept_two
+    assert last.exists(), (
+        "the sweep deleted the only dated recording with bytes in it: a guard whose witness "
+        "set can be emptied by an age rule is a guard the sweep disarms itself")
+    assert len(witnesses()) >= 1, witnesses()
+
+
+def test_the_five_live_memory_graph_names_survive_the_sweep_however_old(rs):
+    """#3499 clause 3: the live names are held by NAME, and the line says so separately.
+
+    None of these five matches a dated pattern, so a bare glob is already enough to spare
+    them — which is exactly why the hold is written as a name list and reported as one: the
+    day a fourth dated-looking family appears in this directory, the thing that saves the
+    cumulative record is a name on a list, not a lucky shape. `semantic-proposals-latest.jsonl`
+    is a symlink onto the cumulative file, so store 7's rule applies to it as well: held, and
+    never followed.
+
+    The `.bak` rotation of `semantic-verdicts-pairs.jsonl` rides along here because its
+    absence from this store is a decision, not an oversight: `compact_verdict_cache(keep=5)`
+    in the resolution job already caps it, and two owners for one rotation is a bug.
+    """
+    root = Path(rs.MEMORY_GRAPH_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    held = {}
+    for name in rs.MEMORY_GRAPH_HELD_NAMES:
+        path = root / name
+        if name == "semantic-proposals-latest.jsonl":
+            path.symlink_to(root / "semantic-proposals-cumulative.jsonl")
+        else:
+            path.write_bytes(b"y" * 4096)
+        _backdate(path, 400)
+        held[name] = path
+    bak = root / "semantic-verdicts-pairs.jsonl.20260101T000000Z.bak"
+    bak.write_bytes(b"z" * 4096)
+    _backdate(bak, 400)
+    dated = _mg_seed(root, MG_CANDIDATES.format("2026-06-01"), days_old=170)
+
+    p = rs.sweep_memory_graph(True, time.time(), root=root)
+    assert p["deleted"] == 1, f"the pass deleted {p['deleted']} file(s), not the 1 dated one"
+    assert p["held_live"] == len(rs.MEMORY_GRAPH_HELD_NAMES) == 5, p
+    assert p["held_link"] == 1, f"the latest symlink counted as {p['held_link']}"
+    for name, path in held.items():
+        assert path.exists() or path.is_symlink(), f"{name} was deleted"
+    assert (root / "semantic-proposals-latest.jsonl").is_symlink(), (
+        "the latest pointer is no longer a symlink: the pass followed it or replaced it")
+    assert bak.exists(), (
+        "the .bak rotation was aged here as well as by compact_verdict_cache's keep=5")
+    assert not dated.exists(), "the one dated file this pass should have taken is still there"
+    assert p["witness_held"] == 0, f"no dated proposals exist, yet the line holds {p['witness_held']}"
+
+    line = rs._memory_graph_line(p)
+    assert "held" in line, line
+    for name in rs.MEMORY_GRAPH_HELD_NAMES:
+        assert name in line, f"{name} is not named in the held clause: {line}"
+    assert "1 deleted" in line, (
+        f"the held files were folded into the deleted count or lost from it: {line}")
+
+
+def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_registered(rs,
+                                                                                     capsys,
+                                                                                     monkeypatch):
+    """#3499 clause 4: one number, one docstring reference to it, one line among the stores.
+
+    The store's docstring quotes `MEMORY_GRAPH_MAX_AGE_DAYS` and states no digits: a number
+    written twice is a number that goes false in one of the two places, which is the failure
+    this file's other docstring guards were written for.
+
+    Registration is pinned through `main()` rather than a list of names, because the thing
+    that matters is that the line is PRINTED among the other stores' lines — a function that
+    exists and is never called reports nothing.
+    """
+    doc = rs.sweep_memory_graph.__doc__ or ""
+    assert "MEMORY_GRAPH_MAX_AGE_DAYS" in doc, "the docstring does not quote the constant"
+    assert "30" not in doc, (
+        f"the docstring restates the horizon as a number, so the constant and the prose can "
+        f"now disagree: {doc}")
+    assert rs.MEMORY_GRAPH_MAX_AGE_DAYS == 30
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  ")]
+    mg = [ln for ln in lines if "memory-graph" in ln]
+    assert len(mg) == 1, f"expected the store's one line among {len(lines)}, got {mg}"
+    assert lines.index(mg[0]) == len(lines) - 1, (
+        "the store does not print last, which is where an appended store has to print so "
+        "task 79's numbered enumeration still lines up positionally")
+
+
+def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_created(rs):
+    """#3499 clause 4's other half: `no memory-graph store yet`, not a bare 0.
+
+    `0 files` is also what a store whose path was mistyped prints, and on this box the
+    directory is created by the weekly resolution job, not by the sweep — a sweep that
+    "helped" by making the directory would report a store it had just invented.
+    """
+    absent = Path(rs.MEMORY_GRAPH_DIR).parent / "no-such-memory-graph"
+    assert not absent.exists()
+    p = rs.sweep_memory_graph(False, time.time(), root=absent)
+    assert p["present"] is False and p["files"] == 0 and p["stale"] == 0, p
+    line = rs._memory_graph_line(p)
+    assert "no memory-graph store yet" in line, line
+    assert "0 KiB candidate" not in line, (
+        f"an absent store reads as a measured zero: {line}")
+    assert not absent.exists(), "the sweep created a store it only reports on"
