@@ -13,6 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from app.harness import capabilities as caps
 from app.harness import guard_arm_matrix as G
 from app.harness import outbound_content as OC
 
@@ -228,7 +231,6 @@ def test_the_report_prints_reach_and_names_a_declaration_that_grants_a_sender(
     # true of a check that can never fire, and this whole file exists because of
     # a guard whose denominator could be empty (#1828). One declared name added,
     # one durable sender, and the report has to name the source AND the name.
-    import app.harness.capabilities as caps
     monkeypatch.setitem(caps.SOURCE_CAPABILITIES, "deep-research",
                         tuple(caps.SOURCE_CAPABILITIES["deep-research"])
                         + ("email_send",))
@@ -236,6 +238,48 @@ def test_the_report_prints_reach_and_names_a_declaration_that_grants_a_sender(
             if f.reason == G.FINDING_INGEST_REACHES_DURABLE]
     assert [f.target for f in hits] == ["deep-research"], hits
     assert "email_send" in hits[0].extra
+
+
+#: A findings line as `scripts/maintenance/guard_arm_matrix.py` prints it:
+#: `  [<reason>] <source>: <extra>`. Built from the constant so the pattern
+#: cannot outlive a rename of the reason it matches.
+_UNDECLARED_ROW = re.compile(
+    rf"\[{re.escape(G.FINDING_UNDECLARED_ENVELOPE)}\] ([^:\s]+):")
+
+
+def _undeclared_rows_printed(stdout: str) -> list[str]:
+    """Every source named on a `--capabilities` findings line for an undeclared set.
+
+    Read off the SUBPROCESS's stdout and nowhere else. The same names are
+    available in-process from `G.capability_findings`, and reading them there
+    would leave this file's non-vacuity node unable to fail: a patched registry
+    would have moved the expected set and the observed set together, and the
+    check could never have disagreed with anything.
+    """
+    return [m.group(1)
+            for line in stdout.splitlines()
+            if G.FINDING_UNDECLARED_ENVELOPE in line
+            for m in [_UNDECLARED_ROW.search(line)] if m]
+
+
+def _assert_printed_undeclared_rows_are_the_owed_sources(stdout: str) -> None:
+    """The printed undeclared rows are exactly the roster minus the declarations.
+
+    Identity rather than count (#3697): both sides come from the same two
+    registries the report is built from, so the round that declares a seventh
+    capability set moves them together and this stays green — which is what the
+    `>= 10` floor it replaced could not do against a live count of exactly ten.
+    Comparing sorted LISTS against a set-derived expectation is what makes it
+    exactly-once: a source printed on two findings lines is a longer list than
+    the set of the same names, so a duplicated row fails here as well as a
+    missing one. The non-empty half is this file's own rule that a denominator
+    which found nothing is a decoration, not a pass.
+    """
+    printed = _undeclared_rows_printed(stdout)
+    owed = set(G.worker_source_names(ROOT)) - set(caps.SOURCE_CAPABILITIES)
+    assert printed and sorted(printed) == sorted(owed), (
+        f"the report prints {sorted(printed)} as declaring no capability set; "
+        f"the roster minus the declarations is {sorted(owed)}")
 
 
 def test_the_report_surface_prints_the_envelopes_on_demand():
@@ -256,19 +300,80 @@ def test_the_report_surface_prints_the_envelopes_on_demand():
     # against the roster's import list read from the AST.
     assert "worker sources with a capability envelope: 16" in out.stdout
     assert "| 24 durable-external reach" not in out.stdout
-    # Every un-narrowed source is named in the findings block, once.
+    # Every un-narrowed source is named in the findings block, once. Which
+    # sources are owed is this node's question; how many is the node below's.
     assert "capability findings" in out.stdout
-    assert out.stdout.count("worker-source-declares-no-capability-set") >= 10
+    # counts: test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more
+    _assert_printed_undeclared_rows_are_the_owed_sources(out.stdout)
+
+
+def test_the_undeclared_row_check_fails_when_only_the_registry_moves(monkeypatch):
+    """The floor this file replaced had to be forged to be believed: here it is.
+
+    Declaring one more source is the event the floor could not survive: measured
+    on the pre-change tree, adding a seventh key to `SOURCE_CAPABILITIES` turned
+    this file's report node red with `AssertionError: assert 9 >= 10`, on a tree
+    that had simply made progress. So the forge is that event — one
+    live-undeclared source gains a declared set in-process, while the report, a
+    SUBPROCESS reading the declarations off disk, goes on printing it. One side
+    moves, and the identity assertion has to disagree. Patching
+    `G.capability_findings` instead would move both sides together and could
+    never raise, which is why `_undeclared_rows_printed` reads stdout. Precedent
+    for the forge: `tests/test_worker_capability_allowlist.py`'s
+    `test_declaring_a_seventh_source_leaves_the_deny_floor_node_green`.
+    """
+    owed = set(G.worker_source_names(ROOT)) - set(caps.SOURCE_CAPABILITIES)
+    assert owed, ("every worker source declares a capability set, so there is no "
+                  "seventh declaration left to forge and this node proves nothing")
+    target = sorted(owed)[0]
+    monkeypatch.setattr(caps, "SOURCE_CAPABILITIES",
+                        {**caps.SOURCE_CAPABILITIES, target: ("READ_FILES",)})
+    out = subprocess.run([sys.executable, str(SCRIPT), "--capabilities"],
+                         cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    # The half that says the forge moved ONE side: the subprocess still prints
+    # `target` as undeclared. Had it read the patched dict too, the two sides
+    # would agree and the raise below would be a pass earned by nothing.
+    assert target in _undeclared_rows_printed(out.stdout), (
+        f"the report no longer prints {target} as undeclared, so the printed side "
+        "moved with the patched one and no disagreement was forged")
+    with pytest.raises(AssertionError):
+        _assert_printed_undeclared_rows_are_the_owed_sources(out.stdout)
+
+
+def test_a_duplicated_undeclared_row_fails_the_identity_check():
+    """`Once` is part of the assertion, so the duplicate is forged here too.
+
+    A count cannot tell a duplicated row from a missing one: `>= 10` stayed green
+    while one source was printed twice and another not at all. This needs no
+    subprocess — the rows are written in the shape the script prints them, and
+    the first call below is the control that proves those synthetic lines parse,
+    because a check that only ever saw a forged input would prove nothing either
+    way. The real print format is pinned against this parser by
+    `test_the_report_surface_prints_the_envelopes_on_demand`, which reads it out
+    of the subprocess.
+    """
+    owed = sorted(set(G.worker_source_names(ROOT)) - set(caps.SOURCE_CAPABILITIES))
+    assert owed, ("every worker source declares a capability set, so there is no "
+                  "row left to duplicate and this node proves nothing")
+    rows = "\n".join(f"  [{G.FINDING_UNDECLARED_ENVELOPE}] {name}: no declared "
+                     "capability set" for name in owed)
+    _assert_printed_undeclared_rows_are_the_owed_sources(rows)
+    with pytest.raises(AssertionError):
+        _assert_printed_undeclared_rows_are_the_owed_sources(
+            rows + f"\n  [{G.FINDING_UNDECLARED_ENVELOPE}] {owed[0]}: printed twice")
 
 
 def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
     """The exact row count belongs with the rounds that moved it: #2671, then #2718.
 
-    The node above deliberately stops at `>= 10` — it predates the roster
-    growing and shrinking, and a fleet-wide report test is the wrong place for an
-    exact count that any new source changes. The exact number lives here instead.
-    Twelve sources were undeclared; #2671 declared `autotriage`, the largest of
-    them by volume, taking the report to ELEVEN
+    The report node above names the owed sources instead of counting them
+    (#3697): it stopped at `>= 10` against a live ten, which is no slack at all,
+    so the next declaration — the one that takes this report to nine rows — would
+    have died there for arithmetic and not for being wrong. Every exact number on
+    this report therefore lives here, with the round that moved it. Twelve
+    sources were undeclared; #2671 declared `autotriage`, the largest of them by
+    volume, taking the report to ELEVEN
     `worker-source-declares-no-capability-set` rows, and #2718 declared
     `bench-mine`, taking it to TEN. Neither name is in any of those rows. Both
     halves matter: a count alone would also be ten if a different pair of sources
