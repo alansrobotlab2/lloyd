@@ -2561,16 +2561,39 @@ def anchor_span_report(text: str) -> tuple[list[tuple[str, Path, int]], list[str
 
 #: The docs whose line anchors must each be graded against a symbol their own
 #: citing sentence names, rather than against "inside SOME definition". Opt-in by
-#: design: the corpus currently holds 169 anchors across 24 architecture docs that
-#: pass on the containment fallback (#3580), so a corpus-wide rule is a 24-doc
-#: prose sweep and not a guard — and the one doc that has already carried two
-#: drifted numbers through a green suite is the one that starts paying for it.
-#: Extending the list is the scope call owed on #3580.
+#: design: 192 anchors in 23 of the 36 architecture docs pass on the containment
+#: fallback (#3580), so a corpus-wide rule is a 23-doc prose sweep and not a
+#: guard — and the one doc that has already carried two drifted numbers through a
+#: green suite is the one that starts paying for it. Extending the list stays the
+#: scope call owed on #3580; #3652 settled only that the population the opt-in
+#: leaves ungraded may not grow, which is `NAMED_SYMBOL_UNNAMED_CEILING` below.
 NAMED_SYMBOL_RAIL_DOCS = ("measurement.md",)
 
 #: No anchor in a rail doc may rest on the fallback. A non-zero value here would
 #: mean the rail was opened with its own doc non-compliant.
 NAMED_SYMBOL_UNNAMED_FLOOR = 0
+
+#: #3652: a non-growth bound on the anchors the rail does NOT cover. Every doc
+#: outside the rail is still graded by containment alone until #3580's scope call
+#: is made, but the population that leaves ungraded is now counted, so a new bare
+#: `path:NNN` citation reddens the suite instead of widening the pile. Measured
+#: 2026-11-02 at 372d0aad: 192 `fallback_decision` rows whose `mode` is not
+#: `"named"` — 166 distinct `path:NNN` spans across 23 of the 36 docs; the remaining
+#: 13 contribute none, the rail doc `measurement.md` among them. Per doc, descending:
+#:
+#:   threat-model.md 42, autonomy-jobs.md 19, context-window.md 18,
+#:   workers-jobs.md 18, guard-coverage.md 14, skills.md 14, djev.md 10,
+#:   tools.md 10, ambient-context-injection.md 7, autonomy.md 6,
+#:   background-runs.md 4, memory.md 4, research-pipeline.md 4, vllm.md 4,
+#:   editing-safeguards.md 3, retrieval.md 3, arch-review.md 2,
+#:   authority-surfaces.md 2, automod.md 2, qmd.md 2, testing.md 2,
+#:   browser-side-panel.md 1, mission-control.md 1
+#:
+#: The bound is one-way: re-typing an anchor so its sentence names the enclosing
+#: definition is the only way to move it, and doing that means lowering this
+#: number in the same commit that cleared the anchor.
+#: `test_the_fallback_anchor_ceiling_is_shown_able_to_bite` is what re-measures it.
+NAMED_SYMBOL_UNNAMED_CEILING = 192
 
 
 def fallback_decision(text: str) -> list[dict]:
@@ -2596,8 +2619,10 @@ def fallback_decision(text: str) -> list[dict]:
       * `mode` "unnamed"  — it named nothing, or nothing the file defines, so
         containment alone decided.
 
-    A rail doc may contain none of the latter two; the docs outside the rail are
-    what the 169 count is about, and they are measured here, never graded.
+    A rail doc may contain none of the latter two. The docs outside the rail are
+    what `NAMED_SYMBOL_UNNAMED_CEILING` bounds: `unnamed_anchor_rows` sums these
+    rows corpus-wide and that sum is graded, while no doc outside the rail is
+    graded anchor by anchor until #3580's scope call is made.
     """
     rows: list[dict] = []
     for span, hit, line in anchor_span_report(text)[0]:
@@ -2612,6 +2637,83 @@ def fallback_decision(text: str) -> list[dict]:
                      "mode": ("named" if picked and set(picked) <= set(enc) else
                               ("mispicked" if picked else "unnamed"))})
     return rows
+
+
+#: The negative control's seam: a slug listed here is read as this text instead of
+#: the bytes on disk. It exists because the corpus the ceiling grades is 36 files
+#: under `architecture/`, which no test may write — so the one way to show a bound
+#: refusing a corpus it does not hold is to hand the bound a corpus it does. The
+#: control that uses it deletes its entry in a `finally`, the way
+#: `test_the_rot_bound_is_shown_able_to_bite` removes its injected exemption, and
+#: nothing else reads this dict.
+_CEILING_SEEDED_DOCS: dict[str, str] = {}
+
+
+def corpus_doc_texts() -> dict[str, str]:
+    """Every architecture doc's text keyed by slug: the corpus the ceiling reads.
+
+    Re-read through `_text` on every call, so the bound never prices a cached copy
+    of a doc that has since moved. `_CEILING_SEEDED_DOCS` is the only seam, and a
+    seed replaces one real doc's text rather than adding a doc of its own — the
+    corpus's shape is `PATH_DOC_SLUGS`, and a phantom slug would be a second
+    surface the shipped guards have never seen.
+    """
+    docs = {slug: _text(slug) for slug in PATH_DOC_SLUGS}
+    extra = sorted(set(_CEILING_SEEDED_DOCS) - set(docs))
+    assert not extra, (
+        f"{extra} seeded into a corpus with no such doc: a seed may only replace a "
+        "doc the ceiling already reads, never invent one")
+    docs.update(_CEILING_SEEDED_DOCS)
+    return docs
+
+
+def unnamed_anchor_rows(docs: dict[str, str] | None = None) -> list[tuple[str, dict]]:
+    """`(slug, row)` for every architecture-doc line anchor the fallback decided.
+
+    One entry per graded anchor whose `fallback_decision` mode is not `"named"` —
+    the `unnamed` and `mispicked` halves together, since both reached their verdict
+    by containment and both are what #3580's two drifts passed on. The slug travels
+    with the row because a corpus total that cannot say which doc grew cannot tell
+    an author where to fix it. `docs` defaults to the corpus on disk
+    (`corpus_doc_texts()`); the argument is the seam the negative control uses.
+    """
+    if docs is None:
+        docs = corpus_doc_texts()
+    return [(slug, row)
+            for slug in sorted(docs)
+            for row in fallback_decision(docs[slug])
+            if row["mode"] != "named"]
+
+
+def unnamed_anchor_ceiling_report(rows: list[tuple[str, dict]]) -> str:
+    """The text the ceiling raises: every offender by doc and span, then the fix.
+
+    Shaped on `test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender`:
+    the count against the bound, one line per doc in descending order with each span
+    spelled as the doc wrote it, then what to write instead, then the ratchet
+    instruction. Every doc is listed rather than only the one that tipped the total,
+    because nothing here knows which doc was edited — an author told "193 against
+    192" with no span has to go and re-measure the corpus themselves.
+    """
+    by_doc: dict[str, list[dict]] = {}
+    for slug, row in rows:
+        by_doc.setdefault(slug, []).append(row)
+    body = "".join(
+        f"  {slug} — {len(entries)} anchors, {len(spans)} distinct: "
+        + ", ".join(f"`{s}`" for s in spans) + "\n"
+        for slug, entries in sorted(by_doc.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        for spans in [sorted({e["span"] for e in entries})])
+    return (
+        f"{len(rows)} architecture-doc line anchors rest on the containment "
+        f"fallback against a ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}:\n"
+        + body
+        + "Each anchor above cites a line with no symbol beside it, so the only "
+        "verdict that could be reached was \"the line falls inside SOME definition\" "
+        "— which is how both of #3580's drifts stayed green. Write the enclosing "
+        "definition's name beside the citation (`main` at `eval/run_eval.py:2686`, "
+        "not the bare span) so that symbol's own span grades it. If you cleared "
+        "one, lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — that is what "
+        "records the shrink.")
 
 
 @pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
@@ -3127,10 +3229,13 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     """Clauses 2, 3 and 4: the rail over the one doc that opted in.
 
     `NAMED_SYMBOL_RAIL_DOCS` is the opt-in, and it holds exactly `measurement.md`
-    — the other 23 architecture docs are left graded by containment alone, which
-    today is 194 fallback-decided anchor occurrences (168 distinct `path:NNN`
-    spans, heaviest `threat-model.md` at 44) that this rail does not touch. The
-    counts are #3580's owed scope call, not a slip in this node.
+    — the other 35 architecture docs are left graded by containment alone, and 23
+    of them carry fallback-decided anchors: 192 occurrences, 166 distinct
+    `path:NNN` spans, heaviest `threat-model.md` at 42 (measured 2026-11-02 at
+    372d0aad). This rail does not touch them, and whether it should is #3580's owed
+    scope call, not a slip in this node; what prices them meanwhile is
+    `NAMED_SYMBOL_UNNAMED_CEILING`, in
+    `test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling`.
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
@@ -3183,6 +3288,115 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     assert anchor_span_report(text)[1] == [], (
         "the doc as written is reported by the shipped rule, so the rail above is "
         "grading a tree this node's re-typing does not describe")
+
+
+def test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling():
+    """#3652 clauses 1 to 3: the anchors the rail leaves ungraded are bounded, by name.
+
+    `test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol` prices one
+    doc; the other 35 stay graded by containment alone until #3580's scope call is
+    made, and until this node nothing said that population may not grow. The bound is
+    the measured count itself — 192 rows as counted 2026-11-02 at 372d0aad — so the
+    suite accepts the corpus exactly as it stands and reddens on one more bare
+    `path:NNN` citation. That is the cheap half of a rule nobody will decide the
+    expensive half of: the docs are not re-typed, but the pile stops growing.
+
+    The `> 0` arm is the #1699 vacuity shape #2582 was filed against: a ceiling over
+    a population nothing measures is a comment. The rail's own copy of that arm is the
+    assert beside `NAMED_SYMBOL_UNNAMED_FLOOR`.
+    """
+    rows = unnamed_anchor_rows()
+    assert len(rows) > 0, (
+        "no architecture-doc anchor rests on the containment fallback, so the ceiling "
+        "below bounds nothing — the #1699 shape #2582 was filed against. Delete "
+        "NAMED_SYMBOL_UNNAMED_CEILING along with the population it counts.")
+    # Clause 5: this bound admits no doc into the rail. measurement.md is the slug
+    # whose rows are all named, so it contributes none of what is counted here, and
+    # every bounded anchor sits in a doc that has not opted in.
+    assert NAMED_SYMBOL_RAIL_DOCS == ("measurement.md",), (
+        f"the rail covers {NAMED_SYMBOL_RAIL_DOCS}; #3652 bounds the ungraded "
+        "population and admits no doc — extending the rail is #3580's call, and each "
+        "new rail doc has to carry a name beside every anchor first")
+    assert [r["span"] for slug, r in rows if slug in NAMED_SYMBOL_RAIL_DOCS] == [], (
+        "a rail doc contributed fallback-decided anchors to the bounded population, so "
+        "the ceiling is absorbing anchors its own rail forbids")
+    assert len(rows) <= NAMED_SYMBOL_UNNAMED_CEILING, unnamed_anchor_ceiling_report(rows)
+
+
+def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
+    """#3652 clause 4: the bound is demonstrated, not asserted.
+
+    Same shape as `test_the_rot_bound_is_shown_able_to_bite`: the corpus is green, one
+    unnamed anchor is seeded into a real doc's text through the seam
+    `corpus_doc_texts` reads, the ceiling must refuse it by slug and span, the seed
+    goes away in a `finally` so it cannot reach a second node, and the unseeded corpus
+    is green again on the far side.
+
+    The tightness assert below is what makes the seed one anchor rather than a
+    computed surplus. The bound was set AT the measured count, so a corpus that
+    shrank without the constant being lowered would let a single seeded anchor
+    through, and a control that cannot reach its `pytest.raises` is a control that
+    asserts nothing — it would then read as a passing test for as long as the drift
+    went unfixed, which is the failure #2795's rot bound was written to end.
+    """
+    slug, span = "autonomy-jobs.md", "eval/run_eval.py:2686"
+    seed = (f"\nThe ceiling's negative control cites `{span}` for the baseline "
+            "write.\n")
+    assert slug in PATH_DOC_SLUGS, f"{slug} is not a doc the ceiling reads"
+    assert span not in _text(slug), (
+        f"{slug} now cites {span} itself, so a seeded occurrence would take its mode "
+        "from the real sentence and price nothing")
+    assert not _CEILING_SEEDED_DOCS, "a seed survived an earlier control"
+    assert corpus_doc_texts()[slug] == _text(slug), (
+        "the seam this control writes into is not the corpus the ceiling reads")
+
+    rows = unnamed_anchor_rows()
+    assert len(rows) == NAMED_SYMBOL_UNNAMED_CEILING, (
+        f"the corpus holds {len(rows)} fallback-decided anchors against a ceiling of "
+        f"{NAMED_SYMBOL_UNNAMED_CEILING}: the population shrank and the constant did "
+        "not. Re-measure, then lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit "
+        "that cleared the anchor — that is what records the shrink.")
+    seeded = corpus_doc_texts()
+    seeded[slug] = _text(slug) + seed
+    seeded_rows = unnamed_anchor_rows(seeded)
+    assert len(seeded_rows) == len(rows) + 1, (
+        f"the seed took the corpus from {len(rows)} rows to {len(seeded_rows)}: the "
+        "bound can only be shown biting on exactly one added fallback-decided anchor")
+    seeded_total = NAMED_SYMBOL_UNNAMED_CEILING + 1
+    seeded_doc = sum(1 for s, _r in rows if s == slug) + 1
+    report = unnamed_anchor_ceiling_report(seeded_rows)
+
+    test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
+
+    _CEILING_SEEDED_DOCS[slug] = seeded[slug]
+    try:
+        with pytest.raises(AssertionError) as raised:
+            test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
+    finally:
+        del _CEILING_SEEDED_DOCS[slug]
+
+    msg = str(raised.value)
+    assert (f"{seeded_total} architecture-doc line anchors rest on the containment "
+            f"fallback against a ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}") in msg, (
+        msg[:300])
+    assert f"{slug} — {seeded_doc} anchors" in msg, msg[:600]
+    assert f"`{span}`" in msg, msg[:600]
+    assert "Write the enclosing definition's name beside the citation" in msg, msg[:600]
+    # Every line of the report must be in the message the node actually raised, so the
+    # checks above cannot be satisfied by a message that lost a doc on the way out.
+    # Compared line by line rather than as one substring because pytest re-indents a
+    # multi-line assertion message when it builds the exception (`\n` becomes `\n    `),
+    # and then appends its own `assert 193 <= 192` explanation — whose length depends on
+    # `-v`, which is why the ending is pinned on `report` below and not on a tail of
+    # `msg`: measured, a `msg[-400:]` check on these same bytes is green under `-q` and
+    # red under the `-v` run `test_the_gate_selection_drops_nothing_and_the_named_node_passes`
+    # makes, because the tail there is pytest's `where` clause, not this node's prose.
+    missing = [ln for ln in report.splitlines() if ln.strip() and ln not in msg]
+    assert missing == [], missing[:2]
+    assert report.endswith("lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — "
+                           "that is what records the shrink."), report[-200:]
+    assert "lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit" in msg, msg[-600:]
+    test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
 
 
 def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
