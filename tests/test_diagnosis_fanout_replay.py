@@ -1606,15 +1606,25 @@ def test_the_ceiling_block_names_the_launcher_but_never_quotes_its_figure():
     True the day `38b5ad15` (2026-10-18T15:50:15-07:00) wrote it, false ever since,
     because what it quotes is runtime data under `~/lloyd-data/` — outside this repo's
     diff, outside the vault, edited by nobody who is reading this comment. Its twin
-    rotted the same way: the launcher's own header cites the constant at
-    `eval/diagnosis_fanout_replay.py:145`, which is where `DEFAULT_TOKEN_CEILING` sat at
-    `46c8cc95` (`145:DEFAULT_TOKEN_CEILING = 200_000`) and is `:166` now. So the block
-    keeps the mechanism, which cannot rot — an explicit `--ceiling` outranks the argparse
-    default at `:1835`, so a raised default never reaches a pass by itself — and sends the
-    reader to the command that answers the figure instead. That is also the only shape of
-    test surviving the owed launcher edit: a node asserting `200000` is in the text goes
-    red the moment a human raises the launcher to 600000, and one asserting `600000` is
-    in it is false until they do.
+    rotted the same way, and this docstring was the twin: as `c41df501` wrote it, it
+    cited `DEFAULT_TOKEN_CEILING` and the `--ceiling` argparse default each by line
+    number, each true for that commit's copy of the file, and the constant has moved
+    since — which is the same failure the paragraph above retires, only aimed at this
+    repo instead of at runtime data. So every anchor here is a SYMBOL plus the command
+    that prints its position, and no line number is quoted: for the constant,
+    `grep -n '^DEFAULT_TOKEN_CEILING' eval/diagnosis_fanout_replay.py`; for the default,
+    `grep -n 'add_argument("--ceiling"' eval/diagnosis_fanout_replay.py`, whose line
+    reads `default=DEFAULT_TOKEN_CEILING`.
+    test_a_line_citation_to_the_instrument_must_name_a_symbol_at_that_line is the node
+    that keeps it that way.
+
+    The mechanism those two numbers were cited for cannot rot, so it stays as prose: an
+    explicit `--ceiling` outranks the argparse default, so a raised default never
+    reaches a pass by itself — which is why the block sends the reader to the command
+    that answers the launcher's figure instead of quoting it. That is also the only
+    shape of test surviving the owed launcher edit: a node asserting `200000` is in the
+    text goes red the moment a human raises the launcher to 600000, and one asserting
+    `600000` is in it is false until they do.
 
     The 200,000/600,000 pair stays in the block ABOVE that sentence, where it is this
     constant's own history ("600,000, up from 200,000") and not a quote of another file,
@@ -1639,6 +1649,132 @@ def test_the_ceiling_block_names_the_launcher_but_never_quotes_its_figure():
         f"the module quotes a launcher ceiling figure ({offenders}) — that number is "
         "owned by ~/lloyd-data/eval/2258/launch-pass.sh, which no diff here can update, "
         "so it is a claim nothing will re-run (#3242)")
+
+
+_EVAL_LINE_CITATION = re.compile(
+    r"eval/diagnosis_fanout_replay\.py:(?P<qualified>\d+)"
+    r"|`:(?P<bare>\d+)`")
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+_HEXISH_SHA = re.compile(r"[0-9a-f]{7,40}")
+_SYMBOL_AT_HEAD = re.compile(r"(--?[A-Za-z][\w-]*|[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _symbol_named_before(prose: str) -> str | None:
+    """The nearest backticked anchor in `prose` that names something checkable, else None.
+
+    Three shapes occur in this file's ceiling prose: a plain name (`DEFAULT_TOKEN_CEILING`),
+    a flag (`--ceiling`), and a content-quote whose symbol follows the number it was
+    quoted with (`145:DEFAULT_TOKEN_CEILING = 200_000`), so that leading number is
+    stripped before reading the name. A sha (`46c8cc95`) and a path name nothing that
+    exists on a line of this module, so they are skipped rather than mistaken for an
+    anchor the prose was leaning on.
+    """
+    for tok in reversed(_BACKTICKED.findall(prose)):
+        tok = re.sub(r"^\d+:\s*", "", tok.strip())
+        if not tok or ":" in tok or "/" in tok or _HEXISH_SHA.fullmatch(tok):
+            continue
+        found = _SYMBOL_AT_HEAD.match(tok)
+        if found:
+            return found.group(1)
+    return None
+
+
+def _line_holds(line: str, symbol: str) -> bool:
+    """Whether `symbol` appears in `line` as itself, not as part of a longer name."""
+    return re.search(rf"(?<![\w.-]){re.escape(symbol)}(?![\w-])", line) is not None
+
+
+def _bad_line_citations(text: str, module_lines: list[str]) -> list[str]:
+    """Every citation in `text` to a line of the instrument that the line disowns.
+
+    Two ways to be wrong. The number sits on a line that does not hold the symbol the
+    prose named just before it — the drift this retires. Or the prose named no symbol,
+    leaving a bare number that no reader can check, which is the same complaint in a
+    form a test cannot resolve either.
+    """
+    offenders = []
+    for cite in _EVAL_LINE_CITATION.finditer(text):
+        n = int(cite.group("qualified") or cite.group("bare"))
+        named = _symbol_named_before(text[:cite.start()])
+        cited = module_lines[n - 1] if 1 <= n <= len(module_lines) else ""
+        if named is None:
+            offenders.append(f"{cite.group(0)!r} names no symbol, so nothing says what "
+                             "the number is supposed to sit on")
+        elif not _line_holds(cited, named):
+            offenders.append(f"{cite.group(0)!r} is cited as the line holding {named!r}, "
+                             f"but it reads: {cited.strip() or '(past the last line)'}")
+    return offenders
+
+
+def test_a_line_citation_to_the_instrument_must_name_a_symbol_at_that_line():
+    """#3659: a numbered citation to this module is checked against this module.
+
+    One constant has carried three line numbers in prose. The live launcher's header
+    cited the line holding `DEFAULT_TOKEN_CEILING` on the day it was written; this
+    file's own ceiling test restated that number for its own day; and
+    `grep -n '^DEFAULT_TOKEN_CEILING' eval/diagnosis_fanout_replay.py` prints a third
+    value now. No test went red for any of those moves, because a number in a comment
+    is only ever prose — so the ceiling block, the ceiling test's docstring and this
+    guard's own docstring are scanned for citations of the form
+    `eval/diagnosis_fanout_replay.py:NNN` or `:NNN`, and each must name a symbol that
+    actually sits on the line it points at. A number whose prose names no symbol is an
+    offender as well: nothing can check it, which is exactly what made the three
+    numbers above survivable. A citation pinned to a commit (`46c8cc95`) is a different
+    grammar and stays unscanned — the tree it points into cannot move.
+    """
+    module_lines = (REPO / "eval" / "diagnosis_fanout_replay.py").read_text(
+        encoding="utf-8").splitlines()
+
+    ceiling_doc = test_the_ceiling_block_names_the_launcher_but_never_quotes_its_figure
+    own_doc = test_a_line_citation_to_the_instrument_must_name_a_symbol_at_that_line
+    surfaces = {
+        "the module's ceiling comment block": _comment_block_above(
+            "DEFAULT_TOKEN_CEILING = "),
+        "the launcher-figure test's docstring": ceiling_doc.__doc__ or "",
+        "this guard's own docstring": own_doc.__doc__ or "",
+    }
+
+    # An extraction that returned nothing would satisfy every absence below, so pin
+    # first that each surface really is the text it claims to be.
+    assert "600,000" in surfaces["the module's ceiling comment block"], (
+        "the ceiling-block extraction is empty or the wrong block")
+    assert "#3242" in surfaces["the launcher-figure test's docstring"], (
+        "the docstring read back is not the ceiling test's, so its citations were never "
+        "scanned")
+    assert "#3659" in surfaces["this guard's own docstring"], (
+        "this guard cannot read its own docstring, so it is not self-policing")
+
+    found = {name: _bad_line_citations(text, module_lines)
+             for name, text in surfaces.items()}
+    assert not any(found.values()), (
+        f"a numbered citation no longer matches the line it cites: {found} — name the "
+        "symbol and the grep that prints its position instead (#3659)")
+
+    # The three checks above are all absences, so the checker itself is proved in both
+    # directions before any of them is trusted.
+    constant_line = next(k for k, ln in enumerate(module_lines, start=1)
+                         if ln.startswith("DEFAULT_TOKEN_CEILING = "))
+    wrong_line = next(k for k, ln in enumerate(module_lines, start=1)
+                      if not _line_holds(ln, "DEFAULT_TOKEN_CEILING"))
+
+    true_cite = (f"`DEFAULT_TOKEN_CEILING` sits at "
+                 f"`eval/diagnosis_fanout_replay.py:{constant_line}`")
+    assert not _bad_line_citations(true_cite, module_lines), (
+        "the checker rejected a citation that is true, so it can never pass and the "
+        "clean result above would prove nothing")
+
+    assert _bad_line_citations(
+        true_cite.replace(f":{constant_line}`", f":{wrong_line}`"), module_lines), (
+        "a qualified citation moved off its symbol was accepted, so the drift above "
+        "would recur silently")
+
+    assert _bad_line_citations(
+        f"`DEFAULT_TOKEN_CEILING` moved to `:{wrong_line}`", module_lines), (
+        "the bare form, which is the shape that rotted twice, is not being scanned")
+
+    assert _bad_line_citations(f"the figure moved to `:{constant_line}`", module_lines), (
+        "a bare line number naming no symbol was accepted, so prose can cite a moving "
+        "line with nothing to check it against")
 
 
 def test_the_generation_budget_cites_both_measured_arm_b_runs():
