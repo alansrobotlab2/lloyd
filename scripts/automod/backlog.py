@@ -6036,6 +6036,39 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     for d in _ledger_events(ledger, "backlog_implement"):
         if d.get("phase") == "finished" and str(d.get("round_id") or "") in live_promoted:
             observing.add(int(d["item_id"]))
+    # #3684: which of those promotions the guardian has ALREADY ruled on, for
+    # the WORDING only. `observing` deliberately keeps a settled promotion in
+    # it — `in_progress` is still the right destination until the sweep writes
+    # `item_landed`, because settling changes nothing about the promotion
+    # (`workers/sources/board_steward.py`'s `_unsettled_promotions` says the
+    # same, and its `round_state=closing` is the steward-side complement of
+    # this state). A round counts as settled only when every commit it promoted
+    # and no rollback took off `main` has a `settled` row, so a second
+    # promotion still being watched keeps the observation sentence; a promoted
+    # row with no commit at all counts as unsettled for the same reason.
+    promoted_commits: dict[str, list[str]] = {}
+    for d in _ledger_events(ledger, "promoted", require_item=False):
+        rid = str(d.get("round_id") or "")
+        commit = str(d.get("commit") or "")
+        if rid and commit and commit not in reverted:
+            promoted_commits.setdefault(rid, []).append(commit)
+    settled_commits = {str(d.get("commit") or "")
+                       for d in _ledger_events(ledger, "settled", require_item=False)}
+    settled_rounds = {rid for rid, cs in promoted_commits.items()
+                      if cs and all(c in settled_commits for c in cs)}
+    # Per item, not per round: an item with an older promotion that settled and
+    # a newer one still being watched is still a promotion under observation.
+    ruled_on: set[int] = set()
+    still_watched: set[int] = set()
+    for d in _ledger_events(ledger, "backlog_implement"):
+        if d.get("phase") != "finished":
+            continue
+        rid = str(d.get("round_id") or "")
+        if rid in settled_rounds:
+            ruled_on.add(int(d["item_id"]))
+        elif rid in live_promoted:
+            still_watched.add(int(d["item_id"]))
+    settled_landing = ruled_on - still_watched
     # A landing in flight is a round in flight (2026-09-17). `automod_land`
     # returns at once and the turn ends; the detached promoter writes
     # `promoted` minutes later. The reconcile that runs at turn end saw a
@@ -6159,7 +6192,28 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         elif iid in observing and not (landed and partial):
             # Promoted, not yet settled: the guardian is watching it and the
             # sweep has not run. Neither back in the pool nor done.
-            out[iid] = ("in_progress", "landed; the promotion is under observation")
+            #
+            # #3684: once the guardian HAS ruled — a `settled` row for the
+            # promoted commit, and still no `item_landed` — the sentence must
+            # not claim it hasn't. That window is every landing, not a corner:
+            # joining each `settled` commit to the later `item_landed` naming the
+            # same commit over the live ledger on 2026-11-01 gave 362 joins over
+            # 375 settled rows at median gap 744 s, max 1707 s, and zero rows at
+            # a 0 s gap (the counts grow with the ledger; the non-zero gap is the
+            # finding). `promotion_ruling` hands this string to a writer that
+            # tries to move the item, `owed.py` reads it for owed-check, and
+            # `reconcile_statuses` writes it into the item's activity log and its
+            # `status_moved` row, so for ~12 minutes each landing was reported as
+            # a promotion nobody had judged.
+            # "Under observation" stays for the case the steward prompt
+            # (`workers/sources/board_steward.py`) reserves it for: promoted,
+            # no `settled` row and no rollback yet. The destination is
+            # `in_progress` either way — `closing`, not this sentence, is where
+            # a settled-but-unswept landing is decided.
+            out[iid] = ("in_progress",
+                        "landed; the promotion is under observation"
+                        if iid not in settled_landing else
+                        "landed; the promotion settled, the item_landed row is not written yet")
         elif iid in outcomes:
             verdict, detail = outcomes[iid]
             if verdict == "spent":

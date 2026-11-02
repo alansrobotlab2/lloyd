@@ -4571,6 +4571,104 @@ def test_an_item_whose_landing_is_mid_drain_stays_in_progress(isolated, monkeypa
     assert status == "in_progress" and "observation" in why
 
 
+# ── #3684: a settled promotion stops being called "under observation" ──────
+
+SETTLE_SHA = "9e371e" + "0" * 34
+
+
+def _promoted_but_unswept(isolated, item_id, rid, commit):
+    """An open item whose round finished, promoted `commit`, and whose landing
+    sweep has not run — the state between the guardian's `settled` row and the
+    `item_landed` row."""
+    write_item(isolated, item_id, status="in_progress")
+    _confirm(item_id)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+                    "round_id": rid, "stop_reason": "stop",
+                    "outcome": {"landed": True, "acceptance": "met"}}, path=S.LEDGER_PATH)
+    S.append_event({"event": "promoted", "round_id": rid, "commit": commit}, path=S.LEDGER_PATH)
+
+
+def test_a_settled_promotion_is_not_called_under_observation(isolated):
+    """#3684 clauses 1 and 3. The guardian appended `settled` for the promoted
+    commit and the landing sweep has still not appended `item_landed`, so the
+    reason must say the promotion settled and that row is unwritten — no form of
+    "observ" — while the destination stays `in_progress`.
+
+    The window is every landing, not a corner. #3684's triage on 2026-11-01 joined
+    each `settled` commit to the later `item_landed` row naming the same commit
+    over the live ledger and measured 362 joins over 375 settled rows at median
+    gap 744 s, max 1707 s and zero rows with a 0 s gap; the gate's review re-ran
+    that join the same day at 365 joins over 381 settled rows with the same
+    median and max. The counts grow with the ledger, so they are dated — what
+    they establish is the non-zero gap. For all of it `promotion_ruling` was
+    handing a writer that tried to move the item, and owed-check was reading,
+    that the guardian had not ruled yet — the opposite of what the ledger says.
+    Settling changes nothing about the promotion, so only the sentence moves
+    here: `closing`, not the status, is where a settled-but-unswept landing is
+    decided."""
+    _promoted_but_unswept(isolated, 9001, "SM_SETTLE", SETTLE_SHA)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[9001]
+    assert status == "in_progress" and "observation" in why, \
+        "promoted with no `settled` row is the case the phrase is reserved for"
+    S.append_event({"event": "settled", "commit": SETTLE_SHA}, path=S.LEDGER_PATH)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[9001]
+    assert status == "in_progress", "the settlement changes the sentence, not the destination"
+    assert "observ" not in why, why
+    assert "settled" in why and "item_landed" in why, \
+        f"it must name the ruling and the row still unwritten: {why!r}"
+    # `reconcile_statuses` stores the reason through `why[:200]` into the
+    # `status_moved` row, so a longer sentence arrives cut.
+    assert len(why) <= 200, f"reason is {len(why)} chars, past the [:200] store: {why!r}"
+
+
+def test_the_settled_reason_survives_the_status_moved_row_whole(isolated):
+    """#3684 clause 4: `reconcile_statuses` stores the reason through `why[:200]`
+    into the `status_moved` row, so a sentence past 200 characters reaches a human
+    or a worker cut mid-thought. The settled reason is 69 characters, and this
+    reads the LEDGER ROW rather than the tuple: the row is what the activity log
+    and `board_decisions` show.
+
+    It also pins the definition the reason now defers to — the steward prompt
+    literal in `workers/sources/board_steward.py` still reserves "under
+    observation" for a promotion with no `settled` row and no rollback, which is
+    the case this round deliberately left alone (the prompt is not in this diff)."""
+    _promoted_but_unswept(isolated, 9003, "SM_LONG", SETTLE_SHA)
+    S.append_event({"event": "settled", "commit": SETTLE_SHA}, path=S.LEDGER_PATH)
+    moves = B.reconcile_statuses(S.LEDGER_PATH)
+    assert [m["to"] for m in moves] == ["in_progress"], moves
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "status_moved" and e.get("item_id") == 9003]
+    assert len(rows) == 1, rows
+    reason = rows[0]["reason"]
+    assert reason == ("landed; the promotion settled, the item_landed row is not written yet"), \
+        f"the [:200] store cut or changed the sentence: {reason!r}"
+    assert len(reason) == 69, f"69 characters is the budgeted size, got {len(reason)}"
+    prompt = (Path(__file__).resolve().parents[1] / "workers" / "sources"
+              / "board_steward.py").read_text(encoding="utf-8")
+    assert "A promotion still under \\\nobservation (promoted, no `settled` row and no rollback yet)" in prompt, \
+        "the prompt definition this reason defers to moved; clause 4 forbids editing it here"
+
+
+def test_a_second_unsettled_promotion_keeps_the_observation_sentence(isolated):
+    """#3684 clause 2, from the other side: the item's earlier promotion settled
+    but a newer one on top of it has no `settled` row and no rollback. That IS a
+    promotion under observation, so the old sentence stays and the settled one
+    does not overwrite it."""
+    _promoted_but_unswept(isolated, 9002, "SM_FIRST", "f" * 40)
+    S.append_event({"event": "settled", "commit": "f" * 40}, path=S.LEDGER_PATH)
+    assert "observ" not in B.desired_statuses(S.LEDGER_PATH)[9002][1]
+    S.append_event({"event": "backlog_implement", "item_id": 9002, "phase": "finished",
+                    "round_id": "SM_SECOND", "stop_reason": "stop",
+                    "outcome": {"landed": True, "acceptance": "met"}}, path=S.LEDGER_PATH)
+    S.append_event({"event": "promoted", "round_id": "SM_SECOND", "commit": "e" * 40},
+                   path=S.LEDGER_PATH)
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[9002]
+    assert status == "in_progress" and "observation" in why, \
+        f"a promotion the guardian has not ruled on keeps the phrase: {why!r}"
+
+
 # ── #1210: a landed-`met` item closes; `draft` stops meaning "finished" ───
 
 SHA40 = "cc652cc652cc" + "0" * 28
