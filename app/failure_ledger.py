@@ -838,3 +838,22 @@ def dispatch_findings(conn: sqlite3.Connection, day: str, *, queue,
              rec["finding_id"]))
     conn.commit()
     return int(queue_id)
+
+
+#: The watermark key `workers/sources/failure_ledger.py` stamped for its sweep
+#: until #3607 renamed it to `last_sweep`. The interval gate still READS it and
+#: nothing writes it any more: a deployment that has already swept holds that one
+#: real stamp under this name, and a read that knew only the new key would find
+#: "never swept" on the first poll after the rename and spend an off-schedule
+#: re-ingest of the 27 MB promotions ledger. Tests pin both halves — the honoured
+#: fallback and the untouched row — in `tests/test_failure_ledger_dispatch.py`.
+#:
+#: Two reasons put the literal here rather than beside the live key it retired, and
+#: a future editor should not have to rediscover either. The source module lists
+#: only the keys it stamps, which is what makes
+#: `git grep -n last_enqueued -- workers/` find only the frontend-probe canary's
+#: own, unrelated `WM_LAST_ENQUEUED` (#3607's scoped check); and every line number
+#: above this one in this module is cited by `architecture/workers-jobs.md` §6 and
+#: pinned by `tests/test_workers_doc_claims.py`, so a constant inserted anywhere
+#: but at the bottom re-points those citations.
+LEGACY_SWEEP_WATERMARK_KEY = "last_enqueued"

@@ -49,9 +49,9 @@ WORDS = ("alpha", "beta", "gamma", "delta")
 
 #: The clock the real scheduled pass runs on (#2893). `interval_seconds: 3600` with
 #: `min_interval_seconds: 86400` lets exactly one sweep through per day, and the
-#: watermark says when the last one was: `workers.db`
-#: `watermarks('failure-ledger','last_enqueued')` is
-#: `2026-10-17T02:38:29.088606+00:00`. #2893's triage read the three logged pass
+#: sweep watermark says when the last one was: `workers.db` read
+#: `2026-10-17T02:38:29.088606+00:00` for that key when this fixture was written,
+#: under the name `last_sweep` had then (#3607). #2893's triage read the three logged pass
 #: instants off the worker log as 01:51:42, 02:03:27 and 02:38:29 UTC, the last
 #: matching that watermark to the second. So the pass that owns day D is awake for
 #: about the first two hours of D and never again. `NOW` above is midday — the one
@@ -230,11 +230,206 @@ def test_the_scheduled_pass_reads_only_the_ledger_clock(tmp_path, monkeypatch):
     assert rows[0].payload["day"] == DAY, (
         "the cap is keyed on the day the pass derived, so a row dated anything but "
         f"{DAY} means the sweep read a clock this file did not set")
-    stamp = queue.wm_get(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_ENQUEUED)
+    stamp = queue.wm_get(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP)
     assert stamp == NOW.isoformat(), (
         f"watermark stamped {stamp!r} instead of the frozen {NOW.isoformat()!r}: the "
         "interval gate would be measuring with a second clock, and a node that pins "
         "the sweep's day could not pin the interval with it")
+
+
+# ---------------------------------------------------------------- watermark keys --
+#
+# #3607 renamed the sweep's watermark `last_enqueued` → `last_sweep`, because the key
+# is stamped after every sweep whether or not anything dispatched and reads as a record
+# of an enqueue. The name is free to change; the row a live deployment already holds is
+# the only record of its last real sweep, so the rename had to read the old name
+# (`workers/sources/failure_ledger.py`'s `WATERMARK_LEGACY_SWEEP`) without ever
+# writing it. These three nodes are those two halves and the edge case that decides
+# whether the fallback is a migration or a trap.
+
+
+def _spy_sweep(monkeypatch) -> list[dict]:
+    """Record whether the interval gate ran the sweep at all, then let it run.
+
+    `enqueue_if_due` returns None on every path by design, so the one call the due
+    branch makes is the only observable the gate offers. Delegating to the real
+    `sweep_and_dispatch` keeps the foil assertions below reading the real ledger and
+    the real queue rather than a stub's word for what would have happened.
+    """
+    real = failure_ledger.sweep_and_dispatch
+    seen: list[dict] = []
+
+    def spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(failure_ledger, "sweep_and_dispatch", spy)
+    return seen
+
+
+def test_a_stamp_under_last_sweep_keeps_the_source_not_due(tmp_path, monkeypatch):
+    """#3607 clause 1's first half, and the node that is red before the rename.
+
+    The gate must consult the NEW key, and the way to prove a read moved is to feed
+    the key it moved to: a queue holding only `last_sweep` at a fresh stamp is due by
+    the retired key and not due by the new one, so on the pre-rename source — whose
+    read names only `last_enqueued` — this pass sweeps and files a row. Red before,
+    green after, for exactly the reason the item names. The deleted-key foil is here
+    for the same reason as below: without it, a gate that sweeps nothing would pass.
+    """
+    conn = fl.connect(tmp_path / "failure_issues.sqlite")
+    assert seed_fresh_failures(conn)
+    conn.close()
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", tmp_path / "failure_issues.sqlite")
+    queue = make_queue(tmp_path)
+    cfg = {"enabled": True, "min_interval_seconds": 86400, **fixture_cfg(tmp_path)}
+    sweeps = _spy_sweep(monkeypatch)
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP,
+                 NOW.isoformat())
+
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+    assert sweeps == [], (
+        "the gate swept although `last_sweep` holds this very instant: the interval "
+        "read is still naming the retired key, which is the half of the rename that "
+        "makes the stamp mean what it is called")
+    assert queue.list_items(source=fl.SOURCE) == [], (
+        "a sweep that was refused must not have spent the day's run either")
+
+    queue.wm_delete(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP)
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+    assert len(sweeps) == 1, (
+        f"with `last_sweep` deleted the same pass ran {len(sweeps)} sweep(s), so the "
+        "stamp above — not the cap, not the fixture — is what held the sweep off")
+    assert len(queue.list_items(source=fl.SOURCE)) == 1, (
+        "and the sweep it owed arrives, as the day's one investigation row")
+
+
+def test_a_stamp_under_the_legacy_key_keeps_the_source_not_due(tmp_path, monkeypatch):
+    """#3607 clause 1: renaming the key must not cost a deployment its sweep.
+
+    The live `workers.db` holds this source's last sweep under the retired name. A
+    gate that knows only `last_sweep` finds no row, concludes "never swept", and
+    re-opens the 27 MB promotions ledger on the next hourly poll — off-schedule, on
+    the one source whose interval gate exists to stop exactly that. So the retired
+    row IS the gate: a queue seeded with nothing but that key at a fresh stamp must
+    not sweep. The second half is what makes the first mean anything — a gate that
+    never ran anything also "enqueued nothing" — so the same pass, that row deleted,
+    must run the sweep and file the day's one investigation.
+    """
+    conn = fl.connect(tmp_path / "failure_issues.sqlite")
+    assert seed_fresh_failures(conn)
+    conn.close()
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", tmp_path / "failure_issues.sqlite")
+    queue = make_queue(tmp_path)
+    cfg = {"enabled": True, "min_interval_seconds": 86400, **fixture_cfg(tmp_path)}
+    sweeps = _spy_sweep(monkeypatch)
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LEGACY_SWEEP,
+                 NOW.isoformat())
+
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+    assert sweeps == [], (
+        "the gate swept with a fresh stamp sitting under the retired key: the rename "
+        "reset every live deployment's interval, which is the off-schedule re-read of "
+        "the promotions ledger the fallback exists to prevent")
+    assert queue.list_items(source=fl.SOURCE) == [], (
+        "a sweep that was refused must not have spent the day's run either")
+
+    queue.wm_delete(failure_ledger.NAME, failure_ledger.WATERMARK_LEGACY_SWEEP)
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+    assert len(sweeps) == 1, (
+        f"with the retired row deleted the same pass ran {len(sweeps)} sweep(s): the "
+        "seeded stamp, not the fixture and not the daily cap, is what held the first "
+        "one off")
+    assert len(queue.list_items(source=fl.SOURCE)) == 1, (
+        "and the sweep it owed still arrives, as the day's one investigation row")
+
+
+def test_a_sweep_stamps_last_sweep_and_never_the_retired_key(tmp_path, monkeypatch):
+    """#3607 clause 2: the stamp moves to the new key, and only to the new key.
+
+    A quiet store on purpose, so nothing dispatches and the only thing this node can
+    be measuring is the stamp. The retired row is seeded with a stamp old enough to
+    be DUE, which is the sole way to watch a pass read it, sweep, and leave it alone;
+    every `wm_set` the pass makes is recorded, so "writes nothing to the retired key"
+    is an observation about the pass rather than an absence the test cannot see.
+    """
+    conn = fl.connect(tmp_path / "failure_issues.sqlite")
+    conn.close()  # sweep_and_dispatch opens its own handle on the same store
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", tmp_path / "failure_issues.sqlite")
+    queue = make_queue(tmp_path)
+    cfg = {"enabled": True, "min_interval_seconds": 86400, **fixture_cfg(tmp_path)}
+    retired = (NOW - timedelta(days=2)).isoformat()
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LEGACY_SWEEP, retired)
+    written: list[tuple[str, str]] = []
+    real_set = queue.wm_set
+
+    def spy_set(source, key, value):
+        written.append((source, key))
+        return real_set(source, key, value)
+
+    monkeypatch.setattr(queue, "wm_set", spy_set)
+
+    asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+    assert queue.list_items(source=fl.SOURCE) == [], (
+        "these fixtures file no finding, so this node is reading a stamp; a queue row "
+        "here means it is reading a dispatch instead and proves nothing about the key")
+    assert written == [(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP)], (
+        f"the pass wrote {written}: from the rename onward the retired key has to stop "
+        "being written, or two stamps advance and only one is ever read back")
+    assert queue.wm_get(failure_ledger.NAME,
+                        failure_ledger.WATERMARK_LAST_SWEEP) == NOW.isoformat(), (
+        "the sweep did not stamp the new key with the ledger's own clock "
+        f"({NOW.isoformat()!r}), which is the clock the day's cap is keyed on")
+    assert queue.wm_get(failure_ledger.NAME,
+                        failure_ledger.WATERMARK_LEGACY_SWEEP) == retired, (
+        "the retired row's value moved, so something wrote a key this source no "
+        "longer owns")
+
+
+def test_a_stale_or_absent_sweep_stamp_still_earns_the_days_run(tmp_path, monkeypatch):
+    """#3607 clause 3: the fallback must not make the source permanently not-due.
+
+    Honouring the retired row is half of a rename. The half that turns it into a mute
+    scheduler is the stale case: a stamp older than `min_interval_seconds`, and a
+    store holding neither key, must both still sweep and file the day's one row. Each
+    case gets its own pair of stores because the daily cap is exactly the thing that
+    would let the second case pass for the wrong reason.
+    """
+    for label, seed_key in (("stale-stamp", failure_ledger.WATERMARK_LAST_SWEEP),
+                            ("neither-key", None)):
+        root = tmp_path / label
+        root.mkdir()
+        db = root / "failure_issues.sqlite"
+        conn = fl.connect(db)
+        assert seed_fresh_failures(conn), f"{label}: the fixture filed no finding"
+        conn.close()
+        monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", db)
+        queue = WorkQueue(root / "workers.db")
+        if seed_key:
+            queue.wm_set(failure_ledger.NAME, seed_key,
+                         (NOW - timedelta(days=2)).isoformat())
+        cfg = {"enabled": True, "min_interval_seconds": 86400,
+               **fixture_cfg(tmp_path)}
+
+        asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
+
+        rows = queue.list_items(source=fl.SOURCE)
+        assert len(rows) == 1, (
+            f"{label}: a watermark that is old, or missing under both the new key and "
+            "the retired one, must not hold the sweep off — a source that can only "
+            "ever be not-due is a source that never sweeps")
+        assert queue.wm_get(failure_ledger.NAME,
+                            failure_ledger.WATERMARK_LAST_SWEEP) == NOW.isoformat(), (
+            f"{label}: the sweep ran and stamped a clock other than the ledger's, or "
+            "stamped the retired key")
+        assert queue.wm_get(failure_ledger.NAME,
+                            failure_ledger.WATERMARK_LEGACY_SWEEP) is None, (
+            f"{label}: the pass wrote the retired key, which is what clause 2 forbids")
 
 
 def test_a_quiet_day_enqueues_nothing_and_says_so(tmp_path):
@@ -431,7 +626,7 @@ def test_a_finding_that_arrives_after_the_days_run_was_sent_stays_queued(
         "growth detector picks up later the same day reappears undispatched, and the "
         "cap is what stops a second run, not the finding table")
 
-    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_ENQUEUED, "")
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP, "")
     assert not asyncio.run(failure_ledger.enqueue_if_due(
         queue, {"enabled": True, **fixture_cfg(tmp_path)})), \
         "watermark cleared, so this is the CAP refusing, not the interval"
@@ -690,7 +885,7 @@ def test_two_morning_passes_on_one_day_still_spend_one_run_on_the_burst(
     # The interval watermark is the POOL's (`workers.db`), not the ledger's, so it is
     # cleared on the queue — which is also the proof that a second sweep, not a
     # skipped one, is what the assertions below are reading.
-    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_ENQUEUED, "")
+    queue.wm_set(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_SWEEP, "")
     asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
     store = fl.connect(db)
     assert fl.dispatch_findings(store, DAY, queue=queue,

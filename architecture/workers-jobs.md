@@ -1477,7 +1477,8 @@ touching it are both about not lying to the reader.
   09-30's 11 events against a median of 13.5 and 10-02's 8 against 11.0 both stay
   quiet. `tests/test_failure_ledger.py` pins both arms; `tests/
   test_failure_ledger_dispatch.py` carries the silent one through `enqueue_if_due`.
-- **`last_enqueued` is the last sweep, not the last enqueued row.** The source stamps
+- **`last_sweep` is the last sweep, not the last enqueued row.** #3607 renamed it on
+  2026-11-02 out of a name that read as an enqueue; the source stamps
   it unconditionally after `sweep_and_dispatch` returns, whether or not a dispatch
   happened, so it is the interval gate's clock and answers exactly one question — has
   this source swept — and nothing about the day's outcome: a day with findings and a
@@ -1488,12 +1489,19 @@ touching it are both about not lying to the reader.
   both advance once per pool ask, per source. A fresh `last_enqueue_ok` therefore says
   the pool is still asking, not that this source swept: `enqueue_if_due` returns early
   inside its own `min_interval_seconds` of the last sweep
-  (`workers/sources/failure_ledger.py:243`), and that early clean return stamps the
+  (`workers/sources/failure_ledger.py:250`), and that early clean return stamps the
   pair like any other. The only stamp saying this source swept recently is its own
-  `last_enqueued`, and it says no more than that: 0 `failure_dispatches` rows sit
-  against a stamp that moves daily (measured 2026-10-30T00:28Z). Stamping a separate
-  enqueue key on a real dispatch, or renaming this one `last_sweep`, is #3532's owed
-  scope call.
+  `last_sweep`, and it says no more than that: 0 `failure_dispatches` rows sit
+  against a stamp that moves daily (measured 2026-10-30T00:28Z). The gate reads that
+  stamp under its new name and writes it under that name alone. A deployment whose last
+  sweep predates the rename holds its one real row under the retired key, and the read
+  honours that row while nothing overwrites it, so renaming the stamp cost no live
+  store an off-schedule re-read of the 27 MB promotions ledger the interval gate exists
+  to prevent. Retiring the name moved the literal into the library
+  (`app/failure_ledger.py`'s `LEGACY_SWEEP_WATERMARK_KEY`), which is what leaves the
+  source module naming one watermark key and one only. Still owed to #3532 is the other
+  half of what it asked for: stamping a separate enqueue key on a real dispatch, which
+  this rename deliberately did not do.
 
 The prompt names at most `DISPATCH_MAX_RECORDS` finding ids plus a window of
 `DISPATCH_WINDOW_DAYS` around `first_seen`, and `execute` pastes the ledger's own
@@ -1552,7 +1560,7 @@ until #3532: the store has produced no qualifying burst since the detector that
 looks for one landed. The schedule is not the blocker either, and its stamps
 are not the same fact: the pool's ask pair (`last_enqueue_check`,
 `last_enqueue_ok` — each stamped once per pool ask, not once per sweep) read
-2026-10-29T23:34Z, and the source's own sweep stamp `last_enqueued` read
+2026-10-29T23:34Z, and the source's own sweep stamp read
 2026-10-29T05:22Z, all three from one read, where the ask pair sits 53 min and
 the sweep stamp 19 h before the `runs` count above. The pool has asked within the
 hour and the sweep last ran 19 h ago; neither is a completed diagnosis — the ask

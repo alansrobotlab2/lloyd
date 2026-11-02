@@ -2192,9 +2192,12 @@ def test_section6_names_the_day_growth_reviews_and_what_the_watermark_means():
     The missing one that cost the bursts: §6 said the sweep runs once a day, which is
     true, and never said WHICH day it counts — and that is the half that decides
     whether a detector can fire at all. The missing one about the watermark:
-    `last_enqueued` reads like "the last row enqueued" and is in fact stamped after
+    The watermark bullet's whole point is that a name can read as the opposite of what
+    the key records: what is now `last_sweep` was stamped under a name that reads like
+    "the last row enqueued" while it is in fact written after
     every sweep, so a reader who trusts the name concludes a source that never
-    dispatched never ran.
+    dispatched never ran. #3607 renamed the key for exactly that reading; the bullet and
+    the nodes below still have to carry the fact, under the new name.
 
     Nothing here greps for a phrase and stops. The lag the doc states is compared to
     `GROWTH_REVIEW_LAG_DAYS`, the helper it names is called, and the source file is
@@ -2225,13 +2228,14 @@ def test_section6_names_the_day_growth_reviews_and_what_the_watermark_means():
     assert "WHERE detected_on = ?" in sub, (
         "§6 lost the reason the two days cannot move apart")
 
-    assert "last_enqueued" in sub and "last sweep" in sub, (
-        "§6 stopped saying what `last_enqueued` actually records")
+    assert "last_sweep" in sub and "last sweep" in sub, (
+        "§6 stopped saying what `last_sweep` actually records — #3607 renamed the key, "
+        "so a node still reading the retired name is grading a key no longer stamped")
     assert "last_enqueue_ok" in sub, (
         "§6 lost the pointer to the stamp that DOES say a pass completed")
     assert one_line.rindex("sweep_and_dispatch, queue=queue") < one_line.index(
         "queue.wm_set"), (
-        "the source no longer stamps `last_enqueued` after the sweep returns, so the "
+        "the source no longer stamps `last_sweep` after the sweep returns, so the "
         "sentence saying it means 'last swept' is the one that needs rewriting")
 
     # §6's two `app/failure_ledger.py:` line citations moved with this edit
@@ -2639,13 +2643,13 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     """Clause 5: the schedule evidence names what each stamp records, and no citation
     of `last_enqueue_ok` is allowed to read as a completed pass.
 
-    Three keys, two facts. `workers/sources/failure_ledger.py:260` stamps the
-    source's `last_enqueued` unconditionally after `sweep_and_dispatch` returns, so it
+    Three keys, two facts. `workers/sources/failure_ledger.py:274` stamps the
+    source's `last_sweep` unconditionally after `sweep_and_dispatch` returns, so it
     is the sweep's clock and says nothing about dispatch — 0 `failure_dispatches` rows
     sat against it at 2026-10-30T00:28Z. The pool's `last_enqueue_check`
     (`workers/pool.py:1636`) is stamped on every ask and `last_enqueue_ok`
     (`workers/pool.py:1647`) on a clean return only; `enqueue_if_due` returns early
-    inside `min_interval_seconds` (`workers/sources/failure_ledger.py:243`) and that
+    inside `min_interval_seconds` (`workers/sources/failure_ledger.py:250`) and that
     early return is clean, so the pair advances once per hourly ask whether or not the
     source swept. The retired paragraph quoted `last_enqueue_ok` as 'a pass completes
     daily', which is why #3532 had to be told the store was merely quiet: a stamp that
@@ -2694,12 +2698,12 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
         "`_affirmed_pass` reads a disowned completion phrase as a claim, which would "
         "refuse the paragraph that retired the wording")
 
-    enq_says = [s for s in sentences if "last_enqueued" in s]
+    enq_says = [s for s in sentences if "last_sweep" in s]
     assert enq_says, (
-        "§6 stopped naming `last_enqueued` as the sweep's stamp, which is the only key "
+        "§6 stopped naming `last_sweep` as the sweep's stamp, which is the only key "
         "that answers whether this source swept")
     assert any("sweep" in s for s in enq_says), (
-        "the `last_enqueued` sentences never call it a sweep stamp, so a reader has no "
+        "the `last_sweep` sentences never call it a sweep stamp, so a reader has no "
         "way to tell it from the pool's ask pair")
 
     # The retired sentence, spliced back into the section: the reading this clause
@@ -2737,14 +2741,28 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
         f"workers/pool.py:1647 no longer stamps the clean-return key ({pool[1646]!r})")
     src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
         encoding="utf-8").splitlines()
-    assert "WATERMARK_LAST_ENQUEUED" in src[259], (
-        f"workers/sources/failure_ledger.py:260 is no longer the unconditional sweep "
-        f"stamp ({src[259]!r}) — the bullet says it fires whether or not a dispatch "
+    assert "WATERMARK_LAST_SWEEP" in src[273], (
+        f"workers/sources/failure_ledger.py:274 is no longer the unconditional sweep "
+        f"stamp ({src[273]!r}) — the bullet says it fires whether or not a dispatch "
         "happened, and if that moved the paragraph is describing a different program")
-    assert "WATERMARK_LAST_ENQUEUED" in src[242], (
-        f"workers/sources/failure_ledger.py:243 no longer reads the watermark for the "
-        f"interval gate ({src[242]!r}), which is the early return that makes the "
+    assert "WATERMARK_LAST_SWEEP" in src[249], (
+        f"workers/sources/failure_ledger.py:250 no longer reads the watermark for the "
+        f"interval gate ({src[249]!r}), which is the early return that makes the "
         "pool's clean-return stamp advance without a sweep")
+    # #3607 left the retired key nowhere in the module that stamps the sweep: the
+    # fallback literal sits in the library, so `git grep -n last_enqueued -- workers/`
+    # finds only the frontend-probe canary's unrelated key. Both halves are pinned
+    # here because the second is the one a future rename of THAT key would break.
+    assert "last_enqueued" not in "\n".join(src), (
+        "workers/sources/failure_ledger.py names the retired sweep key again, so the "
+        "sweep has two possible stamps again and the scoped grep #3607 asked for is "
+        "no longer a check anyone can run")
+    canary = (ROOT / "workers" / "sources" / "frontend_probe_canary.py").read_text(
+        encoding="utf-8")
+    assert 'WM_LAST_ENQUEUED = "last_enqueued"' in canary, (
+        "the rename reached the frontend-probe canary's own watermark: it is a "
+        "different source's key, holding the day that source last enqueued, and #3607 "
+        "left it alone on purpose")
 
 
 def test_section6_says_the_growth_detector_is_armed_not_unreachable():

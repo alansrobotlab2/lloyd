@@ -97,7 +97,14 @@ DEFAULT_TIMEOUT_SECONDS = 900
 #: through as its own name rather than being labelled wrong.
 KIND_LABELS = {"new_onset": "New onset", "growth": "Growth"}
 
-WATERMARK_LAST_ENQUEUED = "last_enqueued"
+WATERMARK_LAST_SWEEP = "last_sweep"
+#: The name the stamp above had until #3607 renamed it for what it records. The
+#: interval gate still reads it and nothing writes it: a deployment holding a real
+#: sweep under the old name would otherwise read as never swept, and the first poll
+#: after the rename would re-read the 27 MB promotions ledger off-schedule. The
+#: literal lives in the library, whose constant's comment names the two reasons it
+#: sits there and not beside the live key it retired.
+WATERMARK_LEGACY_SWEEP = fl.LEGACY_SWEEP_WATERMARK_KEY
 #: One day is one pass. The pool may poll sooner; the watermark is what makes the
 #: sweep idempotent *in time* rather than only in content (ingestion is
 #: insert-only, but a re-read of a 27 MB ledger is still a re-read of 27 MB).
@@ -240,7 +247,14 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # can be "due" on the watermark's calendar while the cap has already spent a
     # different day, and a test that pins the sweep's day (`tests/
     # test_failure_ledger_dispatch.py`) cannot pin the interval with it.
-    last = await asyncio.to_thread(queue.wm_get, NAME, WATERMARK_LAST_ENQUEUED)
+    last = await asyncio.to_thread(queue.wm_get, NAME, WATERMARK_LAST_SWEEP)
+    if last is None:
+        # Absent under the new key is not "never swept": until the first sweep after
+        # #3607 the last one is recorded under the retired name, and a row there is
+        # as good a reason to wait as a row here. `""` — what the tests clear it to,
+        # and what a cleared watermark means to every other source — is not absent,
+        # so clearing `last_sweep` still forces the sweep regardless of the legacy row.
+        last = await asyncio.to_thread(queue.wm_get, NAME, WATERMARK_LEGACY_SWEEP)
     interval = float(src_cfg.get("min_interval_seconds", DEFAULT_INTERVAL_SECONDS))
     if last:
         try:
@@ -257,7 +271,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         live=src_cfg.get("promotions_ledger") or None,
         archives=[Path(p) for p in src_cfg["promotions_archives"]]
         if src_cfg.get("promotions_archives") else None)
-    await asyncio.to_thread(queue.wm_set, NAME, WATERMARK_LAST_ENQUEUED,
+    await asyncio.to_thread(queue.wm_set, NAME, WATERMARK_LAST_SWEEP,
                             fl.now_utc().isoformat())
     logger.info("failure-ledger %s: %d finding(s), %d event(s) new, "
                 "investigation queue_id=%s", report["day"], len(report["findings"]),
