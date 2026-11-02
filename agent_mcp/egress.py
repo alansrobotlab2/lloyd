@@ -115,6 +115,13 @@ DECISION_ALLOW = "allow"
 DECISION_DENY = "deny"
 DECISION_GRANT = "grant-required"
 
+#: The `reason` tag `guard` writes for `http_request`'s sanctioned local-service lane
+#: (`loopback_ok`). It is a constant because `_flip_counts` has to recognise that lane
+#: afterwards — it is the only witness that the row was allowed by the allowance rather
+#: than by the list — and a tag spelled twice is a lane that stops being recognisable
+#: the day one of the two spellings is edited.
+_LOOPBACK_ALLOWANCE = "loopback allowance"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS egress_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -825,7 +832,7 @@ def guard(tool: str, url: str = "", *, host: str = "",
     if host and loopback_ok and _is_loopback(host):
         # `http_request`'s sanctioned local-service lane: neither the floor nor
         # the destination axis applies (see the module docstring).
-        decision, reason = DECISION_ALLOW, "loopback allowance"
+        decision, reason = DECISION_ALLOW, _LOOPBACK_ALLOWANCE
     elif enforced and not host:
         decision, allowed = DECISION_DENY, False
         reason = f'Unparsable destination: "{url}"'
@@ -937,12 +944,103 @@ def _maybe_prune(conn: sqlite3.Connection, *, now: float) -> None:
 
 # ── the report /api/dashboard reads ─────────────────────────────────────────
 
+def _flip_counts(conn: sqlite3.Connection, *, since: str, at: datetime,
+                 limit: int) -> dict:
+    """What arming `enforce` would refuse, computed from coverage, not from the table.
+
+    #3549. While `enforce` is off an unattended call to a host outside the list never
+    reaches `_decide` — the only branch that calls it is the `enforced or attended_here`
+    one in `guard` — so its row is written `decision='allow'` with an empty `reason` and
+    is byte-identical to a genuinely allow-listed row. A reviewer deciding that flip and
+    reading `by_decision` therefore sees `deny: 0` on a table whose unattended rows
+    would mostly have been refused. So these counts do not read the decision column at
+    all: a row is would-deny iff no allow entry covers its host for that row's own scope
+    through `_covers` — the same predicate `guard`/`_decide` apply, expiry included,
+    evaluated at report time because the question is what a flip would do now.
+
+    Two axes, deliberately overlapping rather than partitioned, because they answer
+    different questions:
+
+    * `would_deny` — the list-miss axis. The remedy is widening the list or minting a
+      grant, per source.
+    * `floor_refused` — the hosts the floor refuses whatever the list says (#628 clause
+      4: an entry naming `127.0.0.1` still denies). Its remedy cannot be the allow list,
+      so a reviewer who sees only the first number over-estimates what adding entries
+      would buy. Seeding an entry for such a host moves `would_deny` and leaves
+      `floor_refused` where it was — which is the point of publishing both.
+
+    Rows `guard` classified attended are excluded from both: they carry
+    `decision='grant-required'`, the one state only an attended call can produce
+    (`_decide` never refuses one), and a flip does not deny a human either. Rows on
+    `http_request`'s sanctioned local-service lane — the only rows carrying the
+    `loopback allowance` reason tag — are excluded too, because `guard`'s first branch
+    allows them ahead of the floor and the list alike, so counting them would be exactly
+    the false positive this function exists to avoid.
+
+    What remains an UPPER bound, and is not corrected here: a live destination grant
+    (`grant_covers`) also opens a host for its own (scope, tool, host) under enforcement,
+    and the table does not record which rows a grant opened. #3549's findings carry that
+    as the known over-count.
+    """
+    entries = allow_entries()
+    covered: dict[tuple[str, str], bool] = {}
+    floored: dict[str, bool] = {}
+    totals: dict[str, int] = {}
+    would: dict[str, int] = {}
+    floors: dict[str, int] = {}
+    for r in conn.execute(
+            f"SELECT host, scope, decision, worker_source, reason, COUNT(*) AS n"  # noqa: S608 — TABLE is a module constant
+            f" FROM {TABLE} WHERE at>=?"
+            " GROUP BY host, scope, decision, worker_source, reason", (since,)):
+        host = str(r["host"])
+        source = str(r["worker_source"] or "")
+        n = int(r["n"])
+        totals[source] = totals.get(source, 0) + n
+        if r["decision"] == DECISION_GRANT or r["reason"] == _LOOPBACK_ALLOWANCE:
+            continue
+        # `reason` is in the GROUP BY rather than summed away, because the two exclusions
+        # are per ROW and a destination can carry both kinds at once: on this box one host
+        # had a floor-refused row and a sanctioned-lane row under the same scope, decision
+        # and source, and aggregating the reason over that group hid the sanctioned row's
+        # witness and counted the pair as two floor refusals. Grouping by it keeps the
+        # result set bounded by the retention window's distinct (destination, scope,
+        # source, reason) shapes, which is what the per-destination query above already pays.
+        if host not in floored:
+            floored[host] = bool(floor_reason(host))
+        pair = (host, str(r["scope"]))
+        if pair not in covered:
+            covered[pair] = any(
+                _covers(e, host=host, scope=pair[1], at=at) for e in entries)
+        if floored[host]:
+            floors[source] = floors.get(source, 0) + n
+        if not covered[pair]:
+            would[source] = would.get(source, 0) + n
+    per_source = [
+        {"worker_source": source,
+         "label": source or "(unattributed)",   # both attended turns and unscoped fleet turns
+         "total": totals.get(source, 0),
+         "would_deny": would.get(source, 0),
+         "floor_refused": floors.get(source, 0)}
+        for source in sorted(totals,
+                             key=lambda s: (-would.get(s, 0), -totals[s], s))
+    ]
+    return {"would_deny": sum(would.values()),
+            "floor_refused": sum(floors.values()),
+            "per_source": per_source[:max(0, int(limit))]}
+
+
 def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
-    """The destination inventory: per-destination and per-scope counts.
+    """The destination inventory: per-destination, per-scope and per-source counts.
 
     Reads without creating — a box with workers switched off must not have a
     database materialised to report zero, and a zero-denominator report must
     say so rather than present an empty table as "nothing left".
+
+    `would_deny` and `floor_refused` are the flip's blast radius and are computed from
+    destination coverage, not the decision column — see `_flip_counts`. They are present
+    as zeros in the no-database report for the same reason `total` is: a key that exists
+    only when there are rows reads as "nothing would be refused" rather than "nothing was
+    recorded", which is the one misreading that could arm enforcement on a false clean.
     """
     since = _iso(_now() - timedelta(days=float(days)))
     path = db_path()
@@ -951,6 +1049,7 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
         "distinct_hosts": 0, "by_decision": {DECISION_ALLOW: 0, DECISION_DENY: 0,
                                              DECISION_GRANT: 0},
         "per_destination": [], "per_scope": [],
+        "would_deny": 0, "floor_refused": 0, "per_source": [],
         # `database_present` is the zero denominator named beside the zero
         # numerator: `total: 0` with a database means no call was made in the
         # window, and without one means the writer never ran. Reporting the
@@ -1006,6 +1105,7 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
             "window_days": float(days), "since": since, "total": total,
             "distinct_hosts": hosts, "by_decision": by_decision,
             "per_destination": per_destination, "per_scope": per_scope,
+            **_flip_counts(conn, since=since, at=_now(), limit=limit),
             "database": str(path), "database_present": True,
             "policy": {"telemetry": telemetry_on(), "enforce": enforce_on(),
                        "allow_entries": len(allow_entries()),

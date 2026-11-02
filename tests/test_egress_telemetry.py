@@ -278,6 +278,14 @@ def test_the_report_names_its_zero_denominator_when_the_database_is_absent(tmp_p
     assert report["total"] == 0
     assert report["database_present"] is False, report
     assert report["database"].endswith("never-written.db")
+    # #3549 clause 5: the flip's counts are present as zeros, not missing. A key that
+    # appears only when there are rows makes an unwritten table read as "nothing would be
+    # refused", which is the one misreading that could arm enforcement on a false clean.
+    # The populated return builds its own literal, so this is the only node that fails if
+    # the two drift apart.
+    assert report["would_deny"] == 0, report
+    assert report["floor_refused"] == 0, report
+    assert report["per_source"] == [], report
 
 
 def test_telemetry_off_writes_nothing(db, monkeypatch, socket):
@@ -304,6 +312,41 @@ def test_the_report_window_excludes_rows_older_than_it(db):
 
     assert report["total"] == 0
     assert report["window_days"] == 7
+
+
+def test_would_deny_and_floor_refused_honour_the_report_window(db, monkeypatch):
+    """#3549 clause 4: the coverage counts age out exactly as `total` does.
+
+    A `would_deny` that scanned the whole table instead of the window would keep reporting
+    the same box as needing allow-list work long after the traffic that implied it had
+    aged out, which is the difference between a 7-day figure a reviewer can act on and a
+    permanent alarm. `floor_refused` is asserted beside it because the two are built by
+    different code paths — one consults the allow entries, one does not — and both read the
+    same `since` bound.
+
+    Two rows are seeded rather than one so the per-source axis has a source to drop: an
+    uncovered public destination (list miss) and a `127.0.0.1` call without the sanctioned
+    flag (the floor's), both under a job scope so `worker_source` is populated.
+    """
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:domain-research:99")
+    egress.guard("http_fetch", "https://recent.example.org/x")   # uncovered, public
+    egress.guard("http_request", "http://127.0.0.1:8080/x")      # the floor's
+
+    before = egress.network_report(days=7)
+    assert (before["total"], before["would_deny"], before["floor_refused"]) == (
+        2, 2, 1), before
+
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE egress_events SET at='2020-01-01T00:00:00+00:00'")
+    conn.commit()
+    conn.close()
+
+    aged = egress.network_report(days=7)
+    assert aged["total"] == 0, aged
+    assert aged["would_deny"] == 0 and aged["floor_refused"] == 0, aged
+    assert aged["per_source"] == [], (
+        "the per-source axis is built over the same window, so an aged-out row must not "
+        "leave a job claiming refusals that no longer count")
 
 
 def test_permanent_allow_entries_are_counted_rather_than_hidden(db):

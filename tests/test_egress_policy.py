@@ -280,6 +280,130 @@ def test_a_live_destination_grant_opens_the_host_for_the_unattended_scope(
     assert ok_socket.calls == [f"GET {LISTED_URL}"]
 
 
+# ── the report's blast radius for the enforce flip (#3549) ──────────────────
+#
+# `network_report` used to publish only counts of the `decision` column, which with
+# `enforce` off can only ever say `deny: 0`: an unattended call to a host outside the
+# list never reaches `_decide`, so its row is written `allow` with an empty `reason` and
+# is indistinguishable from a genuinely allow-listed one — the shipped
+# `test_the_report_counts_per_destination_and_per_scope` asserts exactly that shape. A
+# reviewer deciding whether to arm `harness.egress_policy.enforce` therefore read "nothing
+# would be refused" off a table recording the opposite. These nodes pin the replacement
+# counts to COVERAGE — `_covers` over the row's own scope — and each seeds its rows with
+# `enforce` off, so the counted and the uncounted row carry the SAME decision value.
+# Without that, an assertion below would pass on a report that just counted `deny`.
+
+def table_rows(db) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        return list(conn.execute(
+            "SELECT host, decision, scope, worker_source, reason FROM egress_events"
+            " ORDER BY id"))
+    finally:
+        conn.close()
+
+
+def test_would_deny_is_counted_from_coverage_not_from_the_decision_column(
+        db, monkeypatch):
+    """One off-list row and one allow-listed row, both written `allow`; the report tells
+    them apart. Clause 1: the number has to be a coverage judgement.
+    """
+    policy_on(monkeypatch, enforce=False,
+              allow=[{"host": LISTED_HOST, "reason": "docs, reviewed"}])
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:domain-research:99")
+
+    egress.guard("http_fetch", UNKNOWN_URL)      # off-list, unattended, unenforced
+    egress.guard("http_fetch", LISTED_URL)       # covered by the entry above
+    report = egress.network_report()
+
+    assert [r["decision"] for r in table_rows(db)] == [
+        egress.DECISION_ALLOW, egress.DECISION_ALLOW], (
+        "both rows say `allow`: a report deriving `would_deny` from the decision column "
+        "would return 0 or 2 here, and cannot return the 1 asked for")
+    assert report["by_decision"] == {egress.DECISION_ALLOW: 2,
+                                     egress.DECISION_DENY: 0,
+                                     egress.DECISION_GRANT: 0}
+    assert report["would_deny"] == 1, report
+    (missing,) = [s for s in report["per_source"] if s["would_deny"]]
+    assert missing["worker_source"] == "domain-research", report["per_source"]
+    assert missing["total"] == 2, (
+        "the axis is keyed by worker_source and carries its own denominator, so a "
+        "reviewer reads 1 of 2 rather than a bare 1")
+
+
+def test_an_attended_row_is_excluded_from_would_deny_while_the_unattended_one_is_counted(
+        db, monkeypatch):
+    """Same host, same off-list destination, two callers.
+
+    `grant-required` is the one decision only an attended call can produce — `_decide`
+    returns it before consulting the grant store and never refuses on that path — so it is
+    the table's witness that a human was on the end. Arming enforcement refuses a human
+    neither more nor less than today does, so those rows are not blast radius; the
+    unattended row for the very same host is.
+    """
+    policy_on(monkeypatch, enforce=False, allow=[])
+    monkeypatch.setattr(egress, "_session_id", lambda: "chat-session-3549")
+    monkeypatch.setattr(egress, "_session_is_user", lambda sid: True)
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "")
+    egress.guard("http_fetch", UNKNOWN_URL)                     # attended
+    monkeypatch.setattr(egress, "_session_is_user", lambda sid: False)
+    monkeypatch.setattr(egress, "_effect_scope",
+                        lambda: "item:domain-research:99")
+    egress.guard("http_fetch", UNKNOWN_URL)                     # unattended
+    report = egress.network_report()
+
+    assert [r["decision"] for r in table_rows(db)] == [
+        egress.DECISION_GRANT, egress.DECISION_ALLOW]
+    assert report["would_deny"] == 1, (
+        "the attended row is the same host and equally uncovered; counting it would "
+        "inflate the very number the flip is being decided on")
+    by_source = {s["worker_source"]: s for s in report["per_source"]}
+    assert by_source[""]["would_deny"] == 0 and by_source[""]["total"] == 1
+    assert by_source["domain-research"]["would_deny"] == 1
+
+
+def test_floor_refused_rows_are_counted_apart_from_list_misses(db, monkeypatch):
+    """`floor_refused` is a different question, so it cannot be arithmetic on
+    `would_deny`.
+
+    A private address is refused by the floor whatever the list says (#628 clause 4 names
+    `127.0.0.1` explicitly), so an entry naming one takes that host out of the list-miss
+    count and leaves the floor count exactly where it was. Published as one number, the
+    second fact is lost and a reviewer would believe an entry for `127.0.0.1` bought
+    something.
+
+    `http_request`'s sanctioned local-service lane is in NEITHER count, and that is this
+    node's third assertion: `guard` allows it ahead of the floor and the list alike, so
+    counting it would add exactly the false positives this report exists to remove. It is
+    recognised by the reason tag `guard` writes, the only witness the row carries.
+    """
+    policy_on(monkeypatch, enforce=False, allow=[])
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:domain-research:99")
+
+    egress.guard("http_request", "http://127.0.0.1:8080/x")     # the floor's, off-list
+    egress.guard("http_fetch", UNKNOWN_URL)                     # off-list, public
+    egress.guard("http_request", "http://127.0.0.1:8080/y",
+                 loopback_ok=True)                              # sanctioned lane
+    report = egress.network_report()
+
+    assert [r["reason"] for r in table_rows(db)] == [
+        "", "", egress._LOOPBACK_ALLOWANCE]
+    assert report["floor_refused"] == 1, report
+    assert report["would_deny"] == 2, (
+        "the loopback row is a list miss as well as a floor refusal — the axes overlap "
+        "on purpose — while the sanctioned lane's row is in neither")
+
+    policy_on(monkeypatch, enforce=False,
+              allow=[{"host": "127.0.0.1", "reason": "local service"}])
+    after = egress.network_report()
+
+    assert after["would_deny"] == 1, after
+    assert after["floor_refused"] == 1, (
+        "the entry moves the list-miss count and cannot move the floor's: that host is "
+        "denied whatever this list says")
+
+
 def test_browser_navigate_refuses_an_unknown_destination_without_launching_chromium(
         db, monkeypatch, no_browser):
     policy_on(monkeypatch)
