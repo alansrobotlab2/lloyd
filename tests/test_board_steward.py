@@ -3840,3 +3840,106 @@ def test_the_architecture_page_names_the_flag_its_ledger_source_and_the_unchange
         assert f"`{source}`" in sec, f"the flag's ledger source {source} is not named"
     assert "≥ 50" in sec and "≥ 0.90" in sec, "both legs of the flip bar must be stated"
     assert not re.search(r"judged[`'\"\\u201d\\u2019]{0,2}\s*(?:>=|≥)\s*100(?![\d.])", sec)
+
+
+# ===========================================================================
+# The row that makes `apply: true` safe to flip (#3467)
+#
+# Before this, the only trace of a move the steward WROTE was the activity line in
+# the item's own front matter — `**ts** — up_next → draft: board steward: <note>`,
+# written by `app/backlog_move.py` and parsed by nobody: before these nodes,
+# `git grep -n "board steward:" -- '*.py'` returned this module's writer and four
+# logger strings, and no ledger reader. So
+# `desired_statuses` could not tell a move the steward wrote from a move it merely
+# suggested, and `reconcile_statuses` reverted the steward's park on its very next
+# poll (900 s) while its own `status_moved` row recorded the revert as a machine
+# move. These nodes pin the WRITER half: one `steward_move` row per move that
+# actually changed an item. The reader half — the abstention that consumes the row
+# — is pinned in `tests/test_backlog_unattended.py`.
+# ===========================================================================
+
+def _move_rows():
+    """Every `steward_move` row in the fixture's ledger, oldest first."""
+    return [e for e in S.read_events(path=S.LEDGER_PATH, limit=1000)
+            if e.get("event") == "steward_move"]
+
+
+def _fm_of(d: Path, iid: int) -> dict:
+    return B._split_frontmatter((d / f"{iid}-item-{iid}.md").read_text())[0]
+
+
+def test_an_applied_move_gets_its_own_ledger_row_not_the_machine_s(board):
+    """Clause 1: the row carries item, from, to, note and the tick that wrote it."""
+    _write(board, 7, "up_next")
+    out = W.apply_moves([{"item_id": 7, "status": "draft", "tags_add": [], "tags_remove": [],
+                          "note": "spent its re-offer, parked for Alan"}],
+                        tick="board-steward:tick#41")
+    assert [m["applied"] for m in out] == [True]
+    assert _fm_of(board, 7)["status"] == "draft"
+    rows = _move_rows()
+    assert len(rows) == 1, f"exactly one row per applied move, got {rows}"
+    row = rows[0]
+    assert (row["item_id"], row["from"], row["to"]) == (7, "up_next", "draft")
+    assert row["note"] == "spent its re-offer, parked for Alan"
+    assert row["tick"] == "board-steward:tick#41"
+    # A name of its own, because `status_moved` means "the machine moved it" to
+    # `scripts/automod/board_decisions.py` and `landed_outcomes.py`, which count it
+    # into the dashboard's decision figures. A steward move booked under that name
+    # would flatter the machine on the very dashboard the flip's bar is read from.
+    machine = [e for e in S.read_events(path=S.LEDGER_PATH, limit=1000)
+               if e.get("event") == "status_moved"]
+    assert machine == [], f"the steward must not borrow the machine's row name: {machine}"
+
+
+def test_a_move_the_writer_refused_or_that_changed_nothing_writes_no_row(board):
+    """Clause 1's other half: the row records a move, not an intention.
+
+    999 does not exist, so `set_status` declines it; item 8 is already `draft`, so
+    the same writer returns False for a no-op. Both come back `applied: False` and
+    neither may leave a row: a row for a move that never happened would hand
+    `desired_statuses` a status nobody wrote, and the abstention would then protect
+    a board state from a machine that is the only thing standing between it and
+    `done`.
+    """
+    _write(board, 8, "draft")
+    out = W.apply_moves([
+        {"item_id": 999, "status": "up_next", "tags_add": [], "tags_remove": [], "note": "ghost"},
+        {"item_id": 8, "status": "draft", "tags_add": [], "tags_remove": [], "note": "no change"},
+    ], tick="board-steward:tick#42")
+    assert [m["applied"] for m in out] == [False, False]
+    assert _move_rows() == [], "a refused or empty move must not claim a status"
+    assert _fm_of(board, 8)["status"] == "draft"
+
+
+def test_two_applied_moves_write_two_rows_each_naming_its_own_item(board):
+    """One row per MOVE, not one per tick — the aggregate `board_steward` row
+    already carries the tick, and it carries PROPOSED moves on a dry-run tick with
+    `applied: []` whenever `apply: false`, so it cannot answer which moves happened."""
+    _write(board, 11, "draft")
+    _write(board, 12, "up_next")
+    W.apply_moves([{"item_id": 11, "status": "up_next", "tags_add": [], "tags_remove": [],
+                    "note": "ready, spend refreshed"},
+                   {"item_id": 12, "status": "draft", "tags_add": [], "tags_remove": [],
+                    "note": "parked"}], tick="board-steward:tick#43")
+    assert [(r["item_id"], r["from"], r["to"], r["tick"]) for r in _move_rows()] == [
+        (11, "draft", "up_next", "board-steward:tick#43"),
+        (12, "up_next", "draft", "board-steward:tick#43")]
+
+
+def test_a_move_that_only_changed_tags_endorses_a_status_without_claiming_one(board):
+    """The row is a STATUS claim, so a tags-only application writes none.
+
+    `set_status` declines a move whose status the item already carries and the
+    caller then applies the tags alone (`apply_moves`'s second branch). Writing a
+    `from`/`to` row for that would say the steward set a status it never moved, and
+    because the abstention holds until a machine event lands, the echo would freeze
+    the item at whatever status it happened to be at while a tag went on — a
+    stronger power than the steward has been given anywhere else.
+    """
+    _write(board, 13, "draft")
+    out = W.apply_moves([{"item_id": 13, "status": "draft", "tags_add": ["needs-human"],
+                          "tags_remove": [], "note": "needs Alan, leave it parked"}],
+                        tick="board-steward:tick#44")
+    assert [m["applied"] for m in out] == [True], "the tag did go on: the move was applied"
+    assert "needs-human" in _fm_of(board, 13)["tags"]
+    assert _move_rows() == [], "no status changed, so no status claim"

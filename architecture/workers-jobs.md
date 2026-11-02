@@ -488,6 +488,23 @@ module docstring's "the replacement" is the plan, not the present. With
 `apply: true` one mechanical writer would apply its moves and
 `select_confirmed` would take its pick.
 
+**How a move will reach the board is decided** (2026-11-02, #3467), and the
+mechanism is landed here while `apply` stays `false`. Every status the steward
+actually applies appends its own `steward_move` ledger row — item, the status
+it moved from, the status it moved to, the note, the tick — and
+`desired_statuses` then answers that item with the row and abstains from its
+own verdict until a `promoted`, `item_landed` or confirmed-triage row is
+stamped after it. The applied move therefore **outranks the machine until a
+later machine event**, which expires the claim instead of leaving a permanent
+park; a tick's aggregate `board_steward` row could not carry this, since its
+`moves` are proposals and its `applied` list is empty while `apply: false`.
+The abstention sits below the group and in-flight rules — those are what
+`split_writable` already refuses at write time — and the steward's own
+`status_moved` row cannot end a claim, because that row is the move the
+abstention stops. `apply: false` is unchanged: the row is written by the
+writer that flag gates, so no row exists on a dry-run tick, and this changes
+the value of no config key.
+
 **That record was not evidence of anything when it was first read** (measured
 2026-09-27, 136 ticks over 7 d). Its successful ticks reported `0 move(s)
 proposed, agreement 100% (0

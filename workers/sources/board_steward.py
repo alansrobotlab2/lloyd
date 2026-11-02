@@ -1091,20 +1091,62 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
             "rate": (len(agree) / len(judged)) if judged else None}
 
 
-def apply_moves(moves: list[dict], *, round_id: str = "") -> list[dict]:
-    """Write the moves through the one status writer. Never `done`."""
-    from scripts.automod import backlog as B
+def apply_moves(moves: list[dict], *, round_id: str = "", tick: str = "") -> list[dict]:
+    """Write the moves through the one status writer. Never `done`.
+
+    Every move that actually changed an item also appends one `steward_move` ledger
+    row — `item_id`, the status it moved from, the status it moved to, the note and
+    the `tick` that wrote it (#3467). That row is the precondition of `apply: true`,
+    and not for want of a trace: the item's own activity line (`**ts** — up_next →
+    draft: board steward: <note>`) records the same thing, but nothing reads front
+    matter, so `desired_statuses` could not tell a move the steward WROTE from one it
+    merely suggested and `reconcile_statuses` reverted the park on its next autocode
+    poll,
+    booking the revert as its own `status_moved` row. The tick's aggregate
+    `board_steward` row cannot answer it either: its `moves` list carries PROPOSED
+    moves on any tick and its `applied` list is empty while `apply: false`.
+
+    Three deliberate edges:
+
+    * Its own event name. `status_moved` means "the machine moved it" to
+      `scripts/automod/board_decisions.py` and `scripts/automod/landed_outcomes.py`,
+      which count that name into the dashboard's decision figures — a steward move
+      booked there would flatter the machine on the dashboard the flip's own bar is
+      read from.
+    * Only a row the writer accepted. A refused move (`set_status` says the item is
+      not open, or gone) and a move that changed nothing leave no row, or the reader
+      would protect a status nobody wrote.
+    * A STATUS claim. When the item already carries the status and only the tags go
+      on (`tag_item`, the branch below), no row is written: the steward endorsed a
+      status rather than moving one, and the abstention the row buys holds until a
+      machine event lands — which would freeze the item at whatever status it happened
+      to be at while a tag went on.
+
+    `tick` is the session id of the steward run that wrote the move, passed by
+    `execute`; it is what ties a row to the tick's own `board_steward` row and run
+    record. A ledger append that raises propagates, exactly as it does for the tick
+    row: a move on the board with no row is the state this change exists to prevent.
+    """
+    from scripts.automod import backlog as B, state as S
     done: list[dict] = []
     for m in moves:
         if m["status"] not in STEWARD_STATUSES:
             continue      # belt and braces over the schema
+        before = B.item_by_id(m["item_id"])
+        was = before.status if before is not None else ""
         why = f"board steward: {m['note'] or 'no note'}"
-        moved = B.set_status(m["item_id"], m["status"], why,
-                             add_tags=tuple(m["tags_add"]), remove_tags=tuple(m["tags_remove"]))
-        if not moved and (m["tags_add"] or m["tags_remove"]):
-            moved = B.tag_item(m["item_id"], add=tuple(m["tags_add"]),
-                               remove=tuple(m["tags_remove"]))
-        done.append({**m, "applied": bool(moved)})
+        moved_status = B.set_status(
+            m["item_id"], m["status"], why,
+            add_tags=tuple(m["tags_add"]), remove_tags=tuple(m["tags_remove"]))
+        moved_tags = False
+        if not moved_status and (m["tags_add"] or m["tags_remove"]):
+            moved_tags = B.tag_item(m["item_id"], add=tuple(m["tags_add"]),
+                                    remove=tuple(m["tags_remove"]))
+        done.append({**m, "applied": bool(moved_status or moved_tags)})
+        if moved_status:
+            S.append_event({"event": "steward_move", "item_id": int(m["item_id"]),
+                            "from": was, "to": m["status"],
+                            "note": m["note"] or "no note", "tick": tick})
     return done
 
 
@@ -1233,7 +1275,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     applied: list[dict] = []
     if apply:
-        applied = await asyncio.to_thread(apply_moves, writable)
+        # `tick` rides onto each move's `steward_move` row (#3467), so a reader can
+        # tie an applied status to the tick that wrote it — the tick's own
+        # `board_steward` row names this session too (`session_id` below).
+        applied = await asyncio.to_thread(apply_moves, writable,
+                                          tick=str(run.get("session_id") or ""))
         if parsed["next_pick"]:
             pp = _pick_path()
             pp.parent.mkdir(parents=True, exist_ok=True)

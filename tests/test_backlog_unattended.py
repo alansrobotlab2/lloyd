@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -3603,6 +3604,11 @@ def test_desired_statuses_covers_every_branch(isolated):
     write_item(isolated, 717, status="up_next")
     # untriaged in draft: no opinion
     write_item(isolated, 718, status="draft")
+    # moved by the board steward: its own ledger row outranks this table (#3467)
+    write_item(isolated, 719); _confirm(719); B.set_status(719, "draft", "the steward parked it")
+    S.append_event({"event": "steward_move", "item_id": 719, "from": "up_next", "to": "draft",
+                    "note": "parked", "tick": "board-steward:tick#1",
+                    "ts": time.time() + 600}, path=S.LEDGER_PATH)
 
     want = B.desired_statuses(S.LEDGER_PATH, None)
     assert want[710][0] == "in_progress" and "in flight" in want[710][1]
@@ -3620,6 +3626,8 @@ def test_desired_statuses_covers_every_branch(isolated):
     assert want[716][0] == "draft" and "not for the unattended loop" in want[716][1]
     assert want[717][0] == "draft" and "never triaged" in want[717][1]
     assert 718 not in want, "no ledger opinion, already where triage looks: untouched"
+    assert want[719][0] == "draft" and "board steward" in want[719][1], (
+        "an applied steward move is a branch of this table, not a stray write")
 
 
 def test_reconcile_moves_only_the_differences_and_is_idempotent(isolated):
@@ -3633,6 +3641,162 @@ def test_reconcile_moves_only_the_differences_and_is_idempotent(isolated):
     assert {e["item_id"] for e in ev} == {720, 721}
     assert B.reconcile_statuses(S.LEDGER_PATH, None) == []
     assert B.reconcile_statuses(S.LEDGER_PATH, None, enabled=False) == []
+
+
+# ===========================================================================
+# The board steward's applied move outranks this table (#3467)
+#
+# `reconcile_statuses` above moves every item whose status differs from
+# `desired_statuses` and appends its own `status_moved` row, on every autocode poll
+# (900 s). Once the steward is allowed to write (`apply: true`) the two writers fight
+# and the machine wins by cadence: it reverts the steward's park on the next poll and
+# books the revert as its own move. The row `apply_moves` now writes for each move
+# that actually happened is what lets this table abstain on an item the steward has
+# claimed. The WRITER is pinned in `tests/test_board_steward.py`; these nodes pin the
+# reader — the newest row, its place in the branch order, and when it expires.
+# ===========================================================================
+
+def _steward_move(item_id, *, frm, to, ts, note="spent its re-offer, parked",
+                  tick="board-steward:tick#7"):
+    """One `steward_move` row, as `workers/sources/board_steward.py:apply_moves`
+    writes it for a move whose writer said yes. `ts` is explicit because every node
+    below is about which row is NEWER."""
+    S.append_event({"event": "steward_move", "item_id": item_id, "from": frm, "to": to,
+                    "note": note, "tick": tick, "ts": ts}, path=S.LEDGER_PATH)
+
+
+def _parked_by_the_steward(isolated, iid, *, base):
+    """An item the table wants `up_next` and the steward has moved to `draft`.
+
+    The park goes through the same writer the steward uses, so the file and the row
+    say what a real applied move says; `base` stamps the row so a node can put a
+    machine event after it.
+    """
+    write_item(isolated, iid)
+    _confirm(iid)                                       # confirmed → up_next
+    B.set_status(iid, "draft", "board steward: parked")
+    _steward_move(iid, frm="up_next", to="draft", ts=base)
+
+
+def test_an_applied_steward_move_replaces_the_table_s_verdict(isolated):
+    """Clause 2: the newest `steward_move` answers for its item, steward named."""
+    base = time.time() + 600
+    _parked_by_the_steward(isolated, 900, base=base)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[900][0] == "draft", "the steward wrote `draft`; the table's `up_next` waits"
+    assert "board steward" in want[900][1], want[900][1]
+    assert len(want[900]) == 2, "a steward claim is not a person's decision: nothing is tagged"
+    # Newest, not first: a second applied move replaces the first one's claim.
+    _steward_move(900, frm="draft", to="up_next", ts=base + 60)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[900][0] == "up_next", "the later steward move is the live claim"
+    assert "board steward" in want[900][1], want[900][1]
+
+
+def test_the_steward_s_claim_sits_below_the_group_and_the_in_flight_rules(isolated):
+    """Placement, not just presence.
+
+    A steward echo above `is_grouped` would place an item that belongs to an
+    umbrella; one above `in_flight` would park an item a round is running on, which
+    is Alan's 2026-09-13 ruling that `in_progress` means a round is running and the
+    exact contradiction `split_writable` already refuses on the write side. The
+    ledger row must not outrank what the writer was not allowed to write.
+    """
+    base = time.time() + 600
+    p = write_item(isolated, 901, status="draft")
+    B.update_frontmatter(p, {"tags": ["backlog", "grouped"], "group": 9})
+    _steward_move(901, frm="draft", to="up_next", ts=base)
+    # in flight: started with nothing after it
+    write_item(isolated, 902)
+    _confirm(902)
+    S.append_event({"event": "backlog_implement", "item_id": 902, "phase": "started",
+                    "round_id": "SM_902"}, path=S.LEDGER_PATH)
+    _steward_move(902, frm="up_next", to="draft", ts=base)
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[901][0] == "draft" and "umbrella" in want[901][1], (
+        "a grouped item is its umbrella's to place, above any steward claim")
+    assert want[902][0] == "in_progress" and "in flight" in want[902][1], (
+        "the steward cannot park an item a round is running on")
+
+
+@pytest.mark.parametrize("superseder", ["item_landed", "promoted", "confirmed again"])
+def test_a_later_machine_event_ends_the_steward_s_claim(isolated, superseder):
+    """Clause 3: the claim expires rather than becoming a permanent park.
+
+    Each case builds the item twice — once with the steward row, once without — and
+    reads the table BEFORE and AFTER the superseding row. Before it the two must
+    DIFFER (the claim is live); after it they must AGREE, because "restores the
+    machine's own verdict" IS "the answer this table gives when no steward row
+    exists". The before-read is what stops the after-read from being satisfied by a
+    reader that ignores the row entirely, and comparing the pair rather than naming a
+    status is what stops it pinning which branch the machine takes — the three
+    superseding rows take three different ones.
+    """
+    def build(iid: int, *, with_claim: bool):
+        write_item(isolated, iid)
+        _confirm(iid)
+        B.set_status(iid, "draft", "board steward: parked")
+        if with_claim:
+            _steward_move(iid, frm="up_next", to="draft", ts=time.time() + 600)
+
+    def supersede(iid: int):
+        base = time.time() + 700
+        if superseder == "item_landed":
+            S.append_event({"event": "item_landed", "item_id": iid, "round_id": f"SM_{iid}",
+                            "commit": f"cc{iid}", "ts": base}, path=S.LEDGER_PATH)
+        elif superseder == "promoted":
+            # A `promoted` row names a round, never an item; the join to the item is
+            # the `backlog_implement` row that opened the round.
+            S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "started",
+                            "round_id": f"SM_{iid}", "ts": base - 1}, path=S.LEDGER_PATH)
+            S.append_event({"event": "promoted", "round_id": f"SM_{iid}", "commit": f"cc{iid}",
+                            "ts": base}, path=S.LEDGER_PATH)
+        else:
+            S.append_event({"event": "backlog_triage", "item_id": iid, "verdict": "confirmed",
+                            "check": "grep -n x", "evidence": "still there",
+                            "acceptance": "the check still fails", "ts": base},
+                           path=S.LEDGER_PATH)
+
+    build(910, with_claim=True)
+    build(911, with_claim=False)
+    before = B.desired_statuses(S.LEDGER_PATH, None)
+    assert before[910] != before[911], (
+        "the claim has to be live before the machine event, or the agreement below "
+        "only shows the row is never read at all")
+    assert "board steward" in before[910][1], before[910][1]
+    for iid in (910, 911):
+        supersede(iid)
+    after = B.desired_statuses(S.LEDGER_PATH, None)
+    assert after[910] == after[911], (
+        f"a {superseder} row after the steward's row must give the machine's own answer, "
+        f"got {after[910]} against {after[911]}")
+    assert "board steward" not in after[910][1], after[910][1]
+
+
+def test_a_steward_park_survives_the_next_reconcile_pass(isolated):
+    """Clause 4, with the fight it ends still in the frame.
+
+    931 is 930 with no steward row: same item, same confirmed verdict, the same park
+    written by the same writer. Without the row the machine reverts the park on this
+    very pass and books the revert as its own `status_moved` row; with the row the
+    pass leaves it alone. That pair is the whole item — the ledger row is the only
+    thing that tells the two apart.
+    """
+    _parked_by_the_steward(isolated, 930, base=time.time() + 600)
+    write_item(isolated, 931)
+    _confirm(931)
+    B.set_status(931, "draft", "board steward: parked")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[931][0] == "up_next", "the control: an unclaimed park is the machine's to move"
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert [(m["item_id"], m["from"], m["to"]) for m in moved] == [(931, "draft", "up_next")], (
+        "the steward's item is the only one this pass leaves standing")
+    assert _status(isolated, 930) == "draft", "the steward's park survives the pass"
+    assert _status(isolated, 931) == "up_next"
+    assert not [e for e in S.read_events(path=S.LEDGER_PATH, limit=1000)
+                if e.get("event") == "status_moved" and e["item_id"] == 930], (
+        "nothing moved 930 back, so no row may say something did")
+    assert B.reconcile_statuses(S.LEDGER_PATH, None) == [], "and the pass stays idempotent"
 
 
 def test_a_round_sets_in_progress_and_an_unnecessary_outcome_closes_it(isolated, monkeypatch):

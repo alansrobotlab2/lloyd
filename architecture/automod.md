@@ -636,6 +636,26 @@ hand, because four things combined:
 Landings recorded before `review_clauses` existed carry none, so none of
 them changes. `tests/test_vault_surface_churn.py` pins all of it.
 
+**Who may move an item is now ordered, not merely listed** (2026-11-02,
+#3467). Closing above stays `close_settled_items`'s and the board steward is
+never a closer — `STEWARD_STATUSES` has no `done` in it — but the statuses it
+does write now reach the board through the ledger. Each move whose writer
+said yes appends one `steward_move` row (item, the status it moved from, the
+status it moved to, the note, the tick), and `desired_statuses` answers that
+item with the row's status and abstains from its own verdict until a
+`promoted`, `item_landed` or confirmed-triage row is stamped after it. The
+steward's applied move thus outranks the state machine until a later machine
+event ends the claim — and the machine's own `status_moved` row cannot end
+it, because that row is exactly the move the abstention exists to stop:
+counting it would let a writer cancel a restraint by doing the thing it is
+restrained from. So the claim expires rather than becoming a permanent park —
+a landing, a promotion or a fresh confirmed verdict restores this table's
+answer — and nothing here touches the closer: a `met` landing still ends the
+item at the sweep, and `apply` is still `false`, because the row is written
+by the writer that flag gates. What lands is the handover's mechanism, not
+its switch. `tests/test_board_steward.py` and
+`tests/test_backlog_unattended.py` pin both halves.
+
 ### 3.2c Bounding the board: the loop must close more than it opens
 
 Quarantine bounded one edge. Over 2026-09-07 → 09-11 the board still took

@@ -1223,6 +1223,52 @@ def test_workers_jobs_documents_the_board_steward():
     assert "never set `done`" in body
 
 
+def test_all_three_board_steward_doc_sites_state_the_ledger_handover():
+    """How an applied move reaches the board is decided (#3467), and a decision one
+    site states while two say nothing is three sites disagreeing.
+
+    The three have different readers: `config.yaml` is what the flag's own block
+    says, `architecture/automod.md` §3.2b owns who may change a status at all, and
+    `architecture/workers-jobs.md` is the job's entry. Each must name the row, the
+    abstention and what ends it. The `apply: false` literal has to stay in the
+    workers-jobs section beside the new mechanism, or the page that now explains how
+    an applied move wins reads as though the moves are being applied — they are not,
+    until owed-check clears the bar one paragraph above it.
+    """
+    wj = WORKERS_JOBS.read_text()
+    m = re.search(r"^### `board-steward`.*?(?=^### |^## )", wj, re.M | re.S)
+    assert m, "no ### board-steward entry"
+    wj_sec = m.group(0)
+
+    am = DOC.read_text()
+    m = re.search(r"^### 3\.2b.*?(?=^### |^## )", am, re.M | re.S)
+    assert m, "no §3.2b entry in architecture/automod.md"
+    am_sec = m.group(0)
+
+    cfg = (ROOT / "config.yaml").read_text()
+    # The flag's section is its key's block plus the comment block above it — walked
+    # back over the comment lines rather than anchored on a heading, because the
+    # comment above `board-steward:` is prose this file's own neighbours edit.
+    key = cfg.index("\n    board-steward:\n")
+    lines = cfg[:key].splitlines(keepends=True)
+    top = len(lines)
+    while top and lines[top - 1].lstrip().startswith("#"):
+        top -= 1
+    cfg_sec = "".join(lines[top:]) + cfg[key:cfg.index("\n    owed-check:", key)]
+
+    for name, text in (("config.yaml's board-steward section", cfg_sec),
+                       ("architecture/automod.md §3.2b", am_sec),
+                       ("architecture/workers-jobs.md's board-steward section", wj_sec)):
+        assert "`steward_move`" in text, f"{name} never names the ledger row"
+        assert "abstain" in text, f"{name} never says the state machine abstains"
+        assert "`promoted`" in text and "`item_landed`" in text, (
+            f"{name} never says what ends the steward's claim")
+        assert "`done`" in text, f"{name} leaves closing out of it"
+    assert "apply: false" in wj_sec, (
+        "the section that now describes the mechanism must still say it is switched off")
+    assert "apply: false" in cfg_sec
+
+
 # ── who may open the knowledge-graph store (#1525) ─────────────────────────
 # Three sentences claimed `app.kg_store` was the store's only opener. All three
 # were false: the guardian's data-damage tripwire has opened it read-only for a row

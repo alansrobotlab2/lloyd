@@ -5995,6 +5995,74 @@ def _apply_status(path: Path, status: str, why: str, *,
         return BW.write_item(path, fm, body, lock=lock)
 
 
+def _steward_claims(ledger: Path) -> dict[int, tuple[float, str, str]]:
+    """`{item_id: (ts, status, note)}` for each item's NEWEST `steward_move` row.
+
+    Those rows are what `workers/sources/board_steward.py:apply_moves` appends for a
+    move whose writer said yes (#3467). Before them, nothing on the ledger
+    distinguished a status the board steward WROTE from one it merely proposed — the
+    tick's aggregate `board_steward` row carries PROPOSED moves on every tick and an
+    empty `applied` list while `apply: false` — so `desired_statuses` had no way to
+    abstain and `reconcile_statuses` reverted the steward's park on its next autocode
+    poll while booking the revert as its own `status_moved` row.
+
+    Newest is decided by `ts` and not by file order — the rule `confirmed_verdicts`
+    uses — so a rotation or a replay handing the reader the rows out of order cannot
+    revive a superseded claim. A row naming a status outside `OPEN_STATUSES` is
+    skipped: this is a status answer, and `done` is not the steward's to give —
+    closing stays `close_settled_items`'s alone, which is why `STEWARD_STATUSES` has
+    no `done` in it either.
+    """
+    out: dict[int, tuple[float, str, str]] = {}
+    for d in _ledger_events(ledger, "steward_move"):
+        try:
+            iid = int(d["item_id"])
+        except (TypeError, ValueError):
+            continue
+        status = str(d.get("to") or "")
+        if status not in OPEN_STATUSES:
+            continue
+        ts = float(d.get("ts") or 0.0)
+        if ts >= out.get(iid, (0.0, "", ""))[0]:
+            out[iid] = (ts, status, str(d.get("note") or ""))
+    return out
+
+
+def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, float]:
+    """`{item_id: newest machine event}` — the timestamps that END a steward claim.
+
+    Three kinds, and no more: the landing (`item_landed`), the promotion
+    (`promoted`), and a fresh confirmed verdict. `promoted` names a round and never an
+    item, so it joins through the `backlog_implement` row that opened the round — the
+    same join `board_steward.item_refs` makes for the same reason.
+
+    A `status_moved` row is deliberately NOT one of them, and the reason is the whole
+    point of the change: that row is the very move the claim exists to stop, so a
+    machine that could end the abstention by writing it would end it by doing the
+    thing the abstention forbids, and the steward's write would last one poll.
+    """
+    out: dict[int, float] = {}
+
+    def _note(iid: int, ts: float) -> None:
+        if ts > out.get(iid, 0.0):
+            out[iid] = ts
+
+    for d in _ledger_events(ledger, "item_landed"):
+        _note(int(d["item_id"]), float(d.get("ts") or 0.0))
+    by_round: dict[str, int] = {}
+    for d in _ledger_events(ledger, "backlog_implement"):
+        rid = str(d.get("round_id") or "")
+        if rid:
+            by_round[rid] = int(d["item_id"])
+    for d in _ledger_events(ledger, "promoted", require_item=False):
+        iid = by_round.get(str(d.get("round_id") or ""))
+        if iid is not None:
+            _note(iid, float(d.get("ts") or 0.0))
+    for iid, ev in confirmed.items():
+        _note(iid, float(ev.get("ts") or 0.0))
+    return out
+
+
 def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
                      *, open_round_items: set[int] = frozenset(),
                      retriage_enabled: bool = True) -> dict[int, tuple]:
@@ -6015,6 +6083,11 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     verdicts = triaged_ids(ledger)
     outcomes = implement_outcomes(ledger)
     marks = retriage_marks(ledger)
+    # #3467: an applied board-steward move, and the newest machine event that ends its
+    # claim on the item. Both read the rows `_ledger_events` already decoded, so this
+    # is two filters over a file this function reads once regardless.
+    steward_claims = _steward_claims(ledger)
+    machine_event = _machine_event_ts(ledger, confirmed)
     # Re-triaged and not yet confirmed again: whatever the implement history
     # after the mark says (a landing that raced the mark, a human reopen before
     # the second triage), `up_next` would strand it — no contract, so neither
@@ -6136,6 +6209,23 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             out[iid] = ("draft", f"folded into umbrella #{item.group}; it closes when that lands")
         elif iid in in_flight:
             out[iid] = ("in_progress", "an automod round is in flight for it")
+        elif (claim := steward_claims.get(iid)) and claim[0] >= machine_event.get(iid, 0.0):
+            # #3467: the board steward wrote this item's status, so this table
+            # abstains. This is not a race the machine wins by frequency — its
+            # `autocode` poll and the steward's tick are both on a 900 s clock — it
+            # wins because this function re-derives an item's status from ledger rows
+            # and the steward's write was not one of them, so the park is reverted on
+            # the next poll and the revert carries its own `status_moved` row, reading
+            # back as a machine decision.
+            # The claim sits BELOW `is_grouped` and `in_flight` on purpose: those two
+            # are what `split_writable` already refuses the steward at write time, so
+            # an echo could never place a grouped item or park one mid-round; letting
+            # it outrank them would give the ledger row a power the writer denied the
+            # move that produced it. It expires the moment the machine does something
+            # of its own after the row — see `_machine_event_ts`.
+            out[iid] = (claim[1], f"the board steward moved it to {claim[1]} "
+                                  f"(`steward_move`: {claim[2][:60]}); the machine abstains "
+                                  f"until this item lands, is promoted or is re-triaged")
         elif landed and not partial and landed_outcome.get(iid, {}).get("acceptance") == "not_met":
             # Documented rule: "a landed round with a not_met clause is offered
             # once more for exactly those clauses". Fall through to the

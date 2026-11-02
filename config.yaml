@@ -1880,6 +1880,24 @@ workers:
     # it writes through the one status writer and `select_confirmed` takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
+    # HOW A MOVE REACHES THE BOARD, decided 2026-11-02 (#3467): every status the
+    # steward actually applies gets its own `steward_move` ledger row — item, the
+    # status it moved from, the status it moved to, the note, the tick — and
+    # `desired_statuses` then answers that item with the row's status and abstains from
+    # its own verdict until a `promoted`, `item_landed` or confirmed-triage row is
+    # stamped after it. The steward's applied move therefore OUTRANKS the state machine
+    # until the machine does something of its own afterwards, which is the handover the
+    # flip was waiting on. Without the row there is nothing to abstain on, and the
+    # machine wins without a contest: it re-derives each item's status from ledger rows
+    # and a steward's write was not one of them, so the park is reverted on the next
+    # poll — the same 900 s clock this job is on (`autocode.interval_seconds`: 900) —
+    # and the revert carries its own `status_moved` row, reading back as a machine
+    # decision. The row names a status, so a move that only put tags on an item already
+    # at that status writes none. NONE OF THIS MOVES A VALUE: the row is written by the
+    # same writer this flag gates, so while `apply` is false no row is written and
+    # nothing above describes a live one. What this settles is the steward's own
+    # precondition; the `autocode.status_pipeline` / `close_on_settle` handover named
+    # above is a different one and stays owed-check's to rule on.
     # Primary since the first live tick: on the secondary it made ordering
     # errors in two of five dry-runs and the live tick died at max_turns on
     # tool reads with no answer. A two-minute judgment every fifteen minutes
