@@ -222,10 +222,45 @@ FAKE_STEP = """#!/usr/bin/env bash
 # verdict line", which is the single-writer property under test.
 LABEL="${1:?usage: flash-next-canary-step.sh <arm-label>}"
 echo "$LABEL" >> "$CANARY_STEP_LOG"
+# #3404: the window id this step was handed is what its two probe legs inherit, so a test
+# that wants the child's environment asks for a file to put it in. Unset means don't bother:
+# the fold's single-writer nodes never look at it.
+if [ -n "${CANARY_WINDOW_SEEN:-}" ]; then printf '%s\n' "${CANARY_WINDOW-UNSET}" \\
+  >> "$CANARY_WINDOW_SEEN"; fi
 mkdir -p "$(dirname "$CANARY_LOG")"
 printf '%s\\n' "{\\"arm\\": \\"$LABEL\\", \\"decision\\": \\"overrode\\", \\"reference\\": \\"20260924T211316Z_idle-5\\", \\"engine\\": {\\"kv_cache_dtype\\": \\"bf16\\"}, \\"worst_prompt\\": {\\"id\\": \\"idle-3\\", \\"first_divergence\\": 7}}" >> "$CANARY_LOG"
 exit "${STEP_RC:-0}"
 """
+
+CAPTURE_STUB = '''#!/usr/bin/env python3
+"""Stands in for the tool probe's `capture` leg (#3404), the second leg a window runs.
+
+The window's window-id work crosses a real process boundary here, and the only proof that
+counts is what the CHILD was given, so this records its own argv and the `CANARY_WINDOW` its
+environment carries to `$LLOYD_DATA/logs/services/test-capture-seen.jsonl`. When
+`$CAPTURE_ORDER` is set it also appends the word `capture` there — the same file the boot leg
+writes its reasons to, which is how a test sees that the shipped arm was recorded BEFORE
+anything was staged or booted. It writes no capture rows: producing them is the probe's
+business and is pinned in `tests/test_tool_call_equivalence_probe.py`, and pointing this seam
+at the real probe would have every window node in this file sending completions at the fleet
+stub, which answers them 404.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+services = Path(os.environ["LLOYD_DATA"]) / "logs" / "services"
+services.mkdir(parents=True, exist_ok=True)
+with (services / "test-capture-seen.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:],
+                         "window": os.environ.get("CANARY_WINDOW") or ""}) + chr(10))
+order = os.environ.get("CAPTURE_ORDER")
+if order:
+    with open(order, "a", encoding="utf-8") as fh:
+        fh.write("capture" + chr(10))
+sys.exit(0)
+'''
 
 LEG = """#!/bin/sh
 # Stands in for the gated restart leg. Records the argv it was called with, bumps the
@@ -269,6 +304,11 @@ def tree(tmp_path):
     (root / "agent-services/bin/flash-next-canary-step.sh").write_text(
         FAKE_STEP, encoding="utf-8")
     (root / "agent-services/bin/flash-next-canary-step.sh").chmod(0o755)
+    # The shipped arm's capture runs the tool probe DIRECTLY, so the fake checkout needs its
+    # own copy of that path — the seam above, in python, because the window launches it with
+    # the venv interpreter as argv[0].
+    (root / "eval").mkdir(parents=True)
+    (root / "eval/tool_call_equivalence_probe.py").write_text(CAPTURE_STUB, encoding="utf-8")
     data = tmp_path / "lloyd-data"
     (data / "logs/services").mkdir(parents=True)
 
@@ -921,3 +961,158 @@ def test_a_promoter_hold_that_lifts_is_waited_out_rather_than_refused(tree):
     assert "held_by:automod" in out, "the wait never saw the promoter's hold"
     assert stub.restarts.read_text().count("\n") == 2, stub.restarts.read_text()
     assert stub.resumed()
+
+
+# --- clause 1 & 4 of #3404: one window id, and the shipped arm inside it ------------------
+#
+# `eval/tool_call_equivalence_probe.py::window_id` reads `CANARY_WINDOW`, and that variable is
+# the ONLY thing saying which boot a captured tool decision came from. Nothing in this file's
+# route set it before #3404, so both probe legs ran with an empty id — and an empty id is not
+# a narrow filter: the probe's pairing guard stands down when it is empty, which left one
+# arm's rows pairable against every capture file the retention sweep still holds, fourteen
+# days of other boots. These nodes run the window as a subprocess, because the thing being
+# proved is what a CHILD process was handed, and an in-process call cannot show that.
+
+
+def _captures(tree) -> list[dict]:
+    """Each `capture` leg this window ran: the argv it got and the window id in its env.
+
+    Read off the seam's own file, which the child writes about itself — the runner's stdout
+    can only ever claim what it meant to pass."""
+    path = tree["data"] / "logs/services/test-capture-seen.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _clean_reruns(tree) -> None:
+    """Between two windows in one test tree, the artifacts that make the second one a re-run
+    of the first go away: the one-shot arm env refuses a reuse by design (#3024), and a
+    canary log already holding this arm's verdict makes the fold a re-asked question. Neither
+    is what the caller is measuring; the boot counter advances with them, which is what
+    `KV_ARM_LOG`'s sequence is read against."""
+    (tree["data"] / "logs/services/flash-next-arm.env").unlink(missing_ok=True)
+    (tree["data"] / "logs/services/flash-next-canary.jsonl").unlink(missing_ok=True)
+    tree["stub"].restarts.write_text("", encoding="utf-8")
+    tree["stub"].counter.write_text("0", encoding="utf-8")
+    tree["stub"].step.write_text("", encoding="utf-8")
+
+
+def test_one_window_id_per_window_run_reaches_both_probe_legs_of_the_window(tree, tmp_path):
+    """Clause 1: `eval/kv_dtype_arm.py` derives ONE id per window and every leg of that
+    window reads the identical value.
+
+    Two legs of one window is the whole pairing: the fold's step (which runs the arm's
+    `capture` and its `report` in its own environment, so one value covers both of them) and
+    this window's own shipped-arm `capture`, which is a SECOND capture in the same window and
+    the second node in the pair the report needs. Two separate windows must NOT share an id —
+    `test_two_arms_in_different_windows_are_never_paired` in the probe's own file is the other
+    half of that law, and an id constant across runs would silently pair one run's arm with
+    another run's shipped engine.
+    """
+    seen = tmp_path / "step-window.txt"
+    _boots(tree, ARM, RESTORE_DTYPE, ARM, RESTORE_DTYPE)
+    proc, out, _ = _win(tree, CANARY_WINDOW_SEEN=str(seen))
+    assert proc.returncode == 0, _fail(proc, out)
+    _clean_reruns(tree)
+    proc2, out2, _ = _win(tree, CANARY_WINDOW_SEEN=str(seen))
+    assert proc2.returncode == 0, _fail(proc2, out2)
+
+    step_ids = [ln for ln in seen.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    caps = _captures(tree)
+    assert len(step_ids) == 2, f"expected one step per window, saw {step_ids}"
+    assert len(caps) == 2, f"expected one shipped capture per window: {caps}"
+
+    for first, second in zip(step_ids, [c["window"] for c in caps]):
+        assert first, "the fold's step was handed an empty CANARY_WINDOW — an empty id is " \
+                      "not a narrow window, it is no window"
+        assert first != "UNSET", f"the step inherited nothing: {first!r}"
+        assert second == first, (
+            f"the shipped arm's capture ran under {second!r} while the fold's step ran "
+            f"under {first!r}: the window's two arms are two windows, and its report will "
+            "see one arm each")
+
+    assert step_ids[0] != step_ids[1], (
+        f"two window runs shared one id {step_ids[0]!r}, which is a window that never "
+        "closes: its report would pair this run's arm with some other run's engine")
+    assert all(i.startswith(f"kv-{ARM}-") for i in step_ids), (
+        f"the id does not name the dtype the window armed: {step_ids}")
+    assert "shipped arm recorded" in out, out[-600:]
+
+
+def test_the_shipped_arm_is_recorded_before_anything_is_staged_or_booted(tree, tmp_path):
+    """Clause 4: the window records the SHIPPED dtype's tool decisions, under its own window
+    id, while the shipped engine is still the one serving.
+
+    Before staging, because a staged file is a claim about the NEXT boot and says nothing about
+    which dtype served the prompts already captured; and before booting, because the capture has
+    to belong to the engine that was serving when the window opened — the thing the armed dtype
+    is being compared against. Its label is `kv-fp8`, `RESTORE_DTYPE`, what the supervisor conf
+    ships and every window hands back, named the way the fold names the arm it boots, so the
+    report sees two arms with two honest names instead of one arm and a refusal."""
+    seen = tmp_path / "step-window.txt"
+    _boots(tree, ARM, RESTORE_DTYPE)
+    proc, out, _ = _win(tree, CANARY_WINDOW_SEEN=str(seen),
+                        CAPTURE_ORDER=str(tree["stub"].restarts))
+    assert proc.returncode == 0, _fail(proc, out)
+
+    caps = _captures(tree)
+    assert len(caps) == 1, f"exactly one shipped capture per window, saw {caps}"
+    assert caps[0]["argv"][0:1] == ["capture"], caps[0]
+    assert caps[0]["argv"][-2:] == ["--label", f"kv-{RESTORE_DTYPE}"], caps[0]
+    assert caps[0]["window"] == seen.read_text(encoding="utf-8").strip(), (
+        "the shipped arm landed in a different window from the fold's step, so the fold's "
+        "report leg will still see one arm")
+
+    order = tree["stub"].restarts.read_text(encoding="utf-8").splitlines()
+    assert order[0] == "capture", (
+        f"the shipped arm was not the first thing this window did: {order}")
+    assert order.index("capture") < order.index(f"kv-{ARM}-arm"), (
+        f"the shipped arm was recorded after the arm boot ({order}); a capture made after "
+        "the engine was already re-armed is neither arm's")
+
+
+def test_an_engine_not_serving_the_shipped_dtype_is_never_labelled_as_it(tree, tmp_path):
+    """The honesty branch of the shipped capture: what is being compared against is a fact
+    read from the live log, and when that log contradicts `RESTORE_DTYPE` the window says so
+    and captures nothing.
+
+    A window whose restore failed leaves `fp8-e5m2` serving (or nothing serving), and the
+    next operator to run a window would then have a file labelled `kv-fp8` whose rows
+    came from an engine that never ran that dtype — which is the comparison's whole point,
+    written by a label. The warning is the deliverable: a window that arms anyway is right,
+    and a report that then sees one arm and declines is the honest answer."""
+    tree["stub"].log.write_text(
+        "A/B config: venv=/home/alansrobotlab/.venvs/vllm-flash-next "
+        "kv_cache_dtype=auto kv_dtype=fp8-e5m2\n", encoding="utf-8")
+    seen = tmp_path / "step-window.txt"
+    _boots(tree, ARM, RESTORE_DTYPE)
+    proc, out, _ = _win(tree, CANARY_WINDOW_SEEN=str(seen))
+    assert proc.returncode == 0, _fail(proc, out)
+    assert _captures(tree) == [], (
+        "the shipped arm was captured under a `kv-fp8` label while the last boot the "
+        "service log records was fp8-e5m2")
+    assert "NOT recorded" in out, out[-700:]
+    assert "fp8-e5m2" in out, "the warning never names the dtype the log actually saw"
+    assert "kv-bfloat16" in seen.read_text(encoding="utf-8"), (
+        "the fold's step still has to run: the window is not cancelled by its instrument")
+
+
+def test_arming_the_dtype_the_engine_already_ships_leaves_one_arm_and_says_so(tree, tmp_path):
+    """Arms both arms of one window" has a boundary, and this is it: arming the shipped dtype
+    the second capture and the arm's own capture would carry the SAME label, so the report
+    would see one arm and decline.
+
+    The window still arms — the dtype question is still a real question, and the engine is not
+    this instrument's hostage (#3109) — but it must not quietly capture one file and let the
+    fold report `1 arm(s)`. The refusal to capture is printed, and the file the capture would
+    have written is not written."""
+    seen = tmp_path / "step-window.txt"
+    _boots(tree, RESTORE_DTYPE, RESTORE_DTYPE)
+    proc, out, _ = _win(tree, dtype=RESTORE_DTYPE, CANARY_WINDOW_SEEN=str(seen))
+    assert proc.returncode == 0, _fail(proc, out)
+    assert _captures(tree) == [], "both arms would have been labelled kv-fp8"
+    assert "no second arm" in out.lower(), out[-700:]
+    assert f"kv-{RESTORE_DTYPE}" in seen.read_text(encoding="utf-8"), (
+        "the fold's step should still run for the arm itself")

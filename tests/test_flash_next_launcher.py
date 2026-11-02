@@ -1869,3 +1869,102 @@ def test_the_fold_leg_writes_the_record_the_probe_owes_per_prompt(tmp_path):
     assert len(engine.bodies) == len(ids), len(engine.bodies)
     assert all(b["temperature"] == 0 and b.get("tools") for b in engine.bodies), (
         "the request the fold caused is not the one clause 1 specifies")
+
+
+# ── #3404: one canary window per sweep, inherited by every step it runs ────────
+# The sweep boots an engine, and `eval/tool_call_equivalence_probe.py::window_id`
+# reads `CANARY_WINDOW`: that variable is the only thing saying which boot a
+# captured tool decision came from. The probe's docstring claimed THIS file stamped
+# it "once per sweep" at line 30 for nine days while the file held no such string
+# and line 30 was its `ENVFILE`/`LOG`/`RESULTS` block (#3188, landed `96b726b9`).
+# Both routes ran windowless, and windowless is not strict — an empty id filters
+# NOTHING, so every capture the retention sweep still keeps becomes a candidate
+# partner for this arm's rows (pinned in
+# tests/test_tool_call_equivalence_probe.py::
+#   test_a_report_with_no_window_open_refuses_instead_of_reading_the_whole_directory).
+# The sweep cannot be run end to end here: its ROOT is the production checkout and
+# its body restarts the live primary, which `app/harness/service_control.py::_LAUNCHERS`
+# denies to a turn and no test has business doing. So the stamp is proven two ways:
+# its EXPRESSION executed in a real bash, and the ordering that lets every step
+# inherit it read out of the file.
+
+def _canary_stamps() -> list[str]:
+    """The lines where the sweep opens its canary window."""
+    return [ln for ln in ARM.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("export CANARY_WINDOW=")]
+
+
+def _bash_window(code: str, **env) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", code], capture_output=True, text=True,
+                          timeout=60, env={**os.environ, **env})
+
+
+def test_the_sweep_stamps_exactly_one_canary_window_per_invocation():
+    """#3404 clause 2, executed: one stamp, and a value that survives the fork.
+
+    The expression under test is the real line lifted out of the real file rather
+    than a re-typed copy, because a re-typed copy is the other way a claim like
+    this goes stale. Two invocations must disagree — two sweeps are two windows,
+    and an id reused across boots is what lets arms from separate sweeps be
+    published as one comparison — and a child process must see the identical id,
+    which IS the mechanism: the sweep writes no file, the probe reads the
+    environment it was handed."""
+    stamps = _canary_stamps()
+    assert len(stamps) == 1, (
+        f"a sweep that stamps CANARY_WINDOW twice opens two windows in one run, and its arms "
+        f"land in whichever the last stamp named: {stamps}")
+
+    read = f'{stamps[0]}; printf "%s" "$CANARY_WINDOW"'
+    first = _bash_window(read).stdout.strip()
+    assert first, (
+        "the stamp produced an empty window id, which is the state this clause exists to make "
+        "unreachable")
+    assert first.startswith("sweep-"), (
+        f"{first!r} does not read as a sweep window to anyone grepping a capture file for it")
+    second = _bash_window(read).stdout.strip()
+    assert first != second, (
+        f"two sweep invocations produced the same window {first!r}, so arms from separate "
+        "boots would be published as one comparison")
+
+    child = _bash_window('printf "%s" "$CANARY_WINDOW"', CANARY_WINDOW=first)
+    assert child.stdout.strip() == first, (
+        f"the id did not survive the fork: the parent held {first!r} and the child read "
+        f"{child.stdout.strip()!r} — and every probe leg is that child")
+
+
+def test_the_window_is_stamped_above_every_step_the_sweep_runs():
+    """#3404 clause 2's other half: an `export` only reaches a step if it happens first.
+
+    Three things make inheritance true, and all three break the moment somebody
+    appends five lines at the bottom: the stamp sits above every step this sweep
+    runs, no step is invoked through `env -i` or with a re-stamped `CANARY_WINDOW=`
+    on the invocation line, and nothing unsets it on the way. The id is also echoed
+    exactly once, because the thing an operator needs after a half-closed window is
+    the id the capture files carry, and a sweep that never prints it leaves them
+    guessing which of fourteen days of captures were theirs."""
+    stamps = _canary_stamps()
+    assert len(stamps) == 1, f"cannot order the steps against {len(stamps)} stamps"
+    lines = ARM.read_text(encoding="utf-8").splitlines()
+    stamp_at = lines.index(stamps[0])
+
+    steps = [(i, ln) for i, ln in enumerate(lines)
+             if re.search(r"flash-next-canary-step\.sh|flash-next-preempt-step\.sh"
+                          r"|bench-flash-next\.py", ln)
+             and not ln.lstrip().startswith("#")]
+    assert steps, "no step invocation in the sweep — the shape these nodes read has changed"
+    for at, ln in steps:
+        assert stamp_at < at, (
+            f"CANARY_WINDOW is stamped at line {stamp_at + 1} but the step at line {at + 1} "
+            f"runs before it, so that step inherits nothing: {ln}")
+        assert "env -i" not in ln and "CANARY_WINDOW=" not in ln, (
+            f"a step that scrubs or re-stamps its environment loses the window the sweep "
+            f"opened: {ln}")
+    assert "unset CANARY_WINDOW" not in "\n".join(lines)
+
+    printed = [ln for ln in lines
+               if "$CANARY_WINDOW" in ln and ln.lstrip().startswith("echo ")]
+    assert len(printed) == 1, (
+        f"the sweep must print its window id exactly once for an operator to read off a log; "
+        f"found {len(printed)}: {printed}")
+    out = _bash_window(f'{stamps[0]}; echo "canary window: $CANARY_WINDOW"').stdout.strip()
+    assert re.fullmatch(r"canary window: sweep-\d{8}T\d{6}Z-\d+", out), out

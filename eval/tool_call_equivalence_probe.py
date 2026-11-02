@@ -66,7 +66,8 @@ on the pair being identical (#3109's rule: no arm is lost to its instrument):
        whose raw arguments are not a JSON object, or a pair that came back
        `different_tool` / `args_differ`
     2  the INSTRUMENT could not decide: the engine unreachable, a completion with no
-       `choices` to read, the corpus unreadable, or fewer than two arms in one window
+       `choices` to read, the corpus unreadable, no window opened, or fewer than two arms in
+       one window
 
 Capture ruling, and why it does not touch the no-blob rule
 ----------------------------------------------------------
@@ -83,7 +84,9 @@ stored. The files are bounded by the retention sweep (`scripts/groundskeeper/ret
 store 20), which keeps 14 days of them, so per-arm captures age rather than accumulate.
 
 Pairing is only ever **inside one window** (`CANARY_WINDOW`), and a report never
-reconstructs a comparison from stored captures of two different windows. #2683 wrote that
+reconstructs a comparison from stored captures of two different windows. A leg run with the
+variable unset has no window rather than a universal one, and `report` refuses instead of
+treating an empty id as a wildcard (#3404). #2683 wrote that
 law for the prose side (`engine_output_probe.py:481-489`: a cross-corpus compare "would
 silently compare a bf16 arm's answer against a new-kv one's and report agreement of 1.0 —
 which is what a comparison of two different questions always looks like") and a sha-less
@@ -209,10 +212,22 @@ def capture_path(arm_label: str) -> Path:
 def window_id() -> str:
     """The window these calls belong to, or "" when nobody opened one.
 
-    `flash-next-run-arm.sh:30` stamps `CANARY_WINDOW` once per sweep and passes it to every
-    step, so in the sweep route every arm of one window shares it; the fold stamps its own
-    when run standalone, which then makes each arm its own window and a report of "one arm
-    here" — the honest answer, and the one that used to be a silent false agreement.
+    Exactly two routes SET it, one id each, and both hand it down through the environment to
+    the canary step, which is the only reason one arm's `capture` and `report` agree on which
+    boot they belong to:
+
+    * `eval/kv_dtype_arm.py` — `arm_window_id` derives the id once per window, and
+      `run_canary_step` and `run_shipped_capture` each pass it in the env of the step and of
+      the probe they run, so the shipped arm's capture and the armed arm's capture land under
+      one id and the fold's single report leg has two arms to compare.
+    * `agent-services/bin/flash-next-run-arm.sh` — one id per sweep invocation, exported
+      above every step the sweep runs, so every arm of one sweep shares it.
+
+    A leg run with the variable unset has no window, and no window is not a wider window:
+    `report` refuses (#3404). Reading an empty id as "all of them" is what let one arm's rows
+    be paired against every capture file the retention sweep still holds — fourteen days of
+    other people's boots, two of which can print a `within-floor` line about prompts that
+    were never asked in the same window.
     """
     return (os.environ.get("CANARY_WINDOW") or "").strip()
 
@@ -734,6 +749,19 @@ def main(argv: list[str] | None = None, *,
         return EXIT_FINDING if findings else EXIT_OK
 
     # report
+    if not window:
+        # An empty window is not a fallback to an inferred one. Both guards downstream stand
+        # down when it is empty — `call_rows_by_arm` filters only `if want_window`, and the
+        # merge below admits a row `if not window` — so a report run this way pairs the arm
+        # being reported on against EVERY capture file the retention sweep still holds:
+        # fourteen days of other boots, with only `corpus_sha256` equality left between them.
+        # That is #2683's law with its guard deleted, and the name
+        # tests/test_flash_next_launcher.py gives it. Refusing is the only honest output, and
+        # nothing is appended: no verdict, no row (#3404 clause 3).
+        print("tool-equivalence: cannot-decide: CANARY_WINDOW is unset, so nothing here "
+              "names a boot to pair inside; the routes that open one are "
+              "eval/kv_dtype_arm.py and agent-services/bin/flash-next-run-arm.sh")
+        return EXIT_INSTRUMENT
     try:
         directory = Path(args.capture_dir) if args.capture_dir else out_path.parent
     except OSError as exc:                       # pragma: no cover — defensive on bad paths

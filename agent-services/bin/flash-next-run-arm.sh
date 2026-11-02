@@ -30,6 +30,17 @@ ENVFILE="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-arm.env"
 LOG="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/agent-llm-primary.log"
 RESULTS="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-arms.jsonl"
 
+# One canary window per sweep invocation (#3404). The tool-call probe pairs arms ONLY
+# inside one window id — `eval/tool_call_equivalence_probe.py::window_id` reads this
+# variable, and `report` now refuses outright when it is unset, because an empty id filters
+# NOTHING: every arm the retention sweep still keeps (14 days of other boots) would be a
+# candidate partner for this one, which is #2683's law with its guard deleted. Exported here,
+# above every step this sweep runs, so the fold's capture leg and its report leg — and the
+# preemption load and the bench below them — all read the same id. `$$` is this script's own
+# pid, which is what makes two sweeps started in the same second two windows.
+export CANARY_WINDOW="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+echo "canary window: $CANARY_WINDOW"
+
 # The host-RAM boot gate — its thresholds, its wait and the reason for both —
 # lives in ONE file that the landing route (`round restart --only
 # agent-llm-primary`) reads too. This script is the SWEEP route, so it uses the

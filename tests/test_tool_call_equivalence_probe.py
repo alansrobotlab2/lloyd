@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -380,6 +381,117 @@ def test_two_arms_in_different_windows_are_never_paired(services, monkeypatch):
     assert rc == tcp.EXIT_INSTRUMENT, "two windows share no pair to decide on"
     kinds = [r["kind"] for r in _captured(services, "kv-bfloat16")]
     assert kinds == ["tool_call"] * 4, kinds
+
+
+# ── #3404: an unset window is no window, and the docstring says where the id comes from ──
+
+def _bare_call_row(arm: str, window: str, ts: str, path: str) -> dict:
+    """One captured decision, written by the test rather than by a capture leg.
+
+    Only the fields the pairing reads: `kind`, `arm`, `window`, `ts`, the prompt's sha (the
+    two rows must ask the SAME question to be pairable at all) and the call itself. Written
+    by hand because the case is two boots fourteen days apart, which no stubbed engine in a
+    tmp dir can produce and no capture leg should be blamed for."""
+    return {"kind": tcp.KIND_CALL, "schema": tcp.SCHEMA, "arm": arm, "window": window,
+            "ts": ts, "prompt": "tc_read_named_path", "prompt_sha256": "a" * 64,
+            "corpus_sha256": "b" * 64, "temperature": 0, "expect_tool_call": True,
+            "model": "stub-engine-1",
+            "tool_calls": [{"name": "Read", "arguments": {"file_path": path}}]}
+
+
+def test_a_report_with_no_window_open_refuses_instead_of_reading_the_whole_directory(
+        services, monkeypatch, capsys):
+    """#3404 clause 3: an empty `CANARY_WINDOW` is not a fallback to an inferred window. Two
+    arms on disk with no window on their rows and none in the environment, fourteen days
+    apart, and the report must decline.
+
+    The refusal is not tidiness. `call_rows_by_arm` filters only `if want_window`, and the
+    merge in `main` admits a row `if not window`, so with the variable unset the guard that
+    exists to make pairing window-local stands down entirely: this arm becomes a candidate
+    partner for every capture file the retention sweep still keeps, fourteen days of other
+    people's boots, and only `corpus_sha256` equality is left between them. Two rows that ask
+    the same prompt then print a `within-floor` line about a comparison that never happened —
+    which is #2683's law with its guard deleted, in the module whose whole job is that guard.
+    """
+    tcp.append_rows(tcp.capture_path("kv-bfloat16"),
+                    [_bare_call_row("kv-bfloat16", "", "2026-10-19T04:20:00Z",
+                                    "/home/alansrobotlab/lloyd/app/harness/state.py")])
+    tcp.append_rows(tcp.capture_path("fp8-kv"),
+                    [_bare_call_row("fp8-kv", "", "2026-11-02T04:20:00Z",
+                                    "/home/alansrobotlab/lloyd/app/harness/state.py")])
+
+    # The counterfactual, measured before the refusal so it stays a fact and not a story: on
+    # the empty-window path these two rows ARE pairable. If this assertion ever fails, the
+    # refusal below is decorative and the premise it rests on has changed.
+    unguarded = tcp.call_rows_by_arm(services, window="")
+    assert sorted(unguarded) == ["fp8-kv", "kv-bfloat16"], (
+        f"an empty window was expected to read both arms and read {sorted(unguarded)}")
+    cross = [p for p in tcp.same_prompt_pairs(unguarded) if p["kind"] == "cross_arm"]
+    assert cross, f"the two windowless rows were expected to pair; got {cross}"
+
+    monkeypatch.delenv("CANARY_WINDOW", raising=False)
+
+    def never_asked(url):
+        raise AssertionError(
+            "a report with no window refused AFTER opening an engine client: the refusal is "
+            "supposed to be the first thing it does")
+
+    rc = tcp.main(["report", "--label", "kv-bfloat16"], client_factory=never_asked)
+    assert rc == tcp.EXIT_INSTRUMENT, (
+        f"a windowless report exited {rc}; it may only ever decline (2)")
+    printed = capsys.readouterr().out
+    assert "CANARY_WINDOW" in printed, (
+        f"the refusal never names the variable to set, so the operator has nothing to fix: "
+        f"{printed!r}")
+    assert not [r for r in _captured(services, "kv-bfloat16")
+                if r["kind"] == tcp.KIND_REPORT], (
+        "a refused report still appended a row: a verdict nobody made must not be readable "
+        "as a verdict")
+
+
+def test_window_id_names_the_two_routes_that_stamp_it_and_cites_no_line_that_is_not_there():
+    """#3404 clause 5: the docstring is the only place a reader learns where the id is set, so
+    it names the two route files and no longer cites a stamp its own tree does not hold.
+
+    What was there before named `flash-next-run-arm.sh:30` — and that launcher had no
+    `CANARY_WINDOW` anywhere in it, and line 30 was its `ENVFILE`/`LOG`/`RESULTS` block. A
+    claim carrying a line number is a claim about a specific byte of a specific file: it is
+    the kind of claim that rots silently, and this probe shipped one for nine days (#3188,
+    landed in `96b726b9`) while both of its routes ran windowless. So the guard forbids any
+    `file:line` form in this docstring, and requires that every file it does name exists and
+    actually sets the variable."""
+    doc = tcp.window_id.__doc__ or ""
+    assert "flash-next-run-arm.sh:30" not in doc, doc
+    assert not re.search(r"[\w./-]+\.(py|sh):\d+", doc), (
+        f"a docstring line-number claim is the shape that went stale: {doc!r}")
+    assert "kv_dtype_arm.py" in doc, "the fold is not named as a route that sets the id"
+    assert "flash-next-run-arm.sh" in doc, "the sweep is not named as a route that sets the id"
+    for named in ("eval/kv_dtype_arm.py", "agent-services/bin/flash-next-run-arm.sh"):
+        route = ROOT / named
+        assert route.is_file(), f"the docstring names {named}, which is not in the tree"
+        assert "CANARY_WINDOW" in route.read_text(encoding="utf-8"), (
+            f"the docstring says {named} sets CANARY_WINDOW; the file does not")
+
+
+def test_the_canary_step_hands_its_environment_to_both_probe_legs():
+    """The seam the two routes' `env=` writes depend on: the step is one process, and its two
+    probe legs are children that inherit it untouched.
+
+    Nothing in this file or `tests/test_flash_next_launcher.py` can prove an inherited value
+    unless the step passes its environment down, so the property is pinned where it lives:
+    exactly two probe legs, and no `env -i` (which would blank the window), no `CANARY_WINDOW=`
+    on the invocation line (which would re-stamp it somewhere a window's own id cannot reach),
+    and no `unset` of it anywhere in the file."""
+    step = (ROOT / "agent-services/bin/flash-next-canary-step.sh").read_text(encoding="utf-8")
+    legs = [ln for ln in step.splitlines() if "$ENGINE_TOOL_PROBE" in ln]
+    assert len(legs) == 2, f"expected the capture leg and the report leg, saw {legs}"
+    assert any(" capture " in ln for ln in legs), legs
+    assert any(" report " in ln for ln in legs), legs
+    for ln in legs:
+        assert "env -i" not in ln and "CANARY_WINDOW=" not in ln, (
+            f"a probe leg that scrubs or re-stamps the environment loses the window the "
+            f"route stamped: {ln}")
+    assert "unset CANARY_WINDOW" not in step
 
 
 # ── #3597: a budget a whole call fits inside, and the floor a split is read against ──

@@ -74,6 +74,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +125,12 @@ ARM_ENV_NAME = "flash-next-arm.env"
 SERVICE_LOG_NAME = "agent-llm-primary.log"
 CANARY_STEP_REL = "agent-services/bin/flash-next-canary-step.sh"
 
+#: The tool-call instrument the fold drives, which this window calls DIRECTLY for exactly
+#: one leg — `capture` of the shipped arm. One file and one argv shape, so the shipped arm's
+#: rows are written by the same code that writes the arm's (`_label_slug`, `window`,
+#: `prompt_sha256` and all), and the window still has one report leg, inside the fold.
+CANARY_PROBE_REL = "eval/tool_call_equivalence_probe.py"
+
 
 class ArmError(Exception):
     """A refusal that stops the window before it touches an engine."""
@@ -162,6 +169,25 @@ def service_log_path() -> Path:
 def canary_log_path() -> Path:
     return Path(os.environ.get("CANARY_LOG")
                 or _data_root() / "logs/services" / "flash-next-canary.jsonl")
+
+
+def arm_window_id(dtype: str) -> str:
+    """One id for this window, derived once, and handed to every leg the window runs.
+
+    `eval/tool_call_equivalence_probe.py::window_id` reads `CANARY_WINDOW`, and that variable
+    is the only thing saying which boot a captured tool decision belongs to: two arms under
+    one id are a comparison, the same two arms under two ids are two windows that can never
+    be paired. It is therefore derived HERE, once, and passed into each child's own env
+    rather than written into `os.environ` — the window has to be able to state which id its
+    children were given even if something upstream altered this process's environment.
+
+    `dtype` plus the UTC second is what an operator reads off a capture file; `os.getpid()`
+    is what makes "one id per window run" a fact instead of a hope, because two windows
+    opened in the same second are two processes and so cannot land on one id and pair with
+    each other.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"kv-{dtype}-{stamp}-{os.getpid()}"
 
 
 def repo_root() -> Path:
@@ -387,11 +413,19 @@ async def run_leg(root: Path, reason: str) -> tuple[bool, str]:
     return True, gated
 
 
-async def run_canary_step(root: Path, label: str, wait: float) -> tuple[int, bool]:
+async def run_canary_step(root: Path, label: str, wait: float, window: str) -> tuple[int, bool]:
     """The fold, as the one executable both routes call. Returns (rc, ran).
 
     `shutil.which` is not consulted: the call names `bash`, because this repo tracks the
-    step 755 but the arm route 644, and a mode bit is not a statement about the code."""
+    step 755 but the arm route 644, and a mode bit is not a statement about the code.
+
+    `CANARY_WINDOW` rides in the child's env for the same reason `CANARY_LOG` does, and it is
+    the more load-bearing of the two: the step runs the tool probe's `capture` and then its
+    `report`, and the variable is the only thing saying which boot those rows came from. With
+    it unset the report leg refuses (exit 2, no row), which is the honest answer and the one
+    that leaves the window unable to answer the tool-call question — so the value here is
+    `config`'s, the one id this window derived for itself.
+    """
     step = root / CANARY_STEP_REL
     if not step.is_file():
         warn(f"canary step missing: {step}")
@@ -406,12 +440,69 @@ async def run_canary_step(root: Path, label: str, wait: float) -> tuple[int, boo
         proc = await asyncio.to_thread(
             lambda: subprocess.run(argv, cwd=str(root), timeout=wait,
                                    env={**os.environ,
-                                        "CANARY_LOG": str(canary_log_path())}))
+                                        "CANARY_LOG": str(canary_log_path()),
+                                        "CANARY_WINDOW": window}))
     except subprocess.TimeoutExpired:
         warn(f"canary step timed out after {wait}s")
         return 124, True
     except OSError as exc:
         warn(f"canary step could not start: {exc}")
+        return 126, False
+    return proc.returncode, True
+
+
+def logged_dtype(log_path: Path) -> str | None:
+    """The dtype of the LAST `A/B config:` line in the live service log, or None.
+
+    Whole-file, where `wait_boot_dtype` reads only the bytes after an offset: the question here
+    is not "what did the boot I am waiting for choose" but "what did the last boot anyone made
+    choose", and that is the last such line in the file. `None` is the ordinary answer on this
+    box — the live service log holds no `A/B config:` line at all today, the nine that exist
+    are in rotated files — and it means unreadable, never a dtype.
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return boot_dtype(text)
+
+
+async def run_shipped_capture(root: Path, label: str, wait: float,
+                              window: str) -> tuple[int, bool]:
+    """The SHIPPED arm's tool-call decisions, recorded under this window's id. (rc, ran).
+
+    This is the second arm the comparison needs. The fold runs one `capture` and one `report`
+    per invocation, both labelled with the arm it was handed, so a window that recorded only
+    the dtype it armed leaves its own report leg saying "1 arm(s) have rows in window …" —
+    exit 2, no row, forever (#3404 clause 4). Recording the shipped arm here is what makes the
+    fold's ONE report leg a decision instead of a refusal.
+
+    `capture` only, and not the whole fold a second time: the fold would also re-run the prose
+    leg and append a second verdict line to `flash-next-canary.jsonl`, which has exactly one
+    writer per arm by #2404's rule, and its own report leg could only have refused anyway
+    (the arm's rows did not exist yet). So this calls the same probe the fold calls, for the
+    one leg nothing else can produce — and the probe prints its own canonical line, which is
+    how the operator sees the window id the shipped rows were stamped with.
+
+    Non-fatal by the same law as the fold's tool legs (#3109: no arm is lost to its
+    instrument). A window whose shipped capture fails still arms, still folds, and its report
+    then honestly declines; that is a visible gap, and an armed engine is not.
+    """
+    probe = root / CANARY_PROBE_REL
+    if not probe.is_file():
+        warn(f"shipped-arm capture: the tool probe is not at {probe}")
+        return 127, False
+    argv = [str(venv_python()), str(probe), "capture", "--label", label]
+    log("shipped capture: $ " + " ".join(shlex.quote(a) for a in argv))
+    try:
+        proc = await asyncio.to_thread(
+            lambda: subprocess.run(argv, cwd=str(root), timeout=wait,
+                                   env={**os.environ, "CANARY_WINDOW": window}))
+    except subprocess.TimeoutExpired:
+        warn(f"shipped-arm capture timed out after {wait}s")
+        return 124, True
+    except OSError as exc:
+        warn(f"shipped-arm capture could not start: {exc}")
         return 126, False
     return proc.returncode, True
 
@@ -477,6 +568,50 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
                          f"{cfg['settle_wait_s']:.0f} s; the gated restart would refuse the "
                          "arm boot. Nothing was staged or booted.")
                     return 2, hold.ours
+
+                # --- the shipped arm, recorded while the shipped engine is the one serving --
+                # Before anything is staged or booted: the pool this window holds has taken
+                # the traffic off the engine, the dtype it is serving is the one the armed
+                # dtype will be compared against, and the fold's single report leg — which
+                # runs later, inside the arm's step — needs BOTH arms on disk to decide
+                # anything (#3404 clause 4). Every failure here is a warning and not a
+                # refusal: #3109's rule, no arm is lost to its instrument.
+                if cfg["dtype"] == RESTORE_DTYPE:
+                    warn(f"arming the shipped dtype ({RESTORE_DTYPE}) leaves no second arm to "
+                         f"record: both captures would carry the label `kv-{RESTORE_DTYPE}`, "
+                         "the report would see one arm and decline. Nothing was captured.")
+                else:
+                    live = await asyncio.to_thread(logged_dtype, log_path)
+                    if live and live != RESTORE_DTYPE:
+                        warn(f"the shipped arm was NOT recorded: the last boot logged in "
+                             f"{log_path} says kv_dtype={live}, not {RESTORE_DTYPE}, so a "
+                             f"`kv-{RESTORE_DTYPE}` label would name an engine that is not "
+                             "serving — a window that failed to close is the usual reason. "
+                             "Arming continues; the fold will honestly report one arm.")
+                    else:
+                        if live is None:
+                            warn(f"no `A/B config:` line in {log_path} says what dtype is "
+                                 f"serving, so `kv-{RESTORE_DTYPE}` is labelled on the restore "
+                                 "contract this file keeps rather than on a logged boot.")
+                        cap_rc, cap_ran = await run_shipped_capture(
+                            root, f"kv-{RESTORE_DTYPE}", cfg["step_wait_s"], cfg["window"])
+                        if not cap_ran:
+                            warn("the shipped arm's capture did not run at all: this window "
+                                 "will hold one arm's rows and its report will decline")
+                        elif cap_rc == 2:
+                            warn("the shipped arm's capture could not decide (exit 2), so no "
+                                 "shipped rows exist: this window's report will decline")
+                        elif cap_rc == 1:
+                            warn("the shipped arm's capture exited 1: its rows ARE recorded, "
+                                 "and one of them is a finding about the shipped engine")
+                        elif cap_rc != 0:
+                            warn(f"the shipped arm's capture exited {cap_rc}, which is neither "
+                                 "a recording nor the instrument's own 1 or 2: read it as "
+                                 "unrecorded")
+                        else:
+                            log(f"shipped arm recorded: kv-{RESTORE_DTYPE} inside window "
+                                f"{cfg['window']}")
+
                 stage_env(env_file, cfg["dtype"])
 
                 # The offset is taken BEFORE the leg that boots, not after it. The gated leg
@@ -513,7 +648,7 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
                     # a verdict the window itself just wrote.
                     before = len(canary_records(canary_file))
                     step_rc, ran = await run_canary_step(root, f"kv-{cfg['dtype']}",
-                                                         cfg["step_wait_s"])
+                                                         cfg["step_wait_s"], cfg["window"])
                     if not ran:
                         warn("the canary step did not run at all")
                     elif step_rc != 0:
@@ -589,6 +724,10 @@ async def run_window(cfg: dict[str, Any]) -> tuple[int, bool]:
 def config(dtype: str) -> dict[str, Any]:
     return {
         "dtype": dtype,
+        # Derived once, here, so the whole window has one id: every leg reads it off this
+        # dict rather than deriving its own, which is what keeps the shipped arm's capture
+        # and the arm's capture inside one pairable window (#3404 clause 1).
+        "window": arm_window_id(dtype),
         "repo": repo_root(),
         "env_file": arm_env_path(),
         "log": service_log_path(),
