@@ -75,8 +75,10 @@ its failure is demonstrated on a seeded heading rather than described.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
+from datetime import date, datetime, timezone  # `date`: the 2026-10-14 onset row below
 from pathlib import Path
 
 import pytest
@@ -6880,3 +6882,370 @@ def test_the_published_maxima_probe_is_rostered_wherever_its_watch_peers_are():
         f"§Watch the machinery spells {sorted(set(spelled))} while its heading declares "
         f"{len(ids)} ids {ids}; a member admitted and a count left stale is the move this "
         "node exists to catch")
+
+
+# ---------------------------------------------------------------------------
+# Job #91 — the thinking-fidelity prevalence series, and the read-side
+# discontinuity #3590 opened in it that nothing named until #3655.
+#
+# Before `7d685b39` the scan walked plain `*.json` only, so a day the retention sweep
+# had already partly gzipped was scored on a shrinking slice of itself, and the series
+# published the result as a rate. The fix changed what the scanner can see; it changed
+# no row. That leaves a file whose rows are written by two readers with no key naming
+# which one wrote which — until the fix, whose own rows carry `files_archived`, and the
+# absence of that key is now the marker. These five nodes hold the skill and the task
+# body to saying so, because the run is handed this prose and a run that does not know
+# the key exists will report a blind read as a change in the rate.
+#
+# Both file-level rails apply and both are load-bearing here rather than decorative.
+# Nothing in the block mutates module state — every name below is a path, a tuple or a
+# function, so no node changes another node's view (§State that changes only at
+# import). And the series is opened to be read and never to be written: the remedy for
+# a discontinuity in a published series is prose plus the restatement the owning run
+# appends, so a node tempted to "repair" a row has no route to one, and #3590's owed
+# entry rules that no round rewrites the published record.
+#
+# Marked `live_vault`, which is the honest mark and not a dodge: the surfaces are the
+# live vault a round under test does not control, and the series lives under the data
+# root, which no worktree has ever held —
+# `tests/test_thinking_fidelity_scan_prevalence_row.py:134` proves that absence for the
+# data root and `:563` marks its own vault-reading node this way for the same reason.
+# So these are hand-run records, and `test_the_quiet_marks_are_declared_at_call_sites`
+# below counts them as quieted rather than as gating.
+# ---------------------------------------------------------------------------
+
+#: Job #91's protocol, the file the run is handed. `SKILL_78_FILE`/`SKILL_80_FILE`
+#: above, same shape and for the same reason: a path, so a renamed skill fails loudly
+#: instead of making every `in` below vacuously false.
+PREVALENCE_SKILL_FILE = (Path.home() / "obsidian" / "skills"
+                         / "thinking-fidelity-prevalence-series" / "SKILL.md")
+
+#: Job #91's own body, which carries its own copy of the baseline table. `_build_task_
+#: prompt` renders the front-matter `description` and not this body, so the table is read
+#: by a human and by every report that quotes the task — which is why #3655 moves both
+#: files and why a node has to look at both. Precedent: #3449 clause 5 moved two skills
+#: and two task descriptions together for exactly this reason.
+PREVALENCE_TASK_FILE = (Path.home() / "obsidian" / "autonomy"
+                        / "91-nightly-thinking-fidelity-prevalence-series.md")
+
+#: The published series. Named absolutely, the way
+#: `tests/test_thinking_fidelity_scan_prevalence_row.py:469` names it, because the data
+#: root is in no checkout and a path relative to `ROOT` would resolve into a worktree
+#: that cannot contain it. Read-only, per the note above.
+PREVALENCE_SERIES = (Path.home() / "lloyd-data" / "_pipeline" / "metrics"
+                     / "thinking-fidelity-prevalence.jsonl")
+
+#: The first `recorded_at` whose rows were written by the fixed scanner. The fix landed
+#: 2026-10-30; the 2026-10-31 09:00Z run is the first that read the archives, and the
+#: same pass re-derived every day in its window — so the date separating the two readers
+#: is a fact about `recorded_at`, and the node on the live series is what keeps the
+#: skill's clause bound to that field rather than to the row's own day.
+_PREV_FIX_DATE = datetime(2026, 10, 31, tzinfo=timezone.utc)
+
+#: The witness the fix added to every row it wrote. Its ABSENCE is what makes a row
+#: archive-blind. A post-fix row carrying `files_archived: 0` is not blind — it read a
+#: day the sweep had not touched (the 2026-10-24 onward restatements carry 0) — so this
+#: is a presence test, never a value test.
+_PREV_KEY = "files_archived"
+
+#: Words that would make a sentence attribute the 09-28 hand figure to the archives.
+#: The prohibition is checked positively elsewhere; this is the negative half, applied
+#: per sentence by the node that carries it.
+_PREV_BLAME_RE = re.compile(
+    r"\b(because|due to|caused by|causes?|explained by|the reason|attribut\w*)", re.I)
+
+
+def _prevalence_section() -> str:
+    """§Read the number this way of #91's skill, closed at the next `##`.
+
+    Bounded rather than whole-file for the reason `_bound_entropy_section` gives: a
+    phrase present anywhere in the skill would satisfy an unbounded `in` while the
+    section that tells the run how to read a number said nothing about it.
+    """
+    lines = PREVALENCE_SKILL_FILE.read_text().splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("## ") and "Read the number this way" in ln), None)
+    assert start is not None, (
+        f"{PREVALENCE_SKILL_FILE} has no 'Read the number this way' heading, so the "
+        "section every bullet below is graded against no longer exists")
+    end = next((j for j in range(start + 1, len(lines)) if lines[j].startswith("## ")),
+               len(lines))
+    section = "".join(lines[start:end])
+    assert section.strip(), "§Read the number this way is empty"
+    return section
+
+
+def _prevalence_rows() -> list[dict]:
+    """Every row of the published series, as written — never a pre-filtered copy.
+
+    Unfiltered on purpose: the claim under test is which rows carry a key, and a reader
+    that dropped the odd-looking ones first would certify the marker clean by
+    construction.
+    """
+    rows = [json.loads(ln) for ln in PREVALENCE_SERIES.read_text().splitlines()
+            if ln.strip()]
+    assert rows, f"{PREVALENCE_SERIES} holds no rows"
+    return rows
+
+
+def _prev_stamp(row: dict) -> datetime:
+    """A row's `recorded_at` as an aware instant.
+
+    Parsed rather than string-compared: the file writes `+00:00` today, and a cutoff that
+    is a date deserves to survive the day a row is written with another offset.
+    """
+    return datetime.fromisoformat(row["recorded_at"]).astimezone(timezone.utc)
+
+
+def _prev_day(row: dict) -> str:
+    """The calendar day a day row is about, as the file writes it."""
+    day = row.get("date") or row.get("day")
+    assert day, f"a row with no day field is not a day row: {row}"
+    return day
+
+
+@live_vault
+def test_the_prevalence_skill_states_which_rows_the_archive_fix_made_comparable():
+    """Clause 1: the discontinuity is named, and named with the key that marks it.
+
+    A run that has never heard of `files_archived` reads an archive-blind row as a
+    smaller store and reports the difference as a change in the rate — which is what it
+    did to 2026-09-28, whose denominator the retention sweep walked down from 13181 blocks
+    to 13049, then 1458, then 101. So the section owes four things: the key, what its
+    absence costs, where the comparable rows start, and the prohibition that follows.
+    """
+    flat = _flat(_prevalence_section())
+    assert f"`{_PREV_KEY}`" in flat, (
+        f"§Read the number this way never names {_PREV_KEY}, so the run is told how to "
+        "read a day row but not which rows the archive fix could not have written — the "
+        "key is the only thing that separates the two readers")
+    for phrase, why in (
+        ("is archive-blind", "without the name for what a keyless row is, a reader has no "
+                             "way to tell a quiet day from a blind read"),
+        (".json.gz", "without naming what was missed, 'archive-blind' is a label and not a "
+                     "mechanism, and nobody can tell whether the row in front of them is "
+                     "one"),
+        (_PREV_FIX_DATE.date().isoformat(), "without the date the comparable cohort starts, "
+                                            "the clause cannot be applied to a row"),
+    ):
+        assert phrase in flat, f"the discontinuity clause never says {phrase!r}: {why}"
+    assert re.search(r"recorded_at[`']? is 2026-10-31|recorded_at.{0,40}2026-10-31", flat), (
+        "the 2026-10-31 cutoff is stated without binding it to `recorded_at`, which is the "
+        "field that decides it — read on the row's own `day` the same claim is false, and "
+        "the node on the live series says so with the file's numbers")
+    assert "not evidence about a rate trend" in flat, (
+        "the clause defines archive-blindness but never forbids citing a blind row as a "
+        "trend, which is the whole reason the clause is here")
+
+
+@live_vault
+def test_the_prevalence_skill_records_the_restatement_ruling_and_the_duplicate_day_rows():
+    """Clause 2: the owed entry's ruling is on the record, with the hazard it leaves.
+
+    #3590's owed entry asked whether the pre-fix rows get marked non-comparable in the
+    JSONL or are superseded by restatement. Landed behaviour answered it — the 2026-10-31
+    09:00Z run re-derived every day in its window and appended, deleting nothing — and the
+    answer has a cost the run has to know: appending means a day has several rows, and the
+    archive-blind ones are the older ones. A clause that records the ruling without the
+    hazard leaves a reader grepping by `day` onto a number the fix already contradicted.
+    """
+    flat = _flat(_prevalence_section())
+    for phrase, why in (
+        ("appended", "the ruling turns on which verb the fix used — an in-place edit would "
+                     "have destroyed the only evidence of what the old reader saw"),
+        ("superseded", "the pre-fix rows are kept rather than deleted, so they need the "
+                       "word that says a kept row is not a current one"),
+        ("deleted", "the half of the ruling the owed entry actually asked for is that the "
+                    "published record was not rewritten"),
+    ):
+        assert phrase in flat, f"the restatement ruling is not recorded ({phrase!r}): {why}"
+    assert re.search(r"newest `?recorded_at`? for a day is the only citable copy", flat), (
+        "appended restatements leave most days with several rows, so the section has to "
+        "name the newest `recorded_at` as the citable copy or 'the day's row' is ambiguous "
+        "in exactly the way that produced the 09-28 ladder")
+
+
+@live_vault
+def test_the_prevalence_baseline_names_both_09_28_figures_and_blames_neither_on_archives():
+    """Clause 3: both 09-28 numbers are carried, one is authoritative, the cause stays open.
+
+    #3590's finding is that the series disagrees with the hand baseline on 2026-09-28 and
+    that correcting it without saying which measurement wins is the worse of the two
+    errors. So the correction is made and the winner named: `59/13181` is a scanner row
+    measuring a closed day over the whole day, and `45/10324` appears in no row the
+    scanner ever wrote. The wrong explanation is worse than either error, because the
+    store held nothing gzipped on 2026-09-29 — the first shrinking `files` count is the row
+    recorded 2026-10-14 — so blaming the archives would teach the next reader to distrust
+    a row that was correct. Hence the sentence-by-sentence check below, not just a search
+    for the prohibition.
+    """
+    section = _prevalence_section()
+    flat = _flat(section)
+    for token, why in (
+        ("45/10324", "the hand figure stays or #1770's measurement disappears; this clause "
+                     "qualifies it, it does not delete it"),
+        ("59/13181", "the scanner's own 09-28 reading, which no baseline sentence here may "
+                     "be written without"),
+        ("32/10413", "09-26, which re-derives exactly — the reason the disagreement is one "
+                     "day and not a broken baseline"),
+        ("54/11956", "09-27, which re-derives exactly, same role"),
+    ):
+        assert token in flat, f"the baseline paragraph does not carry {token}: {why}"
+    assert "authoritative" in flat, (
+        "both 09-28 figures are present with no ruling between them, which is the state "
+        "#3590 refused to leave the baseline in")
+    assert "0.44%" in flat and "0.45%" in flat, (
+        "the two 09-28 readings are quoted as one rounded rate; they are 0.44% and 0.45%, "
+        "and the ruling is about which measurement wins, not about the level — the point "
+        "of naming both is that no conclusion changes either way")
+    assert re.search(r"unidentified|cause.{0,30}unknown", flat), (
+        "the hand figure's cause is stated as settled; it is not — nothing was archived "
+        "when it was taken, so the honest word is unidentified")
+    assert "Do not publish `45/10324` as an archive-blind reading" in flat, (
+        "the clause that forbids the false explanation is missing")
+
+    for s in _sentences(section):
+        if ("10324" in s and _PREV_BLAME_RE.search(s)
+                and any(w in s for w in ("archive", "files_archived", ".json.gz"))):
+            raise AssertionError(
+                f"a sentence attributes 45/10324 to the archives: {s[:200]!r} — nothing "
+                "in the store was gzipped when the hand figure was measured on "
+                "2026-09-29, so that attribution is false wherever it appears")
+
+
+@live_vault
+def test_the_prevalence_marker_is_a_recorded_at_fact_and_the_series_proves_it():
+    """Clause 4: the cutoff the skill states is the field the file supports, and the
+    duplicate rows are bounded by a rule rather than by luck.
+
+    Three claims over the live series, and the middle one is why this node exists. No row
+    recorded before 2026-10-31 carries `files_archived` and every row recorded on or after
+    it does. The SAME test read on the row's own `day` is false — that run re-derived days
+    back to 2026-09-09, so 41 pre-cutoff days carry keyed rows — and a clause pinned to
+    `day` would read as a documentation bug to anyone who checked it against the file. The
+    third claim is what makes the duplicates a bounded hazard instead of an unbounded one:
+    the newest row of every day is keyed, so a citable copy always exists even though
+    778 archive-blind day rows are still in the file.
+    """
+    rows = _prevalence_rows()
+    before = [r for r in rows if _prev_stamp(r) < _PREV_FIX_DATE]
+    after = [r for r in rows if _prev_stamp(r) >= _PREV_FIX_DATE]
+    assert before and after, (
+        f"the series is all one side of the fix ({len(before)} rows before "
+        f"{_PREV_FIX_DATE.date()}, {len(after)} after), so this node is witnessing no "
+        "discontinuity and the skill's clause is unverified")
+    assert [r for r in before if _PREV_KEY in r] == [], (
+        f"{len([r for r in before if _PREV_KEY in r])} rows recorded before "
+        f"{_PREV_FIX_DATE.date()} carry {_PREV_KEY}, so the key no longer marks the "
+        "discontinuity and the skill's cutoff date is the wrong one")
+    assert [r for r in after if _PREV_KEY not in r] == [], (
+        f"{len([r for r in after if _PREV_KEY not in r])} rows recorded on or after "
+        f"{_PREV_FIX_DATE.date()} lack {_PREV_KEY}; the skill calls every such row "
+        "comparable and the file disagrees")
+
+    wrong_field = [r for r in rows if _prev_day(r) < _PREV_FIX_DATE.date().isoformat()
+                   and _PREV_KEY in r]
+    assert wrong_field, (
+        f"no row dated before {_PREV_FIX_DATE.date()} carries {_PREV_KEY}, so the cutoff "
+        "could be re-pinned to `day` and this node would not notice if someone did — the "
+        "restatement run appended keyed rows for days back to 2026-09-09, and that is what "
+        "makes `recorded_at` the only field that works")
+
+    day_rows = [r for r in rows if r.get("scope") == "day"]
+    assert day_rows, f"{PREVALENCE_SERIES.name} has no `scope: day` rows"
+    blind = [r for r in day_rows if _PREV_KEY not in r]
+    blind_days = sorted({_prev_day(r) for r in blind})
+    keyed_days = {_prev_day(r) for r in day_rows if _PREV_KEY in r}
+    assert (len(blind), len(blind_days), blind_days[0], blind_days[-1]) == (
+        778, 41, "2026-09-09", "2026-10-30"), (
+        f"the archive-blind cohort the skill quotes is no longer 778 day rows over 41 days "
+        f"2026-09-09..2026-10-30 (now {len(blind)} rows, {len(blind_days)} days, "
+        f"{blind_days[:1]}..{blind_days[-1:]}), so the skill's sentence and the number the "
+        "next reader finds in the file have come apart")
+    assert [d for d in blind_days if d not in keyed_days] == [], (
+        "an archive-blind day has no restated row beside it, so the newest-row rule below "
+        "cannot rescue it and the skill's 'newest is citable' promise is false for that day")
+
+    by_day: dict[str, list[dict]] = {}
+    for r in day_rows:
+        by_day.setdefault(_prev_day(r), []).append(r)
+    unrescued = sorted(d for d, rs in by_day.items()
+                       if _PREV_KEY not in max(rs, key=_prev_stamp))
+    assert unrescued == [], (
+        f"the newest row of {unrescued} is archive-blind, so the only citable copy of that "
+        "day is the blind one and the rule the skill states has stopped holding")
+    assert sum(1 for rs in by_day.values() if len(rs) > 1) >= 41, (
+        "fewer than 41 days carry more than one row, which is the count the restatement "
+        "left behind; if it dropped, rows were deleted from the published series and "
+        "#3590's no-rewrite ruling is what broke")
+
+    sep28 = by_day.get("2026-09-28", [])
+    blind_pairs = {(r["flagged"], r["blocks"]) for r in sep28 if _PREV_KEY not in r}
+    assert {(59, 13181), (59, 13049), (9, 1458), (2, 101)} <= blind_pairs, (
+        f"the 2026-09-28 ladder the skill cites as the worked example of rate-trend "
+        f"corruption is no longer in the file (archive-blind pairs: {sorted(blind_pairs)}), "
+        "so the strongest piece of evidence for the clause has gone stale")
+    restated = [r for r in sep28 if _PREV_KEY in r]
+    assert restated and all((r["flagged"], r["blocks"]) == (59, 13181)
+                            for r in restated), (
+        f"the post-fix restatements of 2026-09-28 no longer agree on 59/13181 "
+        f"({sorted({(r['flagged'], r['blocks']) for r in restated})}), so `59/13181` is not "
+        "the authoritative baseline the skill says it is")
+    latest = max(restated, key=_prev_stamp)
+    assert (latest["files"], latest[_PREV_KEY]) == (468, 463), (
+        f"the newest restatement of 2026-09-28 reads {latest['files']} files / "
+        f"{latest[_PREV_KEY]} archived, not the 468/463 the skill quotes as the restored "
+        "whole of that day")
+
+    # The evidence behind the skill's refusal to blame the archives. Every 09-28 row
+    # recorded before 2026-10-14 reads the same 468 files / 13181 blocks the scanner saw
+    # the morning after the hand figure was taken, and the first row that reads fewer is
+    # the 2026-10-14 one — so the sweep had archived nothing yet on 2026-09-29 and
+    # `45/10324` cannot be an archive-blind reading. If this uniformity ever goes, the
+    # skill's "cause unidentified" sentence has lost its evidence and has to be re-derived.
+    early = [r for r in sep28
+             if _prev_stamp(r) < datetime(2026, 10, 14, tzinfo=timezone.utc)]
+    assert early and {(r["files"], r["blocks"]) for r in early} == {(468, 13181)}, (
+        f"the 2026-09-28 rows recorded before 2026-10-14 no longer all read 468 files / "
+        f"13181 blocks ({sorted({(r['files'], r['blocks']) for r in early})}), so the claim "
+        "that nothing was archived when the hand figure was taken is no longer what the "
+        "file says")
+    on14 = [(r["files"], r["blocks"]) for r in sep28
+            if _prev_stamp(r).date() == date(2026, 10, 14)]
+    assert on14 == [(444, 13049)], (
+        f"the first shrinking 2026-09-28 reading is no longer 444/13049 recorded 2026-10-14 "
+        f"({on14}); the skill dates the discontinuity's onset by that row")
+
+
+@live_vault
+def test_the_prevalence_task_table_qualifies_the_hand_baseline_the_series_never_matched():
+    """Clause 5: #91's own table stops presenting `45/10324` as the day's number.
+
+    The task body duplicates the skill's baseline table, and a table is read as a list of
+    facts — which is how an unqualified 09-28 row kept re-supplying the figure the series
+    never agreed to, out of a file that outranks the skill in every report that quotes the
+    job. `_build_task_prompt` renders the front-matter `description` rather than this body,
+    so this half reaches a human and the reports, not the worker; it still has to agree
+    with the skill, or the two disagree in the direction where the wrong one is shorter.
+    """
+    text = PREVALENCE_TASK_FILE.read_text()
+    rows = [ln for ln in text.splitlines() if ln.startswith("| 2026-09-")]
+    assert len(rows) == 3, (
+        f"{PREVALENCE_TASK_FILE.name} carries {len(rows)} baseline table rows, not the "
+        "three days the baseline is made of — the node cannot tell which day is "
+        "unqualified, so the table's shape is what changed")
+    sep28 = [ln for ln in rows if "2026-09-28" in ln]
+    assert len(sep28) == 1, "09-28 appears in the baseline table more than once"
+    row = _flat(sep28[0])
+    assert "13181" in row, (
+        f"the 09-28 row carries no post-fix reading beside the hand one: {row[:200]!r} — "
+        "the row has to say what the series reads for that day, or a reader takes the hand "
+        "figure as the current one")
+    assert "authoritative" in row, (
+        f"the 09-28 row names both figures with no ruling between them: {row[:200]!r}")
+    assert "Read the number this way" in _flat(text), (
+        "the task body never points at the skill's discontinuity section, so the table is "
+        "a second unattributed copy of a number the skill has already qualified")
+    assert "cause unidentified" in _flat(text), (
+        "the task's 09-28 row gives the gap an explanation the evidence refuses; the honest "
+        "word is that the cause of the hand figure's smaller numbers is unidentified")
