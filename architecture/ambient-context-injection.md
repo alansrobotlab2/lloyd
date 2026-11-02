@@ -590,9 +590,29 @@ mode has no reason to block it.
   `tests/test_ambient_decision_turn_scope.py`, which crosses the router/store seam with
   the real route and the real dict (a mocked store would pin nothing), and the comment
   above `_ambient_decisions` no longer promises the `finally` clause that made the leak
-  look impossible to anyone who read it. Ambient traffic here is thin enough that no
-  crossed silencing had left a fingerprint, which is a coverage gap, not a clean bill;
-  the scan that would settle it is recorded as owed on #2599.
+  look impossible to anyone who read it. Ambient traffic here was thin enough that no
+  crossed silencing had left a fingerprint, which is a coverage gap, not a clean bill,
+  and the scan that settles it ran four days later, on 2026-10-16, in this item's own
+  owed-check pass — which closed the question instead of leaving it standing. Over
+  `~/lloyd-data/sessions`: 11,801 files (10,106 `.json` + 1,695 `.json.gz`, 0
+  unparseable), 25 `ambient_decide` tool_call rows, 9 silent ambient breadcrumbs across
+  22 files touching the tier, and 0 files where breadcrumbs outnumber calls — the same
+  fingerprint the 2026-10-12 triage had, on a corpus a fifth larger. The aggregate
+  cannot attribute a crumb to a turn, because a breadcrumb carries no `turn_id`, so that
+  pass also segmented each file on its `source:ambient` user row's `turn_id`: 43 ambient
+  turn segments, all 9 crumbs sitting in a segment that made its own decide call, 0 in a
+  zero-call segment, 0 with no segment. Splitting at the land stamp
+  `2026-10-12T08:50:47Z` gives PRE-fix 19 calls / 6 crumbs / 18 files — identical to the
+  2026-10-12 fingerprint — and POST-fix 6 / 3. Its own words are "decisive against recheck":
+  every surviving pre-fix ambient turn was already counted on 2026-10-12, and traffic after
+  the stamp adds only rows about the build that replaced it, while retention only ever
+  deletes. So the settled reading is that no crossed silencing appears anywhere in the
+  surviving corpus, and that the aggregate route could not have found one which did — the
+  direct route is the 43 segments. Watching live traffic for a crossing from here stays
+  owed-check's to re-run. Those figures are quoted on this page as the record of a published
+  scan, and no node re-walks `~/lloyd-data/sessions` to check them: the corpus is runtime
+  data the suite refuses to run against (`tests/conftest.py`), so a re-walk would measure the
+  tree it happened to run in.
 
 - 2026-10-12 — **#2601 landed**: the notes channel got the read door its peek had
   been promising since #1516. `GET /api/next-session-notes` serves

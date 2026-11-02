@@ -11372,3 +11372,174 @@ def test_the_ceiling_note_cost_no_other_page_and_no_new_command_block():
             f"{slug} now names {CEILING_FUNCTION}: #3611 ruled that page needs no "
             "availability note, so either that ruling changed and this list changed "
             "with it, or the line spread by copy instead of by decision")
+
+
+# --------------------------------------------------------------------------- #
+# The ambient cross-silencing scan: measured, not owed (#3622, 2026-11-02)
+# --------------------------------------------------------------------------- #
+
+#: The pointer #3622 retires. `architecture/ambient-context-injection.md` closed its
+#: 2026-10-12 `#2599 landed` entry with "the scan that would settle it is recorded as owed
+#: on #2599", but #2599 is `status: done` and that item's own owed-check pass had already
+#: settled the question on 2026-10-16 — the page deferred a finished measurement to an item
+#: that cannot perform it. A closed item is not an owner, and a page saying a closed
+#: measurement is still owed is what makes the next pass book an absence that already
+#: shut: the #2371 → #2379 → #2397 chain, #2933's sweep prose, and #3574's `#2027` pair are
+#: that failure three times, in three different pages. So the pattern is pinned as a shape
+#: rather than as this one sentence — the rot is the pointer, and the next page to rot will
+#: carry a different number.
+OWED_POINTER = re.compile(r"owed on #\d+")
+
+#: The retired sentence exactly as the page carried it (its `:593`-`:595`, before this
+#: round broke it across those lines). Fixture for the node below: a live page can satisfy
+#: an absence check with a pattern that has never matched anything, and this item exists
+#: because a previous pass rewrote two sentences elsewhere without retiring the claim — so
+#: the reader is put to the text it is supposed to catch, the way
+#: `test_the_rewrite_cost_page_no_longer_owes_a_measurement_it_published` does.
+RETIRED_SCAN_POINTER = (
+    "Ambient traffic here is thin enough that no crossed silencing had left a "
+    "fingerprint, which is a coverage gap, not a clean bill; the scan that would settle "
+    "it is recorded as owed on #2599.")
+
+
+def _owed_pointer_gaps(text: str) -> list[str]:
+    """Which closed-item ownership pointers this text makes, in the order it makes them.
+
+    One function reads the live page and the fixture above, so the two cannot disagree
+    about what the pattern is. `_flat` because the page is hand-wrapped: the retired
+    sentence broke between "clean bill;" and "the scan that would settle it", so a
+    raw-bytes match would miss the exact sentence it exists to catch.
+    """
+    return [m.group(0) for m in OWED_POINTER.finditer(_flat(text))]
+
+
+def test_the_ambient_page_no_longer_owes_the_scan_it_already_records():
+    """Clauses 1 and 2: the pointer is gone, and the pattern is proven to fire on the
+    sentence it was taken out of.
+
+    The scope is the whole page, and that is the whole point of the node. Every sibling
+    node in this file bounds its scan at `## Review log`, because a dated entry is a record
+    of what a past pass saw and is entitled to keep its wording — and that is exactly why a
+    section-scoped absence check would have been GREEN HERE BEFORE ANY EDIT: the retired
+    pointer lived inside the 2026-10-12 entry, the page's only `owed on` hit anywhere. The
+    fix followed the `historical:` doctrine in `PATH_CITATION_EXEMPTIONS` and rewrote the
+    sentence into the settled reading rather than deleting the entry, so the only assertion
+    that can fail is one that reads the page end to end — which is also the shape of the
+    acceptance check, `git grep 'owed on #'` returning zero hits on both pages.
+    """
+    page = _text("ambient-context-injection.md")
+    assert _owed_pointer_gaps(RETIRED_SCAN_POINTER) == ["owed on #2599"], (
+        "the retired sentence did not fire the pattern, so the absence below is a green "
+        "light permanently fixed on a text that can never violate it")
+    assert not _owed_pointer_gaps(page), (
+        f"the page defers work to an item number again: {_owed_pointer_gaps(page)} — a "
+        "closed item cannot own it, and the measurement behind this one is published below")
+
+
+#: What the 2026-10-16 owed-check pass returned and the entry now records, quoted from
+#: `~/obsidian/backlog/2599-ambient-decisions-is-keyed-by-session-not-turn-the.md`,
+#: `owed_settled[0]` (`outcome: settled`, at `2026-10-16T04:32:56.624277`). Asserted as
+#: prose against the page and deliberately NOT recomputed — see
+#: `test_neither_doc_claims_module_recomputes_a_scan_it_is_only_meant_to_quote`, which is
+#: the pin that keeps it that way. Re-running the scan over a fresh window is owed-check
+#: work; the pre/post split is quoted with its own arms (PRE 19/6/18, POST 6/3) rather than
+#: only the totals, because the arms are what make the reading decisive: the pre-fix arm is
+#: identical to the 2026-10-12 fingerprint, so every surviving pre-fix ambient turn was
+#: already in the count and no later traffic can answer the question.
+SETTLED_SILENCING_SCAN = {
+    "files the scan walked": "11,801 files",
+    "the uncompressed half of that walk": "10,106",
+    "the compressed half of that walk": "1,695",
+    "files that would not parse": "0 unparseable",
+    "`ambient_decide` tool_call rows in the corpus":
+        "25 `ambient_decide` tool_call rows",
+    "silent ambient breadcrumbs in the corpus": "9 silent ambient breadcrumbs",
+    "files touching the tier": "22 files touching the tier",
+    "the fingerprint the ruling turns on": "0 files where breadcrumbs outnumber calls",
+    "ambient turn segments, the direct test the aggregate cannot be":
+        "43 ambient turn segments",
+    "the land stamp the pre/post split is taken at": "2026-10-12T08:50:47Z",
+    "the pre-fix arm": "PRE-fix 19 calls / 6 crumbs / 18 files",
+    "the post-fix arm": "POST-fix 6 / 3",
+}
+
+
+def test_the_ambient_page_records_the_settled_scan_with_the_numbers_that_settled_it():
+    """Clause 1's positive half: the retired pointer is replaced by the reading, with the
+    figures, the date, and the verdict the pass itself returned.
+
+    Every figure is compared against the page and none against the corpus, and the tamper
+    after the loop is what proves that: if these numbers were recomputed, or merely
+    restated from this constant, rewriting one of them on the page would change nothing and
+    `still_present` would come back the full length.
+    """
+    flat = _flat(_text("ambient-context-injection.md"))
+    assert "2026-10-16" in flat, (
+        "the reading lost the date it was measured on, so a reader cannot tell it is "
+        "four days after the entry it sits in rather than the entry's own first look")
+    assert _flat('"decisive against recheck"') in flat, (
+        "the page does not carry the verdict the pass returned, which is the sentence that "
+        "tells a reader not to book the scan again")
+    for what, figure in SETTLED_SILENCING_SCAN.items():
+        assert _flat(figure) in flat, (
+            f"the page no longer states {what} as {figure!r} — the pass returned it on "
+            "2026-10-16 and this page is the only live place it can be read")
+
+    tampered = flat.replace("0 files where breadcrumbs outnumber calls",
+                            "3 files where breadcrumbs outnumber calls", 1)
+    assert tampered != flat, (
+        "the seeded tamper did not take, so the figure loop above is untested")
+    still_present = [figure for figure in SETTLED_SILENCING_SCAN.values()
+                     if _flat(figure) in tampered]
+    assert len(still_present) == len(SETTLED_SILENCING_SCAN) - 1, (
+        f"rewriting the fingerprint in a copy of the page dropped "
+        f"{len(SETTLED_SILENCING_SCAN) - len(still_present)} figures, not exactly one — so "
+        "that loop is not reading the numbers off the page")
+
+
+#: What re-walking the corpus would take. The session corpus lives under the runtime data
+#: root and a fifth of it is compressed, so a node that recomputed the scan would have to
+#: name the corpus root or the compressed suffix. Spelled by concatenation because this
+#: module's own source is what the check reads: a marker written literally would be the
+#: thing the node bans, and the node would stay green until someone edited the comment.
+RESCAN_MARKERS = ("lloyd-data" "/sessions", ".json" ".gz")
+
+#: The corpus root is banned from both modules; the compressed suffix only from this one,
+#: because `test_research_doc_claims.py` has nodes reading compressed fixtures of its own.
+#: Naming the corpus is what clause 3 forbids wherever either page is quoted; the suffix is
+#: the tell that a walk here would be of THIS scan, whose figures live in this file.
+RESCAN_SCOPE = ((Path(__file__), RESCAN_MARKERS),
+                (Path(__file__).with_name("test_research_doc_claims.py"),
+                 RESCAN_MARKERS[:1]))
+
+
+def test_neither_doc_claims_module_recomputes_a_scan_it_is_only_meant_to_quote():
+    """Clause 3: the settled figures stay prose in both doc-claims modules.
+
+    Not a stylistic preference. `tests/conftest.py:241` refuses the suite against the
+    production tree, and a gate worktree's own data root is empty, so a node that walked
+    the corpus would either fail in a round for a reason that is not the doc's — the trap
+    #2933's block documents and #3574's `SETTLED_PAIRING` repeats — or, worse, pass while
+    measuring an empty directory and certify a page nobody checked. Retention only deletes,
+    so a later walk is not even the same corpus. Re-running over a fresh window is owed-check
+    work, recorded on this item.
+
+    The fixture at the end is the same control as the pointer node's: markers that have
+    never fired on either module are worth nothing until they fire on something, and it is
+    assembled FROM the markers rather than written out, because writing it out would put
+    every marker back into the source this check reads.
+    """
+    for mod, markers in RESCAN_SCOPE:
+        hits = [m for m in markers if m in mod.read_text(encoding="utf-8")]
+        assert not hits, (
+            f"{mod.name} now names the runtime session corpus ({hits}), which means a node "
+            "in it is recomputing a scan whose figures are quoted prose from a settled "
+            "owed-check pass — see SETTLED_SILENCING_SCAN")
+
+    root, suffix = RESCAN_MARKERS
+    planted = (f'for p in sorted(HOME / "{root}"):\n'
+               f'    with read_compressed(p if p.endswith("{suffix}") else p) as fh:\n'
+               '        pass\n')
+    assert [m for m in RESCAN_MARKERS if m in planted] == list(RESCAN_MARKERS), (
+        "a planted corpus walk tripped none of the markers, so the absences above "
+        "assert nothing")

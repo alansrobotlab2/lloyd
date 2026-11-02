@@ -96,9 +96,20 @@ store instead of printing its initialiser, which is what makes the dry run below
 worth reading. Nothing deletes `topics` rows, and `import_legacy` is idempotent
 against the archive that is still in the vault, so the corpus is one command
 from back. Running it is an operator's call, not a round's: it writes production
-`research.db`, which is outside this repo, and it is owed on #3085. Until it is
-back (or ruled dropped), `similar()` has no legacy side to match against and a
-retired checklist topic can be proposed and re-researched (#3046).
+`research.db`, which is outside this repo. The command is
+`python -m app.research_store import ~/obsidian/lloyd/research-queue-archive.md`,
+`--dry-run` first, and the read-only check after it is
+`python -m app.research_store stats` reporting `archived` at 314 or more. It has
+no owner rather than a dead one, deliberately: the payload halves above shipped,
+the item that shipped them is closed, and a closed item cannot run a command, so
+naming one here would only rot again. What the question carries instead is a
+date — **2026-11-08**. If `stats()` still reports `archived: 0` on that date,
+the corpus is ruled dropped, that ruling is recorded in this section, and the
+role this paragraph plays retires with it. Nothing here claims the corpus came
+back: the number this section quotes is `archived: 0`, and §2's `archived` row
+still says zero rows. Until it is back (or ruled dropped), `similar()` has no
+legacy side to match against and a retired checklist topic can be proposed and
+re-researched (#3046).
 
 ---
 

@@ -1763,3 +1763,88 @@ def test_the_research_doc_states_the_discriminator_the_pool_code_keeps():
         "it with `mark_completed` alone, which is the half the code-side slice above "
         f"pins in `workers/pool.py` — it is also the shape of the sentence `25364e54` "
         f"deleted for naming the wrong call. The claim to keep is: {DOC_FAILED_ARM!r}.")
+
+
+# --------------------------------------------------------------------------- #
+# §1's restore obligation carries a date, not a closed item (#3622, 2026-11-02)
+# --------------------------------------------------------------------------- #
+
+#: The clause §1 of the doc carried until #3622 retired it: the restore's ownership pointed
+#: at #3085, which is `status: done`, so the page named a closed item as the owner of a
+#: command nobody has run. `tests/test_architecture_coverage_doc_claims.py` pins the same
+#: shape across the whole `architecture/` corpus; this node is the one-page pin for the page
+#: this file reads, and its fixture is the clause above — the pattern is shown firing on the
+#: text it retires rather than on nothing.
+CLOSED_ITEM_POINTER = re.compile(r"owed on #\d+")
+RETIRED_RESTORE_OWNERSHIP = (
+    "`research.db`, which is outside this repo, and it is owed on #3085.")
+
+#: What §1 carries instead: the operator's own command and the date the fallback ruling
+#: fires (#3085's owed-check of 2026-10-25T16:48:09: if `archived` is still 0 on that date,
+#: rule the corpus dropped and record it here).
+RESTORE_IMPORT_COMMAND = ("python -m app.research_store import "
+                          "~/obsidian/lloyd/research-queue-archive.md")
+RESTORE_READ_BACK_COMMAND = "python -m app.research_store stats"
+DROP_RULING_DATE = "2026-11-08"
+
+
+def test_section_1_carries_the_restore_obligation_without_a_closed_item_as_owner():
+    """#3622 clauses 4 and 5: the obligation survives, the dead number does not, and every
+    pin the sibling nodes hold stays where they reach it.
+
+    The paragraph is kept because the work is not done: `stats()` reports `archived: 0`, so
+    `similar()` still has no legacy side and a retired checklist topic can still be
+    re-proposed (#3046). What goes is the promise that a closed item will run it. No other
+    item number is substituted — #3320, the standing hand-run carrier for this import, is
+    `status: done` with its receipt exiting 1 (`ARCHIVED=0 TOTAL=140`), so naming it would
+    be the same rot filed one number later; the date is what a reader can act on.
+
+    The id set is pinned closed rather than the one number: a substituted id is exactly as
+    dead as a kept one, and §1's three numbers are the only ones this section has ever had.
+
+    The slice is §1 itself — `## 1.` to `## 2.` — because every claim here is about that
+    section and the page header above it names items this section does not own. A pointer
+    re-added anywhere else on the page is what
+    `test_architecture_coverage_doc_claims.py`'s corpus-wide node is for; this node is the
+    close read of the paragraph whose obligation is still live.
+    """
+    from app import research_store
+
+    body = DOC.read_text(encoding="utf-8").split("## Review log", 1)[0]
+    section = body.split("## 1. ", 1)[1].split("## 2. ", 1)[0]
+    flat = " ".join(section.split())
+
+    assert CLOSED_ITEM_POINTER.search(RETIRED_RESTORE_OWNERSHIP), (
+        "the retired clause did not fire the pattern, so the absence below is a green light "
+        "permanently fixed on a text that can never violate it")
+    assert not CLOSED_ITEM_POINTER.search(flat), (
+        "§1 defers the restore to an item number again — a closed item cannot run the "
+        "command, which is the rot #3622 retired")
+
+    assert RESTORE_IMPORT_COMMAND in flat, (
+        "§1 no longer names the command the operator runs, so the obligation it keeps has "
+        "nothing to act on")
+    assert "--dry-run" in flat, (
+        "§1 no longer says to dry-run first, which is the half that keeps the operator's "
+        "first reading of a month-old receipt from writing production `research.db`")
+    assert RESTORE_READ_BACK_COMMAND in flat, (
+        f"§1 no longer names {RESTORE_READ_BACK_COMMAND!r} as the read-back, so the "
+        "obligation has no test of its own completion")
+    assert DROP_RULING_DATE in flat, (
+        f"§1 no longer carries {DROP_RULING_DATE}, the date the corpus is ruled dropped if "
+        "`archived` is still 0 — without it the obligation has no end")
+
+    assert flat.count("#3085") == 1 and "#3085 ended both halves of that silence" in flat, (
+        "§1's one remaining `#3085` is no longer the attribution of what that item shipped: "
+        "the attribution is a record and stays, the ownership clause is the rot, and a node "
+        "of the §1 pins above asserts `3085` is present in this section")
+    ids = sorted(set(re.findall(r"#(\d+)", flat)))
+    assert ids == ["1278", "3046", "3085"], (
+        f"§1 names {ids}, not the set it held when #3622 retired the pointer "
+        "['1278', '3046', '3085'] — a substituted id is as dead as a kept one, and nothing "
+        "here may invent an owner for a command no open item holds")
+
+    assert "`archived: 0`" in flat, (
+        "§1 no longer states the reading the obligation rests on, so the section would read "
+        "as though the corpus were back")
+    assert research_store.DEDUP_CORPUS_STATUS == "archived" and "DEDUP_CORPUS_STATUS" in flat
