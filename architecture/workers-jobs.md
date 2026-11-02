@@ -542,6 +542,32 @@ instrument would make the flip harder to earn. **The flip itself is unchanged:
 `rate` ≥ 0.90, #3089 asked / #3329 ruled), which this module restates as its
 trigger and does not own.
 
+**What the steward is SHOWN of the machine's round state is now one named flag**
+(#3547). Every board line carries `round_flag=` with exactly one of three values —
+`round_in_flight`, `observation_live`, `none` — projected by
+`workers/sources/board_steward.py:round_flag` from the same entry of
+`unfinished_rounds` that writes the `round_state=` field #3546 added, and therefore
+from the same promotions-ledger rows `desired_statuses` reads in
+`scripts/automod/backlog.py`: `observing` (a `backlog_implement` `phase=finished`
+whose round has a `promoted` row no `rollback_succeeded` reverted — `promoted` and
+`closing` here) and `in_flight` (an unfinished round per
+`items_with_unfinished_rounds`, plus an open worktree, a live gate process or a live
+`land.running` marker — `worktree`, `gate`, `landing`). It is a projection rather
+than a second read because the line and the gate must never disagree about whether a
+round is live, and the line is the only half the steward can see.
+
+While the flag is not `none`, the tick refuses the write of any move other than
+`in_progress` for that item — the `up_next` on a live round and the `-> draft`
+demotion that together made the 28 disagreeing ids of the window this item was filed
+on. The refusal is placed strictly *after* `agreement()` scores the tick's moves, and
+the suppressed moves are recorded in that row's `suppressed` field beside the full
+`moves` list: a filter applied before the scoring would have converted every
+suppression into an `agree` and walked `rate` toward 1.0 without the steward making
+one more correct judgement, and `rate` is a leg of the flip. Neither the flag nor the
+suppression changes the bar: **`apply` still turns only on owed-check's rule** —
+summed `judged` ≥ 50 and agree `rate` ≥ 0.90 — measured on the ticks' scored moves,
+which is what this change leaves untouched.
+
 Since #1688 the record no longer claims what it did not measure. `agreement()`
 carries `judged` — the decisions both sides made — on the run meta and the
 `board_steward` ledger row, and its `rate` is `None` when `judged` is 0; such a

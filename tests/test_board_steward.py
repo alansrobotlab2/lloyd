@@ -3498,3 +3498,345 @@ def test_a_tick_holding_an_item_with_a_live_round_records_no_disagreement(board,
         "the pre-fix table does not even reproduce the row this node closes"
     assert scored["disagree_sides"] == [{"item_id": 3418, "status": "up_next",
                                         "why": pre_fix[3418][1]}]
+
+
+# ─────────── #3547: the machine's live round state as ONE named flag ───────────
+#
+# The figures are the ones the item was filed on, measured 2026-10-29T17:54Z at
+# HEAD `752cca1a`: `GET /api/workers/health?days=7` reported for board-steward
+# judged 119, agree 90, disagree 28, rate 0.7563, and an independent read-only
+# recount of `runs.meta_json.agreement` over ~/lloyd-data/workers.db found those
+# same 28 disagreeing rows across 25 distinct ids. The item's own headline cites
+# 26 / 0.7759, which was the reading when it was written; both readings sit under
+# the 0.90 the `apply` flip waits for, and 28 is the number quoted below because it
+# is the one a second command reproduces.
+#
+# What the prompt already says about a round's FIVE states is #3546's shipped work
+# and is not re-tested here. What was missing is the one field that says, per shown
+# item, whether a round is live at all — and the machine's own refusal of a move
+# that contradicts it.
+
+STATUS_WORDS = ("draft", "up_next", "in_progress", "done")
+
+
+def _load(board, iid: int):
+    """The item as its front matter now reads on disk."""
+    hits = list(board.glob(f"{iid}-*.md"))
+    assert len(hits) == 1, f"{iid} matched {len(hits)} files"
+    return B.load_item(hits[0])
+
+
+def _line(prompt: str, iid: int) -> str:
+    hits = [l for l in prompt.splitlines() if l.startswith(f"#{iid} ")]
+    assert len(hits) == 1, f"item {iid} rendered {len(hits)} board lines"
+    return hits[0]
+
+
+def _flags(prompt: str) -> dict[int, str]:
+    out = {}
+    for line in prompt.splitlines():
+        m = re.match(r"#(\d+) ", line)
+        if not m:
+            continue
+        got = re.findall(r"\bround_flag=(\S+)", line)
+        assert len(got) == 1, f"{line}\nexpected exactly one round_flag=, found {len(got)}"
+        out[int(m.group(1))] = got[0]
+    return out
+
+
+def test_every_shown_item_s_board_line_carries_one_derived_round_flag(board, monkeypatch):
+    """Clause 1. Four items, four ledger situations, one `round_flag=` each.
+
+    The ledger is written through `S.append_event` on the fixture's
+    `S.LEDGER_PATH` — the same file, with the same row shapes, that
+    `desired_statuses` reads — and the flag is derived by the same
+    `unfinished_rounds` call that supplies #3546's `round_state=` field:
+
+    The four states are the ones `unfinished_rounds` is verified to produce, written
+    the way the #3546 node writes them (`_promotion` for the promotion pair,
+    `gate_in_progress` for a running gate, an absent worktree everywhere else):
+
+      #7   `backlog_implement`/`phase=finished` whose round has a `promoted` row no
+           `rollback_succeeded` reverted, no `settled` row — state `promoted`, the
+           `observing` set, the promotion under observation → `observation_live`.
+           This is #3518's and #3524's situation at the #3546 filing tick.
+      #8   a finished implement whose round has a live gate process — state `gate`,
+           an unfinished round → `round_in_flight`
+      #9   a round that finished and promoted nothing → `none`
+      #10  `promoted`, `settled`, and the sweep has written `item_landed`: the
+           `closing` interval is over → `none`
+
+    And a flag may not contain a status word. #3547's triage names the hazard: print
+    the machine's target status and the model copies it, so `rate` climbs with no
+    more correct judgements — and a flag that read `in_progress` would be exactly
+    that leak, because `in_progress` is also a status the steward may propose.
+    """
+    from scripts.automod import backlog as B, state as S
+
+    for iid, st in ((7, "in_progress"), (8, "in_progress"), (9, "up_next"),
+                    (10, "done")):
+        _write(board, iid, st)
+    led = S.LEDGER_PATH           # the board fixture points this at tmp_path
+    _promotion(led, 7, "R7", "a" * 40, settle=False, base=1)
+    _led(led, event="backlog_implement", item_id=8, phase="finished",
+         round_id="SM_GATE", ts=20)
+    _led(led, event="backlog_implement", item_id=9, phase="finished",
+         round_id="SM_OVER", ts=30)
+    _promotion(led, 10, "R10", "b" * 40, settle=True, base=40)
+    _led(led, event="item_landed", round_id="R10", item_id=10, ts=44)
+    monkeypatch.setattr("scripts.automod.worktree.worktree_path",
+                        lambda rid: board.parent / "no-such-worktree")
+    monkeypatch.setattr(S, "gate_in_progress",
+                        lambda rid: {"pid": 4242} if rid == "SM_GATE" else None)
+    monkeypatch.setattr(S, "land_in_progress", lambda rid: None)
+
+    ids = {7, 8, 9, 10}
+    prompt = W.build_prompt(events=[], items=[_item(i, "in_progress") for i in sorted(ids)],
+                           n_open=len(ids), since_ts=0,
+                           round_state=W.unfinished_rounds(S.LEDGER_PATH, ids))
+    flags = _flags(prompt)
+    assert flags == {7: "observation_live", 8: "round_in_flight",
+                     9: "none", 10: "none"}, flags
+    for iid, value in flags.items():
+        assert value in W.ROUND_FLAG_VALUES, (iid, value)
+        assert not [w for w in STATUS_WORDS if w in value], (iid, value)
+    # One ledger, one read: the rows that put #7's flag at `observation_live` are the
+    # rows that make the state machine hold the same item. Asserted against
+    # `desired_statuses` itself rather than asserted in prose.
+    assert B.desired_statuses(S.LEDGER_PATH)[7][0] == "in_progress", \
+        "the flag is non-none on a ledger the state machine does not hold for"
+    # #3546's finer field is unchanged: still only on a line whose round is
+    # unfinished, and never on the settled one.
+    assert "round_state=" in _line(prompt, 8)
+    assert "round_state=" not in _line(prompt, 10), \
+        "the settled promotion gained #3546's field, which says it is unsettled"
+
+
+def test_the_flag_projection_answers_none_only_for_an_item_with_no_live_round():
+    """Clause 1's vocabulary: three values, and the projection fails toward holding.
+
+    A state outside both named sets answers `round_in_flight`, never `none`. The
+    direction is the point: `none` is the value that licenses `up_next` and `draft`,
+    so a sixth state `ROUND_STATES` may later grow must fail toward holding the item.
+    An entry is taken as `(round_id, states)` — handing the function a bare states
+    tuple would read the round id as a state and answer `round_in_flight` for a
+    promotion under observation, which is the wrong direction on the one case the
+    filed rows are about.
+    """
+    assert W.ROUND_FLAG_VALUES == ("observation_live", "round_in_flight", "none")
+    assert W.ROUND_STATES == ("promoted", "closing", "worktree", "gate", "landing")
+    for value in W.ROUND_FLAG_VALUES:
+        assert not [w for w in STATUS_WORDS if w in value], value
+    assert W.round_flag(None) == "none"
+    for state in ("promoted", "closing"):
+        assert W.round_flag(("R1", (state,))) == "observation_live", state
+    for state in ("worktree", "gate", "landing"):
+        assert W.round_flag(("R1", (state,))) == "round_in_flight", state
+    assert W.round_flag(("R1", ("promoted", "gate"))) == "round_in_flight", \
+        "a live process and an unsettled promotion both hold; the process is named"
+    assert W.round_flag(("R1", ("invented_state",))) == "round_in_flight", \
+        "an unmapped state must not release the item"
+    # The flag is a projection of the entry, so the line and any gate on it cannot
+    # disagree about whether a round is live.
+def test_a_shown_item_with_no_live_round_still_asks_its_flag():
+    """The line cost of clause 1, printed instead of claimed in a docstring.
+
+    `_item_line`'s comment says an item with no live round pays 16 characters and a
+    line under observation pays 28. Both figures are measured here off the one
+    difference between the two renderings, because a byte count quoted from prose is
+    the kind of figure this tree has already been burned on.
+
+    The 16 is what #3546's "a None renders the line exactly as it read before" gave
+    up: an absent entry now answers `none` on the line instead of answering nothing,
+    so a rule can read the field on every item rather than infer from its absence.
+    """
+    plain = W._item_line(_item(7, "up_next"))
+    live = W._item_line(_item(7, "up_next"), round_state=("R7", ("promoted",)))
+    both = W._item_line(_item(7, "in_progress"), round_state=("R7", ("gate",)))
+    assert "round_flag=none" in plain
+    assert "round_flag=observation_live" in live
+    assert "round_flag=round_in_flight" in both
+    for line in (plain, live, both):
+        assert line.count("round_flag=") == 1, line
+    assert len(" round_flag=none") == 16, len(" round_flag=none")
+    assert len(" round_flag=observation_live") == 28, len(" round_flag=observation_live")
+    # What the 16 characters bought, and what they did not: the fine-grained field is
+    # still absent where nothing is unfinished, so a `none` line pays for the flag and
+    # for nothing else — #3546's rendering is unchanged below it.
+    assert "round_state=" not in plain and "round=" not in plain.replace("round_flag=", "")
+    assert "round=R7 round_state=promoted" in live
+
+
+def test_a_move_the_flag_refuses_is_never_written_yet_still_scored(board, monkeypatch):
+    """Clause 2 end to end: the flag gates the WRITE, and never the SCORE.
+
+    One tick, `apply: true`, three moves, ruled on three ways by the flag:
+
+      #7  on the board at `up_next`, its promotion unsettled so its flag is
+          `observation_live`, and the steward proposes `up_next` — leave it there.
+          The machine holds `in_progress` (`observing`), so the proposal
+          contradicts the flag: it must not reach the board. #3518 and #3524 are
+          the rows this is for.
+      #8  flag `none`, machine wants `draft` (confirmed with an empty acceptance).
+          Its move is honoured and written — the control that proves #7 and #9 were
+          stopped by their flags and not by something switched off wholesale.
+      #9  its `SM_9` promotion unsettled so its flag is `observation_live`, the
+          machine holds it at `up_next` where it already sits, and the steward
+          proposes `draft`. Suppressed, and the one that makes the score's shape
+          measurable — see the rate paragraph.
+
+    Then the score, which is the rest of the clause. `agreement()` is called on the
+    moves the steward PROPOSED, so #7 and #9 both land in `disagree`, `judged` is 3
+    and `rate` is one third. Re-running `agreement()` on ONLY the writable move —
+    what filtering the list before the call would have scored — gives `disagree`
+    EMPTY, `disagree_sides` empty and `rate` 0.5: higher, on a smaller denominator,
+    for an identical steward answer. That is the inflation #3547's triage names, and
+    it is a rate the `apply` flip reads (judged >= 50 AND rate >= 0.90). The two
+    numbers below are computed by the same `agreement()` over the same
+    `expected`/`current`, so the ORDERING of the gate is pinned by arithmetic rather
+    than by a comment claiming it. `judged` is also reported: 3 against 2, because
+    dropping a proposal removes the decision it was a judgement about.
+    """
+    from workers.sources import _common as C
+    from scripts.automod import backlog as B, state as S
+    from workers import board_disagreement as D
+
+    _ten_item_board(board)
+    led = S.LEDGER_PATH
+    _promotion(led, 7, "R7", "a" * 40, settle=False, base=1)
+    # #9's round is the `SM_9` one `_ten_item_board` already finished. A `promoted`
+    # row with no `settled` after it is #3518's and #3524's shape exactly.
+    _led(led, event="promoted", round_id="SM_9", commit="c" * 40, ts=99)
+    monkeypatch.setattr("scripts.automod.worktree.worktree_path",
+                        lambda rid: board.parent / "no-such-worktree")
+    raw = [{"item_id": 7, "status": "up_next", "note": "stale, needs a human"},
+           {"item_id": 8, "status": "draft", "note": "never triaged"},
+           {"item_id": 9, "status": "draft", "note": "umbrella, re-offer it"}]
+    expected = {7: ("in_progress", "promotion under observation"),
+                8: ("draft", "confirmed with no acceptance"),
+                9: ("up_next", "already in the pool, and staying")}
+    current = {7: "up_next", 8: "up_next", 9: "up_next"}
+    parsed = W.parse_steward({"moves": raw})
+    monkeypatch.setattr(B, "desired_statuses", lambda *a, **k: dict(expected))
+    monkeypatch.setattr(D, "window_now", lambda **kw: _window7())
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": raw, "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": True})))
+
+    assert out["status"] == "success", out
+    assert _load(board, 8).status == "draft", "the none-flagged move was not written"
+    for iid in (7, 9):
+        assert _load(board, iid).status == "up_next", \
+            f"#{iid}'s front matter was rewritten on the strength of a live round"
+    row = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+    assert [m["item_id"] for m in row["moves"]] == [7, 8, 9], "the row lost a proposal"
+    assert [m["item_id"] for m in row["suppressed"]] == [7, 9]
+    assert [m["item_id"] for m in row["applied"]] == [8]
+    assert "2 refused by round_flag" in out["summary"], out["summary"]
+
+    agree = row["agreement"]
+    assert agree["disagree"] == [7, 9] and agree["agree"] == [8]
+    assert agree["judged"] == 3 and agree["rate"] == pytest.approx(1 / 3)
+    assert agree == W.agreement(parsed["moves"], expected, current), \
+        "the recorded score is not the score of the steward's own answer"
+    clamped = W.agreement([m for m in parsed["moves"] if m["item_id"] == 8],
+                          expected, current)
+    assert clamped["disagree"] == [] and clamped["disagree_sides"] == [], \
+        "pre-clamping left the disagreement in the record — it was supposed to"
+    assert clamped["judged"] == 2 and clamped["rate"] == pytest.approx(0.5)
+    assert clamped["rate"] > agree["rate"], \
+        "filtering before the score must be the worse-sounding option, or the rail " \
+        "this node stands on is not the one the item describes"
+    # #3677: `disagree_sides` is the MACHINE's side of each disagreement — the
+    # status `expected` wanted and why — recorded as the tick scored it.
+    assert [d["item_id"] for d in agree["disagree_sides"]] == [7, 9]
+    assert agree["disagree_sides"][0] == {"item_id": 7, "status": "in_progress",
+                                          "why": "promotion under observation"}
+
+
+def test_the_gate_refuses_a_demotion_and_a_leave_it_alone_but_still_allows_a_claim():
+    """Clause 2's shape, on both live values and with the controls in the same loop.
+
+    `up_next` and `draft` are the two destinations the filed rows show. Leaving an
+    item where it sits is the third and the one a prompt that says "no move is also
+    an answer" invites: on an item the machine holds at `in_progress`, a proposed
+    `up_next` is the machine's no-op and the steward's claim that the round is over
+    — so it is refused on the same terms as a demotion. The `none` rows are the
+    positive control that the gate is not a freeze, and a live item stays claimable.
+    """
+    def move(iid, status):
+        return {"item_id": iid, "status": status, "note": "n",
+                "tags_add": [], "tags_remove": []}
+
+    for flag in ("observation_live", "round_in_flight"):
+        live = {7: flag}
+        for status in ("up_next", "draft"):
+            writable, suppressed = W.split_writable([move(7, status)], live)
+            assert writable == [] and [m["item_id"] for m in suppressed] == [7], (flag, status)
+        writable, suppressed = W.split_writable([move(7, "in_progress")], live)
+        assert len(writable) == 1 and suppressed == [], f"{flag}: a live round must be claimable"
+    none = {7: "none"}
+    for status in ("up_next", "draft", "in_progress"):
+        writable, suppressed = W.split_writable([move(7, status)], none)
+        assert len(writable) == 1 and suppressed == [], status
+    # An item the flag map does not name is `none`, not a refusal: an item the
+    # machine never looked at is not evidence of a live round.
+    assert W.split_writable([move(99, "draft")], {})[1] == []
+    # Two equal moves for one item are both refused — the partition is by position,
+    # and an equality filter would have dropped only one of a duplicated pair.
+    writable, suppressed = W.split_writable([move(7, "draft"), move(7, "draft")],
+                                            {7: "observation_live", 8: "none"})
+    assert writable == [] and len(suppressed) == 2
+
+
+def test_the_prompt_names_the_three_flag_values_and_refuses_the_move_they_block():
+    """Clause 3: the shipped prompt states the flag's vocabulary and the refusal.
+
+    Asserted inside the one bullet the flag owns — cut at the next bullet, so the
+    vocabulary cannot be satisfied by an unrelated sentence elsewhere — except the
+    third value, which is a value and so is asserted on the prompt as a whole: a
+    test that demanded `none` inside the bullet would be asking for the word "none"
+    to appear where the flag is defined, which is what the assertion then checks.
+    """
+    text = W.PROMPT
+    assert "- **`round_flag=`" in text, "the field is never named to the steward"
+    start = text.index("- **`round_flag=`")
+    nxt = text.find("\n- ", start + 5)
+    bullet = text[start:nxt if nxt > 0 else len(text)]
+    for value in ("observation_live", "round_in_flight"):
+        assert f"`{value}`" in bullet, value
+    assert "`none`" in bullet, "the flag's third value is undefined prose"
+    assert "**`in_progress` and nothing else**" in bullet
+    for phrase in ("refused by the machine", "scored against you"):
+        assert phrase in bullet, phrase
+    # Nothing in the bullet may state a target status as the flag's own value: the
+    # words are in the sentence because the sentence names the move that is refused,
+    # so the check is on the flag's definition, which is the three backticked values.
+    assert [v for v in W.ROUND_FLAG_VALUES if f"`{v}`" in bullet] == list(W.ROUND_FLAG_VALUES)
+
+
+def test_the_architecture_page_names_the_flag_its_ledger_source_and_the_unchanged_bar():
+    """Clause 4: `architecture/workers-jobs.md` §board-steward documents the flag.
+
+    The flip bar is asserted as both of its numbers, so a page that dropped one or
+    moved either cannot pass; `≥` rather than `>=` follows what this page already
+    prints. The retired 100 floor is asserted absent for the same reason the file's
+    own banned-string node asserts it tree-wide.
+    """
+    doc = (Path(__file__).resolve().parents[1]
+           / "architecture" / "workers-jobs.md").read_text(encoding="utf-8")
+    start = doc.index("### `board-steward`")
+    nxt = doc.find("\n### ", start + 5)
+    sec = doc[start:nxt if nxt > 0 else len(doc)]
+    assert "`round_flag=`" in sec
+    for value in W.ROUND_FLAG_VALUES:
+        assert f"`{value}`" in sec, value
+    for source in ("desired_statuses", "items_with_unfinished_rounds", "promoted"):
+        assert f"`{source}`" in sec, f"the flag's ledger source {source} is not named"
+    assert "≥ 50" in sec and "≥ 0.90" in sec, "both legs of the flip bar must be stated"
+    assert not re.search(r"judged[`'\"\\u201d\\u2019]{0,2}\s*(?:>=|≥)\s*100(?![\d.])", sec)

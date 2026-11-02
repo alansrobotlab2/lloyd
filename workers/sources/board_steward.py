@@ -210,6 +210,18 @@ that round is alive), `landing` (a `land.running` marker with a live pid — the
 ended with a promotion that `settled` and an outcome of `met` closes by itself; \
 `not_met` / `deferred` leave it `up_next` for one more attempt on exactly the \
 unmet clauses.
+- **`round_flag=` is on EVERY board line, and it is the gate.** Three values, no \
+others: `round_in_flight` (a `worktree`, `gate` or `landing` state holds), \
+`observation_live` (`promoted` or `closing` holds — landed, and either the guardian \
+has not ruled or the ruling is not yet on the item), `none` (no round of this item is \
+live, so none of the holds below apply to it). While the flag is anything but `none` \
+you may propose **`in_progress` and nothing else** for that item: a `up_next` or \
+`draft` proposal, or a proposal to leave it where it sits, is refused by the machine \
+before it reaches the board AND is still scored against you in this tick's agreement \
+record, so proposing it costs the agreement and changes nothing on the board. The \
+flag is projected from the same rows the \
+five states above are read from, and it names no status the machine wants — only \
+whether a round is live.
 - **`round_state=closing`: the landing is over, its outcome is not yet on the \
 item, and the item stays `in_progress`.** The commit `settled`, the sweep has not \
 yet written this item's `item_landed` row, and `desired_statuses` is holding it \
@@ -691,6 +703,106 @@ def unfinished_rounds(ledger: Path, for_items: set[int]) -> dict[int, tuple]:
     return out
 
 
+#: #3547: the ONE value the move gate reads. #3546 put the five states on the board
+#: line for the prompt's per-state bullets, but a rule that refuses a write needs a
+#: single named value, and re-deriving the five states inside the gate would be a
+#: second reader of the same ledger — the two would eventually disagree about
+#: whether a round is live, and only one of them is on the line the steward reads.
+#:
+#: The two live values are #3546's states grouped along the same seam
+#: `desired_statuses` decides on: `observation_live` is its `observing` arm
+#: (`scripts/automod/backlog.py`: a `backlog_implement` `phase=finished` whose
+#: `round_id` has a `promoted` row no `rollback_succeeded` reverted — the guardian
+#: has not ruled it), which is `promoted` plus `closing` here; `round_in_flight` is
+#: its `in_flight` arm, which is `worktree` plus `gate` plus `landing`. `none` is
+#: neither, and it is the only value that licenses a demotion.
+#:
+#: No value names a status. The flag says whether a round is live and nothing else:
+#: printing what `desired_statuses` wants would move `judgement.rate`, which is the
+#: measurement that decides whether `apply` flips (#3546's clause 1 rails the same
+#: thing, and `test_the_recorded_side_is_not_rendered_into_the_prompt_or_the_board_line`
+#: holds both).
+ROUND_FLAG_VALUES = ("observation_live", "round_in_flight", "none")
+_OBSERVATION_LIVE_STATES = frozenset(("promoted", "closing"))
+_IN_FLIGHT_STATES = frozenset(("worktree", "gate", "landing"))
+
+
+def round_flag(round_state: tuple | None) -> str:
+    """One of `ROUND_FLAG_VALUES` for an item's `unfinished_rounds` entry.
+
+    The input is the ENTRY — `(round_id, states)` or None — and not its states
+    tuple: the one shape the caller already holds is the one shape this takes, so a
+    caller cannot hand it the round id and read back `round_in_flight` for a
+    promotion the guardian is watching.
+
+    A projection of what is already rendered, never a second read of the ledger: the
+    flag and the `round_state=` beside it are the same fact at two resolutions, so a
+    gate that consulted its own copy could refuse a move the line invites.
+
+    A state in neither named set answers `round_in_flight`, not `none`. The direction
+    is deliberate: `none` is the value that licenses `up_next` and `draft`, so an
+    unmapped state — a sixth one `ROUND_STATES` may later grow — must fail toward
+    holding the item, never toward releasing it. An absent entry is the only honest
+    `none`, because that is what `unfinished_rounds` leaves out for an item it
+    checked and found finished.
+
+    `observation_live` loses to `round_in_flight` when both hold (a promoted,
+    unsettled round whose worktree is still open). Both prohibit the same moves, so
+    the choice is about which one the steward is told, and a round with a live
+    process is the more specific fact.
+    """
+    if not round_state:
+        return "none"
+    held = set(round_state[1])
+    if held & _IN_FLIGHT_STATES or held - _OBSERVATION_LIVE_STATES:
+        return "round_in_flight"
+    return "observation_live"
+
+
+def move_contradicts_flag(move: dict, flag: str) -> bool:
+    """Whether writing `move` would contradict what the machine sees on this item.
+
+    A non-`none` flag licenses exactly one destination: `in_progress`. Anything else
+    for that item is the contradiction — a move off `in_progress` while the round is
+    live, a move `-> draft`, and also a proposal that leaves the item at the status it
+    is already at while the machine holds it for a promotion nobody has settled. That
+    last case is what #3546 recorded for #3518 and #3524: an `up_next` proposed while
+    the promotion was still under observation.
+
+    Refusing it cannot lose a disagreement. The filer is called as
+    `_file_quietly(agree, parsed["moves"], expected)` — the scored agreement and the
+    PROPOSED moves — never from this partition, so the suppressed move reaches the
+    ledger with the tick's own numbers whether or not it was written.
+
+    The reverse direction is deliberately NOT gated. `-> in_progress` on a `none`
+    item is the class the item's own summary names ("claiming `in_progress` with no
+    round running"), and it is worth refusing, but not here: the flag is derived from
+    ledger rows, so a round that has opened and not yet written its `backlog_implement`
+    row reads `none`, and suppressing on the absence of a row would refuse the
+    legitimate claim that the state machine itself is about to make.
+    """
+    if flag == "none":
+        return False
+    return move.get("status") != "in_progress"
+
+
+def split_writable(moves: list[dict], flags: dict[int, str]) -> tuple[list[dict], list[dict]]:
+    """`(writable, suppressed)` — the same move dicts, partitioned, order kept.
+
+    An item the flag map does not name is treated as `none`: an item the machine
+    never looked at is not evidence of a live round, and the map's absence is the
+    same as the function answering "no round". A non-integer `item_id` cannot reach
+    here — `parse_steward` coerces it and drops the move if the coercion fails.
+    """
+    writable: list[dict] = []
+    suppressed: list[dict] = []
+    for m in moves:
+        bucket = suppressed if move_contradicts_flag(
+            m, flags.get(int(m["item_id"]), "none")) else writable
+        bucket.append(m)
+    return writable, suppressed
+
+
 def item_refs(ledger: Path) -> dict[str, int]:
     """Every ref a round-bearing row may name a round by → the item it belongs to.
 
@@ -775,13 +887,22 @@ def _item_line(i: Any, *, round_state: tuple | None = None) -> str:
     table, and printing the answer on the line would be grading the steward off
     the answer sheet. The round state is a fact about the board, not a verdict.
 
-    `round_state` is that item's entry from `unfinished_rounds`, or None — a None
-    renders the line exactly as it read before #3546, so an item with no live
-    round gains no bytes.
+    `round_state` is that item's entry from `unfinished_rounds`, or None.
+
+    #3547 changed what a None costs: `round_flag=` is on EVERY line, including an item
+    with no live round, because the flag is the gate's input and a rule that reads "the
+    line said nothing" is a rule that fires on a truncation. The cost is 16 characters
+    on such a line (`round_flag=none` plus its separator), 28 on a line whose flag is
+    `observation_live`, on at most `max_items` lines per tick — `test_a_shown_item_with_no_live_round_still_asks_its_flag`
+    prints both figures rather than leaving them to this sentence. What they buy is the
+    machine's own hold on the moves this item was filed over: 28 disagreeing ids in the
+    seven days to 2026-10-29T17:54Z, whatever their destinations were. The
+    fine-grained `round=… round_state=…` stays exactly where #3546 puts it — only on a
+    line whose round is unfinished.
     """
     body = " ".join((i.body or "").split())[:BODY_CHARS]
     tags = ",".join(i.tags or [])
-    rel = []
+    rel = [f"round_flag={round_flag(round_state)}"]
     if i.group:
         rel.append(f"group=#{i.group}")
     if i.members:
@@ -1097,9 +1218,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     agree = agreement(parsed["moves"], expected, current)
 
+    # #3547: the flag gates the WRITE and never the SCORE. `agree` above is built
+    # from `parsed["moves"]` — the steward's own answer — and its `rate` is one of
+    # the two legs of the `apply` flip (judged >= 50 AND rate >= 0.90). Filtering
+    # before that call takes a suppressed move out of the judged set on every item
+    # the machine holds without a pending move, so the same answer scores higher on a
+    # smaller denominator: `tests/test_board_steward.py
+    # ::test_a_move_the_flag_refuses_is_never_written_yet_still_scored` measures 1/2
+    # where the steward earned 1/3, on one tick. That is #3546's triage's "manufacture
+    # the flip bar's own number". So the filter is strictly after `agreement`, and a
+    # suppressed move stays in the tick's disagreement exactly as proposed.
+    flags = {i.id: round_flag(round_state.get(i.id)) for i in shown}
+    writable, suppressed = split_writable(parsed["moves"], flags)
+
     applied: list[dict] = []
     if apply:
-        applied = await asyncio.to_thread(apply_moves, parsed["moves"])
+        applied = await asyncio.to_thread(apply_moves, writable)
         if parsed["next_pick"]:
             pp = _pick_path()
             pp.parent.mkdir(parents=True, exist_ok=True)
@@ -1124,6 +1258,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                   "last_session": run.get("session_id")})
     S.append_event({"event": "board_steward", "apply": apply, "events": len(events),
                     "items_shown": len(shown), "moves": parsed["moves"],
+                    # #3547: what the flag refused, alongside the moves that were
+                    # proposed anyway. The row already carries the full `moves` list
+                    # and the agreement scored from it, so a reader can tell a
+                    # suppressed move from an unmade one only if this is here — and
+                    # in a dry run (`apply: false`, what ships today) nothing was
+                    # written either way, so without it the refusal is invisible.
+                    "suppressed": suppressed,
                     "next_pick": parsed["next_pick"],
                     "next_pick_reason": parsed["next_pick_reason"],
                     "agreement": agree, "applied": applied, "board_health": health,
@@ -1153,7 +1294,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # made an empty run of ticks read as agreement.
     rate = (f"{agree['rate']:.0%} of {agree['judged']} judged"
             if agree["rate"] is not None else "not measured, 0 judged")
-    counts = (f"{len(parsed['moves'])} move(s) {verb}, agreement "
+    # The move the steward PROPOSED is the count, so it stays `len(parsed["moves"])`
+    # and never `len(writable)` — the sentence describes the answer it graded, and
+    # the refusals are named beside it rather than subtracted out of it. ~30 extra
+    # characters, and only on a tick that refused something, which is the case whose
+    # outcome would otherwise be lost to the 500-character cap this string carries.
+    refused = (f", {len(suppressed)} refused by round_flag" if suppressed else "")
+    counts = (f"{len(parsed['moves'])} move(s) {verb}{refused}, agreement "
               f"{rate} ({len(agree['agree'])} agree, "
               f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
               f"where the machine abstains, {len(agree['missed'])} missed); "
