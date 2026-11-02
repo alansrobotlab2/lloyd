@@ -56,6 +56,7 @@ the corpus zero stays distinguishable from a pattern that matches nothing.
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -449,10 +450,15 @@ def test_the_writer_and_the_test_share_one_definition():
 # `$(date -u +%Y-%m-%d)` and shipped no rail, so the next edit that deletes the two
 # letters puts a local day back into every vault commit subject that job writes —
 # and nothing on the landing path notices, because `template_clock_violations` only
-# knew about zone abbreviations. The shapes below are the swept lines with `-u`
-# deleted (skills/nightly-reflection-signals/SKILL.md:266 and
-# skills/nightly-reflection-knowledge-write/SKILL.md:95 are their landed form), so
-# each mutation is a regression someone can actually type, not a invented string.
+# knew about zone abbreviations. The shapes below are those swept lines with `-u`
+# deleted, and their landed forms are quoted here by TEXT rather than addressed by
+# line number — the subjects `nightly-reflection: pre-flight $(date -u +%Y-%m-%d) …`
+# and `nightly: knowledge write $(date -u +%Y-%m-%d)`. A `SKILL.md:` plus a number in
+# this file would be a claim about a file no round under test controls and that grows
+# nightly: the two numbers that used to sit here were true the day #2454 wrote them and
+# were both wrong by the day #3513 was filed. `test_no_citation_in_this_file_points_at_a_
+# vault_line_number` is what keeps this section honest, so each mutation stays a
+# regression someone can actually type rather than an invented string.
 #
 # Why the rule reads the quoted subject span and not the line: #2227's own
 # line-level check (`grep -v 'date -u'`) printed 6 where the truth was 7, because a
@@ -526,10 +532,14 @@ def test_a_date_u_sibling_on_the_same_line_cannot_hide_a_local_subject():
 
     #2227's own grep printed 6 where the truth was 7 for exactly this reason: the
     per-line filter removed a line whose *only* local clock read was inside the
-    subject, because a `date -u` appeared elsewhere on it. Here the sibling is a
-    real one — an `LLOYD_JOB_WRITES` value in the shape
-    skills/nightly-reflection-config/SKILL.md:159 writes — and the local subject
-    beside it must still be refused. The rule can promise this because it never
+    subject, because a `date -u` appeared elsewhere on it. Here the sibling is the
+    `LLOYD_JOB_WRITES=` prefix itself, and the fixture's value is the
+    `memory/learnings/$(date -u +%F).md` ELEMENT of the colon-joined list that
+    prefix carries in the runbook: the live list also names an `autonomy/…` entry and
+    the runbook's own path, and it has grown since #2454 cut this fixture, so the
+    fixture quotes one element rather than a whole value and no vault line number is
+    cited for it. The point being pinned is a UTC element beside a local subject, and
+    the local subject must still be refused. The rule can promise this because it never
     looks at the line, only at the quoted subject span.
     """
     command = ('LLOYD_JOB_WRITES="memory/learnings/$(date -u +%F).md" '
@@ -557,13 +567,24 @@ def test_a_date_u_sibling_on_the_same_line_cannot_hide_a_local_subject():
 def test_a_date_substitution_outside_a_commit_subject_span_is_not_a_clock_claim():
     """Clause 4: filenames, env values and tmp files are not subjects.
 
-    Three shapes, all taken from live skill prose so the boundary is a real one and
-    not a convenience: the artifact filename #2454 names, the `tee` tmp file at
-    skills/nightly-reflection-signals/SKILL.md:266 — whose local `$(date +%s)` sits
-    on the same line as a subject that is clean — and the `LLOYD_JOB_WRITES` prefix
-    before the wrapper at skills/nightly-reflection-config/SKILL.md:159. A rule that
-    flagged these would be red on the corpus it ships against, and the first fix
-    anyone would apply to a noisy rail is to delete it.
+    Three shapes, each identified by the text it quotes rather than by a vault line
+    number, and none of them claimed to be present in the runbooks today —
+    `test_no_citation_in_this_file_points_at_a_vault_line_number` is what forbids that
+    claim, because a runbook grows nightly and the two numbers that used to sit here
+    were true the day #2454 wrote them and false by the day this one was filed.
+
+    The artifact filename `out=consolidation-$(date +%Y-%m-%d).md` is the PRE-#3183
+    form of nightly-skill-consolidation's summary filename: #3183 moved that runbook to
+    `consolidation-$(date -u +%Y-%m-%d).md`, so the local form is no longer anything the
+    live template writes. It is kept deliberately as the shape someone can re-type —
+    deleting those two letters from the live form reproduces the exact defect #2227
+    swept and #3183 fixed — and a fixture drawn only from current text would pin
+    nothing about it. The `tee /tmp/preflight-$(date +%s).txt` suffix is the form whose
+    local epoch lands on the same line as a clean `date -u` subject, and the
+    `LLOYD_JOB_WRITES=` prefix before the wrapper is the form whose UTC element sits
+    beside one. What the three have in common is the boundary, not their provenance: a
+    rule that flagged these would be red on the corpus it ships against, and the first
+    fix anyone applies to a noisy rail is to delete it.
     """
     clean = (
         "out=consolidation-$(date +%Y-%m-%d).md\n"
@@ -626,13 +647,21 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
     The scan above asserting zero dirty skills proves nothing about THIS rule if the
     matcher never fires on real text — a pattern that matches no subject would keep
     the corpus permanently clean, which is #1112's inert-check complaint in a new
-    costume. So the population is counted with a probe of its own: at least 6 active
-    skill lines interpolate a `$(date …)` into a `git commit -m`/`vault-commit.sh`
-    subject (measured 6 on 2026-10-09: autonomy-data-pipeline:359,1028,
-    nightly-reflection-config:159,204, nightly-reflection-knowledge-write:95,
-    nightly-reflection-signals:266), and every file carrying one is clean under the
-    rule — which is the same 6 #2227 swept, so the rail is guarding text that
-    exists.
+    costume. So the population is counted with a probe of its own, below: at least 6
+    active skill lines interpolate a `$(date …)` into a `git commit -m`/`vault-commit.sh`
+    subject, and every file carrying one is clean under the rule. That 6 is a FLOOR, set at
+    the population #2227 swept, so the rail is guarding text that exists.
+
+    No live count and no per-file split is quoted in this docstring. The sentence used to
+    carry the population's six vault addresses as "measured 6 on 2026-10-09", and every one
+    of them had moved by the day #3513 was filed while the files themselves stayed put: a
+    runbook grows from the top, so an address is the least durable thing that can be quoted
+    from one — and an exact count is the second least, because one nightly adding a subject
+    line falsifies the sentence while this node stays green. What the node asserts is the
+    floor, and it recomputes the population from the tree on every run; the literal in the
+    assert below is the only number this file states about the corpus, and
+    `test_no_citation_in_this_file_points_at_a_vault_line_number` keeps the addresses out of
+    the sentence for good.
     """
     bodies = _active_skills()
     population = [
@@ -643,7 +672,8 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
     ]
     assert len(population) >= 6, (
         f"only {len(population)} active-skill lines interpolate a date into a "
-        f"commit subject (measured 6 on 2026-10-09): {population[:6]} — the rule "
+        f"commit subject, under the floor of 6 that #2227's sweep set: "
+        f"{population[:6]} — the rule "
         "below has almost nothing to judge, so its zero needs re-measuring by hand"
     )
     dirty = {n: v for n, v in
@@ -653,3 +683,249 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
         "the sweep regressed in a live skill: "
         + "\n".join(f"{n}: {v}" for n, v in sorted(dirty.items()))
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── #3513: this file's own provenance claims, pinned over its own text ───────
+# #2454 justified its fixture by addressing the runbook lines it came from. Each of the
+# two lines it addressed has carried THREE different numbers across this file's life —
+# the number #2454 wrote, a different one at #3513's triage, and a third one measured in
+# the round that fixed it — because a nightly runbook grows from the top. That is the
+# whole argument for pinning the ABSENCE of addresses instead of correcting them: a
+# corrected number is stale on the next nightly, and this node is what makes the next
+# stale number a red test rather than a plausible sentence. Deliberately NOT marked
+# `live_vault`: pytest.ini's automod invocation carries `-m "not live_vault"`, so a node
+# that only re-read ~/obsidian would be graded by a test the gate never runs. It reads
+# THIS module's text instead, which needs no vault and no pytest.ini change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Assembled from pieces so that naming a phrase here is not itself the phrase.
+_LIVE_PROSE_CLAIMS = (
+    "taken from live " + "skill prose",
+    "taken from live " + "prose",
+    "live skill " + "prose",
+    "present in live " + "prose",
+    "the shape the live runbook " + "writes",
+    "exactly what the live runbook " + "writes",
+)
+
+# A citation is a runbook FILENAME or a hyphenated runbook NAME followed by a line
+# number. Assembled the same way, so this node's own patterns cannot be found by its
+# own scan — and no example of the banned form is spelled out anywhere in this file,
+# because the acceptance grep that filed this item forbids the literal as much as the
+# claim it replaces. The second pattern catches a hyphenated runbook name addressed
+# directly, which is the other way this file used to point at the vault.
+_NAME_CITATIONS = tuple(
+    re.compile(p)
+    for p in (r"[\w.-]+\.md" + r"\s*:\s*\d",                        # `<file>.md:<line>`
+              r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+" + r"\s*:\s*\d")      # `<runbook>:<line>`
+)
+
+
+def _line_citation_hits(source: str) -> list[str]:
+    """Every runbook-address form in `source`, labelled with the line it sits on."""
+    return [
+        f"line {source[:m.start()].count(chr(10)) + 1}: {source[m.start():m.end()]!r}"
+        for m in (match for pattern in _NAME_CITATIONS for match in pattern.finditer(source))
+    ]
+
+
+def _collapsed_with_lines(source: str) -> tuple[str, list[int]]:
+    """`source` with every whitespace run collapsed to one space, plus the line each
+    character of the result came from.
+
+    The collapse is what lets a phrase be matched across a line break: a claim wrapped
+    over two lines is the same claim, and a matcher that reads one line at a time reported
+    nothing for it — the second review of SM_20261102_012735 planted exactly that and got
+    no hit. The line map is what lets such a match still be reported at a line, rather than
+    as a bare count.
+    """
+    chars: list[str] = []
+    owners: list[int] = []
+    gap = False
+    for lineno, line in enumerate(source.splitlines(), 1):
+        body = line.strip()
+        if not body:
+            gap = True
+            continue
+        if gap:
+            chars.append(" ")
+            owners.append(lineno)
+        # Every line break is whitespace, so every line break is one space here — not
+        # just the ones with a blank line in them, which is what a `gap` flag alone would
+        # have done and what made a claim wrapped at the break unmatchable again.
+        gap = True
+        for chunk in re.split(r"(\s+)", body):
+            if not chunk:
+                continue
+            if chunk.isspace():
+                chars.append(" ")
+                owners.append(lineno)
+            else:
+                chars.extend(chunk)
+                owners.extend([lineno] * len(chunk))
+    return "".join(chars), owners
+
+
+def _phrase_hits(source: str) -> list[str]:
+    """Every banned phrase in `source`, wherever it sits and however it is wrapped.
+
+    Three things about the scan are load-bearing:
+
+    It reads the WHOLE module text, not its docstrings, because the grep that filed this
+    item searched the file: the literal is as red in a comment as in prose, and the only
+    reason `_LIVE_PROSE_CLAIMS` can name these phrases at all is that it is assembled from
+    pieces. A docstring-only scan looked correct and let a comment re-add the very sentence
+    the item was filed to delete.
+
+    It matches over the whitespace-collapsed text (`_collapsed_with_lines`), so the claim
+    cannot be smuggled past it by wrapping it at the line length, and a hit that spans
+    lines says which ones it spans.
+
+    A hit is labelled with the thing that carries it, and a DOCSTRING carrier's line comes
+    from `getattr` rather than the attribute because the module docstring is carried by an
+    `ast.Module` node, which has no `lineno` at all. The first version of this report
+    dereferenced `node.lineno` for every docstring-bearing node, so a phrase there raised
+    AttributeError out of the assert's own message instead of printing the finding — the
+    failure mode the review of SM_20261102_005909 named. A check that crashes on one
+    carrier reports nothing at all.
+
+    Occurrences are reported earliest-start first and longest-claim-first, and a match
+    inside one already reported is dropped: `_LIVE_PROSE_CLAIMS` holds a claim and its own
+    tail, so one stretch of text is one finding and the count means occurrences.
+    """
+    docstring_label: dict[int, str] = {}
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        if not ast.get_docstring(node):
+            continue
+        carrier = getattr(node, "name", None)
+        label = (f"{getattr(node, 'lineno', 1)}: in "
+                 + (f"{carrier}()" if carrier else "the module docstring"))
+        span = node.body[0]
+        for ln in range(span.lineno, (getattr(span, "end_lineno", None) or span.lineno) + 1):
+            docstring_label[ln] = label
+    joined, owner = _collapsed_with_lines(source)
+    found: list[tuple[int, int, str]] = []
+    for phrase in _LIVE_PROSE_CLAIMS:
+        start = 0
+        while True:
+            at = joined.find(phrase, start)
+            if at < 0:
+                break
+            found.append((at, at + len(phrase), phrase))
+            start = at + 1
+    hits: list[str] = []
+    reported_to = -1
+    for at, end, phrase in sorted(found, key=lambda f: (f[0], f[0] - f[1])):
+        if at < reported_to:
+            # The text is already reported by the longer claim that starts no later than
+            # here, so naming the nested tail as well would double the count for one line.
+            continue
+        first, last = owner[at], owner[end - 1]
+        where = f"{Path(__file__).name}:" + docstring_label.get(
+            first, f"{first}: outside a docstring")
+        across = "" if first == last else f", spanning lines {first}-{last}"
+        hits.append(f"{where}: {phrase!r} at line {first}{across}")
+        reported_to = end
+    return hits
+
+
+def test_no_citation_in_this_file_points_at_a_vault_line_number():
+    """#3513 clause 3: neither a vault address nor a live-prose claim may live here.
+
+    Two failure modes, both of which this file has already shipped:
+
+    A `.md` filename or a hyphenated runbook name followed by a line number is a claim
+    about a file no round under test controls, and the nightly runbooks grow from the top,
+    so the number decays while the sentence goes on reading as evidence. Identifying a
+    shape by its quoted text — the
+    `tee /tmp/preflight-$(date +%s).txt` suffix, the `LLOYD_JOB_WRITES=` prefix, the
+    subject `nightly: knowledge write $(date -u +%Y-%m-%d)` — says the same thing and
+    cannot go stale, because it is checked against the shape it is used for rather than
+    against a line count.
+
+    The second mode is subtler and is what clause (3) of the item is really about: a
+    docstring that says a fixture shape is current runbook text when nothing in this
+    file asserts that the live runbook contains it. #2454 asserted all three of its shapes
+    came from live runbook text about a filename #3183 later swept to `-u` (#3183's own
+    commit changed nothing but that runbook), so the fixture's stated basis for being a
+    real boundary was false for nine days without any test noticing. Asserting a shape is
+    live prose is a claim about `~/obsidian`; if it is worth making, it belongs in a node
+    that reads `~/obsidian` and is marked `live_vault`, not in prose.
+
+    Both scans read the WHOLE module text, comments and code included, because the grep
+    that filed this item searched the file rather than its docstrings: the literal is as
+    red in a comment as in prose, and `_LIVE_PROSE_CLAIMS` can name these phrases at all
+    only because it is assembled from pieces. The one at the head of the #2454 section is
+    the address form, which a docstring-only scan would also have missed. Both scans are
+    exercised against planted text before their zero here is trusted — a module docstring,
+    a function docstring, a comment, the same claim cut across a line break, and a clean
+    file — and each finding names its carrier and the lines it spans, including the module
+    docstring, whose node has no line number of its own to report.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+
+    addressed = _line_citation_hits(source)
+    assert not addressed, (
+        "a vault line-number citation is back in this file, and it will be wrong the "
+        "first time a runbook grows: " + "; ".join(addressed)
+    )
+
+    claimed = _phrase_hits(source)
+    assert not claimed, (
+        "this file asserts that one of its fixture shapes is what the runbooks say, and "
+        "no node here checks that against ~/obsidian — the claim decays the first time a "
+        "runbook is swept; make it a live_vault node, or identify the shape by its quoted "
+        "text and drop the claim: " + "; ".join(claimed)
+    )
+
+    # Both scans need a positive control: a zero over this file is the same evidence as a
+    # grep over a path that does not exist. Each probe is assembled at run time, so this
+    # file never carries the phrase or the address it is looking for. The module-docstring
+    # probe is the regression the review of SM_20261102_005909 asked for — an
+    # `ast.Module` node has no `lineno`, and the report used to raise AttributeError on
+    # exactly this input instead of naming the line it found. The comment probe is the one
+    # this round found by tripping it: a docstring-only scan shipped the banned literal in
+    # a comment three lines below the node that was supposed to ban it.
+    planted = _LIVE_PROSE_CLAIMS[0]
+    # The same claim cut at a line break, which is how prose writes a long phrase.
+    wrapped_probe = '"""taken from live skill\nprose here\n"""\n'
+    for probe, want, carrier in (
+        ('"""' + planted + ' here\n"""\n\nx = 1\n', 1, "the module docstring"),
+        ('def f():\n    """shaped: ' + planted + '"""\n', 1, "f()"),
+        ("# note: " + planted + " in a comment\n", 1, "outside a docstring"),
+        (wrapped_probe, 1, "the module docstring"),
+        ("def g():\n    '''plain words'''\n", 0, ""),
+    ):
+        hits = _phrase_hits(probe)
+        assert len(hits) == want, (
+            f"the phrase scan returned {hits} for a probe expecting {want} hit(s) — a "
+            "scan that finds nothing planted finds nothing in this file either"
+        )
+        if carrier:
+            assert carrier in hits[0], (
+                f"the report must name the carrier {carrier!r}, got {hits[0]!r}"
+            )
+    # And the wrapped claim must say WHICH lines it spans: a matcher that reads one line
+    # at a time saw nothing in that probe and called the file clean, which is how the
+    # second review of SM_20261102_012735 found the hole.
+    spanning = _phrase_hits(wrapped_probe)
+    assert "spanning lines 1-2" in spanning[0], (
+        f"a claim wrapped over a line break must report the span, got {spanning[0]!r}"
+    )
+    cited = _line_citation_hits("see notes" + ".md" + ": 12\n")
+    assert len(cited) == 1, (
+        f"the address scan missed the form it exists to ban: {cited}"
+    )
+
+    # And the shapes this file is about must still be the ones it pins: the ban above is
+    # only worth having if the quoted texts it tells people to cite instead are present.
+    for shape in ("tee /tmp/preflight-$(date +%s).txt", "LLOYD_JOB_WRITES=",
+                  "consolidation-$(date +%Y-%m-%d).md"):
+        assert shape in source, (
+            f"the fixture shape {shape!r} has left this file, and with it the regression "
+            "the #2454 exemption exists to catch"
+        )
