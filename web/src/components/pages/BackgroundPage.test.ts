@@ -27,7 +27,20 @@
 // (the factory, and the reducer it dispatches into), and the wiring is checked as text in
 // `the panel wires the executed pieces together` below.
 
-import { describe, it, expect, afterEach } from 'vitest'
+// What #3640's nodes below add to that route, and why they need the clock: the
+// decision under test is a class on one span, so it is rendered (`SourceHealthRow` is
+// the leaf `SourceCard` renders) and the one link that cannot be executed here is
+// checked as text at the bottom of the block. `vi.setSystemTime` is pinned because
+// `relative()` measures against now — every age asserted below is arithmetic on two
+// seeded stamps, so "passes today" and "passes because the box's date drifted" are
+// not the same claim.
+//
+// A span's colour is read out of the markup by `classOfSpanHolding` rather than by
+// grepping the file for `text-rose-400`, because the closed-burst row legitimately
+// DOES contain a rose span — `{h.failed} failed` is a rose count whatever the tail
+// says — and an assertion over the whole string could not tell those two apart.
+
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 import source from './BackgroundPage.tsx?raw'
@@ -35,6 +48,13 @@ import panelSource from './runsPanelState.ts?raw'
 import toolbarSource from './RunsToolbar.tsx?raw'
 import { api } from '../../api'
 import { RunsToolbar } from './RunsToolbar'
+import {
+  ALARM_FAIL_RATE,
+  SourceHealthRow,
+  failureAgeText,
+  rateIsAlarming,
+  type SourceHealth,
+} from './SourceHealthRow'
 import {
   initialPanelState,
   loadRuns,
@@ -302,5 +322,161 @@ describe('the client builds the real URL (#2648 clause 4, executed)', () => {
     stub({ sessions: [], count: 0, bench_hidden: 148 })
     const out = await api.listBackgroundSessions(150)
     expect(out.bench_hidden).toBe(148)
+  })
+})
+
+// ── The per-source health row dates its own failures (#3640) ──────────────────
+//
+// `fail_rate` is a ratio over a window and says nothing about where inside that
+// window its numerator sits. Read 2026-10-28, youtube-digest's row was 51 % over 100
+// runs whose every failure predated a landed revert by five days — and #3523 was
+// filed at `high` off exactly that payload, because dating it meant a hand-run
+// aggregate over `workers.db` that nobody in front of a dashboard is going to do. The
+// queue has since put the tail beside the rate (`last_failure` and
+// `consecutive_failures`, #3527); these nodes pin the panel reading it, in both
+// directions: a closed burst stops rendering as a live defect, and a live burst still
+// does. The second direction is not decoration — over `?days=90` the live endpoint
+// reports ZERO sources with `consecutive_failures > 0`, so this gate could ship as a
+// colour that never fires again and nobody downstream would notice.
+
+const SEEDED_NOW = '2026-11-02T12:00:00+00:00'
+
+/// The 2026-10-28 payload #3523 was filed from, shaped as the route sends it: a rate
+/// over the whole window, and a tail whose newest run is a success. `last_failure`
+/// sits 2 d 19 h BEFORE `last_completed`, so `relative()` puts it at `2d ago` and the
+/// completion at `1h ago`.
+const CLOSED_BURST: SourceHealth = {
+  total: 100, ok: 49, failed: 51, skipped: 0,
+  fail_rate: 0.51, gpu_hours: 5.96,
+  last_completed: '2026-11-02T11:00:00+00:00',
+  last_failure: '2026-10-30T17:09:58+00:00',
+  consecutive_failures: 0,
+}
+
+/// Same rate, opposite tail: three failures in a row at the end of the window, and a
+/// newest failure NEWER than the newest completion. This is the row the rose exists
+/// for, and it must survive whatever the closed-burst half of the gate does.
+const LIVE_BURST: SourceHealth = {
+  total: 100, ok: 49, failed: 51, skipped: 0,
+  fail_rate: 0.51, gpu_hours: 5.96,
+  last_completed: '2026-10-31T11:00:00+00:00',
+  last_failure: '2026-11-02T11:30:00+00:00',
+  consecutive_failures: 3,
+}
+
+/** The class attribute of the `<span>` whose entire text is `text`, or `''` when that
+ *  span carries no class — which on this row is the muted ink, colour being opt-in.
+ *  Scoped to one span deliberately: `{h.failed} failed` is rose in every seed below,
+ *  so an assertion over the whole markup cannot tell "the rate is muted" from "there
+ *  is no rose anywhere". */
+function classOfSpanHolding(html: string, text: string): string {
+  const esc = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = html.match(new RegExp(`<span([^>]*)>${esc}</span>`))
+  if (!m) throw new Error(`no <span> holds exactly ${JSON.stringify(text)} in:\n${html}`)
+  const cls = /class="([^"]*)"/.exec(m[1])
+  return cls ? cls[1] : ''
+}
+
+describe('SourceHealthRow — the failure rate and the age of its failures', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(SEEDED_NOW))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('the alarm threshold is the 50 % the clauses name', () => {
+    expect(ALARM_FAIL_RATE).toBe(0.5)
+  })
+
+  it('a closed burst prints the age beside the rate and drops the rose', () => {
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: CLOSED_BURST }))
+    // Positive control on the formatter: 2 d 19 h back is `2d ago`, and a stamp the
+    // payload never sent prints nothing rather than a label with no age after it.
+    expect(failureAgeText(CLOSED_BURST)).toBe('last failure 2d ago')
+    expect(failureAgeText({ ...CLOSED_BURST, last_failure: null })).toBe('')
+    expect(html).toContain('51% failing')
+    expect(html).toContain('last failure 2d ago')
+    expect(html).toContain('last 1h ago')
+    // The colour decision, at both levels.
+    expect(rateIsAlarming(CLOSED_BURST)).toBe(false)
+    expect(classOfSpanHolding(html, '51% failing')).toBe('')
+    expect(classOfSpanHolding(html, 'last failure 2d ago')).toBe('')
+    // …and the rose that DOES survive is the run count's, not the rate's.
+    expect(classOfSpanHolding(html, '51 failed')).toContain('text-rose-400')
+  })
+
+  it('prints the age immediately after the rate, not somewhere in the row', () => {
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: CLOSED_BURST }))
+    const rateEnd = html.indexOf('51% failing') + '51% failing'.length
+    const ageStart = html.indexOf('last failure 2d ago')
+    expect(rateEnd).toBeGreaterThan('51% failing'.length)
+    expect(ageStart).toBeGreaterThan(rateEnd)
+    // Adjacency is the clause ("beside the rate"): the only bytes between the two
+    // readings are the closing tag and the opening tag of the age's own span.
+    expect(html.slice(rateEnd, ageStart)).toMatch(/^<\/span><span( class="")?>$/)
+  })
+
+  it('a live burst at the same rate still goes rose, streak and all', () => {
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: LIVE_BURST }))
+    expect(rateIsAlarming(LIVE_BURST)).toBe(true)
+    expect(failureAgeText(LIVE_BURST)).toBe('last failure 30m ago · 3 in a row')
+    expect(classOfSpanHolding(html, '51% failing')).toContain('text-rose-400')
+    expect(classOfSpanHolding(html, 'last failure 30m ago · 3 in a row'))
+      .toContain('text-rose-400')
+  })
+
+  it('a backend that cannot answer the tail question keeps the rose', () => {
+    // `consecutive_failures` is optional because a backend older than `b22a1b3c`
+    // sends no such key. Removing it must NOT disarm the alarm: unknown is read as
+    // live, or every pre-#3527 backend silently loses its only alarm.
+    const { consecutive_failures: removed, ...legacy } = LIVE_BURST
+    expect(removed).toBe(3) // the destructure really did take the streak away
+    expect(legacy).not.toHaveProperty('consecutive_failures')
+    expect(rateIsAlarming(legacy)).toBe(true)
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: legacy }))
+    expect(classOfSpanHolding(html, '51% failing')).toContain('text-rose-400')
+    // The age still prints; the streak is simply not invented for it.
+    expect(html).toContain('last failure 30m ago')
+    expect(html).not.toContain('in a row')
+  })
+
+  it('a rate under the threshold is never loud, live tail or not', () => {
+    // The other half of the AND: `consecutive_failures` alone must not colour a row
+    // whose failure rate is ordinary noise.
+    expect(rateIsAlarming({ ...LIVE_BURST, fail_rate: 0.49 })).toBe(false)
+    expect(rateIsAlarming({ ...LIVE_BURST, fail_rate: null })).toBe(false)
+  })
+
+  it('a source with no failure in the window prints no age at all', () => {
+    // `last_failure: null` is the common case — over `?days=7` today `autoresearch`
+    // and `backlog-cluster` report none — and a dangling "last failure" with nothing
+    // after it is the failure mode `relative()` returning '' exists to prevent.
+    const clean: SourceHealth = {
+      ...CLOSED_BURST, ok: 100, failed: 0, fail_rate: 0,
+      last_failure: null, consecutive_failures: 0,
+    }
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: clean }))
+    expect(html).toContain('0% failing')
+    expect(html).not.toContain('last failure')
+    expect(html).not.toContain('text-rose-400')
+  })
+
+  it('SourceCard renders this component, so the decision above is the one on screen', () => {
+    // The one link these nodes cannot execute (no DOM env — see this file's header):
+    // that the page hands a source's own `health` to the leaf whose markup they just
+    // rendered, rather than keeping a second inline copy of the row.
+    expect(source).toContain("import { SourceHealthRow } from './SourceHealthRow'")
+    expect(source).toMatch(/const h = source\.health/)
+    expect(source).toMatch(/<SourceHealthRow h=\{h\} \/>/)
+    // And the page must not still carry its own copy of either decision: a second
+    // `>= 0.5` or a second `relative()` in this file is the drift these lines guard.
+    expect(source).not.toMatch(/function relative\(/)
+    expect(source).not.toMatch(/fail_rate >= 0\.5/)
+    expect(source).toContain("import { relative } from '@/lib/relativeTime'")
+    // `health: null` stays SourceCard's branch and stays worded as "no runs" — the
+    // absence the panel must never render as a 0 % pass rate.
+    expect(source).toContain('<span>no runs in the window</span>')
   })
 })

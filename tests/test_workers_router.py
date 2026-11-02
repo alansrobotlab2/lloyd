@@ -1513,11 +1513,33 @@ def _health_type() -> str:
     return body
 
 
+#: Where the per-source row's markup lives since #3640. The rose on a 50 %+ failure
+#: rate is a decision, and a decision written inline in a page's JSX can only be tested
+#: by mounting the page — which nothing in this repo can do (`web/vitest.config.ts`
+#: pins `environment: "node"`, no DOM package is installable because `web/package.json`
+#: is denied to a round, and `api.ts` reads `import.meta.env` at module scope). So the
+#: row is a component of its own and `BackgroundPage.test.ts` renders it; these source
+#: bindings follow the markup rather than forcing the extraction back.
+SOURCE_HEALTH_TSX = ROOT / "web/src/components/pages/SourceHealthRow.tsx"
+
+
 def _source_row() -> tuple[str, str]:
-    """(the `h === null` branch, the has-runs branch) of the per-source flex row."""
+    """(the `h === null` branch, the has-runs branch) of the per-source flex row.
+
+    Rebound 2026-11-02 for #3640, which moved the has-runs branch into
+    `SourceHealthRow.tsx`: the null branch stays the page's — `SourceCard` still decides
+    which row gets which — and the runs branch is read out of the leaf. The delegation
+    is asserted here, or the three nodes below would go on passing over markup that no
+    page renders, which is the failure mode the extraction creates.
+    """
     page = PAGE_TSX.read_text(encoding="utf-8")
     row = page.split("{h === null ? (", 1)[1].split("{source.recent.length > 0", 1)[0]
-    null_branch, runs_branch = row.split(") : (", 1)
+    null_branch, rendered = row.split(") : (", 1)
+    assert "<SourceHealthRow h={h} />" in rendered, (
+        "SourceCard no longer renders SourceHealthRow, so the markup read below is "
+        "not the markup on screen")
+    leaf = SOURCE_HEALTH_TSX.read_text(encoding="utf-8")
+    runs_branch = leaf[leaf.index("export function SourceHealthRow"):]
     assert "{h.total} run" in runs_branch, "the has-runs branch lost its run count"
     return null_branch, runs_branch
 
@@ -1527,6 +1549,194 @@ def _code(src: str) -> str:
     import re
     src = re.sub(r"\{/\*.*?\*/\}", "", src, flags=re.S)
     return "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("//"))
+
+
+#: The file that RENDERS this row (#3640 clauses 4 and 5). Read as text here because a
+#: vitest node is not a citable pytest node id and this file is the one that already
+#: binds the markup — the same mirror `test_background_runs_panel_contract.py:298` uses
+#: for the toolbar, which is also how a render-only pin survives in a repo whose vitest
+#: environment is `node` and whose `web/package.json` is denied to a round.
+BG_TEST_TS = ROOT / "web/src/components/pages/BackgroundPage.test.ts"
+RELATIVE_TS = ROOT / "web/src/lib/relativeTime.ts"
+
+
+def _ts_code(src: str) -> str:
+    """`src` with EVERY comment form removed: `//`, `/* */` and JSX `{/* */}`.
+
+    `_code` above leaves block comments in, which is right for the markup it grades.
+    The two nodes below assert on a predicate's text, and `SourceHealthRow.tsx` opens
+    with a docblock that names both payload fields, both item numbers and the word
+    `rose` — a check that could match its own file's prose is a prose assertion wearing
+    a regex, which is the thing the review rung exists to catch.
+    """
+    import re
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("//"))
+
+
+def _js_return(leaf: str, func: str) -> str:
+    """The single `return` expression of a one-statement exported predicate."""
+    import re
+    m = re.search(rf"export function {func}\([^)]*\)[^{{]*\{{\s*return ([^\n]+)\n\}}",
+                  leaf)
+    assert m, (f"{func} is no longer an exported one-return function in "
+               f"{SOURCE_HEALTH_TSX.relative_to(ROOT)} — the predicate these nodes "
+               "grade has moved or grown statements")
+    return m.group(1)
+
+
+def _seed_block(name: str) -> str:
+    """One seeded `SourceHealth` literal out of the vitest file, up to the next one."""
+    spec = BG_TEST_TS.read_text(encoding="utf-8")
+    start = spec.index(f"const {name}: SourceHealth = {{")
+    nxt = spec.find("const ", start + 10)
+    end = spec.index("\n}", start)
+    return spec[start:end] if nxt < 0 or nxt > end else spec[start:nxt]
+
+
+def test_the_rate_goes_rose_only_while_its_failure_tail_is_live():
+    """#3640 clauses 4 and 5, read at the decision the row makes.
+
+    Clause 4 gives the rose a tail condition, clause 5 keeps it firing for a source
+    failing now, and the two are the same conjunction — so both are graded on
+    `rateIsAlarming`'s own expression, stripped of comments, plus the two payloads the
+    vitest file decides between. Four changes fail here and each is one clause quietly
+    reversed: the bound moved off 0.5; the tail arm dropped from the conjunction (which
+    is #3523's shape reinstalled — a rate as a property of a source); `unknown` flipped
+    from live to dead, disarming the alarm for every backend older than `b22a1b3c`; or
+    the rate's colour moved off the predicate back onto the bare comparison.
+    """
+    import re
+    leaf = _ts_code(SOURCE_HEALTH_TSX.read_text(encoding="utf-8"))
+
+    assert "export const ALARM_FAIL_RATE = 0.5" in leaf, (
+        "the 50 % bound is no longer a named constant at the number both clauses give")
+
+    gate = _js_return(leaf, "rateIsAlarming")
+    assert "&&" in gate, f"the gate is not a conjunction any more: {gate!r}"
+    assert "h.fail_rate !== null" in gate, (
+        "a null rate — a source with no runs in the window — is no longer excluded")
+    assert "ALARM_FAIL_RATE" in gate, "the gate stopped using the named bound"
+    assert "failureTailIsLive(h)" in gate, (
+        f"clause 5 reversed: the rose is back on the rate alone ({gate!r}), the colour "
+        "#3523 was filed at `high` off")
+
+    tail = _js_return(leaf, "failureTailIsLive")
+    assert "h.consecutive_failures > 0" in tail, (
+        f"clause 5's live arm is gone ({tail!r}): a source failing NOW no longer "
+        "colours its rate, and the rose would ship as a colour that never fires")
+    assert "h.consecutive_failures == null" in tail, (
+        f"an absent streak is no longer read as live ({tail!r}) — every backend older "
+        "than `b22a1b3c` would lose the row's only alarm, silently")
+
+    assert "const alarming = rateIsAlarming(h)" in leaf, (
+        "the row no longer derives its colour from the exported predicate")
+    assert leaf.count("cn(alarming && 'text-rose-400')") == 2, (
+        "the rate's span and the age's span are the row's only two predicate-coloured "
+        f"spans; found {leaf.count(chr(99) + 'n(alarming')}")
+    assert "fail_rate >= 0.5" not in leaf, (
+        "a rate-only rose comparison is back in the row beside the predicate")
+    assert "fail_rate" not in _ts_code(PAGE_TSX.read_text(encoding="utf-8")), (
+        "the page colours a rate again, in a second copy the predicate does not gate")
+
+    # The two payloads this decision is made about, read out of the file that renders
+    # them. ISO stamps with one offset compare correctly as strings, so the ORDER of
+    # the two stamps is checkable here — which is what keeps a seed from being edited
+    # into its own opposite while its node's name still says "closed burst".
+    closed, live = _seed_block("CLOSED_BURST"), _seed_block("LIVE_BURST")
+    for name, block in (("CLOSED_BURST", closed), ("LIVE_BURST", live)):
+        assert "fail_rate: 0.51" in block, (
+            f"{name} no longer seeds the rate clause 4 names (0.51)")
+    def _stamp(block: str, field: str) -> str:
+        m = re.search(rf"{field}: '([^']+)'", block)
+        assert m, f"{field} is missing from a seed block"
+        return m.group(1)
+    assert _stamp(closed, "last_failure") < _stamp(closed, "last_completed"), (
+        "the closed-burst seed inverted: its newest failure is no longer OLDER than "
+        "its newest completion, so it is not a closed burst any more")
+    assert _stamp(live, "last_failure") > _stamp(live, "last_completed"), (
+        "the live-burst seed inverted: a failure behind the newest completion is "
+        "clause 4's case, not clause 5's")
+    assert re.search(r"consecutive_failures: 0\b", closed), (
+        "clause 4's case needs a clean tail — a streak of 0")
+    streak = re.search(r"consecutive_failures: (\d+)", live)
+    assert streak and int(streak.group(1)) > 0, (
+        "clause 5's case needs a NON-zero tail streak, or the rose it guards has "
+        "nothing live to fire on")
+
+    # And the rendered assertions themselves, or the mirror would survive deleting the
+    # nodes it mirrors: the closed burst must be asserted rose-FREE and the live burst
+    # rose-ful, at the same rate, which is the pair the two clauses are.
+    spec = BG_TEST_TS.read_text(encoding="utf-8")
+    assert "expect(rateIsAlarming(CLOSED_BURST)).toBe(false)" in spec, (
+        "the closed burst's decision is no longer asserted")
+    assert "expect(classOfSpanHolding(html, '51% failing')).toBe('')" in spec, (
+        "nobody asserts the closed burst's rate span carries no class any more — "
+        "clause 4's muted ink is unpinned")
+    assert "expect(rateIsAlarming(LIVE_BURST)).toBe(true)" in spec, (
+        "the live burst's decision is no longer asserted")
+    assert spec.count("expect(classOfSpanHolding(html, '51% failing'))"
+                      ".toContain('text-rose-400')") >= 2, (
+        "clause 5's rose is asserted fewer than twice (live burst and legacy backend), "
+        "so weakening the gate would go unnoticed")
+
+
+def test_the_row_prints_the_failure_age_beside_the_rate_in_muted_ink():
+    """#3640 clause 4's printing half: an age, in the right place, in the wrong colour
+    for an alarm — which is the point.
+
+    Three separate things can go wrong and each is asserted apart: the age can stop
+    being computed (`last_failure` null, or the formatter deleted from under it), it can
+    be printed somewhere else in the row than beside the rate, or it can be printed in
+    the alarm colour unconditionally, which would put a rose back on a burst that
+    closed five days ago — the exact reading clause 4 exists to remove.
+    """
+    leaf = _ts_code(SOURCE_HEALTH_TSX.read_text(encoding="utf-8"))
+
+    assert "const age = relative(h.last_failure)" in leaf, (
+        "the age is no longer built from `last_failure`")
+    assert "if (!age) return ''" in leaf, (
+        "a source with no failure in the window would print a label with no age after "
+        "it — the dangling `last failure` the null guard exists to prevent")
+    assert "last failure " in leaf, "the age text lost its label"
+    assert "h.consecutive_failures ?? 0" in leaf, (
+        "the streak is no longer read for the text, so a live burst loses its "
+        "`· 3 in a row` and a legacy backend would print a fabricated one")
+
+    rate_at = leaf.index("% failing")
+    guard_at = leaf.index("{age !== '' && (")
+    age_at = leaf.index("{age}</span>")
+    gpu_at = leaf.index("h.gpu_hours")
+    assert rate_at < guard_at < age_at < gpu_at, (
+        "the age is no longer printed between the rate and the gpu-hours span; clause "
+        "4 says beside the rate, and a row that buries it three spans away is a row "
+        "that still needs `workers.db` to date a failure")
+    age_span = leaf[guard_at:gpu_at]
+    assert "cn(alarming && 'text-rose-400')" in age_span, (
+        "the age span no longer shares the rate's colour decision, so a live burst "
+        "dates its failure in muted ink while its rate screams")
+    assert 'className="text-rose-400"' not in age_span, (
+        "the age span rose on its own: a closed burst would print its five-day-old "
+        "failure in the alarm colour, which is the defect clause 4 closes")
+
+    lib = RELATIVE_TS.read_text(encoding="utf-8")
+    assert "export function relative(" in lib, "the shared formatter is gone"
+    assert "if (!iso) return ''" in lib and "Number.isFinite(then)" in lib, (
+        "`relative()` no longer returns '' for a missing or unparseable stamp, so the "
+        "guard above can never fire")
+    page = _ts_code(PAGE_TSX.read_text(encoding="utf-8"))
+    assert "import { relative } from '@/lib/relativeTime'" in page, (
+        "the page stopped using the shared formatter")
+    assert "function relative(" not in page, (
+        "the page keeps a second copy of the formatter, and the two will drift")
+
+    spec = BG_TEST_TS.read_text(encoding="utf-8")
+    assert "expect(html).toContain('last failure 2d ago')" in spec, (
+        "nobody asserts the age is on the rendered row at all")
+    assert "expect(classOfSpanHolding(html, 'last failure 2d ago')).toBe('')" in spec, (
+        "nobody asserts the printed age carries no colour class")
+    assert "expect(html).not.toContain('last failure')" in spec, (
+        "the no-failure case is no longer asserted to print nothing")
 
 
 def test_the_health_type_declares_the_split_as_optional():
@@ -2191,6 +2401,8 @@ def test_the_published_filter_names_a_starving_source_and_says_nothing_otherwise
     are pinned here over bytes the real route built: one row back-dated 2 h must make the
     filter name `probe` with its seconds, its count and the bound; a queue with nothing
     in it must print nothing, which is the only way that silence now means anything.
+    Since #3640 the same line also carries the date that source's failure population
+    closed, so the two readings a human takes from Step 3b arrive on one line.
 
     The filter is EXTRACTED from the skill (see `_documented_jq_program`), never retyped,
     and run through the same `jq -r` the step tells a human to run.
@@ -2219,14 +2431,26 @@ def test_the_published_filter_names_a_starving_source_and_says_nothing_otherwise
     assert ran.returncode == 0, f"jq refused the published filter: {ran.stderr}"
     lines = [ln for ln in ran.stdout.splitlines() if ln.strip()]
     assert len(lines) == 1, f"exactly one starving source expected, got {ran.stdout!r}"
-    assert re.match(r"^probe: oldest queued 7[0-9]{3}s, 1 row\(s\) over 3600s$",
-                    lines[0]), lines[0]
-    # The line's three numbers are the payload's own, not three more literals: the
+    # Rebound 2026-11-02 for #3640, which appended the failure tail to this published
+    # line: `last failure …, consecutive …`. The wait half is matched exactly as before
+    # — this item must not be able to loosen it — and the tail is captured rather than
+    # written as a literal, because the four values are the payload's own.
+    m = re.match(r"^probe: oldest queued 7[0-9]{3}s, 1 row\(s\) over 3600s"
+                 r" · last failure (.+), consecutive (\d+)$", lines[0])
+    assert m, lines[0]
+    # The line's numbers are the payload's own, not four more literals: the
     # filter is a VIEW of the fields, and this is what says so.
     row = json.loads(body)["sources"][0]
     assert int(re.search(r"queued (\d+)s", lines[0]).group(1)) == int(
         row["pending_wait_max_seconds"])
     assert row["pending_wait_over_bound_count"] == 1
+    health = row.get("health") or {}
+    assert m.group(1) == (health.get("last_failure")
+                          or "none in the window"), (
+        "the printed failure date is not the payload's `last_failure`, nor its "
+        "declared absence")
+    assert int(m.group(2)) == int(health.get("consecutive_failures") or 0), (
+        "the printed tail streak is not the payload's `consecutive_failures`")
 
     healthy, q2 = _clamp_client(monkeypatch, tmp_path, name="healthy.db")
     _seed_run(q2, datetime.now(timezone.utc) - timedelta(hours=6))

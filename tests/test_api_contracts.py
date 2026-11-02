@@ -153,6 +153,20 @@ MINING_PILE_HEALTH_KEYS = WORKER_SOURCE_HEALTH_KEYS | {"staged_pending"}
 #: third source taking the bound has to arrive here too, and
 #: `test_the_pile_bound_belongs_to_exactly_these_sources` is what makes it loud.
 PILE_BOUND_SOURCES = {"bench-mine", "session-distill"}
+#: The keys `web/src/api.ts` declares inside `WorkerSourceHealth`'s NESTED `health:`
+#: block (#3640). A literal, for the same reason the top-level set above is one: the
+#: ratchet that reads the interface parses two-space keys only, so for four days these
+#: were invisible to it — which is exactly how `last_failure` and
+#: `consecutive_failures` could ship in the payload (`b22a1b3c`, #3527) with the type
+#: Mission Control compiles against still stopping at `matrix_shrunk`. NOT the whole
+#: wire: the rollup also emits `silent`, `runs_with_bundle`, `runs_without_bundle` and
+#: the four `claims_*` keys, which the panel has never read and this set therefore does
+#: not claim. A key joining it is fine — it has to be looked at here first.
+WORKER_SOURCE_HEALTH_NESTED_KEYS = {
+    "total", "ok", "failed", "skipped", "fail_rate", "gpu_hours",
+    "last_completed", "last_failure", "consecutive_failures",
+    "unfinished_matrix", "deadline_cut", "matrix_shrunk",
+}
 
 
 async def test_workers_health_shape(client, monkeypatch, tmp_path):
@@ -298,6 +312,44 @@ def test_the_web_client_declares_every_field_the_route_returns():
     assert WORKER_SOURCE_HEALTH_KEYS - declared == {"dispatch"}, {
         "emitted_but_undeclared": sorted(WORKER_SOURCE_HEALTH_KEYS - declared),
         "expected": "exactly `dispatch`, the one pre-existing gap (see the docstring)"}
+
+    # The NESTED `health:` block, which the parse above cannot see and therefore never
+    # graded (#3640 clause 3). That blindness is the whole finding: `b22a1b3c` grew the
+    # payload with `last_failure` and `consecutive_failures` on 2026-10-30, and the type
+    # Mission Control compiles against still stopped at `matrix_shrunk`, so the fields
+    # that make `fail_rate` readable (#3523 was filed at `high` off a closed burst)
+    # could not be read from a component. Read at four spaces of indentation, which is
+    # where the interface's nested object lives.
+    health_marker = "\n  health: {"
+    assert health_marker in block, \
+        "WorkerSourceHealth no longer has a nested `health:` block to grade"
+    hblock = block[block.index(health_marker):]
+    hblock = hblock[: hblock.index("\n  }")]
+    declared_health = set(_re.findall(r"^    ([A-Za-z_]\w*)\??:", hblock, _re.M))
+    assert len(declared_health) >= 8, (
+        f"positive control: only {sorted(declared_health)} parsed out of the nested "
+        "block — the indent this reads is four spaces, so a reformat that dedents "
+        "the sub-keys silently empties the set")
+    assert declared_health == WORKER_SOURCE_HEALTH_NESTED_KEYS, {
+        "unexpected": sorted(declared_health - WORKER_SOURCE_HEALTH_NESTED_KEYS),
+        "missing": sorted(WORKER_SOURCE_HEALTH_NESTED_KEYS - declared_health),
+        "expected": "the literal above — see its comment for what is deliberately "
+                    "not in it"}
+    # Nullability, not just presence: `last_failure` is null for any source whose
+    # window holds no failure (two of the seventeen today), so a `string` type would
+    # tell a component it can call `.slice()` on it; and the streak is OPTIONAL for
+    # #3089's reason — a backend older than `b22a1b3c` sends no such key, and
+    # `BackgroundPage.test.ts`'s legacy-backend node is what that optionality buys.
+    assert "last_failure: string | null" in hblock, (
+        "`last_failure` must be declared non-optional and null-able: every source "
+        "sends the key, and sources with no failure in the window send null")
+    assert "consecutive_failures?: number" in hblock, (
+        "`consecutive_failures` must stay optional — an older backend omits it, and "
+        "a required type would make those rows a type error rather than an "
+        "undated tail")
+    # The producer half of the pair is pinned where the rollup is built
+    # (`tests/test_workers_router.py`), so these two keys are graded on both sides of
+    # the seam, which is the side that rotted once already.
 
 
 async def test_created_sessions_are_never_background_shaped(client, tmp_path,

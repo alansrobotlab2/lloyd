@@ -523,6 +523,250 @@ def test_the_watchdog_skill_prints_the_alarm_field():
         "decides nothing")
 
 
+# ── #3640: Step 3b has to date a failure population, not just count one ───────
+#
+# `b22a1b3c` (#3527) put `last_failure` and `consecutive_failures` on this endpoint and
+# the one job that reads it every 15 minutes never picked them up: Step 3b's jq filtered
+# on the `pending_wait_*` trio and printed nothing else, and `last_failure` appeared
+# nowhere in the skill library. So the pair that separates #3523 — filed at `high` off a
+# `fail_rate` of 0.51 whose every failure predated a landed revert by five days — from a
+# source failing NOW sat in JSON while the watchdog went on reading rates as properties
+# of sources. Same gap #2185 closed for the wait fields two items earlier, one field
+# later, closed the same way: the skill's own code block, executed.
+#
+# Executed rather than grepped because two of the three shapes this payload returns
+# cannot be printed by a program that assumes a failure exists: `automod-regression` has
+# `health: null` outright, and `autoresearch` and `backlog-cluster` send
+# `last_failure: null`. A jq that errors on either means Step 3b dies on the idle rows —
+# the failure mode the node above names for Step 1's table — and a grep for
+# `.health.last_failure` cannot see that.
+#
+# Unmarked, and a missing skill or missing `jq` FAILS rather than skips, for the reason
+# `_skill_text`'s comment gives plus the gate runner's hardcoded `-m "not live_vault"`:
+# a marked or skipped node here pins nothing.
+
+#: Four of the shapes this endpoint actually returns (measured 2026-11-02 at
+#: `?days=7&runs=0`: 17 sources with a `health` block, one without). One closed burst,
+#: one source that ran and never failed, one source with no run in the window, and one
+#: burst still running.
+_STEP3B_SEED = {
+    "sources": [
+        {"name": "youtube-digest", "pending_wait_max_seconds": 12.0,
+         "pending_wait_over_bound_count": 3, "pending_wait_bound_seconds": 3600,
+         "health": {"total": 100, "ok": 49, "failed": 51, "skipped": 0,
+                    "fail_rate": 0.51, "gpu_hours": 5.96,
+                    "last_completed": "2026-11-02T11:00:00+00:00",
+                    "last_failure": "2026-10-30T17:09:58+00:00",
+                    "consecutive_failures": 0}},
+        {"name": "autoresearch", "pending_wait_max_seconds": 0.0,
+         "pending_wait_over_bound_count": 0, "pending_wait_bound_seconds": 3600,
+         "health": {"total": 5, "ok": 5, "failed": 0, "skipped": 0,
+                    "fail_rate": 0.0, "gpu_hours": 0.1,
+                    "last_completed": "2026-11-01T01:00:00+00:00",
+                    "last_failure": None, "consecutive_failures": 0}},
+        {"name": "automod-regression", "pending_wait_max_seconds": 0.0,
+         "pending_wait_over_bound_count": 0, "pending_wait_bound_seconds": 3600,
+         "health": None},
+        # The same two fields read the OTHER way: a burst still running, so the tail
+        # streak is 3 and `last_failure` is NEWER than `last_completed`. Every other
+        # row here carries a streak of 0, which is what makes this one load-bearing —
+        # a program that printed the literal `consecutive 0` for every source, or that
+        # printed the streak only when it was zero, satisfies those rows and is caught
+        # only by a row whose real value is not 0.
+        {"name": "bench-mine", "pending_wait_max_seconds": 0.0,
+         "pending_wait_over_bound_count": 0, "pending_wait_bound_seconds": 3600,
+         "health": {"total": 21, "ok": 8, "failed": 13, "skipped": 0,
+                    "fail_rate": 0.62, "gpu_hours": 3.1,
+                    "last_completed": "2026-10-31T09:00:00+00:00",
+                    "last_failure": "2026-11-02T10:00:00+00:00",
+                    "consecutive_failures": 3}},
+    ],
+}
+
+
+def _step3b_section() -> str:
+    step = _skill_text().partition("## Step 3b")[2]
+    section = step.split("## Step 3c")[0]
+    assert section.strip(), "the skill has no `## Step 3b` section to read"
+    return section
+
+
+def _step3b_jq_programs() -> tuple[list[str], list[str]]:
+    """The jq programs Step 3b documents, pulled out of its own code blocks.
+
+    Returns (programs that print the failure age, programs that report a queue wait).
+    """
+    import re
+    progs = re.findall(r"jq -r '([^']*)'", _step3b_section(), re.S)
+    assert progs, "Step 3b documents no `jq -r '...'` program to run"
+    # `select(` is the divider, not the field names: the queue-wait program below also
+    # prints both fields since #3640, and it is FILTERED by design — one line per
+    # over-bound source. The clause here is about the unfiltered one, the line the
+    # watchdog prints for every source in the fleet.
+    dating = [p for p in progs if ".health.last_failure" in p
+              and ".health.consecutive_failures" in p and "select(" not in p]
+    waiting = [p for p in progs if "pending_wait_over_bound_count > 0" in p]
+    return dating, waiting
+
+
+def _jq_run(prog: str, payload: str) -> tuple[int, str, str]:
+    """Run one documented jq program over a payload and hand back rc/out/err.
+
+    rc is RETURNED rather than asserted because the two callers need opposite
+    readings: a null `health` row must not error the filter (rc 0, one line per
+    source), while an erroring filter is itself the finding. `jq` missing is a FAIL,
+    not a skip — a skipped node here pins nothing.
+    """
+    import shutil
+    import subprocess
+    if shutil.which("jq") is None:
+        pytest.fail("no jq on this box, so Step 3b's documented command cannot be "
+                    "executed — and a skipped node here pins nothing")
+    proc = subprocess.run(["jq", "-r", prog], input=payload,
+                          capture_output=True, text=True, timeout=30)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _live_workers_health() -> str:
+    """The live payload, fetched once per node that asks for it."""
+    import subprocess
+    live = subprocess.run(
+        ["curl", "-s", "localhost:8080/api/workers/health?days=7&runs=0"],
+        capture_output=True, text=True, timeout=30)
+    assert live.returncode == 0 and live.stdout.strip(), (
+        "the backend did not answer, so the live half of this check did not run")
+    return live.stdout
+
+
+def test_step3b_dates_every_source_off_the_payload():
+    """Clause 1, executed: every source in Step 3b's output carries its own date.
+
+    Not a grep for `.health.last_failure` in the file. The published filter is
+    EXTRACTED and run over a payload with the four shapes the endpoint returns — a
+    closed burst, a burst still running, a source that never failed, a source whose
+    `health` is null — and then over the LIVE payload with the clause's own reading on
+    top: the newest `last_failure` in that payload has to appear in the program's own
+    output. A filter that printed the words `last failure` beside a hardcoded nothing
+    would satisfy a grep and an rc, and would still leave the operator reaching for
+    `workers.db`, which is the thing clause 1 says is no longer required.
+
+    Fails three ways before the change, all of them observed rather than predicted.
+    Against a vault staged at `905b97aff^` (the commit before the skill edit) the
+    section publishes ONE jq program, filtered on `pending_wait_over_bound_count > 0`,
+    so the extracted set has no unfiltered member and the first assert fires. Against a
+    retyped copy of the published filter — the version written here first — it passes
+    today while the operator's line still prints the wrong thing: that copy selected on
+    `(.health | .last_failure) != null`, printing 2 of the live fleet's 18 sources,
+    which is clause 1's "every named source" lost silently because rc was 0 and the
+    lines looked right. And against a filter that ignores a null `health`, the failure
+    mode the Step 1 node above names, rc comes back non-zero on the seeded payload.
+    """
+    import re
+    dating, waiting = _step3b_jq_programs()
+    assert dating, ("Step 3b documents no unfiltered jq program printing "
+                    "`.health.last_failure` and `.health.consecutive_failures` — so "
+                    "dating a source's failure population still needs `workers.db`")
+    assert waiting, "the pre-existing queue-wait filter vanished from Step 3b"
+
+    # Every documented unfiltered program is graded, not `dating[0]`: a page that
+    # later grows a second one has to date the fleet from it too, and a check pinned to
+    # position zero would go on passing while the line an operator pastes — the last in
+    # the block — quietly rotted.
+    for prog in dating:
+        rc, out, err = _jq_run(prog, json.dumps(_STEP3B_SEED))
+        assert rc == 0, (
+            f"Step 3b's dating filter errors on a payload shaped like the live one "
+            f"(rc {rc}, one line per source expected):\n{err[:400]}\nprogram:\n{prog}")
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        assert len(lines) == len(_STEP3B_SEED["sources"]), (
+            f"the dating filter printed {len(lines)} line(s) for "
+            f"{len(_STEP3B_SEED['sources'])} sources — it drops a row or dies on one")
+        for src in _STEP3B_SEED["sources"]:
+            health = src.get("health") or {}
+            line = next((ln for ln in lines if ln.startswith(src["name"] + ":")), None)
+            assert line is not None, f"the filter printed no line for {src['name']}"
+            stamp = health.get("last_failure")
+            if stamp:
+                assert stamp in line, (
+                    f"{src['name']}: the filter printed {line!r} but its payload's "
+                    f"`last_failure` is {stamp!r} — the date is not the payload's")
+            else:
+                # Absence has to PRINT as absence, not vanish: a source whose failures
+                # are unknown and one that has none are different facts, and a line
+                # that omits the field reads as the first. And it must print no DATE,
+                # which is what separates a real sentinel from a program that echoes
+                # one string for every row.
+                assert ("none" in line.lower() or "—" in line
+                        or "no failure" in line.lower()), (
+                    f"{src['name']}: nothing to date, and the line says nothing about "
+                    f"it either: {line!r}")
+                assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
+                    f"{src['name']}: `last_failure` is null and the line still "
+                    f"carries a date: {line!r}")
+            tail = re.search(r"consecutive[^0-9]*(-?\d+)\s*$", line)
+            assert tail is not None, (
+                f"{src['name']}: no line carries the tail streak: {line!r}")
+            assert int(tail.group(1)) == int(health.get("consecutive_failures") or 0), (
+                f"{src['name']}: printed streak {tail.group(1)} for a payload streak "
+                f"of {health.get('consecutive_failures')!r}")
+        # One seeded row's streak IS 3, so a program hardcoded to `consecutive 0` — the
+        # value the other rows happen to share — cannot print its way past this.
+        assert any(re.search(r"consecutive[^0-9]*[1-9]\d*\s*$", ln) for ln in lines), (
+            "not one seeded line shows a non-zero tail streak, so the printed streak "
+            f"is not the payload's: {lines}")
+
+    # Then the same programs over the LIVE payload — the half a seeded fixture cannot
+    # give, because it is the field's real producer, microsecond offsets and all.
+    live = json.loads(_live_workers_health())
+    assert live.get("sources"), "the live payload carries no sources to date"
+    newest = max((s["health"]["last_failure"] for s in live["sources"]
+                  if s.get("health") and s["health"].get("last_failure")),
+                 default=None)
+    assert newest, "no source in the live window has a failure to date"
+    for prog in dating:
+        rc, out, err = _jq_run(prog, json.dumps(live))
+        assert rc == 0, f"Step 3b's dating filter errors on the LIVE payload: {err[:400]}"
+        assert newest in out, (
+            f"the live payload's newest `last_failure` ({newest}) does not appear in "
+            "its own program's output — the filter is not printing the field. "
+            f"First lines: {out.splitlines()[:3]}")
+        for name in [s["name"] for s in live["sources"] if not s.get("health")]:
+            line = next((ln for ln in out.splitlines()
+                         if ln.startswith(name + ":")), None)
+            assert line is not None, (
+                f"{name} has `health: null` in the live payload and the filter printed "
+                "no line for it — Step 3b would stop naming sources at that row")
+            assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
+                f"{name} has no health block at all and the line still printed a "
+                f"date: {line!r}")
+
+
+def test_step3b_states_the_closed_burst_rule_in_payload_terms():
+    """Clause 2: the prose says which rate is a defect and which one is history.
+
+    The payload terms must appear WITH the verdict, because the verdict is the thing
+    #3523 got wrong: a `fail_rate` ≥ 0.5 whose `last_failure` is older than
+    `last_completed` with `consecutive_failures` 0 is a closed burst and must not be
+    filed as a live defect. And its inverse is asserted too — a high rate whose streak
+    is non-zero IS live — so the rule cannot be softened into "ignore high rates".
+    """
+    step = _step3b_section()
+    low = step.lower()
+    for term in ("fail_rate", "last_failure", "last_completed",
+                 "consecutive_failures"):
+        assert term in step, f"the rule is not in payload terms: `{term}` is gone"
+    assert "closed burst" in low, "Step 3b never names the closed burst"
+    assert "live defect" in low, (
+        "Step 3b never contrasts the closed burst with a live defect, which is the "
+        "half that would have kept #3523 off the board at `high`")
+    assert ("must not file" in low or "do not file" in low or "no item" in low), (
+        "the rule stops at a description and never reaches what the watchdog does "
+        "about it")
+    assert "consecutive_failures` > 0" in step or "consecutive_failures > 0" in step, (
+        "Step 3b never says which high rate IS live, so the rule would suppress the "
+        "alarm as easily as the false alarm")
+
+
 # ── #3070: the stall list has to say which of its stalls are rulings ───────────
 #
 # This payload was the fleet's one parked-blind surface. The watchdog puts the

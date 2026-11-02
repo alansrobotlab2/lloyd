@@ -332,6 +332,20 @@ export interface WorkerSourceHealth {
     fail_rate: number | null
     gpu_hours: number
     last_completed: string | null
+    // #3527, and the pair that makes `fail_rate` readable: WHERE inside the window
+    // its numerator sits. `last_failure` is the newest failed/interrupted stamp and is
+    // null when the window holds no failure at all. Without them a rate is a property
+    // of a source rather than an event — youtube-digest read 51 % over 100 runs on
+    // 2026-10-28 with every failure five days behind a fresh success, and #3523 was
+    // filed at `high` off that payload because dating it meant a hand-run aggregate
+    // over `workers.db` that nobody in front of a dashboard is going to do.
+    last_failure: string | null
+    // The tail streak: how many of this source's most recent runs were failures in a
+    // row, so 0 means its newest run succeeded and the burst is behind it. Optional
+    // for the one reason `judgement` and `staged_pending` are optional — a backend
+    // older than `b22a1b3c` sends no such key, and a required field there would make
+    // those rows a type error rather than an undated tail.
+    consecutive_failures?: number
     // #1857's split of the runs that ended with part of a matrix unrun (#1970).
     // Optional on purpose: a backend older than the split sends none of them,
     // and `undefined` must stay hidden rather than render as a healthy 0.

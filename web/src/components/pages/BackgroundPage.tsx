@@ -39,6 +39,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { runTranscriptIds, transcriptLabel } from '@/lib/runSessions'
 import { emptyStateCopy } from './benchRows'
 import { RunsToolbar } from './RunsToolbar'
+import { SourceHealthRow } from './SourceHealthRow'
 import {
   initialPanelState,
   loadRuns,
@@ -46,19 +47,9 @@ import {
   panelReduce,
 } from './runsPanelState'
 import { cn } from '@/lib/utils'
+import { relative } from '@/lib/relativeTime'
 
 const POLL_MS = 10_000
-
-function relative(iso: string): string {
-  if (!iso) return ''
-  const then = new Date(iso).getTime()
-  if (!Number.isFinite(then)) return ''
-  const delta = (Date.now() - then) / 1000
-  if (delta < 60) return 'just now'
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`
-  return `${Math.floor(delta / 86400)}d ago`
-}
 
 /** A run's producer, as the tab groups them. The session's `source` is the
  *  fine-grained identity (`autonomy-task:39`); this is the family. */
@@ -221,28 +212,10 @@ function SourceCard({
           // it as healthy is exactly the mistake this panel exists to stop.
           <span>no runs in the window</span>
         ) : (
-          <>
-            <span>{h.total} run{h.total === 1 ? '' : 's'}</span>
-            {/* #1857's split, beside the run count it is a share of — 2 of 40
-                and 2 of 2 are opposite readings. Only the deadline cut is the
-                alarm; a shrunk matrix is the projection doing its job. */}
-            {(h.deadline_cut ?? 0) > 0 && (
-              <span className="text-rose-400">{h.deadline_cut} deadline-cut</span>
-            )}
-            {(h.matrix_shrunk ?? 0) > 0 && (
-              <span>{h.matrix_shrunk} matrix-shrunk</span>
-            )}
-            <span className="text-emerald-400">{h.ok} ok</span>
-            {h.failed > 0 && <span className="text-rose-400">{h.failed} failed</span>}
-            {h.skipped > 0 && <span>{h.skipped} skipped</span>}
-            <span className={cn(
-              h.fail_rate !== null && h.fail_rate >= 0.5 && 'text-rose-400',
-            )}>
-              {h.fail_rate === null ? '—' : `${Math.round(h.fail_rate * 100)}% failing`}
-            </span>
-            <span>{h.gpu_hours}h</span>
-            {h.last_completed && <span>last {relative(h.last_completed)}</span>}
-          </>
+          // The rate, its failure population's age, and the alarm colour that
+          // belongs to a live tail and to nothing else — all of it decided inside
+          // `SourceHealthRow`, whose own tests seed a closed burst and a live one.
+          <SourceHealthRow h={h} />
         )}
       </div>
 
