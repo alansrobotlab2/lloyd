@@ -1313,6 +1313,77 @@ def test_p6b_states_the_none_with_tools_property_as_measured_on_the_live_build()
             f"harness.max_turns_wrapup ships {alias!r} and P6(b) does not say so")
 
 
+DRIFT_SCRIPT = "scripts/maintenance/engine_build_drift.py"
+
+
+def test_p6b_names_the_engine_build_detector_beside_the_probe():
+    """#3648 clause 6: the instruction "re-run it after every engine rebuild" has a
+    detector named in the same bullet that issues it.
+
+    Before #3648 that sentence was prose with nothing behind it: the probe is run by no
+    job, so a rebuild silently invalidated a measurement whose whole subject is which
+    build it was taken on — the exact accident `app/harness/tests/test_finalizer.py:879`
+    records, where the docstring said "the installed vLLM 0.28.1" and became false the day
+    the box moved to `0.31.1rc1.dev260`, with no test to notice. Naming the script is the
+    clause; what a bullet could do instead is name a script that does not exist, or name
+    one that does something else, so the script is read and its behaviour checked.
+
+    Placement is graded too, because it is the one way this edit could break the node
+    above: the sentence is appended AFTER the bullet's `Pins:` tail, never between the
+    build string and its measured-on date, which the proximity check below re-runs.
+    """
+    bullet = _flat_bullet(_section(DOC_TEXT, P6_HEADING), P6B_BULLET)
+    assert DRIFT_SCRIPT in bullet, (
+        "P6(b) still issues 're-run it after every engine rebuild' with no detector "
+        f"named: {DRIFT_SCRIPT} is absent, so the instruction is unowned")
+    assert "eval/tool_choice_none_probe.py" in bullet, (
+        "the detector has to be named beside the thing it invalidates, not in a bullet "
+        "of its own — a reader who never reaches the probe never learns to re-run it")
+
+    script = ROOT / DRIFT_SCRIPT
+    assert script.is_file(), (
+        f"{DRIFT_SCRIPT} is named by the doc and is not in the tree — the phantom-path "
+        "failure this file's own `probe.is_file()` check exists to catch")
+    src = script.read_text(encoding="utf-8")
+    assert "eval/tool_choice_none_probe.py" in src, (
+        "the bullet says the detector exits non-zero NAMING the probe; the script never "
+        "prints that path, so a drift report would name neither what changed nor what "
+        "to re-run")
+    assert "/version" in src, (
+        "the bullet says the detector asks the engine for its build over `GET /version`")
+    assert "/v1" not in src, (
+        "the bullet claims the detector sends no completion request; the script names a "
+        "/v1 path, so the doc is advertising a check that would perturb the very "
+        "prompt-token counts the probe decides on")
+    assert "finalizer.py" in src, (
+        "the bullet says the expectation is the build `finalizer.py`'s docstring records; "
+        "the script must read that file rather than hold its own copy")
+
+    # Placement: appended, not interleaved. Two ways to be wrong, and each breaks
+    # something different — inserted before the `Pins:` tail the sentence lands mid-bullet
+    # where it can split the measurement from its numbers, and inserted between the date
+    # and the build it breaks the node above while still passing every contains-check here.
+    assert bullet.index("Pins:") < bullet.index(DRIFT_SCRIPT), (
+        "the detector sentence was inserted before the bullet's `Pins:` tail; the item's "
+        "clause-6 finding says append it after that tail")
+    assert bullet.index(DRIFT_SCRIPT) > max(bullet.index(TC_NONE_BUILD),
+                                            bullet.index(TC_NONE_MEASURED_ON)), (
+        "the detector is named between the measurement's build and its date")
+    assert abs(bullet.index(TC_NONE_BUILD) - bullet.index(TC_NONE_MEASURED_ON)) < 240, (
+        f"the build string is now "
+        f"{abs(bullet.index(TC_NONE_BUILD) - bullet.index(TC_NONE_MEASURED_ON))} "
+        "characters from its measured-on date — the append moved them apart, which is "
+        "exactly the hazard the item's clause-6 finding names")
+
+    # And the detector is a detector. A bullet that let it be described as the thing that
+    # MEASURES the property would put a second instrument over `none` prefix-equality on
+    # this page, and only the probe does that, on prompt tokens.
+    assert not re.search(r"(drift|detector)[^.]{0,120}(measures|re-?measures|verifies)",
+                         bullet, re.I), (
+        "the bullet credits the drift check with measuring the property; it compares "
+        "build strings and nothing else")
+
+
 def test_the_structured_verdicts_bullet_dates_the_property_and_warms_up_correctly():
     """#2678 clause 4: the 1.19 s / 25.00 s bullet names its build, and the
     warm-up warning counts one request, not two.

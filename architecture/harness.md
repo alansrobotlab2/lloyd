@@ -1334,6 +1334,12 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   (`run_prompt_on_primary`), whose `TurnResult.ok` reads non-empty text as
   success. Pins: `app/harness/tests/test_tool_choice_levers.py`,
   `tests/test_task_subagent_answer.py::test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated`.
+  `scripts/maintenance/engine_build_drift.py` is the detector that turns that re-run into
+  something that happens: it asks the engine for its build over one `GET /version`,
+  compares it to the build `finalizer.py`'s docstring records, and exits non-zero naming
+  this probe when the two differ — UNKNOWN, never a pass, when the engine will not name
+  its build. It sends no completion request, so it cannot perturb the prompt-token counts
+  the probe decides on.
 
 ### D11 — `/compact` is a queued turn that folds into the same record
 
