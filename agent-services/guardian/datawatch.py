@@ -1172,6 +1172,94 @@ def write_arrivals_baseline(state_dir, files: "dict[str, float]", now: float,
     os.replace(tmp, state_dir / ARRIVALS_STATE_FILE)
 
 
+def prune_arrivals_baseline(state_dir, names, now: "float | None" = None,
+                            root: "str | None" = None):
+    """Drop exactly `names` from the arrivals baseline, and refuse every name that must stay.
+
+    #3422: `write_arrivals_baseline` merges monotonically, which is right for a sidecar that
+    comes and goes and wrong for a name somebody DELETED. With `false` still a `seen` key, an
+    operator who removes it and then meets it again — a misfired shell redirect, the same
+    mistake in another job — is met by silence: `new_top_level_names` reports only names
+    absent from the baseline, so the one leg that exists to notice a new name at this root
+    cannot notice the recurrence of an old one. Removal without this prune leaves the class
+    permanently muted, which is worse than never having looked.
+
+    A pure bookkeeping step, not a deletion: this function never opens the root for writing,
+    and `root=` is read-only — it exists so a name that is still STANDING there cannot be
+    re-labelled as an arrival by a prune that ran for the wrong reason. A name that is a
+    SQLite sidecar by the leg's own pairing is refused, because a sidecar name is deliberately
+    kept forever — #3109's muting, which the muted-sidecar node in
+    `tests/test_guardian_datawatch.py` pins — and a sidecar pruned from the baseline would
+    come back as a fresh alert every hour for the rest of the store's life.
+
+    This function is the guardian's only write to the arrivals baseline besides
+    `write_arrivals_baseline`, and it edits that one JSON state file: it deletes no name, and
+    #3422's report-only contract is a boundary on THIS module rather than an absence in it —
+    the module's one deletion has always moved code-tree residue INTO the data root, tree
+    argument first, and never a data-root name OUT of it. The line holding that boundary is
+    `tests/test_guardian_datawatch.py::
+    test_the_guardians_only_mover_moves_code_tree_residue_into_the_root`, and `guardian.py`
+    never calls this function at all, so the hourly leg cannot clear its own memory of an
+    arrival.
+
+    It cannot call `write_arrivals_baseline` to persist: that function's whole job is to merge,
+    and merging re-adds the name being pruned. Same tmp + `os.replace` shape for the same
+    reason — a half-written baseline parses as corrupt, and a corrupt baseline re-arms the leg.
+    Returns `(pruned, refused)`; a name simply absent from the baseline is neither, and is a
+    no-op, so a rerun costs nothing.
+    """
+    state_dir = Path(state_dir)
+    # Read for the root the caller named: the baseline records which root it was measured
+    # against and `read_arrivals_baseline` refuses a mismatch, so reading the default root's
+    # baseline here would answer "no baseline" for every fixture root and for any run the
+    # caller passed `root=` to — a silent no-op that reads as a successful prune.
+    seen_now = (read_arrivals_baseline(state_dir) if root is None
+                else read_arrivals_baseline(state_dir, root))
+    if not seen_now:
+        return [], []
+    # What that reader hands back IS the `seen` mapping, not the envelope around it — the same
+    # shape `write_arrivals_baseline` merges. Asking it for a `seen` key would answer `None`
+    # and the prune would report a clean no-op over a baseline full of the names.
+    seen = dict(seen_now)
+    # `read_arrivals_baseline` only answered because the envelope's root matched, so the root
+    # written back below is the same string it validated, not a new claim.
+    recorded_root = os.path.realpath(str(root) if root is not None else DATA_ROOT)
+    # The screen the pairing question is asked against: the names the leg already believes
+    # stand here, plus the live root when the caller named one and it can be read. A root that
+    # cannot be read contributes nothing rather than refusing everything: an unreadable root is
+    # the shadow leg's alarm, not this bookkeeping step's.
+    screen = dict(seen)
+    if root is not None:
+        try:
+            screen.update(top_level_regular_files(root))
+        except OSError:
+            pass
+    pruned: list[str] = []
+    refused: list[tuple[str, str]] = []
+    for name in names:
+        if name not in seen:
+            continue
+        if _sidecar_of_store_in_this_scan(name, screen):
+            refused.append((name, "a SQLite sidecar name is kept in the baseline for good, "
+                                  "or its muting would have to be re-earned every hour"))
+            continue
+        if root is not None and os.path.lexists(os.path.join(str(root), name)):
+            refused.append((name, f"still stands at {root}: a name only removed from the "
+                                  "baseline would be reported as a brand-new arrival"))
+            continue
+        seen.pop(name)
+        pruned.append(name)
+    if not pruned:
+        return [], refused
+    now = time.time() if now is None else now
+    state_dir.mkdir(parents=True, exist_ok=True)
+    tmp = state_dir / f"{ARRIVALS_STATE_FILE}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"root": recorded_root, "seen": seen,
+                               "updated": now}, indent=1), encoding="utf-8")
+    os.replace(tmp, state_dir / ARRIVALS_STATE_FILE)
+    return pruned, refused
+
+
 def _days_ago(mtime: float, now: float) -> int:
     return max(0, int((now - mtime) // 86400))
 

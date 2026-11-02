@@ -1800,3 +1800,277 @@ def test_the_retract_leg_no_longer_asserts_a_byte_size():
     assert set(G.RUNTIME_DATA_SHADOW_ALERT_TITLES_RETIRED) <= set(
         G.RUNTIME_DATA_ALERT_TITLES), (
         "a retired heading the hourly all-clear does not walk is retired only on paper")
+
+
+# ── #3422: the arrivals baseline can be pruned, so a removed name stays nameable ──
+# `write_arrivals_baseline` merges MONOTONICALLY and `new_top_level_names` reports only names
+# absent from the baseline, so a name that was `seen` before it was deleted could never be
+# reported again: the leg that exists to name a recurrence of the `false`/`sqlite3` class was
+# structurally unable to name one. These nodes pin the prune and, just as much, the names the
+# prune must refuse — a sidecar pruned from the baseline returns as a fresh human decision
+# every hour for the rest of the store's life.
+
+
+def test_pruning_a_removed_name_makes_its_recurrence_nameable(tmp_path):
+    """#3422 clause 4: delete + prune, then re-create, and the leg reports exactly that one.
+
+    The whole reason the prune exists. Without it the second `false` is invisible forever: the
+    baseline says the leg has seen that name, and a name it has seen is not an arrival.
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = tmp_path / "state"
+    (root / ".lloyd-data-root").write_bytes(b"")
+    (root / "usage.db").write_bytes(b"x" * 64)
+    (root / "false").write_bytes(b"")
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)), now=100.0,
+                               data_root=str(root))
+    assert "false" in D.read_arrivals_baseline(state, str(root))
+    (root / "false").unlink()
+    pruned, refused = D.prune_arrivals_baseline(state, ["false"], now=200.0, root=str(root))
+    assert pruned == ["false"] and refused == [], (pruned, refused)
+    assert "false" not in D.read_arrivals_baseline(state, str(root))
+
+    (root / "false").write_bytes(b"")                       # the recurrence
+    findings = D.new_top_level_names(D.top_level_regular_files(str(root)),
+                                     D.read_arrivals_baseline(state, str(root)),
+                                     now=300.0)
+    assert [f["name"] for f in findings] == ["false"], (
+        f"the recurrence was not the single thing reported: {[f['name'] for f in findings]}")
+
+
+def test_pruning_leaves_every_other_seen_name_alone(tmp_path):
+    """Exactly the removed names and only those: a prune is a delta, not a reset.
+
+    The other half of clause 4. A prune that rewrote the baseline wholesale would re-arm the
+    leg, and a re-armed leg reports the entire legitimate inventory — the sessions marker,
+    `workers.db`, the snapshot marker — as fresh human decisions, which is the noise that gets
+    a new alert switched off (the same reason `read_arrivals_baseline` answers `None` rather
+    than `{}`).
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = tmp_path / "state"
+    (root / ".lloyd-data-root").write_bytes(b"")
+    for n in ("false", "sqlite3", "usage.db"):
+        (root / n).write_bytes(b"")
+    before = D.top_level_regular_files(str(root))
+    D.write_arrivals_baseline(state, before, now=100.0, data_root=str(root))
+    for n in ("false", "sqlite3"):
+        (root / n).unlink()
+    # Both removed names are named, and only they are dropped: `sqlite3` is pruned because it
+    # was pruned, not because the file is gone — pruning every absent name would silently
+    # un-mute names the leg muted for other reasons.
+    pruned, refused = D.prune_arrivals_baseline(state, ["false", "sqlite3"], now=200.0,
+                                                root=str(root))
+    assert pruned == ["false", "sqlite3"] and refused == [], (pruned, refused)
+    after = D.read_arrivals_baseline(state, str(root))
+    assert set(after) == {".lloyd-data-root", "usage.db"}, sorted(after)
+    assert after["usage.db"] == before["usage.db"], (
+        "the kept names were rewritten, not left alone")
+
+
+def test_a_sidecar_name_is_never_pruned_from_the_arrivals_baseline(tmp_path):
+    """Clause 4's refusal, and the one that keeps `#3109`'s muting from becoming an alert loop.
+
+    A 0-byte `usage.db-wal` is real and routine — it is what a checkpoint leaves behind — and
+    the leg mutes it by PAIRING, which works only while the name stays in `seen`. Prune it and
+    the next hour sees a name it has never seen, so the mute costs a human decision every hour
+    the store lives; the node named in clause 4 pins the kept half and this one the refusal.
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = tmp_path / "state"
+    (root / ".lloyd-data-root").write_bytes(b"")
+    (root / "usage.db").write_bytes(b"x" * 64)
+    (root / "usage.db-wal").write_bytes(b"")
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)), now=100.0,
+                               data_root=str(root))
+    (root / "usage.db-wal").unlink()                        # checkpointed away, as it does
+    pruned, refused = D.prune_arrivals_baseline(state, ["usage.db-wal"], now=200.0,
+                                                 root=str(root))
+    assert pruned == [], f"a sidecar was pruned: {pruned}"
+    assert refused and refused[0][0] == "usage.db-wal", refused
+    assert "usage.db-wal" in D.read_arrivals_baseline(state, str(root)), (
+        "the muting was removed, so the next WAL is a fresh alert")
+
+
+def test_a_name_still_standing_at_the_root_is_not_pruned(tmp_path):
+    """A prune is a bookkeeping act ABOUT a deletion, not a way of performing one.
+
+    Dropping a still-present name from the baseline would make the hourly leg report the file
+    that has been there for weeks as a brand-new arrival, which is worse than muting it: the
+    alert would carry a claim about when the name appeared that is not true. The remover passes
+    `root=` for exactly this check.
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = tmp_path / "state"
+    (root / ".lloyd-data-root").write_bytes(b"")
+    (root / "false").write_bytes(b"")
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)), now=100.0,
+                               data_root=str(root))
+    pruned, refused = D.prune_arrivals_baseline(state, ["false"], now=200.0, root=str(root))
+    assert pruned == [] and refused and refused[0][0] == "false", (pruned, refused)
+    assert "still stands" in refused[0][1], refused
+    assert (root / "false").exists(), "the prune removed a file: it is not a deletion route"
+    assert "false" in D.read_arrivals_baseline(state, str(root))
+
+
+def test_the_arrivals_prune_is_a_state_edit_and_gains_no_deletion(tmp_path):
+    """#3422 clause 5: the report-only contract survives the prune that clause 4 required.
+
+    Clause 4 needed a new capability in the guardian's own module, so the contract had to be
+    restated as a boundary rather than as an absence: `datawatch.py` already deletes (its
+    `quarantine_inert` moves code-tree residue INTO the data root), so what must hold is that
+    the NEW route touches only the leg's own JSON state file. Asserted over the function's own
+    source, because a reviewer reading the file later cannot otherwise tell a prune that edits
+    a dict from one that grew an `os.unlink` at its tail.
+    """
+    src = (ROOT / "agent-services/guardian/datawatch.py").read_text(encoding="utf-8")
+    prune = src.split("def prune_arrivals_baseline", 1)[1].split("\n\n\ndef ", 1)[0]
+    assert "os.replace" in prune, "the prune writes through the tmp+rename the leg already uses"
+    for verb in ("os.unlink", "os.remove", "os.rename", "shutil.move", "shutil.rmtree",
+                 "quarantine_inert(", "Path.unlink"):
+        assert verb not in prune, f"the prune gained `{verb}` over a data-root name"
+    # And the caller side: the hourly loop never reaches the prune. It is the remover's tool.
+    g = (ROOT / "agent-services/guardian/guardian.py").read_text(encoding="utf-8")
+    assert "prune_arrivals_baseline" not in g, (
+        "the hourly leg pruning its own memory of an arrival is a self-clearing alert")
+
+
+def test_the_guardians_only_mover_moves_code_tree_residue_into_the_root(tmp_path):
+    """#3422 clause 5, MEASURED: the mover is run, and what it moves is the tree's copy.
+
+    #3109 settled that the leg over this root measures and never touches. #3422 gave the
+    guardian's own module a new write — `prune_arrivals_baseline`, because clause 4 cannot be
+    done from outside the module that owns the baseline file — so the contract has to be stated
+    as a BOUNDARY rather than as an absence. A blanket "no deletions in datawatch.py" would be
+    false as written: `quarantine_inert` unlinks, and has since before #3109.
+
+    So the boundary is tested by RUNNING the mover, not by reading the root before and after a
+    walk that could not have changed it. A version of this node that only called
+    `top_level_regular_files` and `write_arrivals_baseline` had three assertions that could not
+    fail, because nothing that deletes was ever pointed at the fixture: a pre/post snapshot
+    around a read measures the read. Here `quarantine_inert` is invoked for real over a code
+    tree holding a genuine inert stray (a 0-byte, hour-old `usage.db` whose populated store
+    stands at the data root — the exact 2026-10-02 shape its own docstring names), so the
+    mover DOES take something, and the assertion is that it takes the tree's copy and leaves
+    every data-root name standing on its own inode. Reverse the direction in the source and
+    the root's `usage.db` is gone or empty, and this node fails.
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    (root / ".lloyd-data-root").write_bytes(b"")
+    store = b"SQLite format 3\x00" + b"u" * 4096
+    (root / "usage.db").write_bytes(store)          # the REAL store: populated, and to stay so
+    for n in ("false", "sqlite3", "workers.db-wal", "next-session-notes.json.lock",
+              "kg.sqlite"):
+        (root / n).write_bytes(b"")
+    (root / "quarantine").mkdir()                   # as the live root has it, before the move
+    only_root_names = ("false", "sqlite3", "workers.db-wal",
+                       "next-session-notes.json.lock", "kg.sqlite")
+
+    def _files() -> "dict[str, tuple]":
+        # Regular files only. The move LANDS inside `quarantine/`, so that directory's own
+        # mtime necessarily changes, and a snapshot that included it would fail for the reason
+        # the mover is supposed to succeed — the claim under test is about data-root FILES.
+        return {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.stat().st_size)
+                for p in root.iterdir() if p.is_file()}
+
+    before = _files()
+
+    # A code tree carrying the residue `inert_residue` is built to recognise: a RUNTIME_NAME,
+    # 0 bytes, one link, idle past INERT_MIN_AGE_SECONDS, no sidecar, and the same name
+    # populated in the data root. `app/data_root.py` is copied in because `_quarantine_dir`
+    # refuses to name a destination it cannot read out of the tree's own layout module (#2110).
+    tree = tmp_path / "checkout"
+    (tree / "app").mkdir(parents=True)
+    shutil.copy2(ROOT / "app" / "data_root.py", tree / "app" / "data_root.py")
+    stray = tree / "usage.db"
+    stray.write_bytes(b"")
+    old = time.time() - (D.INERT_MIN_AGE_SECONDS + 3600)
+    os.utime(stray, (old, old))
+
+    moved = D.quarantine_inert(str(tree), ["usage.db"], data_root=str(root), now=time.time())
+
+    # The route ran. Without this the whole node is the vacuous shape again: a mover that
+    # decided to move nothing would satisfy every "nothing was touched" claim below.
+    assert [n for n, _ in moved] == ["usage.db"], (
+        f"the mover did not move the stray it exists for, so the snapshot proves nothing: "
+        f"{moved}")
+    assert not stray.exists(), "the tree's copy is still there, so nothing actually moved"
+
+    # …the copy that moved is the TREE's, and the destination is inside the data root.
+    dest = Path(moved[0][1])
+    assert str(dest).startswith(str(root / "quarantine")), (
+        f"the destination is outside the data root: {dest}")
+    assert dest.stat().st_size == 0, "the file that moved was not the tree's empty copy"
+
+    # …and every name that belongs to the root is untouched, on its own inode, still standing.
+    after = _files()
+    assert after == before, (
+        "a data-root name changed: "
+        + "; ".join(f"{k}: {before.get(k)} -> {after.get(k)}"
+                    for k in sorted(set(before) | set(after))
+                    if before.get(k) != after.get(k)))
+    assert (root / "usage.db").read_bytes() == store, (
+        "the mover took the data root's populated store instead of the tree's empty copy")
+    for n in only_root_names:
+        assert (root / n).exists(), f"the mover took the data-root name {n}"
+
+    # Quarantine holds the residue and nothing named for the cruft class. Asserted as a set of
+    # names rather than "empty", because it is no longer empty — that is the point.
+    in_q = {p.name for p in (root / "quarantine").rglob("*")}
+    assert any(n.endswith("-usage.db") for n in in_q), sorted(in_q)
+    assert not [n for n in in_q if n.endswith(only_root_names)], (
+        f"a data-root name was moved into quarantine: {sorted(in_q)}")
+    assert (root / "quarantine" / "tree-strays" / "log.jsonl").is_file(), (
+        "the move was not witnessed, which is what #2110 exists to prevent")
+
+    # And the same snapshot around clause 4's prune: it rewrites a JSON file in the STATE dir,
+    # so the root must be byte-identical across a prune that names one of its own names.
+    state = tmp_path / "state"
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)), now=100.0,
+                              data_root=str(root))
+    (root / "false").unlink()                       # what the remover would have done
+    pruned, refused = D.prune_arrivals_baseline(state, ["false", "sqlite3"], now=200.0,
+                                                root=str(root))
+    assert pruned == ["false"] and refused[0][0] == "sqlite3", (pruned, refused)
+    after_prune = _files()
+    assert after_prune == {k: v for k, v in before.items() if k != "false"}, (
+        "the prune deleted, renamed or rewrote something at the root")
+    assert (root / "sqlite3").exists(), "the prune deleted a name it was only asked to forget"
+
+
+def test_the_report_only_boundary_still_holds_in_the_module_text(tmp_path):
+    """#3422 clause 5's static half, where a future edit is invisible to any run.
+
+    The mover's direction is measured by
+    `test_the_guardians_only_mover_moves_code_tree_residue_into_the_root`; this node is what a
+    reviewer cannot see from a green run: a route to the remover appearing
+    in the guardian, or a deletion verb arriving in the prune. A module-wide ban on `os.rename`
+    or `.replace(` would be false the day it is written — the leg's own state writes use
+    tmp+`os.replace`, and sqlite's quoting escape is a `name.replace(...)` — so the verbs
+    `datawatch` has never had are refused outright, and the two it always had (`os.unlink`,
+    twice, both inside `quarantine_inert`) are pinned at their count.
+    """
+    src = (ROOT / "agent-services/guardian/datawatch.py").read_text(encoding="utf-8")
+    guard = (ROOT / "agent-services/guardian/guardian.py").read_text(encoding="utf-8")
+    assert "clear_data_root_cruft" not in src and "clear_data_root_cruft" not in guard, (
+        "the guardian reached the remover, so a watchdog now deletes data-root names")
+    for verb in ("os.remove(", "shutil.move(", "shutil.rmtree(", "os.rename("):
+        assert verb not in src, f"datawatch.py gained `{verb}`"
+    assert src.count("os.unlink(") == 2, (
+        f"the module's unlink count moved from the two inside `quarantine_inert`: "
+        f"{src.count('os.unlink(')}")
+    qi = src.split("def quarantine_inert", 1)[1].split("\n\n\ndef ", 1)[0]
+    # `_quarantine_dir(tree, data_root)` is the destination the move is made to, and the tree
+    # is the first argument: the residue comes FROM the code tree and goes INTO the data root.
+    assert "_quarantine_dir(tree, data_root)" in qi, (
+        "the one deletion the guardian has must name where it moves things TO")
+    assert "os.unlink(src)" in qi and "os.unlink(dest)" in qi, (
+        f"the module's two unlinks are expected here and nowhere else: {src.count('os.unlink(')}")
+    assert "def quarantine_inert(tree: str" in src, (
+        "quarantine_inert takes the CODE TREE as its subject; a signature that grew a "
+        "data-root-first argument is a direction change")
