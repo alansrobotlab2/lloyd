@@ -494,10 +494,21 @@ def test_a_task_with_no_marker_reports_zero_not_missing(client, queue,
 # what makes the sentence true; the lines are not this diff's to change.
 
 #: The watchdog skill, on the live board this box's jobs load from.
-def _skill_text() -> str:
+def _skill_path() -> Path:
+    """Where the watchdog's skill is read from, resolved once for every node below.
+
+    Named in the failure messages because these nodes read a tree no round controls: a
+    report that says only "Step 3b has no fleet dater" cannot be told apart from a report
+    produced against a stale copy of the skill, and the difference decides whether the
+    finding is real.
+    """
     import os
     root = os.environ.get("LLOYD_OBSIDIAN_VAULT") or (Path.home() / "obsidian")
-    path = Path(root) / "skills" / "queue-health-check" / "SKILL.md"
+    return Path(root) / "skills" / "queue-health-check" / "SKILL.md"
+
+
+def _skill_text() -> str:
+    path = _skill_path()
     if not path.is_file():
         pytest.fail(f"no queue-health-check skill on this box at {path} — the "
                     "job that reads this endpoint loads it from here")
@@ -650,16 +661,19 @@ def test_step3b_dates_every_source_off_the_payload():
     would satisfy a grep and an rc, and would still leave the operator reaching for
     `workers.db`, which is the thing clause 1 says is no longer required.
 
-    Fails three ways before the change, all of them observed rather than predicted.
-    Against a vault staged at `905b97aff^` (the commit before the skill edit) the
-    section publishes ONE jq program, filtered on `pending_wait_over_bound_count > 0`,
-    so the extracted set has no unfiltered member and the first assert fires. Against a
-    retyped copy of the published filter — the version written here first — it passes
-    today while the operator's line still prints the wrong thing: that copy selected on
-    `(.health | .last_failure) != null`, printing 2 of the live fleet's 18 sources,
-    which is clause 1's "every named source" lost silently because rc was 0 and the
-    lines looked right. And against a filter that ignores a null `health`, the failure
-    mode the Step 1 node above names, rc comes back non-zero on the seeded payload.
+    Fails the ways named here were run, not predicted. Against a vault staged at the
+    landed bytes of `905b97aff` (the skill as #3640's first round left it) the head
+    command is the FILTERED one, so the first assert below fires naming the operator's own
+    line. Against a copy of the new dater with `newest success` deleted, the
+    `last_completed` assert fires — the closed-burst rule at the foot of this Step needs
+    both stamps on the line it is read off. And a filter that ignores a null `health`, the
+    failure mode the Step 1 node above names, comes back rc non-zero on the seeded payload.
+
+    One trap worth naming because it nearly shipped: a retyped copy of a filter is not the
+    filter. A copy that selected on `(.health | .last_failure) != null` exits 0 and prints
+    only the sources that have a failure — 9 of the live fleet's 17 as measured here — which
+    reads as a working command while dropping every source clause 1 says must be dated.
+    That is why everything below runs `progs` out of the page.
     """
     import re
     dating, waiting = _step3b_jq_programs()
@@ -667,6 +681,46 @@ def test_step3b_dates_every_source_off_the_payload():
                     "`.health.last_failure` and `.health.consecutive_failures` — so "
                     "dating a source's failure population still needs `workers.db`")
     assert waiting, "the pre-existing queue-wait filter vanished from Step 3b"
+
+    # WHERE the fleet-wide dater lives is the finding, not whether it exists. #3640's
+    # first round pinned the reading and put the fleet-wide filter in the `### Dating`
+    # subsection BELOW Step 3b's command block, whose filter selects on
+    # `pending_wait_over_bound_count`. The same reading was therefore published twice on one
+    # page — once where the reader is, once where it is not — recorded on this item's
+    # Findings. A watchdog that runs the command the Step hands it gets an
+    # empty answer on a source failing its way to 0.5 with an empty queue, and the age it
+    # then needs is in a block further down the page it was not told to run. So: the FIRST
+    # documented program is the unfiltered dater, and the subsection documents no second
+    # one — one reading, published once, where the Step tells you to run it.
+    every = re.findall(r"jq -r '([^']*)'", _step3b_section(), re.S)
+    assert every, "Step 3b documents no jq program at all"
+    first = every[0]
+    assert ".health.last_failure" in first and ".health.consecutive_failures" in first \
+        and "select(" not in first, (
+        "the command Step 3b actually hands the reader is filtered, so a source that is "
+        "failing its way to 0.51 with an empty queue prints nothing and its failure "
+        f"population still has to be dated by hand:\n{first[:200]}")
+    # The reading rule at the foot of this Step compares `last_failure` against
+    # `last_completed`. A line that prints only the failure age makes the reader go back
+    # to the raw payload to apply it, which is the hand-work the Step exists to remove, so
+    # the dater carries both stamps beside the streak.
+    assert ".health.last_completed" in first, (
+        "Step 3b's fleet dater prints the failure age but not the newest-success stamp, so "
+        "the closed-burst rule (`last_failure` older than `last_completed`) cannot be "
+        "applied to the line it is read off")
+    below = _step3b_section().partition("### Dating")[2]
+    assert not re.findall(r"jq -r '([^']*)'", below, re.S), (
+        "the `### Dating` subsection carries a second jq program printing the failure "
+        "age: two filters for one reading on one page is the drift this file keeps "
+        "correcting, and the head of the Step is where the command belongs")
+    # The line that dates a failure population carries BOTH sides of the comparison the
+    # reading rule turns on: `last_failure` older than `last_completed` is what separates
+    # a closed burst from a live one, and a line with only the failure side sends the
+    # reader back to the payload for the other half.
+    assert ".health.last_completed" in first, (
+        "the fleet dater prints the failure age without the success it is compared "
+        "against, so the closed-burst rule below cannot be read off the line this Step "
+        "tells you to run")
 
     # Every documented unfiltered program is graded, not `dating[0]`: a page that
     # later grows a second one has to date the fleet from it too, and a check pinned to
@@ -700,8 +754,13 @@ def test_step3b_dates_every_source_off_the_payload():
                         or "no failure" in line.lower()), (
                     f"{src['name']}: nothing to date, and the line says nothing about "
                     f"it either: {line!r}")
-                assert not re.search(r"\d{4}-\d{2}-\d{2}", line), (
-                    f"{src['name']}: `last_failure` is null and the line still "
+                # Scoped to the failure field's own segment: since #3640 the line also
+                # prints `newest success`, which legitimately carries a date on a source
+                # that ran cleanly. The sentinel proved here is that the FAILURE slot
+                # prints no date, not that the whole line is date-free.
+                seg = re.search(r"last failure(.*?)(?: · |$)", line)
+                assert seg and not re.search(r"\d{4}-\d{2}-\d{2}", seg.group(1)), (
+                    f"{src['name']}: `last_failure` is null and the failure field still "
                     f"carries a date: {line!r}")
             tail = re.search(r"consecutive[^0-9]*(-?\d+)\s*$", line)
             assert tail is not None, (

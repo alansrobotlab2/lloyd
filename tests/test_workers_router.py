@@ -2305,15 +2305,27 @@ def _skill_step(text: str, heading: str) -> str:
 
 
 def _documented_jq_program(step: str) -> str:
-    """The jq program the step tells an operator to paste, read off the page.
+    """The queue-wait jq program the step tells an operator to paste, read off the page.
 
     Extracted rather than retyped because the thing under test is the PUBLISHED filter:
     a copy of it written in this file keeps passing when the skill's one-liner drifts,
     which is the exact gap that left Step 3b pre-labelling an empty result as health.
+
+    Selected by predicate, not by position: #3640 put a SECOND `jq -r` program in Step 3b
+    — the per-source failure-age dater, printed FIRST so a reader sees it first — and this
+    node's contract is the wait filter's: it must name exactly the starving source and
+    print nothing when nobody is over bound. Reading `progs[0]` would have grabbed the
+    dater, which prints every source by design, and reported a published filter that
+    "cannot stay silent on a healthy fleet" when the filter on the page does stay silent.
     """
-    m = re.search(r"jq\s+-r\s+'(.*?)'", step, re.S)
-    assert m, "Step 3b publishes no `jq -r '<program>'` filter to test"
-    return m.group(1)
+    progs = re.findall(r"jq\s+-r\s+'(.*?)'", step, re.S)
+    assert progs, "Step 3b publishes no `jq -r '<program>'` filter to test"
+    wait = [p for p in progs if "pending_wait_over_bound_count > 0" in p]
+    assert len(wait) == 1, (
+        f"Step 3b publishes {len(wait)} programs filtered on "
+        "`pending_wait_over_bound_count > 0`; this node reads the wait filter and cannot "
+        "choose between them")
+    return wait[0]
 
 
 def test_the_now_keyword_is_what_makes_a_wait_reproducible(tmp_path):
