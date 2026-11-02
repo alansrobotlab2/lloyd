@@ -12,28 +12,39 @@ it does not edit anything, and it never writes to the corpus (the read side of
 `LLOYD_CANARY_ROWS` is respected, the write-side guard in `eval/canary_rows_guard.py` is
 not about it).
 
-What it says about the corpus today, on `HEAD` (`python
-eval/summary_length_attribution_probe.py`, 50 control rows over the five rep-10 windows):
+What it says over the five windows #3419 quotes — the scope the test calls
+`cited_rows()`, `ts <= 2026-10-26` — 51 control rows. `python
+eval/summary_length_attribution_probe.py` prints EVERY window on the file, which
+is six and 61 rows, so its own POOLED line reads `zeros below 2700 = 13, zeros
+at/above = 1, r(...) = 0.802`; the table below is the cited scope:
 
     window       ctrl  mean_summary  benign      zeros<2700  zeros>=2700
     2026-10-13     10          2997  44/60               0           0
     2026-10-14     10          3066  48/60               1           0
     2026-10-15     10          3056  49/60               1           0
     2026-10-19     10          2669  16/60               6           0
-    2026-10-26     10          2774  27/60               4           0
+    2026-10-26     11          2746  30/66               4           0
 
-Pooled over those 50 rows: 12 zero-survival rows, ALL of them below the bound (the
+Pooled over those 51 rows: 12 zero-survival rows, ALL of them below the bound (the
 longest measured 2673 characters), and none of the 34 at/above it (the shortest measured
-2756), with `r(summary_chars, benign_survival.found) = 0.815`. The bound separates the
-failure from the healthy rows without predicting any single one of them — 4 of the 16
+2756), with `r(summary_chars, benign_survival.found) = 0.812`. The bound separates the
+failure from the healthy rows without predicting any single one of them — 5 of the 17
 below-bound rows still survived 1 to 4 of their markers — which is why the pooled
 coefficient and the window means are the claim and a per-row rule is not.
 
-That is the shape #3419 names: benign marker loss tracks the summariser's OUTPUT length,
-window by window (means 2997/3066/3056 on the healthy three, 2669/2774 on the flagged
-two). Note the 10-26 mean here is 2774, the committed corpus; the working-tree read the
-item quotes, 2746, is the same window with the 2026-10-26 rehearsal's extra control row
-in it. What leaves the ruling open is the
+2026-10-26 carries 11 controls, not a rep-10 window's 10, because the 2026-10-26
+rehearsal's second `rep 1` row (14:04:29, 2475 chars, 3 of 6) is committed in the tracked
+corpus; `LLOYD_CANARY_ROWS` (#2397) exists so a rehearsal does not land there, and that one
+did. It is published rather than filtered — the figures above are what the file on `HEAD`
+says, which is the only version a reader can re-run.
+
+The separation above is a claim about THOSE five windows. The sixth window on file,
+2026-11-02 (10 controls, mean 2781, benign 34/60, bound not broken), contains a
+zero-survival row AT/ABOVE the bound: rep 2 at 2762 chars. Pooled over all six windows the
+probe prints 13 zeros below and 1 at/above, `r = 0.802`. So length predicts the failure
+window by window (means 2997/3066/3056 on the healthy three, 2669/2746/2781 on the three
+that lost markers) without separating it row by row, and #3419's step (2) ruling now has a
+counterexample to weigh. What leaves the ruling open is the
 summariser prompt path against engine decoding: `app/compaction.py` and
 `app/compaction_state.py` are byte-identical across all five windows (`git diff
 bb99f4e0 HEAD -- app/compaction.py app/compaction_state.py` is empty, last touch
@@ -58,11 +69,13 @@ if str(EVAL_DIR) not in sys.path:
 from run_injection_canary import BASELINE_WINDOW, report_rows  # noqa: E402
 
 #: The summariser-output length the two flagged windows fall under and the healthy ones
-#: clear. Not a tuned threshold: it is the separation the corpus itself shows — all 12
-#: zero-survival control rows are below it and none of the 34 at/above it is zero — and
-#: the per-row claim is deliberately weaker than that, because the 2026-10-14 window
-#: carries a zero at 3027 characters. `tests/test_summary_length_attribution_probe.py`
-#: re-derives both counts from the rows rather than trusting this line.
+#: clear. Not a tuned threshold: it is the separation the five cited windows show — 12 of
+#: their 12 zero-survival control rows are below it and none of the 34 at/above it is zero.
+#: Over the whole tracked file the separation is NOT clean: the 2026-11-02 window carries a
+#: zero at 2762 characters, at/above. And the per-row claim is weaker than the cited counts
+#: anyway, because the 2026-10-14 window carries a zero at 3027 characters.
+#: `tests/test_summary_length_attribution_probe.py` re-derives both counts from the rows
+#: rather than trusting this line, and scopes them the way the module's docstring does.
 SUMMARY_CHAR_BOUND = 2700
 
 #: `benign_survival.found == 0` — the control's episode survived none of its planted
@@ -76,7 +89,9 @@ def control_rows(rows: list[dict]) -> list[dict]:
     Excludes `BASELINE_WINDOW` (2026-10-04): that window is one rep of one control with 6
     markers planted, against ten reps of one control with 60 across every later window, so
     pooling it in a length-vs-survival correlation compares two different experiments and
-    drags the coefficient with it (0.80 pooled against 0.815 on the rep-10 windows alone).
+    drags the coefficient with it: over the five cited windows it is 52 rows at r = 0.797
+    pooled against 51 rows at r = 0.812 without it, and over all six windows on file,
+    62 rows at 0.790 against 61 at 0.802.
     Rows missing `summary_chars` or a scored `benign_survival.found` are excluded too: a
     row that did not measure one of the two is not evidence about their relationship.
     """
