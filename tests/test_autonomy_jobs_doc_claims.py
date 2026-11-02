@@ -4736,7 +4736,7 @@ REQUIRED_CITATIONS = frozenset({
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:282",                   # PHANTOM_EXEMPT
     "agent_mcp/skills.py:88",                      # _QUARANTINE_STATUSES
-    "app/routers/backlog.py:850",                  # backlog_task_delete
+    "app/routers/backlog.py:870",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it)
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
     "app/paths.py:310",                            # VAULT_FACTS_ROOT, added by #2795
 })

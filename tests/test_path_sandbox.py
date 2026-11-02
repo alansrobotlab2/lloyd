@@ -410,12 +410,26 @@ def test_the_two_scheduled_vault_writes_stay_writable(scratch_home):
 
 def test_the_string_predicate_is_still_blind_to_the_shapes_the_substrate_refuses():
     """No new `check_bash_command` regexes are part of this change, and this is
-    the proof: these twelve real-path spellings are the residual the 2026-10-03
-    triage measured as returning `None` on the hook lane, and they still do.
+    the proof: these real-path spellings are the residual the 2026-10-03 triage
+    measured as returning `None` on the hook lane, and they still do.
     They are refused by the mount, so a future run must not "fix" them here —
     and must not quietly add a pattern and call this test obsolete.
 
-    The control below is not decoration (#3133 clause 3). Twelve `None`s are also
+    Ten, not twelve, since #3701. Two of the original twelve were plain shell
+    redirects into the vault tree — `cat /tmp/x > ~/obsidian/lloyd/USER.md` and
+    `echo x > ~/obsidian/lloyd/MEMORY.md` — and a redirect that CREATES a file under
+    `~/obsidian` is refused as of that item, because an unattended session used
+    exactly this lane to mint a second `backlog/3691-*.md`. That refusal is NOT this
+    node's subject and is not counted as a growth here: it comes off the structured
+    predicate `check_bash_write_denied` → `bash_vault_write_denial`
+    (`app/harness/protected_paths.py`), whose label is asserted to be the
+    `protected write: ` lane below, which is the direct form of the claim this node
+    was always making — that the refusal did not arrive as a new `_HARD_DENY_PATTERNS`
+    regex. The mover, `rm`, `truncate`, `find -delete`, `perl -ni`, `tee`, the
+    `python3 -c` open and the `git -C … checkout` undo are all still blind here, which
+    is the mount's job; the ten are what a future #3701-shaped change must not grow.
+
+    The control below is not decoration (#3133 clause 3). Ten `None`s are also
     what a matcher that returns `None` for EVERYTHING gives, and this file was the
     one place in the suite that could be satisfied by a dead deny-list: the same
     landing that shipped this pin fixed the previous suite for exactly that class
@@ -444,8 +458,6 @@ def test_the_string_predicate_is_still_blind_to_the_shapes_the_substrate_refuses
         f"truncate -s 0 {real}/obsidian/lloyd/USER.md",
         f"find {real}/obsidian -name USER.md -delete",
         "perl -ni -e 'print' " + f"{real}/obsidian/lloyd/SOUL.md",
-        f"cat /tmp/x > {real}/obsidian/lloyd/USER.md",
-        f"echo x > {real}/obsidian/lloyd/MEMORY.md",
         f"echo x | tee -a {real}/obsidian/lloyd/MEMORY.md",
         f'''python3 -c "open('{real}/obsidian/lloyd/USER.md','w').write('x')"''',
         f"ln -sfn /tmp/evil {real}/obsidian/lloyd/MEMORY.md",
@@ -456,6 +468,22 @@ def test_the_string_predicate_is_still_blind_to_the_shapes_the_substrate_refuses
     assert not still_blind, \
         "these shapes are the substrate's job; a predicate that now denies one " \
         f"means the deny-list grew here instead: {still_blind}"
+
+    # The two plain redirects moved out of the list above on 2026-11-02 (#3701), and
+    # the assertion that keeps this node honest is about WHERE they are refused now:
+    # the structured write predicate's own label, never a `_HARD_DENY_PATTERNS` regex.
+    # Asserting the label is a stronger form of the original claim than asserting
+    # blindness was — blindness could only show that no new pattern arrived, while this
+    # names the lane that answers, so a later run that does add a regex cannot satisfy
+    # it by re-labelling a pattern as a write refusal.
+    for redirect in (f"cat /tmp/x > {real}/obsidian/lloyd/USER.md",
+                     f"echo x > {real}/obsidian/lloyd/MEMORY.md"):
+        match = check_bash_command(redirect, cwd="/tmp")
+        assert match is not None, \
+            f"a redirect creating a file in the vault tree went through: {redirect}"
+        assert match[0].startswith("protected write: "), \
+            f"{redirect} was refused by {match[0]!r}, not the structured write lane — " \
+            "the deny-list grew with a regex here, which is what this node forbids"
 
 
 # ---------------------------------------------------------------------------

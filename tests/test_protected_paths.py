@@ -1171,3 +1171,77 @@ def test_the_read_deny_table_is_what_the_intake_doc_points_at():
     section = doc.split("## 5. Intake", 1)[1].split("\n## 6.", 1)[0]
     assert "~/lloyd/.env" in section, "the section's own example must stay named"
     assert PP.read_deny_reason(os.path.expanduser("~/lloyd/.env")) is not None
+
+
+# ── #3701 clause 5: the vault-tree rule is the Bash lane's, and only the Bash lane's ──
+#
+# `bash_vault_write_denial` closes `~/obsidian` to shell redirects. This section is the
+# other side of that line, and it is the load-bearing one: the two loaded-memory files
+# `~/obsidian/lloyd/USER.md` and `MEMORY.md` must keep answering None on the FILE lane,
+# because the nightly reflection's sanctioned route is `Write`/`vault_write` and the
+# module header at `protected_paths.py:204` says outright that putting them in the
+# deny-set is "a worse outage than the hole". A guard added by widening
+# `PROTECTED_WRITE_ROOTS` would pass every node in `test_bash_write_guard.py` and break
+# the reflection — which is exactly why this file, not that one, pins the scope.
+
+@pytest.fixture
+def vault_home(tmp_path, monkeypatch):
+    """A scratch `$HOME` holding the two loaded-memory files and an ordinary tree."""
+    h = tmp_path / "home"
+    for rel in ("obsidian/lloyd/USER.md", "obsidian/lloyd/MEMORY.md",
+                "obsidian/lloyd/SOUL.md", "notes/knowledge/note.md"):
+        p = h / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("content\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+def test_the_file_lane_still_allows_the_two_loaded_memory_files(vault_home):
+    """`write_deny_reason` answers None for USER.md and MEMORY.md — the reflection lives.
+
+    Measured at `bd0366ed` and unchanged by this round: these are the two files the
+    deny-set deliberately excludes. They are still outside it, so `vault_write` and
+    `builtin_fs` keep writing them, and the vault rule above sits only on the lane that
+    has no sanctioned writer (`bash_vault_write_denial`, which the Bash nodes in
+    `tests/test_bash_write_guard.py` refuse them on).
+    """
+    for rel in ("obsidian/lloyd/USER.md", "obsidian/lloyd/MEMORY.md"):
+        target = str(vault_home / rel)
+        assert protected_paths.write_deny_reason(target) is None, \
+            f"{rel} entered the write deny-set — the nightly reflection is now refused"
+    assert protected_paths.write_deny_reason(
+        str(vault_home / "obsidian/lloyd/SOUL.md")) is not None, \
+        "SOUL.md is the one vault file the deny-set does cover, and it must stay covered"
+
+
+def test_a_redirect_outside_the_vault_tree_is_still_allowed(vault_home):
+    """The rule is one root wide: a write elsewhere is untouched.
+
+    `{home}/notes/knowledge/note.md` is the same depth and shape as the vault path it
+    replaced in `tests/test_safety_gate_discrimination.py`'s benign arm, and
+    `~/otherproject` is the sibling-tree spelling the uv-store section already uses for
+    "a `.venvs`-shaped path in somebody else's project". A root matched on a suffix, or
+    widened to `$HOME`, loses here while still refusing the board.
+    """
+    for command in (f"cat > {vault_home}/notes/knowledge/note.md",
+                    "echo x >> ~/otherproject/notes/backlog.md",
+                    f"printf x > {vault_home}/lloyd/app/probe.py"):
+        assert protected_paths.check_bash_write_denied(command, str(vault_home)) is None, \
+            f"a write outside the vault tree was refused: {command}"
+
+
+def test_the_two_lanes_disagree_about_the_vault_by_design(vault_home):
+    """The asymmetry, stated as one assertion pair rather than two files' worth of prose.
+
+    Same path, two lanes, two answers, and both are correct: the file lane is the
+    reflection's route and allows it; the shell has no sanctioned vault writer and
+    refuses it. This is the shape the item scopes, and the pair is what a later reader
+    cannot "simplify" into one predicate without a test going red.
+    """
+    target = str(vault_home / "obsidian/lloyd/MEMORY.md")
+    command = f"echo x >> {target}"
+    assert protected_paths.write_deny_reason(target) is None
+    reason = protected_paths.check_bash_write_denied(command, str(vault_home))
+    assert reason is not None, "the Bash lane let a redirect into the memory file through"
+    assert target in reason, reason

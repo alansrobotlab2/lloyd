@@ -160,7 +160,14 @@ _DENY_FILES = ["obsidian/lloyd/SOUL.md", ".openclaw/credentials.json",
 _MERELY_NAMES_THE_SET = [
     "cat ~/lloyd/agent-services/supervisord.conf",
     "ls ~/lloyd/.venvs",
-    "echo x > ~/obsidian/knowledge/note.md",
+    # Moved out of the vault on 2026-11-02 by #3701. This entry used to read
+    # `echo x > ~/obsidian/knowledge/note.md` and asserted the Bash lane lets a
+    # redirect into the vault tree through — which is the exact permission that
+    # minted a second `3691-*.md` on 2026-11-01, so it is refused now (see
+    # `bash_vault_write_denial`, and clause 4 of that item for what replaces it).
+    # What stays on this list is the same shape OUTSIDE the vault tree, so the
+    # narrowing to one root is still pinned by a real benign arm.
+    "echo x > ~/notes/knowledge/note.md",
     "cd ~/lloyd && cp a.py b.py",
     "cp a.py b.py",
     "grep -rn supervisord ~/lloyd/agent-services",

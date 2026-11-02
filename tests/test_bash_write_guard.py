@@ -596,3 +596,95 @@ def test_no_write_target_from_the_reference_traffic_ends_in_a_quote(home):
         for path, shape in targets:
             assert not path.endswith(('"', "'")), (path, shape, cmd)
         assert [p for p, _shape in targets] == want, cmd
+
+
+# ── #3701 clause 4: a redirect that CREATES a file under the vault tree ───────
+#
+# The 2026-11-01 incident, from #3696: an unattended session ran
+# `cat >> ~/obsidian/backlog/<hand-guessed-slug>.md` and minted a second `3691-*.md`
+# with no front matter. Nothing refused it. `write_targets` had already resolved and
+# classified that very target — `('…/backlog/probe.md', 'a redirect into')` — and
+# `check_bash_write_denied` answered None, because the predicate under it,
+# `write_deny_reason`, covers ONE vault file (`~/obsidian/lloyd/SOUL.md`) and no vault
+# tree. The tree cannot join `PROTECTED_WRITE_ROOTS`: `builtin_fs` and `vault_write`
+# both ask that predicate, and the nightly reflection's sanctioned route for
+# `lloyd/USER.md` and `MEMORY.md` is that lane, so covering the tree there takes the
+# reflection out every night. The rule therefore goes on the Bash lane, which has no
+# sanctioned vault writer at all — and clause 5 in
+# `tests/test_protected_paths.py` is the half that stays open.
+#
+# Every target below is a path that does NOT exist in the scratch home: the guard is
+# about creating a file in the vault, so a check that keyed on the file being there
+# already would miss the incident exactly.
+
+VAULT_TREE_WRITES = {
+    "redirect-creates-board-file-absolute": "cat > {home}/obsidian/backlog/probe.md",
+    "redirect-creates-board-file-heredoc": "cat >> ~/obsidian/backlog/probe.md <<'EOF'\n"
+                                           "- one correction entry\nEOF\n",
+    "redirect-append-tilde-memory": "echo x >> ~/obsidian/memory/corrections.md",
+    "redirect-printf-vault-knowledge": "printf x > {home}/obsidian/knowledge/probe.md",
+}
+
+
+@pytest.mark.parametrize("key", sorted(VAULT_TREE_WRITES))
+def test_a_redirect_creating_a_file_under_the_vault_tree_is_refused_on_the_bash_lane(home, key):
+    """The one-line probe from #3701's acceptance, on every redirect spelling.
+
+    Measured at `bd0366ed`, all four returned None here while `write_targets` named
+    the resolved path as `a redirect into`. The refusal must carry the resolved path:
+    an operator told only "inside the vault" cannot tell which file a run reached for.
+    """
+    command = _cmd(VAULT_TREE_WRITES[key], home)
+    reason = PP.check_bash_write_denied(command, str(home / "lloyd"))
+    assert reason is not None, f"{key}: the vault tree let a shell redirect through"
+    assert "redirect" in reason, f"{key}: {reason}"
+    assert str(home / "obsidian") in reason, \
+        f"{key}: the refusal must name the resolved vault path, got {reason}"
+    assert "(#3701)" in reason, f"{key}: {reason}"
+
+
+def test_the_vault_redirect_refusal_reaches_the_dispatch_lane_with_the_write_label(home):
+    """Not only the predicate: the aggregator's own Bash call refuses it.
+
+    `check_bash_command` puts `check_bash_write_denied` fifth in its chain
+    (`app/harness/safety.py:521`), and `tests/unit/test_harness_safety.py` pins which
+    lane answers each positive, so this pins the label as well as the refusal — the
+    vault rule must arrive under `protected write: `, the same label #1049's deny-set
+    uses, and not under a new one a deny-log reader would have to learn.
+    """
+    command = _cmd(VAULT_TREE_WRITES["redirect-creates-board-file-heredoc"], home)
+    match = check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
+                              session_id=SID)
+    assert match is not None, "the heredoc redirect reached the dispatch lane unanswered"
+    assert match[0].startswith("protected write: "), match[0]
+    assert str(home / "obsidian") in match[0], match[0]
+
+
+def test_the_vault_tree_is_covered_on_the_bash_lane_without_joining_the_deny_set(home):
+    """The deny-set is untouched — the clause that keeps the reflection alive.
+
+    Adding `~/obsidian` to `PROTECTED_WRITE_ROOTS` would refuse every one of these
+    commands AND the nightly reflection's sanctioned `vault_write` of
+    `lloyd/USER.md`/`MEMORY.md`, which is the outage the module header at
+    `protected_paths.py:204` was written to prevent. So the root lives in its own
+    constant, and this node is what stops the shortcut.
+    """
+    templates = [t for t, _label in PP.PROTECTED_WRITE_ROOTS]
+    assert "~/obsidian" not in templates, \
+        "the vault tree went into the deny-set — the file lane now refuses the reflection"
+    assert PP.VAULT_BASH_WRITE_ROOT == "~/obsidian"
+
+
+def test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed(home):
+    """`cp` into the vault still passes, and this node says so on purpose.
+
+    `write_targets` classifies `cp`, `install`, `ln`, `mv`, `rsync` and `tee` with
+    shapes of their own, so widening the root over all of them is a one-entry change to
+    `VAULT_BASH_WRITE_SHAPES`. #3701 names redirects only and records the widening as
+    owed to the owed-check job; a node that asserted the mover refusal today would take
+    that ruling by accident and leave no evidence of the decision.
+    """
+    mover = _cmd("cp /tmp/x.txt {home}/obsidian/backlog/moved-by-cp.md", home)
+    assert PP.check_bash_write_denied(mover, str(home / "lloyd")) is None, \
+        "a mover into the vault was refused — the owed widening was taken without a ruling"
+    assert PP.VAULT_BASH_WRITE_SHAPES == ("a redirect into",), PP.VAULT_BASH_WRITE_SHAPES

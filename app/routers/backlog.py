@@ -333,14 +333,34 @@ def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
 
 
 def _backlog_find_file(task_id: int) -> Path | None:
-    """Find the markdown file for a given task ID."""
-    if not _BACKLOG_DIR.exists():
-        return None
-    for f in _BACKLOG_DIR.glob("*.md"):
-        m = _BACKLOG_PATTERN.match(f.name)
-        if m and int(m.group(1)) == task_id:
-            return f
-    return None
+    """Find the markdown file for a given task ID.
+
+    Delegates to `app.backlog_write.resolve_backlog_id_file`, the one resolver every
+    lane of this store asks (#3701). A second `<id>-*.md` on the board therefore
+    raises `BW.AmbiguousBacklogId` here rather than silently returning whichever
+    file glob yielded first — the behaviour that let one `backlog_write_task` append
+    to a phantom `3691-*.md` and the next overwrite the real item's body. Call sites
+    turn that into a 409 through `_backlog_find_file_or_409`; this function does not,
+    because the reader that just wants a path must not have to know HTTP to be safe.
+    """
+    return BW.resolve_backlog_id_file(_BACKLOG_DIR, task_id)
+
+
+def _backlog_find_file_or_409(task_id: int) -> Path:
+    """The route-side resolver: a 404 for no such item, a 409 for a duplicate id.
+
+    409 and not 500 because the collision is a state of the board a person resolves
+    by hand, and the detail names every matching path so they can tell which file is
+    the phantom. No file is read, changed or deleted on that path — which is the half
+    that matters for `task-delete` (#3701 clause 2).
+    """
+    try:
+        filepath = _backlog_find_file(task_id)
+    except BW.AmbiguousBacklogId as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not filepath:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return filepath
 
 
 def _split_body(body: str) -> tuple:
@@ -472,9 +492,9 @@ def backlog_task_detail(task_id: int):
     the string `task-update` writes back, which is what makes the round-trip
     safe: the modal's editing source is this route, never the row.
     """
-    filepath = _backlog_find_file(task_id)
-    if not filepath:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # A duplicate id on the board refuses here rather than resolving to one of the
+    # pair, so this route cannot read, overwrite or unlink the wrong item (#3701).
+    filepath = _backlog_find_file_or_409(task_id)
     try:
         fm, body = _backlog_cached_fm(filepath)
     except Exception as exc:
@@ -647,9 +667,9 @@ async def backlog_task_update(request: Request):
     task_id = data.get("id")
     if not task_id:
         raise HTTPException(status_code=400, detail="id required")
-    filepath = _backlog_find_file(task_id)
-    if not filepath:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # A duplicate id on the board refuses here rather than resolving to one of the
+    # pair, so this route cannot read, overwrite or unlink the wrong item (#3701).
+    filepath = _backlog_find_file_or_409(task_id)
     # Read *through* the cache: this route is about to rewrite the file, so
     # building the new version from a snapshot another writer moved would turn a
     # stale read into a stale write.
@@ -852,9 +872,9 @@ async def backlog_task_delete(request: Request):
     task_id = data.get("id")
     if not task_id:
         raise HTTPException(status_code=400, detail="id required")
-    filepath = _backlog_find_file(task_id)
-    if not filepath:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # A duplicate id on the board refuses here rather than resolving to one of the
+    # pair, so this route cannot read, overwrite or unlink the wrong item (#3701).
+    filepath = _backlog_find_file_or_409(task_id)
     filepath.unlink()
     _FM_CACHE.pop(str(filepath), None)
     return JSONResponse({"success": True})

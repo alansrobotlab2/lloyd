@@ -66,19 +66,28 @@ def parse_frontmatter(content: str) -> tuple:
 
 
 def load_task(task_id: int) -> dict | None:
-    if not BACKLOG_DIR.exists():
+    """Parse the one item file for `task_id`, or None when there is no such item.
+
+    This is the resolver `backlog_write_task` reads through — `save_task` writes back
+    to the `filename` this function sets — so before #3701 it was the lane the
+    incident actually used, and it had its own copy of the first-glob-match loop that
+    `app.routers.backlog` had. Both copies are gone: this now asks
+    `BW.resolve_backlog_id_file`, the same check the board routes ask, so a second
+    `<id>-*.md` raises `BW.AmbiguousBacklogId` naming every path instead of returning
+    whichever file won the glob (#3701 clause 3). Raising rather than returning None
+    is deliberate: None means "no such item", and a caller that heard that for a
+    collision would answer *that* and go on to create a third file for the id.
+    """
+    filepath = BW.resolve_backlog_id_file(BACKLOG_DIR, task_id)
+    if filepath is None:
         return None
-    pattern = re.compile(r"^(\d+)[-_].*\.md$")
-    for f in BACKLOG_DIR.glob("*.md"):
-        match = pattern.match(f.name)
-        if match and int(match.group(1)) == task_id:
-            content = f.read_text()
-            frontmatter, body = parse_frontmatter(content)
-            frontmatter["id"] = int(match.group(1))
-            frontmatter["filename"] = f.name
-            frontmatter["body"] = body
-            return frontmatter
-    return None
+    match = BW.BACKLOG_ID_PATTERN.match(filepath.name)
+    content = filepath.read_text()
+    frontmatter, body = parse_frontmatter(content)
+    frontmatter["id"] = int(match.group(1)) if match else int(task_id)
+    frontmatter["filename"] = filepath.name
+    frontmatter["body"] = body
+    return frontmatter
 
 
 def save_task(task: dict) -> bool:
@@ -295,7 +304,13 @@ def _handle_get(args: dict) -> str:
     task_id = args.get("task_id")
     if not task_id:
         return json.dumps({"success": False, "error": "task_id required"})
-    task = load_task(task_id)
+    try:
+        task = load_task(task_id)
+    except BW.AmbiguousBacklogId as exc:
+        # Reading is refused for the same reason writing is: `backlog_get_task`
+        # answering with one of the pair is how a phantom body gets quoted back as
+        # the item, and then written back as it (#3701).
+        return json.dumps({"success": False, "error": str(exc)})
     if not task:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
     return json.dumps({"success": True, "task": {
@@ -346,7 +361,15 @@ def _handle_write(args: dict) -> str:
     creating = task_id is None
 
     if task_id is not None:
-        task = load_task(task_id)
+        try:
+            task = load_task(task_id)
+        except BW.AmbiguousBacklogId as exc:
+            # A duplicate id answers with the pair and nothing is written — not the
+            # phantom, not the real item. This is the lane that did the damage on
+            # 2026-11-01: one call appended to the phantom, the next overwrote the
+            # real body, because the resolver picked a winner (#3701 clause 3).
+            logger.warning("backlog_write_task refused on id %s: %s", task_id, exc)
+            return json.dumps({"success": False, "error": str(exc)})
         if not task:
             return json.dumps({"success": False, "error": f"Task {task_id} not found"})
         # `segment: backlog` is the store's own invariant for every file in this
@@ -744,7 +767,15 @@ def _merge_into(target: dict, args: dict, similar: list[dict]) -> str | None:
     """Append the would-be item onto `target`. None when the target cannot be
     written (missing, or YAML the writer refuses to round-trip) — the caller
     then creates, because the finding must land somewhere."""
-    task = load_task(int(target["id"]))
+    try:
+        task = load_task(int(target["id"]))
+    except BW.AmbiguousBacklogId:
+        # An ambiguous merge target is a target that cannot be written, which is the
+        # documented `None` contract: the caller then creates a NEW id instead, and
+        # neither file of the pair is touched. Refusing the whole call instead would
+        # lose the finding, and creating against a *colliding* id is not what happens
+        # — the create path allocates a fresh max id (#3701).
+        return None
     if not task or task.get("_yaml_broken"):
         return None
     try:

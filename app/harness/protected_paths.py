@@ -1312,6 +1312,19 @@ def check_bash_write_denied(command: str, cwd: str | None = None) -> str | None:
         bench_reason = _bench_assertion_denial(path, cwd)
         if bench_reason:
             return f"{shape} {path} — {bench_reason}"
+        # The vault tree, on this lane and this lane only (#3701). Asked LAST so a
+        # target that already has a more specific refusal — the deny-set above, the
+        # bench rail here — keeps the reason a test and an operator already know.
+        # A redirect that CREATES a board file is what this catches: on 2026-11-01 an
+        # unattended session ran `cat >> ~/obsidian/backlog/<hand-guessed>.md`,
+        # minting a second `3691-*.md` with no front matter, which reddened the
+        # board's canary and then let two `backlog_write_task` calls corrupt the real
+        # item. `write_targets` already resolved and classified that target as
+        # "a redirect into"; nothing below refused it, because `write_deny_reason`
+        # covers one vault FILE and no vault tree — on purpose, per the header at :204.
+        vault_reason = bash_vault_write_denial(path, shape)
+        if vault_reason:
+            return f"{shape} {path} — {vault_reason}"
     return None
 
 
@@ -1351,3 +1364,95 @@ def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
         return _scan(command, start, home, roots, 0)
     except Exception:  # noqa: BLE001 — a parser bug must not become a crash
         return None
+
+
+# ---------------------------------------------------------------------------
+# The vault tree as a Bash-only write root (#3701)
+# ---------------------------------------------------------------------------
+#
+# This is the module's FOURTH policy and its narrowest. It lives here, at the end of
+# the file rather than beside `write_deny_reason`, for a documentary reason: four
+# documents on this box cite this file BY LINE NUMBER (the header above :264 says so,
+# and `tests/test_architecture_coverage_doc_claims.py` parses those citations), so an
+# insertion at line 250 would silently re-point all of them. Appending costs the
+# reader a forward reference and buys back every one of those citations.
+#
+# Why the vault tree cannot simply join `PROTECTED_WRITE_ROOTS`, stated once more
+# because it is the whole design of this function: `builtin_fs` and `vault_write` both
+# ask `write_deny_reason`, and the nightly reflection's sanctioned route for
+# `~/obsidian/lloyd/USER.md` and `MEMORY.md` IS that lane (header at :204). Covering
+# the tree there refuses the reflection every night — a bigger outage than the hole.
+# The shell has no sanctioned writer anywhere in the vault: every real vault write on
+# this box goes through `vault_write`, `automod_vault_land`, or a `git` subprocess, and
+# the documented undo route `git -C ~/obsidian checkout -- lloyd/USER.md` is a mover,
+# not a redirect, so it is untouched by this predicate (measured: `git` is in neither
+# `_WRITE_LAST_OPERAND` nor `_WRITE_EVERY_OPERAND`, so `write_targets` returns [] for
+# it). That asymmetry — redirect yes, file lane no — is exactly what the item scopes.
+#:
+#: A home-relative template like the deny-set's, so a test with a scratch `HOME` moves
+#: the root with it instead of having to patch a constant.
+VAULT_BASH_WRITE_ROOT: str = "~/obsidian"
+
+#: The `write_targets` shapes this root refuses — the redirect classification, spelled
+#: exactly as `write_targets` emits it (its `add_token(tok, "a redirect into")`).
+#: ONE shape on purpose: `write_targets` also resolves `cp`, `install`, `ln`, `mv`,
+#: `rsync` and `tee` destinations with shapes of their own, so covering them is a
+#: one-entry widening, and #3701 names redirects alone and leaves that widening to the
+#: owed-check job. `tests/test_bash_write_guard.py` pins that a `cp` into the vault is
+#: NOT yet refused, so the owed ruling cannot be taken by accident.
+VAULT_BASH_WRITE_SHAPES: tuple[str, ...] = ("a redirect into",)
+
+#: The clause of a refusal that says what the root is. It names the lane, because the
+#: answer "inside the vault" alone would read like a deny-set membership and invite
+#: someone to "fix" the file lane's None.
+VAULT_BASH_WRITE_LABEL: str = ("the Obsidian vault tree, which the Bash lane has no "
+                               "sanctioned writer for — use vault_write or "
+                               "automod_vault_land (#3701)")
+
+
+def vault_bash_write_root() -> str | None:
+    """The vault root for the Bash lane, realpathed; None if it cannot be resolved.
+
+    Computed per call like `protected_write_roots()`, and NOT required to exist: the
+    incident this closes is a redirect that CREATED the file, and a root that is
+    missing on a scratch box must not turn the guard off — an unresolvable root returns
+    None and the caller allows, which is the same fail-open shape `write_deny_reason`
+    has for an empty target, and is reached only when `$HOME` itself is unset.
+    """
+    try:
+        expanded = os.path.expanduser(VAULT_BASH_WRITE_ROOT)
+        if not expanded:
+            return None
+        return os.path.realpath(expanded)
+    except Exception:  # noqa: BLE001 — a guard must not become a crash
+        return None
+
+
+def bash_vault_write_denial(target: str, shape: str) -> str | None:
+    """Why a shell write of `shape` to `target` is refused on the BASH lane, None to allow.
+
+    Two conditions, both narrow. The shape must be one of `VAULT_BASH_WRITE_SHAPES` —
+    the redirect classification, and no mover — because #3701 scopes the change to
+    redirects and names widening to `cp`/`mv`/`tee` as a ruling for someone else. And
+    the target must fall under `VAULT_BASH_WRITE_ROOT` by realpath-anchored
+    whole-component prefix matching, with no `exists()` test: `write_deny_reason` never
+    asks whether the target is on disk either, so a redirect that CREATES a board file
+    is refused on the identical predicate to one that overwrites it — which is why "the
+    file did not exist yet" needed no new logic, only a root on this lane.
+
+    Deliberately NOT a second argument to `write_deny_reason`, whose own docstring says
+    "no second argument, no contextvar, no `allow_*` wrapper": this is a different
+    question (which lane?) over a different surface (the whole tree), and the file
+    lane's answers for `~/obsidian/lloyd/USER.md` and `MEMORY.md` must stay None
+    (#3701 clause 5), which `tests/test_protected_paths.py` pins.
+    """
+    if not target or shape not in VAULT_BASH_WRITE_SHAPES:
+        return None
+    root = vault_bash_write_root()
+    if not root:
+        return None
+    try:
+        real = os.path.realpath(target)
+    except Exception:  # noqa: BLE001
+        return None
+    return VAULT_BASH_WRITE_LABEL if _covers(root, real) else None

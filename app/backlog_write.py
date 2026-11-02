@@ -48,8 +48,9 @@ reaches an item file goes through `write_item`, and
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import yaml
 
@@ -191,3 +192,87 @@ def write_item(path: Path | str, fm: Mapping[str, Any],
     text = item_text(merge_journal(journal, fm), disk_body if body is None else body)
     atomic_io.atomic_write_text(path, text, fsync=True, tmp_dir=atomic_io.SCRATCH_DIR)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Resolving an id to its file — the one place that answers "which file is #N?"
+# ---------------------------------------------------------------------------
+#
+# Two lanes ask this question and, until #3701, each had its own copy of the same
+# `for f in glob("*.md"): if name startswith "<id>": return f` loop:
+# `app.routers.backlog._backlog_find_file` (the board's GET / task-update /
+# task-delete routes) and `agent_mcp.backlog.load_task` (what `backlog_write_task`
+# reads before it writes, and what the merge path reads before appending). Both
+# returned the FIRST match, and glob order is directory order, not date order.
+#
+# That is the shape of the 2026-11-01 incident on item 3691: an unattended session
+# wrote a hand-guessed slug with `cat >>` (a lane that had no path rule either, so
+# it created a file where the board had one), which put a SECOND `3691-*.md` on the
+# board. Every later read of id 3691 then silently answered whichever file glob
+# happened to yield — one `backlog_write_task` call appended to the phantom body,
+# the next overwrote the real item's body with the phantom's, and nothing along the
+# way said "there are two of these".
+#
+# So the rule is: an id that matches more than one file is not a lookup to be won,
+# it is a state that must be reported. Ambiguity raises, and the error names EVERY
+# matching path, because the operator's next action is to work out which file is
+# the phantom and remove it — an error that says "found 2" without naming them
+# cannot be acted on. Neither file is read, written, or deleted on this path: the
+# delete route reaching `unlink()` with a collision behind it is how a board item
+# gets destroyed by the call that was trying to tidy up.
+#
+# The fix deliberately lives in the resolver and not in its callers: a guard that
+# a lane has to remember to ask is the guard that was missing here.
+
+BACKLOG_ID_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
+
+
+class AmbiguousBacklogId(Exception):
+    """More than one `backlog/<id>-*.md` file carries the id being resolved (#3701).
+
+    Raised by `resolve_backlog_id_file`, so by every reader and every writer of an
+    item file. Its message names every matching path in full: the point of catching
+    it is to let a human see the pair, and the point of raising it is that no lane
+    gets to pick a winner.
+    """
+
+    def __init__(self, task_id: int, paths: Sequence[Path | str]):
+        self.task_id = int(task_id)
+        self.paths = [Path(p) for p in paths]
+        super().__init__(
+            f"{len(self.paths)} backlog files share id {self.task_id}, so none of "
+            f"them can be read or written until the duplicate is resolved: "
+            f"{', '.join(str(p) for p in self.paths)}")
+
+
+def backlog_id_matches(backlog_dir: Path | str, task_id: int) -> list[Path]:
+    """Every `backlog/<id>-*.md` under `backlog_dir`, sorted by name.
+
+    Sorted rather than glob-ordered so the pair a collision reports reads the same
+    in every run and in every test, and so no caller mistakes the ordering for a
+    tie-breaker it does not have.
+    """
+    directory = Path(backlog_dir)
+    if not directory.exists():
+        return []
+    wanted = int(task_id)
+    return sorted(
+        (f for f in directory.glob("*.md")
+         if (m := BACKLOG_ID_PATTERN.match(f.name))
+         and int(m.group(1)) == wanted),
+        key=lambda f: f.name)
+
+
+def resolve_backlog_id_file(backlog_dir: Path | str, task_id: int) -> Path | None:
+    """The one file for `task_id`; None when there is no such item.
+
+    Raises `AmbiguousBacklogId` when there is more than one, and returns neither.
+    Every lane that resolves a backlog id goes through here — the board routes and
+    the MCP tool lane — so the two cannot drift apart again (#3701 clause 3).
+    """
+    matches = backlog_id_matches(backlog_dir, task_id)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousBacklogId(task_id, matches)
+    return matches[0]
