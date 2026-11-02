@@ -448,15 +448,24 @@ def test_the_reclaim_figures_are_the_ones_the_nightly_series_measured():
     assert f"{gap:,} more live rows" in flat, f"the two reads are {gap} rows apart"
 
 
-def test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies():
-    """#2302 clause 4: the two mechanisms that survived the first real run, and
-    the absence of any hour-of-day rule.
+def test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard():
+    """#2302 clause 4 (the two mechanisms) and #3460 clause 5 (the clock guard).
 
     The retry is pinned to the script's own constants and to the two embed passes
-    each run logged, so the sentence cannot outlive the mechanism; the `.bak`
-    claim is pinned to the retention series, which must still hold the swap's
-    backup as its newest member; and the clock-window sentence is pinned against
-    the one thing that would contradict it — a branch on the hour in the script.
+    each run logged, so the sentence cannot outlive the mechanism; the `.bak` claim
+    is pinned to the retention series, which must still hold the swap's backup as
+    its newest member.
+
+    The third leg used to pin the ABSENCE of an hour-of-day rule: it asserted
+    `"no clock window applies" in flat`, `"22:00" not in flat`, and
+    `".hour" not in src`. #3460 clause 5 makes that reading false on purpose — the
+    acceptance says the same change that schedules the nightly BUILD has to "retire
+    the contradiction rather than tripping it", because a scheduled 36-minute re-embed
+    must not straddle the 22:00-04:00 nightly hours. So the node now pins the guard
+    that paragraph describes against the code that implements it, in both
+    directions: the paragraph names the window and the caller, the script carries the
+    two constants and the `.hour` branch, and the budget the paragraph quotes is the
+    number the constant holds — re-read from source here, never quoted from prose.
     """
     flat = _flat(_task81_bullet())
     assert "embed lock is per directory" in flat and "exclude each other" in flat
@@ -472,11 +481,27 @@ def test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies():
     series = _report(MAINTENANCE_AFTER)["stray_retention"]["bak_series"]
     assert series[0] == _swapped_backup(), (
         f"the swap's backup is not the series' newest: {series}")
-    assert "no clock window applies" in flat, "the paragraph stopped saying the route has no window"
-    assert "22:00" not in flat and "04:00" not in flat, "a clock window is implied again"
-    assert ".hour" not in src, (
-        "qmd_index_maintenance.py now branches on the hour, and the paragraph's "
-        "'no clock window applies' has to be rewritten in the same change")
+    # The window, as the paragraph states it and as the script holds it. The two
+    # directions are checked against each other, not against a literal repeated here.
+    assert "22:00" in flat and "04:00" in flat, (
+        "the paragraph stopped naming the nightly hours the scheduled build must not "
+        "straddle")
+    assert "rebuild-YYYYMMDD" in flat, (
+        "the paragraph no longer names the scheduled caller or the name it derives")
+    budget = re.search(r"^SCHEDULED_BUILD_BUDGET_S = (\d+)$", src, re.M)
+    assert budget, ("the 2400-second budget the paragraph quotes is no longer a "
+                    "constant in the script")
+    assert budget.group(1) in flat, (
+        f"the paragraph no longer states the {budget.group(1)} s the guard adds to the "
+        "start instant")
+    hours = re.search(r"^SCHEDULED_BUILD_WINDOW_HOURS = frozenset\(\{([^}]*)\}\)$",
+                      src, re.M)
+    assert hours, "the guarded hours are no longer a constant in the script"
+    assert sorted(int(h) for h in hours.group(1).split(",")) == [0, 1, 2, 3, 4, 22, 23], (
+        "the script's window is no longer the nightly hours the paragraph names")
+    assert ".hour" in src, (
+        "qmd_index_maintenance.py no longer branches on the hour, so the guard the "
+        "paragraph describes — and #3460 clause 2 requires — is gone")
 
 
 def test_the_swap_fixture_is_admissible_and_tracked():
@@ -655,7 +680,7 @@ def test_the_cited_reports_resolve_to_committed_bytes_and_nothing_in_this_file_s
 _PINS = (
     test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it,
     test_the_reclaim_figures_are_the_ones_the_nightly_series_measured,
-    test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies,
+    test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard,
 )
 
 
@@ -683,7 +708,7 @@ def test_removing_a_witness_fails_the_three_pins_naming_the_missing_file(monkeyp
         SWAP_REPORT: test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it,
         MAINTENANCE_BEFORE: test_the_reclaim_figures_are_the_ones_the_nightly_series_measured,
         REHEARSAL_REPORT:
-            test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies,
+            test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard,
     }
     assert len(must_fail) == 3 and set(must_fail.values()) <= set(_PINS), (
         "the clause-3 pairings are not the three pins of #2302")

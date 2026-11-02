@@ -3869,6 +3869,13 @@ def _run_over_shape(monkeypatch, tmp_path, shape: dict, capsys,
     monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
     monkeypatch.setattr(m, "inspect_index", lambda: dict(shape))
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    # #3460 gave the nightly a new collaborator on exactly the shapes these nodes feed
+    # it (OCT_20_SHAPE is approaching), and this helper's subject is the exit code and
+    # the printed summary, not the build. `scheduled_side_copy_build` and the route
+    # behind it are #3460's own nodes' subject, driven in-band there.
+    monkeypatch.setattr(m, "scheduled_side_copy_build", lambda started: {
+        "name": m.scheduled_side_copy_name(started), "build_launched": False,
+        "stubbed": "this helper's subject is the exit code, not the build (#3460)"})
     if not probe_via_sh:
         monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
     monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
@@ -7293,4 +7300,418 @@ def test_the_pin_block_stays_suppressed_when_the_pin_agrees(tmp_path, monkeypatc
     assert "live -> pin config" not in green, green
     assert m.RETAKE_PIN_COMMAND not in green, green
     assert m.RESYNC_COMMAND not in green, green
+
+
+# --- #3460: the nightly launches the side-copy BUILD, never the swap ----------
+#
+# #3071's 2026-09-25→10-25 ruling accepts a ~2-3-week rebuild only if it stops being a
+# 37-minute sitting: "the build becomes schedulable, the swap stays by hand". #3314
+# landed the split; no caller arrived for the build half, and `git grep -n
+# rebuild-side-copy -- ':!eval/**'` named only the script's own strings, the doc and
+# these nodes. So the sitting stayed in front of a person: the two real hand builds
+# measured `elapsed_s` 2149.8 and 2197.0.
+#
+# The trigger is live, not hypothetical. Seven straight nightly reports (2026-10-21
+# through 10-26) read `capacity_approaching: true` with `need_capacity: false` —
+# occupancy 0.319 → 0.2833, dead 514.8 → 662.2 MiB — which is OCT_20_SHAPE's state
+# below. `OCT_06_SHAPE`, the night after a swap, is the other side.
+#
+# The guard's window is the nightly one, [22, 23, 0, 1, 2, 3, 4], and the quantity it
+# tests is the END of the build: `SCHEDULED_BUILD_BUDGET_S` = 2400 s added to the start.
+# Task #81's own `preferred_hours: [5]` puts the start at 05:00:51 / 05:01:10 /
+# 05:01:20 on the three reports before this was filed, so 05:01 + 2400 s = 05:41, hour
+# 5, clear by 95 minutes. A 23:00 start ends 23:40 and is refused.
+#
+# The three fixtures the nodes below drive are named in the acceptance: the pinned
+# 05:01 night, the pinned 23:00 night, and the copy-already-there night. Each runs the
+# real `main()` in-band — the helper patches every collaborator but its own
+# `scheduled_side_copy_build` and `run_side_copy_route`, so the flag plumbing, the
+# window guard and the report block are all the shipped code path.
+
+#: A `verify_side_copy` result that passes: `run_side_copy_route` refuses to print
+#: `swapped`/`built` on anything else, so the spy rebuild below returns this shape.
+SCHEDULED_VERIFIED = {
+    "passed": True, "side_live_rows": 41_536, "floor_vectors_live": 41_536,
+    "pending_embeddings": 0, "vsearch_hits": 5, "failed": [],
+}
+
+
+def _local_wallclock(hour: int, minute: int = 0) -> datetime:
+    """Today's local date at one wall-clock time, offset-bearing like `run_started()`.
+
+    The pinned clock has to be offset-bearing because the real `run_started()` is: a
+    naive value into `elapsed_s = (run_started() - start).total_seconds()` is exactly
+    the TypeError #3665 closed, and a helper that tripped it on the mutating path would
+    have been the bug rather than the test of it.
+    """
+    return datetime.now().astimezone().replace(hour=hour, minute=minute, second=0,
+                                               microsecond=0)
+
+
+def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
+                       tty: bool = False, copy_present: str | None = None,
+                       build_raises=None, spy: bool = True,
+                       bare_copy: str | None = None,
+                       shape: dict | None = None):
+    """Drive one in-band nightly run: clock pinned, stdin of one kind, build watched.
+
+    `at` is the pinned start instant; `tty` chooses what `_stdin_is_interactive`
+    measures (a real pty for True, a real pipe for False — the same property #2458's
+    rail reads, not a flag this test could set to whatever it wanted to believe);
+    `copy_present` puts a marker-bearing side copy of that name on disk as a hand build
+    would have left it; `build_raises` makes the build itself fail. `shape` is the
+    `inspect_index` snapshot — the 2026-10-20 approaching state unless a node names
+    another, which is how the trigger's negative edge is reached at all.
+
+    `rebuild_side_copy` is replaced by a spy that returns a passing verification,
+    because a real re-embed is a 36-minute GPU job that writes 500 MB — what is under
+    test is whether the nightly ASKS for it, how often, and what it does around that.
+    `spy=False` leaves the real one in place, for
+    `test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_collide`,
+    which pins the name against the real `SideCopyRefused`.
+    `swap_side_copy` raises on contact: clause 1's "reaches swap_side_copy never" is
+    pinned by the run having to complete. `supervisorctl` is unreachable two ways —
+    `supervisor` explodes and `_sh` is recorded rather than run — so clause 3's "stops
+    no service" is a count over the whole run, not a guess about the route.
+
+    Returns (rc, the nightly report as written, stdout, the recorded `_sh` calls, the
+    names `rebuild_side_copy` was called with).
+    """
+    d = _qmd_dir_at(tmp_path, _live_trio_at(at.timestamp()))
+    t, l = _pair(tmp_path)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+    monkeypatch.setattr(m, "inspect_index",
+                        lambda *a: dict(shape if shape is not None else OCT_20_SHAPE))
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(m, "run_started", lambda at_epoch=None: at)
+
+    shell: list[list[str]] = []
+
+    def recording_sh(cmd, timeout, env=None):
+        shell.append([str(c) for c in cmd])
+        return 0, "done"
+
+    def explode(*a, **k):
+        raise AssertionError(f"the scheduled build touched supervisorctl: {a} {k}")
+
+    monkeypatch.setattr(m, "_sh", recording_sh)
+    monkeypatch.setattr(m, "supervisor", explode)
+
+    def no_swap(*a, **k):
+        raise AssertionError("the scheduled run reached swap_side_copy: the swap stays "
+                             "a terminal's (#3460 clause 1)")
+
+    monkeypatch.setattr(m, "swap_side_copy", no_swap)
+
+    builds: list[str] = []
+
+    def spy_rebuild(name):
+        builds.append(name)
+        if build_raises is not None:
+            raise build_raises
+        return {"name": name, "verification": dict(SCHEDULED_VERIFIED),
+                "side_bytes": 481_000_000, "side_occupancy": 0.822,
+                "live_occupancy": 0.3285}
+
+    if spy:
+        monkeypatch.setattr(m, "rebuild_side_copy", spy_rebuild)
+
+    if copy_present:
+        # Written through the module's own path helpers, with INDEX already patched,
+        # so the marker is exactly where `side_copy_exists` looks for it.
+        m.side_index_path(copy_present).write_bytes(b"\0" * 8)
+        m.side_marker_path(copy_present).write_text(json.dumps({
+            "built_utc": "2026-11-01T04:11:39+00:00",
+            "verification": SCHEDULED_VERIFIED,
+            "side_bytes": 481_000_000,
+            "swap_reclaimed_bytes": 1_675_615_728}), encoding="utf-8")
+    if bare_copy:
+        # A database of that name with NO marker: somebody else's copy, which is the
+        # state the date-derived name exists to never reach.
+        m.side_index_path(bare_copy).write_bytes(b"\0" * 8)
+
+    with _stdin_on(tty=tty):
+        monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+        rc = m.main()
+    cap = capsys.readouterr()
+    out, err = cap.out, cap.err
+    report = json.loads((m.REPORT_DIR / f"{m.REPORT_PREFIX}{at:%Y-%m-%d}.json")
+                        .read_text(encoding="utf-8"))
+    return rc, report, out, shell, builds, err
+
+
+def test_a_capacity_approaching_nightly_builds_the_side_copy_exactly_once_and_never_swaps(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1, and the name convention with it.
+
+    The 2026-10-20 state (occupancy 0.3285, 483.5 MiB dead) is `capacity_approaching`
+    true with `need_capacity` false, which is what seven straight nightly reports read
+    from 10-21 to 10-26; stdin is a pipe, because that is what the job runs on. The run
+    has to hand `rebuild_side_copy` exactly one name and complete — `swap_side_copy`
+    raises on contact, so reaching it would fail this node rather than be reported by
+    it. The name is `rebuild-YYYYMMDD` of the run: derived from the date rather than
+    fixed, because `rebuild_side_copy` refuses a name whose database exists without its
+    marker, so a fixed name a person had already used would make every later nightly
+    refuse itself against that copy forever.
+    """
+    at = _local_wallclock(5, 1)
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at)
+
+    assert report["capacity_approaching"] is True and report["need_capacity"] is False
+    assert builds == [f"rebuild-{at:%Y%m%d}"], (
+        f"expected exactly one build named for the run date, got {builds}")
+    assert m.SIDE_NAME_RE.match(builds[0]), builds[0]
+    block = report["side_copy_build"]
+    assert block["build_launched"] is True and block["name"] == builds[0], block
+    assert "refused" not in block and "failed" not in block and "skipped" not in block, block
+    assert rc == 0, f"the nightly exited {rc} with a build launched"
+    assert "side copy BUILD" in out, out
+    # The route's own dated artifact is where the owed `elapsed_s` measurement will be
+    # read from, so this is the first evidence that the scheduled route writes it.
+    assert list(m.REPORT_DIR.glob(f"qmd-side-copy-{builds[0]}-*.json")), (
+        f"no side-copy witness beside {sorted(p.name for p in m.REPORT_DIR.iterdir())}")
+
+
+def test_the_window_guard_is_end_of_build_plus_2400_seconds_outside_22_to_04():
+    """Clause 2, as one arithmetic function, before any run invokes it.
+
+    Both edges of the boundary and the constants themselves: 05:01 (the measured
+    nightly start) ends 05:41 and clears; 23:00 ends 23:40 and is refused; and the
+    latest start still allowed is 21:19, whose 2400 s budget ends 21:59, while 21:20
+    ends 22:00 and is refused. The window is the nightly hours the reflection chain
+    owns, read out of the script's own constant rather than re-listed here.
+    """
+    assert m.SCHEDULED_BUILD_BUDGET_S == 2400
+    assert sorted(m.SCHEDULED_BUILD_WINDOW_HOURS) == [0, 1, 2, 3, 4, 22, 23]
+
+    clear = m.scheduled_build_window(_local_wallclock(5, 1))
+    assert clear["allowed"] is True and clear["end_hour"] == 5, clear
+    refused = m.scheduled_build_window(_local_wallclock(23, 0))
+    assert refused["allowed"] is False and refused["end_hour"] == 23, refused
+    last_clear = m.scheduled_build_window(_local_wallclock(21, 19))
+    assert last_clear["allowed"] is True and last_clear["end_hour"] == 21, last_clear
+    first_refused = m.scheduled_build_window(_local_wallclock(21, 20))
+    assert first_refused["allowed"] is False and first_refused["end_hour"] == 22, (
+        first_refused)
+    assert m.scheduled_build_window(_local_wallclock(22, 0))["allowed"] is False
+    assert refused["reason"], "a refusal that cannot be printed cannot be reported"
+
+
+def test_a_2300_start_builds_nothing_and_says_which_window_refused_it(monkeypatch,
+                                                                      tmp_path, capsys):
+    """Clause 2 through the whole run: the refusal is printed AND recorded.
+
+    A pinned 23:00 start on the same approaching shape would end 23:40, inside the
+    nightly hours, so nothing may be built — and a silent skip is the failure mode
+    #3071's ruling cannot survive, because a person watching for a copy would read "no
+    copy" as "nothing needed one". The report's block carries the reason and the window
+    that produced it.
+    """
+    at = _local_wallclock(23, 0)
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at)
+
+    assert builds == [], f"a build started inside the nightly hours: {builds}"
+    assert rc == 0, f"a refused bonus build exited {rc}"
+    block = report["side_copy_build"]
+    assert block["build_launched"] is False, block
+    assert block["window"]["allowed"] is False, block
+    assert "23:00" in block["refused"] and "23:40" in block["refused"], block
+    assert "side copy build REFUSED" in out and "23:40" in out, out
+
+
+def test_a_0501_start_proceeds_and_a_tty_run_leaves_the_build_to_the_person(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2's proceed case, plus the one thing that stops it on a terminal.
+
+    05:01 is task #81's own `preferred_hours: [5]` start as the three reports before
+    this item recorded it (05:00:51, 05:01:10, 05:01:20), and it proceeds. The second
+    half matters as much: a person who types the plain script did not ask to sit
+    through a re-embed, so an interactive stdin skips the scheduled build and points at
+    the flag instead — the same measured property #2458's rail reads.
+    """
+    rc, report, out, _, builds, _err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1))
+    assert builds and rc == 0, (builds, rc)
+
+    rc_tty, tty_report, tty_out, _, tty_builds, _terr = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1), tty=True)
+    assert tty_builds == [], f"a terminal got a 36-minute build: {tty_builds}"
+    assert "interactive terminal" in tty_report["side_copy_build"]["skipped"]
+    assert "interactive terminal" in tty_out, tty_out
+    assert rc_tty == 0
+
+
+def test_the_scheduled_build_runs_no_supervisorctl_command_at_all(monkeypatch,
+                                                                 tmp_path, capsys):
+    """Clause 3, first half: the build stops nothing, counted over the whole run.
+
+    `_sh` is every subprocess this script runs and `supervisor` is the only wrapper that
+    spells a service name, so an empty transcript after a run that launched a build is
+    the whole claim: the daemon keeps serving through the re-embed, which is the reason
+    the copy exists instead of an in-place rebuild.
+    """
+    rc, report, _, shell, builds, _serr = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1))
+    assert builds, "the build did not run, so this asserted nothing about it"
+    assert shell == [], f"the scheduled build ran subprocesses: {shell}"
+    assert rc == 0
+
+
+def test_the_build_moves_the_exit_code_on_no_outcome_of_four(monkeypatch, tmp_path,
+                                                            capsys):
+    """Clause 3, second half: skipped, run, refused and failed all exit 0.
+
+    The same approaching report, four nights, one varying: a TTY skips it, a pipe runs
+    it, a 23:00 clock refuses it, and a dying `qmd embed` fails it. Every one exits 0
+    while `need_capacity` is false, and the fifth case is the trigger's own negative
+    edge — the night after a swap (occupancy 0.822) is not approaching, records no
+    block at all, and builds nothing, which is what keeps this from being a 36-minute
+    job every fourteen nights.
+    """
+    at = _local_wallclock(5, 1)
+    # Each call reads its own dated report back before the next one overwrites it, so
+    # four runs share one tmp_path and each still judges its own bytes.
+    skipped_rc, skipped, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys,
+                                                   at=at, tty=True)[:4]
+    run_rc, ran, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys, at=at)[:4]
+    refused_rc, refused, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys,
+                                                   at=_local_wallclock(23, 0))[:4]
+    failed_rc, failed, f_out, _ = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at,
+        build_raises=RuntimeError("node died mid-embed"))[:4]
+
+    assert [skipped_rc, run_rc, refused_rc, failed_rc] == [0, 0, 0, 0]
+    assert "skipped" in skipped["side_copy_build"], skipped["side_copy_build"]
+    assert ran["side_copy_build"]["build_launched"] is True
+    assert "refused" in refused["side_copy_build"], refused["side_copy_build"]
+    assert failed["side_copy_build"]["failed"].startswith("RuntimeError"), failed
+    assert failed["side_copy_build"]["build_launched"] is True, (
+        "a failed build was still a build that was launched")
+    assert "side copy build FAILED" in f_out, f_out
+    assert failed["need_capacity"] is False, "the fired-verdict exit is what this rode on"
+
+
+def test_a_nightly_that_finds_a_copy_built_prints_the_swap_and_builds_nothing(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4: the payoff of the split is a copy waiting and a seconds-scale hand step.
+
+    With a marker-bearing copy of the name this run would have chosen already on disk,
+    the nightly launches nothing — rebuilding a verified copy would pay the 36 minutes
+    #3071 ruled out of the sitting — and prints the exact command for a terminal. The
+    command is asserted against `m.HAND_SWAP_COMMAND` rather than a literal so the two
+    cannot drift apart, and it is checked in its assembled form: name and `--swap`
+    present, `--dry-run` absent, because the line a person pastes is the finding.
+    """
+    at = _local_wallclock(5, 1)
+    name = f"rebuild-{at:%Y%m%d}"
+    rc, report, out, _, builds, _err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, copy_present=name)
+
+    assert builds == [], f"rebuilt a copy that was already verified: {builds}"
+    assert rc == 0
+    block = report["side_copy_build"]
+    assert block["build_launched"] is False and "skipped" in block, block
+    expected = m.HAND_SWAP_COMMAND.format(name=name)
+    assert block["hand_step"] == expected, block
+    assert expected in out, out
+    assert ("--rebuild-side-copy" in expected and f"{name} --swap" in expected
+            and "--dry-run" not in expected), expected
+    assert name in out and "--swap" in out and "--dry-run" not in out, out
+
+
+def test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_collide(
+        monkeypatch, tmp_path, capsys):
+    """The name convention, against the real `rebuild_side_copy` rather than a spy.
+
+    `rebuild_side_copy` refuses a name whose database is on disk without this route's
+    marker — "pick another name" — so a fixed scheduled name that a person had already
+    used by hand would make every nightly refuse itself against that copy for as long as
+    the copy stands. Both hand builds used date-stamped names (`rebuild-20261004`,
+    `rebuild-20261005`), and deriving the name from the run date is what keeps the two
+    namespaces apart, so this is the real function reached through the scheduled route on
+    the collision state: it refuses, the nightly records why, exits 0, and runs no
+    subprocess.
+    """
+    at = _local_wallclock(5, 1)
+    name = f"rebuild-{at:%Y%m%d}"
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, spy=False, bare_copy=name)
+
+    block = report["side_copy_build"]
+    assert block["name"] == name == m.scheduled_side_copy_name(at), block
+    assert block["build_launched"] is True and block["route_rc"] == 2, block
+    assert "route refused" in block["refused"], block
+    # The reason itself lives where the route writes it: the refusal the block points at
+    # is this line, so the record and the print cannot drift.
+    assert "pick another name" in err, err
+    assert rc == 0, f"a collision with a hand copy changed the exit code: {rc}"
+    assert shell == [], f"the refused build still ran subprocesses: {shell}"
+    assert "side copy build REFUSED" in out, out
+    # The other half of the convention: the next night's name is a different name, so
+    # one person's copy can block at most the one night it was built on.
+    assert m.scheduled_side_copy_name(at + timedelta(days=1)) != name
+
+
+def test_a_nightly_that_is_not_approaching_launches_no_build(monkeypatch, tmp_path,
+                                                             capsys):
+    """The trigger's negative edge, and the reason this is not a nightly 36-minute job.
+
+    `OCT_06_SHAPE` is the night after the 2026-10-05 swap — occupancy 0.822, freshly
+    rebuilt — where `capacity_approaching` is False by the same constant that fires the
+    build on 0.3285. The key is absent from that report, exactly like
+    `capacity_owed_to_a_person` beside it: a dry run or a healthy index records no
+    decision because it made none.
+    """
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1), shape=OCT_06_SHAPE)
+    assert report["capacity_approaching"] is False and report["need_capacity"] is False
+    assert builds == [] and "side_copy_build" not in report, report
+    assert rc == 0 and shell == []
+    assert "side copy" not in out, out
+
+
+def test_a_dry_run_of_an_approaching_nightly_launches_no_build(monkeypatch, tmp_path,
+                                                              capsys):
+    """The dry-run edge of the same rule, since `--dry-run` is what a person checks with.
+
+    A dry run that launched a re-embed would be the one command in the file that lies
+    about what it does, and the node that pins its prints reads this same shape.
+    """
+    d = _qmd_dir_at(tmp_path, _live_trio_at(_local_wallclock(5, 1).timestamp()))
+    t, l = _pair(tmp_path)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+    monkeypatch.setattr(m, "inspect_index", lambda *a: dict(OCT_20_SHAPE))
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+
+    builds: list[str] = []
+    monkeypatch.setattr(m, "rebuild_side_copy", lambda name: builds.append(name))
+    monkeypatch.setattr(m, "supervisor",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("supervisor")))
+    monkeypatch.setattr(m, "_sh", lambda cmd, timeout, env=None: (0, "dry"))
+    with _stdin_on(tty=False):
+        monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py", "--dry-run"])
+        rc = m.main()
+    out = capsys.readouterr().out
+    reports = sorted(m.REPORT_DIR.glob(f"{m.REPORT_PREFIX}*")) if m.REPORT_DIR.exists() \
+        else []
+
+    # A dry run writes no dated report at all (`main` reaches `_write_report` only for a
+    # run that may have changed something), so the absence of the block is asserted over
+    # whatever it did write — and on this path that is nothing, which is itself the
+    # evidence that no decision was recorded.
+    assert reports == [], f"a dry run wrote a report: {[p.name for p in reports]}"
+    assert builds == [], f"a dry run launched a 36-minute re-embed: {builds}"
+    assert rc == 0
+    assert "dry-run" in out, out
+    assert "APPROACHING" in out, f"the approaching verdict stopped printing: {out}"
 

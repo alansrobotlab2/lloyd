@@ -202,7 +202,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -370,7 +370,9 @@ VEC0_REBUILD_RULED_OUT = (
     "daemon with no vector leg for the whole re-embed. A fired need_capacity means a "
     "side copy has to be built and then swapped in: the BUILD is this script's own "
     "`--rebuild-side-copy NAME`, needs no terminal and may run unattended, and the "
-    "SWAP is the half a person does from a terminal (#3314).")
+    "SWAP is the half a person does from a terminal (#3314). Since #3460 the nightly "
+    "run whose report reads `capacity_approaching` is what launches that BUILD, and it "
+    "never reaches the SWAP.")
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -1588,7 +1590,13 @@ CAPACITY_WHAT_TO_DO = (
     "`--swap`, which on a copy that build left behind re-verifies it and moves it in in "
     "seconds. Ask for `--swap` with no copy present and it builds first, paying the 36 "
     "minutes again. Since #2458 the script refuses `--swap` outright unless stdin is an "
-    "interactive terminal; no scheduled run passes it.")
+    "interactive terminal; no scheduled run passes it. The BUILD is scheduled as of "
+    "#3460: the nightly run that reports `capacity_approaching` and finds no copy on "
+    "disk launches its own `--rebuild-side-copy rebuild-YYYYMMDD`, refuses to start one "
+    "whose 2400-second budget would end inside the 22:00-04:00 nightly hours, and when a "
+    "copy is already waiting prints the `--swap` command for a terminal instead of "
+    "running it. What is owed here is therefore the seconds-scale swap, not the "
+    "36-minute sitting.")
 
 
 def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
@@ -3099,6 +3107,142 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
     return rc
 
 
+#: How long the scheduled build is allowed to run before its end instant is refused.
+#: The two real hand builds measured `elapsed_s` 2149.8 s and 2197.0 s, so this is the
+#: observed ~36 minutes plus ~4 of slack — and it is the quantity the window guard adds
+#: to the start instant (#3460). It is not a timeout: nothing kills a build that overruns
+#: it, the guard only decides whether the run may begin.
+SCHEDULED_BUILD_BUDGET_S = 2400
+
+#: The local hours a scheduled build must not still be running in: the nightly window
+#: [22, 23, 0, 1, 2, 3, 4] the reflection chain owns (`app/autonomy.py`'s
+#: `preferred_hours` example). The embed window is why the guard exists at all — a
+#: re-embed holds the per-directory embed lock and lags the watcher's embeds of the live
+#: index, so an overrunning build would take the GPU and the vector leg's freshness
+#: during the hours the nightly reflection writes are landing.
+SCHEDULED_BUILD_WINDOW_HOURS = frozenset({22, 23, 0, 1, 2, 3, 4})
+
+#: The command a person runs for the half this job may not take, printed verbatim by a
+#: scheduled run that finds a copy already waiting. It is the route's own usage form.
+HAND_SWAP_COMMAND = ("python scripts/maintenance/qmd_index_maintenance.py"
+                     " --rebuild-side-copy {name} --swap")
+
+
+def scheduled_side_copy_name(at: datetime) -> str:
+    """The name the scheduled build gives its copy: `rebuild-YYYYMMDD` of the run.
+
+    The date-stamped convention is the two hand builds' own (`rebuild-20261004`,
+    `rebuild-20261005`), and deriving it from the run date is what keeps the scheduled
+    name from ever colliding with a person's: `rebuild_side_copy` refuses a name whose
+    database exists without this route's marker ("pick another name"), so one fixed
+    name that somebody happened to use by hand would make every nightly refuse itself
+    against that copy for good.
+    """
+    return f"rebuild-{at:%Y%m%d}"
+
+
+def scheduled_build_window(at: datetime) -> dict:
+    """Whether a build begun at `at` may start: one arithmetic check, on its END.
+
+    `at + SCHEDULED_BUILD_BUDGET_S` must fall outside
+    `SCHEDULED_BUILD_WINDOW_HOURS`. The END is the measured quantity, not the start,
+    because what the guard exists to avoid is a build *in progress* inside the nightly
+    hours, and a start near the boundary is the only case where the two disagree.
+
+    The nightly as scheduled passes it by an hour and a half: task #81's own
+    `preferred_hours: [5]` puts the start at 05:00:51 / 05:01:10 / 05:01:20 on the three
+    reports before this was filed, and 05:01 + 2400 s = 05:41, hour 5, outside the
+    window. The guard is a guard, not the reason it works at 05:00.
+    """
+    end = at + timedelta(seconds=SCHEDULED_BUILD_BUDGET_S)
+    inside = end.hour in SCHEDULED_BUILD_WINDOW_HOURS
+    window = sorted(SCHEDULED_BUILD_WINDOW_HOURS)
+    return {
+        "start_hour": at.hour, "end_hour": end.hour,
+        "budget_s": SCHEDULED_BUILD_BUDGET_S, "window_hours": window,
+        "allowed": not inside,
+        "reason": (f"a build started {at:%H:%M} would end {end:%H:%M}, inside the "
+                   f"nightly hours {window}: refusing to start it" if inside else
+                   f"a build started {at:%H:%M} ends {end:%H:%M}, outside the nightly "
+                   f"hours {window}"),
+    }
+
+
+def scheduled_side_copy_build(started: datetime) -> dict:
+    """Launch the BUILD half of the side-copy route from the nightly run (#3460).
+
+    #3071's 2026-10-25 ruling accepts a ~2-3-week rebuild only if it stops being a
+    37-minute sitting: "the build becomes schedulable, the swap stays by hand". #3314
+    landed the split and no caller ever arrived for the build half, so the copy nobody
+    built meant the sitting was still in front of a person. This is that caller: the job
+    that already computes `capacity_approaching` builds the copy when none is there.
+
+    Three rails keep it inside the ruling, and each is pinned by a node in
+    `tests/test_qmd_index_maintenance.py`:
+
+      * it never swaps. `run_side_copy_route` is called with `swap=False`, so
+        `swap_side_copy` — the only caller of `supervisorctl stop` in this file — is not
+        reached from here, and #2458's terminal rail is untouched.
+      * it never starts a build whose end lands in `SCHEDULED_BUILD_WINDOW_HOURS`, and
+        the refusal is both printed and recorded in the block it returns.
+      * it never moves the exit code. The route's own rc is recorded as `route_rc` and
+        dropped; a refused or failed build is recorded and swallowed, because on a night
+        `need_capacity` is false the run's own verdict is still healthy, and a red
+        nightly for a bonus build would be the boy-who-cried-wolf that #1897's red
+        verdict exists to be and this one must not.
+
+    A copy this route already built is not rebuilt: the run prints the exact `--swap`
+    command instead and does nothing else, which is the payoff the split was for — the
+    hand step then takes seconds, not 36 minutes.
+    """
+    name = scheduled_side_copy_name(started)
+    out: dict = {"name": name, "build_launched": False}
+    if _stdin_is_interactive():
+        # The route has its own flag for a terminal, and a person typing the plain
+        # script did not ask to sit through a re-embed. This is the same measured
+        # property #2458 refuses a swap on — what the kernel says about stdin.
+        out["skipped"] = ("stdin is an interactive terminal: the hand route's "
+                          "`--rebuild-side-copy NAME` is the invocation for a person")
+        print(f"  side copy BUILD     skipped — {out['skipped']}")
+        return out
+    if side_copy_exists(name):
+        out["skipped"] = "a copy this route built is already on disk: no build run"
+        out["hand_step"] = HAND_SWAP_COMMAND.format(name=name)
+        print(f"  side copy {name} is already built: no build run. The swap is the hand "
+              f"step: {out['hand_step']}")
+        return out
+    window = scheduled_build_window(run_started())
+    out["window"] = window
+    if not window["allowed"]:
+        out["refused"] = window["reason"]
+        print(f"  side copy build REFUSED  {window['reason']}")
+        return out
+    print(f"  side copy BUILD     {window['reason']}; building {name} (about 36 "
+          f"minutes, no service stopped, exit code unmoved)")
+    # `build_launched` means "this run asked the route to build", so it is set before
+    # the call. `route_rc` is the route's own exit code, recorded and dropped: the route
+    # turns a `SideCopyRefused` into its own `refused:` line on stderr and exit 2, so the
+    # code is how a refusal reaches here — and clause 3 is why none of it may move this
+    # run's exit code.
+    out["build_launched"] = True
+    try:
+        rc = run_side_copy_route(name, swap=False, dry_run=False, as_json=False)
+    except Exception as e:  # noqa: BLE001 — a bonus build must not red the nightly
+        out["failed"] = f"{type(e).__name__}: {e}"
+        print(f"  side copy build FAILED   {out['failed']}")
+        return out
+    out["route_rc"] = rc
+    if rc == 2:
+        out["refused"] = ("the side-copy route refused this name (route exit 2); its own "
+                          "`refused:` line on stderr carries the reason")
+        print(f"  side copy build REFUSED  route exit 2 for {name}: see that route's "
+              f"`refused:` line for the reason")
+    elif rc != 0:
+        out["failed"] = f"the side-copy route exited {rc}"
+        print(f"  side copy build FAILED   {out['failed']}")
+    return out
+
+
 def _write_report(report: dict, started: datetime) -> Path:
     """Land the dated JSON report, on every run that did something or nothing.
 
@@ -3261,6 +3405,17 @@ def main() -> int:
     if report["need_capacity"]:
         report["capacity_owed_to_a_person"] = capacity_owed(
             before.get("vec0"), before.get("footprint"))
+
+    # #3460: the scheduled BUILD, ABOVE the work gate for #2709's exact reason. On the
+    # nights this was filed `need_prune` and `need_embed` were both False, so a build
+    # placed in the mutating section below would have skipped precisely the nightly it
+    # was meant to serve. It is keyed off the same key that drives the `capacity
+    # APPROACHING` line, so the dated JSON and the printed line cannot disagree about
+    # which nights are build nights; and like `capacity_owed_to_a_person` beside it, the
+    # block is present on the runs whose decision is live rather than on every run — a
+    # dry run records no decision because it makes none.
+    if report["capacity_approaching"] and not args.dry_run:
+        report["side_copy_build"] = scheduled_side_copy_build(started)
 
     # #2709: the WAL reset, ABOVE the work gate rather than inside it. On the 2026-10-14
     # run `need_prune` and `need_embed` were both False, so a checkpoint placed in the

@@ -280,10 +280,19 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   first, and the old form — `--swap` on a line that also builds — pays the re-embed again
   for a copy that exists, which is the duplicated cost the split removes. `--dry-run`
   prints the commands it would actually run, and runs none. No scheduled run passes
-  `--swap`, and no clock window applies either: nothing in
-  `scripts/maintenance/qmd_index_maintenance.py` branches on the hour, so the
-  route is refused by a failed verification or a busy embed lock, never by the
-  time of day. It has been run for real since the route landed, twice. The
+  `--swap`: that half stays a person's. The BUILD is scheduled as of #3460 — the
+  nightly run whose report reads `capacity_approaching` and finds no copy on disk
+  launches `--rebuild-side-copy rebuild-YYYYMMDD` itself, the name derived from the run
+  date so it can never be refused as somebody else's copy. One guard reads the clock:
+  `scheduled_build_window` refuses to start a build whose `SCHEDULED_BUILD_BUDGET_S`
+  (**2400 s**) budget would put its end inside the nightly hours **22:00–04:00**
+  (`SCHEDULED_BUILD_WINDOW_HOURS`), printing and recording the reason, and a run that
+  finds a copy already waiting launches nothing and prints the `--swap` command for a
+  terminal to take in seconds. The measured nightly start of 05:01 ends 05:41, which is
+  41 minutes past the close of that window. It is the only branch on `.hour` in
+  `scripts/maintenance/qmd_index_maintenance.py`: everywhere else the route is refused
+  by a failed verification or a busy embed lock, never by the time of day. It has been
+  run for real since the route landed, twice. The
   2026-10-04 invocation built a side copy and verified it but stopped short of
   swapping (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261004-2026-10-04T113501.json`);
   the 2026-10-05 one rebuilt and swapped
