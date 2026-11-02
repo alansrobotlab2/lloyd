@@ -16,9 +16,10 @@ staking a copy of Alan's memory on the test.
 from __future__ import annotations
 
 import itertools
-
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ from app.data_root import DATA_ROOT_MARKER  # noqa: E402
 from scripts.autoresearch import bench_fixture
 from scripts.autoresearch.bench_fixture import (  # noqa: E402
     FIXTURE_ROOT_RELATIVE, FixtureRefused, BenchFixture, build_fixture,
-    declared_scopes, fixture_parent)
+    declared_scopes, fixture_parent, sweep_orphan_fixtures)
 
 
 def _live(tmp_path: Path) -> tuple[Path, Path]:
@@ -217,3 +218,155 @@ def test_declared_scopes_reads_the_two_task_spellings_and_nothing_else():
     assert declared_scopes({"writes": ["vault", "kg"]}) == ["vault", "kg"]
     assert declared_scopes({}) == []
     assert declared_scopes({"writes": None}) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── #3690: bounding the copy that outlived its trial ─────────────────────────
+# `cleanup()` is called at the END of a trial, so the always-delete rule holds only
+# while the runner survives to reach that line. Two ways it does not: a process killed
+# mid-trial, and — the one that needs no signal at all — a raise between the trial's
+# `finally` and the `cleanup()` that sits after it. Either leaves a SECOND COPY OF ALAN'S
+# ACTUAL MEMORY in the fixtures area with nothing that ages it. The nodes below grade the
+# one mechanism that bounds it: an age sweep over the fixtures parent, run by the builder
+# that is standing in the right directory, behind the same rails `cleanup()` uses.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _plant(parent: Path, name: str, *, age_s: float, now: float) -> Path:
+    """An entry in a fixtures area aged `age_s` seconds, holding the shape a copy has.
+
+    Aged with `os.utime` on the directory rather than by sleeping, because the age the
+    sweep reads is the directory's own and a test that waits 400 s for a leak it could
+    fabricate in microseconds is a test nobody runs.
+    """
+    d = parent / name
+    (d / "obsidian" / "lloyd").mkdir(parents=True)
+    (d / "obsidian" / "lloyd" / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    os.utime(d, (now - age_s, now - age_s))
+    return d
+
+
+def test_the_sweep_deletes_a_copy_older_than_the_ceiling_and_keeps_a_fresh_one(tmp_path):
+    """#3690 clause 1: the ceiling is a parameter, and the two sides of it are two
+    outcomes.
+
+    The ceiling the sweep is given is the runner's per-trial hard cap — `ORPHAN_MAX_AGE_S`
+    restates `scripts/autoresearch/common.py:170`'s `timeout_secs = 300`, and the node that
+    pins the build wiring below uses that number rather than a convenient one, because a
+    fixture is built for exactly one trial and a copy still here after a whole trial
+    cannot be a live one.
+    """
+    now = time.time()
+    parent = tmp_path / "fixtures"
+    aged = _plant(parent, "aged_deadbeef", age_s=400, now=now)
+    fresh = _plant(parent, "fresh_deadbeef", age_s=10, now=now)
+    assert bench_fixture.ORPHAN_MAX_AGE_S == 300, (
+        "the ceiling drifted from the runner's per-trial cap; the constant's comment names "
+        "common.py:170 as its source")
+
+    report = sweep_orphan_fixtures(parent, bench_fixture.ORPHAN_MAX_AGE_S, now=now)
+
+    assert not aged.exists(), "the orphan outlived the ceiling: the leak this item is about"
+    assert fresh.is_dir(), "a live trial's copy was deleted — the guard that keeps nothing " \
+                           "is worse than the leak"
+    assert report["deleted"] == [str(aged)]
+    assert report["kept"] == [str(fresh)]
+    assert report["refused"] == []
+    # The same file, one second either side of the line, so a `>=`/`>` slip is visible.
+    edge = _plant(parent / "fixtures_edge", "x", age_s=1, now=now)  # not a fixtures parent
+    assert sweep_orphan_fixtures(edge.parent, 300, now=now)["refused"], \
+        "an age sweep offered a non-fixtures parent deleted something"
+
+
+def test_the_sweep_refuses_a_parent_that_is_not_the_fixtures_area(tmp_path):
+    """#3690 clause 2a: `rmtree` is one wrong parent away from a real deletion, so the
+    parent's NAME is a rail, and refusing means reporting, not raising.
+
+    Refusal is a report and not an exception because the sweep runs inside `build_fixture`:
+    a housekeeping pass that can veto a build is a housekeeping pass that gets taken out of
+    the build, and the leak comes back. The path still has to be NAMED, or the entry that
+    will not age out becomes an invisible leak instead of a visible refusal.
+    """
+    now = time.time()
+    wrong = tmp_path / "lloyd-data" / "eval" / "notfixtures"
+    aged = _plant(wrong, "aged_deadbeef", age_s=400, now=now)
+
+    report = sweep_orphan_fixtures(wrong, 300, now=now)
+
+    assert aged.is_dir(), "a directory under a parent not named `fixtures` was deleted"
+    assert report["deleted"] == []
+    assert len(report["refused"]) == 1 and str(aged) in report["refused"][0], report
+    # One guard, not two: the path the sweep refuses is refused by `cleanup()` too, so the
+    # sweep cannot delete through a rail the object's own deleter still enforces.
+    foreign = BenchFixture(root=aged, vault=aged, data_root=aged,
+                           id="t_foreign_1", scopes=["vault"])
+    with pytest.raises(RuntimeError):
+        foreign.cleanup()
+    assert aged.is_dir()
+
+
+def test_the_sweep_refuses_an_aged_copy_inside_either_production_tree(tmp_path, monkeypatch):
+    """#3690 clause 2b: neither production tree may be inside a delete target, and the
+    refusal says which path it stopped on.
+
+    `build_fixture` refuses to BUILD inside `PRODUCTION_VAULT`/`PRODUCTION_DATA_ROOT`; this
+    is the same strong test pointed the other way, at a delete. It is the difference between
+    the two that makes it worth a node: a build cannot put a copy there, but a sweep is handed
+    a parent by a caller, and the parent that reads as a fixtures area while sitting inside
+    `~/lloyd-data` is exactly the path where `rmtree` would be deleting the house's own
+    `eval/` subtree. The roots are patched, not staked — these trees are the account's real
+    memory and the check under test is a path comparison.
+    """
+    now = time.time()
+    live_data = tmp_path / "lloyd-data"
+    in_data = _plant(live_data / "eval" / "fixtures", "aged_deadbeef", age_s=400, now=now)
+    live_vault = tmp_path / "obsidian"
+    (live_vault / "lloyd").mkdir(parents=True)
+    in_vault = _plant(live_vault / "eval" / "fixtures", "aged_deadbeef", age_s=400, now=now)
+    monkeypatch.setattr(bench_fixture, "PRODUCTION_DATA_ROOT", live_data.resolve())
+    monkeypatch.setattr(bench_fixture, "PRODUCTION_VAULT", live_vault.resolve())
+
+    for parent, aged in ((live_data / "eval" / "fixtures", in_data),
+                         (live_vault / "eval" / "fixtures", in_vault)):
+        report = sweep_orphan_fixtures(parent, 300, now=now)
+        assert aged.is_dir(), f"a sweep deleted inside a production tree: {parent}"
+        assert report["deleted"] == []
+        assert len(report["refused"]) == 1 and str(aged) in report["refused"][0], report
+
+
+def test_building_a_fixture_sweeps_its_own_fixtures_area_first(tmp_path):
+    """#3690 clause 3, and the item's own planted-directory acceptance check, run as
+    written: plant `aged_deadbeef` older than 300 s and `fresh_deadbeef` at the current
+    time, build in that parent, and the aged directory must be gone while the fresh one and
+    the new build both remain.
+
+    The builder is the only code that ever stands in the right directory, which is why the
+    sweep lives on its path and not in the data-root retention sweep: that sweep resolves
+    `$LLOYD_DATA` (`scripts/groundskeeper/retention-sweep.py:395`), and rule (2) of this very
+    file guarantees no fixture can ever be under it, so a store added there would enumerate
+    an empty path forever.
+    """
+    vault, data = _live(tmp_path)
+    parent = fixture_parent(data)
+    parent.mkdir(parents=True)
+    now = time.time()
+    aged = _plant(parent, "aged_deadbeef", age_s=400, now=now)
+    fresh = _plant(parent, "fresh_deadbeef", age_s=10, now=now)
+
+    fx = build_fixture(trial_id="t_sweep_1", writes=["vault"], vault=vault, data_root=data,
+                       fixtures_parent=parent)
+    try:
+        assert not aged.exists(), (
+            "the build left the orphan in place: the acceptance check this item was filed "
+            "with is still failing")
+        assert fresh.is_dir(), "the sweep deleted a copy inside the ceiling"
+        assert fx.root.is_dir() and fx.root != fresh, "the build did not create its own copy"
+        assert sorted(p.name for p in parent.iterdir()) == ["fresh_deadbeef", "t_sweep_1"]
+        assert (fx.vault / "lloyd" / "MEMORY.md").is_file(), (
+            "the sweep ran over the copy this build had just made")
+        assert (vault / "lloyd" / "MEMORY.md").is_file(), "the source vault was touched"
+    finally:
+        fx.cleanup()
+    # `cleanup()` and the sweep share one rails function, so the copy the build made is gone
+    # and the planted fresh copy is still there for the next build to sweep.
+    assert fresh.is_dir() and not fx.root.exists()

@@ -1171,21 +1171,32 @@ async def run_trial(
         # fixture — and the agent never saw it: its text is in no prompt, no tool list and
         # no trace. The reward sits BESIDE the composite rather than inside it, so an
         # existing task's promotion math does not move.
-        se = score_side_effects(task, fixture_ctx["fixture"],
-                                Path(__file__).resolve().parents[2])
-        trace["side_effect_reward"] = se["reward"]
-        # Per-check detail is read under `detail`, the key `run_verifiers` emits — see
-        # `bench_side_effects.VerifierResult`. Reading a name the producer never writes is
-        # a KeyError on the first durable-write trial that ever runs a check, which is the
-        # worst possible moment to discover it: the trial is over, its trace is in hand, and
-        # the exception is thrown on the way to recording the reward it just earned.
-        trace["side_effect_checks"] = [
-            {"name": c["name"], "passed": c["passed"],
-             **({"reason": c["detail"]} if c.get("detail") else {})}
-            for c in se["checks"]]
-        trace["side_effect_reward_reason"] = se["reward_reason"]
-        trace["fixture_writes"] = se["fixture_writes"]
-        fixture_ctx["fixture"].cleanup()
+        # #3690: the copy goes whether the verifier completes or not. Every line below can
+        # raise — `score_side_effects` runs the task's own check commands, and the
+        # comprehension after it indexes each check's `name`/`passed` keys, which is exactly
+        # where the KeyError this file's own comment warns about lands — and until now
+        # `cleanup()` sat AFTER them, reachable only on the path that got all the way here.
+        # That was the leak with the runner still alive and no signal involved: a raising
+        # verifier orphaned a second copy of Alan's actual memory in the fixtures area with
+        # nothing but `ORPHAN_MAX_AGE_S` to age it out. The trial's `finally` above restores
+        # the ENVIRONMENT; this is the deletion, and it belongs on the exception path too.
+        try:
+            se = score_side_effects(task, fixture_ctx["fixture"],
+                                    Path(__file__).resolve().parents[2])
+            trace["side_effect_reward"] = se["reward"]
+            # Per-check detail is read under `detail`, the key `run_verifiers` emits — see
+            # `bench_side_effects.VerifierResult`. Reading a name the producer never writes is
+            # a KeyError on the first durable-write trial that ever runs a check, which is the
+            # worst possible moment to discover it: the trial is over, its trace is in hand,
+            # and the exception is thrown on the way to recording the reward it just earned.
+            trace["side_effect_checks"] = [
+                {"name": c["name"], "passed": c["passed"],
+                 **({"reason": c["detail"]} if c.get("detail") else {})}
+                for c in se["checks"]]
+            trace["side_effect_reward_reason"] = se["reward_reason"]
+            trace["fixture_writes"] = se["fixture_writes"]
+        finally:
+            fixture_ctx["fixture"].cleanup()
 
     trace["bench_probes"] = rubric_probes(trace)
     trace["bench_probe_count"] = len(trace["bench_probes"])

@@ -29,8 +29,10 @@ half-built version fails:
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,11 +42,29 @@ from app.data_root import (
     DATA_ROOT_MARKER, KG_DB_RELATIVE, PRODUCTION_DATA_ROOT, PRODUCTION_VAULT,
     VAULT_ROOT_ENV, VAULT_ROOT_FALLBACK_ENV)
 
+logger = logging.getLogger(__name__)
+
 #: Where a fixture lives under a data root. Under `DATA_ROOT`, not beside it, for the
 #: reason the item states: the copy is a second copy of Alan's actual memory, and it has
 #: to sit where the rest of the runtime data's handling (permissions, the retention
 #: sweep, the backup exclusion) already applies.
 FIXTURE_ROOT_RELATIVE = Path("eval") / "fixtures"
+
+#: How long a directory in the fixtures area may outlive its own build: the runner's
+#: per-trial hard cap, `scripts/autoresearch/common.py:170` (`timeout_secs = 300  # per-trial
+#: hard cap`), restated here rather than imported because that value is a local of
+#: `build_run_spec` and has no module-level spelling to import.
+#:
+#: The ceiling is not a storage policy, it is a fact about the object: a fixture is built by
+#: one trial and deleted by the same trial, so a copy in this area older than a whole trial
+#: cannot be a live one. What it ages out is the orphan the always-delete rule cannot reach —
+#: `cleanup()` is called at the END of the trial (`bench_runner_sdk.py:1188`), after the
+#: side-effect verifier, so a raise between the trial's `finally` and that line, or a process
+#: killed mid-trial, leaves a second copy of Alan's actual memory with nothing that ages it.
+#: Whether the ceiling should be longer — kept for a failed run's forensics rather than
+#: deleted with the trial — is the ruling #3690 leaves to owed-check; the mechanism lives here
+#: so that ruling changes a number and not a design.
+ORPHAN_MAX_AGE_S = 300
 
 #: The stores a task may declare, as `writes:` entries, that live in the data root
 #: rather than the vault. Anything else in `writes:` is a vault-relative path.
@@ -98,6 +118,101 @@ def _refuse_if_inside(candidate: Path, live: Path, what: str) -> None:
             f"{what} resolves inside the live tree ({b}) — refusing to copy into it")
 
 
+def _delete_refusal(target: Path, fixtures_area: Path | None = None) -> str | None:
+    """Why deleting `target` must be refused, or `None` when the rails let it through.
+
+    THIS is the guard, and it is the only one: `BenchFixture.cleanup()` asks it about the
+    one directory it owns, and `sweep_orphan_fixtures()` asks it about every directory it is
+    offered. A second copy of the rule is a second way for the two to disagree about what is
+    deletable, which is the failure #3690's "keep the mechanism to ONE" is about.
+
+    Three rails, each earned:
+
+    (1) The parent must be named `fixtures`. A deletion whose target sits somewhere else is
+        a caller that passed the wrong parent, and `shutil.rmtree` does not undo.
+        `fixtures_area` is `cleanup()`'s escape hatch for the deeper layout rule (1) of
+        `build_fixture` allows — a destination nested under the data root's fixtures area —
+        so the sweep passes it when it knows the area and refuses by name alone when not.
+    (2) and (3) Neither production tree may be inside the target, by the same strong test
+        `build_fixture` refuses a destination with: `relative_to` on both the literal and the
+        resolved path, so a symlinked entry that points at `~/obsidian` is refused by the
+        rail rather than deleted through it.
+    """
+    t = Path(target)
+    if t.parent.name != FIXTURE_ROOT_RELATIVE.name and \
+            (fixtures_area is None or t.parent.parent != fixtures_area):
+        return (f"refusing to delete {t}: it is not a fixture directory under "
+                f"{FIXTURE_ROOT_RELATIVE}")
+    for live, what in ((PRODUCTION_VAULT, "PRODUCTION_VAULT"),
+                       (PRODUCTION_DATA_ROOT, "PRODUCTION_DATA_ROOT")):
+        try:
+            # The strong test IS `build_fixture`'s own call, so a destination that cannot be
+            # BUILT inside a live tree cannot be DELETED out of one either and neither rail
+            # can be narrowed on its own. Only the sentence is this one's: a caller asking to
+            # delete is not being refused a copy.
+            _refuse_if_inside(t, live, "the live tree")
+        except FixtureRefused:
+            return (f"refusing to delete {t}: it resolves inside {what} ({live}) — the same "
+                    "test `build_fixture` refuses a destination with")
+    return None
+
+
+def sweep_orphan_fixtures(fixtures_parent: Path | str, max_age_s: float,
+                          *, now: float | None = None,
+                          fixtures_area: Path | None = None) -> dict[str, list[str]]:
+    """Delete fixture copies older than `max_age_s` seconds; report every decision.
+
+    Returns `{"deleted": [...], "kept": [...], "refused": [...]}` of path strings, and never
+    raises for a path it declines: a housekeeping pass that can veto the build it is part of
+    is a housekeeping pass that gets removed from the build. A refused path is reported
+    instead, and `build_fixture` logs it, so an entry that will not age out stays visible
+    rather than becoming a silent leak.
+
+    `now` is injectable so a test can age an entry by the clock rather than by sleeping, and
+    `fixtures_area` forwards rail (1)'s escape hatch — `build_fixture` passes the area it has
+    already validated its destination against.
+
+    Only a directory can be an orphan: a file in this area is not a fixture copy, and a
+    SYMLINK is refused rather than followed — `shutil.rmtree` will not delete a link to a
+    directory, so treating one as deleted would be a report of a removal that did not happen.
+    """
+    parent = Path(fixtures_parent)
+    report: dict[str, list[str]] = {"deleted": [], "kept": [], "refused": []}
+    if not parent.is_dir():
+        return report
+    cutoff = (time.time() if now is None else float(now)) - float(max_age_s)
+    for entry in sorted(parent.iterdir()):
+        if entry.is_symlink():
+            report["refused"].append(f"{entry}: refusing to delete a symlink")
+            continue
+        if not entry.is_dir():
+            continue
+        reason = _delete_refusal(entry, fixtures_area)
+        if reason:
+            report["refused"].append(f"{entry}: {reason}")
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError as exc:              # raced away, or unreadable: neither is a delete
+            report["refused"].append(f"{entry}: stat failed ({exc})")
+            continue
+        if mtime > cutoff:
+            report["kept"].append(str(entry))
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if entry.exists():
+            report["refused"].append(f"{entry}: still present after rmtree")
+            continue
+        report["deleted"].append(str(entry))
+    if report["deleted"]:
+        logger.warning("bench_fixture: swept %d orphaned fixture copy/copied: %s",
+                       len(report["deleted"]), ", ".join(report["deleted"]))
+    if report["refused"]:
+        logger.warning("bench_fixture: refused %d fixture entr(ies): %s",
+                       len(report["refused"]), "; ".join(report["refused"][:5]))
+    return report
+
+
 def declared_scopes(task: dict[str, Any]) -> list[str]:
     """The task's `writes:` list, normalised, or [] when it declares none."""
     raw = task.get("writes")
@@ -110,7 +225,8 @@ def declared_scopes(task: dict[str, Any]) -> list[str]:
 
 def build_fixture(*, trial_id: str, writes: list[str], vault: Path | str,
                   data_root: Path | str, fixtures_parent: Path | str | None = None,
-                  git_identity: str = "bench") -> "BenchFixture":
+                  git_identity: str = "bench",
+                  orphan_max_age_s: float | None = None) -> "BenchFixture":
     """Copy the declared slice into `<fixtures_parent>/<trial_id>/` and return it.
 
     `vault` and `data_root` are the SOURCE — passed in rather than looked up, so a test
@@ -170,6 +286,21 @@ def build_fixture(*, trial_id: str, writes: list[str], vault: Path | str,
 
     if dest.exists():
         raise FixtureRefused(f"fixture destination already exists: {dest}")
+
+    # Bound the orphans before making room for this one. A build is the one moment the leak
+    # is observable from the inside: the area is about to be used, so anything in it older
+    # than a whole trial belongs to a build that never reached its `cleanup()` — a trial that
+    # raised between its own `finally` and the call that follows it
+    # (`bench_runner_sdk.py:1188`), or a process killed mid-run.
+    #
+    # Here and not in the data-root retention sweep deliberately: the sweep resolves
+    # `$LLOYD_DATA` (`scripts/groundskeeper/retention-sweep.py:395`), which rule (2) above
+    # guarantees can never hold a fixture, so a store added there would enumerate an empty
+    # path forever. `orphan_max_age_s` overrides the ceiling for a caller that knows better
+    # — the runner's own per-trial timeout — and `None` means the documented default.
+    sweep_orphan_fixtures(dest_parent,
+                          ORPHAN_MAX_AGE_S if orphan_max_age_s is None else orphan_max_age_s,
+                          fixtures_area=fixtures_area)
 
     dest.mkdir(parents=True)
     fixture_data = dest / "lloyd-data"
@@ -327,15 +458,14 @@ class BenchFixture:
 
         The guard is not paranoia about a bug in this file: `shutil.rmtree` on a path
         that resolved to the vault because a caller passed the wrong parent is
-        unrecoverable, and the cost of checking is one comparison.
+        unrecoverable, and the cost of checking is one comparison. The comparison lives in
+        `_delete_refusal`, which `sweep_orphan_fixtures` asks the same question of — one
+        guard shared by the two deleters, because two rails that can disagree about what is
+        deletable is the failure mode neither of them is allowed to have.
         """
-        if self.root.parent.name != FIXTURE_ROOT_RELATIVE.name and \
-                self.root.parent.parent != fixture_parent(self.data_root):
-            raise RuntimeError(
-                f"refusing to delete {self.root}: it is not a fixture directory under "
-                f"{FIXTURE_ROOT_RELATIVE}")
-        if PRODUCTION_VAULT in self.root.parents or self.root == PRODUCTION_VAULT:
-            raise RuntimeError(f"refusing to delete a tree containing PRODUCTION_VAULT: {self.root}")
+        reason = _delete_refusal(self.root, fixture_parent(self.data_root))
+        if reason:
+            raise RuntimeError(reason)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def as_row(self) -> dict[str, Any]:

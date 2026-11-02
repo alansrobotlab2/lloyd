@@ -1944,3 +1944,50 @@ def _scoped_server_saying(monkeypatch, tool_sandbox_extra: dict) -> None:
                                 "prefixes": ["bench_"], "background_slugs": ["bench"],
                                 **tool_sandbox_extra}}
     monkeypatch.setenv(STATE_URL_ENV, _aggregator_serving(payload))
+
+
+def test_a_scoped_trial_whose_side_effect_verifier_raises_still_deletes_the_copy(monkeypatch,
+                                                                                 tmp_path):
+    """#3690 clause 4: the copy goes on the exception path as well as the normal one.
+
+    This is the orphan that needs no killed process. `cleanup()` sat AFTER the verifier —
+    reachable only by a trial that got all the way through `score_side_effects` and the
+    comprehension that reads each check's `name`/`passed` keys — so a raise anywhere in that
+    block left a second copy of the vault on disk with the runner alive, the trial recorded,
+    and nothing to age the copy out. The raise simulated here is the one this file's own
+    comment names (`KeyError: 'name'`, a check dict missing a key `run_verifiers` writes),
+    which is the least exotic way it happens: the trial is over, its reward is in hand, and
+    the exception is thrown on the way to recording it.
+
+    The exception itself still propagates — turning a scoring failure into a silent
+    success is a different bug, and the node asserts the raise arrives at the caller. What
+    changes is that the copy is gone by the time it gets there.
+    """
+    _patch_off_vault(monkeypatch)
+    events: list[str] = []
+    built = _scoped(monkeypatch, tmp_path, events=events,
+                    flags={"is_production_data": False, "is_production_vault": False})
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("memory_add")]),
+                   _StreamScript([("recorded", [])]))
+
+    def _raising_verifier(*a, **kw):
+        events.append("verify")
+        raise KeyError("name")
+    monkeypatch.setattr(_runner, "score_side_effects", _raising_verifier)
+
+    root_before = Path(built.inner.root)
+    assert root_before.is_dir(), "the trial never got a fixture, so this proves nothing"
+
+    with pytest.raises(KeyError):
+        asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                              "test-model", 30))
+
+    assert built.cleanups == 1, f"cleanup ran {built.cleanups} time(s): {events}"
+    assert not root_before.exists(), (
+        "the verifier raised and the fixture directory stayed: exactly the leak #3690 is "
+        f"about, left by the raise on its way to {root_before}")
+    assert events[-1] == "cleanup" and "verify" in events, (
+        f"the copy was deleted before the verifier ran, which is not the path under test: "
+        f"{events}")
+    assert built.src_vault.is_dir() and (built.src_vault / "memory" / "MEMORY.md").is_file(), (
+        "the source vault was touched while clearing the copy")
