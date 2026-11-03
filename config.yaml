@@ -2555,30 +2555,38 @@ workers:
     failure-ledger:
       enabled: true
       # Two intervals, and they answer different questions. `interval_seconds` is
-      # when the pool ASKS (`WorkerPool._scheduler_pass`, workers/pool.py:1179):
-      # hourly, so a day whose ledger filled at 03:00 is not waiting on a daily
-      # tick to be noticed. `min_interval_seconds` is what the source allows
-      # itself — `enqueue_if_due` reads it at workers/sources/failure_ledger.py:228
-      # against its own watermark — and it stays at one sweep a day, which is what
-      # `DEFAULT_INTERVAL_SECONDS` (:103, 24 h) already asked for and what keeps a
-      # re-read of a 27 MB promotions ledger off the hourly tick.
+      # when the pool ASKS: `WorkerPool._scheduler_pass` in `workers/pool.py`, which
+      # takes it with `int(src_cfg.get("interval_seconds", 3600))`. Hourly, so a day
+      # whose ledger filled at 03:00 is not waiting on a daily tick to be noticed.
+      # `min_interval_seconds` is what the source allows itself — `enqueue_if_due` in
+      # `workers/sources/failure_ledger.py` reads it with
+      # `interval = float(src_cfg.get("min_interval_seconds", …))` against its own
+      # watermark — and it stays at one sweep a day, which is what
+      # `DEFAULT_INTERVAL_SECONDS` (the 24 h constant in that same module) already
+      # asked for and what keeps a re-read of a 27 MB promotions ledger off the
+      # hourly tick.
       interval_seconds: 3600
       min_interval_seconds: 86400
       max_inflight: 1
-      # Wall-clock bound on the one turn (workers/pool.py:1376). It investigates
-      # ≤20 ledger rows, one window of `git log`, and writes a few paragraphs.
+      # Wall-clock bound on the one turn: `workers/pool.py` reads it as
+      # `int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))`.
+      # It investigates ≤20 ledger rows, one window of `git log`, and writes a few
+      # paragraphs.
       max_duration_seconds: 900
       # No `model:` key: the turn reaches the primary through
-      # `run_prompt_on_primary` (workers/sources/failure_ledger.py:305), whose
+      # `run_prompt_on_primary`, which `execute` calls in
+      # `workers/sources/failure_ledger.py` as
+      # `await run_prompt_on_primary(turn_prompt, max_turns=…, source=NAME, …)`. Its
       # signature takes a prompt, a turn ceiling and a source but no model, so a
       # key naming an engine here would be a knob attached to nothing — which is
       # also why the other two direct-to-primary sources carry none.
       # Stated here at the value actually in force, NOT as a knob: `execute` reads
-      # the ceiling off the QUEUE PAYLOAD (`payload.get("max_turns")`, :303-304),
-      # and `sweep_and_dispatch` writes no such field, so every row runs at
-      # `DEFAULT_MAX_TURNS` (:90) = 12. `tests/test_workers_doc_claims.py` pins
-      # this number to that default so the two cannot drift apart; editing it here
-      # alone would change nothing, and wiring the key through is recorded on #2309.
+      # the ceiling off the QUEUE PAYLOAD (`max_turns = int(payload.get("max_turns")
+      # or DEFAULT_MAX_TURNS)`), and `sweep_and_dispatch` writes no such field, so
+      # every row runs at `DEFAULT_MAX_TURNS` = 12. `tests/test_workers_doc_claims.py`
+      # pins this number to that default so the two cannot drift apart; editing it
+      # here alone would change nothing, and wiring the key through is recorded on
+      # #2309.
       max_turns: 12
   staging_root: ${LLOYD_DATA}/_pipeline/vault-derived/pending-research
 

@@ -1995,11 +1995,14 @@ def _failure_ledger_para() -> str:
 def test_the_failure_ledger_source_ships_a_block_the_scheduler_reads():
     """#2309 clause 1: registered AND configured, at the values pool.py consumes.
 
-    Every key is pinned to the line that reads it, because a block whose keys nothing
-    reads is a comment: `enabled` and `interval_seconds` at `workers/pool.py:1176-1179`
-    (the skip, then the poll), `min_interval_seconds` at
-    `workers/sources/failure_ledger.py:228` (the source's own watermark), `max_inflight`
-    at `workers/pool.py:1333`, `max_duration_seconds` at `:1376`.
+    Every key is pinned to the code that reads it, because a block whose keys nothing
+    reads is a comment: `enabled` and `interval_seconds` in `workers/pool.py`'s
+    `WorkerPool._scheduler_pass` (the skip, then the poll), `min_interval_seconds` in
+    `workers/sources/failure_ledger.py`'s `enqueue_if_due` (the source's own
+    watermark), `max_inflight` and `max_duration_seconds` in `workers/pool.py`'s
+    capacity and wall-clock reads. Named by symbol, never by line number: this
+    docstring used to cite `pool.py:1176-1179`, `:1333` and `:1376` and had rotted
+    with them (#3608).
 
     The registry-symmetry half runs on `get_sources_config()` — the live mapping the
     scheduler iterates — because that is the exact expression the item names as its
@@ -2009,12 +2012,12 @@ def test_the_failure_ledger_source_ships_a_block_the_scheduler_reads():
     assert not set(sources.SOURCE_REGISTRY) - set(sources.get_sources_config()), (
         "registered sources with no `workers.sources` block: `_scheduler_pass` reads "
         "`{}` for each and steps past it without calling `enqueue_if_due` "
-        f"(workers/pool.py:1176-1177) — the #2079 shape: "
+        f"(`WorkerPool._scheduler_pass` in `workers/pool.py`) — the #2079 shape: "
         f"{sorted(set(sources.SOURCE_REGISTRY) - set(sources.get_sources_config()))}")
 
     blk = dict(_src_cfg().get("failure-ledger") or {})
     assert blk.get("enabled") is True, (
-        "the block exists but `enabled` is not true, so workers/pool.py:1177 still "
+        "the block exists but `enabled` is not true, so `_scheduler_pass` still "
         f"steps past the source: {blk or 'no block at all'}")
     assert blk.get("interval_seconds") == 3600, blk
     assert blk.get("min_interval_seconds") == 86400, blk
@@ -2062,6 +2065,139 @@ def test_the_failure_ledger_source_ships_a_block_the_scheduler_reads():
         "`execute` no longer reads the turn ceiling off the payload, so the comment "
         "above this assert and the one in config.yaml describe a wire that is not "
         "there — either wire it or delete the key")
+
+
+def test_the_failure_ledger_block_in_config_yaml_cites_code_not_line_numbers():
+    """#3608: the `failure-ledger:` block points at code text, never at a line number.
+
+    All seven numeric citations this block carried rotted but one. Written together
+    in `a82cf77c` (#2309) and never revised, they read `workers/pool.py:1179` for
+    `_scheduler_pass` (a blank line by 2026-11-03), `workers/sources/failure_ledger.py:228`
+    for the min-interval read (a `finally:`), `(:103)` for `DEFAULT_INTERVAL_SECONDS`
+    (a sentence of prose), `workers/pool.py:1376` for the wall-clock read (unrelated
+    config-source prose), `workers/sources/failure_ledger.py:305` for the
+    `run_prompt_on_primary` call (`conn.close()`), `:303-304` for
+    `payload.get("max_turns")` (`return rows` / `finally:`), and `(:90)` for
+    `DEFAULT_MAX_TURNS` — the only one that still landed on its symbol. Six wrong
+    citations in one block, inside a month, from two edits that added lines ABOVE
+    them. That is the failure #2971 banned for `workers/queue.py` and #3233 widened,
+    reproduced on a second file, so the numbers are gone: each comment now quotes the
+    code the claim is about, which no insertion elsewhere can move.
+
+    The node therefore checks four things: no citation form survives (clause 1), each
+    quoted fragment is found verbatim in the file the comment attributes it to (2),
+    the block's four substantive claims still hold against the code (3), and not one
+    value moved, including the `max_turns` ↔ `DEFAULT_MAX_TURNS` link the node above
+    depends on (4). A fragment split across two comment lines would not match the
+    file, so this also keeps every quote greppable as written.
+    """
+    cfg_text = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    lines = cfg_text.splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("    ") and ln.strip() == "failure-ledger:")
+    block: list[str] = []
+    for ln in lines[start + 1:]:
+        if not ln.startswith("     "):      # dedent out of the source block
+            break
+        block.append(ln)
+    assert block, "the `failure-ledger:` block is empty or gone from config.yaml"
+    comments = " ".join(ln.split("#", 1)[1].strip()
+                        for ln in block if ln.lstrip().startswith("#"))
+    assert comments, "the block has no comment lines left to verify"
+
+    # --- clause 1: no line-number citation survives, in any of its three spellings.
+    # A path-qualified `…py:1179`, a parenthetic `(:103` / `(:90)`, or a bare
+    # range after a comma `, :303-304` — the bare forms are the ones the item's own
+    # `grep 'failure_ledger.py:[0-9]'` check could never see.
+    citation = re.compile(r"\w*\.py:\d[\d\-]*|\(:\s*\d[\d)-]*|, :\s*\d[\d\-]*")
+    hits = [m.group(0) for m in citation.finditer(comments)]
+    assert not hits, (
+        f"the block cites line numbers again {hits}: an edit anywhere above a "
+        "citation invalidates every citation under it, which is how six of this "
+        "block's seven rotted within a month (#2971's ruling, #3608)")
+    for gone in ("pool.py:1179", "failure_ledger.py:228", "(:103", "pool.py:1376",
+                 "failure_ledger.py:305", ":303-304", "(:90"):
+        assert gone not in comments, f"the stale citation {gone!r} is back"
+
+    # --- clause 2: every code reference the block makes resolves in the file it
+    # names. (file, text the comment quotes, text the file must contain)
+    pointers = [
+        ("workers/pool.py", "WorkerPool._scheduler_pass",
+         "async def _scheduler_pass"),
+        ("workers/pool.py", 'int(src_cfg.get("interval_seconds", 3600))',
+         'int(src_cfg.get("interval_seconds", 3600))'),
+        ("workers/pool.py",
+         'int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))',
+         'int(src_cfg_item.get("max_duration_seconds", '
+         '_DEFAULT_MAX_DURATION_SECONDS))'),
+        ("workers/sources/failure_ledger.py",
+         'interval = float(src_cfg.get("min_interval_seconds"',
+         'interval = float(src_cfg.get("min_interval_seconds", '
+         'DEFAULT_INTERVAL_SECONDS))'),
+        ("workers/sources/failure_ledger.py", "DEFAULT_INTERVAL_SECONDS",
+         "DEFAULT_INTERVAL_SECONDS = 24 * 3600"),
+        ("workers/sources/failure_ledger.py",
+         "await run_prompt_on_primary(turn_prompt, max_turns=",
+         "await run_prompt_on_primary(turn_prompt, max_turns="),
+        ("workers/sources/failure_ledger.py", 'payload.get("max_turns")',
+         'max_turns = int(payload.get("max_turns")'),
+        ("workers/sources/failure_ledger.py", "DEFAULT_MAX_TURNS",
+         "DEFAULT_MAX_TURNS = 12"),
+    ]
+    for rel, quoted, expected in pointers:
+        body = (ROOT / rel).read_text(encoding="utf-8")
+        assert quoted in comments, (
+            f"the block stopped quoting {quoted!r}, so the pointer into {rel} is no "
+            "longer the code this node can resolve — re-point it at the code, not at "
+            "a line number")
+        assert expected in body, (
+            f"{rel} no longer contains {expected!r}: the block describes code that "
+            "is not there")
+
+    # --- clause 3: the four claims the block makes, against the code they describe.
+    fl_body = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
+        encoding="utf-8")
+    assert "watermark" in comments and "wm_get" in fl_body and \
+        "WATERMARK_LAST_SWEEP" in fl_body, (
+        "`min_interval_seconds` is no longer checked against the source's own "
+        "watermark, which is the difference the block's two-interval paragraph is "
+        "drawing")
+    assert "24 h" in comments, "the block no longer says DEFAULT_INTERVAL_SECONDS is 24 h"
+    from workers.sources import failure_ledger as fl_mod
+
+    assert fl_mod.DEFAULT_INTERVAL_SECONDS == 24 * 3600, (
+        f"DEFAULT_INTERVAL_SECONDS is {fl_mod.DEFAULT_INTERVAL_SECONDS}, so the "
+        "block's '24 h' is now a wrong number rather than a moved line")
+    common = (ROOT / "workers" / "sources" / "_common.py").read_text(encoding="utf-8")
+    sig = re.search(r"async def run_prompt_on_primary\(([^)]*)\)", common, re.S)
+    assert sig, "run_prompt_on_primary is gone or its signature is spelled differently"
+    params = sig.group(1)
+    for p in ("prompt", "max_turns", "source"):
+        assert p in params, (
+            f"run_prompt_on_primary no longer takes {p!r}; the block's reason for "
+            f"carrying no `model` key rests on that parameter: {params!r}")
+    assert re.search(r"\bmodel\b", params) is None, (
+        f"run_prompt_on_primary grew a model parameter ({params!r}), so the block's "
+        "`model`-less argument is false and the key is a real gap")
+    assert '"max_turns"' not in (
+        ROOT / "app" / "failure_ledger.py").read_text(encoding="utf-8"), (
+        "the library started writing a `max_turns` payload field, so the ceiling in "
+        "force is no longer DEFAULT_MAX_TURNS and the block's 'the value actually in "
+        "force' sentence, plus the pin below, both need rewriting")
+
+    # --- clause 4: comment-only. Every value stands, and the two defaults the block
+    # says it restates still restate them.
+    blk = dict(_src_cfg().get("failure-ledger") or {})
+    assert {k: blk[k] for k in ("interval_seconds", "min_interval_seconds",
+                                "max_inflight", "max_duration_seconds",
+                                "max_turns")} == {
+        "interval_seconds": 3600, "min_interval_seconds": 86400, "max_inflight": 1,
+        "max_duration_seconds": 900, "max_turns": 12}, (
+        f"a value in the block moved with the comments: {blk}")
+    assert blk["min_interval_seconds"] == fl_mod.DEFAULT_INTERVAL_SECONDS == 86400
+    assert blk["max_turns"] == fl_mod.DEFAULT_MAX_TURNS == 12, (
+        "the max_turns ↔ DEFAULT_MAX_TURNS link the node above pins is broken, and "
+        "this block's 'the value actually in force' is a claim about it")
 
 
 def test_the_failure_ledger_roster_row_reads_scheduled():
