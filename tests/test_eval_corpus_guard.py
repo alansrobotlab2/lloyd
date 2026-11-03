@@ -4414,10 +4414,18 @@ def test_the_3076_upper_bound_guard_is_anchored_read_only_and_launches_nothing()
 # §3 of `eval/measurements/lloyd-architecture-ab-2026-10-20.md` prints two tallies of the
 # same trial: the artifact's own `{"gold_in_top10":0,"gold_top1":0}` and, eight lines
 # later, the recomputed `{"gold_in_top5":9,"gold_top1":7}`. The node above this section
-# re-derives both from `~/lloyd-data/eval/3076/upper.json` on every gate run — which is
-# correct, and was the whole hazard: that file is the trial's scratch, and the trial
-# regenerates it. The provenance of the copy committed here is therefore the provenance
-# of the run it witnessed, fixed at the moment it was copied:
+# re-derives both figures from `~/lloyd-data/eval/3076/upper.json` and SKIPS BY NAME when
+# that file is absent — it calls `require_live_data(TRIAL_UPPER, ..., kind="file")`, and the
+# meta-node ending just above this header is what pins those two named skips — so on a
+# fresh checkout, another machine, or once the scratch has been swept it stays silent
+# instead of confirming anything. The node that reads the tracked copy UNCONDITIONALLY,
+# skipping on nothing but the note, is
+# `test_the_committed_3076_upper_bound_witness_still_reproduces_the_quoted_tally` below: no
+# tree is green on the strength of the live reading alone, and §3's own "What is pinned, and
+# by which guard" paragraph says this in the same order. Both readings are correct where
+# they run, and the live one was the whole hazard: `upper.json` is the trial's scratch, and
+# the trial regenerates it. The provenance of the copy committed here is therefore the
+# provenance of the run it witnessed, fixed at the moment it was copied:
 #
 #   * source: `/home/alansrobotlab/lloyd-data/eval/3076/upper.json`, mtime
 #     `2026-10-20T08:09:08-0700` (the artifact's own `ran_at` is
