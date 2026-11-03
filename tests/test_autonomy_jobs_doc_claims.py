@@ -5323,7 +5323,7 @@ def test_the_runner_keeps_seven_snapshots_and_cannot_reach_the_store_or_a_quaran
     """Clause 3: the prune is a number, and it is pointed only at snapshots.
 
     Step 4 of `skills/retag-untagged-facts/SKILL.md` is what bounds the store this
-    job opens: the facts tree is 40,411 `.md` files, and
+    job opens: the facts tree measured 46,109 `.md` files on 2026-11-03, and
     `scripts/groundskeeper/retention-sweep.py` has no pattern for `facts-snapshot-*`,
     so an unpruned nightly `cp -al` grows forever. Reading the command out of the
     skill rather than restating it is deliberate — the run executes the skill's
@@ -7510,3 +7510,378 @@ def test_the_fleet_cost_rails_fire_on_a_seeded_copy_of_the_doc():
         assert not finder(text), (
             f"the live doc already trips the {name!r} seed's finder, so the seed's "
             "failure says nothing about the seed")
+
+
+# ── #3408: a facts-tree size is a measurement, so each one carries its date ────
+#
+# `skills/retag-untagged-facts/SKILL.md` argued `cp -al` (Step 1) and the keep-7 prune
+# (Step 4) out of the facts tree's file count, and quoted the count taken for its
+# 2026-10-14 dry run as though it were a constant. The tree is derived output the
+# nightly pipeline rewrites: it measured 44,227 `.md` files on 2026-10-26, and 46,109
+# on 2026-11-03. The same stale figure sat in job #98's body, in §Canonicalize below,
+# and in two docstrings in this suite. Nothing behavioural caught the drift and nothing
+# behavioural could: the node that reads the skill's prose reads the keep-N out of it
+# and never the tree size, and no code under `scripts/groundskeeper/` bounds
+# `facts-snapshot-*` at all — the count is load-bearing purely as the stated reason
+# keep-7 exists, so a stale one mis-sizes an argument without failing one run.
+#
+# These two rails grade the FORM of a size claim and are deliberately blind to which
+# number is current. A tree-size figure has to sit in a sentence that also carries the
+# date it was measured, and the sentences that price the bound have to carry the
+# command that re-derives it. A later pass that re-runs the command and writes a
+# bigger dated figure passes untouched; a pass that copies an old figure as though it
+# were current, or that lets the doc report on the skill's prose again, does not.
+# Widening this into a rail over tree-size counts in EVERY skill is a design ruling
+# #3408 left owed; this pair covers the surfaces that rotted.
+
+SKILL_SURFACE = "skills/retag-untagged-facts/SKILL.md"
+JOB_SURFACE = f"autonomy/{_RETAG_JOB}"
+DOC_SURFACE = "architecture/autonomy-jobs.md §Canonicalize"
+CLAIMS_SURFACE = "tests/test_autonomy_jobs_doc_claims.py"
+RETAG_TESTS_SURFACE = "tests/test_retag_untagged_facts.py"
+
+#: The re-derivation command, exactly as prose has to spell it. One shell line rather
+#: than "run find over the facts tree" because the defect was a figure nobody could
+#: re-measure without guessing which root it came from.
+RETAG_TREE_SIZE_COMMAND = ("cd ~/lloyd-data/_pipeline/vault-derived"
+                           " && find facts -name '*.md' | wc -l")
+
+#: A facts-tree size in the spelling these surfaces use: a thousands-grouped or
+#: `k`-rounded count standing in front of `file`/`files`/`paths`, the `.md` qualifier
+#: optional and possibly backticked. `831-file` and `830 files` are deliberately NOT
+#: this shape: they count the records a retag rewrites, never the tree it snapshots,
+#: and they have been quoted undated in these files for months without being a size.
+_TREE_SIZE_FIGURE = re.compile(
+    r"(?P<num>\d{1,3},\d{3}|\d{2,3}k)\s*-?\s*"
+    r"(?:`{0,2}\*{0,2}\.?md\*{0,2}`{0,2}\s*)?(?P<unit>files?\b|paths\b)")
+
+_ISO_MEASUREMENT_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+
+#: The 2026-10-14 dry run's reading. It survives in exactly one place — the skill's
+#: `Measured 2026-10-14:` preamble, a true record of #2686's dry run, kept on purpose.
+#: Anywhere else it is a count months past its date quoted as current, which is the
+#: shape #3408 was filed on.
+_DRY_RUN_TREE_SIZE = "40,411"
+
+#: The skill steps whose prose prices a bound out of the tree's size. They need the
+#: command and not merely a date, because they are the sentences keep-7 is weighed
+#: against; the skill's other dated figures need only the date.
+_SIZE_ARGUED_SKILL_STEPS = ("Step 1", "Step 4")
+
+#: The four strings the ordering node reads out of job #98, in the order the runner has
+#: to execute them. An edit that shuffled the file's own summary of the order would
+#: silently re-time the repair against the #60 alarm it is meant to precede.
+_JOB_ORDER_STRINGS = ("cp -al", "retag_untagged_facts.py --apply", "kg_hygiene.scan",
+                      "keeping the newest 7")
+
+
+def _vault_surfaces(texts: dict[str, str] | None = None) -> dict[str, str]:
+    """The skill and job #98 as published — the two vault files #3408 corrected.
+
+    Overridable so the seeded probes can hand the rails one mutated surface instead of
+    only being told the live one is clean.
+    """
+    if texts is not None:
+        return texts
+    home = Path.home()
+    return {
+        SKILL_SURFACE: (home / "obsidian" / "skills" / _RETAG_SKILL).read_text(encoding="utf-8"),
+        JOB_SURFACE: (home / "obsidian" / "autonomy" / _RETAG_JOB).read_text(encoding="utf-8"),
+    }
+
+
+def _repo_surfaces(texts: dict[str, str] | None = None) -> dict[str, str]:
+    """The repo's half of the same figure: §Canonicalize and this suite's own prose.
+
+    This file scans itself because #3408 found the stale count in two docstrings as
+    well as in the vault, and a rail that stopped at the vault would leave those two
+    free to rot on their own schedule.
+    """
+    if texts is not None:
+        return texts
+    return {
+        DOC_SURFACE: _group_section(CANON_HEADER),
+        CLAIMS_SURFACE: Path(__file__).read_text(encoding="utf-8"),
+        RETAG_TESTS_SURFACE: (Path(__file__).parent / "test_retag_untagged_facts.py").read_text(
+            encoding="utf-8"),
+    }
+
+
+def _prose_chunks(name: str, text: str) -> list[str]:
+    """The readable units of one surface, at the grain a claim is actually made at.
+
+    Markdown hard-wraps near 88 columns, so a figure and its date sit on different
+    physical lines and only a joined sentence is a claim. A Python file is the other
+    way round: flattening it into sentences would let a date in one assertion excuse a
+    bare figure in another, so its docstrings and comments are taken line by line —
+    and its CODE is left out entirely, because this file carries the seeds below, and a
+    seed that spelled a stale figure into a string literal would otherwise be caught by
+    the very rail that exists to catch a stale figure in prose.
+    """
+    if not name.startswith("tests/"):
+        return [s for s in _SENT_SPLIT.split(_flat(text)) if s.strip()]
+    import io
+    import tokenize
+
+    chunks: list[str] = []
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (SyntaxError, tokenize.TokenError):
+        toks = []
+    chunks.extend(t.string for t in toks if t.type == tokenize.COMMENT)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return chunks
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                chunks.extend(ln for ln in doc.splitlines() if ln.strip())
+    return chunks
+
+
+def _undated_tree_size_defects(texts: dict[str, str]) -> list[str]:
+    """Each facts-tree size quoted with no measurement date beside it, as strings."""
+    defects: list[str] = []
+    for name, text in texts.items():
+        grain = "line" if name.startswith("tests/") else "sentence"
+        for chunk in _prose_chunks(name, text):
+            for m in _TREE_SIZE_FIGURE.finditer(chunk):
+                if not _ISO_MEASUREMENT_DATE.search(chunk):
+                    defects.append(
+                        f"{name} quotes a facts-tree size of {m.group(0)!r} with no "
+                        f"measurement date in the same {grain}, so nothing tells a reader "
+                        f"when it stopped being true: {chunk[:150]!r}")
+                elif m.group("num") == _DRY_RUN_TREE_SIZE and "2026-10-14" not in chunk:
+                    defects.append(
+                        f"{name} quotes the 2026-10-14 dry run's reading {m.group(0)!r} "
+                        "outside that reading — the stale figure #3408 was filed on, now "
+                        f"standing where a current measurement belongs: {chunk[:150]!r}")
+    return defects
+
+
+def _unpriceable_size_argument_defects(texts: dict[str, str]) -> list[str]:
+    """A dated size whose argument lost the command that re-derives it.
+
+    Step-scoped for the skill — the two steps are the argument, and repeating a
+    74-character shell line in every sentence that mentions a size would make the skill
+    unreadable — and paragraph-scoped for a doc section, for the same reason: the
+    command is too long to sit inside a hard-wrapped sentence. Only this half is loose;
+    the date check above is per sentence, so a figure with no date is refused however
+    near a command it happens to sit.
+    """
+    defects: list[str] = []
+    skill = texts.get(SKILL_SURFACE)
+    if skill is not None:
+        steps = {f"Step {m.group(1)}": m.group(2) for m in re.finditer(
+            r"(?ms)^## Step (\d)[^\n]*\n(.*?)(?=^## |\Z)", skill)}
+        for step in _SIZE_ARGUED_SKILL_STEPS:
+            body = steps.get(step)
+            if body is None:
+                defects.append(
+                    f"{SKILL_SURFACE} lost its `## {step}` heading, so the sentence that "
+                    "prices the bound this job performs is no longer there to price")
+            elif RETAG_TREE_SIZE_COMMAND not in body:
+                defects.append(
+                    f"{SKILL_SURFACE} `## {step}` states the tree's size without the "
+                    f"re-derivation command `{RETAG_TREE_SIZE_COMMAND}`, leaving the next "
+                    "reader to guess which root the figure was taken from — which is how "
+                    "the count ran 3,816 files stale between 2026-10-14 and 2026-10-26")
+    for name, text in texts.items():
+        if not name.endswith("§Canonicalize"):
+            continue
+        # Paragraph, not sentence: the 74-character command will not fit a
+        # hard-wrapped sentence, and a paragraph is the unit the argument is
+        # actually made at here. The date check above stays sentence-scoped, so
+        # loosening this half does not let an undated figure through.
+        for para in re.split(r"\n\s*\n", text):
+            if _TREE_SIZE_FIGURE.search(para) and RETAG_TREE_SIZE_COMMAND not in para:
+                defects.append(
+                    f"{name} states a facts-tree size without `{RETAG_TREE_SIZE_COMMAND}`, "
+                    "so the figure is dated but nobody can re-derive it: "
+                    f"{_flat(para)[:170]!r}")
+    return defects
+
+
+def job_first_cp_al_stripped(job: str) -> str:
+    """Job #98 with its FIRST `cp -al` renamed away.
+
+    The order check reads the first occurrence of each step string, which is exactly
+    what a reworded summary breaks: deleting the front-matter mention pushes `cp -al`
+    down to the body, where it sits after the prune line, and the file then reads as
+    though the runner pruned before it snapshotted.
+    """
+    return job.replace("cp -al", "hardlink-copy", 1)
+
+
+def _retag_vault_size_defects(texts: dict[str, str] | None = None) -> list[str]:
+    """How the retag skill and job #98 have let their tree size go stale."""
+    texts = _vault_surfaces(texts)
+    defects = (_undated_tree_size_defects(texts)
+               + _unpriceable_size_argument_defects(texts))
+    skill = texts[SKILL_SURFACE]
+    if skill.count(_DRY_RUN_TREE_SIZE) != 1:
+        defects.append(
+            f"{SKILL_SURFACE} carries the {_DRY_RUN_TREE_SIZE} reading "
+            f"{skill.count(_DRY_RUN_TREE_SIZE)} times; exactly one is allowed — the dated "
+            "2026-10-14 dry-run record in the preamble. A retired count surviving "
+            "anywhere else is the drift this item was filed on")
+    if "Measured 2026-10-14" not in skill:
+        defects.append(
+            f"{SKILL_SURFACE} no longer labels its 2026-10-14 reading as one, so the "
+            "surviving dry-run figure has become an undated claim instead of a record")
+    if "**Keep exactly 7 snapshots**" not in skill:
+        defects.append(
+            f"{SKILL_SURFACE} lost the literal `**Keep exactly 7 snapshots**` phrase, "
+            "which is the string "
+            "test_the_runner_keeps_seven_snapshots_and_cannot_reach_the_store_or_a_quarantine "
+            "reads the prune's bound out of — rewording it moves the bound off the rail")
+    body = texts[JOB_SURFACE]
+    missing = [s for s in _JOB_ORDER_STRINGS if s not in body]
+    if missing:
+        defects.append(
+            f"{JOB_SURFACE} no longer states {missing} at all, and the node that reads the "
+            "runner's order out of this file asserts each of them by exact string — a "
+            "reworded summary silently un-pins the step order")
+    else:
+        order = [body.index(s) for s in _JOB_ORDER_STRINGS]
+        if order != sorted(order):
+            defects.append(
+                f"{JOB_SURFACE} now summarises the runner's steps in the order "
+                f"{[s for _, s in sorted(zip(order, _JOB_ORDER_STRINGS))]} and not "
+                "snapshot → apply → scan → prune, which is the job's whole contract with "
+                "the #60 alarm")
+    return defects
+
+
+def _retag_repo_size_defects(texts: dict[str, str] | None = None) -> list[str]:
+    """How the repo's own prose has let the same tree size go stale."""
+    texts = _repo_surfaces(texts)
+    defects = (_undated_tree_size_defects(texts)
+               + _unpriceable_size_argument_defects(texts))
+    canon = texts[DOC_SURFACE]
+    if _DRY_RUN_TREE_SIZE in canon:
+        defects.append(
+            f"§Canonicalize quotes {_DRY_RUN_TREE_SIZE} again, so the retired reading is "
+            "back in the doc a reviewer reads for the current one")
+    if "still quotes" in canon:
+        defects.append(
+            "§Canonicalize is reporting on what the skill says (`… still quotes …`) "
+            "instead of on the tree. That sentence was written true and goes false the "
+            "moment the skill is refreshed, and no test read it — #3409's exact shape, "
+            "one section over")
+    return defects
+
+
+def test_no_facts_tree_size_survives_in_the_repo_surfaces_without_its_date():
+    """Clause 5, and the half of the premise that sat inside this repo.
+
+    #3408 found the stale 2026-10-14 count inside this checkout too. §Canonicalize
+    carried a current figure with its date, and then spent the sentence after it
+    reporting that the skill still quoted the old one — a claim about a live vault
+    file, written by commit `ca3fef47`, which goes false in the same diff that fixes
+    the skill and which no test read. So this rail refuses both halves: a size figure
+    with no date, and a §Canonicalize sentence that reports on the skill's prose
+    instead of on the tree.
+
+    The seeds are the proof that this is a rail and not a photograph: each mutates one
+    surface and has to come back with a defect. The prune's behaviour stays pinned by
+    `test_the_runner_keeps_seven_snapshots_and_cannot_reach_the_store_or_a_quarantine`,
+    which runs the prune for real; this node pins only how the size is stated.
+    """
+    assert _retag_repo_size_defects() == []
+
+    surfaces = _repo_surfaces()
+    retag_tests = surfaces[RETAG_TESTS_SURFACE]
+    seeds = {
+        "a tree size with every measurement date stripped": (
+            DOC_SURFACE,
+            re.sub(r"\b20\d\d-\d\d-\d\d\b", "a recent count", surfaces[DOC_SURFACE]),
+            "with no measurement date"),
+        "the bound argued with no re-derivation command": (
+            DOC_SURFACE, surfaces[DOC_SURFACE].replace(RETAG_TREE_SIZE_COMMAND,
+                                                       "the count command"),
+            "states a facts-tree size without"),
+        "the doc reporting the skill stale again": (
+            DOC_SURFACE, surfaces[DOC_SURFACE].replace(
+                "is an unbounded store", "(the skill still quotes 40,411) is an unbounded store"),
+            "reporting on what the skill says"),
+        "a docstring quoting a bare tree size": (
+            RETAG_TESTS_SURFACE, retag_tests.replace(
+                "46,109 `.md` files measured on 2026-11-03", "40,411 `.md` files"),
+            "with no measurement date"),
+    }
+    for name, (key, mutated, expect) in seeds.items():
+        assert mutated != surfaces[key], (
+            f"the seed {name!r} perturbed nothing, so its defect list would prove only "
+            "that the finder matches no text at all")
+        defects = _retag_repo_size_defects({**surfaces, key: mutated})
+        assert any(expect in d for d in defects), (
+            f"a repo surface carrying {name!r} produced {[d[:100] for d in defects]}, in "
+            f"which nothing names {expect!r} — the rail is not reading what this seed "
+            "changed")
+        assert not _retag_repo_size_defects(surfaces), (
+            f"the live tree already trips the {name!r} seed's defect, so a failure here "
+            "would say nothing about the seed")
+
+
+@live_vault
+def test_the_retag_skill_and_job_date_every_tree_size_they_quote():
+    """Clauses 1, 2 and 4: the vault's half of the figure, judged as a form.
+
+    Step 1 priced `cp -al` and Step 4 priced the prune out of a tree counted on
+    2026-10-14, and by 2026-11-03 the tree measured 46,109 `.md` files against the
+    prose's 40,411 — a 14% understatement of the number keep-7 exists because of, in
+    the two sentences a reader weighs that bound against. The fix is not the bigger
+    figure, which goes stale on the same clock; it is that every size figure names when
+    it was measured and the two that price the bound name the command, so the next
+    reader re-runs something instead of trusting a digit. Job #98's body carried the
+    same retired count, and its step order is checked here too because the sentence
+    #3408 corrected sits between the apply and the prune in that summary.
+
+    `@live_vault` because `~/obsidian/skills/` and `~/obsidian/autonomy/` are trees a
+    round does not control — the same reason the vault readers at the top of this file
+    take the mark — so the gate deselects this node and the run named in the round
+    report is the one that judges it. Clause 3's behaviour belongs to
+    `test_the_runner_keeps_seven_snapshots_and_cannot_reach_the_store_or_a_quarantine`,
+    which reads the keep-N out of this same prose and which this diff leaves untouched;
+    the finder still refuses a skill that lost the literal phrase, so a reworded bound
+    is caught here as well as there.
+    """
+    assert _retag_vault_size_defects() == []
+
+    surfaces = _vault_surfaces()
+    skill = surfaces[SKILL_SURFACE]
+    head, step4_heading, step4 = skill.partition("## Step 4")
+    seeds = {
+        "a tree size with every measurement date stripped": (
+            SKILL_SURFACE, re.sub(r"\b2026-\d\d-\d\d\b", "a recent date", skill),
+            "with no measurement date"),
+        "the retired 2026-10-14 reading quoted as current": (
+            SKILL_SURFACE,
+            skill.replace("44,227 `.md` files on", f"{_DRY_RUN_TREE_SIZE} `.md` files on", 1),
+            "outside that reading"),
+        "Step 4 priced with no re-derivation command": (
+            SKILL_SURFACE,
+            head + step4_heading + step4.replace(RETAG_TREE_SIZE_COMMAND, "the count command"),
+            "`## Step 4` states the tree's size without"),
+        "the keep-7 sentence reworded": (
+            SKILL_SURFACE,
+            skill.replace("**Keep exactly 7 snapshots**", "**Retain exactly 7 snapshots**"),
+            "lost the literal `**Keep exactly 7 snapshots**`"),
+        "job #98's steps summarised out of order": (
+            JOB_SURFACE, job_first_cp_al_stripped(surfaces[JOB_SURFACE]),
+            "summarises the runner's steps"),
+    }
+    for name, (key, mutated, expect) in seeds.items():
+        assert mutated != surfaces[key], (
+            f"the seed {name!r} perturbed nothing, so its defect list would prove only "
+            "that the finder matches no text at all")
+        defects = _retag_vault_size_defects({**surfaces, key: mutated})
+        assert any(expect in d for d in defects), (
+            f"a skill carrying {name!r} produced {[d[:100] for d in defects]}, in which "
+            f"nothing names {expect!r} — the rail is not reading what this seed changed")
+        assert not _retag_vault_size_defects(surfaces), (
+            f"the live vault already trips the {name!r} seed's defect, so a failure here "
+            "would say nothing about the seed")

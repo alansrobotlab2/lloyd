@@ -1021,12 +1021,12 @@ def test_a_hardlink_snapshot_still_holds_the_pre_apply_bytes_after_the_apply(
         facts_root, tmp_path):
     """The one property `skills/retag-untagged-facts/SKILL.md` step 1 bets the run on.
 
-    The daily runner (#98, #2722) snapshots a 40,411-file facts tree with `cp -al`
-    immediately before `--apply`, and a hardlink is only a witness — rather than a
-    second name for the bytes the repair is about to change — because the repair
-    never writes into the linked file: `atomic_write_text` writes a temp and
-    `os.replace`s *that* inode over the target (`app/atomic_io.py:104`, the replace
-    at `:135`). So the snapshot's entry keeps
+    The daily runner (#98, #2722) snapshots the facts tree with `cp -al` immediately
+    before `--apply` (46,109 `.md` files measured on 2026-11-03), and a hardlink is
+    only a witness — rather than a second name for the bytes the repair is about to
+    change — because the repair never writes into the linked file:
+    `atomic_write_text` writes a temp and `os.replace`s *that* inode over the target
+    (`app/atomic_io.py:104`, the replace at `:135`). So the snapshot's entry keeps
     pointing at the pre-apply inode and the before-state survives its own repair.
 
     The failure this pins is the quiet one: had the repair written in place, both

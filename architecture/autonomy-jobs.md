@@ -956,11 +956,13 @@ the repair renames a new inode over each file it touches — the property
 since a snapshot that silently tracked the write would be worse than none. And it
 prunes what it creates, keeping the newest 7, because no other mechanism bounds
 that root — `scripts/groundskeeper/retention-sweep.py` has no pattern for
-`facts-snapshot-*`, so an unpruned nightly snapshot of a 44,227-file tree
-(`find facts -name '*.md' | wc -l`, 2026-10-26; the skill still quotes 40,411)
-is an
-unbounded store opened on the very night a count was scheduled to come down. Its
-report reads the count back through the rail (#60's scan) and not through its own
+`facts-snapshot-*`, so an unpruned nightly snapshot of a tree measured at 46,109
+`.md` files on 2026-11-03 is an unbounded store opened on the very night a count
+was scheduled to come down. Re-derive the size — the tree is derived output the
+nightly pipeline rewrites, and the skill's copy of the count was twelve days stale
+when #3408 was filed — with
+`cd ~/lloyd-data/_pipeline/vault-derived && find facts -name '*.md' | wc -l`.
+Its report reads the count back through the rail (#60's scan) and not through its own
 plan, because the plan is a strict superset of what the rail counts — 3,209
 records in 831 files against 3,206 in 830 on the 2026-10-14 dry run — and any
 check written as an equality between the two fails on arithmetic instead of on
