@@ -290,3 +290,77 @@ def test_the_probe_the_pool_ticks_is_the_one_the_gate_reads(monkeypatch, tmp_pat
     assert sp.shared() is ran[0], (
         "the pool ticks a probe that is not the process-wide one the dispatch "
         "gate reads — the outage would be measured twice again")
+
+
+# ── #3520: the primary's down body has to read as two sentences ────────────────
+#
+# The Oct 16 journal line ran them together: `...not a broken one.Its log:
+# supervisorctl tail agent-llm-primary stderr.`, with a double space behind
+# `(#1359).` as well. Cause: PRIMARY_COST is interpolated between the sentence
+# ending `(#1359). ` and the one beginning `Its log:`, and the literal led with
+# a space and ended without one — so the only service that substitutes a
+# non-empty clause is the only one that renders wrong. The test above cannot
+# see this: its assertions are lowercase substrings, and each survives both
+# defects.
+
+def _down_body(svc: dict, procs: dict, minutes: int = 31) -> str:
+    """The `down` body a service actually announces past the 30-minute grace."""
+    probe, clock, calls = _probe()
+    _held(probe, clock, svc, procs, minutes)
+    assert len(calls) == 1, calls
+    return calls[0][1]
+
+
+def test_the_primary_down_body_reads_as_two_sentences():
+    """Clauses 1 and 2, in one body, pinned from both ends.
+
+    What a reader gets 30 minutes into a primary outage is a sentence about the
+    dispatch cost wedged between the state sentence and the log hint. #1683
+    wrote that clause without deciding either of its edges, so both joints came
+    out wrong — one with no space after the full stop, one with two before the
+    clause. The positive assertion pins the join that carries meaning and the
+    negatives pin the exact shapes this body shipped with, so the fix cannot be
+    made by shifting the defect to the other end of the literal.
+    """
+    body = _down_body(PRIMARY_SVC, _primary_procs())
+
+    assert "not a broken one. Its log:" in body, body
+    assert "one.Its" not in body, f"the run-on is still there: {body}"
+    assert "(#1359).  " not in body, f"the double space is still there: {body}"
+    assert "  " not in body, f"a double space survives somewhere: {body!r}"
+
+
+def test_the_join_of_the_two_sentences_would_show_the_run_on():
+    """The control that keeps the assertion above from passing by absence.
+
+    `assert "one.Its" not in body` is satisfied for the dull reason the moment
+    the body stops containing `Its log:` at all — a reworded hint, a re-ordered
+    clause, a body that never reaches the sentence. This rebuilds the defective
+    join out of the same fragments the module puts together — by dropping the
+    trailing space on purpose, which is precisely the regression the fix removes
+    — and demands the detector fire on it, so the ban above is known to be able
+    to fail for the right reason. Written against `rstrip()` rather than the
+    literal as it stands, so this node holds on both sides of the fix.
+    """
+    joined = f"{sp.PRIMARY_COST.rstrip()}Its log: supervisorctl tail x stderr."
+    assert "one.Its" in joined, (
+        f"cannot build a run-on out of PRIMARY_COST ({joined!r}), so 'one.Its' is "
+        "no longer what a missing space between those two sentences looks like — "
+        "and the assertion that bans it is checking nothing")
+
+
+def test_a_non_primary_down_body_claims_no_dispatch_cost_and_still_reads_cleanly():
+    """Clause 3, and the reason the fix has to live inside PRIMARY_COST.
+
+    djev's body must not borrow the primary's dispatch claim, which is false for
+    every other service, and its two sentences have always joined correctly
+    because that branch substitutes `''`. Asserting the clean render is what
+    makes the primary's defect specific: a fix that put the missing space on the
+    shared sentence instead of inside the literal would double-space every body
+    in the file, and this node is where that would show.
+    """
+    body = _down_body(DJEV, _procs("RUNNING"))
+
+    assert "dispatch is paused" not in body.lower(), body
+    assert "(#1359). Its log:" in body, body
+    assert "  " not in body, f"a double space survives somewhere: {body!r}"

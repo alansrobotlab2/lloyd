@@ -78,9 +78,15 @@ PRIMARY_ENGINE = "agent-llm-primary"
 #: What a primary outage costs, said in the in-room line rather than only in the
 #: gate's discord alert 15 minutes later: the fleet is stopped, so every stall
 #: alert from here on describes a paused fleet and not a broken one (#1683).
-PRIMARY_COST = (" autonomy dispatch is PAUSED while the primary is unreachable "
+#: Both edges of this literal are load-bearing and (#3520) is the receipt for
+#: noticing only one of them: it is interpolated between a sentence ending
+#: `(#1359). ` and one beginning `Its log:`, so it must open on a word and close
+#: on a space. It shipped opening on a space (double space after `(#1359).`) and
+#: closing on the full stop (the run-on `one.Its log:` in the Oct 16 journal).
+#: The spacing is pinned by tests/test_service_probe.py, not by reading.
+PRIMARY_COST = ("autonomy dispatch is PAUSED while the primary is unreachable "
                 "(workers/sources/scheduled_task.py), so every stall alert from "
-                "here on describes a paused fleet, not a broken one.")
+                "here on describes a paused fleet, not a broken one. ")
 
 #: Seconds a port may stay closed while its program is in supervisord's hands.
 DEFAULT_GRACE_S = 15 * 60
