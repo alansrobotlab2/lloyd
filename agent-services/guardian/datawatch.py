@@ -423,6 +423,13 @@ def inert_residue(tree: str, names, data_root: str = DATA_ROOT,
     return out
 
 
+#: The audit ledger `quarantine_inert` appends one row to per move, written beside the
+#: payloads it moved. One spelling for the mover and for `quarantine_ledger_gaps` below:
+#: two spellings of one filename is #2110's "two candidate directories" one level down,
+#: and the reconciliation is only worth running if it reads the file the mover writes.
+QUARANTINE_LEDGER = "log.jsonl"
+
+
 def quarantine_inert(tree: str, names, data_root: "str | None" = None,
                      now: float | None = None) -> list[tuple[str, str]]:
     """Move each `inert_residue` file out of the tree. Returns `(name, destination)`
@@ -475,7 +482,7 @@ def quarantine_inert(tree: str, names, data_root: "str | None" = None,
                 os.unlink(dest)
                 continue
             os.unlink(src)
-            with open(os.path.join(qdir, "log.jsonl"), "a", encoding="utf-8") as fh:
+            with open(os.path.join(qdir, QUARANTINE_LEDGER), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({
                     "at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
                     "source": src, "destination": dest, "size": 0,
@@ -487,6 +494,156 @@ def quarantine_inert(tree: str, names, data_root: "str | None" = None,
             continue
         moved.append((name, dest))
     return moved
+
+
+# ---------------------------------------------------------------------------
+# Is everything standing in the quarantine accounted for by its ledger? (#3584)
+# ---------------------------------------------------------------------------
+#
+# `quarantine_inert` is the only mover in this repository, and the row it appends beside
+# the payload is the only thing that says where a payload came from. So the directory is
+# "its own audit and not just a pile of empty files" only for the payloads THAT function
+# moved. On 2026-10-29 ALERT.md had to say it out loud: a payload left the data root with
+# no move recorded by the guardian (`memory/2026-10-29.md`, the clearance line #2110 made
+# the guardian distinguish "this loop moved it" from "it is not here and this loop did
+# nothing"). And on this box the whole directory is like that right now — the payload
+# stamped `2026-10-29-kg-sqlite` holds an 81,920-byte `kg.sqlite` with a 32,768-byte
+# `-shm` and a 0-byte `-wal`, and there is no `log.jsonl` anywhere under the data root's
+# quarantine directory: `datawatch.py` is the tree's only writer of that filename and it
+# runs solely inside a move. (The leaf name is not spelled anywhere in this directory's
+# files, comment included — `tests/test_guardian_inert_stray.py` bans it, and the live
+# payload is named by its own stamp, which is what a person searches for.)
+#
+# The shapes prove the mover did not make it. `quarantine_inert` writes a FLAT file named
+# `{%Y%m%dT%H%M%SZ}-{name}` of exactly 0 bytes; the live payload is a DIRECTORY named
+# `2026-10-29-kg-sqlite` holding a non-empty store. So a name-based reconciliation has to
+# match a directory name as well as a file name, which is the one thing
+# `top_level_regular_files` cannot see — it filters to regular files by design.
+#
+# Report-only, and that ruling is inherited, not new: #3109 settled it for the data-root
+# half of this walk ("the removal of the two live files is a human action under
+# `~/lloyd-data`"), #2110 wrote the same rule into `agent_mcp/_bash_tree_strays.py`'s
+# `watched()` docstring for the checkout half, and #3422 states it for the arrivals prune.
+# Nothing here unlinks, renames, moves, chmods or creates: the guardian cannot know
+# whether a payload a person set aside by hand is theirs.
+
+def _ledger_destinations(quarantine_dir: str) -> frozenset[str]:
+    """The top-level payload names the quarantine ledger accounts for beside that dir.
+
+    The FIRST SEGMENT under `quarantine_dir` of each row's `destination`, not its
+    basename. `quarantine_inert`'s destination is a flat file, so for its own moves the
+    two answers are the same string; they differ for a payload someone set aside as a
+    directory, where the rows (if any) name the files INSIDE it while the name standing
+    at the top level is the directory's. Reading basenames would call such a payload
+    unaccounted on a ledger that in fact lists its every file — the false alarm that
+    gets a report switched off. A destination outside `quarantine_dir` accounts for
+    nothing here, and a name beginning with `..` is treated as outside, which errs
+    toward reporting a payload rather than clearing it.
+
+    A row that is not a JSON object, or a line that is not JSON at all, RAISES. #2056's
+    rule is the module's, not one function's: a measurement that could not be taken must
+    not answer as if it had. A ledger this function cannot parse cannot say whether a
+    payload is accounted for, and answering "not accounted for" about every name would be
+    an equally unfounded statement in the louder direction. A blank line is not that: the
+    writer terminates every row with `\\n`, so the final read line is empty on every
+    healthy ledger.
+    """
+    ledger = os.path.join(quarantine_dir, QUARANTINE_LEDGER)
+    names: set[str] = set()
+    try:
+        with open(ledger, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        # No ledger is not an empty ledger: it accounts for NOTHING, which is the
+        # direction that reports too much rather than the one that clears a payload.
+        return frozenset()
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise ValueError(f"{ledger}:{n} is not a JSON line, so the stray quarantine "
+                             f"cannot be reconciled against its ledger: {exc}") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"{ledger}:{n} is not a JSON object, so the stray quarantine "
+                             "cannot be reconciled against its ledger")
+        dest = row.get("destination")
+        if not isinstance(dest, str) or not dest:
+            continue
+        rel = os.path.relpath(dest, quarantine_dir)
+        if os.path.isabs(rel) or rel == "." or rel.startswith(".."):
+            continue
+        names.add(rel.split(os.sep, 1)[0])
+    return frozenset(names)
+
+
+def quarantine_ledger_gaps(quarantine_dir: str) -> list[dict]:
+    """Every entry standing in `quarantine_dir` that its ledger cannot account for.
+
+    Read-only in the strict sense: one `os.scandir` of the directory's top level and one
+    open of the ledger for reading, and the caller's alert is the whole action. No entry
+    is opened, moved, renamed, touched or removed, whatever it turns out to be.
+
+    The unit is the TOP-LEVEL ENTRY, of any type. `top_level_regular_files` is the module's
+    other enumeration and it filters to regular files on purpose; a filter here would
+    miss exactly the live payload, which is a directory with two sidecars inside it. The
+    sidecars are not reported individually: they are inside the entry that is named, and
+    naming the container is what sends a person to the right place.
+
+    A ledger with no rows, or no ledger at all, accounts for nothing, so every standing
+    entry is named — which is the live state of this box and the state the clause is
+    written for. A quarantine directory that does not exist RAISES `FileNotFoundError`,
+    like `data_root_shadows` and `top_level_regular_files` raise for a root that is not
+    there: an empty list is the answer to "I reconciled this directory and every payload in
+    it has a row", and a directory that has never been created has not been reconciled. The
+    caller treats the absence as no-statement-in-either-direction, which is what a machine
+    that has never had to move anything should get — see the leg in `guardian.py`.
+
+    The directory is a REQUIRED argument and this function never resolves one. That is not
+    tidiness: `tests/test_guardian_inert_stray.py` bans the quarantine's leaf name anywhere
+    in this directory's files, prose included, because the destination is meant to have
+    exactly one route — `policy.quarantine_dir()`, which reads `QUARANTINE_DIR_RELATIVE`
+    from the tree's own layout module and returns None when it cannot. A caller therefore
+    has to go through that accessor, which is the accessor that can refuse.
+    """
+    qdir = os.path.abspath(quarantine_dir)
+    with os.scandir(qdir) as it:        # FileNotFoundError propagates: see the docstring
+        entries = sorted(it, key=lambda de: de.name)
+    accounted = _ledger_destinations(qdir)
+    out: list[dict] = []
+    for de in entries:
+        if de.name == QUARANTINE_LEDGER or de.name in accounted:
+            continue
+        out.append({"name": de.name,
+                    "path": os.path.join(qdir, de.name),
+                    "directory": de.is_dir(follow_symlinks=False)})
+    return out
+
+
+def quarantine_gap_alert(gaps: list[dict]) -> "dict | None":
+    """The report for unaccounted quarantine payloads, or None when there are none.
+
+    Same shape as `arrivals_alert` and the same reason: `needs_human=True` is the whole
+    alert, no `quarantine` key and no `staged` key is emitted, so the resolve path has
+    nothing to consume and cannot act on it. The full path is in the body rather than the
+    bare name because the reader's next act is a lookup in that directory, and a
+    directory payload is labelled as one because the mover never makes a directory, so
+    that word alone says "something other than this code put this here".
+    """
+    if not gaps:
+        return None
+    detail = "; ".join(f"{g['path']}" + (" [a directory]" if g.get("directory") else "")
+                       for g in gaps)
+    return {
+        "needs_human": True,
+        "reason": (f"{len(gaps)} payload(s) stand in the stray quarantine with no "
+                   f"destination row in its {QUARANTINE_LEDGER}: {detail}. Report-only: "
+                   "the guardian moves and deletes nothing. A payload that arrived "
+                   "without a row has no recorded source, size or time, so this line is "
+                   "all that says it is here."),
+        "evidence": detail,
+    }
 
 
 #: Top-level folders of the data root that are rebuildable caches, not data:
@@ -1127,8 +1284,13 @@ def top_level_regular_files(data_root: str = DATA_ROOT) -> dict[str, float]:
     return out
 
 
-def read_arrivals_baseline(state_dir, data_root: str = DATA_ROOT) -> "dict | None":
-    """The names this leg has already seen, or `None` when it has never run.
+def _read_arrivals_state(state_dir, data_root: str = DATA_ROOT) -> "dict | None":
+    """The whole persisted arrivals envelope, or `None` when it is unusable for this root.
+
+    One reader for the envelope because it has TWO writers (`write_arrivals_baseline` and
+    `prune_arrivals_baseline`) and three keys that have to survive both: a reader that
+    hands back only part of it is how a writer comes to drop a key it never read — which
+    is exactly what #3584 clause 5 is about for `departed`.
 
     `None` is a real third state and must not collapse to `{}`: a leg that re-armed from
     an empty baseline would, on every restart, report the entire legitimate inventory
@@ -1144,32 +1306,104 @@ def read_arrivals_baseline(state_dir, data_root: str = DATA_ROOT) -> "dict | Non
         return None
     if not isinstance(state, dict) or state.get("root") != os.path.realpath(data_root):
         return None
+    return state
+
+
+def read_arrivals_baseline(state_dir, data_root: str = DATA_ROOT) -> "dict | None":
+    """The names this leg has already seen, or `None` when it has never run.
+
+    The `seen` mapping only, and that meaning is unchanged by #3584: callers from
+    `new_top_level_names` to `prune_arrivals_baseline` reason over a name→mtime map, and
+    `seen` itself stays MONOTONIC (`write_arrivals_baseline` merges, #3422's prune is the
+    one deliberate removal), so a departure is recorded in `departed` and NOT taken out of
+    here. `read_arrivals_departed` is the other half.
+    """
+    state = _read_arrivals_state(state_dir, data_root)
+    if state is None:
+        return None
     seen = state.get("seen")
     return seen if isinstance(seen, dict) else None
 
 
+def read_arrivals_departed(state_dir, data_root: str = DATA_ROOT) -> list[str]:
+    """The names this leg saw and no longer sees, oldest recording first.
+
+    A name that left the root is the other half of the same event the arrivals leg reports
+    an arrival for, and until #3584 it was simply overwritten out of existence: the two
+    writers persisted `{root, seen, updated}` and nothing else, so a disappearance left no
+    trace in the journal and no way to say which tick last saw the file. `[]` means either
+    "no departure recorded" or "no usable baseline", and the two are indistinguishable
+    here on purpose — a departure is a fact a writer ADDS, never a caller that reads.
+    """
+    state = _read_arrivals_state(state_dir, data_root)
+    if state is None:
+        return []
+    departed = state.get("departed")
+    return [d for d in departed if isinstance(d, str)] if isinstance(departed, list) else []
+
+
 def write_arrivals_baseline(state_dir, files: "dict[str, float]", now: float,
-                            data_root: str = DATA_ROOT) -> None:
-    """Record what the leg saw, MONOTONICALLY: the union of what it saw before and now.
+                            data_root: str = DATA_ROOT) -> list[dict]:
+    """Record what the leg saw, MONOTONICALLY, and return the departures newly recorded.
 
     A snapshot of this hour alone would make a sqlite sidecar that legitimately comes and
     goes (`usage.db-wal` removed at checkpoint, recreated by the next writer) a recurring
     human-decision alert. A name the leg has once seen stays seen, so an arrival really is
     a first appearance. `V._atomic_write` is the tmp+rename the rest of this file's state
     uses, so a crash cannot leave a half-written baseline that would re-arm the leg.
+
+    MONOTONIC means monotonic: #3584 adds a `departed` list beside `root`/`seen`/`updated`
+    and does NOT remove a departed name from `seen`. Dropping it there would re-arm the
+    arrivals leg on every WAL checkpoint — the exact noise this function's own merge
+    exists to prevent, and #3422's prune is the only route that removes a name from `seen`
+    because a prune is a person's statement that the name is gone. A departure is therefore
+    an ADDITION to the journal, visible without losing the arrival history the same file
+    carries.
+
+    The mute is the arrivals leg's own rule, `_sidecar_of_store_in_this_scan`, asked against
+    `previous ∪ files` rather than `files` alone: a departure is by definition a name
+    MISSING from the fresh scan, so the pairing that explains it may only be visible in the
+    old one. That mutes both real shapes — a `-wal` checkpointed while its store stands,
+    whose disappearance means nothing, and a store deleted outright, whose own name is then
+    reported and whose sidecars are the same event said twice. A sidecar whose base the leg
+    never saw is not muted: that is an unexplained name going missing.
+
+    Returns the findings for names recorded as departed FOR THE FIRST TIME on this pass; a
+    name already in `departed` is not in the list, which is the noise rule
+    `new_top_level_names` states for arrivals read on the departure side. The caller alerts
+    on the return value and persists everything else.
     """
     state_dir = Path(state_dir)
-    previous = read_arrivals_baseline(state_dir, data_root) or {}
+    envelope = _read_arrivals_state(state_dir, data_root) or {}
+    previous = envelope.get("seen")
+    previous = previous if isinstance(previous, dict) else {}
+    recorded = envelope.get("departed")
+    departed = ([d for d in recorded if isinstance(d, str)]
+                if isinstance(recorded, list) else [])
     seen = {**previous, **files}
+    already = set(departed)
+    screen = {**previous, **files}
+    newly: list[dict] = []
+    for name in sorted(set(previous) - set(files)):
+        if name in already or _sidecar_of_store_in_this_scan(name, screen):
+            continue
+        departed.append(name)
+        # `age_days` is measured here, where the pass's own `now` is, and carried in the
+        # finding — the same reason `new_top_level_names` stamps it rather than leaving the
+        # alert to call the clock: a report built an hour later would date the departure by
+        # the hour it was read, not the hour the name was last measured.
+        newly.append({"name": name, "last_seen": previous[name],
+                      "age_days": _days_ago(previous[name], now)})
     state_dir.mkdir(parents=True, exist_ok=True)
     # tmp + `os.replace`, the same shape `VaultWatch._persist` uses for its own state file:
     # a partially-written baseline would parse as corrupt, and a corrupt baseline re-arms
     # the leg, which is the one failure that hides a real arrival for an hour.
     tmp = state_dir / f"{ARRIVALS_STATE_FILE}.{os.getpid()}.tmp"
     tmp.write_text(json.dumps({
-        "root": os.path.realpath(data_root), "seen": seen, "updated": now}, indent=1),
-        encoding="utf-8")
+        "root": os.path.realpath(data_root), "seen": seen, "updated": now,
+        "departed": departed}, indent=1), encoding="utf-8")
     os.replace(tmp, state_dir / ARRIVALS_STATE_FILE)
+    return newly
 
 
 def prune_arrivals_baseline(state_dir, names, now: "float | None" = None,
@@ -1207,19 +1441,33 @@ def prune_arrivals_baseline(state_dir, names, now: "float | None" = None,
     reason — a half-written baseline parses as corrupt, and a corrupt baseline re-arms the leg.
     Returns `(pruned, refused)`; a name simply absent from the baseline is neither, and is a
     no-op, so a rerun costs nothing.
+
+    #3584 clause 5, and the reason this function reads the ENVELOPE and not just `seen`: it
+    rewrites the whole file, so every key it does not carry out is a key it deletes. A prune
+    that re-emitted only `{root, seen, updated}` would erase a recorded departure exactly as
+    surely as the arrivals writer dropping the key, and a guard that lives on one of two
+    write surfaces is a guard on neither. Pruning a name out of `seen` is this function's
+    job; expunging the journal of a name that left is nobody's, so `departed` is carried
+    through, not filtered.
     """
     state_dir = Path(state_dir)
-    # Read for the root the caller named: the baseline records which root it was measured
-    # against and `read_arrivals_baseline` refuses a mismatch, so reading the default root's
-    # baseline here would answer "no baseline" for every fixture root and for any run the
-    # caller passed `root=` to — a silent no-op that reads as a successful prune.
-    seen_now = (read_arrivals_baseline(state_dir) if root is None
-                else read_arrivals_baseline(state_dir, root))
-    if not seen_now:
+    # Read for the root the caller named: the envelope records which root it was measured
+    # against and the reader refuses a mismatch, so reading the default root's baseline here
+    # would answer "no baseline" for every fixture root and for any run the caller passed
+    # `root=` to — a silent no-op that reads as a successful prune.
+    envelope = (_read_arrivals_state(state_dir) if root is None
+                else _read_arrivals_state(state_dir, root))
+    if envelope is None:
         return [], []
-    # What that reader hands back IS the `seen` mapping, not the envelope around it — the same
-    # shape `write_arrivals_baseline` merges. Asking it for a `seen` key would answer `None`
-    # and the prune would report a clean no-op over a baseline full of the names.
+    # The envelope and not the `seen` mapping, because writing needs every key the file
+    # already had. `read_arrivals_baseline` would answer the same `seen` here; the prune
+    # then persists a file with the departure journal missing from it.
+    seen_now = envelope.get("seen")
+    if not isinstance(seen_now, dict) or not seen_now:
+        return [], []
+    carried = envelope.get("departed")
+    carried = ([d for d in carried if isinstance(d, str)]
+               if isinstance(carried, list) else [])
     seen = dict(seen_now)
     # `read_arrivals_baseline` only answered because the envelope's root matched, so the root
     # written back below is the same string it validated, not a new claim.
@@ -1254,8 +1502,8 @@ def prune_arrivals_baseline(state_dir, names, now: "float | None" = None,
     now = time.time() if now is None else now
     state_dir.mkdir(parents=True, exist_ok=True)
     tmp = state_dir / f"{ARRIVALS_STATE_FILE}.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps({"root": recorded_root, "seen": seen,
-                               "updated": now}, indent=1), encoding="utf-8")
+    tmp.write_text(json.dumps({"root": recorded_root, "seen": seen, "updated": now,
+                               "departed": carried}, indent=1), encoding="utf-8")
     os.replace(tmp, state_dir / ARRIVALS_STATE_FILE)
     return pruned, refused
 
@@ -1353,6 +1601,39 @@ def arrivals_alert(arrivals: list[dict]) -> "dict | None":
         "needs_human": True,
         "reason": (f"{len(arrivals)} new name(s) at the data root's top level: {detail}. "
                    "Report-only: the guardian moves nothing, and the decision is yours."),
+        "evidence": detail,
+    }
+
+
+def departures_alert(departed: list[dict]) -> "dict | None":
+    """The report for names that left the data root's top level, or None when there are none.
+
+    One sentence of its own reason, and the same `needs_human=True` routing as the arrival
+    report, because the two are the same question pointed the other way: a name at this
+    root is a person's, so a name that left it is either their doing or a job's, and the
+    guardian cannot tell which and does not act either way. The date the leg last saw the
+    name is the whole payload of the line — "gone" without "when was it last here" cannot
+    be checked against anything, and a name that left nine days ago and one that left in
+    the last hour are different questions asked of different people, which is
+    `arrivals_alert`'s reasoning read backwards.
+
+    Nothing is asserted about WHY it left, and nothing here can be: this leg measures two
+    scans and the difference between them, and a deletion, a rename and a mount that moved
+    are the same one observation from here.
+    """
+    if not departed:
+        return None
+    detail = "; ".join(
+        f"{f['name']} — last seen "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(f['last_seen']))}"
+        + (f" ({f['age_days']} days ago)" if "age_days" in f else "")
+        for f in departed)
+    return {
+        "needs_human": True,
+        "reason": (f"{len(departed)} name(s) the data root's arrivals leg had seen are no "
+                   f"longer at its top level: {detail}. Report-only: this leg never "
+                   "deletes, and the name stays in the arrival journal as well, so this "
+                   "line is a note that it left, not an instruction."),
         "evidence": detail,
     }
 

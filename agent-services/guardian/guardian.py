@@ -1876,6 +1876,10 @@ class Guardian:
         arrivals_baselined = False
         arrivals_error = ""
         arrivals_files: dict[str, float] = {}
+        # Names the arrivals journal holds and this scan does not, taken from the
+        # baseline write below (#3584). Empty until a persist has actually run, which is
+        # also what keeps a disarmed pass from reporting a departure it never recorded.
+        departed: list[dict] = []
         # `policy.GUARDIAN_STATE` is read HERE and not at import because it is the seam the
         # incident harnesses patch: an hourly leg that persists has to be pointable at the
         # test's own directory, or a unit test writes its baseline into the live guardian's
@@ -1912,8 +1916,8 @@ class Guardian:
             # instead of closed by a person, and the tick that re-arms says nothing. A paused
             # guardian makes no statement in either direction, so it records nothing either.
             try:
-                datawatch.write_arrivals_baseline(arrivals_state, arrivals_files, now,
-                                                  datawatch.DATA_ROOT)
+                departed = datawatch.write_arrivals_baseline(arrivals_state, arrivals_files,
+                                                             now, datawatch.DATA_ROOT)
             except OSError as exc:
                 # The alert still goes out; a baseline that will not write means the next
                 # hour re-alerts, which is the loud direction and the one to prefer.
@@ -1951,6 +1955,110 @@ class Guardian:
                 f"{time.strftime('%Y-%m-%d %H:%M')}. "
                 "_resolved by the next measured pass; a name this leg reported is still "
                 "yours to delete or explain — it is not moved._")
+
+        # ── names that LEFT the data root's top level (#3584) ────────────────────────
+        # The same two name sets the leg above diffs for arrivals, read for the direction
+        # that had no report: `departed` is what the baseline write found standing in the
+        # journal and missing from this scan. Until now a disappearance was overwritten
+        # out of that file on the next pass, so nothing said which tick last saw a store
+        # here — the same event the quarantine reconciliation below sees from the other
+        # side, a payload that moved with nobody's record of it.
+        departed_report = datawatch.departures_alert(departed) if departed else None
+        if departed_report and self.data.armed:
+            # Its own title because it is its own condition (#3124), and the two headings
+            # are each other's opposite: "a new name appeared" is false of a name that
+            # left, and one section carrying both would retract whichever the next hour
+            # disagreed about. The alert is the whole action — nothing here deletes, and
+            # the name stays in the arrival journal as well, so the departure is a note
+            # and not an instruction.
+            self.alert("error", RUNTIME_DATA_DEPARTURES_ALERT_TITLE,
+                       departed_report["reason"] + "\n\n" + departed_report["evidence"],
+                       evidence=departed_report["evidence"],
+                       coalesce=True,
+                       needs_human=True)
+        elif (arrivals_measured and not arrivals_baselined and not departed
+                and self.data.armed):
+            # The same arming rule the arrivals retraction obeys: the pass that recorded a
+            # baseline compared it against nothing, so it earns no statement that nothing
+            # left. `resolve` writes nothing unless this section is actually open.
+            self.notifier.resolve(
+                RUNTIME_DATA_DEPARTURES_ALERT_TITLE,
+                "No name left the data root's top level as of "
+                f"{time.strftime('%Y-%m-%d %H:%M')}. "
+                "_a name this leg reported as departed stays in its arrival journal; "
+                "nothing was deleted, and the decision about it is still yours._")
+
+        # ── is everything standing in the stray quarantine accounted for? (#3584) ─────
+        # The stray leg's ledger row beside the payload is the only thing in this
+        # repository that says where a quarantined file came from, and it is written only
+        # inside a move. A payload that got there any other way — a session's `mv`, a
+        # person clearing a root by hand — leaves the directory holding bytes no ledger
+        # describes. That is the state ALERT.md had to describe on 2026-10-29T18:54:09-07:00
+        # as a move with no record, and it is the live state of this box: the stray
+        # quarantine holds a stamped payload dated that day and no ledger beside it. (The
+        # directory is named by `app.data_root.QUARANTINE_DIR_RELATIVE` and reached only
+        # through `policy.quarantine_dir()` — `tests/test_guardian_inert_stray.py` bans a
+        # spelled-out quarantine leaf inside this directory's files, prose included, so
+        # nothing here can write the route by hand.)
+        #
+        # Measured BEFORE the stray leg below moves anything, for the reason #3210 pinned
+        # as an index inside this method: a report-only scan has to be provably ordered
+        # ahead of the tree's one mover, because a destination that mover has created and
+        # not yet journalled would otherwise be this check's own false alarm. Report-only
+        # is load-bearing, and inherited: #3109 rules for the data root, #2110 for the
+        # checkout half, and the guardian cannot know whether a payload someone set aside
+        # by hand is theirs. (This span is fenced by `tests/test_guardian_datawatch.py`'s
+        # arrivals-leg node, which forbids that mover's NAME between here and its own
+        # `if strays:` block — so the prose above says "the stray leg", and an editor who
+        # spells the function out fails a test about a different leg.)
+        gaps: list[dict] = []
+        gaps_measured = False
+        qdir = policy.quarantine_dir(repo=policy.REPO, data_root=datawatch.DATA_ROOT)
+        if qdir is None:
+            # No address is not an empty quarantine. The layout could not be read, so this
+            # pass measures nothing and claims nothing in either direction — the log line
+            # is the whole record, and the retraction below is unreachable from here.
+            log("stray quarantine ledger check skipped: the data layout gave no address")
+        else:
+            try:
+                gaps = datawatch.quarantine_ledger_gaps(qdir)
+                gaps_measured = True
+            except (OSError, ValueError) as exc:
+                # #2056 from the caller's side: a directory that will not be read, a
+                # ledger that will not parse. `gaps_measured` stays False, so this neither
+                # alerts nor retracts.
+                log(f"stray quarantine ledger check could not run: {str(exc)[:120]}")
+        gap_report = datawatch.quarantine_gap_alert(gaps) if gaps else None
+        if gap_report and self.data.armed:
+            self.alert("error", RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE,
+                       gap_report["reason"] + "\n\n" + gap_report["evidence"],
+                       evidence=gap_report["evidence"],
+                       coalesce=True,
+                       needs_human=True)
+        elif gaps_measured and not gaps and self.data.armed:
+            # Only a pass that RECONCILED a directory retracts, and only this heading
+            # (#3124: `resolve` matches headings literally). `gaps_measured` is the load
+            # bearing half and it is deliberately narrower than "no findings": a directory
+            # that does not exist, an address the layout would not give, and a directory
+            # that would not be read all leave it False, because the sentence below is a
+            # claim about a ledger and the payloads it must account for, and none of those
+            # states is a reconciliation. #2056's rule from the other side: a leg that
+            # could not measure has no statement to make in EITHER direction, and a check
+            # that printed a clearance every hour whether or not there was anything to
+            # check is a check whose clearance line means nothing. The cost is honest and
+            # stated: delete the whole quarantine directory while this section is open and
+            # the section stays open until a person closes it, because nothing has
+            # established that its condition went away.
+            #
+            # `tests/test_guardian_inert_stray.py` counts the resolve calls one clean tick
+            # makes and asserts they are exactly the headings of the incident that tick is
+            # clearing, which is the same rule as a test: this leg may add a statement to a
+            # tick only when it has something to state.
+            self.notifier.resolve(
+                RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE,
+                "Every payload in the stray quarantine has a row in its ledger as of "
+                f"{time.strftime('%Y-%m-%d %H:%M')}. "
+                "_nothing was moved or deleted by this check._")
 
         if strays and self.data.armed:
             # Residue first: an empty, idle second copy of a store that lives in the
@@ -2886,6 +2994,22 @@ class Guardian:
             sd_notify("WATCHDOG=1")
             self.maybe_selftest()
             time.sleep(self.interval)
+
+
+#: Two more report-only headings for the same hourly data-root check (#3584). They are
+#: here, at module level but BELOW `Guardian.evaluate_liveness`, rather than beside their
+#: siblings at `RUNTIME_DATA_ALERT_TITLE`/:170 and `RUNTIME_DATA_ARRIVALS_ALERT_TITLE`/:234,
+#: for one reason that is not taste: `tests/test_architecture_coverage_doc_claims.py`
+#: pins `evaluate_liveness`'s head at :923 because `architecture/threat-model.md`'s T-26
+#: cell cites that line number, so any net line added above it moves a citation a human
+#: reads (#3577's whole point, and the re-point chain that test's comment block lists).
+#: Below the head, the only anchor that moves is `main`, whose literal the same commit
+#: re-points. Two headings, not one, because the two conditions are each other's opposite
+#: and #3124 rules that a heading states the condition that fired: a section that could
+#: read both "a name left the data root" and "a payload appeared in the quarantine" would
+#: be retracted by the hour that contradicted half of it.
+RUNTIME_DATA_DEPARTURES_ALERT_TITLE = "A name left the data root's top level"
+RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE = "A quarantined stray has no ledger row"
 
 
 # ── tripwire clear conditions (#3106; module level and shared under #3502) ────────

@@ -3060,7 +3060,21 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # `evaluate_liveness` holds :923 — which is the whole reason the lifted function sits
     # below the class and not in the imports, where #3502's first attempt put it at :430
     # and pushed this head off its own citation.
-    assert heads[guardian]["main"] == 3030, (
+    # 3030 → 3154 is #3584: the same shape a fourth time, and the biggest of them, because
+    # it puts TWO new report-only legs inside `_runtime_data_incident` (the departures half
+    # of the arrivals journal, and the stray-quarantine ledger reconciliation) at
+    # `@@ -1952,6 +1956,110 @@`, adds the `departed` accumulator at `@@ -1876,6 +1876,10 @@`,
+    # takes the return value of the baseline write at `@@ -1912,8 +1916,8 @@`, and puts the
+    # two new alert headings at module level at `@@ -2888,6 +2996,22 @@` — BELOW the class,
+    # beside `tripwire_is_clear`, rather than beside their siblings at :170 and :234, which
+    # is precisely #3502's lesson: a heading added above :923 would move the head T-26
+    # cites. Four hunks, all between the two anchors, net +124 (126 added, 2 removed), and
+    # `evaluate_liveness` holds :923 — the assert below is the one that would have caught it,
+    # and `test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has` stayed
+    # green untouched. No document cites `main`'s number: `git grep -n ':3030'` across the
+    # vault's knowledge tree answers nothing, so this literal is the only citation and this
+    # comment is the whole re-point.
+    assert heads[guardian]["main"] == 3154, (
         f"`main` moved off :3013 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 923, (

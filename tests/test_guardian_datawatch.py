@@ -2074,3 +2074,54 @@ def test_the_report_only_boundary_still_holds_in_the_module_text(tmp_path):
     assert "def quarantine_inert(tree: str" in src, (
         "quarantine_inert takes the CODE TREE as its subject; a signature that grew a "
         "data-root-first argument is a direction change")
+
+
+# ── #3584 clause 5: the prune carries the departure journal through the file it rewrites ──
+
+def test_a_prune_carries_the_departure_journal_through_the_file_it_rewrites(tmp_path):
+    """The arrivals baseline has TWO writers, and clause 5 is about the second one.
+
+    `prune_arrivals_baseline` cannot call `write_arrivals_baseline` to persist — merging is
+    that function's job and a merge re-adds the name being pruned — so it re-emits the whole
+    envelope itself. Which means any key it does not carry out is a key it DELETES, and a
+    guard on only one of two write surfaces is a guard on neither: #3584 added `departed` to
+    the file, and a prune that re-emitted `{root, seen, updated}` would erase a recorded
+    departure on the first prune after it, silently and with a green arrivals leg.
+
+    Two prunes are checked because the second is the interesting one. Pruning an unrelated
+    name and finding the journal intact could still be luck about which name was touched;
+    pruning the DEPARTED name out of `seen` — the state #3422's operator reaches for when
+    they confirm a file is gone for good — is the one call that looks like it should clear
+    the record. It clears the arrival memory only. `departed` is what the file says about a
+    name that left, and that is not this function's to un-say.
+    """
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = tmp_path / "state"
+    (root / ".lloyd-data-root").write_bytes(b"")
+    (root / "usage.db").write_bytes(b"x" * 64)
+    (root / "false").write_bytes(b"")
+    D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)), now=100.0,
+                              data_root=str(root))
+    (root / "false").unlink()
+    recorded = D.write_arrivals_baseline(state, D.top_level_regular_files(str(root)),
+                                         now=150.0, data_root=str(root))
+    assert [f["name"] for f in recorded] == ["false"], (
+        f"the fixture must hold a recorded departure before the prune touches it: {recorded}")
+
+    (root / "usage.db").unlink()
+    pruned, refused = D.prune_arrivals_baseline(state, ["usage.db", "false"], now=200.0,
+                                                root=str(root))
+    assert pruned == ["usage.db", "false"] and refused == [], (pruned, refused)
+
+    state_file = json.loads((state / "data-root-arrivals.json").read_text(encoding="utf-8"))
+    assert set(state_file) == {"root", "seen", "updated", "departed"}, (
+        f"the prune writes all four keys or the journal is gone: {sorted(state_file)}")
+    assert state_file["departed"] == ["false"], (
+        f"a prune that re-emits the envelope must carry the departure journal with it, "
+        f"including when the pruned name IS the departed one: {state_file['departed']}")
+    assert "false" not in state_file["seen"] and "usage.db" not in state_file["seen"], (
+        "what the prune IS meant to do still works: the arrival memory is cleared for the "
+        f"names it was given: {sorted(state_file['seen'])}")
+    assert D.read_arrivals_departed(str(state), str(root)) == ["false"], (
+        "and the reader a person or a later tick uses still answers for that departure")

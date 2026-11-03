@@ -40,6 +40,7 @@ beside them.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import shutil
@@ -1619,3 +1620,416 @@ def test_the_immutable_read_the_paragraph_names_answers_zero_and_touches_nothing
         f"the -shm changed in SIZE rather than being re-stamped, so this is not the "
         f"#3559 signature (same 32,768 bytes, a new mtime): "
         f"{c_before[shm]} -> {c_after[shm]}")
+
+
+# ── #3584: does the quarantine's ledger account for what stands in the quarantine? ──
+#
+# `quarantine_inert` appends one JSONL row per move into `log.jsonl` BESIDE the payload it
+# moved, and that row is the only statement in this repository about where a quarantined
+# file came from: "the quarantine directory is its own audit and not just a pile of empty
+# files" is a property of the mover's loop, not of the directory. A payload that gets there
+# by any other route — a session's `mv`, a person clearing a root by hand — is bytes with no
+# provenance, and on 2026-10-29 ALERT.md had to say exactly that. The directory on this box
+# is in that state right now: `~/lloyd-data/quarantine/tree-strays/` holds
+# `2026-10-29-kg-sqlite/` with an 81,920-byte `kg.sqlite`, a 32,768-byte `-shm` and a 0-byte
+# `-wal`, while `find ~/lloyd-data/quarantine -maxdepth 3 -name log.jsonl` answers nothing.
+#
+# The mover did not make that payload and its own shapes are the proof: a destination of
+# `{%Y%m%dT%H%M%SZ}-{name}`, FLAT, of exactly 0 bytes. So the reconciliation has to name a
+# DIRECTORY payload, and name it as ONE entry — the one shape `top_level_regular_files`,
+# this module's other enumeration, filters out by design ("No name filter of any kind", but
+# regular files only, #3210). Report-only throughout, inheriting #3109 for the data root and
+# #2110 for the checkout half: the guardian cannot know whether a payload someone set aside
+# by hand is theirs, so nothing in these nodes may move, rename or remove anything.
+
+
+def _quarantine_of(tmp_path, *, create: bool = True):
+    """(data root, quarantine dir) for a checkout carrying the shipped layout module.
+
+    The address comes from `policy.quarantine_dir`, the same route the guardian's hourly
+    leg uses, so these nodes fail if the reconciliation is ever pointed at a directory the
+    mover does not write to — two quarantine directories, one of them checked, is the
+    failure #2110 names for the candidate roots.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    qdir = Path(policy.quarantine_dir(repo=str(repo), data_root=str(data)))
+    assert qdir.parts[-2:] == ("quarantine", "tree-strays"), (
+        f"the fixture's address must be the mover's own: {qdir}")
+    if create:
+        qdir.mkdir(parents=True, exist_ok=True)
+    return data, qdir
+
+
+def test_a_payload_standing_in_the_quarantine_with_no_ledger_is_named_whole(tmp_path):
+    """Clause 1: no ledger accounts for nothing, and a directory is one payload.
+
+    The fixture is the live one, transcribed: a stamped DIRECTORY holding a store and its
+    two sidecars, plus a flat 0-byte file of the shape the mover does make, and no
+    `log.jsonl`. Both are named; the sidecars are not named alongside their container,
+    because three lines about one payload is three lines that contradict each other the
+    hour someone deletes the directory, and the container is the path a person acts on.
+
+    Read-only is measured, not asserted in prose: every payload file keeps its size, inode,
+    mtime and mode, and the directory's own listing is what it was — including no ledger,
+    since a check that "fixed" the missing file by creating one would be this leg writing
+    the data root, which is the thing the item's own contract forbids.
+    """
+    data, qdir = _quarantine_of(tmp_path)
+    live = qdir / "2026-10-29-kg-sqlite"
+    _store(live / "kg.sqlite", 81_920)
+    _store(live / "kg.sqlite-shm", 32_768)
+    _store(live / "kg.sqlite-wal", 0)
+    flat = qdir / "20261029T183102Z-usage.sqlite"
+    flat.write_bytes(b"")
+    before = {p: _fingerprint(p) for p in sorted(live.iterdir())}
+    listing = sorted(os.listdir(qdir))
+
+    found = datawatch.quarantine_ledger_gaps(str(qdir))
+
+    assert [g["name"] for g in found] == ["2026-10-29-kg-sqlite", flat.name], (
+        f"with no ledger, every standing entry is unaccounted for: {found}")
+    assert found[0]["directory"] is True, (
+        "the mover only ever makes a flat file, so the word 'directory' is what tells the "
+        f"reader something other than the guardian put this here: {found[0]}")
+    assert found[1]["directory"] is False, f"a flat payload is not a directory: {found[1]}"
+    assert Path(found[0]["path"]) == live, (
+        "the report must carry the path a person looks in, not the bare name: "
+        f"{found[0]['path']}")
+    assert sorted(os.listdir(qdir)) == listing, (
+        "naming a payload must not create, move or remove anything in the quarantine")
+    for path, was in before.items():
+        assert _fingerprint(path) == was, f"{path} changed under a read-only check"
+    assert not (qdir / "log.jsonl").exists(), (
+        "the check that reports a missing ledger must not answer by writing one")
+
+
+def test_a_ledger_with_no_rows_in_it_accounts_for_no_payload(tmp_path):
+    """Clause 1's other half: an empty ledger and no ledger say the same true thing.
+
+    Worth a node because the two look different on disk and the difference is where a
+    lenient reader would go wrong: `FileNotFoundError` is excused (a quarantine that has
+    never seen a move has no file, which is not a failure), while an existing file with no
+    destination rows is a ledger that has looked at nothing — and answering "everything is
+    accounted for" to that would clear the exact payload this item is about.
+    """
+    data, qdir = _quarantine_of(tmp_path)
+    (qdir / "2026-11-01-sessions").mkdir()
+    (qdir / "stray.json").write_text("{}\n", encoding="utf-8")
+
+    empty = qdir / "log.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert [g["name"] for g in datawatch.quarantine_ledger_gaps(str(qdir))] == [
+        "2026-11-01-sessions", "stray.json"], (
+        "a ledger of zero rows accounts for zero payloads")
+
+    # The writer terminates every row with `\n`, so a healthy ledger's last read line is
+    # empty. Treating that as corruption would make the check raise on its own happy path.
+    empty.write_text("\n", encoding="utf-8")
+    assert len(datawatch.quarantine_ledger_gaps(str(qdir))) == 2, (
+        "the trailing newline of a well-formed ledger is not a corrupt line")
+
+    empty.write_text('{"destination": "' + str(qdir / "stray.json") + '"}\n',
+                     encoding="utf-8")
+    assert [g["name"] for g in datawatch.quarantine_ledger_gaps(str(qdir))] == [
+        "2026-11-01-sessions"], (
+        "one real destination row clears exactly the payload it names")
+
+
+def test_what_the_stray_leg_moved_and_journalled_is_not_reported(tmp_path):
+    """Clause 2: the reconciliation cannot fire on the mover's own work.
+
+    Both the payload and the ledger row are PRODUCED here by `quarantine_inert` rather than
+    typed in, so the node breaks the day the two disagree about the destination's spelling
+    or the row's field names — which is the only way this pair can silently drift apart,
+    since nothing else in the tree reads the ledger. A check that alerted on every payload
+    the guardian itself moved would be noise within an hour, and noise is how a report-only
+    leg gets switched off.
+
+    A quarantine directory that does not exist is the other silent case, and it is silent
+    by REFUSAL rather than by answering empty: this fixture never creates one, because the
+    mover creates its own lazily, and `quarantine_ledger_gaps` raises for it the way
+    `data_root_shadows` raises for a missing root. An empty list is the answer to "every
+    payload here has a row", and a directory that was never created has not been
+    reconciled — so the caller that catches the raise makes no statement, which is what a
+    machine that has never moved anything should hear back.
+    """
+    tree = _shipped_layout_repo(tmp_path)
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    (data / "workers.db").write_bytes(b"SQLite format 3\x00" + b"x" * 100)
+    stray = tree / "workers.db"
+    stray.write_bytes(b"")
+    os.utime(stray, (OLD, OLD))
+    never = Path(policy.quarantine_dir(repo=str(tree), data_root=str(data)))
+    assert not never.exists()
+    try:
+        datawatch.quarantine_ledger_gaps(str(never))
+        raise AssertionError("a quarantine directory that does not exist was reconciled")
+    except FileNotFoundError:
+        pass
+
+    moved = datawatch.quarantine_inert(str(tree), ["workers.db"], str(data), NOW)
+    assert len(moved) == 1, "the fixture must produce a real moved payload and a real row"
+    qdir = Path(moved[0][1]).parent
+    assert (qdir / "log.jsonl").is_file(), "the mover writes its own ledger"
+    assert datawatch.quarantine_ledger_gaps(str(qdir)) == [], (
+        "the guardian must not be alerted about a payload the guardian moved")
+
+
+def test_a_ledger_that_names_files_inside_a_directory_payload_accounts_for_it(tmp_path):
+    """Clause 2 read against a directory: the FIRST SEGMENT under the quarantine matches.
+
+    `quarantine_inert`'s destinations are flat, so for its own moves a basename and a
+    first-segment are the same string and this node would pass either way. It exists for
+    the payload the live box actually has: someone sets a store aside as a directory, and
+    a ledger row per file inside it. Matching basenames would report `2026-10-29-kg-sqlite`
+    as unaccounted for while its ledger listed all three of its files — a false alarm about
+    a payload that is fully documented, which is precisely the kind that gets the leg
+    muted. A row whose destination is somewhere OUTSIDE the quarantine still accounts for
+    nothing here, so the negative control is in the same node.
+    """
+    data, qdir = _quarantine_of(tmp_path)
+    payload = qdir / "hand-set-aside"
+    _store(payload / "kg.sqlite", 4096)
+
+    def _row(dest: Path) -> str:
+        import json as _json
+        return _json.dumps({"source": "/somewhere/kg.sqlite",
+                            "destination": str(dest), "size": 4096}) + "\n"
+
+    (qdir / "log.jsonl").write_text(_row(payload / "kg.sqlite"), encoding="utf-8")
+    assert datawatch.quarantine_ledger_gaps(str(qdir)) == [], (
+        "a ledger that names a payload's inner file documents that payload")
+
+    (qdir / "log.jsonl").write_text(_row(qdir / "a-different-payload"), encoding="utf-8")
+    assert [g["name"] for g in datawatch.quarantine_ledger_gaps(str(qdir))] == [
+        "hand-set-aside"], (
+        "a row about another payload cannot clear this one")
+
+    (qdir / "log.jsonl").write_text(
+        _row(Path("/home/alansrobotlab/lloyd-data/elsewhere/kg.sqlite")), encoding="utf-8")
+    assert [g["name"] for g in datawatch.quarantine_ledger_gaps(str(qdir))] == [
+        "hand-set-aside"], (
+        "a destination outside the quarantine accounts for nothing standing inside it")
+
+
+def test_an_unaccounted_payload_is_reported_and_the_tick_decides_no_differently(
+        tmp_path, monkeypatch):
+    """Clause 3: the report is the whole action, proved by differencing two ticks.
+
+    The same guardian, the same clock, the same data root, run twice — once over an empty
+    quarantine, once over one holding a payload its ledger cannot account for — with every
+    alert and every retraction recorded. The difference between the two runs must be one
+    `alert` and nothing else: one extra heading, `needs_human=True` on it, `resolve` called
+    identically the other way, the method still returning `None`, and the arm flag
+    untouched. That is what "reaches the same arm/liveness decision" means when it is
+    measured rather than asserted, and a second branch in the tick that suppressed an alert
+    or armed the mover would land here.
+
+    The mover is patched to a stub that fails the node if it is reached: `stray_in_tree`
+    already returns nothing so the stray leg cannot fire, and the stub is what proves it
+    for the payload under test rather than for the fixture's shape. The clean baseline is
+    measured on the tick AFTER the first, because the first pass records a name set and
+    compares it against nothing — a retraction it is not entitled to make — so comparing a
+    first pass with a comparing pass would difference the two legs' arming rules and not
+    the presence of a payload.
+    """
+    import types
+
+    import guardian as gmod
+    import notify
+
+    def _move_never(*a, **k):
+        raise AssertionError("a quarantine payload with no ledger row must not be moved, "
+                             "re-moved or tidied by the check that reports it")
+
+    data, qdir = _quarantine_of(tmp_path)
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(gmod.policy, "REPO", str(repo))
+    monkeypatch.setattr(gmod.datawatch, "DATA_ROOT", str(data))
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", str(tmp_path / "gstate"))
+    monkeypatch.setattr(gmod.datawatch, "stray_in_tree", lambda _tree: [])
+    monkeypatch.setattr(gmod.datawatch, "quarantine_inert", _move_never)
+
+    def _run_tick():
+        sent: list[tuple] = []
+        sealed: list[str] = []
+        vault = tmp_path / "obsidian"
+        (vault / "memory").mkdir(parents=True, exist_ok=True)
+        n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                            vault_root=str(vault), backend_url="http://127.0.0.1:1")
+        n.alert = lambda *a, **k: sent.append((a, k))
+        n.resolve = lambda title, *a, **k: sealed.append(title)
+        n.announce = lambda *a, **k: {}
+        g = gmod.Guardian.__new__(gmod.Guardian)
+        g.notifier = n
+        g.data = types.SimpleNamespace(armed=True)
+        g._alert_seen = {}
+        g.last_alert = ""
+        assert g._runtime_data_incident(NOW) is None, (
+            "this check reports through alerts; a return value would be a decision")
+        assert g.data.armed is True, "the tick that found a payload also un-armed itself"
+        return sent, sealed
+
+    # TWO clean ticks, deliberately: the first records the arrivals baseline and compares
+    # it against nothing, so only the second is in the same measuring-against-a-baseline
+    # state the dirty tick will be in. Differencing a first pass against a comparing pass
+    # would difference the two arrivals legs' arming rules, not the presence of a payload.
+    _run_tick()
+    clean_sent, clean_sealed = _run_tick()
+    assert clean_sent == [], (
+        f"an empty quarantine is not an incident: {clean_sent}")
+    assert gmod.RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE in clean_sealed, (
+        "the clean tick has to REACH the ledger check and seal it, or the comparison below "
+        f"is describing a leg that never ran: {clean_sealed}")
+
+    payload = qdir / "2026-10-29-kg-sqlite"
+    _store(payload / "kg.sqlite", 81_920)
+    _store(payload / "kg.sqlite-wal", 0)
+    _store(payload / "kg.sqlite-shm", 32_768)
+    before = {p: _fingerprint(p) for p in sorted(payload.iterdir())}
+    listing = sorted(os.listdir(qdir))
+
+    gap_sent, gap_sealed = _run_tick()
+
+    assert len(gap_sent) == 1, (
+        f"one unaccounted payload, one alert, no other statement: {gap_sent}")
+    (level, title, body), kwargs = gap_sent[0]
+    assert title == gmod.RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE, (
+        f"the finding needs its own heading, not a shared one (#3124): {title!r}")
+    assert kwargs["needs_human"] is True, (
+        f"a quarantined payload is a person's file to explain: {kwargs}")
+    assert kwargs.get("quarantine") is None and kwargs.get("staged") is None, (
+        f"the alert must offer the guardian nothing to do: {sorted(kwargs)}")
+    assert str(payload) in body, (
+        f"the body names the payload by path, the thing the bare name cannot say: {body}")
+    assert "directory" in body, (
+        f"a directory payload is labelled as one, because the mover never makes one: {body}")
+    # The two ticks' whole difference, enumerated: the ledger check's retraction on the
+    # clean run is its alert on the dirty one, and no other section of this hourly check —
+    # shadow, arrivals, departures, strays — says anything differently. Read this way
+    # (symmetric difference, not "the dirty run also sealed X") because a leg that armed
+    # differently, moved something, or suppressed a retraction elsewhere would show up as a
+    # second element on one side, which is exactly what clause 3 forbids.
+    assert set(clean_sealed) ^ set(gap_sealed) == {
+        gmod.RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE}, (
+        f"the two ticks differ ONLY by the ledger check's own line — its retraction on the "
+        f"clean run becomes its alert on the dirty one, and the shadow, arrivals and "
+        f"departure statements are identical: clean={clean_sealed} dirty={gap_sealed}")
+    assert gmod.RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE not in gap_sealed, (
+        "a tick that alerts about a payload must not seal the section it alerted into")
+
+    for path, was in before.items():
+        assert _fingerprint(path) == was, f"{path} changed under a report-only tick"
+    assert sorted(os.listdir(qdir)) == listing, (
+        "the tick created nothing in the quarantine either, including no ledger")
+
+
+# ── #3584 clause 4: the arrivals journal records departures as well as arrivals ──
+#
+# The state file `data-root-arrivals.json` persisted `{root, seen, updated}` and nothing
+# else, so a name that left the data root's top level was silently dropped on the next
+# write and no later reader could say which tick last saw it — the same event as the
+# unaccounted quarantine payload above, seen from the side that still has the clock.
+#
+# The addition must not disturb the key that the leg's whole noise rule rests on. `seen` is
+# MONOTONIC on purpose: `usage.db-wal` is removed at a checkpoint and recreated by the next
+# writer, and a snapshot-per-pass would report that every hour forever. So a departure goes
+# INTO `departed` and the name STAYS in `seen`. The only route that removes a name from
+# `seen` remains #3422's prune, because a prune is a person saying the name is gone.
+
+
+def test_a_name_that_left_the_root_is_journalled_once_and_stays_counted_as_seen(tmp_path):
+    """Clause 4: `departed` beside `root`/`seen`/`updated`, reported on one tick only.
+
+    Three passes over the same root, the second of which has one name missing. The finding
+    is asserted three ways: in the return value (what the tick alerts on), in the persisted
+    file (what a person reads afterwards), and in the third pass's silence (the once-only
+    rule `new_top_level_names` states for arrivals, read on the departure side — a
+    departure that re-alerts hourly is an alert that gets switched off).
+
+    And `seen` is asserted to STILL hold the departed name. That is the clause's sharp
+    edge: the intuitive implementation removes it, and the hourly WAL checkpoint would then
+    become a recurring alert about a file nobody deleted.
+    """
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    state = tmp_path / "gstate"
+    first = {"sessions": OLD, "workers.db": OLD, "scratch-notes.txt": OLD}
+    assert datawatch.write_arrivals_baseline(state, first, NOW, str(data)) == [], (
+        "the first pass has no previous scan, so it can claim no departure")
+
+    second = {"sessions": OLD, "workers.db": OLD}
+    newly = datawatch.write_arrivals_baseline(state, second, NOW + 3600, str(data))
+    assert [f["name"] for f in newly] == ["scratch-notes.txt"], (
+        f"the name missing from this scan is the departure: {newly}")
+    assert newly[0]["last_seen"] == OLD, (
+        f"the finding must carry when the leg last measured the name: {newly[0]}")
+    assert "age_days" in newly[0], (
+        f"and how long ago that was, measured on the pass's own clock: {newly[0]}")
+
+    persisted = json.loads((state / "data-root-arrivals.json").read_text(encoding="utf-8"))
+    assert set(persisted) == {"root", "seen", "updated", "departed"}, (
+        f"the envelope gains one key and keeps the other three: {sorted(persisted)}")
+    assert persisted["departed"] == ["scratch-notes.txt"], persisted["departed"]
+    assert "scratch-notes.txt" in persisted["seen"], (
+        "`seen` is monotonic: a departure is journalled, the arrival history is not "
+        f"edited — {sorted(persisted['seen'])}")
+    assert datawatch.read_arrivals_departed(str(state), str(data)) == ["scratch-notes.txt"]
+
+    again = datawatch.write_arrivals_baseline(state, second, NOW + 7200, str(data))
+    assert again == [], (
+        f"a recorded departure is not re-reported on a later tick: {again}")
+    assert json.loads((state / "data-root-arrivals.json").read_text(
+        encoding="utf-8"))["departed"] == ["scratch-notes.txt"], (
+        "and the journal keeps the record even though this pass said nothing")
+
+    report = datawatch.departures_alert(newly)
+    assert report["needs_human"] is True, (
+        f"a name that left a person's root is their decision, like an arrival: {report}")
+    assert "scratch-notes.txt" in report["reason"], report["reason"]
+    assert datawatch.departures_alert([]) is None, "no departure, no statement"
+
+
+def test_a_sidecar_that_vanished_while_its_store_stands_is_not_called_a_departure(tmp_path):
+    """The mute the arrivals leg already has, read against a disappearance.
+
+    `_sidecar_of_store_in_this_scan` exists because a `-wal` that is checkpointed away and
+    recreated by the next writer is not an event: asked about ARRIVALS it suppresses an
+    alert for every sidecar. Asked about departures it does the same job for the same
+    reason, and the pairing may only be visible in the OLD scan — the new one is precisely
+    where the sidecar is absent — so the question is put to `previous ∪ files`.
+
+    The other half of the node is why the mute cannot be naive: when a store and its sidecar
+    BOTH go missing the store's own name must still be reported, with the sidecar folded
+    into it rather than said twice. And a sidecar whose base name the leg never saw is an
+    unexplained name going missing, which is reported. Three journal directories, one per
+    claim, so no node depends on another's leftovers.
+    """
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+
+    checkpoint = tmp_path / "s1"
+    datawatch.write_arrivals_baseline(checkpoint, {"usage.db": OLD, "usage.db-wal": OLD,
+                                                   "kg.sqlite": OLD}, NOW, str(data))
+    assert datawatch.write_arrivals_baseline(
+        checkpoint, {"usage.db": OLD, "kg.sqlite": OLD}, NOW + 3600, str(data)) == [], (
+        "a WAL checkpointed away while its store stands is no one's deletion, and the "
+        "pairing that says so exists only in the previous scan")
+
+    deleted = tmp_path / "s2"
+    datawatch.write_arrivals_baseline(deleted, {"usage.db": OLD, "usage.db-wal": OLD},
+                                      NOW, str(data))
+    names = [f["name"] for f in datawatch.write_arrivals_baseline(
+        deleted, {"kg.sqlite": OLD}, NOW + 3600, str(data))]
+    assert names == ["usage.db"], (
+        f"the store is the event and its sidecar is that event said twice: {names}")
+
+    orphan = tmp_path / "s3"
+    datawatch.write_arrivals_baseline(orphan, {"research.db-wal": OLD}, NOW, str(data))
+    names = [f["name"] for f in datawatch.write_arrivals_baseline(
+        orphan, {"sessions": OLD}, NOW + 3600, str(data))]
+    assert names == ["research.db-wal"], (
+        "a sidecar whose base this leg never saw has no explanation available, so its "
+        f"disappearance is the news: {names}")
