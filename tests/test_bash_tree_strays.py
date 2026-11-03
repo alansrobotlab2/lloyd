@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -2188,3 +2189,132 @@ def test_the_module_docstring_splits_prevention_between_the_two_halves():
     check = flat(_bash_tree_strays._empty_db_check)
     assert "read-only open per NEW DB-suffixed file" in check, (
         "_empty_db_check must price the measurement it now pays")
+
+
+# ── the byte-bearing leg decides by ROWS, so a `meta` row is content too (#3744) ──
+#
+# This leg does not own an emptiness rule: `_schema_only_tables` asks the guardian's
+# `_content_rows`, exec'd out of `agent-services/guardian/datawatch.py`, and stays silent
+# when that probe says the file has rows. So the exec of a file across a directory boundary
+# IS the process seam here, and the nodes below are the test across it: they lay the shapes
+# with a Bash call, as a real job does, and read what the leg said. A row rule changed on the
+# guardian's side of that seam has to arrive here, and nothing in this file had to change for
+# it to — which is what these nodes are actually proving.
+
+#: Lay a store whose ONLY table is the shipped `meta` (`key TEXT PRIMARY KEY, value TEXT`,
+#: `app/kg_store.py:84-87`), the way `KGStore(path)` + `meta_set` leaves one: the DDL is the
+#: shipped text, not a paraphrase, because the column names are the subject. A second argv
+#: argument names a key OUTSIDE the exempt set (`schema_version`, `last_reindex`,
+#: `migrated_at`); with no second argument the store holds only the provisioning row.
+LAY_META = """
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA page_size=4096')
+c.execute('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)')
+c.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+if len(sys.argv) > 2:
+    c.executemany('INSERT INTO meta VALUES (?, ?)',
+                  [(('note_%d' % i), 'x' * 60) for i in range(400)])
+c.commit(); c.close()
+"""
+
+#: Lay a byte-bearing store that has NO tables at all: pages from a table that was dropped.
+#: This is the shape `_schema_only_tables` must still name with 0 tables — emptiness is not
+#: the same claim as "no data tables", and the exemption that changed for #3744 is about rows.
+LAY_DROPPED = """
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA page_size=4096')
+c.execute('CREATE TABLE gone (id INTEGER PRIMARY KEY, body TEXT)')
+c.executemany('INSERT INTO gone (body) VALUES (?)',
+              [(('x' * 60) + str(i),) for i in range(930)])
+c.execute('DROP TABLE gone')
+c.commit(); c.close()
+"""
+
+
+async def test_a_byte_bearing_store_whose_content_is_a_meta_row_is_left_unnamed(
+        scratch, monkeypatch):
+    """Clause 4: the call that laid it says nothing about a store holding a `meta` row.
+
+    The store is the one `KGStore` plus one `meta_set` call leaves: `meta` as the only table,
+    400 rows of 60-byte values, every key outside the exempt set, and no data table anywhere.
+    Before #3744 the leg measured it as schema-only, so the note reached the session reading
+    "0 rows in 0 tables" over 400 rows it had just written, and told it that removing the file
+    was its own call.
+
+    The silence here is not this file's rule: `_schema_only_tables` asks the guardian's
+    `_content_rows`, which it execs out of `agent-services/guardian/datawatch.py`, and this
+    node is what proves the row rule crossed that seam. If the leg ever grew its own copy of
+    the emptiness test, the copy would keep answering 0 rows here and this node would fail.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay_meta.py").write_text(LAY_META)
+
+    text = await _run(f"cd {cwd} && python3 lay_meta.py kg.sqlite content && echo laid")
+    assert "laid" in text
+    path = cwd / "kg.sqlite"
+    assert path.stat().st_size > 32_768, (
+        f"the fixture is {path.stat().st_size} bytes, so the 0-byte predicate could have "
+        "handled it and this node would not be about the row rule")
+    assert _bash_tree_strays._schema_only_tables(str(path), path.stat().st_size) is None, (
+        "the leg must measure this store as populated, not as zero tables: None is the "
+        "leave-alone answer and 0 is the accusation")
+    assert EMPTY_DB_MARK not in text, "the call that laid it is not told it holds nothing"
+    assert [r for r in _rows(journal) if r["kind"] == "empty-db-created"] == [], (
+        "and nothing is journalled: an origin row for a populated store is an invitation to "
+        "delete it")
+
+
+async def test_a_byte_bearing_store_holding_only_its_provisioning_row_is_still_named(
+        scratch, monkeypatch):
+    """Clause 4 again: #3481's shape survives the row rule, named with 0 tables.
+
+    Same laying call, no second argument, so the only row in the only table is the
+    `('schema_version', '1')` that provisioning writes. That row is exempt by KEY, the store
+    is empty to a reader, and the session that made it is told on the call that made it —
+    which is the half of this item that must not move, and the half a fix written as
+    "`meta` is exempt unless it has a row that is not `schema_version`" gets right, and one
+    written as "`meta` rows are content" gets wrong in the direction that hides a stray.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay_meta.py").write_text(LAY_META)
+
+    text = await _run(f"cd {cwd} && python3 lay_meta.py kg.sqlite && echo laid")
+    path = cwd / "kg.sqlite"
+    assert path.stat().st_size > 4096, "byte-bearing, which is what the leg exists for"
+    assert _bash_tree_strays._schema_only_tables(str(path), path.stat().st_size) == 0, (
+        "zero data tables is the measured answer for the provisioning shape, not a decline")
+    assert EMPTY_DB_MARK in text and "kg.sqlite" in text, (
+        "the call that laid the empty store is told, and un-naming it is the regression this "
+        "node exists to catch")
+    assert [r["paths"] for r in _rows(journal)
+            if r["kind"] == "empty-db-created"] == [["kg.sqlite"]], _rows(journal)
+
+
+async def test_a_byte_bearing_store_with_no_tables_at_all_is_still_named_with_zero(
+        scratch, monkeypatch):
+    """Clause 4's other edge: a file with pages and NO table is named with 0 tables.
+
+    A 930-row table inserted and dropped leaves pages, a valid header and an empty
+    `sqlite_master`. The row rule is about which rows count, so it must not turn into "a file
+    is only reportable if it has a data table": a torn header and a store whose schema was
+    dropped are exactly the byte-bearing files with nothing to read, and the count this leg
+    reports for them is 0 — said plainly, not skipped.
+    """
+    (_, journal), _, cwd = scratch
+    _as(monkeypatch, WORKER)
+    (cwd / "lay_gone.py").write_text(LAY_DROPPED)
+
+    text = await _run(f"cd {cwd} && python3 lay_gone.py kg.sqlite && echo laid")
+    path = cwd / "kg.sqlite"
+    assert path.stat().st_size > 4096, "the dropped table left its pages behind"
+    with sqlite3.connect(str(path)) as con:
+        assert con.execute("select count(*) from sqlite_master").fetchone()[0] == 0, (
+            "the fixture kept a table, so this is no longer the zero-table shape")
+    assert _bash_tree_strays._schema_only_tables(str(path), path.stat().st_size) == 0
+    assert EMPTY_DB_MARK in text, (
+        "a byte-bearing file with no tables is emptiness, and emptiness is reportable")
+    assert [r for r in _rows(journal) if r["kind"] == "empty-db-created"], _rows(journal)

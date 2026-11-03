@@ -694,7 +694,79 @@ SHADOW_MAX_ENTRIES = 1_000_000
 #: data tables), which is the shape this check was written for and did not see. Only
 #: `meta` is here, on purpose: a name is decided by its copies under this root, so a store
 #: that carries a table no sibling has is a different store, and its content counts.
+#:
+#: WHAT THAT EXEMPTS IS ROWS, NOT A TABLE (#3744). Dropping the name from the count also
+#: dropped EVERY row it holds, which is broader than the paragraph above: `KGStore.meta_set`
+#: is public API (`app/kg_store.py:341-344`), so one call to it puts real content in the one
+#: table this check skipped wholesale. Measured at 2026-11-03 on a 53,248-byte store whose
+#: only table was `meta` with 400 rows: `_content_rows` answered `(True, 0, 0)` and the
+#: hourly finding read `data_rows: 0` beside the store it shadowed — an invitation to delete
+#: 400 rows. So a row of a bookkeeping table is exempt only if its key is in
+#: `SHADOW_BOOKKEEPING_KEYS`; any other row is content, and the name buys nothing.
 SHADOW_BOOKKEEPING_TABLES = frozenset({"meta"})
+
+#: The keys whose ROWS are the exempt ones — the shipped spelling is `meta(key, value)`
+#: (`app/kg_store.py:84-87`). `schema_version` is what provisioning writes; `last_reindex` is
+#: written by `KGStore.reindex(full=True)` (`app/kg_store.py:1308-1310`) and `migrated_at` by
+#: `scripts/memory/kg_migrate_to_sqlite.py:166`. Those two are why this is a SET and not one
+#: key: a store whose data tables are all empty but whose `meta` additionally carries
+#: `last_reindex` is still EMPTY TO A READER, and exempting only `schema_version` would call
+#: it populated and stop naming it — #3481's hazard handed back to every store a maintenance
+#: job has ever touched. Any key outside this set, including one `meta_set` invents later,
+#: counts as content ON PURPOSE: naming a populated store too often costs one finding, an
+#: empty-looking verdict over somebody's data costs the data. One list, read by both
+#: consumers — the hourly probe below and the Bash-call strays leg, which exec-loads this
+#: file rather than reimplementing the rule.
+SHADOW_BOOKKEEPING_KEYS = frozenset({"schema_version", "last_reindex", "migrated_at"})
+
+#: The column a bookkeeping table's key lives in — `meta(key, value)`
+#: (`app/kg_store.py:84-87`), spelled as the shipped schema spells it, never guessed: a query
+#: naming a column the store does not have raises `sqlite3.OperationalError`, and this
+#: module's `except sqlite3.Error` reports that as a DECLINE, which both consumers read as
+#: silence — the hourly loop skips the candidate and the strays leg says nothing about the
+#: call that laid it. A check that fails that way is invisible. The column is therefore
+#: checked against the table before it is named in a query, and a table without it is charged
+#: as content instead of raising.
+_BOOKKEEPING_KEY_COLUMN = "key"
+
+
+def _bookkeeping_holds_content(con: "sqlite3.Connection", table: str) -> int:
+    """1 when a bookkeeping table holds a row that is not exempt bookkeeping, else 0.
+
+    Answers inside the caller's already-bracketed read-only connection, so classifying a row
+    costs no second open of the candidate (#3744's clause on one read-only open per file). It
+    answers 1 or 0 rather than a tally, because the only reading anyone takes of this number
+    is zero-or-not: both consumers act on populated by SILENCING themselves, and a finding is
+    emitted only at zero rows.
+
+    Only `SHADOW_BOOKKEEPING_KEYS` are exempt. Everything that cannot be PROVED bookkeeping is
+    charged as content: a key outside the set, a row whose key is NULL (legal in SQLite on a
+    ROWID-table primary key, and `key NOT IN (...)` answers UNKNOWN for it, which would drop
+    it out of a naive count), and a table of an exempt NAME that is not the shipped shape — a
+    vendored tool's `meta(k, v)` — whose rows this probe cannot read at all. The direction that
+    cannot hand a person a populated file to delete is the only one this check may pick.
+    """
+    key_column = _BOOKKEEPING_KEY_COLUMN
+    columns = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    if key_column not in columns:
+        # Not the shipped `meta(key, value)`, so its rows cannot be read as keys and cannot be
+        # proved bookkeeping. Charged as content rather than raised over: a query naming a
+        # column that is not there raises `sqlite3.OperationalError`, which the caller's
+        # `except sqlite3.Error` turns into a DECLINE — and a declined candidate is skipped by
+        # the hourly loop and answered `None` by the strays leg, so the whole check goes quiet
+        # while still looking green. That is the failure mode this function exists to avoid.
+        return 1
+    # Keys are bound, never interpolated, and the set is pinned non-empty by a test —
+    # `NOT IN ()` is a syntax error, and a syntax error here is a DECLINE, which both
+    # consumers would read as silence.
+    placeholders = ",".join("?" * len(SHADOW_BOOKKEEPING_KEYS))
+    row = con.execute(
+        f"SELECT EXISTS (SELECT 1 FROM {table} "
+        f"WHERE {key_column} IS NULL OR {key_column} NOT IN ({placeholders}))",
+        sorted(SHADOW_BOOKKEEPING_KEYS),
+    ).fetchone()
+    return int(bool(row and row[0]))
+
 
 #: `struct flock` for the `F_GETLK` query, in NATIVE alignment: `l_type` and `l_whence`
 #: (2 bytes each), padding to 8, then `l_start`, `l_len` (8 each) and `l_pid` at offset 24.
@@ -882,7 +954,8 @@ def _read_open(path: str) -> "str | None":
 def _content_rows(path: str, size: int) -> tuple[bool, int, int]:
     """Measure whether `path` holds content, opening it read-only: `(ok, tables, rows)`.
 
-    `rows` is whether any data table holds a row, reported as 0 or 1 — the only question
+    `rows` is whether any data table holds a row OR any bookkeeping table holds a row that is
+    not exempt bookkeeping, reported as 0 or 1 — the only question
     the caller asks is "is any of this readable content", and
     `select exists(select 1 from t)` costs one b-tree page read whatever the table holds,
     so a populated store is answered as cheaply as an empty one and the probe's cost does
@@ -894,6 +967,19 @@ def _content_rows(path: str, size: int) -> tuple[bool, int, int]:
     content. `size` is the caller's measured byte count and is not used: after #3481 bytes
     decide nothing here, and the parameter stays because every caller passes its own
     measurement and a probe that re-`stat`ed would be reading a different instant.
+
+    WHICH ROWS ARE EXEMPT. `SHADOW_BOOKKEEPING_TABLES` keeps `meta` out of the table count,
+    and that exemption is of ROWS, never of a table: a row of a bookkeeping table is exempt
+    only if its key is one of the three in `SHADOW_BOOKKEEPING_KEYS` — `schema_version`
+    (what provisioning writes), `last_reindex` and `migrated_at` (what the maintenance jobs
+    write) — and any other row of it is CONTENT (#3744 — `KGStore.meta_set` is public API, so
+    a job can put its own content in there and have it read as nothing). A row that cannot be
+    PROVED bookkeeping is charged as content on purpose, and `_bookkeeping_holds_content`
+    names the three shapes that lands: a key outside the set, a NULL key, and a table of an
+    exempt name that is not the shipped `key`/`value` shape. Guessing the other way would
+    report a populated store as empty, which is the one answer this probe is not allowed to
+    give: both consumers act on populated by saying nothing, so `rows=0` is the answer that
+    puts a file in front of a human with the word "empty" on it.
 
     Which single open is chosen, and why exactly one, is `_read_open`'s subject: the safe
     choice depends on whether a write-ahead log beside the file holds bytes, and both of
@@ -936,6 +1022,18 @@ def _content_rows(path: str, size: int) -> tuple[bool, int, int]:
                            % name.replace('"', '""')).fetchone()[0]:
                 rows = 1
                 break                  # populated: the answer, no further table asked
+        if not rows:
+            # Nothing the count includes holds a row, so ask the tables the count EXCLUDES —
+            # and ask about their ROWS, which is the whole of #3744. Exempting `meta` by name
+            # was always about one row (`SHADOW_BOOKKEEPING_KEYS`); a store whose only content
+            # is a key `KGStore.meta_set` wrote has content, and answering 0 rows here is what
+            # made the hourly check invite a person to delete it. Asked only after the data
+            # tables come back empty, so a populated store never pays for it.
+            for name in names:
+                if (name in SHADOW_BOOKKEEPING_TABLES
+                        and _bookkeeping_holds_content(con, name)):
+                    rows = 1
+                    break              # a key outside the exempt set: content, and answered
         return True, len(data_tables), rows
     except sqlite3.Error:
         return False, 0, 0

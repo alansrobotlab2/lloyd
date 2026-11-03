@@ -40,6 +40,7 @@ beside them.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import os
 import re
@@ -665,7 +666,7 @@ def _kg_schema() -> str:
 
 
 def _provisioned(path: Path, *, facts_rows: int = 0, pad_rows: int = 0,
-                 now: float = OLD) -> Path:
+                 meta_rows: tuple = (), now: float = OLD) -> Path:
     """A REAL SQLite database carrying the shipped KG schema in WAL mode, aged to `now`.
 
     What `KGStore(path)` leaves behind: `_SCHEMA` executed, one `meta` row carrying
@@ -673,6 +674,11 @@ def _provisioned(path: Path, *, facts_rows: int = 0, pad_rows: int = 0,
     and deletes them again WITHOUT vacuuming, which is how a database ends up holding
     free pages: bytes, zero rows, and a fully valid file. `facts_rows` leaves its rows
     in place, which is the populated side of the pair.
+
+    `meta_rows` puts extra rows in `meta` on top of the provisioning one, which is what
+    `KGStore.meta_set` — public API at `app/kg_store.py:341-344` — does to a live store:
+    `reindex(full=True)` writes `last_reindex` and the migration script writes
+    `migrated_at`. #3744 is about which of those rows the shadow exemption may ignore.
 
     **WAL mode, because that is what the shipped store is.** `KGStore._open()` runs
     `PRAGMA journal_mode=WAL` (`app/kg_store.py:228-229`) on the connection it hands out, so
@@ -697,6 +703,7 @@ def _provisioned(path: Path, *, facts_rows: int = 0, pad_rows: int = 0,
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1') "
                     "ON CONFLICT(key) DO NOTHING")
+        con.executemany("INSERT INTO meta(key, value) VALUES (?, ?)", list(meta_rows))
         for i in range(facts_rows):
             con.execute("INSERT INTO facts_idx(entity, category, text_hash, file_path) "
                         "VALUES (?, 'state', ?, ?)",
@@ -717,6 +724,48 @@ def _provisioned(path: Path, *, facts_rows: int = 0, pad_rows: int = 0,
         assert not os.path.lexists(str(path) + side), (
             f"{path}{side} survived the close, so the fixture starts with residue and "
             "'the probe created nothing' below would not be this run's claim")
+    os.utime(path, (now, now))
+    return path
+
+
+def _meta_ddl() -> str:
+    """The shipped `meta` CREATE statement alone, read out of `app/kg_store.py:_SCHEMA`.
+
+    Read and not retyped, for `_kg_schema`'s own reason: the column names are the whole
+    subject here. `meta` is `(key TEXT PRIMARY KEY, value TEXT)`
+    (`app/kg_store.py:84-87`), and an exemption written against columns named `k`/`v`
+    raises `sqlite3.OperationalError` on the live schema — which `_content_rows`'s
+    `except sqlite3.Error` would report as a DECLINE for every candidate, silencing both
+    consumers at once while looking green. So this fixture can only ever be built on the
+    columns the shipped store really has.
+    """
+    for stmt in _kg_schema().split(";"):
+        if re.search(r"CREATE TABLE IF NOT EXISTS meta\b", stmt, re.I):
+            return stmt
+    raise AssertionError("app/kg_store.py's _SCHEMA no longer creates a `meta` table")
+
+
+def _meta_only_store(path: Path, meta_rows: tuple, *, now: float = OLD) -> Path:
+    """A byte-bearing SQLite store whose ONLY table is the shipped `meta` table.
+
+    The shape #3744 is about: 400 rows of 60-byte values land this file at 53,248 bytes on
+    2026-11-03 — measured, and the number the item quotes — while `sqlite_master` holds one
+    name and every name the shadow check counts as a data table is absent. A store like this
+    is what `KGStore(path)` becomes for a job that only ever calls `meta_set`: real content,
+    zero data tables, and the one shape the old table-name exemption answered as "empty".
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
+    try:
+        con.executescript(_meta_ddl() + ";")
+        con.execute("PRAGMA journal_mode=WAL")
+        con.executemany("INSERT INTO meta(key, value) VALUES (?, ?)", list(meta_rows))
+        con.commit()
+        assert con.execute("SELECT count(*) FROM meta").fetchone()[0] == len(meta_rows), (
+            "the fixture's rows did not land, so 'the probe saw content' below would be a "
+            "claim about a file that holds nothing")
+    finally:
+        con.close()
     os.utime(path, (now, now))
     return path
 
@@ -2033,3 +2082,232 @@ def test_a_sidecar_that_vanished_while_its_store_stands_is_not_called_a_departur
     assert names == ["research.db-wal"], (
         "a sidecar whose base this leg never saw has no explanation available, so its "
         f"disappearance is the news: {names}")
+
+
+# ── the exemption is a rule about ROWS, not about a table name (#3744) ──
+#
+# `SHADOW_BOOKKEEPING_TABLES` drops `meta` from the count by NAME, so every row of that table
+# is invisible to the content test — including rows nobody provisioned. `KGStore.meta_set` is
+# public API (`app/kg_store.py:341-344`), so a job that writes one puts real content in the
+# one table the check skips wholesale. Measured at this round's base: a 53,248-byte store
+# whose only table is `meta` with 400 rows answered `_content_rows -> (True, 0, 0)`,
+# `_schema_only_tables -> 0`, and `data_root_shadows` emitted a finding reading
+# `data_rows: 0` — an alert telling a person to delete 400 rows. The exemption's own comment
+# always described something narrower ("`_init_schema` writes ONE row at PROVISIONING"); these
+# nodes are that narrower rule.
+#: The bookkeeping keys `KGStore` itself writes into `meta` AFTER provisioning, read off the
+#: module's own constant rather than spelled out here: `reindex(full=True)` writes
+#: `last_reindex` (`app/kg_store.py:1308-1310`) and `scripts/memory/kg_migrate_to_sqlite.py:166`
+#: writes `migrated_at`, so a key added to that constant is exercised by the node below
+#: without anyone editing this file. Read LAZILY, inside the node, so that a constant going
+#: missing fails the one node that is about it instead of erroring the whole file at
+#: collection — this module has 40 other nodes whose subject is a different shape entirely.
+PROVISIONING_KEY = "schema_version"
+
+
+def _post_provisioning_bookkeeping_keys() -> list:
+    extra = sorted(set(datawatch.SHADOW_BOOKKEEPING_KEYS) - {PROVISIONING_KEY})
+    assert extra, (
+        "SHADOW_BOOKKEEPING_KEYS holds nothing but the provisioning key, which is the one-key "
+        "exemption #3744 exists to rule out — a store that has ever been reindexed would go "
+        "un-named again")
+    return extra
+
+
+def test_a_meta_only_store_whose_rows_are_not_bookkeeping_is_not_reported_empty(tmp_path):
+    """Clause 1: `meta` is not a synonym for empty, and 400 rows are not "no data".
+
+    The fixture is the item's own shape — 53,248 bytes, `meta` as the only table, 400 rows of
+    60-byte values, every key outside the bookkeeping set — and at this round's base both
+    consumers called it empty: `_content_rows` returned `(True, 0, 0)` and
+    `data_root_shadows` listed it as a shadow with `data_rows: 0`, beside the trusted
+    declared store, which is the sentence that invites a person to delete it. After the row
+    rule the probe says rows=1 and the alert says nothing at all about the file, because a
+    store with content in it is a store and not a shadow.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _meta_only_store(data / "kg.sqlite",
+                             tuple((f"note_{i}", "x" * 60) for i in range(400)))
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    size = os.path.getsize(stray)
+    assert size > 32_768, (
+        f"the fixture is {size} bytes, so this node is no longer about a byte-bearing store "
+        "the old 0-byte predicate could not see either")
+
+    assert datawatch._content_rows(str(stray), size) == (True, 0, 1), (
+        "a meta row outside the bookkeeping key set is content: rows must be 1 even though "
+        "the store holds no data table at all")
+    assert _shadows(data, repo) == [], (
+        "the hourly check must stop telling a person to delete a store holding 400 rows: "
+        f"{_shadows(data, repo)}")
+
+
+def test_a_meta_only_store_holding_only_the_provisioning_row_is_still_named(tmp_path):
+    """Clause 2: #3481's answer cannot regress — and this is where the naive fix dies.
+
+    `meta('schema_version', '1')` over NO data table at all is still empty to a reader: the
+    row is what `KGStore._init_schema` writes while provisioning, so it is in every store
+    that ever existed and never in any of them as content. The file is byte-bearing (three
+    pages) and must still be reported, with `data_tables: 0` said plainly.
+
+    This node is also the trap the item's own proposed SQL springs. `where k <>
+    'schema_version'` names columns the shipped schema does not have
+    (`app/kg_store.py:84-87` spells them `key`/`value`), so it raises
+    `sqlite3.OperationalError`; `_content_rows` swallows every `sqlite3.Error` into
+    `(False, 0, 0)`, `ok=False` is the DECLINE answer, and both consumers read a decline as
+    silence — `data_root_shadows` skips the candidate and `_schema_only_tables` returns None.
+    A fix that broke this way would print no warning anywhere and keep its green suite; the
+    missing finding here is the only place it shows.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _meta_only_store(data / "kg.sqlite", (("schema_version", "1"),))
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    size = os.path.getsize(stray)
+    assert size > 4096, (
+        f"the provisioning fixture is {size} bytes, so 'byte-bearing but empty' is no "
+        "longer a shape this node can test")
+
+    assert datawatch._content_rows(str(stray), size) == (True, 0, 0), (
+        "the exempt row must be exempt by KEY and not by table name: a store whose only "
+        "row is the provisioning one is empty, and a decline would be the silent answer")
+    found = _shadows(data, repo)
+    assert _reported(found) == [str(stray)], (
+        f"a byte-bearing store holding nothing but its provisioning row is still a shadow: "
+        f"{found}")
+    assert found[0]["data_rows"] == 0 and found[0]["data_tables"] == 0, found[0]
+
+
+def test_a_bookkeeping_key_beyond_the_provisioning_one_is_exempt_too(tmp_path):
+    """Clause 3: the exemption is the bookkeeping KEYS, and there is more than one of them.
+
+    `reindex(full=True)` writes `('last_reindex', now)` (`app/kg_store.py:1308-1310`) and
+    `scripts/memory/kg_migrate_to_sqlite.py:166` writes `('migrated_at', …)`, so any store the
+    fleet has ever reindexed or migrated carries two `meta` rows over empty data tables and is
+    STILL empty to a reader. An exemption keyed on `schema_version` alone would call that store
+    populated, and it would go un-named for good — #3481's hazard handed back to every store a
+    maintenance job has touched. The keys are looped from `datawatch.SHADOW_BOOKKEEPING_KEYS`,
+    which is what makes the ONE CONSTANT the thing under test rather than a key: a fourth
+    bookkeeping key added there is exercised here without editing this node, and a set reduced
+    to one key trips the assertion inside the helper.
+    """
+    repo = _shipped_layout_repo(tmp_path)
+    for key in _post_provisioning_bookkeeping_keys():
+        data = tmp_path / f"data-{key}"
+        stray = _provisioned(data / "kg.sqlite",
+                             meta_rows=((key, "2026-11-03T12:00:00Z"),))
+        _provisioned(data / SHIPPED_KG, facts_rows=40)
+        with sqlite3.connect(str(stray)) as con:
+            assert sorted(r[0] for r in con.execute("SELECT key FROM meta")) == sorted(
+                {PROVISIONING_KEY, key}), "the fixture's second meta row did not land"
+
+        assert datawatch._content_rows(str(stray),
+                                       os.path.getsize(stray)) == (True, len(KG_DATA_TABLES),
+                                                                   0), (
+            f"{key} is bookkeeping the constant names, so the store stays empty to the probe")
+        assert _reported(_shadows(data, repo)) == [str(stray)], (
+            f"a store whose only extra meta row is the bookkeeping key {key} is still a "
+            "shadow; un-naming it is #3481 all over again")
+
+
+def test_a_meta_row_with_no_key_at_all_is_content_not_an_exempt_row(tmp_path):
+    """The `not in (…)` arm answers only for keys that exist; a NULL key answers "unknown".
+
+    `meta.key` is a PRIMARY KEY, and in a SQLite ROWID table a NULL primary key is legal and
+    stored — so a row with no key is a row no key set contains, and SQL's three-valued logic
+    would let `key NOT IN ('a','b')` return UNKNOWN for it and drop it out of the count. That
+    is the direction that calls a populated store empty, which is the one error this check is
+    not allowed to make, so the NULL case is charged as content explicitly.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = _meta_only_store(data / "kg.sqlite",
+                             (("schema_version", "1"), (None, "written by hand")))
+    _provisioned(data / SHIPPED_KG, facts_rows=40)
+    with sqlite3.connect(str(stray)) as con:
+        assert con.execute("SELECT count(*) FROM meta WHERE key IS NULL").fetchone()[0] == 1, (
+            "the fixture's keyless row did not survive SQLite, so nothing below is pinned")
+
+    assert datawatch._content_rows(str(stray), os.path.getsize(stray)) == (True, 0, 1), (
+        "a row the probe cannot match to a bookkeeping key is content, not a free pass")
+    assert _shadows(data, repo) == [], (
+        "and the hourly check says nothing about a store whose meta holds a keyless row: "
+        f"{_shadows(data, repo)}")
+
+
+def test_a_bookkeeping_table_the_probe_cannot_classify_is_charged_as_content(tmp_path):
+    """A table called `meta` with other columns is NOT the shipped `meta`, and is not exempt.
+
+    The exemption means one specific table: `(key TEXT PRIMARY KEY, value TEXT)`
+    (`app/kg_store.py:84-87`). A store that carries a same-named table shaped differently —
+    a vendored tool's `meta(k, v)`, the columns the item's own draft SQL assumed — is a store
+    whose bookkeeping rows this probe cannot read, and the direction that cannot hand a human
+    a populated file to delete is "content". The cost is an unnamed stray that stays for the
+    next tick's owner; the alternative is an alert over somebody's data.
+    """
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    stray = data / "kg.sqlite"
+    stray.parent.mkdir(parents=True)
+    con = sqlite3.connect(str(stray))
+    try:
+        con.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+        con.executemany("INSERT INTO meta(k, v) VALUES (?, ?)",
+                        [(f"note_{i}", "x" * 60) for i in range(400)])
+        con.commit()
+    finally:
+        con.close()
+    os.utime(stray, (OLD, OLD))
+    size = os.path.getsize(stray)
+    assert size > 32_768, f"the fixture is {size} bytes, not a byte-bearing store"
+    assert _data_rows_of(str(stray)) == 0, (
+        "the fixture has no data table, which is the point: only the name `meta` is here")
+
+    assert datawatch._content_rows(str(stray), size) == (True, 0, 1), (
+        "an unrecognisable bookkeeping table is content: `ok=False` would decline the file "
+        "out of existence in both consumers, and silence is not how a populated store is "
+        "left alone")
+    assert _shadows(data, repo) == []
+
+
+def test_the_exempt_rows_are_named_by_key_in_the_prose_and_from_one_constant():
+    """Clause 5: the prose says which ROWS are exempt, and one constant is their only list.
+
+    Three pins, because the failure this clause guards against is prose drifting from code:
+
+    * `_content_rows`' docstring states the rule in the same terms the code applies — the
+      bookkeeping key set by name, and that a `meta_set` key outside it counts as content ON
+      PURPOSE rather than by oversight.
+    * The `#:` block above `SHADOW_BOOKKEEPING_KEYS` says the same about the rows, which is
+      where a reader standing at the constant looks first.
+    * No site restates a key as a literal. The constant is the list both consumers read, and
+      a `'schema_version'` written into the probe would be a second list that can drift from
+      the first — which is exactly how the table-name exemption came to disagree with its own
+      rationale.
+    """
+    assert datawatch.SHADOW_BOOKKEEPING_KEYS == frozenset(
+        {"schema_version", "last_reindex", "migrated_at"}), (
+        "the exempt key set changed; every node in this section reads its parameters off "
+        "this constant, and #3744's acceptance names exactly these three keys")
+
+    doc = datawatch._content_rows.__doc__ or ""
+    for needle in ("SHADOW_BOOKKEEPING_KEYS", "on purpose",
+                   "schema_version", "last_reindex", "migrated_at"):
+        assert needle in doc, (
+            f"`_content_rows`'s docstring no longer says `{needle}`, so the prose a reader "
+            "trusts about which rows are exempt is no longer the code's rule")
+
+    src = inspect.getsource(datawatch)
+    block = src[:src.index("SHADOW_BOOKKEEPING_KEYS =")][-1500:].lower()
+    assert "exempt" in block and "row" in block and "content" in block, (
+        "the comment above the bookkeeping key constant no longer states which ROWS are "
+        "exempt and what the rest is: "
+        + block[-400:])
+
+    probe = (inspect.getsource(datawatch._content_rows)
+             + inspect.getsource(datawatch._bookkeeping_holds_content))
+    for key in datawatch.SHADOW_BOOKKEEPING_KEYS:
+        assert f"'{key}'" not in probe, (
+            f"'{key}' is spelled as a literal inside the probe, so the probe and "
+            "SHADOW_BOOKKEEPING_KEYS are now two lists that can drift apart")
