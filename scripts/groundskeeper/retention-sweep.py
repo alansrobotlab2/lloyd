@@ -659,6 +659,25 @@ BENCH_SESSION_ARCHIVE_AGE_DAYS = 7
 RUN_RECORD_MAX_AGE_DAYS = 30
 ACTIVITY_LOG_MAX_ENTRIES = 200
 CANDIDATE_MAX_AGE_DAYS = 30
+#: Hard ceiling on how long the reopen hold in `sweep_candidates` may keep ONE snapshot
+#: on disk, measured on that file's own mtime like the horizon above it.
+#:
+#: 75 = `REOPEN_AFTER_DAYS` (60, owned by `scripts/skill_verdicts.py`) plus 15 days of
+#: slack, and the slack is the reason it is not exactly 60: the hold asks "is this key's
+#: date leg still in the future?", so a snapshot has to survive to the instant the leg
+#: comes due, and 15 days is the room for the nightly job to re-adjudicate it at that
+#: instant rather than one the sweep already emptied. It is NOT a second reopen horizon —
+#: `sweep_candidates` never adds `REOPEN_AFTER_DAYS` to anything; it calls
+#: `skill_verdicts.reopen_expiry` and only compares that answer to `now` (#3632 clause 2).
+#:
+#: What it is for is the unbounded case. A hold keyed only to "the leg has not come due"
+#: is as long as the ledger says it is, and the ledger's anchor is operator-written text:
+#: `_parse_ts` accepts any ISO stamp, so one future-dated `first_decided_at` would keep
+#: every snapshot for that key forever and the store named in #3632 — a corpus the sweep
+#: exists to bound — would become unbounded by a typo. Past this ceiling the file goes
+#: whatever the ledger claims, and the report line still counts it as deleted rather than
+#: held, so a cap that fired is visible.
+CANDIDATE_HOLD_MAX_AGE_DAYS = 75
 # How long a raw transcript survives after it was fetched. Long enough for the two follow-ups
 # that actually re-read it — a re-digest within the week, and an audit asking whether a digest
 # matched its input — and short enough that the directory holds a rolling month instead of
@@ -717,6 +736,15 @@ DB_BUSY_TIMEOUT_MS = 5000
 # candidates still awaiting action are never pruned regardless of age
 CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
 _CANDIDATE_STATUS_RE = re.compile(r"^status:\s*(\S+)", re.MULTILINE)
+#: The candidate's join to the verdict ledger: the `pattern:` frontmatter field is the
+#: ledger's `pattern_key`, and it is the only thing a hold can be looked up by. Scoped to
+#: the frontmatter head like `skill_verdicts.read_candidate` scopes its own `_PATTERN_RE`,
+#: because mined bodies carry example `pattern:` lines. Read by a regex rather than by
+#: `read_candidate` itself because that helper also parses `occurrences:` with `int()`, and
+#: a candidate carrying `occurrences: three` would then raise out of the store that is
+#: supposed to finish its sweep and print a line whatever the ledger says (#3632 clause 4).
+_CANDIDATE_PATTERN_RE = re.compile(r"^pattern:\s*(\S+)", re.MULTILINE)
+_CANDIDATE_HEAD_BYTES = 2000
 
 # last_active sits near the top of the session JSON (insertion order,
 # indent=2) — read a small prefix instead of parsing 390MB of transcripts.
@@ -1064,23 +1092,128 @@ def sweep_activity_logs(apply: bool) -> tuple[int, int, int]:
     return files, pruned, dropped
 
 
-def sweep_candidates(apply: bool, now: float) -> tuple[int, int]:
-    """Delete processed skill-candidate files older than
-    CANDIDATE_MAX_AGE_DAYS. Candidates whose status is still actionable
-    (CANDIDATE_KEEP_STATUSES) are kept. Returns (count, bytes)."""
-    count = freed = 0
+def _candidate_frontmatter_head(text: str) -> str:
+    """The frontmatter block of a candidate, or a prefix when it has no `---` fences.
+
+    The same slice `skill_verdicts.read_candidate` searches, and for the same reason: a
+    mined body carries quoted `status:` and `pattern:` lines from the sessions it mined, and
+    a match against one of those would join a candidate to a verdict made about a different
+    pattern.
+    """
+    return text.split("---", 2)[1] if text.startswith("---") else text[:_CANDIDATE_HEAD_BYTES]
+
+
+def _verdicts_module():
+    """The sibling `scripts/skill_verdicts.py`, importable from either call style.
+
+    Lazy and function-local because it is a sibling script, not a package member: it
+    resolves when the sweep runs as `python3 scripts/groundskeeper/retention-sweep.py` and
+    also when a test loads this file with importlib, where `scripts/` is not on `sys.path`.
+    The one importer of it in this file is `candidate_reopen_expiries`, which wraps the call
+    — an ImportError here must reach that handler, never silence the hold by propagating out
+    of a store that has always finished its sweep (#3632 clause 4).
+    """
+    scripts_dir = str(_TREE / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import skill_verdicts
+    return skill_verdicts
+
+
+def candidate_reopen_expiries() -> dict[str, datetime]:
+    """`pattern_key` -> date-leg reopen expiry, for every terminal key in the ledger.
+
+    The candidate store and the verdict ledger are joined here and nowhere else: the
+    horizon that decides whether a snapshot may be unlinked is `skill_verdicts
+    .reopen_expiry`, which ages on `first_decided_at` (#2746), so this sweep cannot drift
+    into a second arithmetic copy of 60 days and neither can the anchor move back under it
+    — a key re-confirmed by the nightly write-back still expires on its FIRST decision, and
+    a hold computed from the latest append would silently release its evidence 60 days after
+    the last re-confirmation instead of the first (#3632 clause 2).
+
+    Only terminal rows are returned: a non-terminal verdict binds nothing, so its evidence
+    needs no protection beyond the keep-list. A row whose date cannot be read is left out,
+    which is `reopen_expiry` returning None — and an un-readably-dated key then ages on the
+    30-day rule like any key with no ledger row at all.
+
+    An EMPTY dict means "hold nothing, age everything on `CANDIDATE_MAX_AGE_DAYS`", and it
+    is returned for every failure to read the ledger: the file is missing, the module will
+    not import, the store path is a directory. Falling back to the rule the store has always
+    run is the right direction of failure for this sweep specifically: the alternative,
+    retaining everything, converts an unreadable ledger into an unbounded corpus and a
+    permanently red `df` — while the bounded cost of the fallback, evidence unlinked 60 days
+    early, is exactly the pre-existing behaviour #3632 is narrowing rather than widening.
+    The reason is printed, so a fallback that outlives a bad afternoon is reported.
+    """
+    try:
+        sv = _verdicts_module()
+        table = sv.load_verdicts(sv.store_path())
+    except Exception as e:                                    # noqa: BLE001
+        print(f"  ! verdict ledger unreadable ({type(e).__name__}: {e}); candidates keep the "
+              f"{CANDIDATE_MAX_AGE_DAYS}-day rule", file=sys.stderr)
+        return {}
+    out: dict[str, datetime] = {}
+    for key, row in table.items():
+        try:
+            if not sv.is_terminal(row):
+                continue
+            expiry = sv.reopen_expiry(row)
+        except Exception as e:                                # noqa: BLE001
+            print(f"  ! verdict for {key} unreadable ({type(e).__name__}: {e}), "
+                  f"its candidates keep the {CANDIDATE_MAX_AGE_DAYS}-day rule",
+                  file=sys.stderr)
+            continue
+        if expiry is not None:
+            out[key] = expiry
+    return out
+
+
+def sweep_candidates(apply: bool, now: float,
+                     reopen_expiries: dict[str, datetime] | None = None) -> tuple[int, int, int]:
+    """Delete processed skill-candidate files older than CANDIDATE_MAX_AGE_DAYS.
+
+    Candidates whose status is still actionable (CANDIDATE_KEEP_STATUSES) are kept, exactly
+    as before. A file past that horizon whose ledger key still binds — a terminal verdict
+    whose date-leg reopen has not come due — is HELD rather than unlinked, because that
+    reopen is the reason the verdict was allowed to end the pattern's life and it re-adjudicates
+    the key off these very files: `skill_verdicts.py check` is file-driven, so a key whose
+    snapshots are gone re-proposes blind instead of being re-judged (#3632). The hold never
+    outlasts `CANDIDATE_HOLD_MAX_AGE_DAYS` of the file's own mtime, whatever the ledger says.
+
+    `reopen_expiries` is `candidate_reopen_expiries()`; None (the default) loads it, so a
+    caller that has not thought about the ledger gets the coupled rule rather than the
+    uncoupled one. An empty dict is a deliberate "hold nothing" and is what the fallback
+    returns.
+
+    Returns (deleted count, bytes freed, held count). The held count is files past the
+    horizon that this rule alone spared — a file younger than `CANDIDATE_MAX_AGE_DAYS` is
+    not held, it is simply not yet due, and counting it would put every nightly emission
+    into the number the operator reads as "the reopen hold is protecting the corpus".
+    """
+    count = freed = held = 0
     if not CANDIDATES_DIR.exists():
-        return 0, 0
+        return 0, 0, 0
+    if reopen_expiries is None:
+        reopen_expiries = candidate_reopen_expiries()
     cutoff = now - CANDIDATE_MAX_AGE_DAYS * 86400
+    hold_cutoff = now - CANDIDATE_HOLD_MAX_AGE_DAYS * 86400
     for path in CANDIDATES_DIR.glob("candidate-*.md"):
         try:
-            if path.is_symlink() or path.stat().st_mtime >= cutoff:
+            mtime = path.stat().st_mtime
+            if path.is_symlink() or mtime >= cutoff:
                 continue
-            m = _CANDIDATE_STATUS_RE.search(
-                path.read_text(encoding="utf-8", errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            head = _candidate_frontmatter_head(text)
+            m = _CANDIDATE_STATUS_RE.search(head)
             status = (m.group(1) if m else "").lower()
             if any(status.startswith(k) for k in CANDIDATE_KEEP_STATUSES):
                 continue
+            if (reopen_expiries and mtime > hold_cutoff):
+                pm = _CANDIDATE_PATTERN_RE.search(head)
+                expiry = reopen_expiries.get(pm.group(1)) if pm else None
+                if expiry is not None and expiry.timestamp() > now:
+                    held += 1
+                    continue
             size = path.stat().st_size
             if apply:
                 path.unlink()
@@ -1088,7 +1221,7 @@ def sweep_candidates(apply: bool, now: float) -> tuple[int, int]:
             freed += size
         except OSError as e:
             print(f"  ! skip {path.name}: {e}", file=sys.stderr)
-    return count, freed
+    return count, freed, held
 
 
 def sweep_transcript_scratch(apply: bool, now: float) -> tuple[int, int]:
@@ -4605,7 +4738,10 @@ def main() -> int:
     sess_n, sess_b = sweep_sessions(args.apply, now)
     runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
     act_f, act_e, act_l = sweep_activity_logs(args.apply)
-    cand_n, cand_b = sweep_candidates(args.apply, now)
+    # Left at its default so the coupled rule is what the shipped job runs: the ledger is
+    # loaded once for the whole store inside `sweep_candidates`, so 74 files cannot straddle
+    # a midnight append by the nightly write-back and be decided against two ledgers.
+    cand_n, cand_b, cand_h = sweep_candidates(args.apply, now)
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
     gq_n, gq_b = sweep_groundskeeper_queue(args.apply, now)
@@ -4664,8 +4800,13 @@ def main() -> int:
     print(f"  activity logs: {act_f} task files truncated, "
           f"{act_e} entries pruned, {act_l} non-entry lines removed "
           f"(keep last {ACTIVITY_LOG_MAX_ENTRIES})")
+    # `N held` is in both modes like every other number on this line, and it is the number
+    # that makes the coupling readable: a dry run that printed only `0 deleted` would be
+    # indistinguishable from a store with nothing past the horizon, which is how #3632's
+    # 30-vs-60 gap read for the whole month it was widening (#3632 clause 5).
     print(f"  skill candidates >{CANDIDATE_MAX_AGE_DAYS}d processed: "
-          f"{cand_n} deleted, {cand_b / 1024:.0f} KiB freed")
+          f"{cand_n} deleted, {cand_h} held for an unexpired reopen, "
+          f"{cand_b / 1024:.0f} KiB freed")
     print(f"  transcript scratch >{TRANSCRIPT_MAX_AGE_DAYS}d: "
           f"{scr_n} deleted, {scr_b / 1024:.0f} KiB freed")
     # Same line in both modes, like the other six: the operator approves `--apply` from

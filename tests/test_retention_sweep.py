@@ -232,6 +232,15 @@ def rs(tmp_path, monkeypatch):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
             if make_dir:
                 (tmp_path / sub).mkdir(exist_ok=True)
+    # The verdict ledger (#3632) is the one store path this module reaches WITHOUT owning the
+    # constant — `skill_verdicts.store_path` resolves it — so the loop above cannot redirect
+    # it and `$SKILL_VERDICTS_STORE` is the only handle. Pointed at a file that does not
+    # exist: that is the state of a box whose nightly has never recorded a verdict, it holds
+    # nothing, and every node below then prunes on the plain age rule unless it seeds rows of
+    # its own (see `_cv_verdict`). Left unredirected, the LIVE ledger — 195 keys, 148 terminal
+    # as measured on 2026-11-03 — would decide the candidate nodes below, and a nightly
+    # append would change this file's results for somebody else's change.
+    monkeypatch.setenv("SKILL_VERDICTS_STORE", str(tmp_path / "verdicts.jsonl"))
     # The redirected ref store gets `git init`'d, rather than left as a plain directory.
     # A store the rung cannot enumerate makes every node below print a SKIPPED line
     # whose message quotes the store path — and that path is a pytest tmp dir NAMED
@@ -10328,3 +10337,398 @@ def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_cr
     assert "0 KiB candidate" not in line, (
         f"an absent store reads as a measured zero: {line}")
     assert not absent.exists(), "the sweep created a store it only reports on"
+
+
+# ---------------------------------------------------------------------------
+# #3632: the candidate store's age rule and the verdict ledger's reopen horizon.
+#
+# The defect, measured over the live corpus on 2026-10-31 and re-measured 2026-11-03:
+# `skill_verdicts` releases a terminal verdict 60 days after the key's FIRST decision, and
+# `nightly-skill-consolidation` §0.2 names that reopen as the reason a pattern may safely
+# end its life on `reviewed_authored`; this sweep unlinked the snapshot that reopen reads
+# 30 days after its mtime. 60 > 30, so the reopen's own evidence could not outlive the
+# verdict by construction. Three of the eleven file-backed terminal keys were already
+# UNREACHABLE on 2026-11-03 (`http_search/logic` reopen 2026-12-14 vs prunable 2026-11-16,
+# `seq-2-bash-other-err-bash-other` 2026-11-10 vs 2026-11-04, `seq-2-http-fetch-err-http-fetch`
+# 2026-12-10 vs 2026-11-15), and two more of the five triage named had already gone fileless
+# in the three days since — the mechanism was destroying the evidence while it was being
+# written down.
+#
+# The fix is a HOLD, not a longer horizon: a snapshot past `CANDIDATE_MAX_AGE_DAYS` survives
+# while `skill_verdicts.reopen_expiry` for its key is still in the future, and never past
+# `CANDIDATE_HOLD_MAX_AGE_DAYS`. Every node below seeds its own ledger through
+# `$SKILL_VERDICTS_STORE`, which the `rs` fixture points at an absent file.
+# ---------------------------------------------------------------------------
+
+#: A member of `skill_verdicts.TERMINAL_VERDICTS`, so `is_terminal` binds it.
+CV_TERMINAL = "rejected_false_positive"
+#: NOT in `TERMINAL_VERDICTS`: a proposed patch below the auto-apply threshold keeps
+#: accumulating evidence and its verdict binds nothing, so its evidence needs no hold.
+CV_NON_TERMINAL = "proposed"
+#: The status the miner writes when a terminal verdict blocked the key — the one every
+#: file in the live corpus carries, and the reason the keep-list protects none of it.
+CV_SUPERSEDED = "superseded_by_verdict"
+
+
+def _cv_stamp(days_ago: float) -> str:
+    """An ISO stamp `days_ago` days before now, in `skill_verdicts.now_iso`'s own shape."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                         time.gmtime(time.time() - days_ago * 86400))
+
+
+def _cv_candidate(root: Path, key: str, *, days_old: float, status: str = CV_SUPERSEDED,
+                  name: str | None = None, with_body_pattern: bool = False) -> Path:
+    """One processed candidate, its mtime the instant the miner is meant to have written it.
+
+    Carries a body line starting `pattern:` or `status:` because mined bodies do exactly
+    that, quoting the sessions they were mined from — a match against one of them would join
+    a snapshot to a verdict made about a different pattern.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / (name or f"candidate-{key.replace('/', '-')}-{days_old:g}.md")
+    body = ""
+    if with_body_pattern:
+        body = "\nThe session also mentions\npattern: Bash/logic\nstatus: pending\n"
+    path.write_text(
+        f"---\npattern: {key}\nstatus: {status}\noccurrences: 4\n---\n\n"
+        f"Body prose for {key}.\nstatus: pending_review and pattern: Edit/logic appear here "
+        f"as quoted text.{body}",
+        encoding="utf-8")
+    _backdate(path, days_old)
+    return path
+
+
+def _cv_verdict(key: str, *, verdict: str = CV_TERMINAL, first_days_ago: float | None = None,
+                decided_days_ago: float = 0.0) -> dict:
+    """Append one ledger row for `key`, dated in days-relative-to-now.
+
+    `first_days_ago` is omitted to exercise the pre-#2746 shape (a row with no
+    `first_decided_at`, which `date_leg_anchor` ages on its own `decided_at`).
+    """
+    store = Path(os.environ["SKILL_VERDICTS_STORE"])
+    store.parent.mkdir(parents=True, exist_ok=True)
+    row = {"pattern_key": key, "verdict": verdict,
+           "decided_at": _cv_stamp(decided_days_ago),
+           "reason": f"seeded by test_retention_sweep for {key}"}
+    if first_days_ago is not None:
+        row["first_decided_at"] = _cv_stamp(first_days_ago)
+    with store.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    return row
+
+
+def _cv_line(capsys) -> str:
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if "skill candidates" in ln]
+    assert len(lines) == 1, f"expected exactly one candidates line, got {lines}"
+    return lines[0]
+
+
+def test_a_candidate_past_the_age_rule_is_held_while_its_key_can_still_reopen(rs):
+    """#3632 clause 1: the two horizons are one rule now, and the two verbs agree on it.
+
+    Two 40-day-old `superseded_by_verdict` snapshots, both past `CANDIDATE_MAX_AGE_DAYS` and
+    neither on the keep-list, differing only in how old their key's FIRST decision is: 20
+    days (reopen comes due in 40, so the snapshot is still the evidence a re-adjudication
+    needs) and 80 days (reopen passed 20 days ago, so the verdict no longer binds and the
+    file is exactly the litter the 30-day rule exists to clear). The first survives `--apply`
+    and the second is unlinked.
+
+    40 days is chosen so both files are past the 30-day age rule and inside the 75-day cap:
+    a fixture where the held file was also past the cap would prove the cap and not the hold.
+    """
+    assert rs.CANDIDATE_MAX_AGE_DAYS == 30, "the store's age rule moved off 30 days"
+    held_key, gone_key = "Bash/logic", "Edit/logic"
+    held = _cv_candidate(Path(rs.CANDIDATES_DIR), held_key, days_old=40)
+    gone = _cv_candidate(Path(rs.CANDIDATES_DIR), gone_key, days_old=40)
+    _cv_verdict(held_key, first_days_ago=20)
+    _cv_verdict(gone_key, first_days_ago=80)
+    gone_bytes = gone.stat().st_size
+    now = time.time()
+
+    dry = rs.sweep_candidates(False, now)
+    assert dry[0] == 1 and dry[2] == 1, (
+        f"the dry run reported {dry[0]} deleted / {dry[2]} held where the seed is one of "
+        "each — the number an operator approves `--apply` against is not the seed's")
+    assert dry[1] == gone_bytes, (
+        "the dry run's KiB figure counted the held file, which no run frees")
+    assert held.exists() and gone.exists(), "a dry run unlinked something"
+
+    deleted, freed, held_n = rs.sweep_candidates(True, now)
+    assert (deleted, freed, held_n) == (1, gone_bytes, 1), (
+        f"--apply returned {(deleted, freed, held_n)} where the dry run promised "
+        f"{dry} — the approved run is not the run that happened")
+    assert held.exists(), (
+        f"{held_key}'s only snapshot was unlinked while its date-leg reopen is still 40 "
+        "days away, which is the #3632 defect itself")
+    assert not gone.exists(), (
+        f"{gone_key} was held although its reopen came due 20 days ago — a hold with no "
+        "release is a store that never bounds")
+
+
+def test_the_hold_comes_from_reopen_expiry_so_a_reconfirmed_key_keeps_its_first_expiry(rs,
+                                                                                      monkeypatch):
+    """#3632 clause 2: the horizon is `skill_verdicts.reopen_expiry`, not arithmetic here.
+
+    `Bash/timeout` is the nightly write-back's own shape: `record` always stamps the line it
+    appends with now, so a recurring key carries `decided_at` = today. #2746 moved the date
+    leg to `first_decided_at` precisely because re-confirming on `decided_at` slid every
+    expiry 60 days further out. So a snapshot whose key was FIRST decided 80 days ago and
+    re-confirmed tonight must be RELEASED — and a sweep that added 60 days to `decided_at`
+    itself, instead of calling the function, would hold it.
+
+    The direction that cannot be satisfied by a second constant is the monkeypatch: 60 days
+    is the ledger module's number, so shortening THAT to 10 days must flip a held file to
+    deleted, and stretching it to 400 must do the reverse. A copy of the arithmetic in this
+    script would answer to neither, and the script defines no such copy to answer to.
+    """
+    assert not hasattr(rs, "REOPEN_AFTER_DAYS"), (
+        "this script grew a second reopen horizon; the hold must read "
+        "`skill_verdicts.reopen_expiry` (#2746's anchor rule lives in that one function)")
+    key = "Bash/timeout"
+    stale_reconfirm = _cv_candidate(Path(rs.CANDIDATES_DIR), key, days_old=40)
+    _cv_verdict(key, first_days_ago=80, decided_days_ago=0)
+
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (1, 0), (
+        f"a key first decided 80 days ago but re-confirmed tonight held its snapshot "
+        f"({deleted} deleted, {held_n} held) — the expiry slid onto the latest append, "
+        "which is the defect #2746 closed inside `check` and this store must not reopen")
+    assert not stale_reconfirm.exists()
+
+    _cv_verdict("Edit/logic", first_days_ago=20, decided_days_ago=0)
+    still_held = _cv_candidate(Path(rs.CANDIDATES_DIR), "Edit/logic", days_old=40)
+    sv = rs._verdicts_module()
+    assert sv.reopen_expiry({"first_decided_at": _cv_stamp(20)}) is not None
+
+    monkeypatch.setattr(sv, "REOPEN_AFTER_DAYS", 10)
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (1, 0), (
+        f"shortening the LEDGER's horizon to 10 days left the sweep holding a 20-day-old "
+        f"decision ({deleted} deleted, {held_n} held): this script is deciding on an "
+        "horizon of its own rather than the one `reopen_expiry` returns")
+    assert not still_held.exists()
+
+    monkeypatch.setattr(sv, "REOPEN_AFTER_DAYS", 400)
+    revived = _cv_candidate(Path(rs.CANDIDATES_DIR), "Edit/logic", days_old=40)
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (0, 1), (
+        f"stretching the LEDGER's horizon to 400 days left the sweep deleting the snapshot "
+        f"({deleted} deleted, {held_n} held) that the ledger now says is still evidence")
+    assert revived.exists()
+
+
+def test_a_candidate_with_no_binding_verdict_or_an_actionable_status_is_still_pruned(rs):
+    """#3632 clause 3: the hold reaches exactly the keys a verdict binds, and no others.
+
+    Four files, all 40 days old, all past the age rule, none of which the rule may hold:
+    a key with no ledger row at all; a key whose latest verdict is `proposed`, which is not
+    terminal and therefore binds nothing even though its date is 40 days off; a file whose
+    OWN status is actionable (`pending_review` → the keep-list spares it, and it is NOT
+    counted as held, because counting it would fold the whole pending corpus into the number
+    the operator reads as "the reopen hold is working"); and a file with no `pattern:` in
+    frontmatter whose body quotes a held key, which must be pruned rather than joined to
+    that key's verdict. A fifth file, 5 days old with an unexpired key, is not held either —
+    it is simply not yet due, and a count that included it would be a count of every nightly
+    emission rather than of the ones this rule spared.
+    """
+    cands = Path(rs.CANDIDATES_DIR)
+    orphan = _cv_candidate(cands, "Write/logic", days_old=40)
+    non_terminal = _cv_candidate(cands, "http_fetch/not_found", days_old=40)
+    actionable = _cv_candidate(cands, "Bash/logic", days_old=40, status="pending_review")
+    body_decoy = _cv_candidate(cands, "", days_old=40, name="candidate-body-decoy.md",
+                               with_body_pattern=True)
+    fresh = _cv_candidate(cands, "Edit/logic", days_old=5)
+    _cv_verdict("http_fetch/not_found", verdict=CV_NON_TERMINAL, first_days_ago=20)
+    _cv_verdict("Bash/logic", first_days_ago=20)
+    _cv_verdict("Edit/logic", first_days_ago=20)
+
+    want = sum(p.stat().st_size for p in (orphan, non_terminal, body_decoy))
+    deleted, freed, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (3, 0), (
+        f"{deleted} deleted / {held_n} held where three of the four stale files should have "
+        "been pruned and none held: the hold reached past the keys it is owed")
+    assert freed == want, (
+        f"the line's KiB figure is {freed} against the {want} bytes the three pruned files "
+        "hold — freed is what an operator sizes the store against")
+    for doomed in (orphan, non_terminal, body_decoy):
+        assert not doomed.exists(), f"{doomed.name} survived on a hold it is not owed"
+    assert actionable.exists(), "the keep-list stopped covering an actionable candidate"
+    assert fresh.exists(), "a candidate inside the age rule was deleted"
+
+
+def test_an_unreadable_ledger_falls_back_to_the_age_rule_and_the_sweep_finishes(rs, capsys,
+                                                                              monkeypatch):
+    """#3632 clause 4, first half: a ledger that cannot be read never stops the sweep.
+
+    Three failure shapes, all with an unexpired terminal verdict seeded so a hold is what a
+    working ledger would do: the file is simply missing, its rows are not JSON, and the
+    module will not import at all. Each must fall back to the plain 30-day rule and still
+    finish, and the last two must say why. Retaining everything instead would turn a corrupt
+    line into an unbounded corpus, which is the failure this store was written against.
+
+    The whole-script form is pinned through `main()` because `main()` is what task #79 and
+    cron invoke: the candidates line has to print and the exit code has to be 0 whatever the
+    ledger says, or one bad afternoon turns the weekly bound into a traceback and every
+    store after it on the list goes unbounded with it.
+    """
+    key = "Bash/logic"
+    store = Path(os.environ["SKILL_VERDICTS_STORE"])
+
+    held = _cv_candidate(Path(rs.CANDIDATES_DIR), key, days_old=40)
+    assert not store.exists(), "the fixture is meant to seed an absent ledger"
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (1, 0), (
+        f"an absent ledger held {held_n} and deleted {deleted}: the fallback must be "
+        "today's 30-day rule, and it must not need the file to exist to run it")
+    assert not held.exists()
+
+    store.write_text("this is not json\n" + json.dumps(
+        {"pattern_key": "Edit/logic", "verdict": CV_TERMINAL,
+         "first_decided_at": _cv_stamp(20), "decided_at": _cv_stamp(20)}) + "\n",
+        encoding="utf-8")
+    unparseable = _cv_candidate(Path(rs.CANDIDATES_DIR), key, days_old=40)
+    guarded = _cv_candidate(Path(rs.CANDIDATES_DIR), "Edit/logic", days_old=40)
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (1, 1), (
+        f"a ledger whose first row is garbage deleted {deleted} and held {held_n}: one bad "
+        "line must cost its own key the hold, not the ledger's other keys")
+    assert not unparseable.exists() and guarded.exists()
+    assert "not JSON" in capsys.readouterr().err, (
+        "an unparseable ledger row was skipped in silence")
+
+    def boom():
+        raise ImportError("no skill_verdicts here")
+
+    monkeypatch.setattr(rs, "_verdicts_module", boom)
+    _cv_verdict(key, first_days_ago=20)
+    again = _cv_candidate(Path(rs.CANDIDATES_DIR), key, days_old=40)
+    deleted, _, held_n = rs.sweep_candidates(True, time.time())
+    # TWO deletions, not one: `again`, and the `guarded` file the PREVIOUS stage held.
+    # That is the point of asserting it this way — a fallback that kept last run's hold
+    # would be freezing a decision it can no longer read, which is retaining-everything
+    # wearing the fallback's clothes. The store is not reset between the three failure
+    # shapes in this node on purpose: the same files are what the next night sees.
+    assert (deleted, held_n) == (2, 0), (
+        f"a failed import deleted {deleted} and held {held_n} of the 2 stale files on disk: "
+        "the module is not optional in the hold's favour, it is required for one to exist, "
+        "and a hold from a run that could read the ledger must not survive into one that "
+        "cannot")
+    assert not again.exists() and not guarded.exists(), (
+        f"a snapshot held by the previous stage survived the ledger going un_readable "
+        f"(guarded still on disk: {guarded.exists()})")
+    assert "unreadable" in capsys.readouterr().err, (
+        "the fallback ran without naming the reason it ran")
+
+    monkeypatch.setattr(sys, "argv", ["retention-sweep.py", "--apply"])
+    _cv_candidate(Path(rs.CANDIDATES_DIR), key, days_old=40)
+    assert rs.main() == 0, "an unreadable ledger stopped the sweep"
+    line = _cv_line(capsys)
+    assert f">{rs.CANDIDATE_MAX_AGE_DAYS}d" in line and "held" in line, (
+        f"the candidates line vanished with the ledger: {line}")
+
+
+def test_the_hold_never_outlasts_the_cap_however_the_ledger_dates_the_key(rs):
+    """#3632 clause 4, second half: 75 days of mtime is the ceiling, whatever the ledger says.
+
+    The anchor is operator-written text — `skill_verdicts._parse_ts` accepts any ISO stamp —
+    so a `first_decided_at` dated in the future states a reopen that never comes due, and a
+    hold that asks only "is the leg still in the future?" would keep that key's snapshots
+    forever. Two files carry the same future-dated verdict and differ only in age: 40 days
+    survives under the cap, 80 days does not, and the older one is reported as deleted rather
+    than as held, so a cap that fired is a visible event and not a silent exemption.
+
+    75 is 60 (`REOPEN_AFTER_DAYS`) plus 15 for the nightly to re-adjudicate at the instant the
+    leg comes due; it is a ceiling on one file's mtime, not a second reopen horizon, which is
+    why the sweep never adds it to anything.
+    """
+    assert rs.CANDIDATE_HOLD_MAX_AGE_DAYS == 75, (
+        "the cap moved; it has to stay >= REOPEN_AFTER_DAYS (60) or it releases every "
+        "snapshot before the reopen it exists to protect, and <= 90 or one bad key holds "
+        "three months of a nightly corpus")
+    assert rs.CANDIDATE_HOLD_MAX_AGE_DAYS > rs._verdicts_module().REOPEN_AFTER_DAYS, (
+        f"the cap ({rs.CANDIDATE_HOLD_MAX_AGE_DAYS}d) no longer clears the ledger's own "
+        f"reopen horizon ({rs._verdicts_module().REOPEN_AFTER_DAYS}d): it would release "
+        "every held snapshot before the reopen it exists to protect can fire, which is the "
+        "#3632 defect put back with a bigger number on it")
+    key = "http_search/logic"
+    cands = Path(rs.CANDIDATES_DIR)
+    under = _cv_candidate(cands, key, days_old=40)
+    over = _cv_candidate(cands, "seq-2-bash-other-err-bash-other", days_old=80,
+                         name="candidate-over-cap.md")
+    _cv_verdict(key, first_days_ago=-365)
+    _cv_verdict("seq-2-bash-other-err-bash-other", first_days_ago=-365)
+
+    over_bytes = over.stat().st_size
+    deleted, freed, held_n = rs.sweep_candidates(True, time.time())
+    assert (deleted, held_n) == (1, 1), (
+        f"a year-dated verdict left {deleted} deleted and {held_n} held: the cap must bind "
+        "at 75 days of mtime whatever the ledger claims, or one future stamp makes this "
+        "store unbounded")
+    assert freed == over_bytes, (
+        f"freed {freed} of the {over_bytes} bytes the over-cap file held — the held file "
+        "must not be in the KiB figure")
+    assert not over.exists(), "the file past the cap survived on a hold the cap forbids"
+    assert under.exists(), "the cap released a file still inside it"
+
+
+def test_the_candidates_line_names_the_held_count_beside_the_deleted_count(rs, capsys,
+                                                                          monkeypatch):
+    """#3632 clause 5, first half: the hold is in the record, in both modes.
+
+    The line that made #3632 invisible for a month was `skill candidates >30d processed: 6
+    deleted, 23 KiB freed` — a number with no second half, so a corpus draining away looked
+    identical to a corpus at rest. `N held for an unexpired reopen` is printed in the DRY run
+    too, like every other figure on the line, because the operator approves `--apply` from
+    these numbers and a hold that only spoke in the run that deletes cannot be approved.
+    """
+    root = Path(rs.CANDIDATES_DIR)
+    _cv_candidate(root, "Bash/logic", days_old=40)
+    _cv_candidate(root, "Edit/logic", days_old=40)
+    _cv_verdict("Bash/logic", first_days_ago=20)
+    _cv_verdict("Edit/logic", first_days_ago=80)
+
+    monkeypatch.setattr(sys, "argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _cv_line(capsys)
+    assert f">{rs.CANDIDATE_MAX_AGE_DAYS}d" in dry, dry
+    assert "1 deleted" in dry and "1 held for an unexpired reopen" in dry, dry
+
+    monkeypatch.setattr(sys, "argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _cv_line(capsys)
+    assert "1 deleted" in applied and "1 held for an unexpired reopen" in applied, applied
+    assert "2 held" not in applied, (
+        f"the applied run counted the deleted file as held too: {applied}")
+    assert (root / "candidate-Bash-logic-40.md").exists(), (
+        "the line promised a hold the run did not keep")
+    assert not (root / "candidate-Edit-logic-40.md").exists()
+
+
+def test_the_skill_states_the_coupled_horizon_and_the_cap_for_the_candidate_store(rs):
+    """#3632 clause 5, second half: the operator's procedure says what the code now does.
+
+    `skills/retention-sweep/SKILL.md` is task #79's prompt, and its candidate row read
+    `delete processed candidates >30d (pending/proposed kept)` — an instruction to delete
+    exactly the files the 60-day reopen needs. A procedure that describes the old rule is
+    worse than no procedure here, because the operator reading `0 deleted` and believing the
+    bound held is the same reader #1835 was filed for. So the row names both horizons and
+    the cap, by the names the script defines.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+
+    rows = {ln.split("|")[1].strip(): ln
+            for ln in skill.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("| ") and ln.count("|") >= 3}
+    row = next((ln for store, ln in rows.items() if "skills/candidates" in store), None)
+    assert row is not None, f"no candidate row in the skill's store table: {list(rows)}"
+    assert "CANDIDATE_MAX_AGE_DAYS" in row and f">{rs.CANDIDATE_MAX_AGE_DAYS}d" in row, row
+    assert "REOPEN_AFTER_DAYS" in row, (
+        f"the row states an age rule with no reopen horizon beside it: {row}")
+    assert "60" in row, f"the row does not name the 60-day leg: {row}"
+    assert "CANDIDATE_HOLD_MAX_AGE_DAYS" in row and "75" in row, (
+        f"the row states a hold with no cap: {row}")
+    assert "superseded_by_verdict" in row, (
+        f"the row's keep-list claim no longer names the status every live file carries: {row}")
