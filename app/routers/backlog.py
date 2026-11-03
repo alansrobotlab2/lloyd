@@ -1,17 +1,30 @@
 """Backlog task endpoints (Obsidian-vault-backed file store).
 
-Three measured facts set the shape of this module (item #1199, 2026-09-16, live
-box: 1,137 files / 11 MB in `~/obsidian/backlog`):
+Three measured facts set the shape of this module (item #1199, measured on the
+live box 2026-09-16 against 1,137 files / 11 MB in `~/obsidian/backlog`):
 
-* reading all 11 MB costs **0.033 s**; **one** YAML frontmatter pass over the
-  corpus costs **1.78 s**. The time is parsing, never I/O;
+* reading the whole corpus is hundredths of a second; **one** YAML frontmatter
+  pass over it is tens of seconds. Parsing dominates I/O by roughly two orders
+  of magnitude — 54x measured 2026-09-16, 111x re-measured 2026-10-26 — so the
+  time is parsing, never I/O. The ratio is the fact worth keeping: the corpus
+  has since tripled, and the two absolutes moved 4x and 9x while the gap
+  between them barely moved at all;
 * the list route used to parse the corpus *twice* per request — once in
   `_backlog_board_map()` and once in its own loop — with `/boards` a third
   pass, and applied its filters *after* parsing. So the cost was flat: one task
-  (`?board_id=1`, 2.3 KB out) cost 3.65 s, the same as all 1,137;
+  (`?board_id=1`, 2.3 KB out) cost 3.65 s on 2026-09-16, the same as the whole
+  board cost then;
 * both list handlers were `async def` while blocking on that parse, which took
   the event loop with it — `/health` answered in 3.1 ms idle and 3.496 s fired
   0.4 s into a backlog load, so the whole backend queued behind this page.
+
+Re-measured 2026-10-26: 3,356 files / 71 MB, front-matter pass 16.0 s, raw read 0.14 s.
+
+That line, not the 2026-09-16 figures above, is what to size a route against:
+the board takes ~50 new items a day, so the corpus only gets bigger. No
+per-file cost is quoted anywhere in this module — mean file size doubled
+between those two measurements, which is why a per-file figure rots even
+faster than a corpus-size one.
 
 Hence: one scan shared by every route (`_backlog_scan`), a `(path, mtime_ns,
 size)`-keyed cache over the parse (`_backlog_cached_fm`), plain `def` handlers
@@ -59,9 +72,11 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # The list row's `description` is a preview, not the item. `TaskCard` renders it
 # through `line-clamp-2` — two visible lines — and bodies were 8,409,812 of the
-# 9,202,414 bytes the route shipped (91.4 %), with a 118,494-byte maximum behind
-# a card that shows two lines. The full body is the detail route's job, and
-# `?q=` matches against it server-side so search did not shrink with the payload.
+# 9,202,414 bytes the route shipped on 2026-09-16 (91.4 %), with a 118,494-byte
+# maximum behind a card that shows two lines. Those are response bytes, not disk
+# bytes, and both grow with the corpus, hence the date. The full body is the
+# detail route's job, and `?q=` matches against it server-side so search did not
+# shrink with the payload.
 DESC_SNIPPET_CHARS = 300
 
 # Parsed frontmatter, keyed by `str(path)`, validated against `stat()` on every
@@ -87,9 +102,11 @@ _FM_CACHE: dict[str, tuple[int, int, dict, str]] = {}
 # the delete is a `RuntimeError: dictionary changed size during iteration`, i.e. a
 # 500 on the board, raised only when a create, a nightly write and the 15-second
 # poll happen to overlap. The lock is held for lookup, insert, and prune only —
-# never across `_backlog_parse_fm` — at 1.78 s over 1,137 files that is ~1.6 ms a
-# file, and holding the lock across it would put every concurrent board request
-# back-to-back behind one cold parse, which is the thing this cache removed.
+# never across `_backlog_parse_fm`. A whole-corpus parse costs roughly two orders
+# of magnitude more than reading the same bytes (the dated figures are in the
+# module docstring, and deliberately not repeated here), so holding the lock
+# across it would put every concurrent board request back-to-back behind one cold
+# parse, which is the thing this cache removed.
 #
 # The lock guards the mapping, not the values: two threads that parse the same file
 # build two equivalent dicts and one wins, and the loser's dict is garbage. That is
@@ -123,8 +140,8 @@ def _backlog_parse_fm(path: Path) -> tuple:
     malformed block, the callers here skip what they cannot parse, and those items
     vanish from the listing *and* from the board's task count with nothing logged.
     A degraded record beats an invisible one — which is the whole point of
-    `parse_frontmatter_text`. Held against the board as it stands on 2026-09-20 the
-    fallback has no live instance here: all 1231 backlog files parse their
+    `parse_frontmatter_text`. The fallback has no live instance on the board as
+    counted 2026-09-20: all 1231 backlog files then present parse their
     line-anchored block, and the 31 that read as broken at that date were all
     manufactured by the split below, not by their YAML. It stays because a
     hand-edited item can still arrive with a real unterminated quote, which is the
@@ -281,10 +298,10 @@ def _write_task_file(filepath: Path, fm: dict, body: str) -> None:
     consequences are pre-existing and were ruled out of scope when clause 3 was
     amended on 2026-09-17 (see the `activity` log on item #1199): `yaml.dump`
     re-quotes and re-wraps a hand-written frontmatter block — `created:` comes back
-    quoted on the 266 of 1,129 board files that store it unquoted (counted on the
-    live board 2026-09-17, `grep -c '^created: [0-9]'`) — and `_backlog_parse_fm`
-    hands back a `.strip()`ed body, so the file loses its trailing newline (800 of
-    1,141 files had one, same count). The clause as
+    quoted on the 266 of 1,129 board files counted on the live board 2026-09-17
+    (`grep -c '^created: [0-9]'`) — and `_backlog_parse_fm` hands back a
+    `.strip()`ed body, so the file loses its trailing newline; on the same
+    count, 800 of 1,141 files (2026-09-17) had one. The clause as
     graded is therefore "a priority-only update changes **no body text**", not
     "byte-identical apart from priority:/updated:" — the latter was true only of
     files the route itself wrote. Closing the re-flow means preserving the block's
@@ -427,9 +444,10 @@ def _row_from(path: Path, fm: dict, body: str, board_map: dict) -> dict:
         "name": name,
         # The snippet, and only the snippet, under a name that says what it is.
         # There is deliberately no `description` key on a list row: 344 KB of the
-        # 1.27 MB first cut of this response was the same snippet a second time
-        # under the old key, and an alias whose value differs in kind from the
-        # body its name promises is how a caller ends up posting a snippet back.
+        # 1.27 MB first cut of this response (2026-09-16) was the same snippet a
+        # second time under the old key, and an alias whose value differs in kind
+        # from the body its name promises is how a caller ends up posting a
+        # snippet back.
         # `GET /api/backlog/task/{id}` is where `description` (the whole body)
         # lives; `?q=` above is what matches the part the row does not carry.
         "description_snippet": snippet,
@@ -459,13 +477,16 @@ def _row_from(path: Path, fm: dict, body: str, board_map: dict) -> dict:
 
 
 # `def`, not `async def`, on every route here that reads the corpus: these
-# handlers parse up to 11 MB of YAML, and a coroutine that blocks does not run
-# slowly, it runs *exclusively* — `/health` measured 3.496 s behind a backlog
-# request against a 3.1 ms idle baseline. FastAPI dispatches a non-coroutine
-# endpoint with `run_in_threadpool`, which is where blocking work belongs.
-# Pinned by tests/test_backlog_route_offload.py. The two write routes stay
-# `async def` because they await `request.json()`; their corpus work is one file
-# plus a cached board map, and they never held the loop for seconds.
+# handlers parse the whole board's YAML frontmatter, which costs roughly two
+# orders of magnitude more than reading those bytes — a number that grows with
+# the corpus, so see the dated line in the module docstring rather than taking
+# this one as an estimate. Either way a coroutine that blocks does not run
+# slowly, it runs *exclusively*: `/health` measured 3.496 s behind a backlog
+# request on 2026-09-16 against a 3.1 ms idle baseline. FastAPI dispatches a
+# non-coroutine endpoint with `run_in_threadpool`, which is where blocking work
+# belongs. Pinned by tests/test_backlog_route_offload.py. The two write routes
+# stay `async def` because they await `request.json()`; their corpus work is one
+# file plus a cached board map, and they never held the loop for seconds.
 @router.get("/api/backlog/boards")
 def backlog_boards():
     if not _BACKLOG_DIR.exists():
@@ -487,10 +508,12 @@ def backlog_boards():
 def backlog_task_detail(task_id: int):
     """One item with its **complete** body — the read half of the snippet split.
 
-    The list cannot carry bodies (9 MB across 1,137 rows whose cards show two
-    lines), so the editor reads the whole thing from here. Its `description` is
-    the string `task-update` writes back, which is what makes the round-trip
-    safe: the modal's editing source is this route, never the row.
+    The list cannot carry bodies — 8,409,812 bytes of them across the rows on
+    2026-09-16, behind cards that show two lines, and the row count has grown
+    every day since — so the editor reads the whole thing from here. Its
+    `description` is the string `task-update` writes back, which is what makes
+    the round-trip safe: the modal's editing source is this route, never the
+    row.
     """
     # A duplicate id on the board refuses here rather than resolving to one of the
     # pair, so this route cannot read, overwrite or unlink the wrong item (#3701).
@@ -514,11 +537,12 @@ def backlog_task_detail(task_id: int):
 
 # ── the done window (item #1213) ─────────────────────────────────────────────
 #
-# The Done column is the largest thing the board renders: 679 of 1,152 rows and
-# 59 % of the payload, measured live 2026-09-17. This is a legibility window, not
-# a performance lever — #1199 already fixed the cost of producing those rows (the
-# payload went 9.2 MB → 920 KB), and a 7-day window only removes about a quarter
-# of it. What it buys is a Done column a person can read.
+# The Done column is the largest thing the board renders, measured live
+# 2026-09-17: 679 of 1,152 rows and 59 % of the payload. This is a legibility
+# window, not a performance lever — #1199 already fixed the cost of producing
+# those rows (the payload went 9.2 MB → 920 KB on 2026-09-16), and a 7-day window
+# only removes about a quarter of it. What it buys is a Done column a person can
+# read.
 
 
 def _done_since_date(raw: str) -> date | None:
@@ -568,9 +592,9 @@ def _done_date(path: Path, fm: dict) -> datetime | None:
 
     The precedence is load-bearing at both ends. `completed:` first because a
     reclosed item's `updated:` is its last touch, not its last completion; the
-    fallbacks next because 241 of 679 done rows (36 %) have no usable
-    `completed:`, and 107 of those were updated inside the last 7 days — without
-    a fallback the window would hide work closed this week.
+    fallbacks next because on 2026-09-17, 241 of 679 done rows (36 %) had no
+    usable `completed:`, and 107 of those were updated inside the last 7 days —
+    without a fallback the window would hide work closed this week.
 
     The third rung reads `stat()` directly rather than the row's `updated_at`,
     which is itself filled from `st_mtime` when `updated:` is absent: collapsed
@@ -624,9 +648,10 @@ def backlog_tasks(board_id: str = "", status: str = "", q: str = "",
         except ValueError:
             filter_board = board_id
     # `?q=` exists because the row no longer carries the body. The client used to
-    # grep `t.description` across 8.3 MB; a snippet would have stopped that
-    # matching mid-body, so the grep moved here, over the scanned body. Same
-    # behaviour, and nearly free once the parse is cached (item #1199, option a).
+    # grep `t.description` across 8.3 MB on 2026-09-16; a snippet would have
+    # stopped that matching mid-body, so the grep moved here, over the scanned
+    # body. Same behaviour, and nearly free once the parse is cached (item #1199,
+    # option a).
     needle = q.strip().lower()
     tasks = []
     for f, fm, body in _backlog_scan():

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -149,3 +150,113 @@ def test_a_probe_is_served_while_a_cold_boards_scan_is_parked(backlog_dir, monke
     assert timings["probe"] < 1.0, (
         f"/boards probe took {timings['probe']:.2f}s; it queued behind the scan"
     )
+
+
+# ── #3410 clause 3: the rationale is a ratio, and the reasoning survives ─────
+#
+# This file's own docstring records why the handlers are plain `def`, and so does
+# the comment above the boards route. Both used to lean on a pair of absolutes —
+# "0.033 s to read, 1.78 s to parse" — and that pair is exactly what rots: on
+# 2026-10-26 the read was 0.14 s and the pass 16.0 s, so the numbers are 4x and 9x
+# off while the *ratio* is the one thing that held (54x then, 111x now — the same
+# "two orders of magnitude" claim). A rewrite that only refreshed the digits would
+# be re-rotted by the next 500 items, so the prose now states the gap as a ratio
+# and keeps the dated figures in exactly one place, the module docstring's
+# re-measurement line (pinned in tests/test_backlog_doc_claims.py).
+#
+# These checks read the source rather than the imported module because the thing
+# under test is prose: a comment cannot be introspected, and the failure being
+# prevented is a comment drifting away from the behaviour it describes.
+
+ROUTE = Path(__file__).resolve().parents[1] / "app" / "routers" / "backlog.py"
+
+
+def _comment_block_above(needle: str) -> str:
+    """The contiguous `#` lines sitting directly above the first line with `needle`.
+
+    Scoped to the block rather than the whole file on purpose: `in src` would pass
+    the moment the phrase appeared anywhere, and the claim here is that *this*
+    rationale still gives this route its reason for being a plain `def`.
+    """
+    lines = ROUTE.read_text(encoding="utf-8").splitlines()
+    at = [i for i, ln in enumerate(lines) if needle in ln]
+    assert at, (f"no line of app/routers/backlog.py contains {needle!r}; the comment "
+                f"this node checks is gone or the anchor was renamed")
+    out: list[str] = []
+    i = at[0] - 1
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        out.append(lines[i].lstrip().lstrip("#").strip())
+        i -= 1
+    assert out, f"no comment block above {needle!r}"
+    # Flattened, because these are prose checks on wrapped text: the sentence
+    # "costs roughly two orders of magnitude more" is legal to break between "two"
+    # and "orders", and a check that failed on the wrap would be an instrument that
+    # punishes good line-wrapping until someone re-wraps the comment to please it.
+    return " ".join(" ".join(reversed(out)).split())
+
+
+def _module_docstring() -> str:
+    """The module docstring, off the parse, flattened for prose checks.
+
+    Off the parse rather than off the bytes around line 1: slicing the file's head
+    would pass on any leading comment or encoding line, and would check the
+    docstring's neighbours instead of the docstring.
+    """
+    import ast
+
+    doc = ast.get_docstring(ast.parse(ROUTE.read_text(encoding="utf-8"))) or ""
+    return " ".join(doc.split())
+
+
+def test_the_parse_versus_io_fact_is_stated_as_a_ratio_not_two_absolutes():
+    doc = _module_docstring()
+    assert doc, "app/routers/backlog.py lost its module docstring"
+    assert "two orders of magnitude" in doc, (
+        "the docstring no longer states the parse-to-I/O gap as a ratio. The pair "
+        "it used to quote — 0.033 s read against a 1.78 s pass — is 4x and 9x low "
+        "as at 2026-10-26, while their ratio moved only from 54x to 111x"
+    )
+    assert "111x" in doc and "54x" in doc, (
+        "the ratio must carry both measurements (54x on 2026-09-16, 111x on "
+        "2026-10-26): one point is an assertion, two points are a trend, and the "
+        "trend is what tells the next reader whether the gap itself is drifting"
+    )
+    assert "1.78 s" not in doc and "0.033 s" not in doc, (
+        "the rotted absolutes are back in the docstring, where a reader would take "
+        "them for the live cost of a corpus pass"
+    )
+
+
+def test_the_plain_def_rationale_and_the_lock_note_survive_the_rewording():
+    """The reasoning must outlive the numbers it was written beside.
+
+    Two claims, both load-bearing: corpus-reading handlers are plain `def` because
+    a blocking coroutine holds the loop, and `_FM_CACHE_LOCK` is deliberately not
+    held across the parse. The second is the one a rewording loses, because it is a
+    note about a cost ("1.78 s over 1,137 files") that this item removed from the
+    file — so it is checked by name here.
+    """
+    boards = _comment_block_above('/api/backlog/boards')
+    assert "not `async def`" in boards, "the block no longer states the shape it argues for"
+    assert "run_in_threadpool" in boards, (
+        "the mechanism is gone: without it the block says 'def' but not why FastAPI obeys")
+    assert "exclusively" in boards, (
+        "the reason a blocking handler is worse than a slow one has been reworded away")
+    assert "two orders of magnitude" in boards, (
+        "the boards comment quotes an absolute corpus size again instead of the ratio")
+    assert "test_backlog_route_offload.py" in boards, (
+        "the block's own witness citation was dropped, and a prose citation that "
+        "names the file keeping it honest is the difference between a claim and a "
+        "guarantee (#2069)")
+
+    lock = _comment_block_above("_FM_CACHE_LOCK = threading.Lock()")
+    assert "never across `_backlog_parse_fm`" in lock, (
+        "the note that the parse runs outside the lock is gone — the design reason "
+        "for the lock's narrow scope, and the one that a cost figure's removal "
+        "would otherwise take with it")
+    assert "ms a file" not in lock and "ms/file" not in lock, (
+        "a per-file cost is quoted as an absolute again; mean file size doubled "
+        "between the two measurements, so it was wrong twice over")
+    assert not re.search(r"1[\d,]{2,}\s+files", lock), (
+        "the lock comment states a corpus file count again, which is the figure "
+        "that tripled and the reason this item exists")

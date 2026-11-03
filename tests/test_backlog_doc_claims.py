@@ -26,6 +26,7 @@ citation in that file's comments and docstrings is only allowed if it resolves.
 
 from __future__ import annotations
 
+import ast
 import io
 import re
 import subprocess
@@ -416,3 +417,145 @@ def test_the_human_paths_prose_no_longer_promises_a_tag_or_a_hold():
     assert gone.returncode == 1, (
         f"the landing route still narrates the retired tag (rc={gone.returncode}): "
         f"{gone.stdout[:400]!r}")
+
+
+# ── #3410: the corpus figures in `app/routers/backlog.py` must be dated ──────
+#
+# The module opens with "1,137 files / 11 MB … one YAML frontmatter pass over the
+# corpus costs 1.78 s", and three comments deeper it repeats "parse up to 11 MB of
+# YAML", "9 MB across 1,137 rows" and "1.78 s over 1,137 files that is ~1.6 ms a
+# file" with no date at all. The corpus tripled: measured 2026-10-26 it is 3,356
+# files / 71 MB and the pass costs 16.0 s, so every one of those reads as a live
+# figure while being between 2.9x and 9x low — and a reader sizing a board
+# endpoint, or the weekly board census that walks the whole corpus, calibrates
+# against it. #1566's `owed_settled` evidence had already measured the same pass at
+# 7.00 s on 2026-10-04 and nobody re-read the header.
+#
+# A dated figure cannot rot silently, because the next measurement is compared to
+# its date rather than to the reader's expectation, so the rule pinned here is
+# per-line and mechanical: a line that puts a backlog corpus size in front of a
+# reader — a file/row count, or a total in MB — carries a measurement date on that
+# same line, or states the parse-to-I/O ratio instead. Two absolute seconds whose
+# gap silently widens is the shape that failed here, so the ratio is the form that
+# is allowed to stand undated. A response's byte total (what `/tasks` shipped) is a
+# different quantity from what is on disk, but it rots the same way and the rule
+# catches it by the same `MB` match, so those lines are dated too.
+
+
+ROUTE = ROOT / "app" / "routers" / "backlog.py"
+
+# How this module states the size of the corpus it reads: a count of its files (or
+# of the rows those files become), or a total in MB. Deliberately narrow: the
+# failure being pinned is an *undated corpus size*, not any number in a comment,
+# and a pattern wide enough to catch "two visible lines" would be a pattern some
+# future reader has to widen with an exemption — which is how a date rule dies.
+_SIZE_CLAIM = re.compile(
+    r"\b\d[\d,]{2,}\s+(?:[\w-]+\s+)?(?:files|rows)\b"   # "1,137 files", "1,129 board files"
+    r"|\b\d+(?:\.\d+)?\s*MB\b"                          # "11 MB", "71 MB"
+)
+_MEASUREMENT_DATE = re.compile(r"2026-\d{2}-\d{2}")
+_RATIO_FORM = re.compile(r"\b\d+(?:\.\d+)?x\b|orders of magnitude")
+
+
+def _undated_size_lines(src: str) -> list[str]:
+    """Lines stating a corpus size with neither a date nor the ratio form."""
+    return [ln.strip() for ln in src.splitlines()
+            if _SIZE_CLAIM.search(ln)
+            and not _MEASUREMENT_DATE.search(ln)
+            and not _RATIO_FORM.search(ln)]
+
+
+def test_no_corpus_figure_in_the_backlog_route_reads_as_todays_board_without_a_date():
+    """Clause 1. Every corpus-size line in the route is dated or is the ratio.
+
+    The three sites #3410 names — "~1.6 ms a file" beside `_FM_CACHE_LOCK`,
+    "parse up to 11 MB of YAML" above the boards route, and "9 MB across 1,137
+    rows" in the detail route's docstring — are the ones that mislead a reader
+    sizing the route *today*, because an undated number is read as current state.
+    """
+    offenders = _undated_size_lines(ROUTE.read_text(encoding="utf-8"))
+    assert not offenders, (
+        f"{len(offenders)} corpus-size line(s) in app/routers/backlog.py state a "
+        f"file count or an MB total with no date and no ratio on the same line, so "
+        f"they read as the board the routes face now: {offenders[:4]}. The corpus "
+        f"grew from 1,137 files to 3,356 in six weeks; date the figure or say "
+        f"'parsing dominates I/O by roughly two orders of magnitude' instead.")
+
+
+def test_the_backlog_route_size_detector_can_actually_fail():
+    """A 0-hit scan is only evidence with a positive control beside it.
+
+    Taken from the module's own dated lines so the control is the real string: the
+    date is deleted from one line that carries a size claim, and the detector must
+    then report it. Without this, a pattern that never matches anything — a typo in
+    the alternation, a file that moved and read as empty — would report clause 1 as
+    satisfied forever.
+    """
+    lines = ROUTE.read_text(encoding="utf-8").splitlines()
+    dated_size_lines = [ln for ln in lines
+                        if _SIZE_CLAIM.search(ln) and _MEASUREMENT_DATE.search(ln)]
+    assert dated_size_lines, (
+        "no line of app/routers/backlog.py carries both a corpus size and a date, "
+        "so there is nothing here to control against — clause 1's own fix (one "
+        "dated re-measurement) is missing, not merely un-detected")
+    doctored = "\n".join(
+        _MEASUREMENT_DATE.sub("", ln) if ln == dated_size_lines[0] else ln
+        for ln in lines)
+    assert _undated_size_lines(doctored), (
+        f"the detector missed a size claim with its date stripped from "
+        f"{dated_size_lines[0]!r}: the check cannot fail, so it certifies nothing")
+
+
+def test_the_route_carries_one_dated_re_measurement_the_next_rot_is_measured_against():
+    """Clause 2. One line, in the module docstring, that drift is measured against.
+
+    It has to carry the date, the count and BOTH seconds together — a reader who
+    learns "16 s" but not "3,356 files on 2026-10-26" has a number and no way to
+    tell whether it is still true, which is the exact state this item was filed
+    about. And it must quote no per-file cost as an absolute: mean file size
+    doubled between the two measurements (9.7 KB to 21.2 KB), so 1.6 ms a file
+    became 4.77 ms a file and restating either re-arms the same rot one corpus
+    later.
+    """
+    src = ROUTE.read_text(encoding="utf-8")
+    doc = ast.get_docstring(ast.parse(src)) or ""
+    assert doc, "app/routers/backlog.py has no module docstring to carry the figure"
+    calibrated = [ln.strip() for ln in doc.splitlines()
+                  if all(tok in ln for tok in ("2026-10-26", "3,356", "71 MB",
+                                               "16.0 s", "0.14 s"))]
+    assert len(calibrated) == 1, (
+        f"expected exactly one re-measurement line in the module docstring carrying "
+        f"the date, the file count and both seconds; found {len(calibrated)}. "
+        f"2026-10-26: 3,356 files / 71 MB, front-matter pass 16.0 s, raw read "
+        f"0.14 s.")
+
+    per_file = [ln.strip() for ln in src.splitlines()
+                if re.search(r"ms\s*(?:a|per|/)\s*(?:file|row)", ln)]
+    assert not per_file, (
+        f"a per-file cost is back as an absolute: {per_file[:2]} — mean file size "
+        f"doubled between 2026-09-16 and 2026-10-26, which is why 1.6 ms a file "
+        f"became 4.77 ms a file; only the ratio held")
+
+
+def test_the_recorded_acceptance_grep_over_the_route_returns_only_dated_lines():
+    """The item's own check, run as the reader would run it.
+
+    `-E` because the recorded pattern is an alternation; `git grep` because that is
+    the form a reader holding this file can re-run, and the same instrument is
+    pointed at a string that must still be found so a wrong pathspec cannot report
+    the pass.
+    """
+    hits = subprocess.run(
+        ["git", "grep", "-n", "-E", "-e", "1,137|11 MB|1137",
+         "--", "app/routers/backlog.py"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=120)
+    assert hits.returncode == 0, (
+        f"the acceptance pattern found nothing at all (rc={hits.returncode}, "
+        f"cwd={ROOT}), so either the module no longer names its corpus or the "
+        f"instrument is broken: stderr={hits.stderr[:200]!r}")
+    lines = [ln for ln in hits.stdout.splitlines() if ln.strip()]
+    assert lines, "the pattern matched but returned no lines"
+    undated = [ln for ln in lines if "2026-" not in ln]
+    assert not undated, (
+        f"{len(undated)} of {len(lines)} hits carry no measurement date, so they "
+        f"read as the live corpus: {undated[:4]}")
