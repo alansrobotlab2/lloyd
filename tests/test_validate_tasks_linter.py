@@ -2118,3 +2118,141 @@ def test_the_linter_names_the_loader_instead_of_citing_its_line_numbers():
         "one of the two pre-app/ line numbers is back in "
         f"{SCRIPT.relative_to(ROOT)}: "
         f"{[ln for ln in lines if ':894' in ln or ':883-891' in ln]}")
+
+
+# ── #3746: #108 Solidcraft Repo Sync is rowed, and its drift row closes ────────
+#
+# #108 arrived at 19:53Z on 2026-11-03 by an agent `Write` rather than the
+# `autonomy_write_task` route, so no commit named it as it was filed: the filing guard
+# appended two `membership-drift.jsonl` rows and the linter began printing two
+# `DOC_MEMBERSHIP` lines for it, while the two `@live_vault` reconciling nodes above —
+# deselected by the gate — were the only checks that could see it. The pair below closes
+# both halves: the committed doc names it in both tables and takes the journal row back,
+# and the live board prints no line naming it while still counting the whole fleet.
+
+
+def test_the_committed_doc_rows_108_in_both_tables_and_closes_its_drift_row(tmp_path):
+    """#3746 clauses 1-4 as one linter run the gate can see, plus the mutation and the close.
+
+    The BOARD is seeded (one file, `108-solidcraft-repo-sync.md`, its real id, name,
+    `status: up_next`, `frequency: daily` and `skill_name`), and the DOC is the repo's own
+    `architecture/autonomy-jobs.md` — a tracked repo file, so a round's worktree doc is what
+    gets graded here and the gate's selection runs this node. It is the #3012 shape, chosen
+    because a silence only the nightly hears is not a rail: #102/#103 and then #107 each sat
+    unrowed for hours with every gate-run node green.
+
+    Two directions are asserted, because either one alone passes vacuously. With the
+    committed doc: no `DOC_MEMBERSHIP` or `DRIFT_UNCLOSED` line names #108, the doc parsed
+    (an `unchecked` line names no id and would slip past that filter), and the scan line
+    counted the seeded file. With every `#108` token deleted from that same text: exactly
+    two warnings, one per membership table — the pair #3746 was filed from.
+
+    The drift half cannot be read off a live run here: `drift_journal_warnings` resolves its
+    store through `app.paths.PIPELINE_DIR`, anchored to the tree the import came from, so
+    from any automod worktree it reads the worktree's own empty `.lloyd-data/_pipeline/`
+    (`scripts/autonomy/validate_tasks.py:415-421`) and prints nothing either way. So the row
+    is SEEDED here, in the writer's own shape with the two table names read from
+    `jobs_membership.TABLES` and the `ts` and `doc_short_sha` of the real
+    `~/lloyd-data/_pipeline/arch-review/membership-drift.jsonl` rows #108's create wrote
+    (2026-11-03T19:52:51.930471+00:00, doc b77b6b9cc904). Against the mutated doc that row
+    is still open — one line, naming #108 — and against the committed doc it is closed,
+    which is the close `drift_closed_since` (`:363`) performs and the thing the nightly will
+    see happen in the live journal after this lands.
+    """
+    from scripts.autonomy import jobs_membership as jm
+    from scripts.autonomy import validate_tasks as vt
+
+    lint = Linter(tmp_path)
+    lint.add("108-solidcraft-repo-sync.md", id=108, name="Solidcraft Repo Sync",
+             status="up_next", frequency="daily", skill_name="solidcraft-repo-sync")
+    real = SCRIPT.resolve().parents[2] / "architecture" / "autonomy-jobs.md"
+
+    def _naming_108(out: str) -> list[str]:
+        return [ln for ln in out.splitlines()
+                if "#108" in ln and ("DOC_MEMBERSHIP" in ln or "DRIFT_UNCLOSED" in ln)]
+
+    rc, out = _membership_run(tmp_path, lint, real)
+    assert rc == 0, f"naming a fleet member must cost a run nothing, got exit {rc}:\n{out[:500]}"
+    assert "DOC_MEMBERSHIP: unchecked" not in out, (
+        f"the linter could not read {real}, so the silence below is not a verdict:\n{out[:500]}")
+    scanned = re.search(r"^Scanned (\d+) task files in (.*)$", out, re.MULTILINE)
+    assert scanned, f"the run printed no scan line this node can count:\n{out[:500]}"
+    on_disk = len(list(lint.autonomy_dir.glob("*.md")))
+    assert int(scanned.group(1)) == on_disk, (
+        f"the run counted {scanned.group(1)} task files while {on_disk} sit in "
+        f"{lint.autonomy_dir}: silence from a scan that saw no fleet says nothing about a doc")
+    assert _naming_108(out) == [], (
+        "a board holding 108-solidcraft-repo-sync.md is not fully rowed in the committed "
+        "doc:\n" + "\n".join(_naming_108(out)))
+
+    text = real.read_text(encoding="utf-8")
+    mutated = re.sub(r"#108\b", "", text)
+    assert mutated != text, (
+        "the deletion landed on nothing, so the two warnings below would be a coincidence "
+        "rather than a consequence of the rows this round added")
+    doc = tmp_path / "autonomy-jobs-without-the-108-rows.md"
+    doc.write_text(mutated, encoding="utf-8")
+    rc2, out2 = _membership_run(tmp_path, lint, doc)
+    hits = _naming_108(out2)
+    assert len(hits) == 2, (
+        f"deleting #108 from the committed doc printed {len(hits)} warnings for it, not the "
+        f"2 the 2026-11-03 filing printed (one per membership table):\n{out2[:700]}")
+    assert any("functions table" in ln for ln in hits) and any(
+        "write-authority" in ln for ln in hits), (
+        f"#108's warnings name only one of the two tables: {hits}. #3746 is one row in EACH, "
+        "and a warning that names one sends a reader to add that one and leave the other wrong")
+
+    row = {"task_id": "#108", "file": "108-solidcraft-repo-sync.md",
+           "tables_missing": [name for name, _header in jm.TABLES],
+           "doc_short_sha": "b77b6b9cc904",
+           "ts": "2026-11-03T19:52:51.930471+00:00"}
+    journal = tmp_path / "membership-drift.jsonl"
+    journal.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    still_open = vt.drift_journal_warnings(doc, journal=journal)
+    assert len(still_open) == 1 and "#108" in still_open[0] and "DRIFT_UNCLOSED" in still_open[0], (
+        f"the seeded row did not read as open against a doc with its rows deleted: {still_open}")
+    assert vt.drift_journal_warnings(real, journal=journal) == [], (
+        "the committed doc did not take #108's drift row back — `drift_closed_since` re-reads "
+        "both tables per row, so an open line here means one of the two rows is missing or "
+        "sits outside the table the row names")
+
+
+@pytest.mark.live_vault
+def test_the_live_board_prints_no_line_naming_108_while_counting_the_whole_fleet():
+    """The acceptance check as written, run over the real board — fleet size READ, never typed.
+
+    `@live_vault` for the reason its two siblings above carry it: `~/obsidian/autonomy` is
+    not the tree under test, so the gate deselects this and the nightly and a bare
+    `pytest tests/` run it. What the gate grades is the seeded node above.
+
+    Two warnings, named so a reader who sees this red knows which side moved. It is silent on
+    #107, the other live unrowed file, because #3738 owns that id's rows and was aborted
+    before landing — the fleet-wide siblings at `:1537` and `:1579` are red on it, and this
+    node deliberately asserts about #108 alone rather than pretending to the whole board.
+    `cwd=ROOT` is the tree this file lives in, so the drift store it reads is that tree's:
+    from `~/lloyd` (the nightly, and any human) it is `~/lloyd-data/_pipeline/`, where the two
+    `DRIFT_UNCLOSED` lines #108's create wrote are observable, and from an automod worktree it
+    is the worktree's empty `.lloyd-data/_pipeline/` and prints nothing either way. The seeded
+    node above is therefore the pin for the close; this one is the pin for the board and the
+    count.
+    """
+    proc = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True,
+                          timeout=180, cwd=str(ROOT))
+    out = proc.stdout + proc.stderr
+    scanned = re.search(r"^Scanned (\d+) task files in (.*)$", out, re.MULTILINE)
+    assert scanned, f"the run printed no scan line this node can count:\n{out[:600]}"
+    printed, scanned_dir = int(scanned.group(1)), Path(scanned.group(2).strip())
+    on_disk = [p for p in scanned_dir.glob("*.md") if re.match(r"\d+-", p.name)]
+    assert printed > 0, f"the directory the linter scanned came back empty: {scanned_dir}"
+    assert printed == len(on_disk), (
+        f"the linter counted {printed} task files while {len(on_disk)} numbered files sit in "
+        f"{scanned_dir}: the count on the report is not the fleet, so the silence below proves "
+        f"nothing about a fleet the scanner did not see\n{out[:400]}")
+    assert "DOC_MEMBERSHIP: unchecked" not in out, (
+        f"the membership check reported it could not read its doc, so the silence below is "
+        f"not a verdict:\n{out[:400]}")
+    hits = [ln for ln in out.splitlines()
+            if "#108" in ln and ("DOC_MEMBERSHIP" in ln or "DRIFT_UNCLOSED" in ln)]
+    assert hits == [], (
+        "#108 is still missing from a membership table, or its filing drift is still open "
+        "after #3746 rowed it:\n" + "\n".join(hits))

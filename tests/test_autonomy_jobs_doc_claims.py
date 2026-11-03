@@ -6307,7 +6307,14 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
                       # half below is what stops an admitted row from carrying a cadence
                       # no node will ever read, and it can only do that from a value in
                       # the tracked tree.
-                      "#104": "daily"},
+                      "#104": "daily",
+                      # #3746: `~/obsidian/autonomy/108-solidcraft-repo-sync.md` declares
+                      # `frequency: daily` (:21) and no `runs_per_day`, so the row §Bound
+                      # entropy gained has a cadence this dict pins on the same footing as
+                      # #104's — and `test_the_cadence_rows_pinned_are_exactly_the_group_
+                      # table_rows` is what makes the row and this key one set, so neither
+                      # can arrive without the other.
+                      "#108": "daily"},
     # #3738: §Watch the machinery, and the one entry in this dict nobody types. The
     # cadence is `WATCH_JOBS`'s first probe — the value #2630 read off each job's task
     # file and has pinned its row's Freq cell against ever since — so the fifteen cells
