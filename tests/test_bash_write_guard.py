@@ -688,3 +688,221 @@ def test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_o
     assert PP.check_bash_write_denied(mover, str(home / "lloyd")) is None, \
         "a mover into the vault was refused — the owed widening was taken without a ruling"
     assert PP.VAULT_BASH_WRITE_SHAPES == ("a redirect into",), PP.VAULT_BASH_WRITE_SHAPES
+
+
+# ── #3737: the refusal for a witness-extract target names the lane that works ────
+#
+# Two refusals on 2026-11-03, both aimed at `backlog/data/`, both answered badly
+# because the sentence the session was handed offered only lanes that cannot carry
+# witness bytes. Both rows of `~/lloyd-data/safety/denials.jsonl`, copied from that
+# journal at this round's base commit:
+#
+#   * `at: 2026-11-03T15:05:04+00:00`, session `20261103_060506_autocode_1237` —
+#     `sed -n '6,11p' $L > backlog/data/2026-11-01.3541-gate-to-land-lag-witness.jsonl`.
+#     Answered by hand-emitting the block through `vault_write`'s content argument: the
+#     committed artifact reads `wc -l -c` → `6 6371` at vault `f7fa7bca2`, and
+#     `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:139`
+#     criticises exactly that — the bytes "travelled through `vault_write`'s content
+#     argument, i.e. through the model's own generation, which is exactly what
+#     'byte-identical' cannot be assumed of".
+#   * `at: 2026-11-03T17:29:07+00:00`, session `20261103_092822_autocode_3774` —
+#     `head -637 ~/lloyd-data/safety/denials.jsonl > backlog/data/2026-10-27.3365-safety-denials.jsonl`.
+#     Never answered at all: `ls ~/obsidian/backlog/data/2026-10-27.3365-safety-denials.jsonl`
+#     was still `No such file or directory` when this round opened, and is still absent
+#     at this round's base.
+#
+# Both rows carry `guard: "safety"` and `where: "hook"` — the harness PreToolUse hook
+# lane, not the aggregator's dispatch-lane check, which journals `where: "dispatch"` and
+# fired on two of this journal's nine vault rows and never on a witness target. So the
+# lane that must carry the advice is the HOOK's `permissionDecisionReason`, and
+# `test_the_witness_staging_advice_reaches_the_session_on_the_hook_lane` is the node that
+# stands across it; the dispatch-lane node below is kept because that lane is the
+# unconditional backstop and every later session may be refused by either.
+#
+# The lane that works — stage the bytes OUTSIDE the vault, move them in with `cp` or
+# `install -m 644`, then `automod_vault_land` the path — is open: #3701 refused the
+# redirect shape alone, and this file's own
+# `test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
+# measures it as open on purpose. It was named nowhere a refused session could read:
+# not in `VAULT_BASH_WRITE_LABEL`, not on the board. The nodes below pin the sentence
+# for that one directory and pin that it stops there. Widening `VAULT_BASH_WRITE_SHAPES`
+# is NOT decided here — the owed #3701 mover ruling stays owed, so the mover node above
+# this block passes unmodified, and so does every one of these targets' `cp`/`install`.
+
+#: Redirects into the witness-artifact directory (`scripts/automod/backlog.py`'s
+#: `WITNESS_ARTIFACT_DIR`, `backlog/data`), in the three spellings the journal shows.
+WITNESS_DIR_WRITES = {
+    "redirect-creates-witness-jsonl": "sed -n '6,11p' /tmp/ledger.jsonl > "
+                                      "{home}/obsidian/backlog/data/witness.jsonl",
+    "redirect-creates-witness-tilde": "echo x > ~/obsidian/backlog/data/probe.jsonl",
+    "redirect-append-witness-marker": "echo x >> "
+                                      "{home}/obsidian/backlog/data/2026-11-03.3737-marker.md",
+}
+
+#: Targets elsewhere in the SAME vault tree. Their refusal must stay the sentence #3701
+#: shipped, byte for byte: an extract aimed at the board or a daily note has no staging
+#: lane to be told about, and advice naming one would be a claim about a directory the
+#: target is not in.
+NON_WITNESS_VAULT_WRITES = {
+    "board-file": "cat > {home}/obsidian/backlog/probe.md",
+    "daily-note": "echo x > {home}/obsidian/memory/2026-11-03.md",
+    "knowledge-note": "printf x > {home}/obsidian/knowledge/probe.md",
+}
+
+#: The fragments clause 1 demands in a witness refusal. `cp` and `automod_vault_land` are
+#: in it because clause 1 names them — but only the three in
+#: `WITNESS_STAGING_ONLY_MARKERS` can also be asserted ABSENT elsewhere in the vault:
+#: #3701's own sentence already ends "use vault_write or automod_vault_land", so a
+#: non-witness refusal that still says exactly that is correct, and an absence check on
+#: `automod_vault_land` would fail on the sentence this item does not change.
+WITNESS_STAGING_MARKERS = (
+    "witness-artifact directory",
+    "outside the vault",
+    "cp",
+    "install -m 644",
+    "automod_vault_land",
+)
+
+#: The staging wording that belongs to the new sentence ALONE, and so is what clause 2
+#: asserts is missing from a refusal for any other vault target.
+WITNESS_STAGING_ONLY_MARKERS = (
+    "witness-artifact directory",
+    "outside the vault",
+    "install -m 644",
+)
+
+
+@pytest.mark.parametrize("key", sorted(WITNESS_DIR_WRITES))
+def test_a_witness_extract_redirect_refusal_names_the_copy_then_land_convention(home, key):
+    """Clause 1: a `backlog/data/` refusal says how byte-exact witness bytes get in.
+
+    The dispatch lane and not only the predicate: `check_bash_command` is the aggregator's
+    unconditional backstop (`agent_mcp/main.py`), so a session refused there has to read
+    the advice too — the lane the two journal rows actually came through is the hook, and
+    `test_the_witness_staging_advice_reaches_the_session_on_the_hook_lane` stands across
+    that one. It arrives under `protected write: ` like every other write refusal — the
+    deny-log reader keeps one prefix — and keeps `(#3701)`, because the base clause is
+    still the reason the redirect is refused; the new sentence only adds where the bytes
+    should have been built.
+    """
+    command = _cmd(WITNESS_DIR_WRITES[key], home)
+    match = check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
+                               session_id=SID)
+    assert match is not None, f"{key}: the witness redirect reached the lane unanswered"
+    reason = match[0]
+    assert reason.startswith("protected write: "), reason
+    assert str(home / "obsidian") in reason, f"{key}: must name the resolved target: {reason}"
+    assert "(#3701)" in reason, f"{key}: the base clause was replaced, not extended: {reason}"
+    for marker in WITNESS_STAGING_MARKERS:
+        assert marker in reason, f"{key}: the refusal does not name {marker!r}: {reason}"
+
+
+def test_the_witness_staging_advice_reaches_the_session_on_the_hook_lane(home):
+    """The lane that ACTUALLY refused the two witness publishes still says the new half.
+
+    Both journal rows for `backlog/data/` carry `where: "hook"` (re-read from
+    `~/lloyd-data/safety/denials.jsonl` at this round's base: 15:05:04Z and 17:29:07Z,
+    `guard: "safety"`, `session_class: "background"`), so the string that decided what
+    those sessions did next was the PreToolUse hook's `permissionDecisionReason` — a
+    second boundary between the guard and the model, and the one the first draft of this
+    block's own docstring got wrong by crediting the dispatch lane with both refusals. A
+    change to a refusal string earns a node on the lane that ships it, so this pins the
+    deny decision AND the staging markers here, on the same redirect shape the 15:05:04Z
+    row records, and a non-witness target as the contrast that the hook lane is not
+    saying it everywhere.
+    """
+    witness = _cmd(WITNESS_DIR_WRITES["redirect-creates-witness-jsonl"], home)
+    decision, reason = _hook_decision(witness, str(home / "lloyd"))
+    assert decision == "deny", f"the hook let a witness redirect through: {witness}"
+    assert "protected write" in reason, reason
+    for marker in WITNESS_STAGING_MARKERS:
+        assert marker in reason, f"the hook lane dropped {marker!r}: {reason}"
+
+    board = _cmd(NON_WITNESS_VAULT_WRITES["board-file"], home)
+    other_decision, other_reason = _hook_decision(board, str(home / "lloyd"))
+    assert other_decision == "deny", f"the board redirect stopped being refused: {board}"
+    for marker in WITNESS_STAGING_ONLY_MARKERS:
+        assert marker not in other_reason, (
+            f"the hook lane leaked staging wording to a board file: {other_reason}")
+
+
+@pytest.mark.parametrize("key", sorted(NON_WITNESS_VAULT_WRITES))
+def test_a_vault_redirect_outside_the_witness_directory_keeps_the_sentence_it_shipped_with(home,
+                                                                                            key):
+    """Clause 2: the staging wording is scoped to the witness directory and stops there.
+
+    Asserted as byte equality against `PP.VAULT_BASH_WRITE_LABEL`, not as "mentions
+    vaulting": `automod_vault_land` is already named by the #3701 sentence for every
+    vault target, so the discriminator is the staging markers, and the strongest form of
+    "keeps its current text" is that nothing else in the tree gained a character.
+    """
+    command = _cmd(NON_WITNESS_VAULT_WRITES[key], home)
+    target = command.rsplit("> ", 1)[1].strip()
+    reason = PP.check_bash_write_denied(command, str(home / "lloyd"))
+    assert reason is not None, f"{key}: the vault redirect reached the lane unanswered"
+    assert reason == f"a redirect into {target} — {PP.VAULT_BASH_WRITE_LABEL}", reason
+    for marker in WITNESS_STAGING_ONLY_MARKERS:
+        assert marker not in reason, f"{key}: staging wording leaked to {target}: {reason}"
+    assert "use vault_write or automod_vault_land (#3701)" in reason, reason
+
+
+def test_the_witness_refusal_fires_on_an_extract_that_does_not_exist_yet(home):
+    """Clause 3: CREATING a witness file is refused on the predicate that already did it.
+
+    The whole point of the journal rows is that the redirect was the thing that would
+    have created the artifact, so an advice clause that only appeared once the file was
+    there would describe a case nobody hits. Measured both ways in one node: the target
+    and its directory absent, then the same target on disk holding bytes — and the two
+    refusals are required to be the SAME string, which is what "no `exists()` test" looks
+    like from outside. If anything downstream ever resolves the witness directory only
+    when it is present, this node is where it fails.
+    """
+    target = home / "obsidian" / "backlog" / "data" / "2026-11-03.3737-new.jsonl"
+    assert not target.parent.exists(), "the scratch vault must not pre-create the witness dir"
+    assert not target.exists()
+    reason_missing = PP.check_bash_write_denied(f"echo x > {target}", str(home / "lloyd"))
+    assert reason_missing is not None, "a redirect CREATING a witness extract was allowed"
+    assert "install -m 644" in reason_missing, reason_missing
+
+    target.parent.mkdir(parents=True)
+    target.write_text("committed witness bytes\n")
+    reason_present = PP.check_bash_write_denied(f"echo x > {target}", str(home / "lloyd"))
+    assert reason_present == reason_missing, (
+        "the witness refusal now depends on the target being on disk — "
+        f"absent: {reason_missing!r} present: {reason_present!r}")
+
+
+def test_the_witness_advice_refuses_no_mover_because_the_staging_lane_stays_open(home):
+    """Clause 4: telling a session to use `install -m 644` must not close `install -m 644`.
+
+    The sentence names a mover as the sanctioned way in, so the round that added it had
+    better not also have widened the refused shapes to cover it — that would make the
+    advice a trap and take the owed #3701 ruling in the same commit as a string change.
+    Measured here rather than trusted: `cp` and `install -m 644` into the very directory
+    the new sentence describes both answer None, and the shape tuple is still the one
+    entry `test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
+    pins from the other side.
+    """
+    for mover in ("cp /tmp/x.jsonl {home}/obsidian/backlog/data/witness.jsonl",
+                  "install -m 644 /tmp/x.jsonl {home}/obsidian/backlog/data/witness.jsonl",
+                  "tee {home}/obsidian/backlog/data/witness.jsonl"):
+        assert PP.check_bash_write_denied(_cmd(mover, home), str(home / "lloyd")) is None, (
+            f"the staging lane named by the refusal was refused: {mover}")
+    assert PP.VAULT_BASH_WRITE_SHAPES == ("a redirect into",), PP.VAULT_BASH_WRITE_SHAPES
+
+
+def test_the_guard_names_the_witness_directory_by_literal_and_agrees_with_the_route(home):
+    """The layering the item ruled, and the drift that ruling leaves room for.
+
+    `app` imports `scripts` nowhere — `git grep -nE "^(from|import) scripts" -- 'app/**'`
+    returned 0 hits at this round's base — so the guard spells the directory as a literal
+    instead of importing `WITNESS_ARTIFACT_DIR` from `scripts/automod/backlog.py:1397`.
+    That buys the layering and pays with a second copy of one string, so the copy is
+    pinned against the constant it describes, read through the same route that names it.
+    """
+    assert PP.VAULT_BASH_WRITE_SUBDIR == "backlog/data", PP.VAULT_BASH_WRITE_SUBDIR
+    from scripts.automod import backlog as B
+    assert PP.VAULT_BASH_WRITE_SUBDIR == B.WITNESS_ARTIFACT_DIR
+    target = home / "obsidian" / B.WITNESS_ARTIFACT_DIR / "probe.jsonl"
+    reason = PP.check_bash_write_denied(f"echo x > {target}", str(home / "lloyd"))
+    assert reason and "witness-artifact directory" in reason, reason

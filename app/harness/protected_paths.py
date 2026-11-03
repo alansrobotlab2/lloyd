@@ -1455,4 +1455,78 @@ def bash_vault_write_denial(target: str, shape: str) -> str | None:
         real = os.path.realpath(target)
     except Exception:  # noqa: BLE001
         return None
-    return VAULT_BASH_WRITE_LABEL if _covers(root, real) else None
+    if not _covers(root, real):
+        return None
+    # Target-aware, and only in its last clause: the reason a redirect into the vault is
+    # refused is the same everywhere, but a target under the witness directory has a
+    # lane to be pointed at that no other vault target has (#3737, appended below).
+    return f"{VAULT_BASH_WRITE_LABEL}{bash_vault_witness_staging(real)}"
+
+
+# ---------------------------------------------------------------------------
+# The witness directory: what a refused redirect there should say as well (#3737)
+# ---------------------------------------------------------------------------
+#
+# Appended after `bash_vault_write_denial` for the reason that block's header gives: four
+# documents cite this file by line number and `tests/test_architecture_coverage_doc_claims.py`
+# parses those citations, so anything that can live at the end must not be inserted above.
+# What follows is one sentence of advice plus the predicate that scopes it. No policy
+# change: no shape joins `VAULT_BASH_WRITE_SHAPES`, and the mover ruling #3701 left owed
+# stays owed — `tests/test_bash_write_guard.py::test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
+# passes unmodified, and its neighbour re-measures a `cp`/`install -m 644` into this very
+# directory as None so the advice cannot become a trap.
+#
+# Why the sentence is needed, from `~/lloyd-data/safety/denials.jsonl` (9 vault refusals,
+# 2 aimed at `backlog/data/`, both on 2026-11-03): `15:05:04Z` session
+# `20261103_060506_autocode_1237` was refused a `sed -n '6,11p' $L > backlog/data/…jsonl`
+# and answered it by hand-emitting the block through `vault_write`'s content argument —
+# 6 lines / 6,371 B committed at vault `f7fa7bca2`, criticised at
+# `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:139` as
+# bytes that "travelled through `vault_write`'s content argument, i.e. through the model's
+# own generation, which is exactly what 'byte-identical' cannot be assumed of". The
+# `17:29:07Z` one (`20261103_092822_autocode_3774`, a 637-line `head` of the same journal)
+# was never answered: the artifact did not exist when this was written. For that traffic
+# the two lanes the #3701 sentence names are both dead ends — `vault_write` can carry the
+# bytes only as text the model regenerates, and `automod_vault_land` takes vault-relative
+# PATHS (`scripts/automod/vault_round.py:1735`) and commits bytes already in the tree, so
+# it never says how they got there.
+
+#: The vault subtree holding witness extracts, as a literal. Deliberately NOT imported
+#: from `scripts/automod/backlog.py:1397`'s `WITNESS_ARTIFACT_DIR`: `app` never imports
+#: `scripts` (`git grep -nE "^(from|import) scripts" -- 'app/**'` → 0 hits at this commit),
+#: and inverting that layering to build one refusal string is the worse trade. The copy is
+#: pinned against the constant it describes by
+#: `tests/test_bash_write_guard.py::test_the_guard_names_the_witness_directory_by_literal_and_agrees_with_the_route`.
+VAULT_BASH_WRITE_SUBDIR: str = "backlog/data"
+
+#: The clause appended for a target under that subtree. It states what a redirect cannot
+#: do with a 320 KB byte-exact extract and then the convention, in the order a session
+#: can follow: stage outside the vault, move the bytes in, land the path.
+VAULT_BASH_WITNESS_STAGING: str = (
+    " — and this target is the witness-artifact directory, where a redirect is the wrong "
+    "lane for a byte-exact extract regardless: build the bytes outside the vault, move "
+    "them in with cp or install -m 644, then commit them with automod_vault_land, which "
+    "takes vault-relative paths and lands the bytes already in the tree (#3737)")
+
+
+def bash_vault_witness_staging(target: str) -> str:
+    """The staging clause for a target under the vault's witness directory, "" otherwise.
+
+    Path arithmetic on the realpath `bash_vault_write_denial` already resolved, with no
+    `exists()` test: the case the journal shows is a redirect that WOULD HAVE CREATED the
+    extract, and advice that appeared only once the file was there would describe a case
+    nobody hits. The directory itself is not an artifact target, so it keeps the plain
+    sentence; anything below it gets the clause. Anything unresolvable answers "" — the
+    advice is optional, the refusal above it is not, and this function returning "" can
+    only ever shorten a refusal, never open a write.
+    """
+    try:
+        root = vault_bash_write_root()
+        if not root:
+            return ""
+        witness = os.path.realpath(os.path.join(root, *VAULT_BASH_WRITE_SUBDIR.split("/")))
+        if target == witness or not _covers(witness, target):
+            return ""
+        return VAULT_BASH_WITNESS_STAGING
+    except Exception:  # noqa: BLE001 — advice must not become a crash
+        return ""
