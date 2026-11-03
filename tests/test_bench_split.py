@@ -518,6 +518,40 @@ LIVE_BENCH_CATEGORIES = {
     # never reaches the gate's `tests` rung. Carried on #2274's findings, not fixed
     # here.
     "bench_028_contradiction_two_kinds": "synthetic",
+    # Keyed by stem with the `category:` each file's own front matter declares
+    # (`lloyd/bench/bench_029_durable_write_vault_note.md:6`,
+    # `bench_030_durable_write_kg_row.md:6` and `bench_031_durable_write_backlog_card.md:6`
+    # each = `synthetic`, the same reading their own `tags:` lists carry), the only
+    # authority this table may copy. Their absence is what reds main at `e39ab4e7`
+    # (#3740) at BOTH nodes: the census names the three unmapped ids, and
+    # `test_the_newest_live_bench_file_is_keyed_with_its_declared_category` reads one
+    # of them as the newest file by mtime. What is new here, and the reason these three
+    # lines are not three copies of the one above: the corpus gained three tasks in ONE
+    # vault commit — `git -C ~/obsidian log -1 -- lloyd/bench/bench_029_durable_write_vault_note.md`
+    # is `a48f0ef8`, committed 2026-11-03T18:17:39Z — and all three carry the SAME mtime
+    # (1793729694 = 2026-11-03T18:14:54Z), so `max(..., key=mtime)` among them is
+    # decided by `glob` order, not by time. Keying only the id that happens to win that
+    # three-way tie would leave the newest-file node green for one directory order and
+    # red for another; keying all three is what makes that node's answer independent of
+    # it. Tracked in the vault as measured for these lines, like `bench_027` and
+    # `bench_028`: 31 `.md` on disk against
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 31, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` is empty — so the
+    # `git clean -fd` that silently un-reds the census is not live for these ids. The
+    # vault commit precedes this round's base `6782277b` (2026-11-03T19:19:09Z) by
+    # 3,690 seconds, so the census sat stale across one full landing rather than being
+    # caught between a file write and the next commit. What these entries do NOT close
+    # is the judge's half, unchanged in kind from #2274's note: the newest set in
+    # `eval/autoresearch_assertions.yaml` is `bench_028_contradiction_two_kinds` (that
+    # file's line 468; 28 keys against the 31 files on disk), so all three of these
+    # tasks fall back to the scalar judge, and the node that asks for one,
+    # `tests/test_autoresearch_judge.py::test_every_live_bench_task_has_an_assertion_set`,
+    # carries `@pytest.mark.live_vault` (`tests/test_autoresearch_judge.py:1267`) and so
+    # never reaches the gate's `tests` rung — the gap stays green on a red tree. Carried
+    # on #3740's findings, not fixed here.
+    "bench_029_durable_write_vault_note": "synthetic",
+    "bench_030_durable_write_kg_row": "synthetic",
+    "bench_031_durable_write_backlog_card": "synthetic",
 }
 
 
