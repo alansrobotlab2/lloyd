@@ -222,6 +222,20 @@ WATCH_JOBS = {
     # `Reports only` beside #101 rather than with #103, whose file write is a write.
     106: ("daily", "published_maxima_probe.py", "published-maxima.jsonl",
           "never re-publish"),
+    # #3738: the four probes read off
+    # ~/obsidian/autonomy/107-scheduled-ceiling-flip-gate-daily-record.md on 2026-11-03.
+    # `frequency: daily` with no `runs_per_day` key and `status: draft` — neither is a
+    # bar, for the standing reason above — and unlike #100 and #101, whose rows were
+    # written before either had a run, this one's journal already holds a real row, so
+    # `reads` is taken from the recorder as well as the task file. It names the gate
+    # module the single command drives rather than the ledger file that module opens,
+    # because the flag is what decides which ledger is read: `readings_path()` follows
+    # `LLOYD_SCHEDULED_CEILING_LEDGER` and ignores `--ledger` entirely. The prohibition
+    # is spelled as the act (`never add`) and not the bare flag, because a flag token on
+    # a command line where every other token is already forbidden is the shape that
+    # reads as permitted.
+    107: ("daily", "scheduled_ceiling_flip_gate", "flip-gate-readings.jsonl",
+          "never add `--ledger`"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -6242,24 +6256,37 @@ def test_the_measure_membership_guard_fires_on_a_seeded_100(tmp_path, monkeypatc
         f"node reads, so a real membership move would sit through it too")
 
 
-# ── #3333 — the two group tables' Freq cells are pinned, not free prose ───────
+# ── #3333 — the group tables' Freq cells are pinned, not free prose ───────────
 #
-# §Ingest and §Bound entropy are the two job-group tables that put a cadence in a
-# column of its own, and both were wrong at once while nothing graded either: this
-# file pinned cadence for §Watch the machinery (`WATCH_JOBS`) and for #86 alone. So
-# `| #30 | 3×/day |` outlived by seventeen days the edit that made it false, and
-# `| #79 | weekly |` understated a daily job sevenfold in the other direction. The
-# values are typed here rather than parsed off `~/obsidian/autonomy/` for the reason
-# #2630 gives for §Watch: a node that opens the task directory is a `live_vault` read,
-# `TESTS_MARK_EXPR` (`scripts/automod/gate.py:719`) deselects `live_vault`, and a
-# cadence check the promotion gate never runs is exactly the hole these two cells fell
-# through — every round that could have caught them ran a suite that did not look.
+# §Ingest and §Bound entropy are the two job-group tables #3333 found wrong at once
+# with nothing grading either: this file pinned cadence for §Watch the machinery
+# (`WATCH_JOBS`) and for #86 alone. So `| #30 | 3×/day |` outlived by seventeen days
+# the edit that made it false, and `| #79 | weekly |` understated a daily job
+# sevenfold in the other direction. The values are typed here rather than parsed off
+# `~/obsidian/autonomy/` for the reason #2630 gives for §Watch: a node that opens the
+# task directory is a `live_vault` read, `TESTS_MARK_EXPR`
+# (`scripts/automod/gate.py:719`) deselects `live_vault`, and a cadence check the
+# promotion gate never runs is exactly the hole these two cells fell through — every
+# round that could have caught them ran a suite that did not look.
+#
+# §Watch the machinery joined the roster under #3738, and its cells are DERIVED from
+# `WATCH_JOBS` rather than typed a second time. The group's cadence was already
+# pinned, but only from inside that dict's own four probes, so the row-set half below
+# held a fifteen-row table as nothing at all — #2630's symmetric-omission hole one
+# level up, one row short of #3333's: a §Watch row whose Freq cell no probe read was
+# invisible here because the group had no entry to compare against. Typing fifteen
+# more cells would have closed that hole by opening the other one — a second copy of
+# fifteen cadences, each free to drift from the list that already holds it — so the
+# one spelling stays in `WATCH_JOBS`, where #2630 put it, and this table reads it.
 
-CADENCE_TABLES = ("Ingest", "Bound entropy")
+CADENCE_TABLES = ("Ingest", "Bound entropy", "Watch the machinery")
 
 #: Each row's `Freq` cell as the table must spell it, read off the task file's own
 #: `frequency:` on 2026-10-25. #68 declares `frequency: every-15min`, which the table
 #: spells for a human reader as `every 15 min`; every other value is the declared word.
+#: §Watch the machinery's fifteen cells are the exception to "typed": they are
+#: `WATCH_JOBS`'s own cadences, derived at the bottom of this dict, so a §Watch Freq
+#: cell has exactly one thing in this file it can disagree with.
 #:
 #: The two that moved, and why the cell is the place to catch it. #30's `3×/day` died
 #: by vault commit `1cc570a7` ("autonomy(#2445): task #30's runs_per_day 3 -> 1 so it
@@ -6281,6 +6308,18 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
                       # no node will ever read, and it can only do that from a value in
                       # the tracked tree.
                       "#104": "daily"},
+    # #3738: §Watch the machinery, and the one entry in this dict nobody types. The
+    # cadence is `WATCH_JOBS`'s first probe — the value #2630 read off each job's task
+    # file and has pinned its row's Freq cell against ever since — so the fifteen cells
+    # below are that list, not a copy of it, and #107's cadence enters this instrument
+    # exactly when it enters the group. It is `daily` because
+    # `~/obsidian/autonomy/107-scheduled-ceiling-flip-gate-daily-record.md` declares
+    # `frequency: daily` (read 2026-11-03), which is also what the per-row probe for
+    # 107 asserts straight off that file; this dict's value is the one the row-set half
+    # and the seeded-copy control below read, so an admitted §Watch row can no longer
+    # carry a cadence this section never looked at.
+    "Watch the machinery": {f"#{jid}": cadence
+                            for jid, (cadence, _r, _w, _b) in WATCH_JOBS.items()},
 }
 
 _CADENCE_CASES = [(g, j) for g in CADENCE_TABLES for j in CADENCE_CELLS[g]]
