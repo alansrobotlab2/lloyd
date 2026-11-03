@@ -40,6 +40,7 @@ Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_ledger_bound.py
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 import subprocess
@@ -514,9 +515,10 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (23,718 B / 82 lines, as
-        re-measured by the #3440 re-freeze), and it names `topics/memory-md-ledger`, so a
-        0-hit below cannot be a wrong path or an empty slice;
+      * the corpus is the whole file at its exact bytes (26,149 B / 82 lines, as
+        re-measured from the copy by the #3719 re-freeze), and it names
+        `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an empty
+        slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
         carries its own positive and negative control, so the pattern is proven able to
         fire and unable to fire on the correct ordinary-topic sentence;
@@ -593,13 +595,33 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # `1ab109f4` bounded what one `checked:` re-stamp may write (§2 item 2: the date, at
     # most one replacing note of at most 160 characters, at most one bare earlier-date) and
     # scoped §1's shorter-rewrite ban to `to fit a row past a refusal`, growing the skill by
-    # 930 B on the same 82 lines. Both literals below are this copy's own, re-measured from
-    # the copy after it was written — `wc -c` 23,718 and `tr -cd '\n' | wc -c` 82 — and not
-    # carried from the item, which quoted the pre-land 22,788 / 82 and would have been a
-    # false receipt had a nightly appended to the skill before this landed.
-    assert len(raw) == 23_718 and text.count("\n") == 82, (
+    # 930 B on the same 82 lines. Both literals then were that copy's own, re-measured from
+    # the copy after it was written and not carried from the item, which quoted the pre-land
+    # 22,788 / 82 and would have been a false receipt had a nightly appended to the skill
+    # before it landed. That freeze's figure is this file's own history at HEAD
+    # (`git log -p` reaches it); the literal below is the current copy's, and one file
+    # carrying one receipt at a time is the point — two live numbers is one too many.
+    # 2026-11-03, #3719: the seventh such pairing, after #2284 (`3c1c9515`), #2415
+    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628, #3282 and #3440. Vault
+    # `c04c2241` (#3561) rewrote §5's retirement bullet: the 2026-09-25 `8a414797`
+    # instruction that a retired line's topic file "stays where it is … never touch the
+    # file" contradicted `validate_memory_index.py`'s unlinked arm, and a vault land
+    # cannot stage a `tests/` path, so the re-freeze has to be a code round.
+    #
+    # Both literals below are THIS copy's own bytes, re-measured after the copy and not
+    # carried from the item. `wc -c` answered 26,149 and `tr -cd '\n' | wc -c` answered 82.
+    # The item is the reason for that rule rather than an exception to it: #3719 quoted
+    # 25,872 at triage, then corrected itself to 26,031 in a figure correction on the same
+    # day, and the live file measured 26,149 when this copy was written. A skill that the
+    # nightly and a live vault round are both editing is exactly why the receipt is taken
+    # from the copy and never from the handoff —
+    # `test_the_witness_receipt_never_lies_about_the_corpus`, below this node, is what
+    # keeps all four statements of it from parting company at the next re-freeze.
+    # The newline count is unchanged at 82: the §5 bullet grew in BYTES and added no line.
+    # Verified on the copy, not assumed from the 82 the previous freeze recorded.
+    assert len(raw) == 26_149 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "23,718 B / 82 lines of the whole skill file — a partial copy would make the "
+        "26,149 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -696,6 +718,78 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
             "coverage owed (#2626)" in text), (
         "section 5 never gained its #2626 over-width-anchor ruling, so the witness still "
         "sends a curator to file a ledger bug over a 3-character authoring typo")
+
+    # §5's retirement bullet as vault `c04c2241` (#3561) rewrote it, pinned by name for the
+    # same reason #2626's two sentences are. What it replaced was the 2026-09-25 `8a414797`
+    # instruction that a retired line's topic file "stays where it is … never touch the
+    # file": followed, it leaves the file on disk with no index line, which is the exact
+    # state `validate_memory_index.py`'s unlinked arm reports — two nightly commits were
+    # red on it, and the skill was telling every later curator to produce more. The bullet
+    # states no cap and no ledger bound, so pinning it leaves the ban re-adjudicating over
+    # the corpus it was cleared against. It is pinned on the bullet's opening and on its
+    # replacement clause rather than on its grep sentences, which are the part #3561's own
+    # review found published a false witness and rewrote: a pin on prose another round is
+    # still correcting is a freeze that cannot land (#3719 clause 4).
+    assert ("**A retirement never leaves its topic file unlinked (#3561).**" in text
+            and "This bullet replaces the 2026-09-25 instruction" in text), (
+        "section 5's retirement bullet is the pre-#3561 text, so this corpus still orders a "
+        "curator to retire a line while leaving its topic file under `lloyd/memory/` "
+        "unlinked — the instruction that reddened `validate_memory_index.py` twice")
+
+
+def test_the_witness_receipt_never_lies_about_the_corpus():
+    """#3719 clause 3: the byte count is written four times in one node, so a stale copy
+    of it is a message that lies about the corpus rather than a typo.
+
+    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` states the
+    frozen copy's size in its docstring, in the measurement comment, as the assert literal,
+    and inside its own failure message — #3719's triage found the fourth site in an item
+    that named only three, and all seven re-freezes this file records (#2284, #2415, #2468,
+    #2540, #2628, #3282, #3440) had to move every one of them by hand. A red message
+    quoting a number the assert never checked leaves a reader unable to tell a bad corpus
+    from a bad test, which is the #3070 class this file keeps running into.
+
+    So the claim is about AGREEMENT, not about a value: it names no byte count, and it is
+    never edited at a re-freeze. That is what makes it the guard rather than a fifth site
+    that has to be remembered. Grepping `tests/` for the superseded figure is the
+    box-level half of the same claim, for one freeze only and once by hand; this is the
+    half that outlives the next six.
+    """
+    src = inspect.getsource(
+        test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling)
+    real = len(SKILL_WITNESS.read_bytes())
+    # Each of the four sites is located by the words around it, not by its neighbourhood of
+    # digits: the same node's comments recite six earlier freezes' figures — 1,136 B, 2,597,
+    # 22,287, 22,788 and 32,768 among them — and every one of those is legitimate history.
+    # A site that cannot be found is a failure too — a receipt reworded out of the
+    # prose it belongs to is the same loss as a receipt left stale, and it is the failure
+    # mode a re-freeze under time pressure actually produces.
+    anchors = {
+        "the docstring's corpus bullet":
+            r"the corpus is the whole file at its exact bytes \((\d[\d,]*) B",
+        "the measurement comment":
+            r"`wc -c` answered (\d[\d,]*) and",
+        "the assert literal":
+            r"len\(raw\) == (\d[\d_]*)",
+        "the assertion's own failure message":
+            r'"(\d[\d,]*) B / \d+ lines of the whole skill file',
+    }
+    stated: dict[str, int] = {}
+    lost: list[str] = []
+    for site, pattern in anchors.items():
+        m = re.search(pattern, src)
+        if m is None:
+            lost.append(site)
+        else:
+            stated[site] = int(m.group(1).replace("_", "").replace(",", ""))
+    assert not lost, (
+        f"the byte-pin node no longer states the witness's size in {' and '.join(lost)}, "
+        f"so the receipt has {len(stated)} of its four statements: re-point this node at "
+        "the new wording, or put the figure back where the prose reports it")
+    assert set(stated.values()) == {real}, (
+        "; ".join(f"{site} says {value:,}" for site, value in sorted(stated.items()))
+        + f", but the frozen copy measures {real:,} B — a red run from that node would "
+        "quote a number its own assert never checked")
 
 
 #: The shape of a completion-note at-ceiling template: `ledger: at ceiling (<bytes> /
