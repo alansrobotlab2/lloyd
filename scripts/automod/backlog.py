@@ -3446,7 +3446,13 @@ def _ledger_rows_merged(ledger: Path) -> list[dict]:
     """The live ledger's rows plus the `promotions-archive-*.jsonl.gz` rotations
     beside it, oldest month first and the live rows last.
 
-    Opt-in, and the default every other reader keeps is the live file alone:
+    Opt-in at this level. #3612 made the readers `board_health` and the queues are
+    built from — `triaged_ids`, `released_ids`, `held_confirmations`,
+    `implement_outcomes` — ask for it by DEFAULT, so "was this item ever judged"
+    outlives a rotation; what still reads the live file alone is a reader whose
+    answer is about a window (`landed_items_trailing`, `board_flow`), where the
+    archived rows are by construction outside it. Why the narrow read was the
+    default for everything:
     `LEDGER_ARCHIVE_AGE_DAYS = 14` (`scripts/groundskeeper/retention-sweep.py`)
     rolls a row out of `promotions.jsonl` after two weeks, so a confirmation
     older than that stops resolving — which is right for the pool (an item that
@@ -3497,15 +3503,74 @@ def _ledger_events(ledger: Path, event: str, *, require_item: bool = True,
     is `[]`, a malformed line is skipped, not raised. One deliberate hardening:
     a line that parses as JSON but is not an object used to be returned and then
     crash its caller on `.get`; it is now dropped by the shared decoder.
+
+    The filtered lists are memoised against a token naming the bytes they were
+    filtered from (`_events_token`), and that memo became load-bearing the moment
+    `merged=True` arrived: a merged read filters 66,587 rows where the live file
+    holds 20,872, and `implement_outcomes` asks this function a question per item.
+    Measured on the live store, taking the readers archive-aware WITHOUT the memo
+    took a cold dashboard cycle from 9.28 s to 16.65 s — past the 14.77 s budget of
+    `test_one_cold_dashboard_cycle_beats_the_budget`, and the warm/cold ratio node
+    with it. With the memo the cycle costs what it cost before.
     """
+    key = (str(ledger), event, bool(require_item), bool(merged))
+    before = _rows_fingerprint(ledger, merged)
+    rows = _ledger_rows_merged(ledger) if merged else _ledger_rows(ledger)
+    after = _rows_fingerprint(ledger, merged)
+    stable = before == after
+    if stable:
+        hit = _events_cache.get(key)
+        if hit is not None and hit[0] == before:
+            return list(hit[1])           # a copy: a caller may sort or append
     out: list[dict] = []
-    for d in (_ledger_rows_merged(ledger) if merged else _ledger_rows(ledger)):
+    for d in rows:
         if d.get("event") != event:
             continue
         if require_item and d.get("item_id") is None:
             continue
         out.append(d)
-    return out
+    if stable:
+        if len(_events_cache) > 512:      # far more than one cycle asks: one per pair
+            _events_cache.clear()
+        _events_cache[key] = (before, out)
+    return list(out)
+
+
+# `{(ledger, event, require_item, merged): (fingerprint, filtered_rows)}`. The
+# fingerprint is what makes a hit safe; see `_rows_fingerprint`. Cleared wholesale past
+# 512 keys, which is far more than one board cycle asks (one key per event/merged pair).
+_events_cache: dict[tuple, tuple[tuple, list[dict]]] = {}
+
+
+def _rows_fingerprint(ledger: Path, merged: bool) -> tuple:
+    """The bytes a filtered list could have been built from: the live file's stat plus,
+    when `merged`, one `(name, mtime_ns, size)` per rotation.
+
+    The live triple is exactly the key `state.ledger_rows` caches by, so this memo can
+    never be fresher or staler than the decode underneath it — including the case
+    `test_a_write_from_another_process_invalidates_the_cache` measures, an append by
+    another process, which moves the size and so moves the fingerprint. The archive
+    triple is the key `state._archive_cache` keys its gzip cache by, so a fold that
+    lands a new month or rewrites one cannot be served rows from the rotation that
+    used to sit there.
+
+    An unanswerable fingerprint is `("unreadable", ...)`, which differs from any stored
+    tuple — costing a re-filter, never a stale answer.
+    """
+    def one(path: Path):
+        try:
+            st = path.stat()
+            return (path.name, st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return (path.name, None, None, None)
+
+    from scripts.automod import state as S
+    try:
+        target = Path(ledger)
+        archives = tuple(sorted(one(p) for p in S.ledger_archives(target))) if merged else ()
+        return (one(target), archives, merged)
+    except Exception:  # noqa: BLE001 - a broken probe must not answer from the memo
+        return ("unreadable", str(ledger), merged)
 
 
 _ACCEPTANCE_PLACEHOLDERS = {"none", "n/a", "na", "not applicable", "null", "nil", "no"}
@@ -3686,7 +3751,8 @@ def _after_mark(d: dict, marks: dict[int, float]) -> bool:
     return m is None or float(d.get("ts") or 0) > m
 
 
-def implement_history(ledger: Path, marks: dict[int, float] | None = None) -> dict[int, list[dict]]:
+def implement_history(ledger: Path, marks: dict[int, float] | None = None, *,
+                      with_archives: bool = True) -> dict[int, list[dict]]:
     """`{item_id: [backlog_implement rows]}` in ledger order, counting from the
     item's last re-triage mark, with every attempt a landing drain refused
     removed.
@@ -3697,10 +3763,19 @@ def implement_history(ledger: Path, marks: dict[int, float] | None = None) -> di
     through to `spent` for a turn that never ran. That was a quiet loss while
     a spend parked the item; with re-triage a spend discards its contract. So
     a `skipped` row takes its `started` with it.
+
+    `with_archives` (default True, #3612) reads the `promotions-archive-*.jsonl.gz`
+    rotations beside the ledger too, and the re-triage mark lookup is widened in the
+    same breath so a mark and the rows it voids are always judged over the same
+    population. An attempt is a fact about the past: the retention sweep moving a
+    round's rows out of the live file (#2043's 14-day window, 2,905 rows on
+    2026-10-31) must not hand that item a fresh attempt because the record of the
+    old one rotated. Live rows are read LAST, so for an item present in both the
+    live row is the later one — see `state.ledger_rows_merged`.
     """
-    marks = retriage_marks(ledger) if marks is None else marks
+    marks = retriage_marks(ledger, with_archives=with_archives) if marks is None else marks
     out: dict[int, list[dict]] = {}
-    for d in _ledger_events(ledger, "backlog_implement"):
+    for d in _ledger_events(ledger, "backlog_implement", merged=with_archives):
         if not _after_mark(d, marks):
             continue
         rows = out.setdefault(int(d["item_id"]), [])
@@ -3714,12 +3789,14 @@ def implement_history(ledger: Path, marks: dict[int, float] | None = None) -> di
     return {iid: rows for iid, rows in out.items() if rows}
 
 
-def _reverted_commits(ledger: Path) -> set[str]:
+def _reverted_commits(ledger: Path, *, merged: bool = False) -> set[str]:
     """`state.reverted_commits` over this ledger: every promoted commit a
     rollback took off `main`, including the ones a `reset` removed without
-    naming them."""
+    naming them. `merged=True` (#3612) asks the rotations too, so a rollback of
+    a promotion whose rows have aged out of the live file is still a rollback."""
     from scripts.automod import state as S
-    return S.reverted_commits(_ledger_rows(ledger))
+    return S.reverted_commits(_ledger_rows_merged(ledger) if merged
+                              else _ledger_rows(ledger))
 
 
 def _live_promoted_rounds(ledger: Path) -> set[str]:
@@ -3800,7 +3877,7 @@ def items_being_gated_or_landed(ledger: Path, *,
     return out
 
 
-def triaged_ids(ledger: Path) -> dict[int, str]:
+def triaged_ids(ledger: Path, *, with_archives: bool = True) -> dict[int, str]:
     """{item_id: verdict} for items with a TERMINAL verdict.
 
     `incomplete` is deliberately not one: an item whose triage ran out of
@@ -3813,10 +3890,23 @@ def triaged_ids(ledger: Path) -> dict[int, str]:
     word in `verdict` was never rendered by anything. A genuine `unverifiable`
     carries source "structured" or "regex" and still parks the item exactly as
     before; only the un-rendered one is ignored.
+
+    `with_archives` (default True, #3612) answers over the live ledger PLUS the
+    `promotions-archive-*.jsonl.gz` rotations beside it, which is what makes a
+    verdict a permanent fact rather than a 14-day one. The retention sweep folds
+    rows older than `LEDGER_ARCHIVE_AGE_DAYS = 14` out of the live file, so on
+    2026-10-30 the first item to live past the window (#2796, one
+    `backlog_triage` row dated 2026-10-16T00:08:30Z) lost its only evidence and
+    `board_health` moved it from `.draft.triaged` to `.draft.pool` — instructing
+    the triage sweep to re-read work that had already landed, and refusing the
+    fold's neutrality proof from then on. Live rows are read LAST
+    (`state.ledger_rows_merged`), so a live row for an item always resolves ahead
+    of an archived one; the re-triage mark lookup is widened in the same breath,
+    or an archived mark would void a live verdict that outlived it.
     """
-    marks = retriage_marks(ledger)
+    marks = retriage_marks(ledger, with_archives=with_archives)
     seen: dict[int, str] = {}
-    for d in _ledger_events(ledger, "backlog_triage"):
+    for d in _ledger_events(ledger, "backlog_triage", merged=with_archives):
         verdict = d.get("verdict", "")
         if str(d.get("verdict_source") or "") == NO_MEASUREMENT_SOURCE:
             seen.pop(int(d["item_id"]), None)
@@ -4010,7 +4100,7 @@ def gate_duration_stats(ledger: Path, *, last: int = 20) -> dict:
             "p90_s": round(secs[min(len(secs) - 1, int(0.9 * (len(secs) - 1) + 0.5))], 1)}
 
 
-def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
+def _last_gate_per_round(ledger: Path, *, merged: bool = False) -> dict[str, dict]:
     """The event that last JUDGED each round: the rung that ended its most
     recent gate run, or a landing that failed after the gate had passed.
 
@@ -4021,9 +4111,13 @@ def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
     refusal is what decides whether the item's attempt was spent. Ordered by
     `ts`, because the two event types are filtered out of the ledger
     separately and file order is lost in the merge.
+
+    `merged=True` asks the rotations too (#3612): a round's last gate event is a
+    fact about that round, and the retention sweep folding it out of the live
+    file must not change what the item's attempt is read as.
     """
-    rows = (_ledger_events(ledger, "gate", require_item=False)
-            + _ledger_events(ledger, "land_failed", require_item=False))
+    rows = (_ledger_events(ledger, "gate", require_item=False, merged=merged)
+            + _ledger_events(ledger, "land_failed", require_item=False, merged=merged))
     rows.sort(key=lambda d: float(d.get("ts") or 0))
     last: dict[str, dict] = {}
     for d in rows:
@@ -4033,7 +4127,7 @@ def _last_gate_per_round(ledger: Path) -> dict[str, dict]:
     return last
 
 
-def gate_passed_unlanded_rounds(ledger: Path) -> set[str]:
+def gate_passed_unlanded_rounds(ledger: Path, *, merged: bool = False) -> set[str]:
     """Rounds whose last gate run passed every rung and that were never
     promoted and never recorded a `land_failed`: the landing did not happen,
     which is not a judgment on the change.
@@ -4046,13 +4140,13 @@ def gate_passed_unlanded_rounds(ledger: Path) -> set[str]:
     rung, so an ok `drill` as the round's last gate event is a full pass.
     """
     promoted = {str(d.get("round_id") or "") for d in
-                _ledger_events(ledger, "promoted", require_item=False)}
-    return {rid for rid, ev in _last_gate_per_round(ledger).items()
+                _ledger_events(ledger, "promoted", require_item=False, merged=merged)}
+    return {rid for rid, ev in _last_gate_per_round(ledger, merged=merged).items()
             if ev.get("event") == "gate" and ev.get("ok") and str(ev.get("rung")) == "drill"
             and rid not in promoted}
 
 
-def externally_blocked_rounds(ledger: Path) -> set[str]:
+def externally_blocked_rounds(ledger: Path, *, merged: bool = False) -> set[str]:
     """Rounds whose final gate attempt failed on a condition they did not cause.
 
     Every case is about something other than the diff: `preflight` when the
@@ -4069,11 +4163,12 @@ def externally_blocked_rounds(ledger: Path) -> set[str]:
     `external` verdict disappears by construction. Old ledger rows still carry
     the flag on a `tests` event and are read exactly as before.
     """
-    return {rid for rid, ev in _last_gate_per_round(ledger).items()
+    return {rid for rid, ev in _last_gate_per_round(ledger, merged=merged).items()
             if not ev.get("ok") and ev.get("external_blocker")}
 
 
-def _external_budget_left(ledger: Path, item_id: int, round_id: str, attempts: int) -> bool:
+def _external_budget_left(ledger: Path, item_id: int, round_id: str, attempts: int, *,
+                          merged: bool = False) -> bool:
     """Whether an externally blocked round may still be re-offered.
 
     A gate-side block (a dirty or moved live tree, an unreachable grader; a
@@ -4087,22 +4182,24 @@ def _external_budget_left(ledger: Path, item_id: int, round_id: str, attempts: i
     graded change went back to triage. Attempts other causes consumed say
     nothing about whether the landing will work next time.
     """
-    last = _last_gate_per_round(ledger).get(round_id) or {}
+    last = _last_gate_per_round(ledger, merged=merged).get(round_id) or {}
     if last.get("event") != "land_failed":
         return attempts <= EXTERNAL_RETRY_CAP
-    rounds = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "backlog_implement")
+    rounds = {str(d.get("round_id") or "")
+              for d in _ledger_events(ledger, "backlog_implement", merged=merged)
               if int(d.get("item_id") or 0) == int(item_id)}
-    failed = sum(1 for d in _ledger_events(ledger, "land_failed", require_item=False)
+    failed = sum(1 for d in _ledger_events(ledger, "land_failed", require_item=False,
+                                           merged=merged)
                  if d.get("external_blocker") and str(d.get("round_id") or "") in rounds)
     return failed <= EXTERNAL_RETRY_CAP
 
 
-def review_retry_rounds(ledger: Path) -> dict[str, dict]:
+def review_retry_rounds(ledger: Path, *, merged: bool = False) -> dict[str, dict]:
     """`{round_id: gate event}` for rounds whose last gate attempt was refused
     by the review rung with the premise judged sound — the implementation or
     its tests fell short. The findings ride the event (`review_findings`)
     because `gate.json` dies with the worktree."""
-    return {rid: ev for rid, ev in _last_gate_per_round(ledger).items()
+    return {rid: ev for rid, ev in _last_gate_per_round(ledger, merged=merged).items()
             if not ev.get("ok") and ev.get("review_retry")}
 
 
@@ -4113,22 +4210,27 @@ def review_unsound_rounds(ledger: Path) -> dict[str, dict]:
             if not ev.get("ok") and ev.get("review_premise_unsound")}
 
 
-def review_events_for_item(ledger: Path, item_id: int) -> list[dict]:
+def review_events_for_item(ledger: Path, item_id: int, *,
+                           merged: bool = False) -> list[dict]:
     """Every `review` event for rounds this item's implement turns opened,
     oldest first — since its last re-triage mark, whose new contract numbers
-    its clauses afresh (a clause 2 refused before it is a different clause)."""
-    mark = retriage_marks(ledger).get(int(item_id), float("-inf"))
-    rids = {str(d.get("round_id") or "") for d in _ledger_events(ledger, "backlog_implement")
+    its clauses afresh (a clause 2 refused before it is a different clause).
+    `merged=True` (#3612) asks the rotations too, so an item's graded history
+    does not shrink when a round's rows age out of the live file."""
+    mark = retriage_marks(ledger, with_archives=merged).get(int(item_id), float("-inf"))
+    rids = {str(d.get("round_id") or "")
+            for d in _ledger_events(ledger, "backlog_implement", merged=merged)
             if int(d["item_id"]) == int(item_id) and d.get("round_id")
             and float(d.get("ts") or 0) > mark}
     rids.discard("")
-    rows = [d for d in _ledger_events(ledger, "review", require_item=False)
+    rows = [d for d in _ledger_events(ledger, "review", require_item=False, merged=merged)
             if str(d.get("round_id") or "") in rids and float(d.get("ts") or 0) > mark]
     rows.sort(key=lambda d: float(d.get("ts") or 0))
     return rows
 
 
-def review_disagreement(ledger: Path, item_id: int) -> int | None:
+def review_disagreement(ledger: Path, item_id: int, *,
+                        merged: bool = False) -> int | None:
     """The clause index two consecutive blocking reviews both flagged, or None.
 
     The early exit from the author/grader loop: when the same clause comes
@@ -4136,7 +4238,8 @@ def review_disagreement(ledger: Path, item_id: int) -> int | None:
     satisfied and the grader has twice disagreed. A third round re-runs the
     same disagreement; a human resolves it.
     """
-    blocking = [d for d in review_events_for_item(ledger, item_id) if d.get("blocking")]
+    blocking = [d for d in review_events_for_item(ledger, item_id, merged=merged)
+                if d.get("blocking")]
     if len(blocking) < 2:
         return None
     prev, last = blocking[-2], blocking[-1]
@@ -4161,7 +4264,7 @@ def review_disagreement(ledger: Path, item_id: int) -> int | None:
     return min(both) if both else None
 
 
-def rolled_back_rounds(ledger: Path) -> set[str]:
+def rolled_back_rounds(ledger: Path, *, merged: bool = False) -> set[str]:
     """Rounds that promoted and were then reverted by the guardian.
 
     Nothing else joins these two facts: the promotion carries the round id and
@@ -4171,9 +4274,9 @@ def rolled_back_rounds(ledger: Path) -> set[str]:
     for re-offering rather than against it — and the landing deletes the
     branch, so the redo really is a redo. The guardian tag holds the tree.
     """
-    reverted = _reverted_commits(ledger)
+    reverted = _reverted_commits(ledger, merged=merged)
     return {str(d.get("round_id") or "") for d in
-            _ledger_events(ledger, "promoted", require_item=False)
+            _ledger_events(ledger, "promoted", require_item=False, merged=merged)
             if str(d.get("commit") or "") in reverted and d.get("round_id")}
 
 
@@ -4251,7 +4354,7 @@ def _infra_outage(ev: dict) -> str:
     return f"row:{stamp}"
 
 
-def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
+def implement_outcomes(ledger: Path, *, with_archives: bool = True) -> dict[int, tuple[str, str]]:
     """`{item_id: (verdict, detail)}` for every item an implement turn touched.
 
     `verdict` is one of `spent`, `reopened`, `external`, `incomplete`,
@@ -4279,8 +4382,19 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     opened for any of them — was read as three attempts and spent #1220 and #654
     outright. `settle_orphaned_turns` writes "not counted as an attempt" onto
     the victim's own file; this is the line that makes the sentence true.
+
+    `with_archives` (default True, #3612) takes the whole table from the live
+    ledger PLUS the `promotions-archive-*.jsonl.gz` rotations beside it, down
+    through `implement_history` and every round helper consulted below. An
+    attempt is a fact about the past, so `LEDGER_ARCHIVE_AGE_DAYS = 14` must not
+    be able to hand an item a fresh budget because the record of its last one
+    rotated: the fold planned for 2026-10-31 moved 2,905 rows, and 136 items had
+    their ONLY triage row among them. #1975's owed ruling (2026-10-02) left this
+    branch open — archive-aware readers or an accepted `triaged`→`pool` flip —
+    and #3612 takes the readers, because the other branch means the loop
+    re-offering work it has already paid for.
     """
-    history = implement_history(ledger)
+    history = implement_history(ledger, with_archives=with_archives)
     latest: dict[int, dict] = {}
     attempts: dict[int, int] = {}
     # Budget deaths counted on their own. The incomplete rule used to read the
@@ -4314,20 +4428,21 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                 if str(d.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS:
                     incompletes[iid] = incompletes.get(iid, 0) + 1
 
-    blocked = externally_blocked_rounds(ledger)
-    unlanded = gate_passed_unlanded_rounds(ledger)
+    blocked = externally_blocked_rounds(ledger, merged=with_archives)
+    unlanded = gate_passed_unlanded_rounds(ledger, merged=with_archives)
     # Capped on its own count, like an external landing failure: how many of
     # this item's rounds ended that way, not how many attempts it has used.
     unlanded_counts: dict[int, int] = {}
-    for d in _ledger_events(ledger, "backlog_implement"):
+    for d in _ledger_events(ledger, "backlog_implement", merged=with_archives):
         if d.get("phase") == "finished" and str(d.get("round_id") or "") in unlanded:
             unlanded_counts[int(d["item_id"])] = unlanded_counts.get(int(d["item_id"]), 0) + 1
-    reverted = rolled_back_rounds(ledger)
-    review_retry = review_retry_rounds(ledger)
+    reverted = rolled_back_rounds(ledger, merged=with_archives)
+    review_retry = review_retry_rounds(ledger, merged=with_archives)
     promoted_ev = {str(d.get("round_id") or ""): d for d in
-                   _ledger_events(ledger, "promoted", require_item=False)}
+                   _ledger_events(ledger, "promoted", require_item=False,
+                                  merged=with_archives)}
     promoted = set(promoted_ev)
-    ungated = ungated_rescued_rounds(ledger)
+    ungated = ungated_rescued_rounds(ledger, merged=with_archives)
     out: dict[int, tuple[str, str]] = {}
     for iid, ev in latest.items():
         phase = str(ev.get("phase") or "")
@@ -4351,7 +4466,8 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             # `not_met` was written before any gate saw the change, and the
             # review rung grading the landed change all `met` answers it
             # (`settled_landings` closes the item on the same grading).
-            if unmet and rid in ungated and code_review_outcome(ledger, rid):
+            if unmet and rid in ungated and code_review_outcome(
+                    ledger, rid, merged=with_archives):
                 unmet = []
             if unmet and n <= 1 + PARTIAL_RETRY_CAP:
                 sha = str(promoted_ev[rid].get("commit") or "")[:8]
@@ -4407,7 +4523,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
         # turn then died at its budget is still incomplete, and both verdicts
         # read the last gate event, so they are exclusive with `external`.
         if rid and rid in review_retry:
-            clause = review_disagreement(ledger, iid)
+            clause = review_disagreement(ledger, iid, merged=with_archives)
             if clause is not None:
                 out[iid] = ("spent",
                             f"review disagreement: clause {clause} came back unmet on two "
@@ -4428,8 +4544,9 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                         f"`automod/{rid}` (pass it as from_branch), gate, and call automod_land, "
                         f"never `round land` from Bash")
             continue
-        if rid and rid in blocked and _external_budget_left(ledger, iid, rid, n):
-            g = _last_gate_per_round(ledger).get(rid) or {}
+        if rid and rid in blocked and _external_budget_left(
+                ledger, iid, rid, n, merged=with_archives):
+            g = _last_gate_per_round(ledger, merged=with_archives).get(rid) or {}
             out[iid] = ("external",
                         f"round {rid} was blocked at the `{g.get('rung')}` rung by a condition "
                         f"it did not cause; its work is on branch `automod/{rid}`")
@@ -4711,13 +4828,14 @@ def ungraded_vault_outcome(outcome) -> dict:
             "item_verdict_refused": "met_without_grader_clauses"}
 
 
-def ungated_rescued_rounds(ledger: Path) -> set[str]:
+def ungated_rescued_rounds(ledger: Path, *, merged: bool = False) -> set[str]:
     """Rounds the reaper gated because their implement turn ended without
     gating (`autocode._gate_if_ungated`, a `gate_rescued` row of kind
     `ungated`). Their turn's outcome predates every gate of the change that
     landed; `settled_landings` reads the review's grading in its place."""
     return {str(d.get("round_id") or "")
-            for d in _ledger_events(ledger, "gate_rescued", require_item=False)
+            for d in _ledger_events(ledger, "gate_rescued", require_item=False,
+                                    merged=merged)
             if d.get("kind") == "ungated" and d.get("round_id")}
 
 
@@ -5193,7 +5311,8 @@ def held_by_head_landing(rows, item_id: int, *, session_id: str | None = None) -
                                     "is recorded as the landing")}}
 
 
-def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
+def code_review_outcome(ledger: Path, round_id: str, *,
+                        merged: bool = False) -> dict | None:
     """A `met` outcome built from the review rung's grading of a code round, or None.
 
     The vault rule (`vault_review_outcome`), for the other surface, and for the
@@ -5226,7 +5345,8 @@ def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
     rid = str(round_id or "")
     if not rid:
         return None
-    graded = [d for d in _ledger_events(ledger, "review", require_item=False)
+    graded = [d for d in _ledger_events(ledger, "review", require_item=False,
+                                        merged=merged)
               if str(d.get("round_id") or "") == rid and d.get("ok") and d.get("clauses")]
     if not graded:
         return None
@@ -6774,16 +6894,18 @@ EXPIRY_EXEMPT_TAGS = frozenset({"grouped", "umbrella", NEEDS_HUMAN_TAG, EXPIRED_
                                 SWEPT_TAG, PARKED_TAG})
 
 
-def expired_ids(ledger: Path) -> set[int]:
-    return {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_expired")}
+def expired_ids(ledger: Path, *, merged: bool = False) -> set[int]:
+    return {int(d["item_id"]) for d in
+            _ledger_events(ledger, "backlog_expired", merged=merged)}
 
 
-def group_kept_ids(ledger: Path) -> set[int]:
+def group_kept_ids(ledger: Path, *, merged: bool = False) -> set[int]:
     """Items a group triage judged `keep` — distinct work, back in the single
     pool. Written by the cluster half of the loop; read here so a kept item
     is released from quarantine the moment it is judged."""
     out: set[int] = set()
-    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False,
+                            merged=merged):
         judged = d.get("judged") or {}
         if isinstance(judged, dict):
             for k, v in judged.items():
@@ -6795,22 +6917,24 @@ def group_kept_ids(ledger: Path) -> set[int]:
     return out
 
 
-def group_keep_note(ledger: Path, item_id: int) -> dict | None:
+def group_keep_note(ledger: Path, item_id: int, *, merged: bool = False) -> dict | None:
     """The latest group triage that judged this item `keep`: `{cluster_id, ts}`.
     `group_kept_ids` answers whether; this keeps the when, which the single
     triage of a kept item is shown."""
     found: dict | None = None
-    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False):
+    for d in _ledger_events(ledger, "backlog_group_triage", require_item=False,
+                            merged=merged):
         judged = d.get("judged") or {}
         if isinstance(judged, dict) and str(judged.get(str(int(item_id)))) == "keep":
             found = {"cluster_id": str(d.get("cluster_id") or ""), "ts": d.get("ts")}
     return found
 
 
-def swept_ids(ledger: Path) -> set[int]:
+def swept_ids(ledger: Path, *, merged: bool = False) -> set[int]:
     """Every id a sweep judged, whatever the verdict (`backlog_sweep` rows)."""
     out: set[int] = set()
-    for d in _ledger_events(ledger, "backlog_sweep", require_item=False):
+    for d in _ledger_events(ledger, "backlog_sweep", require_item=False,
+                            merged=merged):
         judged = d.get("judged") or {}
         if isinstance(judged, dict):
             for k in judged:
@@ -6821,12 +6945,24 @@ def swept_ids(ledger: Path) -> set[int]:
     return out
 
 
-def released_ids(ledger: Path) -> set[int]:
+def released_ids(ledger: Path, *, with_archives: bool = True) -> set[int]:
     """Self-filed items the pass may triage after all: expired and reopened,
     judged `keep` by a group triage, ranked by a sweep, or re-triaged after a
-    spent attempt."""
-    return (expired_ids(ledger) | group_kept_ids(ledger) | swept_ids(ledger)
-            | set(retriage_marks(ledger)) | triage_requested_ids(ledger))
+    spent attempt.
+
+    `with_archives` (default True, #3612) puts all five of those questions to the
+    live ledger PLUS the `promotions-archive-*.jsonl.gz` rotations beside it. A
+    release is not an event with a shelf life: an item a group triage judged
+    `keep` 22 days ago is still distinct work, and `board_health`'s `.released`
+    and `.quarantined` have to answer the same on both sides of a retention fold.
+    The fold that refused itself from 2026-10-30 onward is the same event that
+    would otherwise move those two figures silently — `.quarantined` is
+    self-filed items MINUS this set, so losing a release adds a quarantine."""
+    return (expired_ids(ledger, merged=with_archives)
+            | group_kept_ids(ledger, merged=with_archives)
+            | swept_ids(ledger, merged=with_archives)
+            | set(retriage_marks(ledger, with_archives=with_archives))
+            | triage_requested_ids(ledger, merged=with_archives))
 
 
 # ── A promotion is a request, not a status ──────────────────────────────────
@@ -6858,9 +6994,10 @@ TRIAGE_REQUEST_CAP = 5
 TRIAGE_REQUEST_WINDOW_S = 86_400.0
 
 
-def triage_requested_ids(ledger: Path) -> set[int]:
+def triage_requested_ids(ledger: Path, *, merged: bool = False) -> set[int]:
     """Self-filed items a promotion released to single triage."""
-    return {int(d["item_id"]) for d in _ledger_events(ledger, TRIAGE_REQUEST_EVENT)}
+    return {int(d["item_id"]) for d in
+            _ledger_events(ledger, TRIAGE_REQUEST_EVENT, merged=merged)}
 
 
 def promotion_ruling(item_id: int, *, ledger: Path | None = None, session_class: str = "chat",
@@ -7586,13 +7723,23 @@ def implement_pool_bound(ledger: Path, *, floor: int = IMPLEMENT_POOL_FLOOR,
 # turn: the verdict is recorded, the item stays in `draft`, and it enters
 # `up_next` oldest-first as room opens.
 
-def held_confirmations(ledger: Path) -> dict[int, float]:
+def held_confirmations(ledger: Path, *,
+                       with_archives: bool = True) -> dict[int, float]:
     """`{item_id: ts}` of confirmations still waiting for room, oldest first
     by `ts`. Held means the item's latest `confirmed` verdict carries
-    `held: true` and no `backlog_confirm_released` row has followed it."""
-    latest = confirmed_verdicts(ledger)
+    `held: true` and no `backlog_confirm_released` row has followed it.
+
+    `with_archives` (default True, #3612) asks `confirmed_verdicts` and the
+    release rows over the live ledger PLUS the rotations, so a held confirmation
+    outlives the 14-day fold. `confirmed_verdicts(..., with_archives=True)` was
+    #3179 taking that ruling for the grader's question; this is the same ruling
+    taken for `board_health`'s `.held` figure, which a fold moved silently
+    before. A row ages out of the live file, never out of being a confirmation,
+    and a release that arrived after its confirmation still resolves ahead of it
+    because `state.ledger_rows_merged` reads the live rows last."""
+    latest = confirmed_verdicts(ledger, with_archives=with_archives)
     released: dict[int, float] = {}
-    for d in _ledger_events(ledger, "backlog_confirm_released"):
+    for d in _ledger_events(ledger, "backlog_confirm_released", merged=with_archives):
         released[int(d["item_id"])] = float(d.get("ts") or 0)
     out: dict[int, float] = {}
     for iid, ev in latest.items():
@@ -8538,7 +8685,14 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     live = live_blockers(ledger, boards, items=items, backlog_dir=backlog_dir)
     held = held_confirmations(ledger)
     outcomes = implement_outcomes(ledger)
-    attempted = {int(d["item_id"]) for d in _ledger_events(ledger, "backlog_implement")}
+    # Merged with the rotations because `outcomes` is: `.up_next.never_attempted`
+    # would otherwise contradict the outcomes table for the same item the moment its
+    # only `backlog_implement` row folded, and a board figure that moves across a
+    # fold is what makes the retention sweep's neutrality proof refuse the fold
+    # (#3612 — the live fold of 2,950 rows diffs to nothing today, this is the arm
+    # of it that was only true by accident).
+    attempted = {int(d["item_id"]) for d in
+                 _ledger_events(ledger, "backlog_implement", merged=True)}
 
     open_counts: dict[str, int] = {}
     for i in items:
@@ -8724,7 +8878,12 @@ def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     (confirmed work with a contract), `needs-human`, `expired`, anything
     already swept or parked, and a batch that ran out of budget twice.
     """
-    done = swept_ids(ledger) | sweep_abandoned_ids(ledger)
+    # `swept_ids` merged with the rotations: a sweep row is the record that the sweep
+    # HAS read an item, and `LEDGER_ARCHIVE_AGE_DAYS = 14` cannot unread it. Left
+    # live-only it did two things at once — the item went back into `unswept` to be
+    # re-read every fortnight forever, and `.sweep.unswept` in `board_health` moved
+    # across the fold, which is the refusal this whole change is about (#3612).
+    done = swept_ids(ledger, merged=True) | sweep_abandoned_ids(ledger)
     seen = triaged_ids(ledger)
     claimed = triage_claimed_ids()
     pool = [i for i in (items if items is not None else open_items(boards))

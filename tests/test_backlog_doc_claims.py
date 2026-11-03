@@ -188,16 +188,25 @@ def _cited_test_witnesses(path: Path) -> list[tuple[int, str]]:
 
 
 def _test_node_names() -> set[str]:
-    """Every `def test_…` defined under `tests/`, from the source, not the runner.
+    """Every `def test_…` or `async def test_…` under `tests/`, from the source, not the runner.
 
     Collected by regex rather than `pytest --collect-only` because the runner
     refuses to start in the production tree (`tests/conftest.py`'s
     `_refuse_the_production_tree`), and a citation check that only works inside a
     worktree is a citation check that is not run.
+
+    The `async` arm is load-bearing and was missing until #3725 tripped it:
+    `scripts/automod/backlog.py` cites
+    `tests/test_dashboard_cold_render.py::test_one_cold_dashboard_cycle_beats_the_budget`,
+    an `async def` that pytest collects (27 tests in that file), and this scan read it as
+    dead. An extractor that sees only synchronous definitions makes an asynchronous witness
+    look fabricated, so the prose gets rewritten away from the node that really covers it —
+    the same wrong denominator this file's own denominator assertion worries about. Both
+    this set and `_resolves`' per-file check had the blind spot.
     """
     names: set[str] = set()
     for p in sorted(TESTS.rglob("*.py")):
-        names |= set(re.findall(r"^def (test_[A-Za-z0-9_]+)\(",
+        names |= set(re.findall(r"^(?:async )?def (test_[A-Za-z0-9_]+)\(",
                                 p.read_text(encoding="utf-8", errors="replace"), re.M))
     return names
 
@@ -217,7 +226,7 @@ def _resolves(citation: str, nodes: set[str]) -> bool:
             return False
         if sep and _TESTISH.match(node):
             body = target.read_text(encoding="utf-8", errors="replace")
-            return bool(re.search(rf"^def {re.escape(node)}\(", body, re.M))
+            return bool(re.search(rf"^(?:async )?def {re.escape(node)}\(", body, re.M))
         return True
     return head in nodes
 

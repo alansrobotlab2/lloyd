@@ -5015,25 +5015,27 @@ def test_the_shipped_probe_writes_a_fold_the_board_cannot_see(rs, tmp_path, caps
 
 def test_the_shipped_probe_writes_a_fold_that_only_moves_a_draft_arm(rs, tmp_path,
                                                                      capsys):
-    """Clause 4 of #3650: the flip is tolerated, so the default probe WRITES.
+    """Clause 4 of #3650 as #3725 leaves it: the shipped probe WRITES this fold, and it now
+    writes because the fold moves no `board_health()` key at all.
 
-    The fixture is the one the retired node used and the effect is unchanged: an open `draft`
-    item whose ONLY `backlog_triage` row is past `LEDGER_ARCHIVE_AGE_DAYS` drops out of
-    `triaged_ids()` once that row archives, and `board_health()` moves it from
-    `draft.triaged` to `draft.pool` — measured on this tree as diff `['.draft.pool',
-    '.draft.triaged']`, before `{triaged: 1, pool: 0}`, after `{triaged: 0, pool: 1}`. What
-    #3650 ruled is that this is not a change in what the board panel ANSWERS: the item file is
-    not in this write, its status bytes do not change, and only a row-counting arm moved —
-    because `triaged_ids` reads only the file it is handed. So the node that asserted a
-    REFUSAL here was pinning the position #3650 replaced, and it asserted a real cost: on the
-    live ledger that refusal was what every scheduled run printed, which is why a 35 MB store
-    went unbounded.
+    The fixture is the one #3650 used: an open `draft` item whose ONLY `backlog_triage` row is
+    past `LEDGER_ARCHIVE_AGE_DAYS`. #3650 shipped `LEDGER_NEUTRALITY_TOLERATED_KEYS` because
+    `triaged_ids` read only the file it was handed, so archiving that row moved
+    `draft.triaged` -> `draft.pool` and the proof refused — measured on that tree as diff
+    `['.draft.pool', '.draft.triaged']`, before `{triaged: 1, pool: 0}`, after
+    `{triaged: 0, pool: 1}`. #3725 then took the other half of #1975's open branch:
+    `triaged_ids` answers over the live ledger PLUS the `promotions-archive-*.jsonl.gz`
+    rotations beside it, and the proof asks the after-side copy beside a STAGED archive of the
+    very rows the fold is about to file. On this fixture the pair therefore no longer moves —
+    the row is filed, not destroyed. The tolerance set itself is unchanged (#3725 clause 3) and
+    stays pinned by `test_the_draft_arm_tolerance_is_exactly_two_paths_and_says_why`; what this
+    node owns is the shipped probe's decision on a real board walk.
 
-    Driven with no `health=` because the whole clause is about the shipped probe deciding this
-    on a real flip; the injected-pair nodes beside it pin the arithmetic, never the probe. A
-    DRY run, which is where the rung's report line is decided and where #3650's acceptance
-    puts its assertion: the fold is reported as archived, no REFUSED on the line, and —
-    because a dry run is a dry run — not one byte of the store moves.
+    Driven with no `health=` because the clause is about the shipped probe deciding, not about
+    the arithmetic the injected-pair nodes beside it pin. A DRY run, which is where the rung's
+    report line is decided and where #3650's acceptance puts its assertion: the fold is
+    reported as archived, no REFUSED on the line, and — because a dry run is a dry run — not
+    one byte of the store moves.
     """
     now = time.time()
     board = tmp_path / "board"
@@ -5070,6 +5072,142 @@ def test_the_shipped_probe_writes_a_fold_that_only_moves_a_draft_arm(rs, tmp_pat
     assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
         "the dry run moved bytes it only reported on")
     assert not _archives(rs), "the dry run created an archive anyway"
+
+
+#: #3725's fixture id: an open `up_next` item, so named because #3024 is the live instance.
+_UP_NEXT_FIXTURE_ID = 9903024
+
+
+def _open_up_next(board: Path, item_id: int) -> None:
+    """One open `up_next` item on the board the proof reads — #3024's shape.
+
+    The draft helper above exists because #3650 ruled that partition; this one is the arm
+    that ruling never reached. `board_health` counts `up_next`'s `never_attempted` from
+    `attempted`, and an item whose ONLY `backlog_implement` rows archive stops being on that
+    set the moment the read narrows to one file — which is a PRIORITISATION input the board
+    steward re-offers on, not a bucket of a partition moving. So the fold has to be
+    invariant here rather than tolerated.
+    """
+    (board / f"{item_id}-an-open-up-next-item.md").write_text(
+        "---\ntype: backlog\nsegment: backlog\nstatus: up_next\npriority: low\n"
+        "board: lloyd\nblocked: false\nassigned: false\n---\n\n# An open up_next item\n\n"
+        "Body.\n", encoding="utf-8")
+
+
+def _up_next_attempt_rows(now: float) -> list[bytes]:
+    """#3024's two rows verbatim in shape: both past the window, both `round_id: None`.
+
+    The `round_id` is load-bearing. `_archive_plan` spares the newest row of each round
+    (`retention-sweep.py:2392` skips a row whose `round_id` is not a non-empty string), so
+    with a round id one of the two would be KEPT and the item would still look attempted —
+    a fixture that cannot lose its attempt is a fixture that cannot test the guard.
+    """
+    return [
+        _fold_row(now - _OLD * 86400, event="backlog_implement",
+                  item_id=_UP_NEXT_FIXTURE_ID, round_id=None, phase="started"),
+        _fold_row(now - _OLD * 86400 + 128, event="backlog_implement",
+                  item_id=_UP_NEXT_FIXTURE_ID, round_id=None, phase="finished"),
+    ]
+
+
+def test_the_shipped_probe_writes_a_fold_whose_only_attempt_loser_is_up_next(rs, tmp_path,
+                                                                            capsys):
+    """Clause 2 of #3725: the live fold of 2026-11-03 must WRITE, dry run AND applied run.
+
+    The state the sweep reached on this box: an open `up_next` item whose only two
+    `backlog_implement` rows are past `LEDGER_ARCHIVE_AGE_DAYS`, nothing else marking it.
+    The shipped probe (no `health=`) refused it — `REFUSED (board_health() changed at
+    .up_next.never_attempted) — live file untouched, 31251370 bytes` on the dry run at
+    06:20Z — because the after-side copy was asked over bytes whose attempt rows existed
+    NOWHERE: the proof runs before step 4 writes the month gzip, so widening
+    `attempted` to `ledger_rows_merged` alone cannot see rows that are still in the live
+    file and about to leave it. With the rows staged beside the after copy the pair agrees
+    and the fold is admissible again.
+
+    Both modes are asserted because they are different code paths over the same proof: a
+    dry run decides the report line an operator approves and returns after step 3, while
+    the applied run goes on to land the gzip and rename the live file, and a fix that only
+    satisfied the dry run would leave the store unbounded exactly as badly.
+    """
+    now = time.time()
+    board = tmp_path / "board"
+    board.mkdir()
+    _open_up_next(board, _UP_NEXT_FIXTURE_ID)
+    attempts = _up_next_attempt_rows(now)
+    rows = _write_ledger(rs, [*attempts, _fold_row(now - _YOUNG * 86400,
+                                                   round_id="SM_SHIPPED_UP")])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    dry = rs.sweep_promotions_ledger(False, now, backlog_dir=board)
+    dry_line = rs._ledger_line(dry)
+    capsys.readouterr()
+
+    assert dry["refused"] is None, (
+        f"the shipped proof still refuses the fold that only un-marks an open up_next item's "
+        f"attempt, which is the refusal holding this store unbounded: {dry['refused']}")
+    assert dry["moved"] == 2, (
+        f"the fold moved {dry['moved']} rows, not the two attempt rows, so the refusal below "
+        f"would not have been about the arm this node is about: {dry}")
+    assert "REFUSED" not in dry_line, dry_line
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, "the dry run moved bytes it only " \
+                                                          "reported on"
+    assert not _archives(rs), "the dry run created an archive anyway"
+
+    applied = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
+
+    assert applied["refused"] is None, (
+        f"the APPLIED run refused where the dry run passed, so the store still never gets "
+        f"bounded: {applied['refused']}")
+    assert applied["moved"] == 2, applied
+    assert _live_lines(rs) == [rows[2]], (
+        "the live file after an applied fold must hold exactly the row the window kept")
+    assert sorted(_archived(rs)) == sorted(attempts), (
+        "the two attempt rows have to be in the gzip byte-for-byte: after the fold that "
+        "archive is the only place `attempted` can still find this item")
+    assert not [a for a in _archives(rs) if "-neutral" in a.name], (
+        "a staged proof archive survived the applied run, and every later merged read would "
+        "count rows the live file still holds")
+
+
+def test_a_fold_that_loses_an_up_next_attempt_from_both_files_still_refuses_there(rs,
+                                                                                 tmp_path,
+                                                                                 monkeypatch):
+    """Clause 3 of #3725: the guard keeps refusing, and it did not get a wider tolerance.
+
+    Same fixture, but `_month_buckets` files NOTHING, so the moved rows land in neither the
+    after-side copy nor any archive — the state of rows that were destroyed. The fold must
+    still be refused, naming `.up_next.never_attempted` and nothing else, with the live
+    bytes untouched and no archive written. This is the node that says clause 2's pass is
+    earned by the staged archive and not by a guard that stopped looking.
+
+    The tolerance set is asserted here too, because that is the other half of this clause
+    and the failure mode is the easy one: adding `.up_next.never_attempted` to the set is
+    one line, makes every node above pass, and leaves the FOLDED store — which from then on
+    IS the live store — reporting an attempted item as never-attempted to the steward.
+    """
+    assert rs.LEDGER_NEUTRALITY_TOLERATED_KEYS == frozenset(
+        {".draft.triaged", ".draft.pool"}), (
+        "#3725 clause 3: the two draft arms #3650 ruled are the whole tolerance. Widening it "
+        "to `.up_next.never_attempted` would silence the refusal by deleting the question")
+    assert ".up_next.never_attempted" not in rs.LEDGER_NEUTRALITY_TOLERATED_KEYS
+
+    monkeypatch.setattr(rs, "_month_buckets", lambda rows, archive_idx: {})
+    now = time.time()
+    board = tmp_path / "board"
+    board.mkdir()
+    _open_up_next(board, _UP_NEXT_FIXTURE_ID)
+    _write_ledger(rs, [*_up_next_attempt_rows(now),
+                       _fold_row(now - _YOUNG * 86400, round_id="SM_DROP_UP")])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    out = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
+
+    assert out["refused"] == "board_health() changed at .up_next.never_attempted", (
+        f"rows that reached NEITHER the live file nor an archive did not refuse at the arm "
+        f"this item is about — the guard is no longer guarding it: {out['refused']}")
+    assert out["moved"] == 0 and out["archived"] == 0, out
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, "a refused fold wrote anyway"
+    assert not _archives(rs), "a refused fold still landed the rows somewhere"
 
 
 def _arm_pair(**after_over):

@@ -749,3 +749,234 @@ def test_the_merged_read_keeps_the_live_ledger_coming_off_disk_once(tmp_path, mo
     # rotation, so its contract resolves with no extra read of anything.
     assert "Archived contract 79." in " | ".join(RV.item_contract(79, ledger=ledger)["clauses"])
     assert S.ledger_read_count(ledger) == 1, "a third contract re-read the live file"
+
+
+# ── #3612: the readers the board is built from answer over the rotations too ───
+#
+# `board_health` splits its drafts into `triaged` and `pool` on `triaged_ids`, and the
+# retention sweep folds rows older than `LEDGER_ARCHIVE_AGE_DAYS = 14` out of the live
+# file into `promotions-archive-<YYYYMM>.jsonl.gz`. Those two facts met on
+# 2026-10-30: #2796's only `backlog_triage` row (2026-10-16T00:08:30Z) crossed the
+# window, a reader that had never looked at an archive answered "untriaged", and an open
+# item that had already landed as `5394a06e` moved out of `.draft.triaged` into
+# `.draft.pool` — which re-offered shipped work to the triage sweep AND refused the
+# fold's neutrality proof, so the store sat at 97.0% of its band ceiling (33,712,848 B
+# against `int(28_960_660 * 1.2)` = 34,752,792 B) with the fold unreachable.
+#
+# Each node below asserts BOTH sides of the switch: the merged answer, and that
+# `with_archives=False` does not give it. A node that only asserted the first would pass
+# on a live row it never needed, which is how #3179's contract reached the board.
+
+
+def _rotation(tmp_path: Path, month: str, rows: list[dict]) -> Path:
+    """A rotation exactly as the sweep writes one: gzipped JSONL named
+    `promotions-archive-<YYYYMM>.jsonl.gz`, beside the ledger, which is the only
+    place `state.ledger_archives` looks."""
+    import gzip
+
+    path = tmp_path / f"promotions-archive-{month}.jsonl.gz"
+    path.write_bytes(gzip.compress(
+        "".join(json.dumps(r) + "\n" for r in rows).encode("utf-8")))
+    return path
+
+
+def _live(tmp_path: Path, rows: list[dict]) -> Path:
+    path = tmp_path / "promotions.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def test_a_folded_triage_verdict_still_answers_from_its_month_archive(tmp_path):
+    """Clause 1: a triage verdict is a fact about the item, not about which of the
+    store's files happens to hold the row today."""
+    ledger = _live(tmp_path, [{"event": "backlog_expired", "item_id": 900001,
+                               "ts": 1_700_000_000.0}])
+    _rotation(tmp_path, "202609", [
+        {"event": "backlog_triage", "item_id": 900001, "verdict": "confirmed",
+         "verdict_source": "structured", "ts": 1_699_000_000.0}])
+
+    assert B.triaged_ids(ledger).get(900001) == "confirmed", (
+        "an item whose ONLY `backlog_triage` row was folded into a monthly rotation "
+        "read as untriaged — the exact flip that moved #2796 out of `.draft.triaged`"
+    )
+    assert B.triaged_ids(ledger, with_archives=False).get(900001) is None, (
+        "the live-only read answered for an archived row, so the assertion above is "
+        "not evidence that the merge ran"
+    )
+
+
+def test_a_live_triage_row_resolves_ahead_of_the_archived_one(tmp_path):
+    """Clause 1's other half: `state.ledger_rows_merged` reads the live file LAST
+    precisely because every reader here resolves by last-wins. An item triaged
+    again after its first row folded must answer with the live verdict, whichever
+    file the merge visited."""
+    ledger = _live(tmp_path, [
+        {"event": "backlog_triage", "item_id": 900002, "verdict": "stale",
+         "verdict_source": "structured", "ts": 1_700_100_000.0}])
+    _rotation(tmp_path, "202609", [
+        {"event": "backlog_triage", "item_id": 900002, "verdict": "confirmed",
+         "verdict_source": "structured", "ts": 1_699_000_000.0}])
+
+    assert B.triaged_ids(ledger)[900002] == "stale", (
+        "the archived row outranked the live one; a folded verdict must never "
+        "overwrite the current one"
+    )
+
+
+def test_a_folded_group_keep_still_releases_the_item(tmp_path):
+    """Clause 2 (`released_ids`). This one is not cosmetic: `board_health`'s
+    `.quarantined` is self-filed items MINUS this set, so a fold that lost a release
+    did not merely drop `.released` — it added a quarantine the item never earned."""
+    ledger = _live(tmp_path, [{"event": "gate", "round_id": "SM_UNRELATED",
+                               "rung": "tests", "ok": True, "ts": 1_700_000_000.0}])
+    _rotation(tmp_path, "202609", [
+        {"event": "backlog_group_triage", "cluster_id": "CL_9", "ts": 1_699_000_000.0,
+         "judged": {"900010": "keep"}}])
+
+    assert 900010 in B.released_ids(ledger), (
+        "a group triage that judged the item distinct work stopped releasing it as "
+        "soon as its row aged out of the live file"
+    )
+    assert 900010 not in B.released_ids(ledger, with_archives=False), (
+        "the live-only read answered for the archived `keep`, so the assertion "
+        "above is not evidence that the merge ran"
+    )
+
+
+def test_a_folded_held_confirmation_still_holds(tmp_path):
+    """Clause 2 (`held_confirmations`), and its release half: a confirmation whose
+    row folded stays held, while a release that is still LIVE resolves against it.
+    #3179 ruled the archived-confirmation question for the grader; this is the same
+    ruling for the board's `.held` figure."""
+    ledger = _live(tmp_path, [
+        {"event": "backlog_confirm_released", "item_id": 900012,
+         "ts": 1_700_200_000.0}])
+    _rotation(tmp_path, "202609", [
+        {"event": "backlog_triage", "item_id": 900011, "verdict": "confirmed",
+         "verdict_source": "structured", "held": True, "ts": 1_699_000_000.0},
+        {"event": "backlog_triage", "item_id": 900012, "verdict": "confirmed",
+         "verdict_source": "structured", "held": True, "ts": 1_699_100_000.0}])
+
+    held = B.held_confirmations(ledger)
+    assert 900011 in held, (
+        "the item is still waiting for room in the implement lane; its confirmation "
+        "merely aged out of the live file"
+    )
+    assert 900012 not in held, (
+        "a release that arrived after the confirmation has to win even when the "
+        "confirmation is archived and the release is live"
+    )
+    assert 900011 not in B.held_confirmations(ledger, with_archives=False), (
+        "the live-only read answered for the archived confirmation, so the first "
+        "assertion is not evidence that the merge ran"
+    )
+
+
+def test_a_folded_attempt_still_counts_as_an_attempt(tmp_path):
+    """Clause 2 (`implement_outcomes`). The budget question — has this item already
+    spent its turn — must not fall back to zero because the record of the turn aged
+    out: that is the branch #1975's owed ruling left open and #3612 refused to take,
+    because an item handed a fresh attempt re-runs work the loop has already paid for.
+
+    Asserted as fold-invariance rather than as one verdict word: the same two rows are
+    laid out twice, once in a rotation and once live, and the two outcomes must agree.
+    Naming the verdict here would pin a word the attempt caps move under."""
+    rows = [{"event": "backlog_implement", "item_id": 900013, "phase": "started",
+             "round_id": "SM_FOLDED_1", "ts": 1_699_000_000.0},
+            {"event": "backlog_implement", "item_id": 900013, "phase": "finished",
+             "round_id": "SM_FOLDED_1", "stop_reason": "completed",
+             "ts": 1_699_000_600.0}]
+    quiet = [{"event": "gate", "round_id": "SM_OTHER", "rung": "tests", "ok": True,
+              "ts": 1_700_000_000.0}]
+
+    folded_dir = tmp_path / "folded"
+    folded_dir.mkdir()
+    _live(folded_dir, quiet)
+    _rotation(folded_dir, "202609", rows)
+    folded_ledger = folded_dir / "promotions.jsonl"
+    folded = B.implement_outcomes(folded_ledger)
+
+    live_dir = tmp_path / "as-live"
+    live_dir.mkdir()
+    shipped = B.implement_outcomes(_live(live_dir, rows))
+
+    assert 900013 in folded, (
+        f"the item's only attempt rows were in the rotation and the outcomes table "
+        f"lost the item: {sorted(folded)}"
+    )
+    assert folded[900013] == shipped[900013], (
+        f"the same two rows answered {shipped[900013]!r} while live and "
+        f"{folded[900013]!r} once folded; an attempt's verdict cannot depend on "
+        f"which file holds it"
+    )
+    assert 900013 not in B.implement_outcomes(folded_ledger, with_archives=False), (
+        "the live-only read kept the item, so the presence assertion above is not "
+        "evidence that the merge ran"
+    )
+
+
+# ── #3725 clause 4: the fold-invariant read goes through this file's cache, not around it ──
+#
+# `board_health` is now a merged reader: its `attempted` set answers over the live file
+# PLUS every `promotions-archive-*.jsonl.gz` beside it, and the retention sweep's
+# neutrality proof calls it twice per probe (before copy, after copy) while the dashboard
+# reaches it once a minute at `_SCORECARD_TTL_S`. The state dir on 2026-11-03 held a
+# 31,257,781-byte live file and two rotations decoding to 46,648,660 bytes, so a merged
+# read that opened those files itself — `gzip.open`, a fresh `read_text` — would put that
+# cost on every call instead of once per file per process.
+
+def test_two_board_health_cycles_read_the_live_file_and_each_rotation_once(tmp_path):
+    """Clause 4: two `board_health()` calls over an UNCHANGED store take each file off
+    disk once for the pair, not once per call — and a write between them costs exactly one
+    more read of the file that changed.
+
+    The store is one live ledger with an attempt row only in the rotation, so a cycle that
+    never opened the gzip would report 0 reads there and this node would be measuring a
+    merge that did not happen. #1204's property is inherited by the merged path, not
+    traded for it: the counter moves where the bytes are read, and a cache hit does not
+    move it at all.
+    """
+    import gzip
+
+    ledger = tmp_path / "promotions.jsonl"
+    archive = tmp_path / "promotions-archive-202601.jsonl.gz"
+    board = tmp_path / "backlog"
+    board.mkdir()
+    (board / "3024-an-open-up-next-item.md").write_text(
+        "---\ntype: backlog\nsegment: backlog\nstatus: up_next\npriority: low\n"
+        "board: lloyd\nblocked: false\nassigned: false\n---\n\n"
+        "# An open up_next item\n\nBody.\n", encoding="utf-8")
+    S.append_event({"event": "backlog_triage", "item_id": 3024, "verdict": "confirmed",
+                    "ts": 1_793_000_000.0}, path=ledger)
+    archive.write_bytes(gzip.compress(json.dumps(
+        {"event": "backlog_implement", "item_id": 3024, "round_id": None,
+         "phase": "started", "ts": 1_792_000_000.0}).encode() + b"\n"))
+
+    S.ledger_rows_reset()
+    first = B.board_health(ledger, backlog_dir=board)
+    after_first = (S.ledger_read_count(ledger), S.ledger_read_count(archive))
+    second = B.board_health(ledger, backlog_dir=board)
+    after_second = (S.ledger_read_count(ledger), S.ledger_read_count(archive))
+
+    assert first["up_next"]["never_attempted"] == 0 == second["up_next"]["never_attempted"], (
+        f"the archived attempt row is not being read, so the counts below measure a walk "
+        f"that never reached the rotation: {first['up_next']} / {second['up_next']}")
+    assert after_first[0] >= 1 and after_first[1] >= 1, (
+        f"one cycle read neither file (live {after_first[0]}, rotation {after_first[1]}): "
+        f"the pair below cannot be bounded if nothing was read to begin with")
+    assert after_second == after_first, (
+        f"two board_health calls over an unchanged store took live={after_second[0]} "
+        f"rotation={after_second[1]} reads against {after_first[0]}/{after_first[1]} for the "
+        f"first: the merged read is re-decoding a file it already holds")
+
+    # And the cache is not a sticky answer: one appended line is one more read of the live
+    # file, and no more of the rotation, which nothing in that write touched.
+    S.append_event({"event": "gate", "round_id": "SM_LATER", "rung": "tests",
+                    "ts": 1_793_000_100.0}, path=ledger)
+    B.board_health(ledger, backlog_dir=board)
+    after_write = (S.ledger_read_count(ledger), S.ledger_read_count(archive))
+    assert after_write[0] == after_second[0] + 1, (
+        f"appending a line took {after_write[0] - after_second[0]} live reads; the "
+        f"(mtime_ns, size, ino) version has to cost exactly one")
+    assert after_write[1] == after_second[1], (
+        "the rotation was re-decoded by a write that never touched it")

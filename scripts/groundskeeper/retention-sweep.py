@@ -2623,6 +2623,22 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+def _month_buckets(rows: list[tuple[bytes, dict | None]],
+                   indices: list[int]) -> dict[str, list[bytes]]:
+    """The rows chosen for archive grouped by the month their own stamp names — the
+    bucket `promotions-archive-<YYYYMM>.jsonl.gz` is written under, and now also the
+    grouping the neutrality proof stages by (#3612). ONE function serves the staging
+    and the write so the bytes the proof shows the readers are the bytes the rotation
+    lands: staging a different month split than the one that gets written would prove
+    a fold that never happens."""
+    months: dict[str, list[bytes]] = {}
+    for index in indices:
+        seconds = _ledger_row_seconds(rows[index][1])
+        month = time.strftime("%Y%m", time.gmtime(seconds))
+        months.setdefault(month, []).append(rows[index][0])
+    return months
+
+
 def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = None,
                             backlog_dir: Path | None = None, health=None,
                             on_attempt=None) -> dict:
@@ -2643,12 +2659,16 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
     1. Read the ledger once, as BYTES. The bytes are the snapshot every later decision is
        taken from, and the size the graft compares against.
     2. Choose the rows (`_archive_plan`).
-    3. Prove neutrality over two temp files — the snapshot's bytes, and the kept bytes —
+    3. Prove neutrality over two temp copies — the snapshot's bytes, and the kept bytes —
        so a row appended while the proof ran cannot make the diff non-empty and cannot
-       make it empty either. Non-empty diff, or no `board_health` to ask: refuse, live
-       file untouched, and the byte pair reported is the size the store still is.
-    4. Append the archived lines to their monthly gzips (deduped, so a retry of a run
-       that refused at step 5 cannot double-write).
+       make it empty either. The kept copy is asked beside a STAGED archive of the rows
+       this fold is about to land (#3612), because the readers `board_health` is built
+       from answer over live PLUS rotations, and a rotation not yet written is evidence
+       destroyed rather than evidence filed. Non-empty diff, or no `board_health` to ask:
+       refuse, live file untouched, and the byte pair reported is the size the store still
+       is. Copies and staged archives are unlinked in one `finally`.
+    4. Append the archived lines to their monthly gzips, in the same month buckets the
+       proof staged, so what lands is what was proven.
     5. Rename over the live file through `_rewrite_live_ledger`, grafting the tail.
 
     A dry run stops after step 3 and writes nothing at all — not even the archive — so
@@ -2700,12 +2720,43 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
     # mind is a log line and not a gate. Both sides are COPIES of the snapshot: comparing
     # the live file against a copy would let a row that landed in the 3 s between the two
     # reads decide the verdict.
+    #
+    # #3612 adds a third condition the proof has to hold. `board_health` splits its
+    # drafts into `triaged` and `pool` on `triaged_ids`, and those readers now answer
+    # over the live file PLUS the `promotions-archive-<YYYYMM>.jsonl.gz` rotations
+    # beside it, so a verdict outlives `LEDGER_ARCHIVE_AGE_DAYS`. But this probe runs
+    # BEFORE step 4 writes the month gzip, so at proof time the rows about to move are
+    # in neither copy nor archive and the after side is a store whose evidence was
+    # DESTROYED — precisely the loss this gate exists to refuse. Measured on the live
+    # store 2026-10-31 with the readers widened and nothing staged, the diff was still
+    # `.draft.pool, .draft.triaged` and the fold stayed unreachable: #2796's only
+    # `backlog_triage` row (2026-10-16T00:08:30Z) had crossed the window about five
+    # hours before the first refusing run, and it is an open item (`status: draft`).
+    # So the after-side copy is now asked beside a STAGED archive of exactly the bytes
+    # step 4 is about to land, grouped by `_month_buckets` — the same grouping the write
+    # uses, which is what makes the staged bytes and the landed bytes the same bytes.
+    # With the stage in place the live fold diffs to nothing and `triaged_ids` answers
+    # 861 items on both sides.
+    #
+    # The stage must sit in the ledger's own parent dir: that is the only directory
+    # `state.ledger_archives()` globs (`promotions-archive-*`, suffix-free on purpose).
+    # It is therefore unlinked in THIS `finally` together with both copies — a survivor
+    # would be a phantom rotation that every later merged read counts, this proof's own
+    # next run first, answering for rows the live file still holds. The `-neutral`
+    # infix keeps it from colliding with a real month gz.
     probe = health or (lambda path: _board_health_payload(path, backlog_dir, now=now))
     before_copy = ledger.parent / f".{ledger.name}.neutral-before"
     after_copy = ledger.parent / f".{ledger.name}.neutral-after"
+    buckets = _month_buckets(rows, archive_idx)
+    staged: list[Path] = []
     try:
         before_copy.write_bytes(raw)
         after_copy.write_bytes(kept_bytes)
+        for month, moved_lines in buckets.items():
+            staged_file = (ledger.parent
+                           / f"{LEDGER_ARCHIVE_PREFIX}{month}-neutral.jsonl.gz")
+            _archive_append(staged_file, moved_lines)
+            staged.append(staged_file)
     except OSError as exc:
         out["refused"] = f"proof copy unwritable ({exc})"
     try:
@@ -2723,6 +2774,8 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
     finally:
         _unlink_quietly(before_copy)
         _unlink_quietly(after_copy)
+        for staged_file in staged:
+            _unlink_quietly(staged_file)
     if out["refused"] is not None:
         # `X -> 0 bytes live` is the one sentence this store must never print while the
         # audit ledger is still 32 MB: a refused archive leaves the live file at the size
@@ -2735,14 +2788,11 @@ def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = No
     if not apply:
         return out
 
-    months: dict[str, list[bytes]] = {}
-    for index in archive_idx:
-        seconds = _ledger_row_seconds(rows[index][1])
-        month = time.strftime("%Y%m", time.gmtime(seconds))
-        months.setdefault(month, []).append(rows[index][0])
-    for month in sorted(months):
+    # The grouping `_month_buckets` computed for the staged proof, not a second
+    # grouping of the same rows: what lands is what was proven (#3612).
+    for month in sorted(buckets):
         target = ledger.parent / f"{LEDGER_ARCHIVE_PREFIX}{month}.jsonl.gz"
-        out["archived"] += _archive_append(target, months[month])
+        out["archived"] += _archive_append(target, buckets[month])
 
     settled, refusal = _rewrite_live_ledger(ledger, kept_bytes, len(raw),
                                            on_attempt=on_attempt)
