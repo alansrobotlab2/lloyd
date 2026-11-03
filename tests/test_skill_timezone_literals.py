@@ -154,20 +154,62 @@ _GOVERNED: dict[str, tuple[str, str]] = {
 #: asserts the literal contract the item was written with and not only this
 #: module's generalisation of it. `generated` is case-folded because skill prose
 #: capitalises the field at least once; check before "fixing" that.
-_ACCEPTANCE_GREP = re.compile(r"HH:MM PST|HH:MM PDT|(?i:generated): .* P[SD]T")
+#:
+#: The third alternative is value-bounded, not `.*`-bounded (#3739). It read
+#: ``(?i:generated): .* P[SD]T`` until this round, and a line-scoped `.*` spans
+#: any distance inside the line: on 2026-11-03 it opened on the ISO-Zulu
+#: provenance stamp ``generated: 2026-11-03T06:12:36Z`` in the
+#: ``nightly-reflection-signals`` runbook and ran to a ``17:53:20 PDT``
+#: boot instant 1,893 characters later — 1,905 matched characters of that
+#: bullet's 5,999-character line — and reported the pair as one re-typed
+#: literal.
+#: Neither end is the class: the value carries a ``Z``, not a season word, and
+#: the ``PDT`` is a measured boot instant quoted as evidence.
+#: ``scripts.skill_timezone.template_clock_violations`` returns 0 violations on
+#: those same bytes, so the wide `.*` was the only defect in the tree, and the
+#: pattern had no positive control at all — `_TYPED_SHAPES` drove only the
+#: general rule — so it could over-report forever and never miss. The class,
+#: as both this module's and the rule's docstrings state it, is a season
+#: abbreviation *beside* a displayed-time token, so what may sit between
+#: ``generated:`` and the abbreviation is a time value and nothing else: an
+#: optional date (``YYYY-MM-DD``, ``2026-09-03``, ``08-29``), an optional time
+#: (``HH:MM``, ``22:35``, ``17:05:00``) joined by a space or an ISO ``T``, then
+#: one space and the abbreviation. A trailing ``Z`` is exactly what refuses it,
+#: which is the fix the class prescribes (``date -u`` emits one). A distance
+#: bound was measured and is not enough: the candidate
+#: ``(?i:generated): [^\s]{1,40}?`` followed by a time and a zone rejects line
+#: 814 but misses the ISO-T form, which is why the grammar below is pinned by
+#: controls in both directions rather than tuned by eye.
+_ACCEPTANCE_GREP_DATE = r"(?:[0-9Y]{4}-[0-9M]{2}-[0-9D]{2}|[0-9M]{2}-[0-9D]{2})"
+_ACCEPTANCE_GREP_TIME = r"[0-9H]{1,2}:[0-9M]{2}(?::[0-9S]{2})?"
+_ACCEPTANCE_GREP = re.compile(
+    "HH:MM PST|HH:MM PDT"
+    r"|(?i:generated):[ \t]*(?:" + _ACCEPTANCE_GREP_DATE
+    + r"(?:[ T]" + _ACCEPTANCE_GREP_TIME + r")?|" + _ACCEPTANCE_GREP_TIME
+    + r") P[SD]T\b"
+)
 
 
 # --- The live vault: what the clause required, and what keeps it true --------------
 
 @pytest.mark.live_vault
 def test_the_acceptance_grep_returns_zero_on_the_governed_skills():
-    """#1189's own acceptance check, as written, over the live tree.
+    """#1189's acceptance grep, third alternative narrowed by #3739, over the live tree.
 
-    ``grep -rn 'HH:MM PST\\|HH:MM PDT\\|generated: .* PST' ~/obsidian/skills/*/SKILL.md``
-    → 0 hits is the clause; this is that grep over the same files, plus the repo
-    copies at ``~/lloyd/skills`` (empty today, and the rule judges what is
-    loaded, so an unswept shadow copy must not be able to hide). A hit here is
-    one of the exact strings the item names, re-typed.
+    The clause as filed was ``grep -rn 'HH:MM PST\\|HH:MM PDT\\|generated: .* PST'
+    ~/obsidian/skills/*/SKILL.md`` → 0 hits. The first two alternatives are that
+    text verbatim; the third is now bounded to a time value (see the notes on the
+    pattern), because the unbounded `.*` reported an ISO-Zulu provenance stamp and
+    a boot instant 1,893 characters down the same line as a re-typed literal — a
+    red nothing else in the system agreed with, since
+    ``scripts.skill_timezone.template_clock_violations`` returns 0 violations on
+    those same bytes. The clause's catch half now lives in
+    ``test_the_acceptance_grep_matches_every_shape_the_class_was_measured_with``,
+    so narrowing the scan cannot quietly turn this into a check that matches
+    nothing. Same files as the clause named, plus the repo copies at
+    ``~/lloyd/skills`` (empty today, and the rule judges what is loaded, so an
+    unswept shadow copy must not be able to hide). A hit here is a season
+    abbreviation beside a displayed-time token, re-typed.
     """
     hits = [
         f"{rel}:{lineno}: {line.strip()[:100]}"
@@ -272,6 +314,109 @@ def test_the_rule_fails_on_every_shape_the_class_was_measured_with(shape):
     assert vs, f"the rule missed the measured shape {shape!r}: {body!r}"
     assert vs[0].startswith("mutant-skill: line ") and "P" in vs[0], (
         f"a violation must name the skill and the line: {vs[0]}"
+    )
+
+
+# --- The acceptance grep's own controls, both directions (#3739) -------------------
+# Until #3739 `_ACCEPTANCE_GREP` had no positive control: `_TYPED_SHAPES` drove
+# only the node above, which calls the general rule, so nothing anywhere asserted
+# that the grep catches any member of the class. A pattern that cannot be shown to
+# catch anything fails in one direction only — it can over-report for ever and
+# never miss — which is exactly how the 1,905-character match inside the
+# ``nightly-reflection-signals`` runbook reached a pre-flight red six weeks
+# after the pattern shipped. Unmarked like the mutations beside them: these read no
+# vault, so every gate rung runs them.
+
+#: The ISO-T spelling of the measured report-header value. Deliberately not a
+#: live sighting — the direct cousin of `_TYPED_SHAPES`' `generated: 2026-09-03
+#: 22:35 PST`, and the shape a bare distance bound was measured to miss (#3739).
+#: It is the reason the narrowing is a value grammar and not a character count.
+_ISO_T_HEADER_SHAPE = "generated: 2026-10-11T17:05:00 PST\n"
+
+#: Everything the acceptance grep must catch: the seven strings #1189 measured,
+#: plus the ISO-T form. Sharing the dict with the general rule's node is the
+#: point — the two consumers of this class (this grep, and the
+#: ``skill_timezone_errors`` rail that vault rounds land through) are pinned
+#: against one corpus, so they cannot drift to different definitions of it.
+_ACCEPTANCE_SHAPES = {
+    **_TYPED_SHAPES,
+    "report header ISO-T measured": _ISO_T_HEADER_SHAPE,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ACCEPTANCE_SHAPES))
+def test_the_acceptance_grep_matches_every_shape_the_class_was_measured_with(shape):
+    """The positive control #3739 found missing: the grep catches all eight.
+
+    Without this the narrowed grep is unfalsifiable in the direction that matters
+    — a pattern that over-matches still returns zero whenever the tree happens to
+    be clean, and one narrowed past the class returns zero always. Each
+    `_TYPED_SHAPES` member is one of the sightings #1189 counted, and the ISO-T
+    entry is the case a distance-only narrowing loses, so a re-widened `.*` and an
+    over-narrowing both land here. The second assertion is the seam: the same
+    strings must still be refused by `template_clock_violations`, which is what
+    ``vault_round.skill_timezone_errors`` runs at land time, so this module's
+    literal contract and the writer's rule stay one class and not two.
+    """
+    shape_text = _ACCEPTANCE_SHAPES[shape]
+    hit = _ACCEPTANCE_GREP.search(shape_text)
+    assert hit, (
+        f"the acceptance grep no longer catches {shape!r}: {shape_text!r} — a "
+        "season abbreviation beside a displayed-time token is the class this "
+        "check exists to catch"
+    )
+    body = "# Skill\n\nWrite it like this:\n\n```\n" + shape_text + "```\n"
+    assert template_clock_violations("mutant-skill", body), (
+        f"{shape!r} is caught by the acceptance grep but not by the land-time "
+        "rule: the two consumers of this class have drifted apart"
+    )
+
+
+#: The measured false positive, verbatim: characters 3541-5446 of line 814 of
+#: ``~/obsidian/skills/nightly-reflection-signals/SKILL.md`` at vault
+#: ``bb81b47b5`` ("nightly-reflection: post-improvement 2026-11-03"), which the
+#: pre-#3739 `.*` reported as one re-typed literal — 1,905 of that line's 5,999
+#: characters. Re-measure with:
+#: ``~/lloyd/.venvs/lloyd/bin/python -c "import pathlib; p = pathlib.Path.home()
+#: / 'obsidian/skills/nightly-reflection-signals/SKILL.md'; print(
+#: p.read_text(errors='replace').splitlines()[813][3541:5446])"``
+#: The node below re-checks the length and the token distance, so a garbled copy
+#: fails rather than silently shrinking the fixture into something the old
+#: pattern would not have matched either.
+_LINE814_MEASURED_SPAN = """generated: 2026-11-03T06:12:36Z`, whose span pair this re-measured in the applying turn). The reason is the 24 h pair this same instrument produced: CUR was **7** files on 10-10 and every ratio was refused, **378** on 10-11 and two were published. An `n` alone cannot tell those two days apart, and PRIOR (`20261009_*` = 238) was itself a day whose last 13 h were paused. When the two windows differ in shape, **refuse the movement rather than shrink the claim** — on 2026-10-11 only `PATH_ESCAPE` and `timed out after` cleared the n floor *and* the positive control, and only those two were booked. **And an `n` of files is not an `n` of activity: print beside every file-count denominator how many of those files carry an assistant turn** (added 2026-10-17 by Config Application #40, on Inferred #1 of that cycle's report). That census measured CUR **345/536** against PRIOR **473/474** — 191 of the day's files never ran a turn at all (role shapes `('subliminal','user')` 157, `('user',)` 29, `()` 5; sourced owed-check 125, bench-mine 23, board-steward 10, autotriage 8, autocode 8, bench 6, youtube-digest 4, automod-review 2; 34 of them 553-byte stubs with `message_count: 0, messages: []`), so every ratio built on the 536 was depressed by files that are an outage's footprint, not traffic, and the report offered no ratio as a trend. The pair is cheap and it is the only thing that separates "the literal stopped appearing" from "nobody ran". Format artefact checked and excluded in the same block: the no-space variant `"role":"assistant"` matches **0** of the 191. **And an active/inactive pair needs the host boot instant beside it: `uptime -s`** (added 2026-10-20 by Config Application #40, on Inferred #2 of `signals-latest.md` 2026-10-20). The `20261019_*` census read 524 files / 506 with a turn / **18 without**, and **17** of those 18 were created in the six minutes after a `17:53:20 PDT"""
+
+
+def test_the_acceptance_grep_does_not_span_a_line_between_two_quoted_stamps():
+    """The negative control: the measured line-814 shape is not a typed template.
+
+    The span opens on ``generated: 2026-11-03T06:12:36Z`` — an ISO-8601 Zulu
+    stamp, the fix shape the class prescribes, carrying a ``Z`` and no season word
+    — and closes on a ``17:53:20 PDT`` host-boot instant quoted as evidence for a
+    census, 1,893 characters after the first. It must stay clean, and it must stay
+    a control: the retired widened pattern is asserted against the same bytes, so
+    a green here means the narrowing removed the distance-span rather than the
+    class. Quoting the live bytes rather than a hand-written lookalike is the
+    point — #3739's whole defect was a synthetic-shaped assumption about what a
+    line contained.
+    """
+    assert len(_LINE814_MEASURED_SPAN) == 1905, (
+        f"the fixture is {len(_LINE814_MEASURED_SPAN)} characters, not the 1,905 "
+        "measured at vault bb81b47b5 — these are no longer the bytes the widened "
+        "pattern matched"
+    )
+    first = _LINE814_MEASURED_SPAN.index("generated: 2026-11-03T06:12:36Z")
+    last = _LINE814_MEASURED_SPAN.index("17:53:20 PDT")
+    assert last - first == 1893, (
+        f"the two stamps are {last - first} characters apart, not the 1,893 "
+        "measured on the live line"
+    )
+    assert re.search(r"(?i:generated): .* P[SD]T", _LINE814_MEASURED_SPAN), (
+        "the widened pattern this round retired no longer matches the fixture, so "
+        "the fixture no longer controls anything"
+    )
+    assert not _ACCEPTANCE_GREP.search(_LINE814_MEASURED_SPAN), (
+        "the acceptance grep spans an ISO-Zulu provenance stamp and an unrelated "
+        "abbreviation elsewhere in one line again — the distance-span is back"
     )
 
 
