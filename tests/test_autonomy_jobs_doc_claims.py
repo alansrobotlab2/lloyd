@@ -7249,3 +7249,264 @@ def test_the_prevalence_task_table_qualifies_the_hand_baseline_the_series_never_
     assert "cause unidentified" in _flat(text), (
         "the task's 09-28 row gives the gap an explanation the evidence refuses; the honest "
         "word is that the cause of the hand figure's smaller numbers is unidentified")
+
+
+# ---------------------------------------------------------------------------
+# §What the fleet actually costs: the #80 worked example (#3448)
+# ---------------------------------------------------------------------------
+#
+# That section's #80 bullet is the doc's worked example of what the deadline anchor
+# looks like "from the other side of the fix", so it is the one paragraph a reader
+# re-checks the anchor against — and it priced the job at a budget the scheduler
+# stopped enforcing and a script cost nobody had measured. Both figures were
+# configuration or a measurement, which is why the section's own header
+# ("A snapshot, not a fact — the seven days to 2026-09-11") never saved them: dating
+# a window dates the rows inside it and says nothing about the config beside them.
+
+#: The heading the three rails below are scoped to. The section is reached by split
+#: rather than by `_live_prose()`'s §Review-log cut because the rail must not read a
+#: retired §Review log figure as a live claim, and must not let a figure from the
+#: next section count as evidence for this one.
+FLEET_COST_HEADING = "## What the fleet actually costs"
+
+#: The budget the live scheduler enforces on #80. `timeout_seconds: 600` in
+#: `~/obsidian/autonomy/80-okf-conformance-check.md`, raised from 300 by the
+#: 2026-09-09 fix and recorded in that file's own activity log, and answered as 600
+#: by `curl -sk https://localhost:5173/api/autonomy/tasks` for id 80 (#78's is 1200).
+#: Typed here because the gate runs `-m "not live_vault"` and the live file is the
+#: vault's, so this pair is the shape the §Bound entropy cadence node uses: the repo
+#: rail holds the number, and its prose names the file the number was read off.
+JOB80_BUDGET_S = 600
+
+#: The cost of `validate_okf.py`, measured on 2026-11-03 by two back-to-back runs
+#: (20.35 s and 20.33 s wall) of the command the doc types. The doc had "2.4-second",
+#: and `~/obsidian/skills/okf-conformance-check/SKILL.md` has "takes ~2 seconds" —
+#: both stale by eight-fold, and the skill's copy is a vault edit #3448's owed-check
+#: pass owns, not this round's. The tolerance below is what makes this a live figure
+#: rather than a frozen one: a restatement that re-measures and re-types survives, a
+#: number that drifted 25% away from any measurement does not.
+JOB80_SCRIPT_COST_S = 20.3
+
+#: The clause naming a budget: a `<N> s … budget` or `budget … <N> s` spelling, so
+#: the stale "on a 300 s budget" and the live "on a 600 s budget" are one shape and
+#: only the number tells them apart. The `[^.]` bound is the sentence's own length:
+#: a shape that could reach across a period would lend one job's budget to another
+#: and report the false positive as a fixed defect.
+_BUDGET_CLAUSE = re.compile(
+    r"\b(?P<lhs>\d+)\s*s\b[^.]{0,60}?\bbudget|\bbudget\b[^.]{0,60}?\b(?P<rhs>\d+)\s*s\b",
+    re.I)
+
+#: A duration or cost figure: `20.3 s`, `20-second`, `mean 36.8 s`, `max 39.7 s`.
+_SECONDS_FIGURE = re.compile(r"\b\d+(?:\.\d+)?(?:\s*s\b|-second\b)")
+
+#: The two aggregates the run-duration evidence owes the reader, either word order.
+_AGGREGATE_FIGURE = re.compile(r"\b(?:mean|max)\b[^.]{0,20}?\b\d+(?:\.\d+)?\s*s\b")
+
+#: The `select` the durations came out of, so a duration in this section is traceable
+#: to the store and the filter rather than to a prose assertion.
+_DURATION_QUERY = re.compile(r"\bselect\b[^`]*?\bfrom runs\b", re.I)
+
+#: `2.4-second` / `2.4 s` — the reading #3448 found and retired. Banned from this
+#: section's live prose outright, because a stale figure that survives inside a
+#: sentence with the fresh one is exactly how the 09-28 row kept re-supplying the
+#: number the prevalence series never agreed to (#3410).
+_STALE_80_SCRIPT_COST = re.compile(r"\b2\.4[\s-]*(?:second|s\b)")
+
+
+def _fleet_cost_prose(text: str | None = None) -> str:
+    """§What the fleet actually costs as live prose, with table rows dropped.
+
+    `text` is an argument rather than a read of the live tree, which is what lets the
+    seeded probes below demonstrate a failure instead of asserting one. Table rows go
+    because a cell is not a sentence and this section's snapshot table is already
+    qualified by its own "A snapshot, not a fact" header.
+    """
+    body = _text() if text is None else text
+    parts = body.split(f"\n{FLEET_COST_HEADING}\n", 1)
+    assert len(parts) == 2, (
+        f"architecture/autonomy-jobs.md no longer has a {FLEET_COST_HEADING.strip('# ')} "
+        "section: these rails read a section they cannot find as a section with nothing "
+        "wrong in it, which is the decorative-rail failure #2630 was filed about")
+    return re.split(r"(?m)^#{2,3} ", parts[1], 1)[0]
+
+
+def _fleet_cost_sentences(text: str | None = None) -> list[str]:
+    """§What the fleet actually costs as flattened sentences."""
+    body = "\n".join(ln for ln in _fleet_cost_prose(text).splitlines()
+                     if not ln.lstrip().startswith("|"))
+    return [s.strip() for s in _SENT_SPLIT.split(_flat(body)) if s.strip()]
+
+
+def _fleet_cost_budget_defects(text: str | None = None) -> list[str]:
+    """How the section's #80 budget claim is wrong, as human-readable strings.
+
+    Defect strings rather than a boolean, so a section that stopped naming a budget
+    at all is a defect ("no budget clause for #80") and not a silent pass: the
+    sentence's whole job is to state the ceiling the run was killed under, and a
+    worked example that lost the number has not been corrected, it has been deleted.
+    """
+    clauses = [(s, int(m.group("lhs") or m.group("rhs")))
+               for s in _fleet_cost_sentences(text) if "#80" in s
+               for m in _BUDGET_CLAUSE.finditer(s)]
+    if not clauses:
+        return ["no sentence in the section gives #80 a budget in seconds — the "
+                "worked example has to name the ceiling it ran under, or there is "
+                "nothing left for a reader to re-check the deadline anchor against"]
+    return [f"attributes a {secs} s budget to #80, but the task file declares "
+            f"`timeout_seconds: {JOB80_BUDGET_S}` and the API answers {JOB80_BUDGET_S} "
+            f"for id 80: {s[:160]!r}"
+            for s, secs in clauses if secs != JOB80_BUDGET_S]
+
+
+def _fleet_cost_script_cost_defects(text: str | None = None) -> list[str]:
+    """How the section's `validate_okf.py` cost claim is wrong, as strings."""
+    priced = [s for s in _fleet_cost_sentences(text) if "validate_okf.py" in s]
+    if not priced:
+        return ["no sentence in the section prices `validate_okf.py`, so the #80 "
+                "example states what the job runs without saying what it costs — "
+                "which is the half that makes the 600 s budget look absurd"]
+    defects: list[str] = []
+    for s in priced:
+        if _STALE_80_SCRIPT_COST.search(s):
+            defects.append(f"still types the retired 2.4 s reading: {s[:160]!r}")
+        figures = [float(m.group(0).removesuffix("-second").removesuffix("s")
+                         .strip() or 0)
+                   for m in _SECONDS_FIGURE.finditer(s)]
+        figures = [f for f in figures if f]
+        near = [f for f in figures if abs(f - JOB80_SCRIPT_COST_S) <= 0.25 * JOB80_SCRIPT_COST_S]
+        if not near:
+            defects.append(
+                f"types no script cost within 25% of the {JOB80_SCRIPT_COST_S} s "
+                f"measured on 2026-11-03 (found {figures}): {s[:160]!r}")
+        if not re.search(r"\b20\d\d-\d\d-\d\d\b", s):
+            defects.append(
+                f"types a script cost with no date, so a reader cannot tell whether "
+                f"it was measured before or after the vault grew: {s[:160]!r}")
+        if "time .venvs/lloyd/bin/python scripts/vault/validate_okf.py" not in s:
+            defects.append(
+                "types a script cost with no re-derivation command "
+                "(`time .venvs/lloyd/bin/python scripts/vault/validate_okf.py`), so "
+                f"the next reader has to guess how it was taken: {s[:160]!r}")
+    return defects
+
+
+def _fleet_cost_duration_defects(text: str | None = None) -> list[str]:
+    """How the section's #80 run-duration evidence is wrong, as strings."""
+    ev = [s for s in _fleet_cost_sentences(text)
+          if re.search(r"\btask_id\s*=\s*'80'", s)]
+    if not ev:
+        return ["no sentence in the section reports #80's measured run durations, so "
+                "the budget is quoted with no evidence of how far below it the runs "
+                "actually land — the claim that the anchor worked stays prose"]
+    defects: list[str] = []
+    for s in ev:
+        if not _DURATION_QUERY.search(s):
+            defects.append(f"reports durations with no `select … from runs` query: {s[:160]!r}")
+        if "source = 'scheduled-task'" not in s and "source='scheduled-task'" not in s:
+            defects.append(
+                "the query omits `source = 'scheduled-task'`, so the rows it names are "
+                f"not the rows the scheduler wrote: {s[:160]!r}")
+        if "~/lloyd-data/workers.db" not in s:
+            defects.append(
+                f"reports durations without naming the store: {s[:160]!r}")
+        if not DATED_RUN_COUNT.search(s):
+            defects.append(
+                "the run count is not written as a dated one (`N runs as of YYYY-MM-DD`"
+                f"), and `WORKER_RUN_MAX_AGE_DAYS = 30` prunes these rows: {s[:160]!r}")
+        if len(_AGGREGATE_FIGURE.findall(s)) < 2:
+            defects.append(
+                f"the evidence carries neither a `mean … s` and a `max … s` to judge "
+                f"the budget against: {s[:160]!r}")
+    return defects
+
+
+def test_the_fleet_cost_example_prices_job80_at_the_live_budget():
+    """Clause 1. §What the fleet actually costs priced #80 at "a 300 s budget" while
+    `~/obsidian/autonomy/80-okf-conformance-check.md` declared `timeout_seconds: 600`
+    and `/api/autonomy/tasks` answered 600 — a figure the 2026-09-09 fix itself
+    records raising, in that task file's own activity log.
+
+    The number is load-bearing in a way the section's snapshot table is not. The
+    table's figures are measurements over a named window and the header says so; a
+    budget is configuration the scheduler reads at dispatch time, so the same header
+    quietly authorised a stale one. 300 s is also the number a reader would re-derive
+    the deadline anchor's thresholds against, since 70% of 300 and 70% of 600 are
+    different warnings.
+    """
+    assert _fleet_cost_budget_defects(_text()) == []
+
+
+def test_the_fleet_cost_example_types_job80_script_cost_with_date_and_command():
+    """Clause 2. The same bullet called `validate_okf.py` "a 2.4-second script", and
+    the fresher witness #3448 cited for that being stale —
+    `~/obsidian/skills/okf-conformance-check/SKILL.md`, "The script above is the
+    entire deliverable … It takes ~2 seconds" — is itself eight-fold out: two runs on
+    2026-11-03 took 20.35 s and 20.33 s.
+
+    So the figure had to come from a measurement taken the day it was typed, with the
+    command that takes it again, rather than from either file's prose. A cost quoted
+    without its date and command is what let the skill's "~2 seconds" and the doc's
+    "2.4-second" disagree for six weeks with nothing to arbitrate.
+    """
+    assert _fleet_cost_script_cost_defects(_text()) == []
+
+
+def test_the_fleet_cost_example_reports_job80_durations_with_window_and_query():
+    """Clause 3. The budget is one half of the example; that no run has come near it
+    since the anchor landed is the other half, and it was prose.
+
+    It is now a query, a store, a dated count and two aggregates. The date is not
+    decoration: `WORKER_RUN_MAX_AGE_DAYS = 30` in
+    `scripts/groundskeeper/retention-sweep.py` deletes `runs` rows, and the
+    2026-09-30 run #3448 was filed against (`workers.db`, 29.56 s) had already been
+    swept by the time this was restated — four weekly rows, mean 36.8 s and max 39.7 s
+    as of 2026-11-03, spanning 2026-10-07 to 2026-10-28, against the 4 runs / mean
+    35.5 s / max 39.7 s #3448 measured nine days earlier with the same query. The
+    window moved the mean without the job changing, which is the whole reason
+    #2805's rule for run counts applies to a duration too.
+    """
+    assert _fleet_cost_duration_defects(_text()) == []
+
+
+def test_the_fleet_cost_rails_fire_on_a_seeded_copy_of_the_doc():
+    """Clause 4. Each of the three defect finders above has to reject a doc edited
+    back into the shape #3448 found, or the fix is a rail that stopped matching
+    anything — the failure #2833 caught inside the guard rather than the prose.
+
+    Each seed therefore asserts twice: that the perturbation took (a `replace` that
+    matched nothing would otherwise "prove" a rail that had simply lost its subject),
+    and that the matching finder reports it. The live text is asserted clean for the
+    same pair, so a seed cannot pass by matching a defect the doc does not have.
+    """
+    text = _text()
+    seeds = {
+        "budget back to 300 s": (
+            _fleet_cost_budget_defects,
+            text.replace("600 s budget", "300 s budget")),
+        "script cost back to 2.4 s": (
+            _fleet_cost_script_cost_defects,
+            text.replace("20.3 s measured", "2.4-second script measured")),
+        "script cost with no date": (
+            _fleet_cost_script_cost_defects,
+            re.sub(r"measured on 20\d\d-\d\d-\d\d", "measured", text)),
+        "script cost with no command": (
+            _fleet_cost_script_cost_defects,
+            text.replace("time .venvs/lloyd/bin/python scripts/vault/validate_okf.py",
+                         "the timing command")),
+        "durations with no query": (
+            _fleet_cost_duration_defects,
+            re.sub(r"select [^`]*? from runs[^`]*?limit 4", "the runs query", text)),
+        "durations with no dated count": (
+            _fleet_cost_duration_defects,
+            re.sub(r"\b\d+ runs as of 20\d\d-\d\d-\d\d\b", "the runs", text)),
+    }
+    for name, (finder, seeded) in seeds.items():
+        assert seeded != text, (
+            f"the seed {name!r} perturbed nothing, so its assertion would prove only "
+            "that the finder matches nothing at all")
+        assert finder(seeded), (
+            f"a doc with {name} passed the §What the fleet actually costs rail — the "
+            "figure this round restated is unpinned, so it can rot again silently")
+        assert not finder(text), (
+            f"the live doc already trips the {name!r} seed's finder, so the seed's "
+            "failure says nothing about the seed")

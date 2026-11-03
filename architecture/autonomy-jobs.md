@@ -1669,10 +1669,23 @@ own first half. Read a day, not a week:
   and are not. Every one of those failures is timestamped 2026-09-08 or 09 —
   `timed out after 300s`, `timed out after 600s` — and both are *weekly*, so each
   has had exactly one run since and both succeeded. #80 runs `validate_okf.py`, a
-  2.4-second script, on a 300 s budget: it had the answer in the first minute and
-  kept investigating until it was killed without ever being asked to write down
-  what it found. That is the failure the deadline anchor in [[autonomy]] was built
-  for, and this is what it looks like from the other side of the fix.
+  ~20-second script: 20.3 s measured on 2026-11-03 with
+  `time .venvs/lloyd/bin/python scripts/vault/validate_okf.py`. The run that produced
+  those failures had the answer inside its first minute and went on investigating
+  until the deadline killed it, without ever being asked to write down what it found.
+  That is the failure the deadline anchor in [[autonomy]] was built for, and this is
+  what it looks like from the other side of the fix — at #80's 600 s budget, the
+  `timeout_seconds: 600` that same 2026-09-09 fix raised and logged in that task
+  file's own activity log, which is the ceiling the anchor's 70%/90% warnings now
+  fire against.
+- **#80 has not come near that budget since the anchor landed.** The rows behind
+  that: 4 runs as of 2026-11-03 spanning 2026-10-07 to 2026-10-28, mean 36.8 s and
+  max 39.7 s, from `select duration_seconds from runs where source =
+  'scheduled-task' and task_id = '80' order by started_at desc limit 4` over
+  `~/lloyd-data/workers.db`. The count is dated because these rows are not durable:
+  #3448 measured mean 35.5 s with this query on 2026-10-27 and the oldest of its four
+  runs has since been swept by `WORKER_RUN_MAX_AGE_DAYS = 30`, so the window moves
+  and the job does not.
 
 A run row also outlives its task. Rows for **#52** (deep-dive research, last run
 2026-09-07, archived) and **#75** (the AI Engineer channel monitor, last run
