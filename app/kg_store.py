@@ -206,7 +206,11 @@ class KGStore:
     needs it to mean (see module docstring)."""
 
     def __init__(self, path: Path | str, *, create: bool = False):
-        self.path = Path(path) if create else _refuse_stray_create(Path(path))
+        # Relative first, and BEFORE the `create` branch: `create=True` skips
+        # `_refuse_stray_create` entirely, so a rule living inside that guard is
+        # skipped by exactly the route a typo takes (#3734).
+        target = _refuse_relative(path)
+        self.path = target if create else _refuse_stray_create(target)
         self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
         self._serial = 0           # bumps on our own commits
@@ -1568,6 +1572,53 @@ def _require_database(path: Path) -> Path:
     return path
 
 
+def _refuse_relative(path: Path | str) -> Path:
+    """Refuse a cwd-relative store path, whichever route arrives at it (#3734).
+
+    ``Path("x/y.sqlite")`` resolves against the process cwd, and `_open()` mkdirs the
+    parent and lets `sqlite3.connect` create the file, so a relative argument never
+    fails: it lays an empty schema-only store in whatever directory the caller ran
+    from, which then answers `0` for every count and `None` for every `resolve()` —
+    a clean-looking non-answer. On 2026-11-03 an alias check passed
+    `app.paths.KG_DB_RELATIVE` (`_pipeline/vault-derived/kg.sqlite`) with the cwd in
+    the code tree and left an 81,920-byte store at
+    ``<the code tree>/_pipeline/vault-derived/kg.sqlite``, beside a repo that reports
+    itself clean because ``/_pipeline/`` is gitignored (``.gitignore:34``) — so
+    nothing watched the directory it had just created.
+
+    `_refuse_stray_create` cannot cover this, and must not be stretched to. Its rule
+    is "inside the data root, a new store belongs beside the declared one", and it
+    returns every path OUTSIDE the root untouched — `tests/test_kg_store.py`'s
+    ``test_an_existing_file_and_a_path_outside_the_data_root_are_untouched`` pins
+    exactly that, and the tmp scratch there depends on it. The code tree is not under
+    the data root, so a cwd-resolved relative path walks straight past the root rule.
+    This check is about RELATIVENESS and nothing else: it passes every absolute path
+    through, in any tree.
+
+    Resolving the argument against `DATA_ROOT` instead of refusing was the other
+    option, and it is the wrong one: in a self-modification worktree `DATA_ROOT` is
+    ``<tree>/.lloyd-data`` (`app.data_root.data_root_for_tree`), so a typo would lay
+    the store inside the round's worktree — the same silent-empty-store class, a new
+    location, still no error. A relative path has no correct resolution to find; the
+    caller has to name the file.
+    """
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    # What sqlite would really open: the argument joined onto the cwd, normalised,
+    # with no symlink chasing — the caller's own path, shown back unedited.
+    target = Path(os.path.abspath(candidate))
+    raise StoreUnavailable(
+        f"refusing to open the knowledge-graph store at the cwd-relative path "
+        f"{str(path)!r}: that resolves to {target} against the current directory "
+        f"({Path.cwd()}), and an absent file there would be created and read from as "
+        f"if it were the store — every count answering 0. The live store is "
+        f"{Path(VAULT_KG_DB).resolve()}: read it with app.kg_store.store(), or pass "
+        f"that absolute path. `app.paths` exports both the absolute `VAULT_KG_DB` and "
+        f"the relative `KG_DB_RELATIVE`; only the absolute one opens a store."
+    )
+
+
 def _refuse_stray_create(path: Path) -> Path:
     """Refuse to provision a new database inside the data root away from the store.
 
@@ -1627,11 +1678,17 @@ def configure(path: Path | str) -> KGStore:
     """Point the process default at `path` (tests, rebuilds). Returns it.
 
     This is a *provisioning* route: unlike `store()` it creates an absent
-    database, which is what `tests/` and the rebuild scripts depend on.
+    database, which is what `tests/` and the rebuild scripts depend on. It is a
+    provisioning route, not a licence for a relative path: it passes `create=True`,
+    which bypasses `_refuse_stray_create`, so `_refuse_relative` is what stops
+    `configure(app.paths.KG_DB_RELATIVE)` laying a store in the cwd (#3734) — and it
+    runs before the globals are assigned, because a refusal that came after would
+    leave `_default_path` pointing at a path no later `store()` will open.
     """
     global _default_path, _default
+    target = _refuse_relative(path)
     with _default_lock:
-        _default_path = Path(path)
+        _default_path = target
         if _default is not None:
             _default.close()
         _default = KGStore(_default_path, create=True)

@@ -864,3 +864,146 @@ def test_an_existing_file_and_a_path_outside_the_data_root_are_untouched(monkeyp
     KGStore(root / "kg.sqlite", create=True).close()
     KGStore(root / "kg.sqlite").close()                         # exists: opens as before
     KGStore(tmp_path / "scratch" / "kg.sqlite").close()         # not under the root
+
+
+# ── #3734: a cwd-relative store path cannot open the store by ANY route ───────
+#
+# `app.paths` exports `KG_DB_RELATIVE` next to the absolute `VAULT_KG_DB`, and on
+# 2026-11-03 an alias check that passed the RELATIVE one (`KGStore(paths.KG_DB_
+# RELATIVE)`, cwd = the code tree) did not fail: the path resolved against the cwd,
+# `_open()` mkdirs the parents and sqlite creates the file, and the resulting
+# 81,920-byte schema-only store answered `aliases.count()` -> 0 and
+# `resolve("Anything")` -> None — a clean-looking non-answer, the same shape as the
+# moved-root items. `_refuse_stray_create` above cannot catch it: the code tree is
+# not under DATA_ROOT, and that guard returns every path outside the root untouched.
+# The rule below is about RELATIVENESS only, so absolute paths — including scratch
+# outside the data root — keep working exactly as the node above pins.
+
+#: The relative path the incident used, spelled as `app.paths.KG_DB_RELATIVE` does.
+_RELATIVE_STORE = "_pipeline/vault-derived/kg.sqlite"
+
+
+def test_a_cwd_relative_store_path_is_refused_and_lays_nothing(monkeypatch, tmp_path):
+    """Clause 1: the route the incident actually took, refused before `_open()`.
+
+    Run under `monkeypatch.chdir`, because what makes a relative path dangerous is
+    precisely that it means a different file in every directory.
+    """
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(StoreUnavailable) as exc:
+        KGStore(_RELATIVE_STORE)
+    assert _RELATIVE_STORE in str(exc.value), (
+        "the refusal must name the argument it refused, or a caller reading a "
+        "traceback cannot tell which path was the mistake")
+    # Nothing on disk: not the file, not either parent directory. `_open()` is what
+    # lays them (`self.path.parent.mkdir(parents=True, exist_ok=True)`), so a clean
+    # cwd here is the proof the refusal happens before the connection, not after.
+    assert not (tmp_path / "_pipeline").exists(), (
+        "the refusal came too late: `vault-derived` was created under the cwd, "
+        "which is the half of the bug that leaves a stray behind")
+    assert list(tmp_path.iterdir()) == [], (
+        "refusing still touched the cwd; a probe that fails must leave nothing")
+
+
+def test_a_cwd_relative_path_is_refused_on_the_create_route_too(monkeypatch, tmp_path):
+    """Clause 2: `create=True` skips `_refuse_stray_create`, so the rule cannot live there.
+
+    The guard added after the first report (#3481's `_refuse_stray_create`) is
+    bypassed wholesale by `create=True` — `__init__` picks the guard only in the
+    else-branch — and `configure()` passes `create=True` unconditionally. A relative
+    path with `create=True` is therefore the loudest version of the bug: the caller
+    explicitly asked to provision, and sqlite will mkdir and create anywhere.
+    """
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(StoreUnavailable):
+        KGStore(_RELATIVE_STORE, create=True)
+    assert list(tmp_path.iterdir()) == [], (
+        "create=True still provisions in the cwd: the relative-path check has to "
+        "run before the create branch, not inside the guard it skips")
+
+
+def test_a_refused_configure_leaves_the_process_default_where_it_was(monkeypatch, tmp_path):
+    """Clause 3: refusing must not retarget the reader it just refused to serve.
+
+    `configure()` assigned `_default_path` before constructing the store, so raising
+    from the constructor left the process default pointing at a path the next
+    `store()` refuses to open: one bad call would have poisoned every later reader
+    in that process instead of failing on its own line.
+    """
+    prior = tmp_path / "prior" / "kg.sqlite"
+    good = kg_store.configure(prior)                     # absolute: provisions, as today
+    good.edges.add(_edge("Lloyd", "vLLM"), origin="test")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    with pytest.raises(StoreUnavailable):
+        kg_store.configure(_RELATIVE_STORE)
+
+    # The failure must be contained to the call that made it.
+    assert kg_store._default_path == prior, (
+        "a refused configure() retargeted the process default: every later reader "
+        "in this process now resolves through a relative path it will not open")
+    again = kg_store.store()
+    assert again.path == prior, (
+        f"store() answered from {again.path} after a refused configure(); it has "
+        f"to keep answering from the path configured before the failed call")
+    assert again.edges.count() == 1, (
+        "the default reader lost the graph it already had — a refusal is not a reset")
+    assert list(elsewhere.iterdir()) == [], (
+        "the refused configure() provisioned in the cwd anyway")
+
+
+def test_the_relative_refusal_names_the_cwd_target_and_the_live_store(monkeypatch, tmp_path):
+    """Clause 4: the message has to separate the code tree from the data root.
+
+    The cwd has to be a DIFFERENT directory from the data root, or the test cannot
+    tell the two paths apart: chdir-ing into the root this fixture patches as
+    `DATA_ROOT` makes the cwd-resolved target and the live store the same string
+    (`<root>/_pipeline/vault-derived/kg.sqlite` both times), so the live-store
+    assertion below would be satisfied by the target's own text and the node would
+    pass while telling the reader nothing. This is the incident's actual shape —
+    cwd = the code tree, data root elsewhere — so the separation is real, not a
+    convenience: `tmp_path/codetree` is where the caller stands, `tmp_path/root` is
+    the data root the guard points them at.
+    """
+    root, declared = _point_data_root(monkeypatch, tmp_path)
+    codetree = tmp_path / "codetree"                  # NOT under the data root
+    codetree.mkdir()
+    monkeypatch.chdir(codetree)
+    target = codetree / _RELATIVE_STORE
+    live = Path(declared).resolve()
+    assert str(target) != str(live), (
+        "the fixture made the cwd-target and the live store the same path, so every "
+        "assertion below checks one string twice and the clause is ungraded")
+    with pytest.raises(StoreUnavailable) as exc:
+        KGStore(_RELATIVE_STORE)
+    msg = str(exc.value)
+    assert str(target) in msg, (
+        "the message must carry the absolute path the relative argument resolved to "
+        "against the cwd, or the reader cannot see WHERE it would have written")
+    assert str(live) in msg, (
+        "the message must name the live store, so the caller has somewhere to go "
+        "instead of guessing at the data root")
+    assert "store()" in msg, (
+        "naming two paths is only useful with the route that opens the right one: "
+        "`_refuse_stray_create`'s refusal says so, this one has to as well")
+    assert list(codetree.iterdir()) == [], (
+        "refusing still laid the parent directories inside the cwd")
+
+
+def test_absolute_paths_are_unaffected_by_the_relative_rule(monkeypatch, tmp_path):
+    """Clause 5: the rule is about relativeness, checked apart from the root rule."""
+    root, declared = _point_data_root(monkeypatch, tmp_path)
+    KGStore(declared).close()                                            # the live path
+    KGStore(root / "elsewhere" / "kg.sqlite", create=True).close()        # declared dir
+    scratch = tmp_path / "outside" / "kg.sqlite"                          # outside root
+    KGStore(scratch).close()
+    KGStore(scratch).close()                                              # opens again
+    assert scratch.is_file() and (root / "elsewhere" / "kg.sqlite").is_file()
+
+    # And the two rules are independent: `_refuse_stray_create` still does its own
+    # job (a NEW store at the root's top is refused), so the new check did not
+    # replace or reorder it.
+    with pytest.raises(StoreUnavailable):
+        KGStore(root / "kg.sqlite")

@@ -828,8 +828,8 @@ def _contradiction_trace(winner: dict, winner_entity: str, reason: str,
     be: a contradiction pair is always intra-entity (`_resolve_scan` globs one
     entity directory, and `_detect_contradictions_sync` pairs inside that one
     list), and both `EdgeStore` self-loop guards refuse `source == target` — `add`
-    raises it (`app/kg_store.py:719`) and `rewrite_endpoint` drops it
-    (`app/kg_store.py:867`). #1596 settled that state on 2026-09-30 with the answer
+    raises it (`app/kg_store.py:723`) and `rewrite_endpoint` drops it
+    (`app/kg_store.py:871`). #1596 settled that state on 2026-09-30 with the answer
     **markdown-only**: this record is the representation of record for a resolved
     contradiction, neither guard relaxes, no fact-granularity node id
     (`Lloyd#state-007`) is minted to give the pair two endpoints, and so no edge row

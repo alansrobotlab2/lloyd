@@ -4040,8 +4040,8 @@ def test_the_cli_exits_2_and_writes_nothing_when_apply_meets_an_absent_store(tmp
 # pair has no two entities to be an edge's endpoints: `_resolve_scan` globs ONE
 # entity directory and `_detect_contradictions_sync` pairs inside that one list,
 # while `EdgeStore.add` raises `refusing self-loop edge` when `source == target`
-# (`app/kg_store.py:719`) and `rewrite_endpoint` drops such a pair rather than
-# rewriting it (`:867`). Measured the same day: 12,244 entity dirs, 0 of them
+# (`app/kg_store.py:723`) and `rewrite_endpoint` drops such a pair rather than
+# rewriting it (`:871`). Measured the same day: 12,244 entity dirs, 0 of them
 # holding more than one distinct `entity`; 48,488 edge rows, 0 with
 # `source = target` in any state. Which shape an intra-entity contradiction takes
 # in the graph was #1596's to settle, and it settled it markdown-only on
