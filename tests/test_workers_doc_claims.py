@@ -2352,6 +2352,26 @@ RETIRED_REACHABILITY = ("neither detector can reach this store",
                         "no pass can review it now",
                         "no arrival condition")
 
+#: The other claim this paragraph was built on, and the one #3609 buries. "No
+#: qualifying burst since the arm landed" read as a reassurance; it was a countdown no
+#: one was running, and it stopped being true on 2026-10-30, when `0b7685cb820e`'s
+#: 2026-10-29 burst was found by the silent-baseline arm and became queue row 17658.
+#: Phrased to survive reflow, because the defect is the claim and not the wording. Every
+#: string here is one the doc actually carried, and the splice fixture in the node below
+#: reproduces the block that carried it, so each entry has a witness and the splice can
+#: prove the absence scan sees it. The paraphrase this list first held, "no qualifying
+#: day", is dropped rather than kept: `git log -S` over `workers-jobs.md` shows no
+#: version ever said it, so nothing could demonstrate the scan catching it, and a banned
+#: phrase with no witness is a check whose green is a guess.
+RETIRED_QUIET = ("no qualifying burst", "since the detector landed",
+                 "day since the arm", "not arrived is that day", "both all-time")
+
+#: The `failure-ledger` subsection's span, addressed by a phrase unique to its heading
+#: (`grep -c` over `workers-jobs.md` returns 1). `_subsec` cuts at the next `### `/`## `
+#: after the prefix's FIRST occurrence, and "`failure-ledger`" alone sits in the §1
+#: roster too, so the short spelling would silently grade the wrong span.
+FAILURE_LEDGER_SUBSEC = "the same fault counted"
+
 
 #: Count nouns this store is actually measured in. The §2 rail's alternation at
 #: `test_section2_carries_no_undated_count` (:1290) omits `events`, `event days` and
@@ -2405,18 +2425,38 @@ def _undated_counts(flat: str) -> tuple[list[str], list[str]]:
 
 
 def _armed_claims(flat: str) -> list[str]:
-    """The forward-looking claims §6's deciding paragraph must make, as failures.
+    """The claims §6's deciding paragraph must make about the detector, as failures.
 
     Empty means every claim is present. Returns a list rather than asserting because
     the guard node has to run these SAME claims over a paragraph with the retired
     sentence welded back into it: the finding #3532 rests on is that nothing but the
     retired-phrase check separates the two wordings, and that can only be shown by
     grading the spliced text with the live node's own checks.
+
+    Re-pinned by #3609. The version before it required a sentence saying nothing
+    qualifying had arrived since the arm landed — and the live store refuted that on
+    2026-10-30: `0b7685cb820e` reached the floor on 2026-10-29, the silent-baseline arm
+    found it, and it became the source's first run. A rail whose green state IS the
+    stale sentence does not date the paragraph, it freezes it. What is required now is
+    the arm stated to have fired, with the rows that say so beside it. The arrival rule
+    and the D-1 bound below are untouched: both describe code, and code is the half of
+    this paragraph that does not rot.
     """
     bad: list[str] = []
-    if not re.search(r"qualifying[^.]{0,70}since[^.]{0,70}(?:arm|landed)", flat, re.I):
-        bad.append("no 'nothing qualifying has arrived since the arm landed' claim, "
-                   "which is the sentence that separates 'quiet' from 'cannot fire'")
+    fired = [s for s in _BENCH_SENTENCE.split(flat)
+             if "silent-baseline" in s.lower()
+             and re.search(r"\bfired\b|\bfires\b", s, re.I)]
+    if not fired:
+        bad.append("no sentence says the silent-baseline arm fired — the claim #3609 "
+                   "exists to put here. 'The store has been quiet' and 'the arm has "
+                   "never fired on this store' read alike to a skimming reader, and "
+                   "only one of them is true")
+    receipts = [s for s in _BENCH_SENTENCE.split(flat)
+                if "failure_findings" in s and "17658" in s]
+    if not receipts:
+        bad.append("no sentence names both `failure_findings` and queue row 17658, so "
+                   "'the arm fired' is a mood rather than two rows a reader can go and "
+                   "SELECT — the finding and the dispatch it became are the receipts")
     arrival = [s for s in _BENCH_SENTENCE.split(flat)
                if "GROWTH_MIN_COUNT" in s and "detect_growth" in s]
     if not arrival:
@@ -2459,13 +2499,13 @@ def _armed_claims(flat: str) -> list[str]:
     return bad
 
 
-def test_section6_dates_the_counts_behind_the_shape_not_seen_zero():
-    """Clause 4 (with clause 3's quiet): every count in the rewritten paragraph
-    carries the date it was read, and the zero has its cause named beside it.
+def test_section6_dates_the_failure_ledger_counts_it_just_read():
+    """#3609: every figure in §6's deciding paragraph carries the date it was read,
+    and the paragraph describes the store the sweep actually left behind.
 
     §2's rail at `test_section2_carries_no_undated_count` exists because a count of a
     live store is a claim about a moment, not a property of the file — that node
-    records 9 of 12 §6 counts undated. So the *absence* of a stamp is the defect, and
+    records 9 of 12 §6 counts undated. So the *absence* of a stamp is a defect, and
     the node has to be able to see one: the first version asked only sentences
     containing the literal `all-time` for their dates, and the review rung proved by
     mutation that deleting the dates from the nine-signature-days sentence left it
@@ -2473,67 +2513,219 @@ def test_section6_dates_the_counts_behind_the_shape_not_seen_zero():
     version pairs every count-bearing sentence in the block, over the store's own
     count nouns, and proves both directions with a splice.
 
+    Re-pinned, not deleted, by #3609 — and the reason is worth keeping. The node
+    passed on 2026-10-31 while the paragraph it policed was false, because five of its
+    asserts named the stale literals (0 runs, 9 signature-days, 27 event days,
+    last-qualifying 2026-10-21, `all-time`, #3281's recheck) as though they were the
+    invariant. A rail that pins VALUES cannot date a paragraph; it freezes one. What
+    survived the re-date is the structure — every count stamped, its stamps provably
+    strippable, the retired claims absent with a splice that proves the absence scan
+    sees them, the D-1 bound named, the closed authorities unnamed.
+
     A stale count is still possible after this: no test can query the live store (the
     skill's own rule — a green suite that asserts about a runtime store is a claim
     with no evidence), so the paragraph's numbers are pinned by their date stamps and
-    the store-side recount is what catches one going stale.
+    the store-side recount owed to #3609 is what catches one going stale again.
     """
     para = _deciding_paragraph()
     flat = " ".join(para.split())
 
-    # clause 3: the quiet, stated outright, with its cause — not its mechanism.
-    quiet = [s for s in _BENCH_SENTENCE.split(flat)
-             if re.search(r"no qualifying (?:burst|day)[^.]{0,70}(?:since|landed)", s, re.I)]
-    assert quiet, (
-        "the paragraph no longer says outright that the store has produced no "
-        "qualifying burst since the arm landed — the one sentence that separates "
-        "'quiet' from 'cannot fire', which is the whole of #3532")
-    assert "2026-10-21" in flat and "2026-10-25" in flat, (
-        "the quiet is asserted without the two dates that bound it (the last "
-        "qualifying day, and the day the arm landed), so a reader cannot tell it "
-        "from a stall")
-    # The last qualifying day, dated by its OWN reading verb. The refused version
-    # paired the date with `_DATED` — the bare ISO regex the date satisfies by
-    # construction, inside a sentence an earlier assert had already required the
-    # literal in — so the element could not go red. This one asks for a word saying
-    # the figure was READ, then shows the ask bites by deleting that stamp.
-    last_day = [s for s in _BENCH_SENTENCE.split(flat)
-                if "2026-10-21" in s and _STAMPED.search(s)]
-    assert last_day, (
-        "the last qualifying day 2026-10-21 is named by no sentence carrying a stamp "
-        "word attached to a date, so the figure has no stated reading time — an "
-        "undated count of a store that gains rows daily, which is the §2 rail's defect "
-        "sitting in the paragraph that replaced the retired claim")
-    unstamp = _STAMPED.sub("counted once", last_day[0], count=1)
-    assert unstamp != last_day[0], (
-        f"`_STAMPED` matched nothing in {last_day[0][:170]!r}, so the assert "
-        "above is being satisfied by something that is not a reading verb on a date")
-    assert not _STAMPED.search(unstamp), (
-        "deleting the count's own stamp left the same sentence still `_STAMPED`, so "
-        "what the assert above really pairs the date with is a date attached to some "
-        "other fact in that sentence — the refused shape wearing a stricter regex")
+    # Clause 1: the live counts, their stamp, and the two stamps of the dispatch they
+    # count. What this block said until #3609 — 0 rows, 0 rows, both all-time, measured
+    # 2026-10-30T00:28Z — was true the hour it was written and false thirteen hours
+    # later, when the first run completed; the pin therefore binds each number to its
+    # reading time AND to the rows it counts, because a stamped wrong number is exactly
+    # what the paragraph already had.
+    counts = [s for s in _BENCH_SENTENCE.split(flat)
+              if re.search(r"\b1\s*`?runs`?", s) and re.search(r"\b1\s*`?queue`?", s)]
+    assert counts, (
+        "no sentence gives both live counts — 1 `runs` row and 1 `queue` row for "
+        "`source='failure-ledger'` — so the paragraph is still stating the "
+        "pre-dispatch zero that #3609 was filed to retire")
+    assert _STAMPED.search(counts[0]), (
+        "the runs/queue counts carry no `Measured <ISO>Z`, so a count of a store that "
+        "gains rows daily is asserted with no stated reading time — the §2 rail's "
+        f"defect, in the sentence that replaced the stale zero: {counts[0][:170]!r}")
+    stripped = _STAMPED.sub("counted once", counts[0], count=1)
+    assert stripped != counts[0], (
+        f"`_STAMPED` matched nothing in {counts[0][:170]!r}, so the assert above is "
+        "being satisfied by something that is not a reading verb attached to a date")
+    _c_stripped, _u_stripped = _undated_counts(flat.replace(counts[0], stripped))
+    assert any(re.search(r"\b1\s*`?runs`?", s) for s in _u_stripped), (
+        "deleting the counts stamp left that sentence out of `_undated_counts`'s "
+        "unpaired list, so the paragraph-wide date rail cannot see this regression and "
+        "one local assert is all that polices it — the shape the review rung refused "
+        "on 2026-10-29")
 
-    # the zero, and why it is a zero.
-    zero = [s for s in _BENCH_SENTENCE.split(flat) if re.search(r"0 `?runs`?|0 runs", s)]
-    assert zero, (
-        "the 0-runs/0-queue measurement left the paragraph, and #3281's seven-day "
-        "criterion needs that denominator stated to be judged against")
-    assert any(re.search(r"no qualifying (?:burst|day)|shape not seen", s, re.I)
-               for s in zero), (
-        "the 0 rows are stated without their cause, so the paragraph invites the "
-        "reader to attribute them to the detector — the inference that filed #3529 as "
-        "a high incident out of a store that had merely been quiet")
-    assert any("all-time" in s for s in zero), (
-        "the 0-runs sentence no longer says its count is all-time, so a reader "
-        "arriving after one dispatch will take the seven-day criterion as met")
+    # Clause 1's two stamps, and which gap the latency is. Enqueue and completion are
+    # separate facts 1 h 47 m apart; #3609's own finding is that letting one stamp
+    # stand for both repeats, inside the paragraph that warns about it, the ask-vs-sweep
+    # error #3607 renamed a watermark to stop.
+    assert "17658" in flat and "run_failure-ledger_20261030_072516_ab105f" in flat, (
+        "the first real dispatch is unnamed. Queue row 17658 and its run id are what "
+        "make '1 `runs` row' a statement about an investigation rather than a number")
+    enq = [s for s in _BENCH_SENTENCE.split(flat)
+           if "17658" in s and "2026-10-30T05:38:31" in s
+           and re.search(r"enqueued|enqueue", s, re.I)]
+    assert enq, (
+        "queue row 17658's enqueue stamp 2026-10-30T05:38:31Z sits in no sentence "
+        "naming the row, so the dispatch has one date and a reader cannot tell the "
+        "sweep's day from the run's")
+    done = [s for s in _BENCH_SENTENCE.split(flat)
+            if "run_failure-ledger_20261030_072516_ab105f" in s
+            and "2026-10-30T07:29:24" in s and "success" in s]
+    assert done, (
+        "the run's own completion stamp 2026-10-30T07:29:24Z and its `success` status "
+        "are nowhere beside its run id — the completed run, not the enqueued row, is "
+        "the thing the seven consecutive days are counted in")
+    assert enq[0] != done[0], (
+        "one sentence carries the enqueue stamp and the completion stamp as one fact. "
+        "They are 1 h 47 m apart and that gap is pool claim latency, which belongs to "
+        "neither the sweep nor the diagnosis")
+    latency = [s for s in _BENCH_SENTENCE.split(flat) if "1 h 47" in s]
+    assert latency, (
+        "the enqueue-to-claim gap is unstated, so the two stamps read as one event")
+    assert "2026-10-30T07:25:16" in latency[0], (
+        "`1 h 47 m` is not pinned to the run's start stamp 2026-10-30T07:25:16Z, so it "
+        f"floats free of both stamps and a later editor can re-attach it to the "
+        f"completion: {latency[0][:170]!r}")
+    # Clause 1's watermark name: #3607 renamed the sweep's key, and a paragraph that
+    # still prints the retired name teaches the reader the confusion it fixed.
+    assert "last_sweep" in flat, (
+        "the paragraph stopped naming `last_sweep`, the only stamp that answers whether "
+        "this source swept")
+    assert "last_enqueued" not in flat, (
+        "the retired sweep watermark name `last_enqueued` is back in the paragraph, "
+        "which is the key #3607 renamed precisely because it reads as an enqueue")
 
-    # The live authority on the residual zero, by name and with its next date: this
-    # is what lets a later reader tell 'the mechanism cannot fire' (retired) from
-    # 'the shape has not been seen yet, and someone is watching' (true).
-    assert "#3281" in flat and "2026-11-03" in flat, (
-        "the paragraph stopped pointing at #3281's owed entry (recheck 2026-11-03). "
-        "It is the live authority on this zero, and #3532's point is that the answer "
-        "is already on the record — owed-check ruled it at 2026-10-27T03:03Z")
+    # Clause 2: the arm's receipts. #3532 built this paragraph on the store having
+    # produced nothing since the detector landed; #3609's finding is that it had, on
+    # 2026-10-30, so the paragraph now has to carry the two rows that say so — the
+    # findings the sweep wrote and the dispatch day that spent one run on them.
+    findings = [s for s in _BENCH_SENTENCE.split(flat)
+                if "failure_findings" in s and "new_onset" in s and "growth" in s]
+    assert findings, (
+        "no sentence names both growth findings written by the first real sweep: "
+        "`new_onset` occ 5 dispatched and `growth` occ 3 held back. They are the "
+        "evidence that both arms ran, not just the one that dispatched")
+    assert any("17658" in s and "dispatch-cap" in s and "1/day" in s for s in findings), (
+        "the held-back growth finding is not tied to the cap that deferred it and the "
+        "queue row now carrying it, which is the part of the record that says the "
+        "1/day cap was doing its job rather than swallowing a finding")
+    assert any("failure_dispatches" in s and "2026-10-30" in s
+               for s in _BENCH_SENTENCE.split(flat)), (
+        "the dispatch day 2026-10-30 is not stated with its `failure_dispatches` row, "
+        "so the cap's key — the fact a second pass reads before spending a run — has "
+        "no witness in the paragraph")
+    for phrase in RETIRED_QUIET:
+        assert phrase not in flat, (
+            f"the paragraph is back to saying {phrase!r}, which the 2026-10-30 burst "
+            "refuted: the arm found it, dispatched it, and the run completed. This is "
+            "the same error as #3532 retired in the other direction — reading one "
+            "quiet stretch as a property of the mechanism")
+    # And the scan has to be able to SEE that regression. Welding the retired
+    # sentences back onto the paragraph must produce hits the live text does not have;
+    # an always-green absence check is the shape #3532's own guard node exists to
+    # refuse, so the splice is the proof, not decoration.
+    retired_quiet = (
+        "Measured 2026-10-30T00:28Z that first real run has still not happened: the "
+        "source has 0 `runs` rows and 0 `queue` rows, both all-time, and the store has "
+        "produced no qualifying burst or new-onset day since the detector landed. "
+        "What has not arrived is that day since the arm. ")
+    # The proof is the same per-sentence scan the loop above runs, run over the SPLICED
+    # paragraph — not a substring test on the fixture. A term like `p not in flat` is
+    # already guaranteed by that loop, so counting those terms measures the fixture
+    # against the phrase list and never touches the scan; the sibling guard at the end of
+    # this file grades its splice the same way and this one now matches it. Every phrase
+    # must be found, which is also what shows each one has a witness in the fixture.
+    spliced_flat = " ".join((retired_quiet + " " + flat).split())
+    seen = [p for p in RETIRED_QUIET
+            if any(p in s for s in _BENCH_SENTENCE.split(spliced_flat))]
+    assert len(seen) == len(RETIRED_QUIET), (
+        f"the absence scan sees {len(seen)} of {len(RETIRED_QUIET)} retired phrases even "
+        f"with the claim welded back in ({seen!r}), so the loop above is blind to the "
+        f"rest and its green says nothing about them")
+
+    # Clause 2's last step: the SIBLING readings in this same subsection that report the
+    # findings and dispatch tables empty. They sit outside `_deciding_paragraph()`, so
+    # every check above stays green if one is un-scoped back into a present-tense
+    # "property of the store" or deleted. Un-scoping is how §6 contradicts itself: the
+    # deciding paragraph reports the burst and its dispatch, and a sibling two thirds of
+    # the way up the same subsection says the tables are empty. Each zero is worth
+    # keeping (the 2026-10-30T00:28Z one is what the watermark argument needs, the
+    # 2026-10-28 one is the #2893 comparison), so what is pinned here is the SCOPING and
+    # the pointer forward, never the deletion.
+    sub = " ".join(_subsec(FAILURE_LEDGER_SUBSEC).split())
+    zeros = [s for s in _BENCH_SENTENCE.split(sub)
+             if "failure_dispatches" in s and re.search(r"\b0\b[^.]{0,60}\brows\b", s)]
+    assert len(zeros) == 3, (
+        f"{len(zeros)} sentences in the subsection report `failure_findings` / "
+        "`failure_dispatches` at 0 rows; three readings said so — the #2893 witness cut, "
+        "the 2026-10-30T00:28Z sweep-stamp reading and the 2026-10-28 store reading — and "
+        "deleting a reading to make the contradiction go away is the failure this clause "
+        "is about, not a fix")
+    live_zeros = [s for s in zeros if "#2893" not in s]
+    assert len(live_zeros) == 2, (
+        "one of the two live-store zero-row readings has gone or merged into the other; "
+        "the watermark argument and the witness comparison each need their own dated "
+        "sentence, and a merged sentence can only carry one measurement day")
+    for s in live_zeros:
+        assert re.search(r"(?:measured|read on|read) 20\d\d-\d\d-\d\d", s, re.I), (
+            "a zero-row reading lost the day it was taken, so the subsection now asserts "
+            "an empty findings table in the same breath as the paragraph reporting it "
+            f"filled: {s[:170]!r}")
+        assert re.search(r"\b(that day|sat|held|had|were)\b", s), (
+            "the reading kept its date but lost the past-tense scoping that makes the "
+            f"date carry any weight: {s[:170]!r}")
+        assert "still at 0 rows" not in s and "rows sit" not in s, (
+            f"the un-scoped present tense is back in {s[:170]!r}, which is the exact "
+            "wording #3609's clause 2 asks to be scoped to its measurement day")
+    assert any("2026-10-29 burst" in s for s in live_zeros), (
+        "neither zero-row reading points at the burst that filled the tables, so a reader "
+        "who reaches the dated zero first is never told it has been superseded")
+
+    # Clause 4a: the bounded retro-active statement survives. It is the one
+    # forward-looking claim this paragraph is allowed, because it is bounded by code
+    # rather than by traffic: the pass reviews only D-1 and there is no catch-up, so a
+    # burst that closed before the arm landed can never be re-reviewed.
+    d1 = [s for s in _BENCH_SENTENCE.split(flat) if "GROWTH_REVIEW_LAG_DAYS" in s]
+    assert len(d1) == 1, (
+        f"{len(d1)} sentences cite GROWTH_REVIEW_LAG_DAYS; the bound is stated once "
+        "here and `test_section6_names_the_day_growth_reviews_and_what_the_watermark_"
+        "means` owns the mechanism, so a second copy is where an unbounded claim hides")
+    assert "2026-10-25" in d1[0], (
+        "the unreachable window lost the day it is pinned to. Without it the sentence "
+        "is the retired unreachability claim with the date deleted — which is exactly "
+        "what `_armed_claims`' bound check catches, and it must not have to")
+    assert "04f90c87b03a" in d1[0] and "a1afbe2e3b04" in d1[0], (
+        "the bound lost the bursts sitting inside it (`04f90c87b03a` 2026-09-25 n=23, "
+        "`a1afbe2e3b04` 2026-09-06 n=6). Named, the bound costs nothing to believe; "
+        "unnamed, a reader assumes the window is empty and the sentence reads as a "
+        "hedge")
+
+    # Clause 4b: the two closed authorities are gone. #543's four-week clock and
+    # #3281's owed recheck were the paragraph's evidence that the zero was being
+    # watched; both items are status: done and the recheck was a promise to re-count a
+    # zero that no longer exists, so leaning on them now delegates a live claim to a
+    # closed ticket. What replaced them is the measurement itself.
+    assert "#543" not in flat, (
+        "the paragraph is back to borrowing authority from #543, which is status: done "
+        "— and whose four-week clock was defined to start at the first real run, which "
+        "completed 2026-10-30T07:29:24Z. That fact is stated in the paragraph now; the "
+        "open ticket is not the evidence")
+    assert "#3281" not in flat, (
+        "the paragraph is pointing at #3281 again. It is status: done, and the owed "
+        "entry it carried was a promise to recheck a zero the store no longer holds")
+    # "2026-11-03" itself cannot be banned: it is the day every count in the paragraph
+    # was read, and a stamp is the thing this node exists to require. What is banned is
+    # the recheck PROMISE that date carried — a forward-dated instruction to re-count a
+    # zero the store no longer holds.
+    for phrase in ("not early", "four-week", "four week", "recheck", "owed entry",
+                   "owed 2026-"):
+        assert phrase not in flat, (
+            f"{phrase!r} is back, and it is the framing that rested the paragraph on a "
+            "closed item's clock and a closed item's future re-reading rather than on "
+            "the store as measured")
 
     # clause 5: the pairing, over the WHOLE paragraph, on the store's own nouns.
     checked, unpaired = _undated_counts(flat)
@@ -2552,11 +2744,64 @@ def test_section6_dates_the_counts_behind_the_shape_not_seen_zero():
         f"{len(unpaired)} of {len(checked)} count-bearing sentence(s) in the "
         f"deciding-criterion paragraph carry no date ({unpaired[0][:150]!r}) — the "
         "store gains rows daily and an undated count is a claim about a moment")
-    assert re.search(r"9 signature-days|nine signature-days", flat, re.I), (
-        "the paragraph stopped giving the quiet its rate. Nine qualifying "
-        "signature-days is the number that says a burst arrives anyway; with no "
-        "arrival *rate* the 'quiet now' sentence reads like the retired 'quiet "
-        "forever' one")
+
+    # Clause 3: the arrival rate, re-derived from the store, with its own reading
+    # stamp. The rate is the sentence that says the quiet is a rate rather than a
+    # property, and it is the figure with the shortest half-life here: it moved from
+    # 9 signature-days/27 event days to 10/29 the moment the 2026-10-29 burst landed.
+    assert re.search(r"10 signature-days|ten signature-days", flat, re.I), (
+        "the paragraph stopped giving the arrival rate its number. Ten qualifying "
+        "signature-days is what says a burst arrives anyway; with no arrival *rate* "
+        "the 'it fired' sentence reads like the retired 'it never fires' one")
+    assert "29 event days" in flat, (
+        "the rate lost its denominator. 10 signature-days over an unstated window is "
+        "a count, not a rate, and the reader cannot tell a quiet store from a short "
+        "one")
+    assert "2026-09-06" in flat and "2026-10-30" in flat, (
+        "the rate's window is no longer bounded by its first and last event day, so "
+        "the 29 has no edges a reader can re-derive it from")
+    # The rate is countable only against a stated floor, and the floor is code: the
+    # clause reads "10 signature-days at GROWTH_MIN_COUNT = 3", so a re-derivation that
+    # changed `GROWTH_MIN_COUNT` reddens this sentence rather than leaving a number that
+    # silently stopped meaning anything.
+    floor = [s for s in _BENCH_SENTENCE.split(flat)
+             if re.search(r"10 signature-days|ten signature-days", s, re.I)
+             and re.search(r"GROWTH_MIN_COUNT|floor of 3|≥3", s)]
+    assert floor, (
+        "the arrival-rate sentence no longer names the threshold a signature-day has to "
+        "clear, so '10 signature-days' is a bare tally — the count changes with "
+        "GROWTH_MIN_COUNT and nothing in the paragraph says which one produced it")
+    # No hedge over the count. #3609's clause 3 asks for the store's number, not a
+    # softer paraphrase of it that survives a re-derivation: "9 distinct days" was the
+    # shape this paragraph would have reached for instead, and a spelled-out nine is the
+    # same hedge wearing different clothes.
+    for hedge in ("9 distinct days", "nine distinct days", "nine signature-days",
+                  "at least 10", "roughly 10", "9 signature-days"):
+        assert hedge not in flat, (
+            f"{hedge!r} is back beside the rate: hedged or superseded wording is how a "
+            "figure outlives its measurement — the store gives one number and this "
+            "paragraph has to carry that one")
+    # The last qualifying day, dated by its OWN reading verb — the discipline the
+    # refused version of this node lacked, kept intact through the re-date: the
+    # `last_day` literal moved to 2026-10-29, the probe did not.
+    last_day = [s for s in _BENCH_SENTENCE.split(flat)
+                if "2026-10-29" in s and _STAMPED.search(s)]
+    assert last_day, (
+        "the last qualifying day 2026-10-29 is named by no sentence carrying a stamp "
+        "word attached to a date, so the figure has no stated reading time — an "
+        "undated count of a store that gains rows daily, which is the §2 rail's defect "
+        "sitting in the paragraph that replaced the retired claim")
+    assert "0b7685cb820e" in last_day[0], (
+        f"the last qualifying day is named without the signature that made it qualify, "
+        f"so a reader cannot re-run the GROUP BY that produced it: {last_day[0][:170]!r}")
+    unstamp = _STAMPED.sub("counted once", last_day[0], count=1)
+    assert unstamp != last_day[0], (
+        f"`_STAMPED` matched nothing in {last_day[0][:170]!r}, so the assert "
+        "above is being satisfied by something that is not a reading verb on a date")
+    assert not _STAMPED.search(unstamp), (
+        "deleting the count's own stamp left the same sentence still `_STAMPED`, so "
+        "what the assert above really pairs the date with is a date attached to some "
+        "other fact in that sentence — the refused shape wearing a stricter regex")
 
     # The rail must be able to see a regression, not merely report the clean case, and
     # each probe below is fed through `_undated_counts` — the node's own paragraph-wide
@@ -2805,8 +3050,13 @@ def test_section6_says_the_growth_detector_is_armed_not_unreachable():
     # clause 4's receipts: the corrected paragraph restates the retired one's three
     # bursts rather than silently dropping two of them — `04f90c87b03a` 09-25 n=23 and
     # `a1afbe2e3b04` 09-06 n=6 are named inside the D-1 sentence, and `detect_growth`
-    # is named as what fires today. So the surviving figures are 0 runs / 0 queue / 9
-    # signature-days / 27 event days / last-qualifying 2026-10-21 / n=8.
+    # is named as what fires today. Those three receipts are the point of the node and
+    # they survived #3609 intact; the store figures that surrounded them did not. The
+    # counts this paragraph carried when this comment was written (0 runs / 0 queue / 9
+    # signature-days / 27 event days / last-qualifying 2026-10-21 / n=8) were #3609's
+    # premise, not an invariant, and every one of them is superseded — so the numbers
+    # deliberately left out of this comment are the ones a future reader must re-derive
+    # from the live store rather than copy from here.
     assert "04f90c87b03a" in para and "a1afbe2e3b04" in para, (
         "the two bursts the retired sentence enumerated have left the paragraph. The "
         "D-1 statement still refers to 'a burst that closed before 2026-10-25', and "

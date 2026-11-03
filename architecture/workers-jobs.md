@@ -1534,8 +1534,11 @@ touching it are both about not lying to the reader.
   inside its own `min_interval_seconds` of the last sweep
   (`workers/sources/failure_ledger.py:250`), and that early clean return stamps the
   pair like any other. The only stamp saying this source swept recently is its own
-  `last_sweep`, and it says no more than that: 0 `failure_dispatches` rows sit
-  against a stamp that moves daily (measured 2026-10-30T00:28Z). The gate reads that
+  `last_sweep`, and it says no more than that: 0 `failure_dispatches` rows sat
+  against a stamp that was moving daily (measured 2026-10-30T00:28Z). That zero belongs
+  to the reading, not to the key: the first dispatch row went in five hours later, and
+  a stamp that moves whether or not anything was found is exactly why the two counts are
+  not interchangeable. The gate reads that
   stamp under its new name and writes it under that name alone. A deployment whose last
   sweep predates the rename holds its one real row under the retired key, and the read
   honours that row while nothing overwrites it, so renaming the stamp cost no live
@@ -1575,9 +1578,11 @@ two families holding 80 and 41 occurrences — the two figures `sweep()` returns
 reports queue depths and run outcomes and cannot count an event. That pair reopens
 against no surviving state of the file: the #2893 witness
 (`backlog/data/failure-ledger.db`, cut 2026-10-17T14:46Z) holds 83 events across 7
-signatures, and the live store on 2026-10-28 holds 95 events across 10 signatures
-over 25 event days, with `failure_findings` and `failure_dispatches` both still at
-0 rows. Counting is what the sweep does
+signatures. Read on 2026-10-28 the live store held 95 events across 10 signatures
+over 25 event days, with `failure_findings` and `failure_dispatches` both at 0 rows that
+day — the 2026-10-29 burst filled both tables the next morning, which is what the
+deciding paragraph at the end of this subsection reports, so the two readings are dated
+and not in contradiction. Counting is what the sweep does
 alone; acting needs the pool. **The denominator is `runs`, not that event count** —
 `app/failure_ledger.py:670` `reconcile()` reports `runs_total` (`:701`) as
 `SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
@@ -1594,47 +1599,79 @@ one poisoned at `attempts = 0`, which is terminal.
 **What decides it, and what was never the obstacle.** Seven consecutive days with a
 `runs` row per day, then the before/after count of identical unanswered notices
 against named, dated open issues: owed-check's ruling, read on the daily note and the
-`[guardian]` board rather than the parked morning brief, and the #543 four-week
-delete-or-keep clock for the ledger starts at that first real run, not at this block's
-landing. **Measured 2026-10-30T00:28Z that first real run has still not
-happened: 0 runs and 0 queue rows for `source='failure-ledger'`, both
-all-time** — and the reason is quieter than the one this paragraph carried
-until #3532: the store has produced no qualifying burst since the detector that
-looks for one landed. The schedule is not the blocker either, and its stamps
+`[guardian]` board rather than the parked morning brief. **Measured
+2026-11-03T06:02:16Z, the source has 1 `runs` row and 1 `queue` row for
+`source='failure-ledger'`** — one investigation asked for and one finished, where the
+figure this paragraph carried until today was the same zero offered as the store's whole
+history. The dispatch is
+queue row 17658, enqueued 2026-10-30T05:38:31Z by the sweep that found the burst. Its
+run `run_failure-ledger_20261030_072516_ab105f` was claimed 1 h 47 m later at
+2026-10-30T07:25:16Z and completed status `success` at 2026-10-30T07:29:24Z after
+247.57 s — 1 h 51 m from the sweep's enqueue to a finished diagnosis — both stamps read
+2026-11-03T06:02:16Z. The 1 h 47 m of that is the pool's claim-to-run latency, and it
+belongs to neither the sweep nor the diagnosis; it is the same distinction #3607 renamed a
+watermark key to stop blurring, because a run's own stamps and the moment the pool picked
+its queue row up are two facts, and a paragraph that prints one for both cannot be
+re-derived by a reader who did not see the store. The sweep wrote
+two rows to `failure_findings` that day (read 2026-11-03T06:02:16Z): finding 1
+`new_onset` occ 5, dispatched into queue row 17658, and finding 2 `growth` occ 3, held
+back by `dispatch-cap: 1/day` and still carried in queue row 17658 for the next pass; the
+day's `failure_dispatches` row is 2026-10-30 with findings [1, 2]. **An arrival is not
+missing, and it is no longer hypothetical: the silent-baseline arm has fired on this
+store end to end** — `detect_growth` found a signature with no stored issue on a closed
+day, `dispatch_findings` spent the day's single run on it, and a worker turn answered it.
+The schedule is not the blocker either, and its stamps
 are not the same fact: the pool's ask pair (`last_enqueue_check`,
 `last_enqueue_ok` — each stamped once per pool ask, not once per sweep) read
-2026-10-29T23:34Z, and the source's own sweep stamp read
-2026-10-29T05:22Z, all three from one read, where the ask pair sits 53 min and
-the sweep stamp 19 h before the `runs` count above. The pool has asked within the
-hour and the sweep last ran 19 h ago; neither is a completed diagnosis — the ask
-pair says nothing about whether this source swept, and the sweep stamp says
-nothing about whether it dispatched. **An arrival is not missing.** A reviewed
+2026-11-03T05:33:11Z, and this source's own sweep stamp `last_sweep` read
+2026-11-02T06:19:02Z, all three from one read 2026-11-03T06:02:16Z — 29 min and
+23 h 43 m before the `runs` count above, and both of them after the first run completed,
+which is the ordering the version of this block before today had backwards. The pool
+asks every hour and the sweep runs once a day; neither stamp is a completed diagnosis —
+the ask pair says nothing about whether this source swept, and `last_sweep` says
+nothing about whether it dispatched. A reviewed
 day holding ≥3 events of one signature — `app/failure_ledger.py:482`
 `GROWTH_MIN_COUNT = 3` — whose trailing-7-day window is empty fires the
 silent-baseline arm in `detect_growth` (`:576`, in main since 2026-10-25), so
 the store's next quiet burst of that shape arrives at the pool on the pass the
-day after it. The rate is a fact about the store and not a hope: counted
-2026-10-30T00:28Z, 9 signature-days reach the floor across the store's 27
-event days (2026-09-06 → 2026-10-27: 27 days carrying events inside a 52-day
-calendar span), roughly one a week. What has not arrived is that day *since
-the arm*: the last qualifying day is 2026-10-21 (`04f90c87b03a`, n=8 counted
-2026-10-30T00:28Z), four days ahead of #3281's settling (2026-10-25), and the
-only event days after it — n=1 (2026-10-22), n=2 (2026-10-24), n=1
-(2026-10-27) — all sit under the floor. Two facts about that 2026-10-21 burst
-are the whole of the confusion, and both are in #3281's round record: the
-scheduled pass DID review it, on 2026-10-22, and the pre-#3281 guard
-`if median is None: continue` then discarded its empty window — the arm's
+day after it — which is the path the burst above took, events on 2026-10-29
+reviewed and enqueued by the 2026-10-30 pass. The rate is a fact about the store and not
+a hope: measured 2026-11-03T06:02:16Z, 10 signature-days reach the floor of 3
+(`GROWTH_MIN_COUNT`) across the store's 29 event days (2026-09-06 → 2026-10-30: 29 days
+carrying events inside a 55-day
+calendar span), so one day in three that carries an event at all qualifies, and across
+the calendar that is one every five and a half days. The last qualifying day is
+2026-10-29 (`0b7685cb820e`, n=3 counted 2026-11-03T06:02:16Z). The event days since the
+2026-10-21 burst this paragraph used to call the last are n=1 (2026-10-22), n=2
+(2026-10-24), n=1 (2026-10-27), n=3 (2026-10-29) and n=2 (2026-10-30), and 2026-10-29 is
+the only one of them at or over the floor — the first day the arm could act on, and the
+first the arm did act on. Two facts about that
+2026-10-21 burst are the whole of the confusion, and both are in the round record that
+settled the burst-from-silence arm (2026-10-27T03:03Z): the
+scheduled pass DID review it, on 2026-10-22, and the guard that arm replaced —
+`if median is None: continue` — then discarded its empty window; the arm's
 measured flip is `[]` at base `752f5ade` versus `[1]` after, replayed on a
 copy of the store because `detect_growth` commits. What is permanently
 unreviewable is bounded, and it is about days rather than about reach: because
 the pass reviews only D-1 (`GROWTH_REVIEW_LAG_DAYS` = 1, `:503`) with no
 catch-up, a burst that closed before 2026-10-25 can never be re-reviewed —
 `04f90c87b03a` 2026-09-25 n=23 and `a1afbe2e3b04` 2026-09-06 n=6 among them —
-so those went unreported and stay that way. The seven-day criterion and #543's
-clock are therefore not early, and they are not stuck either: the live
-authority on the residual zero is #3281's owed entry, which owed-check ruled
-on 2026-10-27T03:03Z ("the source is live, not stalled … the zero is 'shape
-not seen', not a defect") with its recheck owed 2026-11-03. What kept the loop
+so those went unreported and stay that way. What the first run did not do is satisfy
+the criterion: one of the seven days exists, and six more sweeps with findings have to
+happen before anyone can say whether the ledger's mining value is measurable. The
+delete-or-keep clock this ledger was given starts at that first real run, which completed
+2026-10-30T07:29:24Z, so it is running now rather than waiting to start; past this
+sentence the authority is the store re-read, not a closed item's ruling about a zero that
+has since stopped being zero. The pre-run state has a witness: the data snapshot
+`20261029T230126Z`, read 2026-11-03T06:02:16Z, holds the ledger at 96 events across 10
+signatures on the 27 days that carried events then, with `failure_findings` and
+`failure_dispatches` both empty, and its `workers.db` shows no `runs` row and no `queue`
+row for this source yet
+(15,673 queue rows all-source) — openable only through sqlite's immutable read-only URI
+form (`mode=ro&immutable=1`), because the WAL sidecars are not captured.
+`scripts/backup/prune-data-snapshots.sh` keeps 48 hourly and 14 daily, so that directory
+rotates out around 2026-11-12 and the pointer above is one to re-derive rather than to
+trust. What kept the loop
 from scheduling the source was never a fence around
 `config.yaml`: that claim was retired on 2026-10-05 by the
 `scripts/automod/spec.py::config_value_change` lane, whose denied set
