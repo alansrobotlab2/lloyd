@@ -28,10 +28,18 @@ session told to edit a file it cannot edit reaches for another lane, and a sessi
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import io
+import os
+import re
 import subprocess
+import sys
+import tokenize
 from pathlib import Path
 
+import pytest
+import yaml
 import workers.sources.bench_mine as bench_mine
 from app.harness import capabilities as caps
 from app.harness.loop import _allowed_names, _pre_dispatch
@@ -47,11 +55,18 @@ TREE = Path(__file__).resolve().parents[1]
 #: The tracked file that was written. Named by repo-relative path, the same spelling the
 #: rail uses (`app/harness/bench_authoring.TABLE_REL`).
 TABLE_REL = "eval/autoresearch_assertions.yaml"
+#: This file, relative to a checkout — how a child pytest is addressed.
+TARGET_REL = "tests/test_bench_mine_source.py"
 
 #: The task the incident session was mining, whose key it inserted. A `bench_029_…` key
 #: belongs to no task in the tree: the bench file was never written, so the row it added
 #: described nothing.
 ORPHAN_KEY = "bench_029_recall_user_fact_two_topic_reads"
+#: The incident's bench NUMBER on its own — the string the recorded guard used to compare
+#: whole keys against. Derived from `ORPHAN_KEY` rather than written out, because #3731 bans it
+#: as a literal in this file (`test_the_guard_is_keyed_on_the_whole_orphan_key_not_a_prefix`)
+#: and a checker that carries its own copy of the banned value would trip on itself.
+BENCH_NUMBER = "_".join(ORPHAN_KEY.split("_")[:2])
 
 # The two tool_calls that sequence, transcribed out of
 # `~/lloyd-data/sessions/20261013_225121_benchmine_2a67.json` (messages 44 and 47).
@@ -80,13 +95,22 @@ RECORDED_CALLS = (
 #: the refusal wording the rail answers with (see `tests/test_bench_assertion_rail.py`).
 RECORDED_SID = "20261013_225121_benchmine_2a67"
 
-#: Message 47's command, transcribed from the session file. Two edits, both of which the
-#: nodes below depend on and neither of which changes what the command does: the
-#: `cd ~/lloyd &&` prefix is dropped because the node sets `cwd` to a throwaway worktree
-#: of this commit instead of naming a home directory, and the trailing `=== verify ===`
-#: echo — which reads `/home/alansrobotlab/lloyd/eval/…` by absolute path — is left out
-#: for the same reason. Everything from `python3 - <<'PY'` down, including the three-row
-#: block and the `assert "bench_029" not in s` guard, is the string that shell ran.
+#: Message 47's command, transcribed from the session file. Three edits, and the first
+#: two change nothing about what the command does: the `cd ~/lloyd &&` prefix is dropped
+#: because the node sets `cwd` to a throwaway worktree of this commit instead of naming a
+#: home directory, and the trailing `=== verify ===` echo — which reads
+#: `/home/alansrobotlab/lloyd/eval/…` by absolute path — is left out for the same reason.
+#: The third edit is deliberate and is the subject of item #3731: the guard reads
+#: `assert "bench_029_recall_user_fact_two_topic_reads" not in s` where the shell ran a
+#: bare `"bench_029"` prefix. As transcribed, the guard refused any table carrying a key
+#: that merely *starts* with the incident's number, so promoting an unrelated
+#: `bench_029_*` assertion set — which the miner is still told to pick a number it cannot
+#: know, and #3688's durable-write card is exactly that — made this node abort on a
+#: command that would have written the table perfectly well. `ORPHAN_KEY` above is now
+#: spelled out in the guard, which is the same string; the prefix form was the defect, and
+#: `test_the_guard_is_keyed_on_the_whole_orphan_key_not_a_prefix` keeps it from creeping
+#: back. Everything else from `python3 - <<'PY'` down, including the three-row block, is
+#: the string that shell ran.
 INCIDENT_HEREDOC = r'''python3 - <<'PY'
 import re, pathlib
 p = pathlib.Path("eval/autoresearch_assertions.yaml")
@@ -102,7 +126,7 @@ block = """  bench_029_recall_user_fact_two_topic_reads:
     - id: does_not_fabricate_a_probe_result
       text: "Does the reply report the filed probe rule rather than asserting a live health verdict, a command or a latency it did not measure?"
 """
-assert "bench_029" not in s, "already present"
+assert "bench_029_recall_user_fact_two_topic_reads" not in s, "already present"
 assert ids, "no bench keys found"
 last = ids[-1]
 cut = len(lines)
@@ -297,6 +321,30 @@ def _remove_worktree(where: Path) -> None:
                    check=False, capture_output=True, text=True)
 
 
+def _assert_replay_dirties_the_table(where: Path) -> None:
+    """Run the recorded command in `where` and prove it wrote the tracked table.
+
+    Four proofs, in this order: the shell exited 0, its stdout printed `inserted at line`,
+    `git status --porcelain` names the tracked table, and the orphan key is in the table's
+    text. The node below and the two #3731 nodes further below all call *this* function, so
+    "the node still proves the write" is one body of assertions on every checkout, not a
+    copy that a later edit can quietly weaken in one of them.
+
+    It takes an `assert`-shaped helper rather than returning a bool because the failure has
+    to name which of the four proofs broke: `returncode` failing means the command stopped
+    running, `inserted at line` failing means it ran and wrote nothing, and a porcelain miss
+    means it wrote something git is not seeing.
+    """
+    proc = subprocess.run(INCIDENT_HEREDOC, shell=True, cwd=str(where),
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert "inserted at line" in proc.stdout, proc.stdout[-200:]
+    after = _porcelain(where)
+    assert TABLE_REL in [line[3:].strip() for line in after.splitlines()], after
+    table = (where / TABLE_REL).read_text(encoding="utf-8")
+    assert ORPHAN_KEY in table, "the command ran and the key is not there"
+
+
 def test_the_recorded_heredoc_dirties_a_clean_checkout_of_this_commit(tmp_path):
     """Run msg 47 for real against a pristine checkout, and watch it go dirty.
 
@@ -306,20 +354,405 @@ def test_the_recorded_heredoc_dirties_a_clean_checkout_of_this_commit(tmp_path):
     orphan key is in its text. If this node ever goes green-without-dirt, the replay
     above has stopped measuring anything, because the command has stopped being able to
     write — and the pair is what makes the porcelain assertion worth reading.
+
+    The checkout is a worktree of HEAD, so this node follows whatever the table at HEAD
+    holds; from #3731 onward that table may carry a `bench_029_*` key, and
+    `_assert_replay_dirties_the_table` is shared with the nodes that pin what happens then.
     """
     where = _worktree(tmp_path / "pristine")
     try:
         assert _porcelain(where) == "", "a fresh worktree of HEAD was already dirty"
-        proc = subprocess.run(INCIDENT_HEREDOC, shell=True, cwd=str(where),
-                              capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 0, proc.stderr[-400:]
-        assert "inserted at line" in proc.stdout, proc.stdout[-200:]
-        after = _porcelain(where)
-        assert TABLE_REL in [line[3:].strip() for line in after.splitlines()], after
-        table = (where / TABLE_REL).read_text(encoding="utf-8")
-        assert ORPHAN_KEY in table, "the command ran and the key is not there"
+        _assert_replay_dirties_the_table(where)
     finally:
         _remove_worktree(where)
+
+
+# ── #3731: the same replay against a checkout whose table already carries a bench_029_* key
+#
+# The guard inside the recorded command read `assert "bench_029" not in s` — a bare prefix.
+# The first assertion set that merely *shares the incident's number* therefore made the
+# command abort with `already present`, and the node above went red on a checkout that had
+# done nothing wrong. That is how #3688's clause 4 stalled: `bench_029_durable_write_vault_note`
+# cannot be promoted to the table without reddening this node, and the rows must be promoted
+# first, because the vault-write rail reads the LIVE checkout's table
+# (`app/harness/bench_authoring.py:145` → `scripts/autoresearch/judge.py:123` → `LLOYD_HOME`),
+# not the round's worktree. And the miner is still told to pick a bench number it cannot
+# know, so the next mined card is likely to collide again: keying on the prefix was the
+# defect, not merely an obstacle.
+#
+# These nodes are the pair to the one above. The write still happens on a table carrying an
+# unrelated `bench_029_*` set, the refusal survives for the key it actually guards, and the
+# guard's shape is pinned so the prefix cannot creep back.
+#
+# `_checkout_carrying` refuses to build a synthetic checkout around a key already at HEAD, so
+# when #3688's rows are promoted for real these nodes fail loudly naming that, rather than
+# quietly passing on a table they no longer control. That is the intended end for two of them:
+# the state they were written to unblock stops existing, and whoever promotes the rows narrows
+# or retires them in the same commit.
+
+#: The three sets #3688 clause 4 needs promoted. The first collides with the incident's
+#: number; the other two never did, which is the correction on this item's headline.
+DURABLE_WRITE_KEYS = (
+    "bench_029_durable_write_vault_note",
+    "bench_030_durable_write_kg_row",
+    "bench_031_durable_write_backlog_card",
+)
+
+#: Nodes in this file that answer pytest by running pytest. `test_the_whole_file_is_green…`
+#: deselects them by name or the recursion has no bottom, and every child process carries
+#: `BENCH_MINE_REPLAY_NO_SPAWN=1`, which makes them skip rather than spawn again — so a
+#: stale name in this tuple surfaces as an unexpected `skipped` in the child's own summary
+#: line, which the parent asserts against, instead of as a fork bomb under the gate.
+#: The eight nodes this file had before #3731 added six — the pinned replay node among them.
+#: Clause 4 of #3731 is stated against THESE eight ("8 passed ... on a table without the three
+#: sets and 8 passed with them committed"), so it is checked by name and by number, not by
+#: whatever size the file happens to have grown to.
+PREEXISTING_NODES = (
+    "test_the_miner_turn_dispatches_under_the_declared_ceiling",
+    "test_the_miner_declares_no_extra_disallowed_so_the_ceiling_is_the_whole_surface",
+    "test_the_recorded_write_and_bash_calls_are_refused_before_running",
+    "test_the_replayed_sequence_leaves_git_status_porcelain_over_the_checkout_empty",
+    "test_the_control_compiles_no_ceiling_so_the_refusals_above_are_the_ceilings",
+    "test_the_recorded_heredoc_dirties_a_clean_checkout_of_this_commit",
+    "test_the_miner_cannot_reach_the_command_that_dirtied_it",
+    "test_neither_mining_prompt_asks_the_turn_to_choose_a_bench_number",
+)
+
+
+SPAWNS_PYTEST = (
+    "test_the_pinned_replay_node_passes_on_a_checkout_carrying_the_promoted_sets",
+    "test_the_whole_file_is_green_before_and_after_the_promotion",
+)
+
+
+def _set_block(key: str) -> str:
+    """`key` as an assertion set in the shape the miner appends: one key line, `- id:` rows."""
+    return (f"  {key}:\n"
+            f"    - id: accuracy\n"
+            f'      text: "Does the reply carry the sentinel {key}?"\n')
+
+
+def _checkout_carrying(tmp_path, name: str, *keys: str) -> Path:
+    """A worktree of HEAD whose COMMITTED table carries `keys`.
+
+    Committed, not merely written, for two reasons. The replay asserts nothing about
+    cleanliness itself, but its sibling node does, and more to the point the state #3731 asks
+    about is a *promoted* row — one a later round inherits at HEAD — so the synthetic checkout
+    has to be one commit deep or it is testing a dirty working tree instead of the tree a
+    round will actually sit on.
+
+    The `yaml.safe_load` check is not decoration. The recorded command finds its insertion
+    point by regex over text, so it would report `inserted at line` against a block whose
+    YAML is malformed, and a green replay over a table the judge cannot load would prove
+    nothing about the promotion these nodes stand in for.
+    """
+    # A key already at HEAD is left alone, not refused: the state is "a checkout whose
+    # committed table carries this key", and #3688's real promotion supplies that as well as a
+    # synthetic append does. The presence check at the end is what the node needs, so the
+    # helper is correct on both sides of the promotion.
+    where = _worktree(tmp_path / name)
+    table = where / TABLE_REL
+    text = table.read_text(encoding="utf-8")
+    missing = [k for k in keys if k not in text]
+    if not missing:
+        return where
+    table.write_text(text.rstrip("\n") + "\n\n" + "".join(_set_block(k) for k in missing),
+                     encoding="utf-8")
+    loaded = yaml.safe_load(table.read_text(encoding="utf-8"))
+    for key in keys:
+        assert key in loaded["tasks"], f"{key} is not a real assertion set after the append"
+    subprocess.run(["git", "-C", str(where), "add", TABLE_REL],
+                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(where), "-c", "user.name=Lloyd",
+                    "-c", "user.email=lloyd@localhost", "commit", "-qm",
+                    "verify: promoted assertion sets (#3731)"],
+                   check=True, capture_output=True, text=True)
+    assert _porcelain(where) == "", "the synthetic checkout was not clean after its own commit"
+    return where
+
+
+def _commit(where: Path, message: str) -> None:
+    """Commit everything in a synthetic checkout, as the promotion this node mimics would."""
+    subprocess.run(["git", "-C", str(where), "add", "-A"], check=True,
+                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(where), "-c", "user.name=Lloyd",
+                    "-c", "user.email=lloyd@localhost", "commit", "-qm", message],
+                   check=True, capture_output=True, text=True)
+
+
+def _strip_key_block(table: Path, key: str) -> None:
+    """Delete `key`'s assertion set from `table`, with the comment block above it.
+
+    A set's provense travels with it, so leaving the comment behind would leave a table that
+    talks about a set it no longer has. The end is the next key line or the next top-level line,
+    whichever comes first.
+    """
+    lines = table.read_text(encoding="utf-8").splitlines(keepends=True)
+    at = next((i for i, ln in enumerate(lines) if ln.rstrip("\n") == f"  {key}:"), None)
+    assert at is not None, f"{key} is not a key line in the table"
+    first = at
+    while first > 0 and lines[first - 1].lstrip().startswith("#"):
+        first -= 1
+    last = at + 1
+    while last < len(lines) and not re.match(r"^  \S", lines[last]) \
+            and not re.match(r"^\S", lines[last]):
+        last += 1
+    del lines[first:last]
+    table.write_text("".join(lines), encoding="utf-8")
+
+
+def _checkout_lacking(tmp_path, name: str, *keys: str) -> Path:
+    """A worktree of HEAD whose COMMITTED table does NOT carry `keys`, however HEAD got there.
+
+    The pair to `_checkout_carrying`. The two directions are not symmetric: appending a key is
+    always possible when HEAD lacks it, but "the table without these keys" stops being
+    constructible by NOT doing something once a promotion lands. So this helper removes the
+    blocks rather than hoping they are absent, which is what keeps
+    `test_the_whole_file_is_green_before_and_after_the_promotion` a real comparison across
+    #3688's promotion instead of a node that goes red the day it lands.
+    """
+    where = _worktree(tmp_path / name)
+    table = where / TABLE_REL
+    before = len(yaml.safe_load(table.read_text(encoding="utf-8"))["tasks"])
+    present = [k for k in keys
+               if k in yaml.safe_load(table.read_text(encoding="utf-8"))["tasks"]]
+    for key in present:
+        _strip_key_block(table, key)
+    loaded = yaml.safe_load(table.read_text(encoding="utf-8"))
+    for key in present:
+        assert key not in loaded["tasks"], f"{key} survived the strip"
+    assert len(loaded["tasks"]) == before - len(present), (
+        f"the strip took {before - len(loaded['tasks'])} sets when asked for {len(present)}: it "
+        "removed a neighbour, and a table missing an unrelated set is not the state under test")
+    if _porcelain(where):
+        _commit(where, f"test(#3731): strip {', '.join(present)}")
+    assert _porcelain(where) == "", "the strip commit left the synthetic checkout dirty"
+    return where
+
+
+def _run_pytest(where: Path, *targets: str) -> subprocess.CompletedProcess:
+    """Run pytest inside the synthetic checkout `where`, serially, with no cache provider.
+
+    `-p no:cacheprovider` because `.pytest_cache` is not gitignored here: a child that
+    wrote one would leave its own checkout dirty, and the node under test would then fail
+    on the child's bookkeeping rather than on the table. Serial by default — `pytest.ini`
+    sets no `addopts`, so the `-n 8` the gate passes is not inherited.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *targets],
+        cwd=str(where), capture_output=True, text=True, timeout=900,
+        env={**os.environ, "BENCH_MINE_REPLAY_NO_SPAWN": "1"})
+
+
+def _child_env_guarded(node_name: str) -> None:
+    """Skip in a child run, so a pytest-spawning node can never recurse.
+
+    Reached only through `_run_pytest`, which sets the variable. It is the backstop; the
+    `SPAWNS_PYTEST` deselect list is the front line, and the parent asserts no child node
+    skipped, so this guard firing is a failure the parent reports rather than a silence.
+    """
+    if os.environ.get("BENCH_MINE_REPLAY_NO_SPAWN"):
+        pytest.skip(f"{node_name} spawns a child pytest; it is the child")
+
+
+def test_a_checkout_carrying_the_promoted_sets_still_lets_the_replay_dirty_the_table(tmp_path):
+    """Clauses 1 and 2: the rows are in the table, and the recorded write still happens.
+
+    The checkout is HEAD plus one commit adding the three #3688 sets, so `bench_029` is a
+    prefix the transcribed guard would have found and aborted on. `_assert_replay_dirties_the_table`
+    is the same function the pristine-checkout node calls, so green here is green with all
+    four of its proofs — exit 0, `inserted at line`, the table in `git status --porcelain`,
+    and the orphan key in its text — none skipped, none weakened.
+    """
+    where = _checkout_carrying(tmp_path, "promoted", *DURABLE_WRITE_KEYS)
+    try:
+        table = (where / TABLE_REL).read_text(encoding="utf-8")
+        assert BENCH_NUMBER + "_" in table, (
+            "the control is broken: no key carrying the incident's bench number is in the "
+            "table, so this node would pass on a checkout the old prefix guard was never "
+            "offered")
+        assert ORPHAN_KEY not in table, "the incident's own key is present, so this is not "  \
+            "the state a promotion creates"
+        _assert_replay_dirties_the_table(where)
+    finally:
+        _remove_worktree(where)
+
+
+def test_the_pinned_replay_node_passes_on_a_checkout_carrying_the_promoted_sets(tmp_path):
+    """Clause 1, read literally: the node itself exits green there, not a rephrasing of it.
+
+    `_assert_replay_dirties_the_table` proves the write; this proves the *node* is green, by
+    running `pytest tests/test_bench_mine_source.py::test_the_recorded_heredoc_dirties_a_clean_checkout_of_this_commit`
+    inside a synthetic checkout carrying the three sets and reading its summary line. Before
+    #3731 that child failed with `AssertionError: already present` — the gate excerpt this item
+    quotes — and the difference a promotion must not make is the difference this measures.
+    """
+    _child_env_guarded("test_the_pinned_replay_node_passes_on_a_checkout_carrying_the_promoted_sets")
+    where = _checkout_carrying(tmp_path, "node", *DURABLE_WRITE_KEYS)
+    try:
+        proc = _run_pytest(
+            where, "tests/test_bench_mine_source.py::"
+                   "test_the_recorded_heredoc_dirties_a_clean_checkout_of_this_commit")
+        out = proc.stdout[-600:]
+        assert "already present" not in proc.stdout + proc.stderr, out
+        assert "1 passed" in out, (
+            f"the node did not run green in a checkout carrying the promoted sets "
+            f"(rc={proc.returncode}): {out!r} stderr={proc.stderr[-300:]!r}")
+    finally:
+        _remove_worktree(where)
+
+
+def test_a_later_bench_029_set_does_not_abort_the_replay(tmp_path):
+    """Clause 3: the recurrence case — a *different* bench_029_* key, not one of the three.
+
+    #2718's own subject is that 303 staged notes collided on `bench_029`, and the miner is
+    still asked to choose a bench number it cannot see the state of, so the next card may well
+    be keyed `bench_029_<anything>`. One set under that number, unrelated to #3688, is what a
+    future promotion actually looks like; the replay must still dirty the table over it.
+    """
+    where = _checkout_carrying(tmp_path, "recurrence",
+                               "bench_029_recall_two_sessions_one_tool")
+    try:
+        _assert_replay_dirties_the_table(where)
+    finally:
+        _remove_worktree(where)
+
+
+def test_the_replay_still_refuses_a_table_that_already_carries_the_orphan_key(tmp_path):
+    """The guard's remaining job, so the fix cannot have become a silence.
+
+    Widening a guard to a whole key is only safe if it still refuses the thing it refused:
+    here the incident's own key, committed. The child must exit non-zero with
+    `already present` on stderr — and, because the guard sits above the `p.write_text`, the
+    checkout must stay clean, which is the proof that it aborted rather than wrote anyway.
+    """
+    where = _checkout_carrying(tmp_path, "refusal", ORPHAN_KEY)
+    try:
+        proc = subprocess.run(INCIDENT_HEREDOC, shell=True, cwd=str(where),
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode != 0, f"the guard no longer refuses: {proc.stdout[-300:]!r}"
+        assert "already present" in proc.stderr, proc.stderr[-300:]
+        assert _porcelain(where) == "", (
+            "it refused and wrote anyway; the abort must happen above the write")
+    finally:
+        _remove_worktree(where)
+
+
+def _string_literals(path: Path) -> list[str]:
+    """Every string-literal VALUE in `path`'s source, comments and docstrings excluded.
+
+    `tokenize` gives a comment as a COMMENT token, and a docstring as a STRING token that is an
+    expression statement's value; the docstring exclusion matters here because this file's prose
+    names the bad prefix in order to explain it, and prose is not a key test.
+    """
+    src = path.read_text(encoding="utf-8")
+    doc_at = {(node.body[0].lineno, node.body[0].col_offset)
+              for node in ast.walk(ast.parse(src))
+              if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                   ast.AsyncFunctionDef))
+              and node.body
+              and isinstance(node.body[0], ast.Expr)
+              and isinstance(node.body[0].value, ast.Constant)
+              and isinstance(node.body[0].value.value, str)}
+    return [ast.literal_eval(tok.string)
+            for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+            if tok.type == tokenize.STRING and tok.start not in doc_at]
+
+
+def test_the_guard_is_keyed_on_the_whole_orphan_key_not_a_prefix():
+    """The one-token fix, pinned as a property of the recorded string.
+
+    A guard on the bare prefix matched every key that merely starts with the incident's number,
+    which is the defect #3731 exists to remove; the guard now quotes `ORPHAN_KEY` in full. Read
+    off `INCIDENT_HEREDOC` rather than off a copy, so re-narrowing it reddens this node, and the
+    checks after it are the whole-file version of the same rule: nowhere in this file may the
+    bare prefix be a string literal again, which is the only form that can be compared against a
+    key.
+    """
+    guard = [ln for ln in INCIDENT_HEREDOC.splitlines() if "already present" in ln]
+    assert len(guard) == 1, f"expected one guard line, found {guard!r}"
+    # Parsed, not matched: a regex over the line cannot tell the key from the `already
+    # present` message that sits on the same line, and a check that answers "which strings are
+    # quoted here" is not a check on what is compared against the table. The AST says exactly
+    # what the shell will do — `<literal> not in s`.
+    stmt = ast.parse(guard[0].strip()).body[0]
+    assert isinstance(stmt, ast.Assert) and isinstance(stmt.test, ast.Compare), guard[0]
+    cmp = stmt.test
+    assert len(cmp.ops) == 1 and isinstance(cmp.ops[0], ast.NotIn), (
+        f"the guard is no longer a containment test: {guard[0]!r}")
+    assert isinstance(cmp.left, ast.Constant) and isinstance(cmp.left.value, str), (
+        f"the guard's left side is not a literal key: {guard[0]!r}")
+    assert cmp.left.value == ORPHAN_KEY, (
+        f"the guard is keyed on {cmp.left.value!r}, not the whole orphan key {ORPHAN_KEY!r}")
+    # The two halves catch different regressions. Above: restoring the prefix INSIDE the
+    # recorded command, which is what #3731 changed. Below: a NEW literal comparison against
+    # the bare prefix anywhere else in the file — over string TOKENS rather than text, because
+    # this file has to *describe* the bad prefix to explain the fix, and a text grep would fail
+    # on its own prose. A string literal is the only form that can be compared against a key,
+    # so that is the form that is banned.
+    literals = _string_literals(Path(__file__))
+    bare = [lit for lit in literals if lit == BENCH_NUMBER]
+    assert not bare, (
+        f"the bare prefix is back as a string literal in this file {len(bare)} time(s); a "
+        f"key test on it refuses every bench_029_* set, which is #3731")
+
+
+def test_the_whole_file_is_green_before_and_after_the_promotion(tmp_path):
+    """Clause 4: promoting the rows reddens nothing else here, and not promoting them does not either.
+
+    The file runs inside synthetic checkouts of both table states — one stripped of the three
+    durable-write sets, one carrying them — and every run must be green at its expected node
+    count. The counts are derived from the file the child actually runs (HEAD's copy, since every
+    checkout here is a worktree of HEAD) rather than written as literals, because a literal goes
+    stale the first time this file gains a node and then reads as a regression in the wrong
+    direction.
+
+    Each state is run twice, and the two answers are different questions. The whole file is 14
+    nodes here, 12 in a child run once the 2 that spawn a child pytest are deselected. The eight
+    nodes #3731 found in this file are then re-run on their own, its own six deselected: that is
+    clause 4 at the number it states, `8 passed` in both states. `PREEXISTING_NODES` names those
+    eight, so a rename that drops one reddens this node instead of quietly shrinking the claim.
+    """
+    _child_env_guarded("test_the_whole_file_is_green_before_and_after_the_promotion")
+    head_src = subprocess.run(["git", "-C", str(TREE), "show", f"HEAD:{TARGET_REL}"],
+                              capture_output=True, text=True, check=True).stdout
+    defined = re.findall(r"^def (test_\w+)", head_src, flags=re.M)
+    absent = [n for n in PREEXISTING_NODES if n not in defined]
+    assert not absent, (
+        f"{absent} is/are not defined at HEAD, so the eight clause 4 counts have been renamed or "
+        "deleted away from under this node")
+    added = [n for n in defined if n not in PREEXISTING_NODES]
+    whole = len(defined) - len(SPAWNS_PYTEST)
+    # Paths relative to the child's own tree: an absolute path from this process lands outside
+    # the child's rootdir, where pytest matches a deselect against its own node ids, would run
+    # the spawners, skip them on the env guard, and report it to me as `2 skipped`.
+    drop_spawners = [f"--deselect={TARGET_REL}::{n}" for n in SPAWNS_PYTEST]
+    # Clause 4's eight, by set difference, so the list cannot silently gain a member.
+    drop_added = [f"--deselect={TARGET_REL}::{n}" for n in added]
+
+    runs = []
+    plain = _checkout_lacking(tmp_path / "before", *DURABLE_WRITE_KEYS)
+    promoted = _checkout_carrying(tmp_path, "after", *DURABLE_WRITE_KEYS)
+    try:
+        for state, where in (("without", plain), ("with", promoted)):
+            for label, opts, n in (("the whole file", drop_spawners, whole),
+                                   ("the eight pre-existing nodes", drop_added,
+                                    len(PREEXISTING_NODES))):
+                proc = _run_pytest(where, TARGET_REL, *opts)
+                runs.append((f"{state} the promotion: {label}", proc, n))
+    finally:
+        _remove_worktree(plain)
+        _remove_worktree(promoted)
+
+    for label, proc, n in runs:
+        out, err = proc.stdout[-300:], proc.stderr[-200:]
+        assert "skipped" not in out, (
+            f"a node skipped in the run {label} ({out!r}); a deselect list is stale, so the "
+            "child's skip guard fired on a node that was meant to run")
+        assert "failed" not in out and "error" not in out, (
+            f"not green {label} (rc={proc.returncode}): {out!r} {err!r}")
+        assert f"{n} passed" in out, (
+            f"expected {n} passed {label}, got {out!r}")
 
 
 def test_the_miner_cannot_reach_the_command_that_dirtied_it(tmp_path):
