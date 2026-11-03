@@ -100,14 +100,25 @@ OK_WM_KEY = "last_enqueue_ok"
 #: whole-process block of ~190 s is enough. #3061's first-measurement rail keeps
 #: those transient ones off the page, and owed-check
 #: `20261025_060328_owedcheck_b7fe` ruled on 2026-10-25 that the rest of them get NO
-#: alarm: the streak rail in ``DispatchWatch.tick`` forgets a source whose age reads
-#: clean at the next measurement (`self._since.pop(name)`), so only a block measured
-#: twice past the window can announce. Raising the factor to 4 would
+#: alarm. The rail that carries that ruling is ``DispatchWatch.tick``: it forgets a
+#: source whose age reads clean at the next measurement (`self._since.pop(name)`), so
+#: the announce condition is a stall measured twice — the loop still asking the source
+#: and getting no clean return, still past the window at two consecutive
+#: measurements. A whole-process block is never that shape, and no value of this
+#: factor makes it one: blocking the process ages BOTH watermarks, so ``verdict``
+#: answers ``downtime`` with ``stalled: False`` and ``tick()`` drops the source before
+#: a streak can start — silent at ANY length, because under this window the source
+#: reads ``ok`` and over it it reads ``downtime``. The one exception is the
+#: ``REPOLL_ON_COMPLETE`` carve-out in this module's docstring: that declaration
+#: re-arms the attempt stamp to the epoch, so for those sources the clean stamp is the
+#: only readable one and a block stays judgeable as a stall. The >=240 s case is
+#: therefore not a threshold question: no multiple of this factor can make a block
+#: announce, and the class has no owner in this module by construction rather than by
+#: tuning, which is why #3061 assigned it to a watchdog outside the loop.
+#: Raising the factor to 4 would
 #: push the 60 s source's real-stall delay from 180 s to 240 s to buy silence the
-#: grace already provides. A block long enough to be measured twice past the window
-#: (>=240 s here) is a different failure — the loop did not run at all — and belongs
-#: to a watchdog outside the loop, not to this threshold. Prospective rather than
-#: measured: 0 log gaps >=150 s in the 4.2 post-landing days to 2026-10-25.
+#: grace already provides. Prospective rather than measured: 0 log gaps >=150 s in the
+#: 4.2 post-landing days to 2026-10-25.
 STALL_FACTOR = 3.0
 
 #: The interval a source is judged on when its config carries no

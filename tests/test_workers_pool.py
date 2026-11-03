@@ -3325,8 +3325,12 @@ def test_stall_factor_comment_records_the_ruling_and_not_the_question():
     is not re-litigated from memory:
 
     * no alarm for a transient block, because the streak rail drops a source that
-      reads clean at the next measurement (`self._since.pop(name)`), so a block has
-      to be measured twice past the window before it can announce;
+      reads clean at the next measurement (`self._since.pop(name)`), so what announces
+      is a stall read past the window twice running — and a whole-process block never
+      reaches that shape at all, because it ages both stamps together and reads
+      ``downtime``, which is not a stall (#3457; the bullet used to say a block merely
+      had to be "measured twice past the window before it can announce", which the
+      code has never done);
     * 3.0 held BY RULING, with its price named — a factor of 4 moves the 60 s
       source's real-stall delay from 180 s to 240 s to buy silence the grace already
       gives;
@@ -3375,9 +3379,39 @@ def test_stall_factor_comment_records_the_ruling_and_not_the_question():
         "rail forgets a source whose age reads clean at the next measurement, so a "
         "one-pass stall cannot announce — cite the call, not a line number, because a "
         "line number here moves on the next unrelated edit")
-    assert "measured twice past the window can announce" in header, (
-        "the block no longer says what it takes to announce: a block has to be read "
-        "past the window on two consecutive measurements")
+    # #3457: the OLD sentence here read "only a block measured twice past the window
+    # can announce", which the code has never done. A whole-process block ages BOTH
+    # watermarks, so `verdict` answers ``downtime`` with `stalled: False`
+    # (`workers/dispatch_watch.py:248-258`) and `tick()` pops `_since` and `continue`s
+    # on a non-stalled row (`:433-438`) — pinned as behaviour by
+    # ``test_a_stamp_that_aged_only_because_the_pool_was_down_is_downtime``, which
+    # asserts exactly `state == STATE_DOWNTIME`, `stalled is False` and
+    # ``watch.tick() == []``. What announces is a source still being ASKED (attempt
+    # stamp fresh) that keeps no clean return, read STALLED on two consecutive ticks.
+    assert "announce condition is a stall measured twice" in header, (
+        "the block no longer states the real announce condition: a source that keeps "
+        "reading STALLED across two consecutive ticks")
+    assert "measured twice past the window" not in header, (
+        "the false claim is back: a block measured twice past the window CANNOT "
+        "announce, because ageing both watermarks makes the row `downtime`, which is "
+        "not a stall — the claim already produced one unconfirmable owed check")
+    assert "ages BOTH watermarks" in header and "``downtime``" in header, (
+        "the block no longer says what a whole-process block actually does: both "
+        "stamps age, the verdict reads downtime, and nothing is announced")
+    assert "``stalled: False``" in header and "silent" in header and "at ANY length" in header, (
+        "the block must say the block case is silent here at any length, not merely "
+        "quiet on one pass — that is the sentence a reader needs before touching the "
+        "factor")
+    # …and the block has to name the ONE source class for which the silence above does
+    # not hold, or "silent at ANY length" reads as a universal. `verdict` skips the
+    # downtime branch for a `REPOLL_ON_COMPLETE` source (its attempt stamp is re-armed
+    # to the epoch), so a block on such a source does read a stall and does announce —
+    # the exemption the behaviour node at
+    # ``test_a_stamp_that_aged_only_because_the_pool_was_down_is_downtime`` also holds.
+    assert "REPOLL_ON_COMPLETE" in header, (
+        "the block claims a block is silent at any length without naming the "
+        "REPOLL_ON_COMPLETE sources it is false for, which are exactly the ones the "
+        "downtime branch must never quiet")
     assert "DispatchWatch.tick" in header, (
         "the block no longer names the rail that retires the transient shape")
     # And the symbol it names has to exist. The first draft of this citation said
@@ -3423,10 +3457,23 @@ def test_stall_factor_comment_records_the_ruling_and_not_the_question():
     assert "each recovering on the next pass" in header, (
         "the falsification lost the recovery that makes these events the shape the "
         "grace rail exists to swallow")
+    # #3457 clause 3: the boundary is structural. The old text implied the >=240 s
+    # case was merely the length at which a block starts to survive the grace rail, so
+    # a reader could conclude a different factor would catch a dead loop. It cannot:
+    # under the window a block reads ``ok``, over it reads ``downtime``, and both
+    # branches return `stalled: False` — there is no owner for the class in this
+    # module at any factor, which is the argument for the outside watchdog.
+    assert "no multiple of this factor can make a block announce" in header, (
+        "the >=240 s boundary is stated as if tuning it could reach the dead-loop "
+        "class; no multiple can, and the block has to say so or the next reader "
+        "re-raises the factor to catch a stopped loop")
+    assert "reads ``ok``" in header and "reads ``downtime``" in header, (
+        "the block must give both sides of the boundary, since the two together are "
+        "why the class has no owner here")
     assert "watchdog outside the loop" in header, (
-        "the block no longer says where a block measured twice past the window "
-        "(>=240 s) belongs, which is the boundary that keeps this threshold from "
-        "being asked to cover a dead loop")
+        "the block no longer says where a dead loop belongs (>=240 s on the 60 s "
+        "source), which is the boundary that keeps this threshold from being asked to "
+        "cover a loop that is not running")
     assert "Prospective rather than measured" in header and "0 log gaps >=150 s" in header, (
         "the ruling is prospective by its own record; the comment has to say so or a "
         "reader takes it for a measured tolerance")
