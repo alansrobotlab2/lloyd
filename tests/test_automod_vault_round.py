@@ -9833,3 +9833,158 @@ def test_the_three_lanes_and_the_pin_all_call_the_one_predicate():
     pin_src = _inspect.getsource(PIN)
     assert "body_contract_violation" in pin_src, (
         "the corpus pin stopped calling the predicate the three rails call")
+
+
+# ── #3545: the orphan-topic-file rail at this door ─────────────────────────
+#: The land door's second-half coverage of the rail whose shell half is
+#: `tests/test_vault_commit_orphan_topic_refusal.py`. This door is not theoretical:
+#: `automod_vault_land` is dispatched into `scripts/automod/vault_round.py`
+#: (`agent_mcp/automod.py`), and `agent_mcp/vault.py` has no commit site at all — so a
+#: rail that lived only in `vault-commit.sh` would leave the door a round's finalizer
+#: and a nightly knowledge write actually use completely open. `871da02a` and
+#: `3b962ad7` are vault commits that reached the tree while
+#: `scripts/memory/validate_memory_index.py` reported `ok: false`, and of the 29 topic
+#: adds under `lloyd/memory/` since 2026-09-25, 12 (41%) landed with no `→ topics/` line
+#: in their own commit. A guard on one of two write surfaces is not a guard (#2468).
+
+#: None of these five nodes passes `item_id`, for the reason this file already names at
+#: `test_a_round_that_rewords_the_body_and_description_passes`: an item contract routes
+#: the land into the vault REVIEWER, which is another gate and an un-stubbed grader call
+#: standing in front of the rail under test. The rail's own ledger row carries
+#: `item_id: None` and is asserted as such below.
+
+ORPHAN_FRONT_MATTER = ("---\ntype: note\nsegment: lloyd\ntags: [memory]\n"
+                       "timestamp: '2026-11-03T00:00:00'\n---\n")
+
+
+def _topic_note(slug: str) -> str:
+    return (ORPHAN_FRONT_MATTER + f"# topics/{slug}\n\n"
+            "The detail an index line is supposed to hook. Written by a "
+            "knowledge write that forgot the index half.\n")
+
+
+def test_land_refuses_a_topic_file_it_was_asked_to_commit(vault, capsys):
+    """Clause 5: the same add, refused at this door, naming both remedies.
+
+    Nothing under `lloyd/` exists in the scratch vault, so `lloyd/MEMORY.md` has no
+    staged blob and nothing links the note — which is the honest reading (`no lines`)
+    and the direction that refuses rather than blesses. Both halves of the clause are
+    asserted: the raise, and that nothing sits in the index afterwards.
+    """
+    note = _stage(vault, "lloyd/memory/a-new-rule.md",
+                  _topic_note("a-new-rule").encode("utf-8"))
+    with pytest.raises(V.VaultRoundError) as e:
+        V.land([note], "nightly: knowledge write 2026-11-03")
+    msg = str(e.value)
+    assert note in msg, msg
+    assert "lloyd/MEMORY.md" in msg and "→ topics/a-new-rule" in msg, msg
+    assert "Topic file disposition" in msg, msg
+    err = capsys.readouterr().err
+    assert "ORPHAN TOPIC FILE REFUSED" in err and note in err, err
+    assert note not in _head_paths(vault), _head_paths(vault)
+    assert note not in _tracked_paths(vault), "a refusal must not leave the add staged"
+    assert (vault / note).exists(), "refusing a note into a commit does not delete it"
+    ev = _events("vault_land")[-1]
+    assert ev["ok"] is False and ev["orphan_topic_refusals"] == [note], ev
+    assert ev["reverted"] == [], "the writer's bytes are never checked over"
+    assert "item_id" not in ev or ev["item_id"] is None, ev
+    assert ev["review"] == "skipped" and "orphan topic file" in ev["review_reason"], ev
+
+
+def test_land_does_not_restate_the_rule_it_imports_the_shared_matcher(vault):
+    """The #3236/#3589 constraint, one matcher module for both doors.
+
+    `vault-commit.sh` is bash and shells out to `scripts/util/orphan_topic_findings.py`;
+    this module imports it. Pinned to the same file for the reason
+    `test_land_and_the_wrapper_read_one_matcher_module` gives: a second copy of the rule
+    is two rulebooks, and the two doors would start disagreeing about what an orphan is.
+    """
+    assert V.OTF.__file__ == str(
+        Path(V.__file__).resolve().parents[1] / "util" / "orphan_topic_findings.py")
+    assert V.OTF.TOPIC_DIR == "lloyd/memory"
+    assert V.OTF.MEMORY_REL == "lloyd/MEMORY.md"
+    assert V.OTF.LEDGER_REL == "lloyd/reviews/memory-md-retired.md"
+    # The rule text itself lives in the module: this function's body carries no copy of
+    # the link grammar, so a change to `→ topics/` can only ever be made once.
+    src = Path(V.__file__).read_text(encoding="utf-8")
+    assert src.count("\u2192 topics/") <= src.count("_topic_note("), \
+        "the link grammar must not be re-spelled inside vault_round.py"
+
+
+def test_land_lands_a_note_whose_index_line_it_also_stages(vault):
+    """The 17-of-29 healthy pattern, at this door.
+
+    A knowledge write that lands its topic file AND its `lloyd/MEMORY.md` line in the
+    same call is the writer this rail must never touch — 17 of the 29 historical adds
+    already look exactly like this. Refusing it would be the rail refusing a healthy
+    commit, which is what the owed-check's refusal-rate measure exists to catch.
+    """
+    note = _stage_text(vault, "lloyd/memory/a-new-rule.md", _topic_note("a-new-rule"))
+    _stage_text(vault, "lloyd/MEMORY.md",
+                "---\ntype: note\nsegment: lloyd\n---\n# Memory\n\n"
+                "- [project] **A new rule.** → topics/a-new-rule\n")
+    out = V.land([note, "lloyd/MEMORY.md"], "nightly: knowledge write 2026-11-03",
+                 )
+    assert out["ok"] is True, out
+    committed = _head_paths(vault)
+    assert note in committed and "lloyd/MEMORY.md" in committed, committed
+    assert "orphan_topic_refusals" not in out, out
+
+
+def test_land_lands_a_ledger_under_memory_that_no_index_line_links(vault):
+    """The `*-md-ledger.md` exclusion at the door that appends to ledgers.
+
+    `lloyd/memory/memory-md-ledger.md` is a ledger — `scripts/memory/memory_ledger.py`
+    reads it by name and no index line links it — so a rail keyed on `lloyd/memory/*.md`
+    alone would refuse the very write this rail's own remedy asks for.
+    """
+    ledger = _stage_text(vault, "lloyd/memory/memory-md-ledger.md",
+                         "---\ntype: note\nsegment: lloyd\n---\n# Ledger\n\n"
+                         "- anchor: some-line\n")
+    out = V.land([ledger], "nightly: ledger append")
+    assert out["ok"] is True, out
+    assert ledger in _head_paths(vault), _head_paths(vault)
+
+
+def test_land_does_not_refuse_a_note_it_did_not_add(vault):
+    """Clause 4's scope, at this door too: an orphan already in HEAD is not this land's.
+
+    The topic file is committed unlinked (by this test, standing in for the historical
+    adds this rail was filed over), the index line is then removed, and a later land of
+    an unrelated note must still succeed. This is what keeps the nightly sweep, which
+    lands other writers' state, from freezing on somebody else's file — #2245's
+    stranded-snapshot failure mode, and the reason the matcher reads
+    `--diff-filter=A` rather than the whole tree.
+    """
+    note = _stage_text(vault, "lloyd/memory/someone-elses-orphan.md",
+                       _topic_note("someone-elses-orphan"))
+    index = _stage_text(vault, "lloyd/MEMORY.md",
+                        "---\ntype: note\nsegment: lloyd\n---\n# Memory\n\n"
+                        "- [project] **Someone else's rule.** → topics/someone-elses-orphan\n")
+    assert V.land([note, index], "sweep: with its line",
+                  )["ok"] is True
+    _stage_text(vault, "lloyd/MEMORY.md",
+                "---\ntype: note\nsegment: lloyd\n---\n# Memory\n")
+    assert V.land([index], "sweep: unhook it", )["ok"] is True
+    assert note in _tracked_paths(vault) and note in _tree_paths(vault)
+    other = _stage_text(vault, "knowledge/unrelated.md",
+                        "---\ntype: reference\nsegment: knowledge\n---\n# note\n")
+    out = V.land([other], "knowledge: an unrelated note")
+    assert out["ok"] is True, out
+    assert other in _head_paths(vault), _head_paths(vault)
+    assert "orphan_topic_refusals" not in out, out
+
+
+def _tracked_paths(vault):
+    return [l for l in git(vault, "ls-files").stdout.splitlines() if l.strip()]
+
+
+def _tree_paths(vault):
+    """What HEAD's TREE holds, not what the last commit touched.
+
+    `_head_paths` above is `git show --name-only`, i.e. one commit's diff — the right
+    thing for "did this commit carry that path", the wrong thing for "is that file in
+    the vault", which is what a scope test needs once the orphan is two commits back.
+    """
+    return [l for l in git(vault, "ls-tree", "-r", "--name-only", "HEAD").stdout.splitlines()
+            if l.strip()]

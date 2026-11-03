@@ -774,6 +774,24 @@ except ImportError:  # pragma: no cover - only if the namespace portion fails
     LSF = _ilu2.module_from_spec(_lsf_spec)
     _lsf_spec.loader.exec_module(LSF)  # type: ignore[union-attr]
 
+# #3545: the orphan-topic-file matcher, read by BOTH doors exactly as `SCF` and `LSF`
+# above are — here and `scripts/util/vault-commit.sh`. This door is not a theoretical
+# second surface: `automod_vault_land` is what a round's finalizer and every nightly
+# vault write go through, and 871da02a / 3b962ad7 are vault commits that reached the
+# tree while the index validator was red. `agent_mcp/vault.py` has no commit site at
+# all (the item named it wrongly at filing), so `land()` IS the second door. Same
+# placement and same by-path fallback as the two above, for the same reason: an
+# ImportError escaping `land()` would be a land that cannot land rather than a rung
+# that declined.
+try:
+    from scripts.util import orphan_topic_findings as OTF
+except ImportError:  # pragma: no cover - only if the namespace portion fails
+    import importlib.util as _ilu3
+    _otf_path = Path(__file__).resolve().parents[1] / "util" / "orphan_topic_findings.py"
+    _otf_spec = _ilu3.spec_from_file_location("orphan_topic_findings", _otf_path)
+    OTF = _ilu3.module_from_spec(_otf_spec)
+    _otf_spec.loader.exec_module(OTF)  # type: ignore[union-attr]
+
 #: #2437/#3146: the four front-matter fields a run writes into its own task file —
 #: `app/autonomy.py` stamps `last_run`/`last_attempt`/`updated` at every completion
 #: and `next_run` from `_next_run_after`. None is in `SCHEDULE_STATE_FIELDS`: that
@@ -2137,6 +2155,51 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                                          "(#3589, disposition per #2415)",
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(" | ".join(strand_lines))
+    # #3545: a topic file THIS landing adds that nothing links. The matcher is
+    # `scripts/util/orphan_topic_findings.py`, the same module the bash door runs at its
+    # own pre-flight — one rule, two doors, because this function has its own `git add`
+    # and its own `git commit` and never calls the wrapper, and `automod_vault_land` is
+    # the door a round's finalizer and a nightly knowledge write actually reach. A guard
+    # on one of two write surfaces is not a guard (#2468); the #3589 strand rung above
+    # is the precedent for the shape, and so is its placement: before the witness block
+    # prints "landed <sha>" text for a commit this function then refused.
+    #
+    # NOTHING is reverted, for the #3589 reason stated above: this refuses an INCOMPLETE
+    # commit — the topic file is the caller's work, the hook line is what it is missing —
+    # and `revert_paths` would check HEAD over the writer's own note to make a point it
+    # cannot repair. The paths ARE pulled out of the index below, which is the one thing
+    # the strand rung above deliberately does not do: a strand is a modification of a
+    # file the next commit fixes anyway, whereas a staged ADD left in the index becomes
+    # the NEXT commit's add (`git commit` commits the index, not the pathspec), and a
+    # refusal that only raised would hand this rail's refusal to whichever job lands
+    # next, refusing it for a file it never wrote. The bytes are untouched, so
+    # re-staging the note with its hook line is the whole remedy.
+    orphan_records, orphan_lines, orphan_unread = OTF.findings(VAULT)
+    if orphan_unread:
+        # Said out loud rather than read as clean, exactly as the strand rung does it: a
+        # check that could not run is the same blindness the validator's printed count
+        # already was, and this door commits anyway only because the alternative is a
+        # landing that cannot land because its own instrument is missing.
+        print(f"vault_round.py: {orphan_unread} — landing without it", file=sys.stderr,
+              flush=True)
+    if orphan_lines:
+        for line in orphan_lines:
+            print(line, file=sys.stderr, flush=True)
+        orphan_paths = [rec["path"] for rec in orphan_records]
+        _git("reset", "-q", "--", *orphan_paths)
+        S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                        "paths": norm, "errors": orphan_lines[:10],
+                        # Keyed by PATH, unlike `strand_refusals` above which keys by
+                        # anchor: what this rail refuses is a file, and the caller has to
+                        # be able to grep its own path out of the ledger row.
+                        "orphan_topic_refusals": orphan_paths,
+                        "reverted": [],
+                        "review": "skipped",
+                        "review_reason": "orphan topic file: a topic file is added under "
+                                         "lloyd/memory/ with no staged lloyd/MEMORY.md "
+                                         "line and no disposition row (#3545)",
+                        **({"session_id": session_id} if session_id else {})})
+        raise VaultRoundError(" | ".join(orphan_lines))
     # The #2381 witness rung, on the door #2381 did not rung it on (#2520). Exactly
     # here, and not a line later: `index_blobs` reads `git diff --cached`, and the
     # index still holds these bytes only until the commit moves HEAD under it. The

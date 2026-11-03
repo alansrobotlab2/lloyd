@@ -424,6 +424,67 @@ else
     fi
 fi
 
+# #3545: a topic file THIS commit adds that nothing links. Hard-refused, like the
+# strand rung above and for the same reason — a warning is the state that produced the
+# orphans, not a fix for them. `scripts/memory/validate_memory_index.py` has reported
+# `topic_files_unlinked` since #2399 and its counts are report-only BY DECISION
+# (#2415 owed ruling 2); the nightly knowledge write's Step 2.5 says in prose that the
+# `→ topics/<slug>` line goes in the same commit, and of the 29 topic-file adds under
+# `lloyd/memory/` since 2026-09-25, 12 landed without one — 41%, six of them from a
+# `nightly-reflection: pre-flight …` sweep commit, with vaults `871da02a` and
+# `3b962ad7` committing while the validator was red. Prose plus a printed count is what
+# was tried; the file it refuses is a rule nobody can read.
+#
+# Scope is `--diff-filter=A`: only a topic file this commit ADDS can be its author's
+# fault, and this wrapper also commits other writers' dirty state, so a whole-tree
+# count here would be the nightly-wide red #2415's owed ruling 2 correctly withheld and
+# #2245's stranded-commit failure mode all over again — 17 of those 29 adds already
+# link in the same commit, so the rail is satisfiable, not fatal. It reads the STAGED
+# `lloyd/MEMORY.md` (`git show :lloyd/MEMORY.md`), never the file on disk, because a
+# scoped commit (#1867, #2245) can carry a hook line that is dirty and unstaged, and
+# the commit that leaves an orphan red is the commit this item was filed about.
+#
+# The second door is `scripts/automod/vault_round.py::land()`, which imports the same
+# module — it has its own `git add` and its own `git commit` and never calls this
+# wrapper, so a guard here alone is a guard on one of two write surfaces (#2468).
+ORPHAN_TOPIC_RUNG="$SCRIPT_DIR/orphan_topic_findings.py"
+if [ ! -f "$ORPHAN_TOPIC_RUNG" ]; then
+    echo "vault-commit.sh: orphan topic-file CHECK SKIPPED (missing $ORPHAN_TOPIC_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: orphan topic-file CHECK SKIPPED (no python interpreter)" >&2
+else
+    # On a refusal the rung prints its refused paths, one per line, on stdout (and its
+    # refusal text on stderr), which is what the loop below pulls out of the index.
+    # Pulling them is the part the strand rung above does NOT do and must not: a strand
+    # is a modification of a file the next commit will fix anyway, whereas a staged ADD
+    # left in the index becomes the NEXT commit's add — `git commit` commits the index,
+    # not the pathspec — so a refusal that only exited would hand this rail's own
+    # refusal to whichever job commits next, refusing it for a file it never authored.
+    # `git reset -q -- <path>` on a newly-added path drops it from the index and leaves
+    # the bytes on disk: the writer's note survives, and re-staging it with the hook line
+    # is the whole remedy. `|| true` because reset has no HEAD to consult in a vault
+    # whose first commit is the one being refused.
+    set +e
+    ORPHAN_TOPIC_PATHS="$("$PY" "$ORPHAN_TOPIC_RUNG" --vault "$VAULT")"
+    ORPHAN_TOPIC_RC=$?
+    set -e
+    if [ "$ORPHAN_TOPIC_RC" -eq 1 ]; then
+        while IFS= read -r ORPHAN_TOPIC_PATH; do
+            [ -n "$ORPHAN_TOPIC_PATH" ] || continue
+            git -C "$VAULT" reset -q -- "$ORPHAN_TOPIC_PATH" || true
+        done <<< "$ORPHAN_TOPIC_PATHS"
+        # Column 0 and before the index readback below, for the #1070 reason that
+        # governs the no-change block: an indented leading token does not survive
+        # reaching a caller as the first thing they read. The per-path refusal naming
+        # both remedies — stage the index line, or write the ledger's disposition row —
+        # came out of the rung on this same stderr.
+        echo "vault-commit.sh: ORPHAN TOPIC FILE CHECK REFUSED the commit above: nothing is committed, and the topic files named are pulled out of the index (their bytes are untouched, so re-staging one with its lloyd/MEMORY.md line is the whole fix). Either stage the lloyd/MEMORY.md line ending → topics/<slug> for each path named, or write the '**Topic file disposition:**' row into lloyd/reviews/memory-md-retired.md (#3545)." >&2
+        exit 1
+    elif [ "$ORPHAN_TOPIC_RC" -gt 1 ]; then
+        echo "vault-commit.sh: orphan topic-file CHECK FAILED (exit $ORPHAN_TOPIC_RC); committing whatever the index holds" >&2
+    fi
+fi
+
 # Read the answer back off the index rather than trusting the list above: `git
 # commit` commits the index, so anything another writer left staged is in this
 # commit whether this invocation named it or not, and the message has to account
