@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Date the daily-note alarm blocks that a live re-read refutes (#2221, #3277).
+"""Date the daily-note alarm blocks that a live re-read refutes (#2221, #3277, #3502).
 
 Why a script and not the guardian
 --------------------------------
@@ -21,8 +21,8 @@ honest sentence is the weaker one: a later read refutes the state the body quote
 retraction is dated to that read. `notify.DAILY_DATED_PREFIX` is the single definition of
 the marker, so a reader and any later code see one word for each of the two facts.
 
-Two witnesses, and why the second one exists
---------------------------------------------
+Three witnesses, and why the third one exists
+---------------------------------------------
 A refutation needs a tool that can answer the question the block asserted. #2221's is
 `supervisorctl status`, and it is structurally blind to every other family: `STATE_LINE`
 looks for a `name: STATE` line, and the blocks raised by `tmpwatch` contain no supervisor
@@ -31,7 +31,7 @@ says — measured 2026-10-24, the sweep's own `count_refutations` returned 0 for
 `memory/2026-10-06.md`, `2026-10-15.md` and `2026-10-16.md` and 0 corpus-wide while seven
 unsealed `/tmp is running out of inodes` blocks sat in those three files. They are also the
 shape `Guardian.reconcile_stranded_alert` produces on purpose: it seals the incident and
-returns `sealed-note-out-of-reach` (`guardian.py:2764`) when the note is outside
+returns `sealed-note-out-of-reach` (`guardian.py:2781`) when the note is outside
 `notify.DAILY_SCAN_DAYS`, so a fresh seal re-accumulates a stranded block each time.
 
 `tmpwatch` is the tool that family's figure belongs to, and it is re-readable:
@@ -45,13 +45,35 @@ leaving the bytes alone. Like `read_running`'s `runner=`, the probe is injected
 (`measurer=`, and `fraction_reader=` on `main`) because the gate runs where `/tmp` cannot be
 steered; the default is the live probe, so a hand-run has no seam to get wrong.
 
+The third one is `guardian.tripwire_is_clear`, and it exists because the two tripwire blocks
+have no owner at all once another alert takes `ALERT.md`'s single slot. `Guardian` answers
+`Vault mass deletion — sync stopped` and `Lloyd data root damaged — promotions halted` with
+the watch's own pair of reads — marker absent, and the tree evaluating clean against that
+watch's baseline — and `_retract_tripwire_alert`'s docstring says of a displaced title that
+"this process has no index to the stale section, which is the sweep's subject, not this
+one's" (`guardian.py:2721-2722`). `memory/2026-10-20.md:17` is that case: the data-root halt fired
+on 2026-10-20, a human cleared the marker, the title was displaced, and the block stayed a
+standing instruction to restore a tree that measured whole — closed only by a hand-written
+correction on 2026-10-26. Neither earlier witness can see it: `refutations()` needs a
+`name: STATE` line, and `fraction_refutes` is bound to `/tmp`. So #3502 adds a third refuter
+that asks **the guardian's own function**, lifted out of `Guardian` for exactly that reason —
+`vaultwatch.sync_gate` and `datawatch.snapshot_gate` are NOT the same question, because both
+answer True when the watch holds no baseline. The reading is one `vaultwatch.measure` per
+root per pass (`tripwire_reader=`), because the data root is a 705,803-file walk, and the
+stamp names the halt flag as a second measurement rather than assuming the halt was lifted:
+the tree measuring whole is not the same fact as nobody holding a pause.
+
 What it deliberately does not do
 --------------------------------
 It never edits a block that already carries `cleared:` or `dated:`, so a second run writes
 nothing. It never touches a block whose subject no tool can answer for: a `Rolled back …`
 notice and a self-test notice have no live witness at all, and a disk figure with no probe
 behind it is not refuted by a probe measuring a different filesystem — each refuter is bound
-to the family that owns its reading, and a block matching neither comes back byte-identical.
+to the family that owns its reading, and a block whose family no witness speaks for comes back
+byte-identical. Three families are spoken for: a supervisor-state block by the live RUNNING
+set, an inode block by `tmpwatch.measure`'s own fraction, and a tripwire block by the
+guardian's `tripwire_is_clear` over the watch that raised it — and the third answers only the
+question that condition asks, so it dates a tripwire block and never clears one.
 And it does not delete or reword the body: a note that recorded a real outage keeps the
 record; what stops is the standing instruction below it.
 """
@@ -63,12 +85,18 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "agent-services" / "guardian"))
 
+import datawatch  # noqa: E402  (DataWatch — the data root's watch, the third witness)
+import guardian as G  # noqa: E402  (tripwire_is_clear, VAULT/DATA_TRIP_ALERT_TITLE — the third witness)
+import gstate  # noqa: E402  (AutomodState.halted — named as a measurement, never a precondition)
 import notify  # noqa: E402  (DAILY_CLEARED_PREFIX / DAILY_DATED_PREFIX)
+import policy  # noqa: E402  (VAULT_ROOT / DATA_ROOT / GUARDIAN_STATE / AUTOMOD_STATE)
 import tmpwatch as tw  # noqa: E402  (ALERT_TITLE / CLEAR_FRACTION / measure — the second witness)
+import vaultwatch  # noqa: E402  (VaultWatch / measure — the vault's watch, the third witness)
 from app.data_root import vault_root
 
 #: The supervisor states that read as "this program is not up". `RUNNING` is absent by
@@ -150,6 +178,126 @@ def refutations(body: str, running: set[str]) -> list[tuple[str, str]]:
                    if name in running})
 
 
+# ── the third witness: the guardian's own tripwire clear condition (#3502) ─────────
+
+#: The two titles whose clear condition is a watch's pair of reads, mapped to the family
+#: of that watch. Bound by title for the same reason `tmpwatch.ALERT_TITLE` is: a block
+#: quoting a file count that this watch does not own must stay byte-identical.
+TRIP_ALERT_TITLES: dict[str, str] = {
+    G.VAULT_TRIP_ALERT_TITLE: "vault",
+    G.DATA_TRIP_ALERT_TITLE: "data",
+}
+
+TRIP_REFUTED_LINE = (
+    "{prefix} {day}: `guardian.tripwire_is_clear` reads `{root}` at {total} files against "
+    "that watch's own baseline with its {family} tripwire marker absent — the same pair of "
+    "reads `Guardian._retract_tripwire_alert` seals a live incident with — so the "
+    "restore-and-swap instructions above are stale. `gstate.AutomodState` reports the "
+    "promotion halt `{halt_path}` {halt_state} at the same read. This says the tree "
+    "measures whole; it does not assert that the worker pause or the promotion halt was "
+    "lifted, which is still whoever holds it. The alarm above records what was true when it "
+    "fired and is not a standing instruction; this block sits outside the "
+    "`notify.DAILY_SCAN_DAYS = {scan}` daily notes `Notifier.resolve` scans back, and once "
+    "another alert held ALERT.md's single slot the guardian had no index to this section at "
+    "all. If this line is wrong then the root is damaged again or the marker is set as of "
+    "now: re-run `python3 agent-services/guardian/{watch_script}.py status` before acting on "
+    "the text above.")
+
+
+class TripwireReading(NamedTuple):
+    """One tripwire family as the guardian's own condition read it, once per pass."""
+    family: str          # "vault" | "data", the watch that raised the alert
+    root: str
+    total: "int | None"  # files the single walk returned; None means it returned nothing
+    clear: bool          # `guardian.tripwire_is_clear`'s answer, unmodified
+    why: str             # that function's own sentence, for the report and the refusals
+    halt_path: str       # the flag file the halt state was read from
+    halted: bool         # `AutomodState.is_halted()` at the same instant
+
+
+def promotion_halt(*, gdir: Path | None = None) -> "tuple[str, bool]":
+    """`(path, set?)` of the promotion halt flag, read the guardian reads it.
+
+    Read as a MEASUREMENT for the stamp, never as a precondition of it: a tree that
+    measures whole is not a lifted halt, and the guardian that halts promotions is not the
+    one that clears them (`gstate.set_halted` has no matching timeout). The path is returned
+    with the answer because `AutomodState.is_halted()` is `self.halted.exists()`, which
+    answers False for a flag it cannot stat — a reader who wants to know whether "not set"
+    was a clean read or an unreadable one needs to know WHICH file was read, which is why the
+    stamp names it.
+    """
+    state = gstate.AutomodState(Path(gdir or policy.AUTOMOD_STATE))
+    return str(state.halted), state.is_halted()
+
+
+def tripwire_watches(*, gdir: Path | None = None) -> dict[str, object]:
+    """The two watches the guardian runs, over the roots it watches.
+
+    Constructing one only loads its persisted baseline (`VaultWatch._load`), so this walks
+    nothing; the walk is `read_tripwire`'s, and it happens once per root there.
+    """
+    state = Path(gdir or policy.GUARDIAN_STATE)
+    return {"vault": vaultwatch.VaultWatch(str(policy.VAULT_ROOT), state),
+            "data": datawatch.DataWatch(str(policy.DATA_ROOT), state)}
+
+
+def read_tripwire(*, watches: dict[str, object] | None = None,
+                  measure=vaultwatch.measure,
+                  halt_reader=promotion_halt) -> dict[str, TripwireReading]:
+    """Ask `guardian.tripwire_is_clear` once per tripwire family, on one walk per root.
+
+    WHY THIS IS A SEAM INJECTED AT THE CLI LIKE `running_reader=` AND `fraction_reader=`.
+    The default measures `policy.VAULT_ROOT` and `policy.DATA_ROOT`, and the data root is a
+    705,803-file walk as of 2026-11-02, so a gate node that let it run would both spend
+    minutes on it and judge a tree the node does not own. The default stays the live read so
+    a hand-run has no seam to get wrong, which is the same trade the other two witnesses
+    made.
+
+    WHY THE SNAPSHOT IS PASSED IN RATHER THAN LEFT TO THE CONDITION. `tripwire_is_clear`
+    measures the tree itself when given no `snap` — correct for the guardian's startup
+    reconciliation, and a second full walk here. Passing the snapshot is what
+    `_retract_tripwire_alert` already does (`guardian.py:2740`), so the criterion is the
+    guardian's and the walk count is this pass's.
+
+    `watches` is injectable because the honest test for the no-baseline refusal needs a
+    watch whose history it controls; `measure` is injectable because the walk-once claim is
+    only checkable by counting the calls.
+    """
+    halt_path, halted = halt_reader()
+    out: dict[str, TripwireReading] = {}
+    for family, watch in (watches if watches is not None else tripwire_watches()).items():
+        snap = measure(watch.root, skip_top=watch.skip_top)
+        clear, why = G.tripwire_is_clear(watch, snap)
+        out[family] = TripwireReading(
+            family=family, root=str(watch.root),
+            total=(None if snap is None else snap.total),
+            clear=bool(clear), why=str(why),
+            halt_path=halt_path, halted=bool(halted))
+    return out
+
+
+def tripwire_reading_for(readings: "dict[str, TripwireReading] | None",
+                         title: str) -> "TripwireReading | None":
+    """This block's tripwire family, or None when the title names neither.
+
+    A family with no reading — the pass could not build that watch, or was injected a dict
+    holding only the other — is a missing comparison, so it comes back None and the block is
+    left alone exactly as a `clear=False` one is.
+    """
+    if not readings:
+        return None
+    for alert, family in TRIP_ALERT_TITLES.items():
+        if alert in title:
+            return readings.get(family)
+    return None
+
+
+def tripwire_refutes(title: str, readings: "dict[str, TripwireReading] | None") -> bool:
+    """True only for a tripwire block the guardian's own condition answers clear."""
+    reading = tripwire_reading_for(readings, title)
+    return bool(reading and reading.clear)
+
+
 def already_sealed(body: str) -> bool:
     """Whether a retraction or a dating is already in the block.
 
@@ -209,19 +357,48 @@ def fraction_stamp(title: str, day: str, fraction: float | None) -> str | None:
                                    scan=notify.DAILY_SCAN_DAYS)
 
 
+def trip_stamp(reading: TripwireReading, day: str) -> str:
+    """The tripwire witness's stamp (#3502). `day` is the read date, the same `--day` value
+    the other two witnesses stamp with — never a date lifted from the block, and never the
+    date the alarm fired.
+
+    What the line may claim is what the shared condition measured and nothing else: the root,
+    the count that one walk returned, the absent marker, and the halt flag as a second
+    reading. `guardian.tripwire_is_clear`'s own True sentence ends by refusing to assert that
+    the pause or the halt was lifted, so neither does this.
+    """
+    return TRIP_REFUTED_LINE.format(
+        prefix=notify.DAILY_DATED_PREFIX, day=day, family=reading.family,
+        root=reading.root,
+        total=("nothing" if reading.total is None else f"{reading.total:,}"),
+        halt_path=reading.halt_path,
+        halt_state=("SET" if reading.halted else "not set"),
+        watch_script=f"{reading.family}watch",
+        scan=notify.DAILY_SCAN_DAYS)
+
+
 def block_is_refuted(title: str, body: str, *, running: set[str],
-                     fraction: float | None) -> bool:
-    """Whether either witness refutes this block. The one criterion the count and the write
+                     fraction: float | None = None,
+                     tripwire: "dict[str, TripwireReading] | None" = None) -> bool:
+    """Whether any witness refutes this block. The one criterion the count and the write
     both consult: `count_refutations` is the CLI's "how many blocks does this pass change",
     and two definitions of "refuted" is how a report starts counting blocks that the writer
     then leaves alone — or the other way round, which is worse.
+
+    The three witnesses are disjoint by TITLE, which is what lets them OR together without
+    one block collecting three stamps: the first answers only a `name: STATE` line, the
+    second only `tmpwatch.ALERT_TITLE`, the third only the two titles in
+    `TRIP_ALERT_TITLES`. `tripwire` defaults to None for the same reason `fraction` does — a
+    pass that did not read the tripwires is not a pass that read them clear.
     """
     if already_sealed(body):
         return False
-    return bool(refutations(body, running)) or fraction_refutes(title, fraction)
+    return (bool(refutations(body, running)) or fraction_refutes(title, fraction)
+            or tripwire_refutes(title, tripwire))
 
 
-def count_refutations(text: str, running: set[str], fraction: float | None = None) -> int:
+def count_refutations(text: str, running: set[str], fraction: float | None = None,
+                      tripwire: "dict[str, TripwireReading] | None" = None) -> int:
     """How many unsealed guardian blocks in `text` a live read refutes.
 
     The sweep's own metric, exposed so the CLI's "0 hits" and the test's "0 hits" are one
@@ -232,7 +409,7 @@ def count_refutations(text: str, running: set[str], fraction: float | None = Non
     """
     return sum(1 for title, start, end in _guardian_sections(text)
                if block_is_refuted(title, text[start:end], running=running,
-                                   fraction=fraction))
+                                   fraction=fraction, tripwire=tripwire))
 
 
 def _guardian_sections(text: str):
@@ -249,8 +426,8 @@ def _guardian_sections(text: str):
         yield title, heading_start + len("## " + title) + 1, end
 
 
-def date_note(text: str, running: set[str], day: str,
-              fraction: float | None = None) -> "tuple[str, int, list[str]]":
+def date_note(text: str, running: set[str], day: str, fraction: float | None = None,
+              tripwire: "dict[str, TripwireReading] | None" = None) -> "tuple[str, int, list[str]]":
     """Append a `dated:` line to every refuted, unsealed guardian block: (text, n, notes).
 
     Appended at the END of the block, after the body, because the standing instruction these
@@ -269,7 +446,8 @@ def date_note(text: str, running: set[str], day: str,
     notes: list[str] = []
     for title, start, end in _guardian_sections(text):
         body = text[start:end]
-        if not block_is_refuted(title, body, running=running, fraction=fraction):
+        if not block_is_refuted(title, body, running=running, fraction=fraction,
+                                tripwire=tripwire):
             continue
         stamps: list[str] = []
         reasons: list[str] = []
@@ -281,6 +459,11 @@ def date_note(text: str, running: set[str], day: str,
         if tmp_stamp:
             stamps.append(tmp_stamp)
             reasons.append(f"measured fraction {fraction:.4f} < {tw.CLEAR_FRACTION:.2f}")
+        reading = tripwire_reading_for(tripwire, title)
+        if reading is not None and reading.clear:
+            stamps.append(trip_stamp(reading, day))
+            count = ("" if reading.total is None else f" ({reading.total:,} files)")
+            reasons.append(f"{reading.family} tripwire clear over {reading.root}{count}")
         inserts.append((end, separator(body) + "\n\n".join(stamps) + "\n"))
         notes.append(f"{title}: " + "; ".join(reasons))
     if not inserts:
@@ -377,14 +560,18 @@ def read_fraction(path: str = tw.PATH, *, measurer=tw.measure) -> float:
 
 
 def main(argv: list[str] | None = None, *, running_reader=read_running,
-         fraction_reader=read_fraction) -> int:
-    """The CLI. Both witnesses are read here and nowhere else, and 2 means a pass was partial.
+         fraction_reader=read_fraction,
+         tripwire_reader=read_tripwire) -> int:
+    """The CLI. All three witnesses are read here and nowhere else, and 2 means a partial pass.
 
-    `running_reader` and `fraction_reader` exist so a test can put numbers under this
-    function without steering the box — the `runner=` reason one level up, applied to the
-    boundary where the counts a human acts on are printed. The defaults are the live reads,
-    so a hand-run reaches `supervisorctl` and `statvfs` with no seam to get wrong, and a
-    refused read still stops the thing loudly: exit 2 with one line on stderr.
+    `running_reader`, `fraction_reader` and `tripwire_reader` exist so a test can put numbers
+    under this function without steering the box — the `runner=` reason one level up, applied to
+    the boundary where the counts a human acts on are printed. The defaults are the live reads,
+    so a hand-run reaches `supervisorctl`, `statvfs` and the two tripwire watches with no seam to
+    get wrong, and a refused read still stops the thing loudly: exit 2 with one line on stderr.
+    `tripwire_reader` is called exactly once per pass, before any file is opened, because its
+    default walks `~/lloyd-data` — over 700,000 files — and a per-note call would multiply that
+    walk by the size of the corpus.
 
     A failed read exits 2 even when the other witness did write, and the reason is the
     report's own ambiguity. Seven stranded blocks and zero blocks both print "blocks: 0";
@@ -416,12 +603,25 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
         print(f"{tw.ALERT_TITLE}: the `tmpwatch.measure` witness is unavailable, so no block "
               f"of that family can be dated this pass: {exc}", file=sys.stderr)
 
+    tripwire: dict[str, TripwireReading] = {}
+    try:
+        tripwire = tripwire_reader() or {}
+    except Exception as exc:                        # noqa: BLE001 — a read, not a bug
+        partial = True
+        print("tripwire: the `guardian.tripwire_is_clear` witness is unavailable, so no "
+              f"tripwire block can be dated this pass: {exc}", file=sys.stderr)
+    for reading in sorted(tripwire.values(), key=lambda r: r.family):
+        if not reading.clear:
+            partial = True
+            print(f"{reading.family} tripwire over {reading.root} is un-dateable this "
+                  f"pass: {reading.why}", file=sys.stderr)
+
     total = 0
     for path in sorted(Path(args.notes).glob("20*.md")):
         text = path.read_text(encoding="utf-8")
-        if not count_refutations(text, running, fraction):
+        if not count_refutations(text, running, fraction, tripwire):
             continue
-        new, n, notes = date_note(text, running, args.day, fraction)
+        new, n, notes = date_note(text, running, args.day, fraction, tripwire)
         total += n
         for s in notes:
             print(f"{path.name}: {s}")
@@ -432,6 +632,14 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
     else:
         witness = (f"{tw.ALERT_TITLE} fraction {fraction:.4f}"
                    f"{'<' if fraction < tw.CLEAR_FRACTION else '>='}{tw.CLEAR_FRACTION:.2f}")
+    if not tripwire:
+        witness += "; tripwire unread; no tripwire block dateable"
+    else:
+        for r in sorted(tripwire.values(), key=lambda x: x.family):
+            witness += (
+                f"; {r.family} tripwire {'clear' if r.clear else 'NOT clear'} over {r.root}"
+                + ("" if r.total is None else f" ({r.total:,} files)")
+                + ("" if r.clear else f" — {r.why}"))
     print(f"{'dated' if args.apply else 'refutable'} blocks: {total} "
           f"(RUNNING: {', '.join(sorted(running))}; {witness})")
     return 2 if partial else 0

@@ -323,8 +323,10 @@ def _kg_store_names(module: ast.Module) -> dict[str, str]:
         `db = kg_store_for_root(production_data_root())`;
     *   a parameter whose call site *in this same file* hands over such an
         expression — the guardian's shape, where `count_kg_rows(policy.KG_DB)` at
-        `agent-services/guardian/guardian.py:1058` fills the `db_path` the open at
-        `:2897` reads. A parameter is a binding like any other; skipping it is how
+        `agent-services/guardian/guardian.py:1106` fills the `db_path` the open at
+        `:2985` reads (both numbers re-pointed by #3502, which moved the open +88 and
+        left the call site alone; `:1058` had been a blank line in `drain_logs` for
+        some rounds before that). A parameter is a binding like any other; skipping it is how
         the witness stayed invisible.
     """
     names: dict[str, str] = {}
@@ -387,7 +389,7 @@ def opens_kg_store(ctx: "_FileCtx") -> list[tuple[int, str]]:
     opening it. The resolved one follows the path exactly one hop, through the two
     binders `_kg_store_names` can see, because a store path handed to `connect`
     through a name is the same open as one typed in: since #3357 the two live
-    read-only witnesses (`agent-services/guardian/guardian.py:2897`,
+    read-only witnesses (`agent-services/guardian/guardian.py:2985`,
     `scripts/automod/promote.py:502`) are both of that shape, so before this arm the
     rule could not report either of them and so could not require either to carry an
     exemption. What stays out is what always stayed out — a path that crossed a file

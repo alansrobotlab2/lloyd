@@ -4844,9 +4844,10 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     import vaultwatch as VW
 
     watch = _tripwire_watch(tmp_path)
-    g = Gmod.Guardian.__new__(Gmod.Guardian)
-
-    clear, note = g._tripwire_is_clear(watch)
+    # `tripwire_is_clear` left the class for module level under #3502, so these eight
+    # reads are of the one function the guardian's two wrappers and the note sweep's
+    # reader now share (`guardian.py:2892`) rather than of a bound method.
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is True, note
     assert watch.root in note and str(watch.history[-1].total) in note, note
     assert "worker pause" in note, (
@@ -4857,14 +4858,14 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     #    and drops the sync gate's own evidence.
     watch.marker.write_text(json.dumps({"reason": "top-level folder 'notes' "
                                        "(1000 files) vanished"}), encoding="utf-8")
-    clear, note = g._tripwire_is_clear(watch)
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is False and str(watch.marker) in note, note
 
     # 2. A marker that exists but does not parse. `tripped()` answers
     #    {"reason": "unreadable marker"} rather than None for exactly this, and an
     #    incident this process cannot read is not a closed one.
     watch.marker.write_text("{ this is not json", encoding="utf-8")
-    clear, note = g._tripwire_is_clear(watch)
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is False and "unreadable marker" in note, note
     watch.marker.unlink()
 
@@ -4875,7 +4876,7 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     #    the predicate asks the history directly and both roots get the same answer.
     cold = _tripwire_watch(tmp_path, state="other-gstate", tick_it=False)
     assert not cold.history, "expected a watch with no persisted baseline"
-    clear, note = g._tripwire_is_clear(cold)
+    clear, note = Gmod.tripwire_is_clear(cold)
     assert clear is False and "no baseline" in note, note
 
     # 4. The tree still reads damaged: the folder is emptied again. `judge` is the
@@ -4883,7 +4884,7 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     #    reading that would have opened it.
     import shutil
     shutil.rmtree(f"{watch.root}/notes")
-    clear, note = g._tripwire_is_clear(watch)
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is False and "still reads" in note, note
 
     # 5. The tree cannot be measured at all. `measure()` answers None for a root it
@@ -4901,14 +4902,14 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     notes.mkdir(parents=True, exist_ok=True)
     for i in range(1000):
         (notes / f"n{i}.md").write_text("x\n", encoding="utf-8")
-    clear, note = g._tripwire_is_clear(watch)
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is False and "could not be measured" in note, note
 
     # ...and the same call with the read restored, so the five answers above are the
     # gate deciding and not an unreachable branch.
     unreachable["on"] = False
     watch.tick()
-    clear, note = g._tripwire_is_clear(watch)
+    clear, note = Gmod.tripwire_is_clear(watch)
     assert clear is True, note
 
     # The real-filesystem control named above: chmod'ing the root away does not
@@ -4916,7 +4917,7 @@ def test_a_tripwire_all_clear_needs_both_reads_and_an_absent_marker(tmp_path,
     # measurement rather than on the read having failed.
     os.chmod(watch.root, 0o000)
     try:
-        clear, note = g._tripwire_is_clear(watch)
+        clear, note = Gmod.tripwire_is_clear(watch)
         assert clear is False, f"an unreadable root read as clear: {note}"
         assert "could not be measured" not in note, (
             "0 files from an unreadable root is a damaged tree, not a failed read — "

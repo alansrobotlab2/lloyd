@@ -3051,7 +3051,16 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # `evaluate_liveness` and above `main`, so only `main` moves, by exactly +11, and
     # `architecture/threat-model.md`'s T-26 cell — which cites the `evaluate_liveness`
     # head, still 923 — does not move with it.
-    assert heads[guardian]["main"] == 3013, (
+    # 3013 → 3030 is #3502: the same shape a third time. Four hunks, all below
+    # `evaluate_liveness` and above `main` — `@@ -475,7 +475,7 @@` (0), the two inside the
+    # class that replace `_tripwire_is_clear`'s 58-line body with the wrappers delegating
+    # to the module-level function (−58 +2, and +2 in the `_retract_tripwire_alert` call),
+    # and `@@ -2944,6 +2888,79 @@` putting `tripwire_is_clear` itself (the 73 lines) between
+    # the last method and `def count_kg_rows`. Net +17, so `main` alone moves and
+    # `evaluate_liveness` holds :923 — which is the whole reason the lifted function sits
+    # below the class and not in the imports, where #3502's first attempt put it at :430
+    # and pushed this head off its own citation.
+    assert heads[guardian]["main"] == 3030, (
         f"`main` moved off :3013 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 923, (

@@ -113,7 +113,7 @@ PLANTED: dict[str, tuple[str, str, int]] = {
 #: because the firing test over that dict asserts `counts == 1` for this rule — folding a
 #: second shape into it would stop pinning that the original literal spelling still fires
 #: at its own line (#3357 clause 4). Both live non-owner openers are of this shape, which
-#: is why the arm exists: `agent-services/guardian/guardian.py:2897` is the parameter
+#: is why the arm exists: `agent-services/guardian/guardian.py:2985` is the parameter
 #: binder, `scripts/automod/promote.py:502` the assignment binder.
 #: binder -> (repo path, source, 1-based line of the `connect`, the name the hit must
 #: name back, the spelling the hit must credit as the source).

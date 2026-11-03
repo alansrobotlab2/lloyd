@@ -475,7 +475,7 @@ class Guardian:
         self._vault_snapshots_checked_at = 0.0
         # Per tripwire title: whether the last tick already journalled that its clear
         # condition did NOT hold. A quiet one-way dict, never an open/closed latch —
-        # the verdict comes from `_tripwire_is_clear` on every tick, and this only
+        # the verdict comes from `tripwire_is_clear` on every tick, and this only
         # decides whether to say it twice (#3106). `_retract_tripwire_alert` also
         # tolerates it missing, because several test homes build a Guardian with
         # `__new__` and set only the fields they use.
@@ -2690,74 +2690,16 @@ class Guardian:
                 "read; which program the alert named is not recoverable from this "
                 "process, so the note names none")
 
-    # ── tripwire clear conditions (#3106) ────────────────────────────────
-    def _tripwire_is_clear(self, watch, snap=None) -> tuple[bool, str]:
-        """Whether one tripwire's incident is over, from the two reads that watch owns.
-
-        The tripwires were the only alarms in the file with no resolver because they
-        were the only ones whose recovery is not a latch this process holds: a vault or
-        data-root wipe is undone by a human restoring the tree and running
-        `vaultwatch.py clear` / `datawatch.py clear`, and `clear()` unlinks the marker,
-        re-baselines and persists — it never names the notifier, so the ALERT.md that
-        orders the restore outlives the incident it was written for. The condition that
-        IS measurable in-process is the same pair `vaultwatch.sync_gate` and
-        `datawatch.snapshot_gate` already read to decide whether to let sync or a
-        snapshot run: the marker is absent, and the tree evaluates clean against the
-        watch's own baseline.
-
-        Four answers come back False, and each is a case where a seal would be an
-        all-clear nobody observed (#2056's rule, read from the retract side):
-
-        * the marker is present — including one that exists but does not parse, which
-          `tripped()` reports as `{"reason": "unreadable marker"}` rather than as
-          absent, so an incident this process cannot read is never a closed one;
-        * the root cannot be measured (`measure` answers None for a root it cannot
-          `stat`) — an unreadable tree is not an intact one, and this is the same
-          mistake the KG-unreadable path (#1525) and the shadow scan (#3109) refuse to
-          make by answering `[]`;
-        * the watch holds no baseline at all, which is a missing comparison rather than
-          a favourable one;
-        * the watch's own `judge` still finds the wipe (root missing, root replaced,
-          the drop across the peak, or a top-level folder emptied), so the alarm is
-          live and the file stays exactly as found.
-
-        `snap` is the snapshot the caller's `tick()` already measured, passed so the
-        clear condition is judged on a real reading of this root without walking it a
-        second time every 5 s; a caller with no tick behind it (the startup
-        reconciliation) leaves it None and this reads the tree once.
-
-        The True sentence is the text `resolve` writes into ALERT.md and the daily
-        note, so it claims the measurement and nothing beyond it: it names the root,
-        the count, and the absent marker, and it says explicitly that lifting the pause
-        or the promotion hold is still someone's act — the guardian never lifted either.
-        """
-        marker = watch.tripped()
-        if marker:
-            return False, (f"the {watch.what} tripwire marker is still set at "
-                           f"{watch.marker} ({marker.get('reason')})")
-        if snap is None:
-            snap = vaultwatch.measure(watch.root, skip_top=watch.skip_top)
-        if snap is None:
-            return False, f"{watch.root} could not be measured at all this tick"
-        if not watch.history:
-            return False, f"{watch.root} has no baseline measurement on record"
-        why = watch.judge(snap)
-        if why:
-            return False, f"the watch still reads the {watch.what} as damaged: {why}"
-        return True, (f"{watch.root} measures {snap.total} files against this watch's "
-                      "baseline and its "
-                      f"{watch.what} tripwire marker is absent, so the restore-and-swap "
-                      "instructions above are stale — this says the tree measures whole, "
-                      "not that the worker pause or the promotion halt was lifted: that "
-                      "is still whoever holds it")
-
+    # The condition itself is the module-level `tripwire_is_clear` above (#3106): it
+    # left the class under #3502 so `guardian_note_sweep.py` can answer the same
+    # question this one does rather than re-deriving a weaker one.
     def _vault_tripwire_is_clear(self) -> tuple[bool, str]:
         """The vault tripwire's clear condition, with no snapshot to reuse (#3106)."""
-        return self._tripwire_is_clear(self.vault)
+        return tripwire_is_clear(self.vault)
 
     def _data_tripwire_is_clear(self) -> tuple[bool, str]:
         """The data root's, same reads, its own root and baseline (#3106)."""
-        return self._tripwire_is_clear(self.data)
+        return tripwire_is_clear(self.data)
 
     def _retract_tripwire_alert(self, watch, title: str, snap=None) -> None:
         """Close a tripwire alarm on the tick its own watch measures the tree whole.
@@ -2793,7 +2735,9 @@ class Guardian:
         incident = self.notifier.alert_file_incident()
         if incident is None or incident[0] != title or incident[1]:
             return                      # ALERT.md is not asserting this incident at all
-        clear, note = self._tripwire_is_clear(watch, snap)
+        # The one shared condition, module level since #3502 so the note sweep answers the
+        # same question this line does.
+        clear, note = tripwire_is_clear(watch, snap)
         if not clear:
             if self._tripwire_still_open.get(title):
                 return                  # same verdict as the last tick: stay quiet
@@ -2942,6 +2886,79 @@ class Guardian:
             sd_notify("WATCHDOG=1")
             self.maybe_selftest()
             time.sleep(self.interval)
+
+
+# ── tripwire clear conditions (#3106; module level and shared under #3502) ────────
+def tripwire_is_clear(watch, snap=None) -> tuple[bool, str]:
+    """Whether one tripwire's incident is over, from the two reads that watch owns.
+
+    The tripwires were the only alarms in the file with no resolver because they
+    were the only ones whose recovery is not a latch this process holds: a vault or
+    data-root wipe is undone by a human restoring the tree and running
+    `vaultwatch.py clear` / `datawatch.py clear`, and `clear()` unlinks the marker,
+    re-baselines and persists — it never names the notifier, so the ALERT.md that
+    orders the restore outlives the incident it was written for. The condition that
+    IS measurable in-process is the same pair `vaultwatch.sync_gate` and
+    `datawatch.snapshot_gate` already read to decide whether to let sync or a
+    snapshot run: the marker is absent, and the tree evaluates clean against the
+    watch's own baseline.
+
+    Four answers come back False, and each is a case where a seal would be an
+    all-clear nobody observed (#2056's rule, read from the retract side):
+
+    * the marker is present — including one that exists but does not parse, which
+      `tripped()` reports as `{"reason": "unreadable marker"}` rather than as
+      absent, so an incident this process cannot read is never a closed one;
+    * the root cannot be measured (`measure` answers None for a root it cannot
+      `stat`) — an unreadable tree is not an intact one, and this is the same
+      mistake the KG-unreadable path (#1525) and the shadow scan (#3109) refuse to
+      make by answering `[]`;
+    * the watch holds no baseline at all, which is a missing comparison rather than
+      a favourable one;
+    * the watch's own `judge` still finds the wipe (root missing, root replaced,
+      the drop across the peak, or a top-level folder emptied), so the alarm is
+      live and the file stays exactly as found.
+
+    `snap` is the snapshot the caller's `tick()` already measured, passed so the
+    clear condition is judged on a real reading of this root without walking it a
+    second time every 5 s; a caller with no tick behind it — the startup
+    reconciliation, or the hand-run note sweep — leaves it None and this reads the
+    tree once.
+
+    The True sentence is the text `resolve` writes into ALERT.md and the daily
+    note, so it claims the measurement and nothing beyond it: it names the root,
+    the count, and the absent marker, and it says explicitly that lifting the pause
+    or the promotion hold is still someone's act — the guardian never lifted either.
+
+    Why this sits at module level and not only on `Guardian` (#3502): the daily-note
+    sweep has to answer the same question about a stranded tripwire block, and a
+    second definition of "clear" is how a sweep clearance starts disagreeing with the
+    wire that raised the alarm. `Guardian` is unreachable from that process without a
+    notifier, a backend URL and a supervisor socket, and the two gates a reader might
+    substitute — `vaultwatch.sync_gate` and `datawatch.snapshot_gate` — both answer
+    True when the watch holds no baseline at all, which the third bullet above
+    refuses. One body, three callers: `_vault_tripwire_is_clear`,
+    `_data_tripwire_is_clear` and `scripts/maintenance/guardian_note_sweep.py`.
+    """
+    marker = watch.tripped()
+    if marker:
+        return False, (f"the {watch.what} tripwire marker is still set at "
+                       f"{watch.marker} ({marker.get('reason')})")
+    if snap is None:
+        snap = vaultwatch.measure(watch.root, skip_top=watch.skip_top)
+    if snap is None:
+        return False, f"{watch.root} could not be measured at all this tick"
+    if not watch.history:
+        return False, f"{watch.root} has no baseline measurement on record"
+    why = watch.judge(snap)
+    if why:
+        return False, f"the watch still reads the {watch.what} as damaged: {why}"
+    return True, (f"{watch.root} measures {snap.total} files against this watch's "
+                  "baseline and its "
+                  f"{watch.what} tripwire marker is absent, so the restore-and-swap "
+                  "instructions above are stale — this says the tree measures whole, "
+                  "not that the worker pause or the promotion halt was lifted: that "
+                  "is still whoever holds it")
 
 
 def count_kg_rows(db_path: str) -> tuple[int | None, str]:

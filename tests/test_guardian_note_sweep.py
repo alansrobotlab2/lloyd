@@ -10,7 +10,7 @@ of them whatever the supervisor says. Triage measured it: the sweep's own
 `2026-10-16.md` and 0 corpus-wide, while seven unsealed blocks sit in those files
 (`2026-10-06.md:13`, `2026-10-15.md:21` and `:55`, `2026-10-16.md:13,37,61,89`).
 
-Blindness, not age, is what makes this worth a second refuter. `guardian.py:2764` returns
+Blindness, not age, is what makes this worth a second refuter. `guardian.py:2779` returns
 `sealed-note-out-of-reach` for exactly this shape — the incident is closed in `ALERT.md`
 while the note it alarmed in is outside `notify.DAILY_SCAN_DAYS = 3` and stays open — so
 every future tmpwatch seal re-accumulates stranded blocks with nothing able to date them.
@@ -26,8 +26,12 @@ Two properties are load-bearing, and both came from prior incidents rather than 
 
 * the reading is injected through a `measurer=` / `fraction_reader=` seam, because the
   gate runs the suite where `/tmp` cannot be steered — `read_running`'s `runner=` exists
-  for the same reason, and the module docstring at `guardian_note_sweep.py:206-215`
-  records #2221's two clause-5 nodes coming back red at `cb235020` for exactly this;
+  for the same reason, and `read_running`'s docstring at
+  `guardian_note_sweep.py:500-506` records #2221's two clause-5 nodes coming back red at
+  `cb235020` for exactly this (re-pointed by that paragraph's own words, not by the range
+  this line carried: it said `206-215` and named the MODULE docstring, which was already
+  wrong at #3502's base `a4473fda` — the passage was at :322 in `read_running` there, and
+  `tripwire_stamp`/`read_tripwire` moved it to :501 here);
 * the stamp is a `dated:` and never a `cleared:`, and neither marker word appears in its
   prose, because the corpus instrument for #2221 is `grep -c 'cleared:'` over the dated
   notes (#1988: an instrument must never read its own description).
@@ -38,9 +42,19 @@ committed fixture, and file bytes for the CLI nodes. `tests/test_guardian_alert_
 :449-651` owns the supervisorctl half and is unmodified by this diff; `REFUTED_LINE`'s bytes
 are unchanged, and the node at the end of this file pins the two phrases that carry its
 honesty claim so a reword there cannot pass silently.
+
+The last section of this file adds the THIRD refuter (#3502), and it lives here rather than
+in a new file because a second file testing "is this block refuted" is the two-definitions
+defect this docstring keeps warning about. Its witness is `guardian.tripwire_is_clear` — the
+guardian's own condition, shared rather than re-derived — over the two titles
+`VAULT_TRIP_ALERT_TITLE` and `DATA_TRIP_ALERT_TITLE`, and its subject is the stranded
+tripwire block at `memory/2026-10-20.md:17`, which triage on 2026-10-27 measured at
+`count_refutations` = 0 with 0 `dated:` and 0 `cleared:` markers and which a hand-written
+correction on 2026-10-26 had already had to close once by hand.
 """
 from __future__ import annotations
 
+import difflib
 import importlib.util as _ilu
 import shutil
 import sys
@@ -55,8 +69,11 @@ for _p in (str(ROOT), str(GUARDIAN_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import datawatch  # noqa: E402  (DataWatch / ROOT_MARKER / snapshot_gate — the third witness)
+import guardian as Gmod  # noqa: E402  (tripwire_is_clear and the two tripwire alert titles)
 import notify  # noqa: E402
 import tmpwatch as TW  # noqa: E402
+import vaultwatch  # noqa: E402  (VaultWatch / measure / sync_gate — the other tripwire watch)
 
 _SWEEP_PATH = ROOT / "scripts" / "maintenance" / "guardian_note_sweep.py"
 _spec = _ilu.spec_from_file_location("guardian_note_sweep_fraction", _SWEEP_PATH)
@@ -326,9 +343,28 @@ def _copy_fixture(tmp_path: Path) -> Path:
     return note
 
 
+def _clean_tripwire() -> dict:
+    """Both tripwire families read clear over roots no test wrote, so nothing is dated.
+
+    The nodes below that are about `/tmp` or the supervisor need the third witness to be
+    *silent* rather than absent: `--apply` exits 2 when a family reads damaged, and a node
+    about the fraction witness that also got a `data tripwire … un-dateable` refusal on
+    stderr would pass for the wrong reason. These readings name roots under /test-root, so
+    a node that asserted one of them was stamped would be asserting a root that does not
+    exist. `tripwire_watches` and `measure` are never called here, which is the point of
+    `tripwire_reader=`: a CLI node cannot walk 705,803 files to prove a parser.
+    """
+    return {fam: SWEEP.TripwireReading(
+                family=fam, root=f"/test-root/{fam}", total=1000, clear=True,
+                why=f"{fam} measures whole against this watch's baseline",
+                halt_path="/test-state/promotions-halted", halted=False)
+            for fam in ("vault", "data")}
+
+
 def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
-             frac_raises: bool = False) -> int:
-    """`main` with both witnesses injected, so a test never steers the box.
+             frac_raises: bool = False, tripwire: object = "clean",
+             trip_raises: bool = False) -> int:
+    """`main` with all three witnesses injected, so a test never steers the box.
 
     `running_reader` answers the supervisor the same way the module's docstring records for
     `runner=`: the gate may run where no supervisor answers, and a node that shelled out
@@ -341,9 +377,14 @@ def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
             raise RuntimeError("cannot read /tmp: OSError: statvfs refused")
         return fraction
 
+    def _tripwire():
+        if trip_raises:
+            raise RuntimeError("tripwire: cannot read the watch state")
+        return _clean_tripwire() if tripwire == "clean" else tripwire
+
     return SWEEP.main(["--notes", str(note_dir), *argv],
                       running_reader=lambda conf: {"lloyd-mc:lloyd-backend"},
-                      fraction_reader=_fraction)
+                      fraction_reader=_fraction, tripwire_reader=_tripwire)
 
 
 def test_the_cli_dates_a_fixture_copy_once_and_writes_it_once(tmp_path, capsys):
@@ -459,3 +500,570 @@ def test_a_note_holding_both_families_gets_one_stamp_per_witness_from_each_refut
     assert "`supervisorctl status` reports `lloyd-mc:lloyd-backend` RUNNING" in sup[0], sup[0]
     assert "predates the retraction #2221 gives its alert family" in sup[0], sup[0]
     assert "cleared:" not in new
+
+
+# ═══ the third witness: the guardian's own tripwire clear condition (#3502) ═════════
+#
+# A tripwire block strands differently from the two families above. When the vault or
+# data-root tripwire fires while another alert already holds ALERT.md's single slot,
+# `Guardian._retract_tripwire_alert` cannot reach the stale section at all — its own
+# docstring says a displaced title leaves the process with "no index to the stale section,
+# which is the sweep's subject, not this one's" — and the sweep had no witness that could
+# read a file count. `memory/2026-10-20.md` is that case: triage on 2026-10-27 measured
+# `count_refutations` = 0 against it while its block carried 0 `dated:` and 0 `cleared:`
+# markers, and closing the directive took a hand-written nightly correction on 2026-10-26.
+#
+# So the criterion here is NOT a new one. It is `guardian.tripwire_is_clear`, the function
+# the guardian's `_vault_tripwire_is_clear` / `_data_tripwire_is_clear` call, lifted to
+# module level for exactly this second caller. Two consequences carry the weight, and both
+# are pinned below: the sweep inherits that function's refusal of a watch with no baseline,
+# which `vaultwatch.sync_gate` and `datawatch.snapshot_gate` do NOT refuse (both skip the
+# comparison when `w.history` is empty and answer True); and the walk happens once per root
+# per pass, because `~/lloyd-data` is 705,803 files as measured on 2026-11-02 and a node
+# that let the default run would spend its budget walking a tree it does not own.
+
+#: The real bytes of `~/obsidian/memory/2026-10-20.md` as they stood at triage: one
+#: unsealed `Self-mod guardian: Lloyd data root damaged — promotions halted` section at :17
+#: with 0 `dated:` and 0 `cleared:` markers anywhere in the file. Committed for the same
+#: reason as the 10-15 fixture — the gate runs with `$HOME` at the round home, where the
+#: live note is not there to open.
+FIXTURE_2020 = Path(__file__).resolve().parent / "fixtures" / "guardian_note_2026-10-20_pre-sweep.md"
+
+DATA_TRIP_TITLE = f"{SWEEP.GUARDIAN_TITLE} {Gmod.DATA_TRIP_ALERT_TITLE}"
+VAULT_TRIP_TITLE = f"{SWEEP.GUARDIAN_TITLE} {Gmod.VAULT_TRIP_ALERT_TITLE}"
+TMP_TITLE = f"{SWEEP.GUARDIAN_TITLE} {TW.ALERT_TITLE}"
+STATE_TITLE = f"{SWEEP.GUARDIAN_TITLE} Service down, but no promotion to revert"
+ROLLBACK_TITLE = f"{SWEEP.GUARDIAN_TITLE} Rolled back 1a2b3c4d → 5e6f7a8b"
+
+DATA_TRIP_BODY = (
+    "Lloyd data root damaged — promotions halted\n\n"
+    "top-level folder 'triage-3087' (3347 files) vanished\n\n"
+    "Files: 658273 → 654927\n\n"
+    "Promotions halted and the worker is paused. To recover: restore the newest snapshot "
+    "into the data root, then run `python3 agent-services/guardian/datawatch.py clear`.\n")
+VAULT_TRIP_BODY = (
+    "Vault mass deletion — sync stopped\n\n"
+    "top-level folder 'knowledge' (3300 files) vanished\n\n"
+    "Stop `ob sync` until a human restores the tree, then run "
+    "`python3 agent-services/guardian/vaultwatch.py clear`.\n")
+TMP_BODY = "/tmp: 845,813 of 1,048,576 inodes used (81%)\n"
+STATE_BODY = "lloyd-mc:lloyd-backend: FATAL: can't find command\n"
+ROLLBACK_BODY = ("The promotion was reverted and the last known good commit is running "
+                 "again.\n")
+
+
+def _trip_note(*pairs) -> str:
+    """A daily note holding the sections named, in order, front matter first."""
+    body = "".join(f"## {title}\n\n{text}\n\n" for title, text in pairs)
+    return "---\ntype: note\ntimestamp: '2026-10-20T13:52:49'\n---\n\n" + body
+
+
+def _tripwire_all_families() -> str:
+    """One block per alarm family the sweep can be asked about, all five unsealed.
+
+    Why the note is this shape: with the fraction witness at or above its clear line and no
+    RUNNING program, the tripwire witness is the ONLY one that can act — so a node that
+    asserts "the other three titles came back False" is testing the title binding and not
+    the emptiness of the note.
+    """
+    return _trip_note((DATA_TRIP_TITLE, DATA_TRIP_BODY),
+                      (VAULT_TRIP_TITLE, VAULT_TRIP_BODY),
+                      (TMP_TITLE, TMP_BODY),
+                      (STATE_TITLE, STATE_BODY),
+                      (ROLLBACK_TITLE, ROLLBACK_BODY))
+
+
+def _tripwire_home(tmp_path, *, files=40, state="gstate"):
+    """Both tripwire watches over two real trees, each with a real baseline recorded.
+
+    The shape `tests/test_guardian_predicates.py:4800` `_tripwire_watch` builds, both
+    families at once: `files` files inside one top-level folder so the folder guard
+    (`vaultwatch.TOPDIR_MIN_FILES` = 20) stays in play, and the data root carries its
+    `datawatch.ROOT_MARKER` because `DataWatch.judge` refuses a root that lost it. 40
+    rather than that helper's 1000 because these nodes run the walk more than once and the
+    claim under test is the comparison, not the size. Nothing is a stand-in: the watches,
+    their baselines, their state files and their markers are the shipped objects, since the
+    reads under test are `tripped()`, `measure()` and the watch's own judge.
+    """
+    gdir = tmp_path / state
+    gdir.mkdir(parents=True, exist_ok=True)
+    out = {"gdir": gdir}
+    watches = {}
+    for family in ("vault", "data"):
+        root = tmp_path / family
+        (root / "notes").mkdir(parents=True, exist_ok=True)
+        for i in range(files):
+            (root / "notes" / f"n{i}.md").write_text("x\n", encoding="utf-8")
+        if family == "data":
+            (root / datawatch.ROOT_MARKER).write_text("", encoding="utf-8")
+            watch = datawatch.DataWatch(str(root), gdir)
+        else:
+            watch = vaultwatch.VaultWatch(str(root), gdir)
+        why, _ = watch.tick()
+        assert why is None and watch.history, f"{family} watch recorded no baseline"
+        watches[family] = watch
+        out[f"{family}_root"] = root
+    out["watches"] = watches
+    return out
+
+
+def _clear_readings(home, *, halted=False, halt_path=None):
+    """The sweep's reading of a home whose two roots measure whole: both families clear."""
+    return SWEEP.read_tripwire(watches=home["watches"],
+                               halt_reader=lambda: (halt_path or "/s/promotions-halted",
+                                                    halted))
+
+
+def _deletions(pre: str, post: str) -> int:
+    """Lines the rewrite removed, counted the way `git diff --numstat` counts them.
+
+    Clause 5 of the item is `git -C ~/obsidian diff --numstat` reporting 0 deletions, so the
+    test measures the same quantity rather than a looser "the body is still in there":
+    `difflib`'s `replace` opcodes carry a deletion in git's eyes too, and an alarm body that
+    was reworded rather than deleted is exactly what this instrument exists to catch.
+    """
+    pre_lines, post_lines = pre.splitlines(), post.splitlines()
+    return sum(i2 - i1 for op, i1, i2, _j1, _j2
+               in difflib.SequenceMatcher(None, pre_lines, post_lines).get_opcodes()
+               if op in ("delete", "replace"))
+
+
+def test_a_clear_tripwire_reading_dates_both_tripwire_blocks_and_no_other_title():
+    """Clause 1: the witness is bound to two titles, not to the fact that a tree is whole.
+
+    Five unsealed guardian sections in, two stamps out. Both tripwire blocks are dateable
+    under the injected reading; the `/tmp` block, the supervisor-state block and the
+    `Rolled back` notice are not, under the SAME reading. That asymmetry is the whole safety
+    property — a witness that read "some root measures whole" as a licence over every
+    stranded block would date an inode alarm from a vault file count, which is #3277's
+    binding defect widened.
+    """
+    readings = {"data": SWEEP.TripwireReading(
+                    family="data", root="/home/alansrobotlab/lloyd-data", total=705803,
+                    clear=True, why="measures whole", halt_path="/s/halted", halted=False),
+                "vault": SWEEP.TripwireReading(
+                    family="vault", root="/home/alansrobotlab/obsidian", total=9511,
+                    clear=True, why="measures whole", halt_path="/s/halted", halted=False)}
+    note = _tripwire_all_families()
+    bodies = {title: text for title, text in
+              ((DATA_TRIP_TITLE, DATA_TRIP_BODY), (VAULT_TRIP_TITLE, VAULT_TRIP_BODY),
+               (TMP_TITLE, TMP_BODY), (STATE_TITLE, STATE_BODY),
+               (ROLLBACK_TITLE, ROLLBACK_BODY))}
+
+    for title in (DATA_TRIP_TITLE, VAULT_TRIP_TITLE):
+        assert SWEEP.block_is_refuted(title, bodies[title], running=NO_PROGRAMS,
+                                      fraction=ABOVE, tripwire=readings), title
+    for title in (TMP_TITLE, STATE_TITLE, ROLLBACK_TITLE):
+        assert SWEEP.block_is_refuted(title, bodies[title], running=NO_PROGRAMS,
+                                      fraction=ABOVE, tripwire=readings) is False, (
+            f"{title} was dated on a reading of somebody else's root")
+
+    assert SWEEP.count_refutations(note, NO_PROGRAMS, ABOVE, readings) == 2
+    new, n, notes = SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, readings)
+    assert n == 2, notes
+    assert _deletions(note, new) == 0, "an alarm body was rewritten, not answered"
+    assert "cleared:" not in new
+
+
+def test_a_missing_tripwire_reading_dates_no_tripwire_block():
+    """The third witness is only silent when absent, never silent-and-clear.
+
+    `tripwire=None` and `tripwire={}` are the two ways a pass reaches a tripwire block with
+    no reading — a caller that never built one, and a reader that returned nothing. Both
+    must leave the block alone. A `clear=True` default on either would date every tripwire
+    block in the vault from the absence of a measurement, which is the same `fraction=None`
+    trap the second witness documents one function above.
+    """
+    note = _trip_note((DATA_TRIP_TITLE, DATA_TRIP_BODY))
+    for missing in (None, {}):
+        assert SWEEP.count_refutations(note, NO_PROGRAMS, ABOVE, missing) == 0
+        assert SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, missing)[1] == 0
+        assert SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, missing)[0] == note
+
+
+def test_the_witness_refuses_a_watch_with_no_baseline_that_both_gates_accept(tmp_path):
+    """Clause 2: the sweep asks the guardian, and inherits a refusal the gates do not make.
+
+    `vaultwatch.sync_gate` (`vaultwatch.py:571`) and `datawatch.snapshot_gate`
+    (`datawatch.py:1478`) both answer True when the watch holds no baseline — they skip the
+    comparison, because "may I sync / may I snapshot" is a question about the marker and the
+    tree, not about a history they may not have. The guardian's condition refuses that state
+    as "a missing comparison rather than a favourable one". A sweep bound to the gates would
+    date `memory/2026-10-20.md` on a box whose guardian state directory had just been wiped:
+    no baseline, no evidence, one retraction.
+    """
+    home = _tripwire_home(tmp_path)
+    cold = {"vault": vaultwatch.VaultWatch(str(home["vault_root"]), home["gdir"] / "cold"),
+            "data": datawatch.DataWatch(str(home["data_root"]), home["gdir"] / "cold")}
+    for watch in cold.values():
+        assert not watch.history, "the cold watch has a baseline; the case is not built"
+
+    assert vaultwatch.sync_gate(root=str(home["vault_root"]),
+                                state_dir=home["gdir"] / "cold")[0] is True
+    assert datawatch.snapshot_gate(root=str(home["data_root"]),
+                                   state_dir=home["gdir"] / "cold")[0] is True
+    for family, watch in cold.items():
+        clear, why = Gmod.tripwire_is_clear(watch)
+        assert clear is False, f"{family}: the shared condition accepted a cold watch: {why}"
+
+    readings = SWEEP.read_tripwire(watches=cold)
+    assert all(r.clear is False for r in readings.values())
+    note = _tripwire_all_families()
+    assert SWEEP.count_refutations(note, NO_PROGRAMS, ABOVE, readings) == 0
+    assert SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, readings)[0] == note
+
+
+def test_the_two_guardian_wrappers_and_the_sweep_answer_from_one_function(tmp_path,
+                                                                         monkeypatch):
+    """Clause 2's other half: one decision, three callers, no forwarding copy to drift.
+
+    A recorder on the module-level function proves the guardian's own two wrappers and the
+    sweep's reader all reach it. The bound method the guardian used to hold is gone rather
+    than left behind as a shim: a second definition of "the watch says the tree is whole" is
+    the failure the sweep's module docstring names, and a shim is how one starts disagreeing
+    with the wire that raised the alarm.
+    """
+    home = _tripwire_home(tmp_path)
+    seen = []
+    monkeypatch.setattr(Gmod, "tripwire_is_clear",
+                        lambda watch, snap=None: (seen.append(str(watch.root))
+                                                  or (True, "recorded")))
+
+    guardian = Gmod.Guardian.__new__(Gmod.Guardian)
+    guardian.vault, guardian.data = home["watches"]["vault"], home["watches"]["data"]
+    assert guardian._vault_tripwire_is_clear() == (True, "recorded")
+    assert guardian._data_tripwire_is_clear() == (True, "recorded")
+    SWEEP.read_tripwire(watches=home["watches"], measure=lambda root, **_kw: None)
+    assert len(seen) == 4, seen                       # 2 wrappers + 2 families, no extra home
+    assert not hasattr(Gmod.Guardian, "_tripwire_is_clear"), (
+        "the clear test must live in one place, not in a method that forwards to it")
+
+
+def test_the_stamp_names_the_flag_file_the_halt_state_is_read_from(tmp_path):
+    """The halt measurement is `gstate.AutomodState`'s own flag, not a lookalike path.
+
+    The clause asks the witness to name `AutomodState`'s halt flag as a second measurement.
+    `is_halted()` is `self.halted.exists()`, so a reader cannot tell a clean "not set" from a
+    flag it could not stat without knowing WHICH file it read — which is why
+    `promotion_halt` returns the path next to the answer and the stamp prints it. Writing the
+    file is the only way to know the path is the one the guardian reads.
+    """
+    gdir = tmp_path / "automod-state"
+    gdir.mkdir()
+    path, halted = SWEEP.promotion_halt(gdir=gdir)
+    assert path.endswith("promotions-halted"), path
+    assert halted is False
+    Path(path).write_text("2026-10-20T13:22Z halted\n", encoding="utf-8")
+    assert SWEEP.promotion_halt(gdir=gdir) == (path, True)
+
+
+@pytest.mark.parametrize("broken_read", [
+    "still damaged", "root gone", "marker unparseable", "reader raised"])
+def test_a_tripwire_reading_that_cannot_be_had_dates_nothing_and_exits_2(tmp_path, capsys,
+                                                                         broken_read):
+    """Clause 3: four ways the witness has no answer, and none of them touches the bytes.
+
+    The first three are read through the shipped watches, not a mock, because each is a
+    different producer failure with the same consequence for a note: the tree still fails
+    the watch's own judge; `measure` answers None for a root it cannot stat; the marker
+    exists but does not parse, which `tripped()` reports as a set marker rather than an
+    absent one. The fourth is the seam itself raising. All four leave the block byte-for-byte
+    as found and make the CLI say which family it could not date and exit 2 — the same
+    refusal the other two witnesses make, because exit 0 with "0 blocks" from a pass that
+    could not measure is indistinguishable from a corpus with nothing stranded.
+    """
+    home = _tripwire_home(tmp_path)
+    readings = _clear_readings(home)
+    assert all(r.clear for r in readings.values()), "the fixture read damaged before it broke"
+
+    if broken_read == "still damaged":
+        for f in (home["data_root"] / "notes").glob("*.md"):
+            f.unlink()
+        readings = SWEEP.read_tripwire(watches=home["watches"])
+        assert readings["data"].clear is False, readings["data"].why
+    elif broken_read == "root gone":
+        shutil.rmtree(home["data_root"])
+        readings = SWEEP.read_tripwire(watches=home["watches"])
+        assert readings["data"].total is None, readings["data"].why
+        assert readings["data"].clear is False
+    elif broken_read == "marker unparseable":
+        (home["gdir"] / "data-tripped.json").write_text("{not json", encoding="utf-8")
+        readings = SWEEP.read_tripwire(watches=home["watches"])
+        assert readings["data"].clear is False, readings["data"].why
+
+    note = tmp_path / "notes" / "2026-10-20.md"
+    note.parent.mkdir()
+    shutil.copyfile(FIXTURE_2020, note)
+    before = note.read_bytes()
+
+    rc = _run_cli(note.parent, "--apply", "--day", DAY, fraction=ABOVE,
+                  tripwire=(None if broken_read == "reader raised" else readings),
+                  trip_raises=(broken_read == "reader raised"))
+    captured = capsys.readouterr()
+    assert rc == 2, (rc, captured.err)
+    assert note.read_bytes() == before, f"{broken_read} wrote to the note"
+    assert _stamp_lines(note.read_text(encoding="utf-8")) == []
+    assert "tripwire" in captured.err.lower(), captured.err
+    if broken_read != "reader raised":
+        assert "data" in captured.err.lower(), (
+            "the refusal must name the family it could not date: " + captured.err)
+
+
+def test_the_cli_exits_2_when_the_tripwire_witness_cannot_be_read_at_all(tmp_path, capsys):
+    """A witness that raises is a refusal, and it stops the whole apply rather than one family.
+
+    `read_tripwire` builds both watches before it reads either, so its failure is not a
+    per-family read failure and the report cannot name a root. What it must not do is print
+    "0 blocks" and exit 0: that is the shape of a clean corpus, and this pass measured
+    nothing about the tripwire family.
+    """
+    note = tmp_path / "notes" / "2026-10-20.md"
+    note.parent.mkdir()
+    shutil.copyfile(FIXTURE_2020, note)
+    before = note.read_bytes()
+
+    rc = _run_cli(note.parent, "--apply", "--day", DAY, fraction=ABOVE, trip_raises=True)
+    captured = capsys.readouterr()
+    assert rc == 2, (rc, captured.err)
+    assert note.read_bytes() == before
+    assert "tripwire" in captured.err.lower(), captured.err
+    assert "guardian.tripwire_is_clear" in captured.err, (
+        "the refusal must name the witness it could not read: " + captured.err)
+
+
+def test_the_tripwire_stamp_is_a_measurement_line_and_never_a_clearance(tmp_path):
+    """Clause 4: what the stamp may say, in the words it must say them in.
+
+    Every phrase checked is a claim the pass is entitled to make from the reading it took:
+    the function that answered, the root it measured, the count it returned, whether
+    `AutomodState`'s halt flag is set and at which path, and the read date. The disclaimer is
+    checked because the alternative is a stamp that reads as lifting a pause the guardian
+    never held — `tripwire_is_clear`'s own True sentence says the tree "measures whole, not
+    that the worker pause or the promotion halt was lifted", and a dated: line that dropped
+    that half would be a stronger claim than its witness.
+    """
+    home = _tripwire_home(tmp_path)
+    readings = _clear_readings(home, halt_path="/home/x/.state/lloyd-automod/promotions-halted")
+    note = _trip_note((DATA_TRIP_TITLE, DATA_TRIP_BODY))
+
+    new, n, notes = SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, readings)
+    assert n == 1, notes
+    stamps = _stamp_lines(new)
+    assert len(stamps) == 1, stamps
+    line = stamps[0]
+    assert line.startswith(f"{notify.DAILY_DATED_PREFIX} {DAY}: "), line
+    total = vaultwatch.measure(str(home["data_root"]),
+                               skip_top=home["watches"]["data"].skip_top).total
+    assert readings["data"].total == total, "the stamp's count is not the walk's"
+    for phrase in ("`guardian.tripwire_is_clear`", str(home["data_root"]),
+                   f"{total:,} files",
+                   "/home/x/.state/lloyd-automod/promotions-halted", "not set",
+                   "does not assert that the worker pause or the promotion halt was lifted",
+                   f"notify.DAILY_SCAN_DAYS = {notify.DAILY_SCAN_DAYS}",
+                   "datawatch.py status"):
+        assert phrase in line, f"the stamp is missing {phrase!r}: {line}"
+    assert "cleared:" not in new
+    assert DATA_TRIP_BODY in new, "the alarm body was edited rather than answered"
+    assert _deletions(note, new) == 0
+
+
+def test_a_halt_still_set_is_stamped_as_set_rather_than_refused(tmp_path):
+    """The halt flag is a second MEASUREMENT in the stamp, never a third precondition.
+
+    Requiring the flag to be absent before dating would make the sweep's clearance depend on
+    an owner that has no timeout: `gstate.set_halted` is cleared only by whoever holds it, so
+    a rule that waited on it would leave the block a standing instruction forever — the
+    exact state this item exists to end. What the pass can say is what it read: the tree
+    measures whole AND the flag is set, both dated, with the reader left to act on the pair.
+    """
+    home = _tripwire_home(tmp_path)
+    readings = _clear_readings(home, halted=True)
+    assert all(r.halted for r in readings.values())
+
+    new, n, _notes = SWEEP.date_note(_tripwire_all_families(), NO_PROGRAMS, DAY, ABOVE,
+                                     readings)
+    assert n == 2
+    for line in _stamp_lines(new):
+        assert "`/s/promotions-halted` SET" in line, line
+        assert "does not assert that the worker pause or the promotion halt was lifted" in line
+
+
+def test_a_stamped_tripwire_block_is_never_stamped_twice(tmp_path):
+    """Clause 4's other half: a second pass over a dated note writes nothing at all.
+
+    The seal is `already_sealed`, the same marker-based test both other witnesses use, and
+    it holds across a changed reading: the second pass here runs with a DIFFERENT count and
+    a halt flag now set. If the seal were keyed on the reading rather than on the note, a
+    re-run would append a second stamp contradicting the first, and the note would carry two
+    "measurements" of the same day with no way to tell which the writer stood behind.
+    """
+    home = _tripwire_home(tmp_path)
+    readings = _clear_readings(home)
+    note = _trip_note((DATA_TRIP_TITLE, DATA_TRIP_BODY), (VAULT_TRIP_TITLE, VAULT_TRIP_BODY))
+    once, n, _ = SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, readings)
+    assert n == 2
+
+    again = SWEEP.read_tripwire(
+        watches=home["watches"],
+        halt_reader=lambda: ("/s/promotions-halted", True))
+    assert SWEEP.count_refutations(once, NO_PROGRAMS, ABOVE, again) == 0
+    new, n2, notes2 = SWEEP.date_note(once, NO_PROGRAMS, DAY, ABOVE, again)
+    assert n2 == 0 and new == once, notes2
+    assert len(_stamp_lines(new)) == 2
+
+
+def test_each_root_is_walked_once_per_pass_and_the_count_is_the_write(tmp_path):
+    """Clause 5: three blocks, two roots, two walks — and one measurement behind the number.
+
+    The count and the bytes must come from one reading: `count_refutations` is what the CLI
+    prints as "refutable blocks" and `date_note` is what writes, so they ask the same
+    `block_is_refuted` and the node asserts the printed figure is the number of stamps that
+    landed. The walk count is the cost claim: `vaultwatch.measure` over `~/lloyd-data` is a
+    705,803-file walk as measured on 2026-11-02, so a pass that measured per block would
+    spend three of them on the three tripwire sections in this note.
+    """
+    home = _tripwire_home(tmp_path)
+    walks = []
+
+    def counting_measure(root, *, skip_top=frozenset()):
+        walks.append(str(root))
+        return vaultwatch.measure(root, skip_top=skip_top)
+
+    readings = SWEEP.read_tripwire(watches=home["watches"], measure=counting_measure)
+    assert all(r.clear for r in readings.values()), readings
+    assert sorted(walks) == sorted({str(home["vault_root"]), str(home["data_root"])}), walks
+
+    note = _trip_note((DATA_TRIP_TITLE, DATA_TRIP_BODY),
+                      (VAULT_TRIP_TITLE, VAULT_TRIP_BODY),
+                      (DATA_TRIP_TITLE + " (again)", DATA_TRIP_BODY),
+                      (TMP_TITLE, TMP_BODY))
+    assert walks == [str(home["vault_root"]), str(home["data_root"])], (
+        "reading the blocks walked a root a second time")
+    counted = SWEEP.count_refutations(note, NO_PROGRAMS, ABOVE, readings)
+    new, n, _notes = SWEEP.date_note(note, NO_PROGRAMS, DAY, ABOVE, readings)
+    assert counted == 3 == n, (counted, n)
+    assert len(_stamp_lines(new)) == counted
+    assert _deletions(note, new) == 0
+    assert walks == [str(home["vault_root"]), str(home["data_root"])], (
+        "counting and writing each walked the roots again")
+
+
+def test_the_cli_takes_one_tripwire_reading_for_a_whole_pass(tmp_path, capsys):
+    """The seam is per pass, like `running_reader=` and `fraction_reader=`, not per note.
+
+    Two notes, both holding the same stranded block shape. The witness runs once: a
+    `tripwire_reader=` called per note would walk both roots twice for a reading that cannot
+    change inside a pass, and the CLI node is the only place that claim is checkable.
+    """
+    for name in ("2026-10-20.md", "2026-10-21.md"):
+        shutil.copyfile(FIXTURE_2020, tmp_path / name)
+    calls = []
+
+    def reader():
+        calls.append(1)
+        return {"data": SWEEP.TripwireReading(
+                    family="data", root=str(tmp_path / "lloyd-data"), total=705803,
+                    clear=True, why="measures whole", halt_path="/s/halted", halted=False)}
+
+    rc = SWEEP.main(["--notes", str(tmp_path), "--apply", "--day", DAY],
+                    running_reader=lambda conf: {"lloyd-mc:lloyd-backend"},
+                    fraction_reader=lambda path: ABOVE, tripwire_reader=reader)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert len(calls) == 1, calls
+    assert "blocks: 2" in out, out
+    for name in ("2026-10-20.md", "2026-10-21.md"):
+        text = (tmp_path / name).read_text(encoding="utf-8")
+        assert len(_stamp_lines(text)) == 1, name
+        assert "cleared:" not in text
+
+
+def test_the_first_real_refutation_is_the_note_the_item_names():
+    """Clause 6's shape, over the committed bytes of `memory/2026-10-20.md`.
+
+    The live `--apply` this item owes is owed because it needs a real reading of
+    `~/lloyd-data` and a real marker state, neither of which the gate owns. What CAN be
+    pinned here is the shape that pass must land in, on the real bytes: one `dated:` line in
+    the tripwire section, `grep -c 'cleared:'` still 0, and 0 deleted lines — the alarm body
+    stays verbatim, which is what the 2026-10-26 hand-written correction also chose to do.
+    """
+    pre = FIXTURE_2020.read_text(encoding="utf-8")
+    assert "Self-mod guardian: Lloyd data root damaged — promotions halted" in pre
+    assert _stamp_lines(pre) == [], "the fixture is post-sweep bytes, not the triage bytes"
+    assert pre.count("cleared:") == 0
+
+    readings = {"data": SWEEP.TripwireReading(
+                    family="data", root="/home/alansrobotlab/lloyd-data", total=705803,
+                    clear=True,
+                    why="/home/alansrobotlab/lloyd-data measures 705803 files against this "
+                        "watch's baseline and its data tripwire marker is absent",
+                    halt_path="/home/x/.state/lloyd-automod/promotions-halted",
+                    halted=False)}
+    assert SWEEP.count_refutations(pre, NO_PROGRAMS, ABOVE, readings) == 1
+    new, n, notes = SWEEP.date_note(pre, NO_PROGRAMS, DAY, ABOVE, readings)
+    assert n == 1, notes
+    stamps = _stamp_lines(new)
+    assert len(stamps) == 1, stamps
+    assert new.count("cleared:") == 0
+    assert _deletions(pre, new) == 0
+    assert SWEEP.count_refutations(new, NO_PROGRAMS, ABOVE, readings) == 0, (
+        "the stamped block is still counted: the next --apply would stamp it again")
+
+# ── clause 3 (#3502): nothing this lift moved is left pointing at the wrong line ──
+#: A `guardian.py:<N>` citation is a claim about a file, and this lift moved the file:
+#: −58 lines between the tripwire wrappers and `def count_kg_rows` (the method body left
+#: the class), +15 from there down (`tripwire_is_clear`'s 73 lines arrived, the 58-line body
+#: and its 2-line neighbours departed). The refused round shipped two cites it had itself
+#: invalidated — `:431` for a function it then moved to :2892, and `:2764` for a line that
+#: was blank at its own base — and a third, `scripts/automod/code_rules.py:390`, named a
+#: line inside an unrelated dict. So the check is mechanical and tree-wide: EVERY line
+#: citation into `agent-services/guardian/guardian.py`, in any tracked file, must land
+#: inside some `def` of that file. Its reach is measured rather than assumed, and it is
+#: narrower than it looks — two mutations of one real cite set the boundary. Moving
+#: `code_rules.py`'s witness cite to `:100`, a header comment outside every definition, FAILS
+#: this node with the cited line's own text; moving the same cite to `:191`, a comment inside
+#: `rollback_title`'s body, PASSES. So it refuses a cite that escaped every function and class
+#: entirely — a module constant, the header prose, past the last line — and does not refuse a
+#: cite inside the WRONG definition. None of the three stale cites this round repaired would it
+#: have caught: `code_rules.py:390`'s `:2897` sat in `reconcile_stranded_alert`'s
+#: `conditions = {`, `code_rules.py:326`'s `:1058` on a blank line inside `drain_logs`, and the
+#: sweep's `:2764` at base was a blank line inside `_retract_tripwire_alert`. Those fell to
+#: reading each sentence against the file, which is what the review still does; this node is the
+#: floor under the first class, never a substitute for that. Two-digit numbers are outside the
+#: scan's `[0-9]{3,4}`, and no citation into a 3,100-line file has ever meant line 42.
+GUARDIAN_SRC = ROOT / "agent-services" / "guardian" / "guardian.py"
+
+
+def test_every_line_citation_into_guardian_py_lands_inside_a_definition():
+    import re as _re
+    import subprocess as _sp
+    lines = GUARDIAN_SRC.read_text().split("\n")
+
+    def head_at(n: int) -> str:
+        for i in range(n, 0, -1):
+            if _re.match(r"^(    def |def )", lines[i - 1]):
+                return lines[i - 1].strip()
+        return ""
+
+    found = _sp.run(["git", "-C", str(ROOT), "grep", "-nE",
+                     r"guardian\.py:[0-9]{3,4}", "--", "*.py", "*.md"],
+                    capture_output=True, text=True, check=True).stdout
+    checked = 0
+    for where in found.splitlines():
+        hit = _re.search(r"guardian\.py:(\d{3,4})", where)
+        if hit is None:
+            continue
+        n = int(hit.group(1))
+        assert n <= len(lines), (
+            f"{where[:120]} cites guardian.py:{n}, past the end of a {len(lines)}-line "
+            "file — the cite is not about this file any more")
+        assert head_at(n), (
+            f"{where[:120]} cites guardian.py:{n}, and that line is inside no definition "
+            f"(it reads {lines[n - 1].strip()[:70]!r}). #3502 moved lines here: −58 between "
+            "the tripwire wrappers and `def count_kg_rows`, +15 below it. Re-point the cite "
+            "by the text of the line it means, then re-run this node.")
+        checked += 1
+    assert checked >= 40, (
+        f"only {checked} citations checked (52 existed on 2026-11-03) — a scan that found "
+        "almost nothing is a coverage gap reading itself as a clean result, which is the "
+        "failure mode this file exists to refuse")
