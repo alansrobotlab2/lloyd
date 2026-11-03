@@ -1084,3 +1084,120 @@ def test_an_id_less_task_file_is_keyed_by_its_own_name_in_every_id_bearing_field
     assert "998" in {t["task_id"] for t in body["tasks"]}, (
         "the per-task rollup lost the one id-less file that ran, so its row is keyed by "
         f"something else: {sorted(t['task_id'] for t in body['tasks'])}")
+
+
+# ── one id, two jobs: where the count comes from (#3730) ─────────────────────
+#
+# The row a human reads to decide whether to arm a stalled job was, on 2026-11-03,
+# `task_id=104 name='scheduled-ceiling flip-gate daily record' status=draft
+# never_run=True runs_in_window=5` — a job that had never run reported as having run
+# five times, because two task files declared `id: 104` and the run rollup is keyed by
+# that id alone. These two nodes are the two halves of clause 4: the derivation is
+# stated where a reader of the payload's source will meet it, and the contradiction is
+# reproducible from fixtures so the claim is not prose about a one-off.
+
+def _task(*, tid: int, name: str, status: str, frequency: str,
+          last_run=None, next_run=None) -> dict:
+    """A task dict in the shape `compute_health` is handed: the loader's own keys and
+    no others, because a fixture carrying a field the loader does not emit would let a
+    test pass on a key the payload never has.
+    """
+    return {"id": tid, "name": name, "status": status, "frequency": frequency,
+            "last_run": last_run, "next_run": next_run}
+
+
+def _run_row(task_id: int, *, status: str = "success") -> dict:
+    """One worker run record naming `task_id`, as `compute_health` receives it.
+
+    Only the fields the tally loop reads are set. A row's `task_id` is the whole
+    identity the rollup has — that is the fact under test, so it is spelled out here
+    rather than derived from a fixture task.
+    """
+    return {"task_id": str(task_id), "status": status, "meta_json": "{}",
+            "summary": "", "response_json": "", "duration_seconds": 1.0}
+
+
+def _sync(*, last_run) -> dict:
+    """ArtCraft as it stood live: armed, `up_next`, and run 2026-11-02T16:28:38Z."""
+    return _task(tid=104, name="ArtCraft Repo Sync", status="up_next",
+                 frequency="daily", last_run=last_run,
+                 next_run=(PIN - dt.timedelta(hours=7)).isoformat())
+
+
+def _flip_gate() -> dict:
+    """The flip-gate draft: never armed, never run, `next_run` 50 h past, so a
+    gap_ratio of 50/24 = 2.08 over its own declared daily period."""
+    return _task(tid=104, name="scheduled-ceiling flip-gate daily record",
+                 status="draft", frequency="daily", last_run=None,
+                 next_run=(PIN - dt.timedelta(hours=50)).isoformat())
+
+
+def test_compute_health_documents_the_run_record_key_its_counts_come_from():
+    """Clause 4: the docstring names the store the counts are counted from.
+
+    `runs_in_window` beside a `never_run=True` read as a stall bug for five days
+    because nothing said the number is this row's own `runs` again, keyed by the task
+    id that also names the record directory on disk. Stating the key is what turns the
+    row into evidence: a reader who knows `autonomy-runs/<task_id>/` is the SAME key can
+    tell a merged history from a stalled job in one look at the pair.
+    """
+    doc = A.compute_health.__doc__ or ""
+    assert "autonomy-runs/<task_id>/" in doc, doc[-1400:]
+    assert "_row_task_id" in doc, "the key of the tally has to be named"
+    assert "runs_in_window" in doc, doc[-1400:]
+    assert "#3730" in doc, "the incident that forced the sentence has to be cited"
+    # The load-bearing part is that the two fields are ONE number seen twice. A
+    # docstring that listed both without saying so would not make the contradiction
+    # legible, which is the whole use of the sentence.
+    assert "again" in doc, doc[-1400:]
+
+
+def test_one_id_two_files_puts_the_other_jobs_runs_behind_the_drafts_name():
+    """The merged row, built from fixtures, as the live payload showed it.
+
+    Five run records for id 104, two files declaring that id, and the row that comes
+    back carries the DRAFT's name and `last_run: null` over the SYNC's five runs —
+    `task_by_id` is a dict comprehension, so the later glob match wins. The
+    contradiction a reader can act on is `never_run=True` beside `runs_in_window=5`;
+    and the armed sync is named by no row in the payload at all, so nothing in the
+    report says a job is running five times a week under someone else's number.
+    """
+    report = A.compute_health([_run_row(104) for _ in range(5)],
+                              [_sync(last_run=(PIN - dt.timedelta(hours=20)).isoformat()),
+                               _flip_gate()],
+                              7, now=PIN)
+
+    rows = [t for t in report["tasks"] if t["task_id"] == "104"]
+    assert len(rows) == 1, f"two files, one id, one row: {rows}"
+    assert rows[0]["name"] == "scheduled-ceiling flip-gate daily record", rows[0]
+    assert rows[0]["runs"] == 5, rows[0]
+    assert rows[0]["last_run"] is None, rows[0]
+
+    stalled = [s for s in report["stalled"] if s["task_id"] == "104"]
+    assert len(stalled) == 1, report["stalled"]
+    assert stalled[0]["never_run"] is True, stalled[0]
+    assert stalled[0]["runs_in_window"] == 5, stalled[0]
+
+    named = ([t["name"] for t in report["tasks"]]
+             + [s["name"] for s in report["stalled"]]
+             + [i.get("name") for i in report["idle_tasks"]])
+    assert "ArtCraft Repo Sync" not in named, (
+        "the job that ran five times in the window is named nowhere in the report")
+
+
+def test_a_shared_id_also_drops_the_second_file_out_of_idle_tasks():
+    """The second absorption, which is a different line of code: `seen` is built from
+    emitted task-ids, so a file whose id is already on the page cannot be reported
+    idle either — it is invisible in all three arrays, not merely merged into a row.
+
+    Both files here look never-run, so the only row is the merged one and neither
+    file can reach `idle_tasks`. #3730's live case needed no second fixture: its sync
+    had run recently, so it was never idle to begin with, and the drop is asserted
+    where it is the only mechanism at work.
+    """
+    report = A.compute_health([_run_row(104)],
+                              [_sync(last_run=None), _flip_gate()], 7, now=PIN)
+
+    assert [t["task_id"] for t in report["tasks"]] == ["104"], report["tasks"]
+    assert [i for i in report["idle_tasks"] if str(i.get("id")) == "104"] == [], (
+        "the id is already in `seen`, so the second file is filtered out too")

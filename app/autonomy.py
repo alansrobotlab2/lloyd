@@ -5718,7 +5718,28 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
     tested near a bound, and a fleet report that mixes two clocks is two
     reports. Production passes nothing — the route reads the wall clock once,
     here, and every field below inherits that single reading.
-    """
+
+    Where the counts come from, and what one shared id does to them (#3730). A row's
+    `runs`, and the `runs_in_window` a `stalled` entry carries (that field is this
+    row's `runs` read again, not a second count), come from `by_task` — the tally
+    keyed by `_row_task_id(row)`, i.e. the worker run record's own `task_id`. That id
+    is also the number naming each job's run record on disk, `autonomy-runs/<task_id>/`
+    (`_record_phrase`'s `rel`), so the rollup and the directory are one key rather than
+    two stores that happen to agree. **One id declared by two task files therefore
+    merges their histories here**: the tally is attributed to whichever file
+    `task_by_id` kept — a dict comprehension over `tasks`, so the last glob match wins
+    — and the count then contradicts the identity printed beside it. That is what the
+    live tree showed on 2026-11-03 with `104` declared by both
+    `104-artcraft-repo-sync.md` (armed daily, five records in `autonomy-runs/104/`) and
+    `104-scheduled-ceiling-flip-gate-daily-record.md` (never armed, never run): one
+    `104` row read `never_run=True runs_in_window=5`, and ArtCraft appeared in none of
+    `tasks`, `idle_tasks` or `stalled` — absorbed here at `task_by_id`, and again by the
+    idle pass's `not in seen` filter. So a shared id is legible as a row whose
+    `never_run` and `runs_in_window` disagree about the same job, and the only honest
+    reading of that pair is that the id names more than one task.
+    `scripts/autonomy/validate_tasks.py` refuses both a duplicated `id:` and an `id:`
+    that disagrees with its `NN-` filename prefix, which is what keeps this row from
+    being produced silently again."""
     if now is None:
         now = _utcnow()
     by_task: dict[str, dict] = {}

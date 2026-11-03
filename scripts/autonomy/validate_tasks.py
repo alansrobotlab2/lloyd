@@ -45,6 +45,17 @@ key is present (#811) — three classes the scheduler only objects to at dispatc
     that was retired on 2026-09-20 (`551e9044`). Since #1555 the two status writers
     also refuse to *arm* such a task (`app/autonomy.py::slot_arm_block`); this is
     the static half, and it answers from `app.llm_slots`, never a copy.
+  * the id naming ONE job (#3730) — `DUPLICATE_TASK_ID` when two numbered files
+    declare the same front-matter `id:` (the warning names every file involved, since
+    the map this check replaced was last-wins and could only ever show one owner), and
+    `ID_FILENAME_MISMATCH` when a file's `id:` disagrees with its `NN-` filename
+    prefix. Each is invisible to the writer that produced the file and to the
+    scheduler loading it, and one shared id merges two jobs in the health payload:
+    `compute_health` keys its run rollup by that id, which is also the name of a
+    job's run-record directory (`autonomy-runs/<task_id>/`). On 2026-11-03 the one
+    `104` row read `never_run=True runs_in_window=5` while the armed sync that had
+    produced those five runs appeared nowhere in the report. Both are warnings, so
+    they only bite a caller that passes `--strict` — nothing arms itself from here.
 
 Usage:
     python scripts/autonomy/validate_tasks.py [--autonomy-dir DIR] [--strict]
@@ -570,6 +581,45 @@ def main(argv: list[str] | None = None) -> int:
         if tid:
             parsed[tid] = fm
 
+    warnings: list[str] = []          # hoisted: the id checks below append into it
+    # ── the id names ONE job (#3730) ──────────────────────────────────────────
+    # `parsed` above is last-wins and silent, which is the bug: every per-task
+    # rollup in the health payload keys on this id (`compute_health`'s
+    # `task_by_id`, and the idle pass that filters already-seen ids), and so does
+    # the run-record directory — `autonomy-runs/<task_id>/<run_id>.md`. Two files
+    # declaring one id therefore do not make two rows with an ugly key: one file
+    # vanishes from `tasks` entirely while the other reports its history. `104`
+    # was declared twice for four days and the live payload printed the never-run
+    # draft flip-gate job as `never_run=True runs_in_window=5` — those five runs
+    # were the armed ArtCraft sync's, which had no row anywhere in the report.
+    by_id: dict[str, list[str]] = {}
+    for p, fm in by_file:
+        declared = str(fm.get("id", "") or "").strip()
+        if declared:
+            by_id.setdefault(declared, []).append(p.name)
+    for tid in sorted(by_id, key=lambda k: int(k) if k.isdigit() else 0):
+        owners = sorted(by_id[tid])
+        if len(owners) > 1:
+            warnings.append(
+                f"{', '.join(owners)}: DUPLICATE_TASK_ID: both declare `id: {tid}`, and the "
+                "health payload keys every per-task rollup and the run-record directory on "
+                "that id — one of the two is dropped from `tasks` while the other reports "
+                "the first's runs. Rename the newer file to the next free number; the "
+                "filename prefix is the id authority `_next_task_id()` mints from")
+    # …and the two spellings of an id must agree. #3625 made the prefix the
+    # authority for a MISSING `id:` and said nothing about a DISAGREEING one, which
+    # is how a hand-stamped file arrives already colliding: the mint path reads
+    # prefixes only, so an id stamped below the highest prefix is invisible to it.
+    # Measured on the live tree 2026-11-03, this fires on zero files.
+    for p, fm in by_file:
+        stem = p.name.split("-")[0]
+        declared = str(fm.get("id", "") or "").strip()
+        if declared and stem.isdigit() and declared != stem:
+            warnings.append(
+                f"{p.name}: ID_FILENAME_MISMATCH: declares `id: {declared}` but its filename "
+                f"prefix is `{stem}-`. The prefix is what `_next_task_id()` reads, so a "
+                "disagreement is invisible to the next mint and is how a collision is born")
+
     # Read once, and only if some file declares a model. model_names returns None
     # when no `models:` mapping can be read; that must never read as a clean pass,
     # so it becomes a loud per-file warning below instead of silence.
@@ -580,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     # answers False for a flag that is absent, so silence here would be a verdict.
     slot_cfg = _UNSET
 
-    warnings: list[str] = []
+    # (`warnings` is declared above, where the id checks append into it.)
     for p, fm in by_file:
         status = str(fm.get("status", "") or "").strip()
         if status and status not in RUNNABLE_STATUSES:

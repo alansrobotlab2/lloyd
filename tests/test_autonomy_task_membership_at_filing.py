@@ -549,3 +549,262 @@ def test_a_report_that_raises_cannot_lose_the_written_file(seeded_fleet, monkeyp
     assert getattr(written, "report", None) is None, (
         "a half-built report was attached, which a reader takes for a real one")
     assert not journal.exists()
+
+
+# ── one id names one job (#3730) ─────────────────────────────────────────────
+#
+# Membership is a filename fact in this design (see the note above), and so is the id:
+# `app/autonomy.py::_load_all` keys its whole task list by the front-matter `id:`,
+# `compute_health` rolls run records up from `autonomy-runs/<task_id>/`, and
+# `_find_task_file` resolves a run request by filename prefix. Two files declaring one id
+# therefore do not merely duplicate a number — the report and the write path disagree about
+# which job it is. #3730 found exactly that live: `104-artcraft-repo-sync.md` (armed, daily,
+# five run records) and `104-scheduled-ceiling-flip-gate-daily-record.md` (never armed, never
+# run) both declared 104, and the health payload showed one `104` row reading
+# `never_run=True runs_in_window=5` — the draft's identity over the sync's history — while
+# ArtCraft had no row in `tasks`, `idle_tasks` or `stalled` at all.
+#
+# The linter is the surface that can see both files at once, so the check lives where
+# `validate_tasks.py` builds `parsed`, and it is a warning + `--strict` exit 2 like every
+# other check in that file: the nightly's exit code is not this round's to change.
+
+def _task_file(d: Path, stem: str, task_id, *, status: str = "draft") -> Path:
+    """A task file named `stem.md` declaring `id: task_id`.
+
+    `status: draft` by design: a draft is not dispatch-checked, so the only warnings a
+    caller sees from a pair of these are the id checks under test. Nothing else in the
+    file is stubbed away — the parse has to be real, since a file that failed to parse
+    would be reported as CRITICAL and skip the id checks entirely.
+    """
+    p = d / f"{stem}.md"
+    p.write_text(
+        "---\n"
+        f"id: {task_id}\n"
+        f"name: {stem.replace('-', ' ')}\n"
+        f"status: {status}\n"
+        "frequency: daily\n"
+        "agent_id: worker\n"
+        "model: primary\n"
+        "---\n\n# body\n\nDo the thing.\n",
+        encoding="utf-8")
+    return p
+
+
+def _linter(d: Path, *extra: str) -> tuple[int, str]:
+    """Run the real CLI over `d`; return `(exit code, printed output)`.
+
+    The CLI rather than the internals, because the clause is about what a person running
+    the linter sees and what the nightly's exit code becomes. `d` is never the default
+    directory, so the membership-table checks stay out of the output and every warning
+    line here is an id line.
+    """
+    import io
+    import contextlib
+    from scripts.autonomy import validate_tasks as vt
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = vt.main(["--autonomy-dir", str(d), *extra])
+    return rc, buf.getvalue()
+
+
+def _id_lines(out: str) -> list[str]:
+    return [ln.strip() for ln in out.splitlines()
+            if "DUPLICATE_TASK_ID" in ln or "ID_FILENAME_MISMATCH" in ln]
+
+
+def test_two_task_files_declaring_one_id_are_both_named_in_one_warning(tmp_path, ):
+    """Clause 1: the collision is reported naming BOTH files, not one of them.
+
+    The half that matters is that the message carries both names. `parsed[tid] = fm` —
+    the dict the check was inserted at — is last-wins, so a message built from it can
+    only ever name one owner, which is precisely the shape that made #3730 invisible for
+    five days: whichever file happened to sort second was the one nobody saw.
+    """
+    # Each prefix matches its own id, so the collision is the ONLY defect on show —
+    # a fixture that also mismatched would pass for the wrong reason.
+    _task_file(tmp_path, "104-artcraft-repo-sync", 104)
+    _task_file(tmp_path, "104-flip-gate-daily-record", 104)
+    _task_file(tmp_path, "105-some-other-job", 105)
+
+    rc, out = _linter(tmp_path)
+    lines = _id_lines(out)
+    assert len(lines) == 1, out
+    assert "104-artcraft-repo-sync.md" in lines[0], lines[0]
+    assert "104-flip-gate-daily-record.md" in lines[0], lines[0]
+    assert "id: 104" in lines[0], lines[0]
+    assert "105-some-other-job.md" not in lines[0], "a clean sibling is not dragged in"
+    assert rc == 0, "a warning stays a warning: the nightly's exit code is unchanged"
+
+
+def test_a_duplicated_id_exits_2_under_strict(tmp_path):
+    """Clause 1's exit half: `--strict` turns the collision into exit 2, the same code
+    every other warning in this file gets under the same flag."""
+    _task_file(tmp_path, "104-artcraft-repo-sync", 104)
+    _task_file(tmp_path, "104-flip-gate-daily-record", 104)
+
+    assert _linter(tmp_path, "--strict")[0] == 2
+    assert _linter(tmp_path)[0] == 0
+
+
+def test_the_collision_check_fires_once_per_id_not_once_per_pair(tmp_path):
+    """Three files on one id is one line naming all three.
+
+    Pairwise reporting would print two lines for the same defect, and a reader who fixed
+    the first pair would still be shown a warning about a file they had already ruled on.
+    """
+    _task_file(tmp_path, "104-a", 104)
+    _task_file(tmp_path, "104-b", 104)
+    _task_file(tmp_path, "104-c", 104)
+    lines = _id_lines(_linter(tmp_path)[1])
+    assert len(lines) == 1, lines
+    assert all(n in lines[0] for n in ("104-a.md", "104-b.md", "104-c.md")), lines[0]
+
+
+def test_a_numbered_file_whose_id_disagrees_with_its_prefix_is_named(tmp_path):
+    """Clause 2: the file, its filename prefix and its declared id are all in the message.
+
+    The stamp and the prefix are two different authorities over one id, and #3730's
+    collision arrived through the stamp: vault commit `d46cdd257` added a file already
+    hand-stamped `id: 104` under a fresh `104-` prefix. So a mismatch is the earlier
+    symptom of the same disease — and if the message named only the file, the reader
+    could not tell which of the two numbers to change.
+    """
+    _task_file(tmp_path, "150-flip-gate-daily-record", 104)
+
+    lines = _id_lines(_linter(tmp_path)[1])
+    assert len(lines) == 1, lines
+    assert "150-flip-gate-daily-record.md" in lines[0], lines[0]
+    assert "150" in lines[0] and "104" in lines[0], lines[0]
+    assert "prefix" in lines[0] and "filename" in lines[0], lines[0]
+
+
+def test_a_disagreeing_id_also_exits_2_under_strict(tmp_path):
+    _task_file(tmp_path, "150-flip-gate-daily-record", 104)
+    assert _linter(tmp_path, "--strict")[0] == 2
+    assert _linter(tmp_path)[0] == 0
+
+
+def test_a_file_whose_prefix_and_id_agree_fires_neither_check(tmp_path):
+    """The zero-fires half of clause 2, in a fixture.
+
+    Two live facts ride on this being quiet: the 49 files in the tree today all agree
+    (`_next_task_id` derives the next id from prefixes alone, so a disagreeing file would
+    already have been minted), and the check must not become the warning everyone learns
+    to scroll past. An unnumbered file is the other half: the report jobs land
+    `24-data-pipeline.md` style with no prefix at all, and they have no prefix to
+    disagree with.
+    """
+    _task_file(tmp_path, "104-artcraft-repo-sync", 104)
+    _task_file(tmp_path, "107-flip-gate-daily-record", 107)
+    _task_file(tmp_path, "24-data-pipeline", 24)
+    rc, out = _linter(tmp_path, "--strict")
+    assert _id_lines(out) == [], out
+    assert rc == 0, out
+
+
+def test_the_check_reads_the_prefix_exactly_as_the_minter_does(monkeypatch):
+    """The check and `agent_mcp/autonomy.py::_next_task_id` must share one convention, or
+    the linter warns about a prefix the minter never promised.
+
+    The minter takes the digits before the first hyphen of every `*.md` (skipping
+    `_config.md`) and mints one above the max, so in this three-file tree it sees 7 and 9
+    and mints 10 — `7x-odd.md` contributes nothing, and neither contributes anything to the
+    check, which is the half that keeps the check from warning about files the minter treats
+    as unnumbered.
+
+    `007-zero-padded.md` is the interesting one, and it is a warning, not silence: the
+    minter reads it as 7, so the NUMBER agrees, but `app/autonomy.py::_find_task_file`
+    resolves a run request by globbing `f"{id}-"` — `7-` never matches `007-zero-padded.md`.
+    A zero-padded file is unreachable by id lookup while looking clean to every count, so
+    the string comparison is the right predicate and the numeric one would hide it.
+    """
+    from agent_mcp import autonomy as AM
+    from agent_mcp.autonomy import _next_task_id
+
+    d = _mkd()
+    _task_file(d, "007-zero-padded", 7)
+    _task_file(d, "9-nine", 9)
+    _task_file(d, "7x-odd", 9)          # unnumbered to both readers
+    monkeypatch.setattr(AM, "AUTONOMY_DIR", d)
+    assert _next_task_id() == 10, "the minter sees 7 and 9, and no number in `7x-odd`"
+    lines = _id_lines(_linter(d)[1])
+    assert len(lines) == 1, lines
+    assert "007-zero-padded.md" in lines[0], lines[0]
+    assert "007" in lines[0] and "id: 7" in lines[0], lines[0]
+
+
+def _mkd():
+    import tempfile
+    return Path(tempfile.mkdtemp())
+
+
+def test_the_live_tree_declares_every_id_exactly_once():
+    """Clause 2's live half and clause 3's tree state: over the real vault the two id
+    checks are silent, which is what "fires on zero files in the current tree" claims and
+    no fixture can establish.
+
+    Six lines of this are the item's own acceptance pipeline — the `sed | sort | uniq -d`
+    over `autonomy/[0-9]*.md` printing nothing — plus the specific pair #3730 was filed
+    on by name, because a tree that merely happened to have no duplicate today would pass
+    a bare `uniq -d` without showing that THIS collision was the one resolved.
+
+    It is `live_vault` for the reason that mark exists: the tree is one a round under test
+    does not control. The `--strict` exit code is NOT asserted, because it is not this
+    check's to make — see the next node for what the strict run over this tree returns and
+    why that is not an id problem.
+    """
+    live = Path(vt_default_dir())
+    if not live.exists():
+        pytest.skip(f"no autonomy dir at {live}")
+
+    _rc, out = _linter(live)
+    assert _id_lines(out) == [], out
+
+    names = sorted(p.name for p in live.glob("[0-9]*.md"))
+    assert "104-artcraft-repo-sync.md" in names, names
+    assert "107-scheduled-ceiling-flip-gate-daily-record.md" in names, names
+    assert "104-scheduled-ceiling-flip-gate-daily-record.md" not in names, names
+    prefixes = [int(n.split("-", 1)[0]) for n in names]
+    assert {i for i in prefixes if prefixes.count(i) > 1} == set(), names
+
+    def declared(stem: str) -> str:
+        text = (live / stem).read_text(encoding="utf-8")
+        fm = text.split("---")[1]
+        return [ln for ln in fm.splitlines() if ln.startswith("id:")][0].strip()
+
+    assert declared("104-artcraft-repo-sync.md") == "id: 104"
+    assert declared("107-scheduled-ceiling-flip-gate-daily-record.md") == "id: 107"
+
+
+def test_the_strict_run_over_the_live_tree_is_quiet_apart_from_membership():
+    """What `--strict` exits 2 on today, named exactly, so the rename's one side-effect is
+    on the record rather than discovered by whoever runs the linter next.
+
+    Resolving the collision REMOVED a mask: while both files declared 104, the flip-gate
+    file satisfied `autonomy-jobs.md`'s `#104` rows through ArtCraft's id, and only once
+    it takes 107 does the membership linter see a live task file with no row in either
+    table. Those two `DOC_MEMBERSHIP` lines are therefore the evidence for the ruling #3730
+    already owes — whether a `draft` task belongs in the membership tables at all, which
+    `scripts/autonomy/jobs_membership.py` does not say and #3592's closure did not cover.
+    This node asserts they are the ONLY thing a strict run complains about, and nothing more.
+    """
+    live = Path(vt_default_dir())
+    if not live.exists():
+        pytest.skip(f"no autonomy dir at {live}")
+
+    rc, out = _linter(live, "--strict")
+    warned = [ln.strip() for ln in out.splitlines()
+              if "DOC_MEMBERSHIP" in ln or "DUPLICATE_TASK_ID" in ln
+              or "ID_FILENAME_MISMATCH" in ln]
+    assert not _id_lines(out), out
+    assert len(warned) == 2, warned
+    assert all("DOC_MEMBERSHIP" in w and "#107" in w for w in warned), warned
+    assert rc == 2, "the flag's meaning is unchanged: any warning is exit 2 under --strict"
+
+
+def vt_default_dir() -> str:
+    """`validate_tasks.DEFAULT_DIR`, as a string, so the live test above asks the
+    linter about the tree the linter is actually pointed at rather than a guessed one."""
+    from scripts.autonomy.validate_tasks import DEFAULT_DIR
+    return str(DEFAULT_DIR)
