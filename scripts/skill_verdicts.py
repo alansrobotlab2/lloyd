@@ -630,6 +630,27 @@ def is_terminal(row: dict | None) -> bool:
     return bool(row) and (row.get("verdict") or "").strip() in TERMINAL_VERDICTS
 
 
+#: The key prefix of a per-run bookkeeping row. `trajectory-skill-mining` step 3.5 mints one of
+#: these per mining night — `run:<YYYY-MM-DD>-nightly-mining` — and #3363 mandates it, so the row
+#: is not going away; what it must stop doing is sitting in the same denominator as a pattern
+#: decision. It carries `below_threshold`, which is NOT in `TERMINAL_VERDICTS`, so it honours
+#: nothing, reopens nothing and can never be falsified away: one accrues every night the miner
+#: runs, and the count of pattern decisions grew monotonically for an unrelated reason (#3591).
+RUN_ROW_PREFIX = "run:"
+
+
+def is_run_bookkeeping_key(key: str) -> bool:
+    """Is this ledger key a per-run bookkeeping row rather than a pattern decision?
+
+    Decided on the key text alone, and by ONE predicate on purpose: `cmd_audit` publishes the
+    pattern figures and `cmd_list` publishes a `keys:` figure, and the two surfaces have to agree
+    about which population each is counting or a run reads two different ledger sizes from one
+    file (#3591 clause 1). Nothing about the ROW is consulted — the verdict is not the rule: a run
+    row could be recorded with any verdict, and a pattern key could share a verdict with one.
+    """
+    return str(key or "").startswith(RUN_ROW_PREFIX)
+
+
 def date_leg_anchor(row: dict) -> datetime | None:
     """The stamp the 60-day leg is weighed on (#2746 clause 1).
 
@@ -3296,10 +3317,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
     decided before `candidate_body_defect` for that reason, and it enters the exit code by name so
     excluding a row from one figure cannot quietly buy a green audit.
 
-    Then the tallies, and their order is load-bearing: `exit_drivers:`, then
-    `candidate_body_scoping: whole_file N dead_strip N input_lost N`, then `stranded:
-    case_sensitive_grep N`, then `denominators: empty_input N undeclared M`, then
-    `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
+    Then the tallies, and their order is load-bearing: `run_rows: N undeclared M`, then
+    `exit_drivers:`, then `candidate_body_scoping: whole_file N dead_strip N input_lost N`,
+    then `stranded: case_sensitive_grep N`, then `denominators: empty_input N undeclared M`,
+    then `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
     `splitlines()[-1]` gets the ledger tally and one that takes `[-2]` gets the denominator
     tally it has been reading since #2048. The new count enters ABOVE those two rather than
     between them, because displacing a published line to make room for a new one is how a
@@ -3317,8 +3338,22 @@ def cmd_audit(args: argparse.Namespace) -> int:
     term whose count is non-zero as `<term> <count>` pairs, spelled with the tokens the tally lines
     already publish — `input_lost`, never `lost_rows` — so it ties to a line the reader already has,
     and reads `exit_drivers: none` on a run that exits 0, because a tally that only appears with
-    findings cannot tell a clean night from an audit nobody ran. It is the first line of the block
-    and the exit reads the same six counts: the pair can never disagree.
+    findings cannot tell a clean night from an audit nobody ran. It sits immediately below
+    `run_rows:` and above every count it can name, and the exit reads the same six counts: the
+    pair can never disagree.
+
+    Two populations share this stdout since #3591, and only the DENOMINATORS are split between
+    them. `trajectory-skill-mining` step 3.5 mints one bookkeeping key per mining night —
+    `run:<YYYY-MM-DD>-nightly-mining`, always `below_threshold`, which `TERMINAL_VERDICTS` does not
+    hold so the row honours nothing, reopens nothing and can never be falsified away — and #3591's
+    triage found 38 of 193 keys were those rows, one accruing every night. `keys:` and the
+    `undeclared` figure therefore count the pattern population, `run_rows:` names the other one and
+    its own undeclared share, and the two figures account for each key exactly once — which is what
+    lets #2051 read `undeclared` as a figure that can actually fall. The six DEFECT figures stay
+    whole-ledger, run rows included: they are the exit terms, #2343's rule is that a driving count
+    has to be visible in a published figure, and a blind or dead run-row falsifier is a defect the
+    nightly has to pay for rather than a denominator filed quietly away. Whether those rows belong
+    in this ledger at all is the scope ruling #3591 deliberately does not take.
 
     The stranded line exists because the ledger's own worst silent failure is not a command
     that cannot run. A falsifier that greps an installed `SKILL.md` for a literal string
@@ -3336,9 +3371,14 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
     The tallies answer different questions and one key can appear in more than one.
     `unrunnable:` is about whether the check can execute; `denominators:` is about whether it
-    says what it read — `undeclared` counts every key whose command named no `input_rows`, the
-    unrunnable ones included, so `empty_input + undeclared + declared` adds up to `keys:`
-    and a reader can check the arithmetic. `stranded:` is a third axis again, overlapping the
+    says what it read — `undeclared` counts every PATTERN key whose command named no
+    `input_rows`, the unrunnable ones included, and the run rows' share is the figure on
+    `run_rows:`, so over the pattern population `empty_input + undeclared + declared` still adds
+    up to `keys:` and a reader can check the arithmetic. The identity is whole-ledger only where no
+    run row is itself an empty-input row — and that is the price taken deliberately, because
+    `empty_input` is one of the six exit terms and shrinking it to the pattern population would
+    cost the nightly's `ledger_empty_input:` evidence a class of defect it has always covered.
+    `stranded:` is a third axis again, overlapping the
     other two freely: a key can be stranded and undeclared, and cannot be stranded and
     unrunnable, because the re-read that proves the artefact has to run, so #2103 leaves that
     pairing to `UNRUNNABLE`, which the classifier decides first. That is why each figure is a
@@ -3354,7 +3394,17 @@ def cmd_audit(args: argparse.Namespace) -> int:
     convention, and this line is what measures whether it is biting.
     """
     table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
+    # #3591: ONE population split, decided by `is_run_bookkeeping_key`, feeding the figures below.
+    # `pattern_keys` is what `keys:` and `undeclared` count; `run_keys` is named beside them. The
+    # loop still walks the WHOLE table: every stored falsifier still runs, every defect line still
+    # prints, and the six exit terms stay whole-ledger figures — a run row whose check cannot see
+    # its input has to cost the run exactly as a pattern row does, and #2343's rule is that every
+    # driving count appears in a published figure, which partitioning `input_lost` would break by
+    # printing `input_lost 0` above an `exit_drivers: input_lost 1`.
+    run_keys = [key for key in table if is_run_bookkeeping_key(key)]
+    pattern_keys = [key for key in table if not is_run_bookkeeping_key(key)]
     dead, empty_input, stranded, undeclared = [], [], [], 0
+    undeclared_run = 0
     # #2166's two shapes, decided on the stored text alone: neither needs the command to run,
     # because the defect is what the command reads rather than what it answers. A key whose
     # falsifier counts a candidate file whole has been inflating all along and reported rc 0
@@ -3372,7 +3422,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
         # publishing it here cannot slow the hundred-odd keys that answered normally.
         state, detail, declared = _run_stored_check(table[key], timeout=args.timeout)
         if declared is None:
-            undeclared += 1
+            # Two figures, one predicate: `undeclared` keeps meaning "how many PATTERN decisions
+            # carry no denominator", which is the number #2051 asks to watch fall, and the run
+            # rows' share is named beside it rather than folded into it (#3591 clause 3).
+            if is_run_bookkeeping_key(key):
+                undeclared_run += 1
+            else:
+                undeclared += 1
         if state == UNRUNNABLE:
             dead.append(key)
             print(f"UNRUNNABLE {key} :: {detail}")
@@ -3421,6 +3477,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
                   ("dead_strip", len(dead_strip)),
                   ("input_lost", len(lost_rows)))
     drivers = " ".join(f"{token} {count}" for token, count in exit_terms if count)
+    # The TOP of the block is this line's slot, for the reason #2343 states for its own: negative
+    # indices count from the END, so a tally added above the whole block leaves `keys:` at -1,
+    # `denominators:` at -2, `stranded:` at -3, `candidate_body_scoping:` at -4 and `exit_drivers:`
+    # at -5 exactly where every nightly and test already reads them, and the new line arrives at
+    # -6. It prints its zero form for the same reason the other tallies do: a figure that only
+    # appears when run rows exist cannot tell a ledger with none from an audit nobody ran.
+    print(f"run_rows: {len(run_keys)} undeclared {undeclared_run}")
     print(f"exit_drivers: {drivers or 'none'}")
     # ABOVE `stranded:`, not below it: #2103's test pins `splitlines()[-3]` to that line, and
     # the rule that lands in #2166's own test is that a new tally arrives above the published
@@ -3431,7 +3494,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
           f"input_lost {len(lost_rows)}")
     print(f"stranded: case_sensitive_grep {len(stranded)}")
     print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
-    print(f"keys: {len(table)} unrunnable: {len(dead)}")
+    # `keys:` is the pattern population and `run_rows:` above it is the other one: the two figures
+    # together are the table, each key counted once. `unrunnable:` stays whole-ledger with the
+    # other five defect figures — a dead run-row falsifier is a defect, not a denominator, and the
+    # nightly's `ledger_unrunnable:` evidence must not be able to read 0 over a ledger that exits 1.
+    print(f"keys: {len(pattern_keys)} unrunnable: {len(dead)}")
     # Still the six-term rule of #2048/#2166/#2339, read off `exit_terms`: `lost_rows` is one of the
     # six because the change that removed those four rows from `whole` is the same change that would
     # otherwise have flipped tonight's audit from exit 1 to exit 0 — excluded from one figure and
@@ -3695,11 +3762,22 @@ def cmd_seed(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
+    """Latest-wins view of the ledger, with the two populations tallied apart (#3591 clause 5).
+
+    Every row is still listed — the per-night rows are a record of what the miner did, and hiding
+    them is not this item's call — but the closing `keys:` figure counts the same pattern
+    population `audit` publishes, because the inflated figure lived in both subcommands and one
+    predicate has to decide both. `run_rows:` is named on its own line above it so the two add up
+    to the table on stdout, and `keys:` stays the LAST line: a runbook taking `splitlines()[-1]`
+    from this surface keeps getting the ledger tally, now over patterns.
+    """
     table = load_verdicts(resolve_verdict_source(args.store)[0])
     for key in sorted(table):
         row = table[key]
         print(f"{key}\t{row.get('verdict')}\t{row.get('decided_at')}\t{row.get('reason')}")
-    print(f"keys: {len(table)}")
+    run_rows = [key for key in table if is_run_bookkeeping_key(key)]
+    print(f"run_rows: {len(run_rows)}")
+    print(f"keys: {len(table) - len(run_rows)}")
     return 0
 
 

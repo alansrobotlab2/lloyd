@@ -2357,13 +2357,19 @@ def test_audit_tally_is_its_final_line(tmp_path):
     # from the END: a line inserted above a block leaves every index inside that block unchanged, so
     # `keys:` stays -1, `denominators:` -2, `stranded:` -3 and `candidate_body_scoping:` -4, while
     # the new line arrives at -5. Two positions are pinned below to prove that, not just assert it.
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 5, (
-        f"tally must be the {len(AUDIT_DEAD) + 5}th and last line of its own output: {out}")
+    # +6 as of #3591, whose `run_rows:` line enters at the TOP of that block for the very same
+    # reason #2343 gave: this clause asks for the line ABOVE `stranded:` and for `-1`, `-2` and `-3`
+    # to hold their figures, and an insertion anywhere BELOW `-3` would displace them. The count
+    # here moves by one and nothing indexed moves at all; `keys:` still reads 7 because none of this
+    # ledger's keys is a `run:` row, and the new line prints its zero form at the new index -6.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 6, (
+        f"tally must be the {len(AUDIT_DEAD) + 6}th and last line of its own output: {out}")
     assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
     assert out.splitlines()[-3] == "stranded: case_sensitive_grep 0", out
     assert out.splitlines()[-4] == ("candidate_body_scoping: whole_file 0 dead_strip 0 "
                                     "input_lost 0"), out
     assert out.splitlines()[-5] == "exit_drivers: unrunnable 4", out
+    assert out.splitlines()[-6] == "run_rows: 0 undeclared 0", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
 
 
@@ -5383,13 +5389,14 @@ def test_the_shipped_cli_prints_exit_drivers_at_its_pinned_position_over_a_real_
     that reaches a different stream or a line that arrives past the one a reader takes. So this runs
     the shipped program over a temp ledger through a real pipe and pins five positions at once:
     `keys:` -1, `denominators:` -2, `stranded:` -3, `candidate_body_scoping:` -4, `exit_drivers:` -5.
-    The driver line enters at the TOP of the tally block, which is the only insertion point that
-    moves none of the four positions a runbook or a test already reads — negative indices count from
-    the end, so a line added above a block leaves the block's own indices exactly where they were.
-    That is why `candidate_body_scoping:` is pinned at `-4` and the new line at `-5`: the item's
-    clause asks for the line "immediately above" the scoping tally AND for the scoping tally to move
-    to `-5`, and those two readings are arithmetically exclusive. The one this node pins is the
-    instruction, the safe half — nothing a published reader indexes is displaced.
+    #2343 entered at the TOP of the tally block, which is the only insertion point that moves none
+    of the four positions a runbook or a test already reads — negative indices count from the end,
+    so a line added above a block leaves the block's own indices exactly where they were. That is why
+    `candidate_body_scoping:` is pinned at `-4` and the driver line at `-5`: the item's clause asked
+    for the line "immediately above" the scoping tally AND for the scoping tally to move to `-5`, and
+    those two readings are arithmetically exclusive. The one #2343 pinned is the instruction, the
+    safe half — nothing a published reader indexes is displaced — and #3591's `run_rows:` line
+    arrives above it at `-6` by the same argument, which is why all five positions here still hold.
     """
     store = tmp_path / "pipe.jsonl"
     cand = candidates_2339(tmp_path)
@@ -6874,3 +6881,289 @@ def test_a_tilde_rooted_directory_that_lists_but_matches_nothing_is_still_input_
     detail = sv.candidate_input_lost(tilde_row_cmd_3010())
     assert detail is not None and "(1 files there, none matching)" in detail, detail
     assert "no such directory" not in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# #3591 — the per-run bookkeeping row is counted apart from the pattern decisions.
+#
+# `trajectory-skill-mining` step 3.5 mints one ledger key per mining night,
+# `run:<YYYY-MM-DD>-nightly-mining`, always carrying verdict `below_threshold`. That verdict is
+# not in `TERMINAL_VERDICTS`, so the row honours nothing, reopens nothing and can never be
+# falsified away — and one accrues every night. `audit`'s `keys:` and `undeclared` counted them
+# beside the pattern decisions all along, so `keys:` could not be read as "how many pattern
+# decisions this ledger holds" and `undeclared` could not fall cleanly, because the denominator
+# grew for a reason that has nothing to do with pattern decisions (#2051's question).
+#
+# The fix is a population split, decided by one predicate and applied to the two DENOMINATORS.
+# The six DEFECT figures (`unrunnable`, `empty_input`, `case_sensitive_grep`, `whole_file`,
+# `dead_strip`, `input_lost`) stay over the whole ledger on purpose, and clause 4 pins the
+# reason: they are the exit terms, and #2343's finding was that every driving count has to be
+# visible in a published figure. Partitioning `input_lost` would print `input_lost 0` above an
+# `exit_drivers: input_lost 1`, which is #2343's gap arriving laundered as a denominator fix.
+# ---------------------------------------------------------------------------
+
+#: The #2052 shape: an observation that also declares how much it read.
+DECLARED_3591 = PRINTING_CMD
+
+#: The same observation with the declaration stripped — the pre-#2052 legacy row. `undeclared`
+#: is decided on the command's STDOUT (`declared_denominator(proc.stdout)`), never on whether the
+#: stored command text mentions the field, which is why the fixture withholds it from the output
+#: rather than from the text.
+UNDECLARED_3591 = f"grep -c '^def ' {_ROOT / 'scripts' / 'skill_verdicts.py'}"
+
+RUN_KEY_A = "run:2026-10-23-nightly-mining"
+RUN_KEY_B = "run:2026-10-24-nightly-mining"
+
+
+def mixed_ledger_3591(store: Path) -> None:
+    """Four latest-wins keys: two pattern decisions and two per-run rows, one of each population
+    declaring its denominator and one not.
+
+    Two per population and not one, so a figure that forgot to partition shows as a wrong count
+    rather than as a missing line, and so the two populations' figures can be checked to account
+    for the four keys and the two undeclared rows exactly once each (#3591 clause 3).
+    """
+    stored_row(store, "Bash/timeout", DECLARED_3591)
+    stored_row(store, "Edit/not_found", UNDECLARED_3591)
+    stored_row(store, RUN_KEY_A, DECLARED_3591, verdict="below_threshold")
+    stored_row(store, RUN_KEY_B, UNDECLARED_3591, verdict="below_threshold")
+
+
+def run_list(store: Path) -> tuple[int, str]:
+    """`list` over the same in-process route `run_audit` uses for `audit`, so the two figures a
+    runbook reads side by side come off one ledger read the same way."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["list", "--store", str(store)])
+    return rc, buf.getvalue()
+
+
+def test_the_run_row_predicate_is_decided_from_the_key_text_alone():
+    """Clause 1, the predicate itself: the `run:` prefix and nothing else decides the shape.
+
+    The negative half is the load-bearing half. A key that merely mentions running
+    (`Bash/run_cancelled`) is a pattern decision and must stay in `keys:`, and the prefix has to be
+    the whole of the rule — the verdict is not, because a pattern key can carry `below_threshold`
+    too, and the row's own text is not either, since the item's shape is the KEY
+    `run:<YYYY-MM-DD>-nightly-mining` minted by `trajectory-skill-mining` step 3.5.
+    """
+    assert sv.is_run_bookkeeping_key(RUN_KEY_A)
+    assert sv.is_run_bookkeeping_key("run:2026-09-20-nightly-mining")
+    assert not sv.is_run_bookkeeping_key("Bash/run_cancelled")
+    assert not sv.is_run_bookkeeping_key("seq-9-bash-fs")
+    assert not sv.is_run_bookkeeping_key("Edit/not_found")
+    assert not sv.is_run_bookkeeping_key("runnightly-mining")
+    assert not sv.is_run_bookkeeping_key("")
+
+
+def test_audit_computes_its_pattern_figures_over_two_keys_and_its_run_row_figures_over_two(store):
+    """Clause 1, applied: `cmd_audit` derives EVERY figure it publishes from that one predicate.
+
+    Four latest-wins keys — two pattern decisions, two per-run rows — and the two populations come
+    apart in every figure: `keys:` reads 2 and `run_rows:` reads 2. Un-partitioned the same ledger
+    printed `keys: 4`, which is the defect #3591 measured at 38 `run:` rows inside 193 keys, one
+    row accruing every mining night. `unrunnable:` deliberately still reads the WHOLE ledger:
+    clause 4 requires that a run row's own defect keep costing the run.
+    """
+    mixed_ledger_3591(store)
+
+    rc, out = run_audit(store)
+    assert rc == 0, out                      # an undeclared denominator is never an exit term
+    lines = out.splitlines()
+    assert lines[-1] == "keys: 2 unrunnable: 0", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 1", out
+    run_lines = [ln for ln in lines if ln.startswith("run_rows:")]
+    assert len(run_lines) == 1, out
+    assert run_lines[0] == "run_rows: 2 undeclared 1", out
+
+
+def test_the_run_row_tally_line_enters_above_stranded_and_moves_no_pinned_index(store):
+    """Clause 2: the run-row tally line enters ABOVE `stranded:`, and no INDEX slot moves.
+
+    The slot rule is the order `cmd_audit`'s docstring publishes at
+    `scripts/skill_verdicts.py:3320-3326` — `keys:` at `splitlines()[-1]`, `denominators:` at `-2`,
+    `stranded:` at `-3` — plus #2166's `candidate_body_scoping:` at `-4` and #2343's
+    `exit_drivers:` at `-5`. Negative indices count from the END, so the only insertion point that
+    satisfies both halves of this clause — a line above `stranded:` AND those three figures unmoved
+    — is the TOP of the block: the new line arrives at `-6` and the five tally lines below it stay
+    exactly where every nightly reads them. Six lines in all here, because this fixture produces no
+    findings above the block.
+    """
+    mixed_ledger_3591(store)
+
+    rc, out = run_audit(store)
+    lines = out.splitlines()
+    assert len(lines) == 6, out
+    assert lines[-6] == "run_rows: 2 undeclared 1", out
+    assert lines[-5] == "exit_drivers: none", out
+    assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0", out
+    assert lines[-3] == "stranded: case_sensitive_grep 0", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 1", out
+    assert lines[-1] == "keys: 2 unrunnable: 0", out
+    assert out.index("run_rows:") < out.index("stranded:"), out
+
+
+def test_the_two_figures_together_account_for_every_key_and_every_undeclared_row_once(store):
+    """Clause 3, as an identity: pattern figures + run-row figures = the ledger, each row once.
+
+    Measured against the module rather than against the printed strings: the key population comes
+    from `load_verdicts` and the undeclared population from re-executing every stored falsifier
+    through `_run_stored_check`, which is how `undeclared` is decided at all — on the command's
+    STDOUT (`declared_denominator`), never on whether the stored text mentions `input_rows=`. So
+    the two published figures have to sum to those two measurements, split the way the predicate
+    splits them: 4 keys as 2 + 2, and this fixture's 2 undeclared rows as 1 pattern + 1 run row.
+    """
+    mixed_ledger_3591(store)
+    table = sv.load_verdicts(store)
+    assert len(table) == 4, sorted(table)
+    undeclared_keys = sorted(
+        key for key, row in table.items()
+        if sv._run_stored_check(row, timeout=10)[2] is None)
+    assert len(undeclared_keys) == 2, undeclared_keys
+
+    rc, out = run_audit(store)
+    assert rc == 0, out
+    lines = out.splitlines()
+    keys_figured = int(lines[-1].split()[1])
+    run_line = next(ln for ln in lines if ln.startswith("run_rows:"))
+    run_keys_figured = int(run_line.split()[1])
+    pattern_undeclared = int(lines[-2].split("undeclared")[1])
+    run_undeclared = int(run_line.split("undeclared")[1])
+
+    assert keys_figured + run_keys_figured == len(table), out
+    assert pattern_undeclared + run_undeclared == len(undeclared_keys), out
+    assert (keys_figured, run_keys_figured) == (2, 2), out
+    assert (pattern_undeclared, run_undeclared) == (1, 1), out
+    assert sorted(k for k in undeclared_keys if sv.is_run_bookkeeping_key(k)) == [RUN_KEY_B], out
+
+
+def test_a_run_row_minted_through_record_verdict_lands_in_the_run_row_figure(store):
+    """The mint↔predicate coupling, inside this repo: the row the miner writes is the row split out.
+
+    `trajectory-skill-mining` step 3.5 mints this key from another process through
+    `record_verdict`, and the predicate matches text that mint produces. Every other node on this
+    surface writes the key with `stored_row`, so without this node nothing in the suite would catch
+    the mint changing shape while the prefix rule kept matching only `run:`. It also pins why the
+    row can be counted apart at all: its verdict is `below_threshold`, which `TERMINAL_VERDICTS`
+    does not hold, so honouring it would be a no-op — and `keys:` still counts only the pattern.
+    """
+    minted = "run:2026-11-02-nightly-mining"
+    sv.record_verdict(store=store, pattern_key=minted, verdict="below_threshold",
+                      reason="no error pattern at or above n=2 met the bar (2 keys, 1 session)",
+                      evidence_cmd=DECLARED_3591, occurrences=0)
+    stored_row(store, "Bash/timeout", DECLARED_3591)
+
+    assert "below_threshold" not in sv.TERMINAL_VERDICTS
+    assert sv.load_verdicts(store)[minted]["verdict"] == "below_threshold"
+    assert sv.is_run_bookkeeping_key(minted)
+
+    rc, out = run_audit(store)
+    assert rc == 0, out
+    lines = out.splitlines()
+    assert lines[-1] == "keys: 1 unrunnable: 0", out
+    assert lines[-6] == "run_rows: 1 undeclared 0", out
+
+
+def test_a_ledger_holding_no_run_row_publishes_the_zero_figure_not_an_absent_line(store):
+    """The zero form, because a tally that only appears when run rows exist cannot separate a
+    ledger with none from an audit nobody ran — the reason #2103 and #2166 print `stranded: … 0`.
+
+    Two pattern keys and no `run:` row: `keys:` still reads 2, which is unchanged behaviour for a
+    ledger of patterns only, and the new line still prints at `-6` reading
+    `run_rows: 0 undeclared 0`.
+    """
+    stored_row(store, "Bash/timeout", DECLARED_3591)
+    stored_row(store, "Edit/not_found", DECLARED_3591)
+
+    rc, out = run_audit(store)
+    assert rc == 0, out
+    lines = out.splitlines()
+    assert lines[-6] == "run_rows: 0 undeclared 0", out
+    assert lines[-1] == "keys: 2 unrunnable: 0", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 0", out
+
+
+def test_a_run_row_whose_falsifier_cannot_see_its_input_still_prints_and_still_exits_1(tmp_path,
+                                                                                       store):
+    """Clause 4: separating the tally silences no rail — the run row's own defect still fires.
+
+    The live recurrence is `INPUT_LOST run:2026-10-23-nightly-mining :: candidate-*-20261023.md
+    … with exit_drivers: input_lost 1` (skills/trajectory-skill-mining/SKILL.md:346-352): a run row
+    naming a dated corpus glob is blind from the next night on, and that printed pair is what makes
+    it repairable. An audit that stopped executing these rows would print `exit_drivers: none` and
+    look green while retiring a working check. So this pins the row's own `INPUT_LOST run:…` line,
+    the six-term exit 1, the whole-ledger defect figures (`input_lost 1` with the run row as its
+    only cause) AND the split beside them: `keys: 1`, `undeclared 0`, `run_rows: 1 undeclared 1`.
+    """
+    cand = candidates_2339(tmp_path)
+    stored_row(store, RUN_KEY_A, seq_row_2339(cand, RUN_KEY_A), verdict="below_threshold")
+    stored_row(store, "Bash/timeout", DECLARED_3591)
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    lines = out.splitlines()
+    lost = [ln for ln in lines if ln.startswith("INPUT_LOST ")]
+    assert len(lost) == 1 and lost[0].startswith(f"INPUT_LOST {RUN_KEY_A} ::"), out
+    assert lines[-5] == "exit_drivers: input_lost 1", out
+    assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 0", out
+    assert lines[-1] == "keys: 1 unrunnable: 0", out
+    assert lines[-6] == "run_rows: 1 undeclared 1", out
+
+
+def test_list_publishes_the_same_pattern_population_audit_counts_in_process(store):
+    """Clause 5, the shared predicate: `list`'s closing `keys:` is `audit`'s `keys:`, same ledger.
+
+    The item's triage found the inflated figure in `cmd_list` too (`keys:` printed over the whole
+    table), so the fix has to be one predicate and not one loop. Over ONE ledger read the same way
+    both commands read it, `list`'s last line is `keys: 2` — the same 2 `audit` publishes — with
+    `run_rows: 2` on the line of its own immediately above it, and both run keys still present as
+    rows: a tally split, not a filter over what a reader can see.
+    """
+    mixed_ledger_3591(store)
+
+    rc, out = run_list(store)
+    assert rc == 0, out
+    lines = out.splitlines()
+    assert lines[-1] == "keys: 2", out
+    assert lines[-2] == "run_rows: 2", out
+    for key in (RUN_KEY_A, RUN_KEY_B):
+        assert any(ln.startswith(f"{key}\t") for ln in lines), out
+
+    _, audited = run_audit(store)
+    assert audited.splitlines()[-1].split()[1] == lines[-1].split()[1], (audited, out)
+
+
+def test_the_shipped_cli_agrees_between_list_and_audit_on_the_pattern_population(tmp_path):
+    """Clause 5 across its process boundary: the bytes both subcommands print through a real pipe.
+
+    A runbook invokes these as subprocesses, and every in-process node here captures stdout with
+    `redirect_stdout`, which cannot see a print that reaches a different stream. So this runs the
+    shipped program over one temp ledger through a real pipe: `list` ends `run_rows: 2` then
+    `keys: 2` — `keys:` still last, so a reader taking `splitlines()[-1]` keeps getting a ledger
+    tally, now over patterns — and `audit`'s `keys:` figure is the same 2 with
+    `run_rows: 2 undeclared 1` among its tallies.
+    """
+    store = tmp_path / "list-vs-audit.jsonl"
+    mixed_ledger_3591(store)
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    cli = str(_ROOT / "scripts" / "skill_verdicts.py")
+
+    listing = subprocess.run([sys.executable, cli, "list", "--store", str(store)],
+                             capture_output=True, text=True, env=env)
+    audit = subprocess.run([sys.executable, cli, "audit", "--store", str(store), "--timeout", "5"],
+                           capture_output=True, text=True, env=env)
+
+    listed = listing.stdout.splitlines()
+    assert listing.returncode == 0, (listing.returncode, listing.stdout, listing.stderr)
+    assert listed[-1] == "keys: 2", listing.stdout
+    assert listed[-2] == "run_rows: 2", listing.stdout
+    for key in (RUN_KEY_A, RUN_KEY_B):
+        assert any(ln.startswith(f"{key}\t") for ln in listed), listing.stdout
+
+    audited = audit.stdout.splitlines()
+    assert audited[-1].startswith("keys: "), audit.stdout
+    assert audited[-1].split()[1] == listed[-1].split()[1], (audited[-1], listed[-1])
+    assert "run_rows: 2 undeclared 1" in audited, audit.stdout
