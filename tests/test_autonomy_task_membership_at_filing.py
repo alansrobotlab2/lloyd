@@ -613,6 +613,54 @@ def _id_lines(out: str) -> list[str]:
             if "DUPLICATE_TASK_ID" in ln or "ID_FILENAME_MISMATCH" in ln]
 
 
+#: The codes a strict run over the LIVE tree is allowed to exit 2 on. Membership drift is
+#: the fleet's own lag and not a defect: `scripts/autonomy/jobs_membership.py` reports it,
+#: appends a drift-journal row so it has a start date, and its own docstring rules that it
+#: "**never refuses anything** — a guard that withheld a task file would be a worse failure
+#: than the drift, and the writer is not the doc's owner". So a task file legitimately
+#: reaches the directory before its two rows do, and the rows come later from a human or a
+#: nightly. Any other code the linter can print is a defect in the tree, which is the thing
+#: the live-tree node below exists to catch.
+TOLERATED_LIVE_CODES = frozenset({"DOC_MEMBERSHIP", "DRIFT_UNCLOSED"})
+
+
+def _structural_warnings(out: str) -> list[str]:
+    """The lines the linter printed under its `⚠️  N structural warning(s):` header.
+
+    Located by the header rather than by matching a code name, for two reasons: the counts
+    block printed ABOVE it (`  UNPARSEABLE: 0`, `scripts/autonomy/validate_tasks.py:788`) is
+    a count and not a warning, and a warning code coined after this helper was written has to
+    land in the list rather than be invisible to it.
+    """
+    lines = out.splitlines()
+    for i, ln in enumerate(lines):
+        if "structural warning(s):" in ln:
+            return [rest.strip() for rest in lines[i + 1:] if rest.strip()]
+    return []
+
+
+def _warn_codes(out: str) -> set[str]:
+    """The warning CODES in `out`, one per warning line, read off the message shape.
+
+    Every message the linter builds is `<subject>: <CODE>: <message>` — `validate_tasks.py:604`
+    (`<names>: DUPLICATE_TASK_ID: both declare …`), `:619` (`<file>: ID_FILENAME_MISMATCH:
+    declares …`), `:510` (`#<id>: DOC_MEMBERSHIP: …`) — except the `DRIFT_UNCLOSED: unchecked`
+    lines at `:445`/`:448`, which put the code first. So the code is the first colon-separated
+    part that is an all-caps underscore word, and this reads it positionally instead of
+    matching a list of known names: a code the linter grows later is a line the live-tree node
+    below has to explain, and a classifier that only recognised the codes its author knew
+    would pass a tree that had already grown a new failure mode.
+    """
+    codes: set[str] = set()
+    for w in _structural_warnings(out):
+        for part in w.split(":"):
+            p = part.strip()
+            if p and p.isupper() and p.replace("_", "").isalpha():
+                codes.add(p)
+                break
+    return codes
+
+
 def test_two_task_files_declaring_one_id_are_both_named_in_one_warning(tmp_path, ):
     """Clause 1: the collision is reported naming BOTH files, not one of them.
 
@@ -778,29 +826,94 @@ def test_the_live_tree_declares_every_id_exactly_once():
 
 
 def test_the_strict_run_over_the_live_tree_is_quiet_apart_from_membership():
-    """What `--strict` exits 2 on today, named exactly, so the rename's one side-effect is
-    on the record rather than discovered by whoever runs the linter next.
+    """What `--strict` may exit 2 on over the live tree: the membership tables' lag, and
+    NOTHING else — which is the same sentence as the node's name, now asserted on shape.
 
-    Resolving the collision REMOVED a mask: while both files declared 104, the flip-gate
-    file satisfied `autonomy-jobs.md`'s `#104` rows through ArtCraft's id, and only once
-    it takes 107 does the membership linter see a live task file with no row in either
-    table. Those two `DOC_MEMBERSHIP` lines are therefore the evidence for the ruling #3730
-    already owes — whether a `draft` task belongs in the membership tables at all, which
-    `scripts/autonomy/jobs_membership.py` does not say and #3592's closure did not cover.
-    This node asserts they are the ONLY thing a strict run complains about, and nothing more.
+    Four things, none of which is a size. The scheduler can read every task file
+    (`UNPARSEABLE: 0`). The id checks are silent — `_id_lines` empty, so no
+    `DUPLICATE_TASK_ID` and no `ID_FILENAME_MISMATCH`, which is #3730's own invariant and the
+    reason this node exists. Every code the run prints is in `TOLERATED_LIVE_CODES`, so a
+    warning of any other kind is a red suite, and each `DOC_MEMBERSHIP` line is *witnessed*:
+    the id it blames is a task file that is actually in the directory (the ghost direction is
+    a doc that lies, not a tolerated lag) and it names one of the two tables
+    `scripts/autonomy/jobs_membership.py::TABLES` says the check reads. Plus the flag's
+    meaning: exit 2 because a warning was printed, and 0 if none had been.
+
+    What was here before was a size — `len(warned) == 2`, every line naming `#107`, `rc == 2`
+    flat — and that size is what #3745 was filed on. It asserted one day's shape of a store
+    that grows by design. Measured at this round's base `aec4159b` on 2026-11-03 the run
+    printed FOUR lines, `#107` and `#108` once per table: `108-solidcraft-repo-sync.md` was
+    created at 2026-11-03T19:53:37Z and its rows are not in `architecture/autonomy-jobs.md`
+    yet, and that is the writer behaving as specified — `jobs_membership.py` reports the drift
+    and appends a row rather than withholding the file, and
+    `~/lloyd-data/_pipeline/arch-review/membership-drift.jsonl` holds `#108` twice with
+    `closed_at: null` (opened 2026-11-03T19:52:51.930471+00:00 and 2026-11-03T19:53:37.502991+00:00)
+    as the record the count was duplicating. The fleet is the thing that files tasks, so any
+    count here is a claim that nobody has filed anything since the last author edited this
+    node — the exact failure this file was written against: "green here would have meant
+    'nobody has filed anything today'" (module docstring). `#107` is a `draft`, and whether a
+    draft owes a membership row is the ruling #3730 still owes; adding its rows retires it from
+    the warned set, which is a fix, and a node that asserted a size would have called that
+    fix a red tree.
     """
     live = Path(vt_default_dir())
     if not live.exists():
         pytest.skip(f"no autonomy dir at {live}")
 
     rc, out = _linter(live, "--strict")
-    warned = [ln.strip() for ln in out.splitlines()
-              if "DOC_MEMBERSHIP" in ln or "DUPLICATE_TASK_ID" in ln
-              or "ID_FILENAME_MISMATCH" in ln]
+    warns = _structural_warnings(out)
+    assert "UNPARSEABLE: 0" in out, out
     assert not _id_lines(out), out
-    assert len(warned) == 2, warned
-    assert all("DOC_MEMBERSHIP" in w and "#107" in w for w in warned), warned
-    assert rc == 2, "the flag's meaning is unchanged: any warning is exit 2 under --strict"
+    assert _warn_codes(out) <= TOLERATED_LIVE_CODES, (
+        f"a strict run over the live tree complained about something that is not the "
+        f"membership tables' lag: {sorted(_warn_codes(out) - TOLERATED_LIVE_CODES)}\n{out}")
+
+    member_ids = {p.name.split("-", 1)[0] for p in live.glob("*.md")
+                  if p.name.split("-", 1)[0].isdigit()}
+    for w in warns:
+        if "DOC_MEMBERSHIP" not in w:
+            continue
+        subject, _, rest = w.partition(":")
+        blamed = subject.strip().lstrip("#")
+        assert blamed.isdigit() and blamed in member_ids, (
+            f"{w}\nblames {subject.strip()}, which is not a numbered task file under {live}: "
+            f"a membership warning about a file the dispatch directory does not hold is the "
+            f"doc lying about the fleet, not the lag this node tolerates")
+        assert any(name in rest for name, _ in jm.TABLES), (
+            f"{w}\nnames neither of the tables the parser reads "
+            f"{[name for name, _ in jm.TABLES]}, so the message and `jm.TABLES` disagree "
+            f"about what the membership check covers")
+
+    assert rc == (2 if warns else 0), (
+        "the flag's meaning is unchanged: any warning is exit 2 under --strict, and none is 0")
+
+
+def test_the_live_tree_invariant_rejects_a_warning_that_is_not_membership_drift(tmp_path):
+    """The bound above is only a guard if the classifier can put something on the wrong side
+    of it, so both sides are shown on real CLI runs over fixtures — a node that merely recited
+    `TOLERATED_LIVE_CODES` could not fail.
+
+    The collision pair is the code the live tree must never print: the run reports
+    `DUPLICATE_TASK_ID`, that code is absent from the tolerated set, and `--strict` exits 2 on
+    it, so one such line in the live run reddens the node above rather than sliding past it.
+    The clean tree is the other side: no warning block at all, so `_structural_warnings`
+    returns the empty list instead of reading the `  UNPARSEABLE: 0` counts line as a warning —
+    a false positive there would make the tolerated-set bound vacuous in exactly the direction
+    that matters, because every run would already be holding a code the set must cover.
+    """
+    _task_file(tmp_path, "104-artcraft-repo-sync", 104)
+    _task_file(tmp_path, "104-flip-gate-daily-record", 104)
+    rc, out = _linter(tmp_path, "--strict")
+    assert "DUPLICATE_TASK_ID" in _warn_codes(out), out
+    assert "DUPLICATE_TASK_ID" not in TOLERATED_LIVE_CODES
+    assert rc == 2, out
+
+    d = _mkd()
+    _task_file(d, "41-clean-single-job", 41)
+    rc_clean, out_clean = _linter(d, "--strict")
+    assert _structural_warnings(out_clean) == [], out_clean
+    assert _warn_codes(out_clean) == set(), out_clean
+    assert rc_clean == 0, out_clean
 
 
 def vt_default_dir() -> str:
