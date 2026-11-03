@@ -451,12 +451,21 @@ CAP_HEADROOM = {"nightly-reflection-knowledge-write": 90}
 #: fix; the ceiling is not a figure but `MAX_BODY_LINES`, and that is guarded by
 #: `test_no_sampled_skill_sits_past_the_cap_the_lint_refuses_on`.
 #:
+#: The path has moved that way once since, and this is that refresh: 95 → 98 on vault
+#: `e5dc16417` (#3649's `scheduled_jobs` component section, +3 lines, 2026-11-02), whose
+#: landing review returned `pass` and whose skill-size gate row read `no regression`
+#: against the same 98. The vault was at 95 lines before it and is at 98 at HEAD, both
+#: counted by `skill_size` on `git show HEAD:…` bytes — the ruler `skill_body_findings`
+#: refuses on, not a second expression of it. What the refresh does NOT do is buy room:
+#: 98 of `MAX_BODY_LINES` 100 is 2 lines of headroom, and the node guarding the cap is
+#: still green because 98 <= 100, which is the distinction #3028 asked for.
+#:
 #: The three that did NOT move are unchanged from 2026-10-04, which is checkable: the
 #: paths were last touched by `49e5c410` (powerpoint, deep-research, 2026-09-24) and
 #: `c0e889d4` (entity-resolution-sweep, 2026-09-26), both before the triage that recorded
 #: them.
 SAMPLE_BASELINE = {"powerpoint": 92, "deep-research": 96,
-                   "system-health-check": 95, "entity-resolution-sweep": 91}
+                   "system-health-check": 98, "entity-resolution-sweep": 91}
 
 
 def _vault() -> Path:
@@ -488,6 +497,75 @@ def _committed_body_lines(vault: Path, name: str) -> int:
     _, body = sl.parse_frontmatter(text)[:2]
     return sl.skill_size(name, vault / "skills" / name / "SKILL.md",
                          text, body)["body_lines"]
+
+
+def test_the_refreshed_figure_is_measured_and_waives_no_case(tmp_path):
+    """#3722 clause 2: the refresh passes the case, it does not remove or waive it.
+
+    `test_the_other_sampled_skills_are_untouched` is parametrized FROM
+    `SAMPLE_BASELINE`, so a drifted figure can be made green four ways and only one is a
+    fix. Deleting the entry makes its parameter — and its check — disappear while the run
+    still prints green; a `skip`, `skipif`, `xfail` or `live_vault` mark on the node does
+    the same thing to all four cases at once; and the node's own guard skips quietly
+    whenever the vault file is absent. This node pins those three shut and witnesses the
+    fourth:
+
+    * the four keys are exactly `sl.SPILL_SAMPLE` minus the one skill `CAP_HEADROOM`
+      guards for #2188, so dropping an entry reddens THIS node even though the
+      parametrized one would merely go quiet;
+    * the control node carries no suppression mark at function or module level — the only
+      mark on it is the `parametrize` that builds its four cases;
+    * where this vault holds the four `SKILL.md` files — the condition under which the
+      control node's absent-path guard does NOT skip — each pinned figure is re-read from
+      the vault's committed bytes and asserted; where it does not, this node skips on that
+      same machine-absent convention, after the three pins above have run, because a
+      vault that is not here cannot contradict a figure;
+    * the figure is a measurement and not a constant: asked of a fixture vault whose
+      committed `SKILL.md` holds 3 body lines, `_committed_body_lines` answers 3, so the
+      number the live case passes on is the number the vault reports.
+    """
+    control = test_the_other_sampled_skills_are_untouched
+    suppressed = {"skip", "skipif", "xfail", "live_vault", "fault_injection"}
+
+    assert set(SAMPLE_BASELINE) == set(sl.SPILL_SAMPLE) - set(CAP_HEADROOM), (
+        "an entry removed from SAMPLE_BASELINE deletes that skill's case from the "
+        "parametrized control node: 4 cases are expected, got "
+        f"{sorted(SAMPLE_BASELINE)}")
+
+    fn_marks = {m.name for m in getattr(control, "pytestmark", [])}
+    assert not fn_marks & suppressed, f"{control.__name__} is waived: {sorted(fn_marks)}"
+    assert "parametrize" in fn_marks, (
+        "the control node is no longer parametrized over the pinned figures, so this "
+        "file's green no longer says the four figures were checked")
+    module_marks = {m.name for m in globals().get("pytestmark", [])}
+    assert not module_marks & suppressed, f"the module is waived: {sorted(module_marks)}"
+
+    live = _vault()
+    absent = [name for name in SAMPLE_BASELINE
+              if not (live / "skills" / name / "SKILL.md").is_file()]
+    if absent:
+        # The same machine-absent convention the control node skips on: a gate round
+        # repoints HOME at a root with no vault, and a missing vault says nothing about a
+        # figure. Everything above — the key set, the marks, the measurement witness — is
+        # asserted unconditionally, because none of it needs this vault; what needs it is
+        # the claim that the four live cases RAN, and that is only reportable where they
+        # did.
+        pytest.skip(f"{sorted(absent)} not in {live}: the parametrized control cases "
+                    "skip on this machine too, so its 'every case ran' half is "
+                    "untestable here")
+    for name, expected in SAMPLE_BASELINE.items():
+        assert _committed_body_lines(live, name) == expected, (
+            f"{name}: pinned {expected}, the vault's committed bytes report otherwise — "
+            "a stale figure, not a waived one")
+
+    fixture = tmp_path / "vault"
+    _skill(fixture / "skills", "system-health-check", 3)
+    subprocess.run(["git", "init", "-q", str(fixture)], check=True)
+    _git(fixture, "add", "-A")
+    _git(fixture, "commit", "-qm", "fixture")
+    assert _committed_body_lines(fixture, "system-health-check") == 3, (
+        "the helper stopped reading the committed bytes, which is the property that makes "
+        "a passing figure a measurement of the vault")
 
 
 def _moving_commit(vault: Path, name: str) -> str:
@@ -596,8 +674,9 @@ def test_no_sampled_skill_sits_past_the_cap_the_lint_refuses_on():
     `MAX_BODY_LINES`, and until now exactly one of the five names was guarded against
     that; the other four were guarded against *movement* instead, which is why a legal
     +11-line section could turn main red while a sampled skill edging up to 99 of 100
-    would have passed this file unnoticed. `system-health-check` is at 95 on 2026-10-19 —
-    legal, with 5 lines of room, which is the state this node is content to call green and
+    would have passed this file unnoticed. `system-health-check` is the tightest of the
+    five at 98 since vault `e5dc16417` (2026-11-02, #3649's `scheduled_jobs` section) —
+    legal, with 2 lines of room, which is the state this node is content to call green and
     the reason the +8-line-rule headroom property stays scoped to the one skill #2188
     chose.
     """
