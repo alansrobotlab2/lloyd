@@ -72,10 +72,12 @@ Re-checking the **same canonical URL** re-focuses the existing session and does
 not re-fire the kickoff — that is the first guard in `handleManualCheck`.
 Navigating away drops the tab's mapping, so the next check on that tab is fresh.
 Switching tabs re-focuses the panel on the matching session or on the
-not-checked state — but that one push is built by hand and carries no `canCheck`,
-while the panel reads the field as `Boolean(msg.canCheck)`, so activating an
-already-loaded tab leaves the button disabled and the panel saying "no checkable
-page here" of a checkable page until the next navigation (#3568). Closing a tab
+not-checked state, through the same `pushFocus` the other four focus paths use —
+one construction of `focus-session` in the file, so the switch carries the
+`canCheck` the panel reads as `Boolean(msg.canCheck)`. It did not: the listener
+built its own literal without the flag, which left the button disabled and the
+panel saying "no checkable page here" of a checkable page until the next
+navigation (#3568, fixed by #3741). Closing a tab
 orphans the session, which stays in Lloyd's
 session list: the panel's lifecycle is the tab's, the transcript's is not.
 Closing the panel does not stop the run ([[background-runs]]).
@@ -253,3 +255,19 @@ on after the output directory had already been emptied.
   empty hosts, not the loopback branch it was cited for — with the symbol, the way
   #2208 ruled for `authority-surfaces.md`; the same citation rots in eight places
   outside this doc (#3570).
+- **2026-11-03 — the tab-switch focus push now carries `canCheck` (#3741, fixing #3568).**
+  `chrome.tabs.onActivated` built its own `focus-session` literal, so a tab switch onto an
+  already-loaded checkable tab pushed a message with no flag and the panel's
+  `Boolean(msg.canCheck)` disabled the button and printed "No checkable page here". The
+  listener body is now `await pushFocus(windowId, tabId)`, which already hydrates, reads
+  the mapping and computes the flag — `type: "focus-session",` appears exactly once in
+  `chrome-extension/src/background/service-worker.ts` (in `pushFocus`) and, after
+  rebuilding through `web/vite.chrome.config.ts` into a temporary outDir and copying only
+  `service-worker.js` back, exactly once in the tracked
+  `chrome-extension/dist/service-worker.js` that Chrome loads. Not measurable the obvious
+  way: `grep -c canCheck` on the bundle reads `1` before and after this change, because the
+  one hit is `pushFocus`'s own `canCheck:s` in both trees, so the pins slice the bundle and
+  then follow the awaited callee into the compiled function
+  (`tests/test_automod_spec.py`, `tests/test_chrome_extension_manifest_tracked.py`). The
+  rebuild also renamed minifier-local identifiers across the whole bundle, which is why
+  `chrome-extension/dist/` is a tracked build output and not hand-edited.

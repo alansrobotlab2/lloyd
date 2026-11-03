@@ -287,16 +287,7 @@ async function handleManualCheck(windowId: number, tabId: number) {
 // session; switching tabs just shows the (possibly empty) state of the
 // new tab and whether its current URL is checkable.
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  await hydrate()
-  const entry = getMapping(tabId)
-  pushToPanel(windowId, {
-    type: "focus-session",
-    windowId,
-    tabId,
-    sessionKey: entry?.sessionKey ?? null,
-    url: entry?.url,
-    title: entry?.title,
-  })
+  await pushFocus(windowId, tabId)
 })
 
 // ── Title updates land late; re-patch metadata when they do ────────────

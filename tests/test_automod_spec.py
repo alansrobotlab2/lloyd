@@ -3138,29 +3138,34 @@ def test_the_turn1mini_grant_carries_its_reason_beside_the_entry(monkeypatch):
 # `canCheck` fix (#3598) be committed at all
 # ---------------------------------------------------------------------------
 #
-# The defect is live and user-visible: with the panel open on tab A, switching to an
-# already-loaded checkable tab B kills 'Check it out, Lloyd'.
-# `chrome.tabs.onActivated` (`chrome-extension/src/background/service-worker.ts:288-299`)
-# pushes a hand-built `focus-session` literal carrying `type/windowId/tabId/sessionKey/
-# url/title` and NO `canCheck`, while `pushFocus` (:80-99) is the only site that computes
-# it (`canCheck = canCheckUrl(tab.url)`). The panel reads an omitted flag as false
+# The defect this grant was written for — and which #3741 has since fixed, in the two
+# files named below and no others — was user-visible: with the panel open on tab A,
+# switching to an already-loaded checkable tab B killed 'Check it out, Lloyd'.
+# `chrome.tabs.onActivated` (`chrome-extension/src/background/service-worker.ts`) pushed a
+# hand-built `focus-session` literal carrying `type/windowId/tabId/sessionKey/url/title`
+# and NO `canCheck`, while `pushFocus` is the only site that computes it
+# (`canCheck = canCheckUrl(tab.url)`). The panel reads an omitted flag as false
 # (`web/src/sidepanel/SidePanelApp.tsx:69` `canCheck: Boolean(msg.canCheck)`, button
-# `disabled` at :164), so a tab switch blanks the button. The tracked shipped artefact
-# agrees: the `onActivated` chunk of `chrome-extension/dist/service-worker.js` ends
-# `…title:n?.title})` with no `canCheck`, which is what Chrome loads.
+# `disabled` at :164, empty-state copy at :177), so a tab switch blanked the button. The
+# tracked shipped artefact agreed: the `onActivated` chunk of
+# `chrome-extension/dist/service-worker.js` ended `…title:n?.title})` with no `canCheck`,
+# which is what Chrome loaded. What the chunk is now, and why a whole-file grep cannot
+# show the difference, is written on
+# `test_the_routed_listener_and_the_tracked_bundle_ship_the_flag_together`.
 #
-# #3598's fix is three steps — route `onActivated` through `await pushFocus(windowId,
-# tabId)`, rebuild the tracked bundle, add the chunk-scoped pin. It cannot be committed,
-# because `ALLOWED_GLOBS` names no `chrome-extension` path and `spec.classify` answers
-# `unlisted` for both the source and the bundle, so rung 0 refuses the diff. This grant
-# is that admission and nothing more: two verbatim files — the worker's source, and the
-# one tracked build output whose shipped defect the item names. The fix rides a later
+# #3598's fix was three steps — route `onActivated` through `await pushFocus(windowId,
+# tabId)`, rebuild the tracked bundle, add the chunk-scoped pin. It could not be committed
+# then, because `ALLOWED_GLOBS` named no `chrome-extension` path and `spec.classify`
+# answered `unlisted` for both the source and the bundle, so rung 0 refused the diff. This
+# grant is that admission and nothing more: two verbatim files — the worker's source, and
+# the one tracked build output whose shipped defect the item names. The fix rode a later
 # round, for the reason this file states at :1133-1140 inside
 # `test_the_scope_spec_stays_protected_though_scripts_is_allowed`: the gate's child is
 # spawned `cwd=LIVE_ROOT` and imports the live tree's module, so rung 0 grades a diff with
 # the LIVE tuple. Widening and fix in one round is refused by its own gate, so two rounds
-# is the only satisfiable route — and that is why no node below asserts that the
-# `focus-session` literal at :293 is gone.
+# was the only satisfiable route — which is how this admission came to be graded on a tree
+# that still carried the bug, and why the node that pinned it has become the positive pin
+# above rather than a comment.
 #
 # The directory is refused, not admitted: 18 other tracked files would come with it. The
 # loudest is `chrome-extension/manifest.json` — in Chrome that file IS the grant, the
@@ -3624,45 +3629,100 @@ def test_the_admission_changes_no_verdict_but_the_two_paths_it_grants():
             timeout=120).stdout, (
             "neither a round diff nor the granted path in the index: this tree is neither "
             "a round nor a main with the admission landed, so the node checked nothing")
-def test_the_admission_left_the_shipped_defect_exactly_where_it_found_it():
-    """Clause 4's positive check: the tree this round merges still carries the bug.
+def test_the_routed_listener_and_the_tracked_bundle_ship_the_flag_together():
+    """#3741: the listener delegates in source AND the bytes Chrome loads reach the flag.
 
-    Three readings, all of them the defect and none of them anything this round was asked
-    to remove. `grep -n 'focus-session'` over the worker source still returns four sites
-    — :32 the `FocusMessage` field, :78 `pushFocus`'s comment, :91 its construction, and
-    :293 the hand-built literal inside the `chrome.tabs.onActivated` listener — so the
-    listener still pushes without `canCheck`; and the tracked bundle's `onActivated` chunk
-    still ends in `title:…})` with no `canCheck` key, which is the byte Chrome loads. If
-    either reading changes in this round, the diff is not an admission. The node does not
-    ask the literal to be gone, because it cannot be: `#3598`'s fix round is the one that
-    routes the listener through `await pushFocus(windowId, tabId)`, and the same rung 0
-    that refused it before this entry landed will grade that diff once it has.
+    This is `#3646`'s defect-pin node rewritten as the positive pin, per #3741 step 5 —
+    rewritten, not deleted, because the readings it made are the ones that now prove the
+    fix rather than the bug. Five of them:
+
+    * Source. `focus-session` is on exactly three lines here — :32 the `FocusMessage`
+      field, :78 `pushFocus`'s comment, :91 its one construction — which the `sites ==
+      [32, 78, 91]` assert below reads line by line, so a fourth site is named by number.
+      (The same scan over the pre-fix tree yields four, the extra one being the listener's
+      literal at :293, which is what #3568 shipped.) The text from
+      `tabs.onActivated.addListener` to the next `addListener(` then names `pushFocus(` with
+      no `canCheck` and no literal of its own.
+    * The tracked bundle, SLICED. That bundle holds the string `canCheck` exactly once BOTH
+      before and after this fix, counted with `str.count` rather than `grep -c`, because
+      `grep -c` counts matching LINES and the whole minified bundle is one line — a second
+      trap in the same instrument. Before, the one occurrence was `pushFocus`'s own
+      `canCheck:s`, which the tab-switch chunk never reached; after, it is the same
+      occurrence and the chunk now reaches it. So no count over the whole file can show this
+      change, which is why #3741 clause 3 forbids one: the node slices the bundle the way the
+      defect-pin did, from `onActivated.addListener(` to the next `addListener(`.
+    * What that slice is allowed to say. The clause asks for `canCheck` inside the slice,
+      and minification makes that literally impossible without lying: esbuild keeps the
+      flag in the CALLEE, so the shipped chunk is
+      `onActivated.addListener(async({tabId:t,windowId:e})=>{await o(e,t)})` and
+      `canCheck` sits in `async function o(...)` further along the file. So the pin
+      follows the call instead of grepping for a word near it — it reads the identifier
+      the chunk awaits, slices that compiled function out of the bundle, and requires
+      `focus-session` and `canCheck` inside it. That is strictly more than the substring:
+      it proves the tab-switch path executes the code that computes the flag, and it would
+      go red on a bundle that pasted `canCheck` into the chunk without routing through the
+      focus-pusher, exactly the shape a stale or hand-patched bundle has.
+    * The two move together, counted rather than grepped. A construction in the source is
+      `type: "focus-session",`, the trailing comma being what separates it from the
+      `FocusMessage` field at :32, which spells the same literal in type position; in the
+      minified bundle it is `type:"focus-session"`, where no field survives to be mistaken
+      for it. That is 1 and 1 fixed, and it was 2 and 2 at the defect — the listener's
+      hand-built literal was the second construction in the source AND in the shipped
+      bytes, which is why an equality on its own would have passed. Pinning the number to
+      one is what makes both directions fail: a source edit that re-adds a literal, and a
+      stale bundle still carrying one.
     """
-    src_lines = (REPO_ROOT / "chrome-extension" / "src" / "background" /
-                 "service-worker.ts").read_text().splitlines()
-    sites = [i + 1 for i, line in enumerate(src_lines) if "focus-session" in line]
-    assert len(sites) == 4, (
-        f"`focus-session` now appears at {sites}, the four sites the defect is made of "
-        "at aed135c9 — a fifth is a second construction site and a fourth-to-lost means "
-        "the fix landed, and either way this node's claim about the shipped tree is "
-        "stale and must be re-measured, not edited to fit")
-    listener = next(i for i, line in enumerate(src_lines, 1)
-                    if "tabs.onActivated.addListener" in line)
-    chunk = src_lines[listener - 1:listener + 12]
-    assert any("focus-session" in line for line in chunk), (
-        f"the onActivated listener at :{listener} no longer builds a focus-session "
-        "literal, which is the fix rather than the admission")
-    assert not any("canCheck" in line for line in chunk), (
-        "the listener now computes canCheck itself, which is a second copy of pushFocus's "
-        "rule and the duplication #3598's clause 4 forbids")
+    src = (REPO_ROOT / "chrome-extension" / "src" / "background" /
+           "service-worker.ts").read_text()
+    sites = [i + 1 for i, line in enumerate(src.splitlines(), 1) if "focus-session" in line]
+    assert len(sites) == 3, (
+        f"`focus-session` appears at {sites}; three is the fixed shape (the FocusMessage "
+        "field, pushFocus's comment, pushFocus's construction) and four is the defect "
+        "this node used to pin — re-measure the tree, do not edit this number")
+    at = src.index("tabs.onActivated.addListener")
+    nxt = src.find("addListener(", at + len("tabs.onActivated.addListener"))
+    listener = src[at:nxt]
+    assert "pushFocus(" in listener, listener
+    for forbidden in ("canCheck", "focus-session"):
+        assert forbidden not in listener, (
+            f"the listener {forbidden}es again, which is the duplicate description "
+            f"#3598/#3741 removed: {listener}")
 
     bundle = (REPO_ROOT / "chrome-extension" / "dist" /
               "service-worker.js").read_text()
     at = bundle.index("onActivated.addListener(")
     nxt = bundle.find("addListener(", at + len("onActivated.addListener("))
-    assert "canCheck" not in bundle[at:nxt], (
-        "the tracked bundle's onActivated chunk carries canCheck, so a rebuild rode into "
-        "this round — the bundle and the source move together in #3598's round or not at "
-        "all, since a bundle rebuilt without the source fix and a source fix without the "
-        "bundle both ship the same dead button through `web/src/sidepanel/"
-        "SidePanelApp.tsx:69`")
+    chunk = bundle[at:nxt]
+    assert "focus-session" not in chunk, (
+        f"the shipped chunk builds its own message again: {chunk}")
+    assert chunk.count("await ") == 1, (
+        f"the shipped chunk awaits more than one thing, so reading the callee off the first "
+        f"`await` would be a guess about which one carries the flag: {chunk}")
+    name = chunk.split("await ", 1)[1].split("(", 1)[0].strip()
+    assert name.isidentifier(), f"cannot read the awaited callee from: {chunk}"
+    start = bundle.index(f"async function {name}(")
+    depth, fn = 0, ""
+    for pos in range(bundle.index("{", start), len(bundle)):
+        if bundle[pos] == "{":
+            depth += 1
+        elif bundle[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                fn = bundle[start:pos + 1]
+                break
+    # Not just any compiled function that happens to hold both words: the real focus-pusher
+    # reads the tab it is focusing, and the value it reads is the one `canCheckUrl` is called
+    # on — so the property access ties this callee to the focus path in a minified bundle
+    # where identifier names carry no meaning.
+    assert "focus-session" in fn and "canCheck" in fn and "chrome.tabs.get" in fn, (
+        f"`{name}`, the function the shipped tab-switch awaits, does not read its own tab and "
+        f"send a focus-session carrying the flag: {fn[:200]}")
+
+    # The comma separates a construction from the `FocusMessage` field, which spells
+    # the same literal in type position and is not a second place that builds one.
+    built_in_src = src.count('type: "focus-session",')
+    built_in_bundle = bundle.count('type:"focus-session"')
+    assert (built_in_src, built_in_bundle) == (1, 1), (
+        f"the source builds {built_in_src} focus-session message and the tracked bundle "
+        f"{built_in_bundle}: source and shipped bytes moved apart, and either direction of "
+        "that disagreement ships the same dead button")

@@ -80,3 +80,66 @@ def test_can_check_url_refuses_exactly_what_should_spawn_session_refuses(tmp_pat
     for url, can, spawn in rows:
         assert can == URLS[url], url
         assert can == spawn, f"{url}: the button and the check disagree"
+
+
+# ── #3741: the tab-switch listener must DEFER to pushFocus, not re-describe it ──
+#
+# `chrome.tabs.onActivated` is the one listener that used to build its own
+# `focus-session` literal instead of calling `pushFocus`, and the literal named
+# `type/windowId/tabId/sessionKey/url/title` with no `canCheck` — so with the panel open,
+# activating an already-loaded checkable tab made the panel read `Boolean(undefined)` as
+# false (`web/src/sidepanel/SidePanelApp.tsx:69`) and the button at :164 went dead while
+# the copy at :177 claimed "No checkable page here". `pushFocus` already hydrates, reads
+# the mapping AND computes the flag, so the second description of the same message was the
+# whole defect: any field it forgot was a field the tab-switch silently dropped.
+#
+# `_fn_body` cannot reach this one: it splits on `async function {name}(` and the listener
+# is an anonymous arrow handed to `addListener`, so no name ever reaches it — the slice is
+# textual, from the registration to the next registration, the style
+# `tests/test_automod_spec.py` already uses for the shipped-bundle pin.
+
+def _listener_slice(text: str) -> str:
+    at = text.index("tabs.onActivated.addListener")
+    nxt = text.find("addListener(", at + len("tabs.onActivated.addListener"))
+    assert nxt != -1, "no listener after onActivated, so the slice has no end"
+    return text[at:nxt]
+
+
+def test_the_tab_switch_listener_defers_to_push_focus():
+    """#3741 clause 1: the listener body is exactly `await pushFocus(windowId, tabId)`.
+
+    The three helpers it used to call by hand are what made the omission possible, so the
+    pin is their absence, not just the call's presence: a listener that hydrates and
+    reads the mapping before delegating is one `await` away from re-introducing a field
+    that only `pushFocus` knows about. And `focus-session` appears at exactly three places
+    in the file — the `FocusMessage` field, `pushFocus`'s comment, and `pushFocus`'s one
+    construction — which is the same fact stated as a count so a fourth hand-built literal
+    anywhere in the file is caught whether or not it lands in this listener.
+    """
+    src = SW.read_text(encoding="utf-8")
+    slice_ = _listener_slice(src)
+    body = slice_[slice_.index("{", slice_.index("=>")) + 1:slice_.rindex("}")].strip()
+    assert body == "await pushFocus(windowId, tabId)", slice_
+    for helper in ("hydrate", "getMapping", "pushToPanel"):
+        assert helper not in slice_, f"{helper} is back inside the listener: {slice_}"
+    assert src.count('focus-session') == 3, [
+        line for line in src.splitlines() if "focus-session" in line]
+
+
+def test_the_tab_switch_never_fabricates_can_check_a_second_time():
+    """#3741 clause 2: the flag is computed in exactly one place, and the slice reaches it.
+
+    The slice must name `pushFocus(` and contain neither `canCheck` nor `focus-session`:
+    a listener that passes the flag through by hand would fix the symptom and keep the
+    duplicate description that caused it. `canCheck = canCheckUrl(` appearing exactly once
+    is the other half — and it is asserted *inside* `pushFocus`'s body, because a
+    second computation in some future helper would also satisfy a bare count.
+    """
+    src = SW.read_text(encoding="utf-8")
+    slice_ = _listener_slice(src)
+    assert "pushFocus(" in slice_, slice_
+    for forbidden in ("canCheck", "focus-session"):
+        assert forbidden not in slice_, f"{forbidden} fabricated in the listener: {slice_}"
+    assert src.count("canCheck = canCheckUrl(") == 1, src
+    assert "canCheck = canCheckUrl(" in _fn_body(src, "pushFocus"), (
+        "the one computation is not inside pushFocus, so the delegation does not carry it")

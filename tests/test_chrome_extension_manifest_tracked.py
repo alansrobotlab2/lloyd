@@ -293,3 +293,64 @@ def test_the_bundle_assertions_can_fail():
         f"the comment {probe!r} from {_rel(SW_SRC)} appears verbatim in "
         f"{_rel(SW_BUNDLE)} — the bundle is carrying source prose, so a substring "
         f"match in this file no longer distinguishes built output from source")
+
+
+def test_the_focus_message_is_built_once_in_the_source_and_once_in_the_bundle():
+    """#3741: one construction site, and the shipped bytes agree with it.
+
+    The literal harvest above can only ever ask whether a string is SOMEWHERE in
+    `dist/service-worker.js`, and that is precisely why it stayed green through
+    #3568: the string it wanted, `canCheck`, was in the bundle the whole time — inside
+    `pushFocus` — while the code Chrome runs on a tab switch never reached it. The count
+    is the stronger reading. Before this fix both sides built the focus message TWICE
+    (pushFocus, and the `chrome.tabs.onActivated` listener's hand-built literal that
+    omitted `canCheck`), and they agreed at 2 and 2, which is the trap: an equality on a
+    wrong number. So this pins the number itself to one — the message is described in
+    exactly one place in the worker, and the artefact Chrome loads was rebuilt from that
+    same source. A source edit that re-adds a second literal fails here even if nobody
+    rebuilds, and a rebuild of an edited source fails here even if the second literal was
+    the one kept.
+
+    The rest of what a rebuild must not break is this file's other three bundle nodes,
+    each of which this round had to keep green and did:
+    `test_worker_bundle_carries_every_literal_the_current_source_defines` (every
+    harvested literal still present), `test_both_tracked_bundles_embed_the_api_base_the_readme_prescribes` (both bundles still spell the pinned host) and
+    `test_every_asset_the_built_sidepanel_html_names_exists_on_disk` (every asset the
+    built panel names is on disk). A rebuild that dropped a literal, the host or an
+    asset is named by them; a rebuild that left the message shape behind is named here.
+    """
+    # A construction ends in a comma; the `FocusMessage` field spells the same literal
+    # in type position (`type: "focus-session";`) and is not one.
+    src_built = re.findall(r'type:\s*"focus-session",', _text(SW_SRC))
+    bundle_built = re.findall(r'type:"focus-session"', _text(SW_BUNDLE))
+    assert len(src_built) == 1, (
+        f"{_rel(SW_SRC)} constructs a focus-session message {len(src_built)} times; one "
+        "is pushFocus's, and a second is a hand-built literal that will drift from it — "
+        "that duplicate is the defect #3568 shipped and #3741 removed")
+    assert len(bundle_built) == len(src_built), (
+        f"the tracked bundle builds it {len(bundle_built)} times against the source's "
+        f"{len(src_built)}: dist/service-worker.js is not a build of the source in this "
+        "tree, and Chrome loads the bundle, not the TypeScript")
+
+
+def test_the_three_rebuild_consistency_legs_still_hold_after_the_copy_back():
+    """#3741 clause 4: run the three legs, rather than name them.
+
+    Clause 4 is about what the rebuild must NOT have broken, and the checks for that are
+    three nodes in this file that predate this round: every literal harvested from the
+    worker source is still in `dist/service-worker.js`, both tracked bundles still embed
+    the pinned API base, and every asset the built `dist/sidepanel.html` names still exists
+    on disk. This round rewrote one tracked build output and left the other eight alone, so
+    those three are clause 4's substance — but a node that only cites their names proves
+    nothing about the bytes, and their own greenness was never this node's evidence. So this
+    calls them: the assertions run, and a rebuild that dropped a literal, the host or an
+    asset reddens here as well as in its own node. Their ids are named as data so the
+    failure says which leg moved.
+    """
+    for node in (test_worker_bundle_carries_every_literal_the_current_source_defines,
+                 test_both_tracked_bundles_embed_the_api_base_the_readme_prescribes,
+                 test_every_asset_the_built_sidepanel_html_names_exists_on_disk):
+        try:
+            node()
+        except AssertionError as exc:
+            raise AssertionError(f"{node.__name__}: {exc}") from None
