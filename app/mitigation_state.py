@@ -338,10 +338,20 @@ def drill_slot(*, path: Optional[Path] = None):
     replacement and cannot span the ~3 s a drill measures for.
 
     The holder's pid goes in a sidecar for the duration (`drill_slot_pid`), cleared on
-    the way out. The lock would be released by a crash anyway; the sidecar would
-    not — hence `_log_drill_exit` in the seat, which is the reader that says
-    "the file has no newer reading" out loud rather than leaving a stale pid to be
-    read as a live drill.
+    the way out. The lock would be released by a crash anyway; the sidecar would not, so a
+    dead drill leaves its pid standing and something has to say so. The reader that does is
+    in `workers/maintenance.py`: `_drill_state_note` compares the seat's stamp against
+    `newest_reading_at` and returns "… so this drill recorded nothing" when the stamp is the
+    newer of the two, and the seat prints that behind "Mitigation drill outcome unknown" for
+    a spawn stamp from `_drill_stamp_of` whose `_drill_proc` handle died with the process that
+    spawned it. Its logger is `lloyd-workers.maintenance`, the backend's own, so
+    those lines are inherited stderr and land in `~/lloyd-data/logs/server.err` — not in
+    `~/lloyd-data/logs/server.log`, `~/lloyd-data/logs/mcp.log` or
+    `~/lloyd-data/logs/lloyd-agent-worker.log`, none of which has ever held a drill line.
+    Grepping only those three is how #3724 reported that a firing with a witness had none,
+    and this paragraph is why: until #3726 it named a function no commit ever wrote, so the
+    trail ended here. Distinguishing the watermark stamp from the newest reading in `read()`
+    is what makes that sentence writable at all.
     """
     from app.atomic_io import commit_lock
 
