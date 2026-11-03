@@ -1508,6 +1508,65 @@ def prune_arrivals_baseline(state_dir, names, now: "float | None" = None,
     return pruned, refused
 
 
+#: The arrivals headings this leg has put on an alert surface and has NOT yet retracted
+#: (#3424). The heading now carries the finding names, so the set of headings this one
+#: incident can be standing under is no longer one constant: a pass that alerted on
+#: `false` and a pass that alerted on `workers-board-steward-extract.db` opened TWO
+#: sections, and a clean pass that sealed only one would leave the other ordering a
+#: person about a file they have already dealt with. Neither alert surface can be asked
+#: what is open — `Notifier.resolve` matches a title exactly against ALERT.md's one slot
+#: and against each daily-note section, and `notify.py`'s board dedup has to stay
+#: exact-name for every title (#2080) — so this leg keeps its own list of what it posted
+#: and walks it on the all-clear. Unscoped by root on purpose, unlike the baseline
+#: above: a measurement of one root is not a measurement of another, but these are
+#: headings on the one global ALERT.md and the one daily note, which belong to no root.
+#: The list is bounded, and `resolve` is idempotent-silent, so a stale entry costs a
+#: no-op call rather than a false claim.
+ARRIVALS_TITLES_STATE_FILE = "data-root-arrivals-titles.json"
+ARRIVALS_TITLES_MAX = 24
+
+
+def read_arrivals_titles(state_dir) -> "list[str]":
+    """The arrivals headings believed open on an alert surface, oldest first; `[]` for none.
+
+    Absent, corrupt or unreadable all answer `[]`, which forgets a retraction — and a
+    forgotten retraction is an alarm that stands until a human closes it, the #1967
+    shape. That is why the write below is atomic rather than this read being stricter: a
+    list that survives a crash is a list that keeps trying.
+    """
+    p = Path(state_dir) / ARRIVALS_TITLES_STATE_FILE
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    titles = state.get("titles") if isinstance(state, dict) else None
+    if not isinstance(titles, list):
+        return []
+    return [t for t in titles if isinstance(t, str) and t]
+
+
+def write_arrivals_titles(state_dir, titles: "list[str]") -> None:
+    """Record the arrivals headings still open, oldest dropped past the cap.
+
+    tmp + `os.replace`, the shape `write_arrivals_baseline` above uses: a half-written
+    list parses as corrupt, and a corrupt list reads as "nothing is open", which is the
+    one failure that leaves an arrivals alarm standing in the surface agents read first
+    with nothing left to retract it.
+    """
+    state_dir = Path(state_dir)
+    kept: "list[str]" = []
+    for t in titles:
+        if isinstance(t, str) and t and t not in kept:
+            kept.append(t)
+    if len(kept) > ARRIVALS_TITLES_MAX:
+        kept = kept[-ARRIVALS_TITLES_MAX:]
+    state_dir.mkdir(parents=True, exist_ok=True)
+    tmp = state_dir / f"{ARRIVALS_TITLES_STATE_FILE}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"titles": kept, "updated": time.time()}, indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, state_dir / ARRIVALS_TITLES_STATE_FILE)
+
+
 def _days_ago(mtime: float, now: float) -> int:
     return max(0, int((now - mtime) // 86400))
 

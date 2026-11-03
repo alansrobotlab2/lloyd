@@ -31,6 +31,7 @@ Three invariants the code below enforces and the tests assert:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -232,6 +233,103 @@ RUNTIME_DATA_ALERT_TITLES = (RUNTIME_DATA_ALERT_TITLE,
 #: and the shadow pair at the live root's top level is by definition NOT new, which is the
 #: whole reason this leg had to be added beside that one rather than inside it.
 RUNTIME_DATA_ARRIVALS_ALERT_TITLE = "A new name appeared at the data root's top level"
+
+#: What `notify.py` allows a heading to be on the board: `_backlog_task` names the item
+#: `f"[guardian] {title}"[:120]` (notify.py:1152, and the same expression in the body at
+#: :1183). A heading over 109 chars is sliced there, silently and mid-word, and two
+#: different name sets can then collide on the TRUNCATED name — which is the exact
+#: collapse #3424 exists to remove, reintroduced by its own fix. So the arrivals heading
+#: is BUILT to fit and never sliced into shape.
+ARRIVALS_BOARD_NAME_CAP = 120
+ARRIVALS_BOARD_NAME_PREFIX = "[guardian] "
+
+#: Hex characters of the set digest that BOTH compact shapes of `arrivals_alert_title`
+#: carry — shape 2's `first (+N more) [digest]` and shape 3's `N new name(s) [digest]`.
+#: Chosen to leave the count form room: the tail is `2 new name(s) [12 hex]` = 28 characters
+#: against the 59 the cap leaves, so the digest can never be what pushes a heading over
+#: the cap. It is in shape 2 as well as shape 3 because the shape that only names the first
+#: name and a count is not a function of the set: the review rung of round
+#: SM_20261102_223914 produced ['false', 'workers-board-steward-extract.db',
+#: 'workers-board-steward-export.db'] and ['false', 'research-board-steward-export.db',
+#: 'research-board-steward-wal.db'], which share their sorted-first name and their size, fit
+#: shape 2's budget at 15 of its 59 characters, and both posted
+#: `…: false (+2 more)` under the digest-less form — one heading, one suppressed decision,
+#: inside the very shape built to stop that.
+#: 48 bits is not a proof of distinctness — it is the point past which a collision needs
+#: 2**24 distinct arrivals to be merely likely, against the ~21 names this root has ever
+#: reported in total, and it is what makes the fallback per-SET rather than per-COUNT.
+ARRIVALS_TITLE_DIGEST_CHARS = 12
+
+
+def arrivals_alert_title(names) -> str:
+    """The arrivals heading for one pass, carrying the names that pass found (#3424).
+
+    The heading IS the incident's identity on every surface at once: the daily-note
+    section, ALERT.md's one slot, and — via `f"[guardian] {title}"` — the board item's
+    `name`, which `_open_duplicate_on_board` compares for exact equality before filing.
+    One constant therefore made every arrivals report the same incident: `#3227` filed
+    for `research.db-wal`/`-shm` at 05:05 on 2026-10-24 and `#3231` for
+    `failure-ledger.db-wal`/`-shm` at 06:05 under byte-identical names, and the second
+    one reached the board only because the first had been closed at 05:22. One open
+    draft is one suppressed decision, and the two decisions are not the same decision.
+
+    Three shapes, longest first, chosen by the budget the board cap leaves after the
+    prefix and the `": "` — never by slicing:
+
+    1. `{heading}: false, sqlite3` — every name, sorted, while they fit.
+    2. `{heading}: workers-board-steward-extract.db (+3 more) [9baf1c2d4e5f]` — the first
+       sorted name, the count, and the same set digest shape 3 carries, when the full list
+       does not fit. The FIRST name is a real name a reader can `ls`, the count says how many
+       more, and the omitted ones are all in the body and the evidence, which carry every
+       finding. The digest is not decoration there: without it this shape keys on one name
+       and a size, so two sets sharing their sorted-first name and their count — the review
+       rung's `['false', 'workers-board-steward-extract.db', 'workers-board-steward-export.db']`
+       and `['false', 'research-board-steward-export.db', 'research-board-steward-wal.db']`,
+       both at 15 of the 59 characters shape 2 has room for — posted one heading and silenced
+       second arrival behind the first's open draft. Pinned by
+       `test_two_sets_sharing_their_first_name_and_count_never_share_shape_two`.
+    3. `{heading}: 4 new name(s) [9baf1c2d4e5f]` — when even shape 2 does not fit, which
+       a name over the budget (a data root will accept one) makes reachable. The count is
+       the form this leg's own `reason` already uses; the bracketed digest is the sorted
+       set's sha256 prefix, and it is what makes the heading a function of the SET. A
+       count alone is not: two sets that share their alphabetically-first name and their
+       size (['aaa.db', 'zzz.db'] and ['aaa.db', 'qqq.db']) share the count too, so a
+       count-only fallback posted ONE heading for two different incidents and silenced
+       the second behind the first's open draft — the exact collapse this change removes,
+       reintroduced by the one branch of its own fix that only an over-long name reaches.
+
+    Shape 2 and shape 3 are why no name is ever cut mid-word: a truncated
+    `workers-board-stewa…` is a string that looks like a name, is not one, and would collide
+    with any other name sharing its prefix — the failure mode this whole change is about. The
+    sort is what makes an identical re-fire of the SAME name set produce the SAME heading,
+    which is what keeps the board's exact-name dedup suppressing it (#2080's rule,
+    untouched), and it is applied to the digest too, so one set makes one string however the
+    scan happened to notice it. Both compact shapes therefore carry the digest, and so each
+    is a function of the WHOLE set: shape 2 alone keyed on a sorted-first name and a count,
+    which the review rung of the previous round showed collapsing two real decisions into one
+    heading. What remains is the 48-bit digest in `ARRIVALS_TITLE_DIGEST_CHARS`, and only for
+    a set that overflows shape 1: two SETS must share a digest to share a posted name, and one
+    SET never does — it always rebuilds the same sorted list. Shape 1's exactness is pinned
+    structurally against notify's real slice by
+    `test_two_arrivals_with_different_names_file_two_items_while_the_first_stays_open`, which
+    fails if a third shape is ever added that can name every name yet collide.
+    """
+    found = sorted({str(n) for n in names if str(n)})
+    room = (ARRIVALS_BOARD_NAME_CAP - len(ARRIVALS_BOARD_NAME_PREFIX)
+            - len(RUNTIME_DATA_ARRIVALS_ALERT_TITLE) - 2)               # len(": ")
+    if not found:
+        return RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    full = ", ".join(found)
+    if len(full) <= room:
+        return f"{RUNTIME_DATA_ARRIVALS_ALERT_TITLE}: {full}"
+    digest = hashlib.sha256("\0".join(found).encode()).hexdigest()[
+        :ARRIVALS_TITLE_DIGEST_CHARS]
+    if len(found) > 1:
+        short = f"{found[0]} (+{len(found) - 1} more) [{digest}]"
+        if len(short) <= room:
+            return f"{RUNTIME_DATA_ARRIVALS_ALERT_TITLE}: {short}"
+    return (f"{RUNTIME_DATA_ARRIVALS_ALERT_TITLE}: {len(found)} new name(s) "
+            f"[{digest}]")
 
 #: The one cause sentence the stray alert may print, and the only reading of its
 #: own numbers that earns it: a stray `mtime` inside the window between this
@@ -1934,11 +2032,28 @@ class Guardian:
             if not arrivals_report.get("needs_human"):
                 log("data-root arrivals report arrived without needs_human; alerting "
                     "as a human decision anyway")
-            self.alert("error", RUNTIME_DATA_ARRIVALS_ALERT_TITLE,
+            # ONE `self.alert` per pass, carrying the names (#3424). The repeat guard at
+            # `alert()` is keyed on the title and `ALERT_REPEAT_SECONDS` is 900 s against
+            # this leg's hourly cadence, so it never fires here in the ordinary case;
+            # where it does, the heading about to be remembered is the heading the
+            # earlier pass already remembered, and `write_arrivals_titles` keeps one copy.
+            arrivals_title = arrivals_alert_title(a["name"] for a in arrivals)
+            self.alert("error", arrivals_title,
                        arrivals_report["reason"] + "\n\n" + arrivals_report["evidence"],
                        evidence=arrivals_report["evidence"],
                        coalesce=True,
                        needs_human=True)
+            # Remembered whether or not this pass's toast survived the repeat guard: the
+            # surfaces that have to be retracted are the daily-note section and ALERT.md,
+            # and the only record that a name-carrying heading is standing there is this
+            # list. A write that fails costs a retried no-op next hour, not a lost
+            # arrival, so it is logged and not raised.
+            try:
+                datawatch.write_arrivals_titles(
+                    arrivals_state,
+                    [*datawatch.read_arrivals_titles(arrivals_state), arrivals_title])
+            except OSError as exc:
+                log(f"data-root arrivals heading list not written (continuing): {exc}")
         elif (arrivals_measured and not arrivals_baselined and not arrivals
                 and self.data.armed):
             # Only a pass that COMPARED two name sets retracts, and only this leg's own
@@ -1949,12 +2064,37 @@ class Guardian:
             # hour that follows is when it first earns a statement; `resolve` writes nothing
             # unless one of our sections is actually open, so a section left by a previous
             # process waits an hour, not longer.
-            self.notifier.resolve(
-                RUNTIME_DATA_ARRIVALS_ALERT_TITLE,
-                "No new name at the data root's top level as of "
-                f"{time.strftime('%Y-%m-%d %H:%M')}. "
-                "_resolved by the next measured pass; a name this leg reported is still "
-                "yours to delete or explain — it is not moved._")
+            #
+            # The all-clear walks every heading this incident can be standing under, not
+            # one constant (#3424, on #3124's rule that resolving one heading and leaving
+            # another standing is the bug). The heading carries names now, so a pass that
+            # alerted on `false` and a pass that alerted on `workers.db` opened two
+            # sections, and retracting only the second leaves the first ordering a person
+            # about a file they have already dealt with. The remembered list is the only
+            # record of the name-carrying ones — ALERT.md answers "which incident is held"
+            # for one slot and the daily note is not asked by anything here — and the bare
+            # constant is walked too, because every arrivals heading this leg opened
+            # BEFORE the title carried names is still standing under exactly that string,
+            # including the one ALERT.md holds right now. Both surfaces are title-exact
+            # (`_alert_file_retract` compares `# {title}`, `_daily_open_at` compares the
+            # section heading), so the walk is what makes a name-carrying heading
+            # retractable without giving `notify.py` a prefix mode that could seal a
+            # different incident's section — the hazard #3124 found, which is why this
+            # list can never contain the shadow headings: only this leg writes it.
+            note = ("No new name at the data root's top level as of "
+                    f"{time.strftime('%Y-%m-%d %H:%M')}. "
+                    "_resolved by the next measured pass; a name this leg reported is "
+                    "still yours to delete or explain — it is not moved._")
+            still_open: list[str] = []
+            for heading in dict.fromkeys(
+                    [*datawatch.read_arrivals_titles(arrivals_state),
+                     RUNTIME_DATA_ARRIVALS_ALERT_TITLE]):
+                if not self.notifier.resolve(heading, note):
+                    still_open.append(heading)
+            try:
+                datawatch.write_arrivals_titles(arrivals_state, still_open)
+            except OSError as exc:
+                log(f"data-root arrivals heading list not written (continuing): {exc}")
 
         # ── names that LEFT the data root's top level (#3584) ────────────────────────
         # The same two name sets the leg above diffs for arrivals, read for the direction

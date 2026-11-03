@@ -3074,11 +3074,37 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # green untouched. No document cites `main`'s number: `git grep -n ':3030'` across the
     # vault's knowledge tree answers nothing, so this literal is the only citation and this
     # comment is the whole re-point.
-    assert heads[guardian]["main"] == 3154, (
-        f"`main` moved off :3013 ({heads[guardian]['main']}) — if it is gone "
+    # 3154 → 3294 AND 923 → 1021 is #3424: FOUR hunks, net +140, and the first of them
+    # to move BOTH heads — which is why `architecture/threat-model.md`’s T-26 cell, citing
+    # the `evaluate_liveness` head, is re-pointed in the same commit (clause 5).
+    # 3154 → 3294 AND 923 → 1021 is #3424: FOUR hunks, net +140, and the first of them
+    # to move BOTH heads — which is why `architecture/threat-model.md`'s T-26 cell, citing
+    # the `evaluate_liveness` head, had to be re-pointed in the same commit (clause 5).
+    # Two hunks are ABOVE `evaluate_liveness`: `@@ -31,6 +31,7 @@` (+1, `import hashlib` for
+    # the set digest) and `@@ -233,6 +234,103 @@` (+97: `ARRIVALS_BOARD_NAME_CAP`,
+    # `ARRIVALS_TITLE_DIGEST_CHARS` and the `arrivals_alert_title` builder that makes an
+    # arrivals heading carry its finding names) — +98 between them, so 923 + 98 = 1021.
+    # Unlike #3502 and #3584, which put their new material BELOW the class precisely to spare
+    # this citation, #3424 cannot: its heading constants and their builder belong beside their
+    # siblings at :234, so the T-26 row moves and is re-pointed in this commit.
+    # Two more hunks are inside `_runtime_data_incident` — `@@ -1934,11 +2032,28 @@` (+17: the
+    # heading is built from the findings before the alert, and the headings this incident may
+    # be standing under are recorded) and `@@ -1949,12 +2064,37 @@` (+25: the all-clear walks
+    # that list instead of the one constant, so a name-carrying heading reaches a cleared
+    # line) — between the anchors, so `main` takes a further +42 on top of the +98:
+    # 3154 + 140 = 3294. Re-check as before: `git diff <base> <head> -- agent-services/
+    # guardian/guardian.py | grep '^@@'` shows those four hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1021 with 3294 below it.
+    # The T-26 row moved with the second of those two numbers (`architecture/threat-model.md`
+    # :145 cites :1021 now); its half of the pair is pinned by its own node below,
+    # `test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has`, so
+    # re-pointing one and not the other fails that pair.
+    assert heads[guardian]["main"] == 3294, (
+        f"`main` moved off :3294 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 923, (
-        f"`evaluate_liveness` moved off :879 "
+    assert heads[guardian]["evaluate_liveness"] == 1021, (
+        f"`evaluate_liveness` moved off :1021 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89
@@ -3102,7 +3128,8 @@ def test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has():
     """#3577: the T-26 row's line cite, checked against the file rather than remembered.
 
     `architecture/threat-model.md`'s T-26 cell points at a LINE NUMBER, not at a
-    symbol - `agent-services/guardian/guardian.py:923`, the head of
+    symbol - `agent-services/guardian/guardian.py:999` as of #3424 (923 before it), the
+    head of
     `def evaluate_liveness` - so any net line added above that definition moves the
     row with nothing in the diff touching the doc. That is how it has drifted before:
     #3019, #3109, #3106 and #2846 each moved it, and that re-point chain is the
@@ -3112,8 +3139,9 @@ def test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has():
     That node pins the head against a literal in the test. This one closes the half
     nothing pinned before: it reads the number the DOC prints and asserts it equals
     the head measured from the file by the same rule the item names -
-    a line-anchored grep of the two `def` prefixes, which prints 923 today with 3013
-    below it (#3603 and then #3628 each moved `main` and left this head alone; the
+    a line-anchored grep of the two `def` prefixes, which prints 1000 today with 3132
+    below it (#3424 moved BOTH, by +76 each, and #3603/#3628 before it each moved
+    `main` alone; the
     chain of those moves is the comment block above). A round that nets lines above the
     head is exactly what
     #3577 risked, because the paragraph it rewrites sits in `_shadow_alert_body`,

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1297,6 +1298,68 @@ def _watcher(tmp_path, monkeypatch, *, armed=True):
     return G, g, data, alerts, cleared, quarantined
 
 
+def _arrivals_alerts(alerts, prefix: str) -> list:
+    """The alerts belonging to the arrivals leg, by heading family (#3424).
+
+    The heading now carries the finding names, so `title == RUNTIME_DATA_ARRIVALS_ALERT_TITLE`
+    is no longer how you ask "is this the arrivals leg" — the heading is that constant
+    FOLLOWED BY `: ` and the names, and the constant alone is still the heading a section
+    opened before the change stands under. A prefix asks both. It is a prefix and not a
+    substring because the family must not reach the stray or shadow headings: #3124 is
+    about one condition's all-clear sealing another condition's section.
+    """
+    return [a for a in alerts if str(a[0]).startswith(prefix)]
+
+
+def _arrivals_posts(posts, prefix: str) -> list:
+    """The board POSTs carrying this leg's heading family (#3424).
+
+    `Notifier._backlog_task` names an item `f"[guardian] {title}"[:120]`, so once the
+    heading carries names the posted name is the prefix plus them. The `[guardian] ` lead
+    is kept in the comparison because it is part of what the board stores, and the match
+    stays a prefix for the same reason as `_arrivals_alerts`: the open-duplicate guard
+    below it is exact-name on purpose (#2080), and a substring test here would let a POST
+    for a different incident read as one for this one.
+    """
+    return [p for p in posts if str(p.get("name", "")).startswith(f"[guardian] {prefix}")]
+
+
+def _alert_surfaces(tmp_path) -> list:
+    """The two surfaces an arrivals heading can be standing on: ALERT.md, then the daily notes.
+
+    `Notifier` puts the state-dir file at `state_dir/ALERT_FILE_NAME` and the daily note at
+    `<vault>/memory/<date>.md`, and the date in that filename comes from the wall clock, not
+    from the `now` these nodes hand the leg — so today's note is found by globbing rather
+    than by naming a date a mocked clock would not have written.
+    """
+    import notify
+    return [tmp_path / notify.ALERT_FILE_NAME] + sorted(
+        (tmp_path / "obsidian" / "memory").glob("*.md"))
+
+
+def _notify_board_name_cap() -> int:
+    """The slice `notify._backlog_task` applies to a posted item name, read out of notify's
+    own source: `item_name = f"[guardian] {title}"[:120]`.
+
+    #3424 clause 2's cap must be pinned against THAT number, not against
+    `guardian.ARRIVALS_BOARD_NAME_CAP`. An assert written against the constant under test
+    goes green when someone raises the constant, which is precisely how a heading would end
+    up cut mid-word by a slice nobody was checking. notify.py has no named constant for the
+    slice, so the value is read from the line instead of duplicated blind: if the line ever
+    changes shape, this raises rather than quietly agreeing with the test.
+    """
+    import inspect
+
+    import notify
+    src = inspect.getsource(notify.Notifier._backlog_task)
+    m = re.search(r'item_name = f"\[guardian\] \{title\}"\[:(\d+)\]', src)
+    assert m, (
+        "`_backlog_task` no longer builds the item name with a literal [:N] slice, so the "
+        "cap these nodes assert against is unpinned — re-point this helper to whatever "
+        "bounds the posted name now")
+    return int(m.group(1))
+
+
 def test_the_hourly_check_names_a_new_stub_once_with_its_date_and_moves_nothing(
         tmp_path, monkeypatch):
     """Clauses 1, 2, 3 and 5, on the surface the acceptance names: the running guardian.
@@ -1329,7 +1392,7 @@ def test_the_hourly_check_names_a_new_stub_once_with_its_date_and_moves_nothing(
         os.utime(p, (stamp, stamp))
 
     g._runtime_data_incident(_NOW + _DAY)
-    hits = [a for a in alerts if a[0] == G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE]
+    hits = _arrivals_alerts(alerts, ARR)
     assert len(hits) == 1, f"the arrivals heading was raised {len(hits)} times: {alerts}"
     title, body, kw = hits[0]
     assert kw.get("needs_human") is True, (
@@ -1380,7 +1443,7 @@ def test_a_name_that_arrives_while_disarmed_is_still_reported_after_rearming(
 
     g.data.armed = True
     g._runtime_data_incident(_NOW + 2 * _DAY)
-    hits = [a for a in alerts if a[0] == G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE]
+    hits = _arrivals_alerts(alerts, G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE)
     assert len(hits) == 1, (
         "the name created while the watcher was disarmed never reached a human: the "
         f"disarmed pass advanced the baseline behind the silent alert: {alerts}")
@@ -1406,7 +1469,7 @@ def test_the_hourly_check_is_quiet_for_a_sidecar_and_still_loud_for_the_name_bes
 
     _sidecar_pair(data, "usage.db")                       # SQLite opening the store
     g._runtime_data_incident(_NOW + _DAY)
-    assert [a for a in alerts if a[0] == ARR] == [], (
+    assert _arrivals_alerts(alerts, ARR) == [], (
         "the guardian asked a person to decide about SQLite's own write-ahead log, which "
         f"is the filing that buried an open error: {alerts}")
     # Read the baseline HERE, not at the end: tick three's scan still holds the pair, so a
@@ -1421,10 +1484,13 @@ def test_the_hourly_check_is_quiet_for_a_sidecar_and_still_loud_for_the_name_bes
     (data / "false").write_bytes(b"")
     os.utime(data / "false", (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
     g._runtime_data_incident(_NOW + 2 * _DAY)
-    hits = [a for a in alerts if a[0] == ARR]
+    hits = _arrivals_alerts(alerts, ARR)
     assert len(hits) == 1, (
         f"the real arrival that shared a pass with the muted pair never reached a human: "
         f"{alerts}")
+    assert hits[0][0] == f"{ARR}: false", (
+        f"the heading that survived the mute names the one arrival, and nothing else: "
+        f"{hits[0][0]}")
     assert "false" in hits[0][1] and "usage.db-wal" not in hits[0][1], hits[0][1]
     assert hits[0][2].get("needs_human") is True, (
         f"routing is unchanged by the mute: {hits[0][2]}")
@@ -1459,18 +1525,18 @@ def test_a_muted_sidecar_files_no_board_item_while_a_real_name_still_files(
 
         _sidecar_pair(data, "usage.db")
         g._runtime_data_incident(_NOW + _DAY)
-        filed = [p for p in seen["posts"] if p.get("name") == f"[guardian] {ARR}"]
+        filed = _arrivals_posts(seen["posts"], ARR)
         assert seen["posts"] == [] and filed == [], (
             "the muted pair still reached the board, which is the filing that became "
             f"#3227: {filed}")
-        assert [a for a in alerts if a[0] == ARR] == [], (
+        assert _arrivals_alerts(alerts, ARR) == [], (
             f"a leg that files nothing but still alerts is the same noise one step later: "
             f"{alerts}")
 
         (data / "false").write_bytes(b"")
         os.utime(data / "false", (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
         g._runtime_data_incident(_NOW + 2 * _DAY)
-        filed = [p for p in seen["posts"] if p.get("name") == f"[guardian] {ARR}"]
+        filed = _arrivals_posts(seen["posts"], ARR)
         assert len(filed) == 1, (
             "the mute stopped at the findings list and never reached the filing of a real "
             f"arrival: {[p.get('name') for p in seen['posts']]}")
@@ -2125,3 +2191,524 @@ def test_a_prune_carries_the_departure_journal_through_the_file_it_rewrites(tmp_
         f"names it was given: {sorted(state_file['seen'])}")
     assert D.read_arrivals_departed(str(state), str(root)) == ["false"], (
         "and the reader a person or a later tick uses still answers for that departure")
+
+
+# ── #3424: the arrivals heading carries the finding names ───────────────────
+#
+# The posted board item name is `f"[guardian] {title}"[:120]` and the open-duplicate
+# guard compares that string EXACTLY, so while the heading was one constant every
+# arrival in the world shared one item name: #3227 (2026-10-24T05:05, `research.db-wal`
+# and `-shm`) and #3231 (06:05, `failure-ledger.db-wal` and `-shm`) are two different
+# decisions that opened under one byte-identical name, and #3231 reached the board only
+# because #3227 happened to have been closed at 05:22. These four nodes are both halves
+# of the ruling the mute node left alone — different names file, the same names do not —
+# plus the hazard the change creates and the surface that hazard lives on.
+#
+# Two of them clear `g._alert_seen` between passes. That map is `Guardian.alert`'s
+# title-keyed repeat guard, `ALERT_REPEAT_SECONDS` = 900 s against a wall clock, and it
+# is a DIFFERENT instrument from the board's open-duplicate guard: this leg ticks hourly,
+# so in real traffic a re-fire an hour later is outside that window and reaches the
+# board. Clearing it says "an hour passed" without freezing a clock; leaving it in place
+# would test the repeat guard and report a board result.
+
+
+def _close_board_row(board_dir) -> str:
+    """Mark every item on the stub board `done`, returning what changed.
+
+    #2080's own clause: closing the open row must let the next identical firing file, so
+    the test that asserts a suppression has to be able to end it the way a human does —
+    by moving the item's `status:` — rather than by deleting the file, which would also
+    remove the evidence the row was ever there.
+    """
+    changed = []
+    for p in sorted(Path(board_dir).glob("*.md")):
+        text = p.read_text(encoding="utf-8")
+        new = re.sub(r"(?m)^status:.*$", "status: done", text, count=1)
+        if new != text:
+            p.write_text(new, encoding="utf-8")
+            changed.append(p.name)
+    return ", ".join(changed)
+
+
+def test_two_arrivals_with_different_names_file_two_items_while_the_first_stays_open(
+        tmp_path, monkeypatch):
+    """Clause 1: the heading is the item's identity, so it must carry the findings.
+
+    Two hourly passes report different name sets. The stub board is the REAL route in
+    `board_dir` mode, so by the second pass it answers a list carrying an OPEN row whose
+    `name` is the first filing — the exact condition in which #2080's guard suppresses,
+    and the exact condition a different arrival has to get through. The first filing's
+    row is still open afterwards: nothing here closes an item, which is the whole harm
+    the item records (one human closure separated #3227 from #3231).
+    """
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    board = tmp_path / "board"
+    board.mkdir()
+    with _stub_board(tmp_path, None, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        g._runtime_data_incident(_NOW)
+
+        (data / "false").write_bytes(b"")
+        os.utime(data / "false", (_NOW, _NOW))
+        g._runtime_data_incident(_NOW + _DAY)
+
+        g._alert_seen.clear()
+        name2 = "workers-board-steward-extract.db"
+        (data / name2).write_bytes(b"x" * 4096)
+        os.utime(data / name2, (_NOW + _DAY, _NOW + _DAY))
+        g._runtime_data_incident(_NOW + 2 * _DAY)
+
+        filed = _arrivals_posts(seen["posts"], ARR)
+        assert len(filed) == 2, (
+            "the second arrival, whose name set differs, never filed its own item: "
+            f"{[p.get('name') for p in seen['posts']]}")
+        names = [p.get("name") for p in filed]
+        assert names[0] != names[1], (
+            f"two different finding sets posted one name, which is how #3231 came within "
+            f"one closure of being silenced by #3227: {names}")
+        assert names[0] == f"[guardian] {ARR}: false", names[0]
+        assert names[1] == f"[guardian] {ARR}: {name2}", names[1]
+        assert seen["gets"], (
+            "no board read happened before the second filing, so this node would pass "
+            "even with #2080's guard deleted — the suppression is what is being "
+            "distinguished here")
+        rows = [p.name for p in board.glob("*.md")]
+        assert len(rows) == 2, (
+            f"the board did not end up carrying both decisions: {rows}")
+        assert "status: done" not in (board / rows[0]).read_text(encoding="utf-8"), (
+            "the first item was closed by this leg, and a filing this node suppresses "
+            "would then be suppressed for the wrong reason")
+
+
+def test_a_long_finding_set_posts_a_name_inside_the_cap_built_before_the_slice(
+        tmp_path, monkeypatch):
+    """Clause 2: the compact form is built before `notify.py`'s `[:120]`, not by it.
+
+    `notify.py:1152` and `:1183` slice silently, so a title handed over too long loses its
+    tail mid-word. The arithmetic is 120 minus the 11-character `[guardian] ` lead minus the
+    48-character heading minus the `: ` separator, leaving 59 characters for names — the
+    item's own "58 chars, 62 left" is off by the apostrophe's worth of one in each half and
+    does not subtract the separator. Four real-looking names overflow 59 comfortably, and a
+    sliced tail would read as a data-root name that does not exist. The compact form — first
+    name plus `(+N more)` — is built in the guardian, so the slice has nothing left to cut.
+    """
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    board = tmp_path / "board"
+    board.mkdir()
+    names = ["workers-board-steward-extract.db", "workers-queue-backup.db",
+             "workers-board-steward-export.db", "workers-index-fragment.db"]
+    with _stub_board(tmp_path, None, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        g._runtime_data_incident(_NOW)
+        for n in names:
+            (data / n).write_bytes(b"x" * 4096)
+            os.utime(data / n, (_NOW, _NOW))
+        g._runtime_data_incident(_NOW + _DAY)
+
+        filed = _arrivals_posts(seen["posts"], ARR)
+        assert len(filed) == 1, f"{[p.get('name') for p in seen['posts']]}"
+        posted = filed[0]["name"]
+        naive = f"[guardian] {ARR}: {', '.join(sorted(names))}"
+        assert len(naive) > 120, (
+            f"this finding set does not exercise the cap at all — the uncompact name is "
+            f"only {len(naive)} chars, so the node would pass with no compaction: {naive}")
+        assert len(posted) <= 120, f"{len(posted)}: {posted}"
+        assert posted.startswith("[guardian] "), posted
+        assert re.search(r" \(\+3 more\) \[[0-9a-f]{12}\]$", posted), (
+            "the compact heading lost the digest that makes shape 2 per-SET, so two sets "
+            f"sharing their sorted-first name and their size share a heading again: {posted}")
+        # The alphabetically-first name, not the first written down: the heading is built
+        # from a sorted list, and that determinism is half of why a stable heading re-files
+        # nothing — one set must make one string whoever noticed it first. (`export` sorts
+        # before `extract`, `p` below `t`.)
+        assert posted.startswith(
+            f"[guardian] {ARR}: {sorted(names)[0]} (+3 more) "), posted
+        # Same size, same sorted-first name, one name swapped in past the prefix shape 2
+        # drops: before the digest was added to this shape the review collapsed exactly
+        # this pair by running the builder, and a second arrival with a genuinely different
+        # finding set would have been silenced by the first's open draft.
+        same_shape = [n for n in names if n != "workers-queue-backup.db"] + \
+            ["workers-queue-backup2.db"]
+        assert sorted(same_shape)[0] == sorted(names)[0] and len(same_shape) == len(names)
+        other_posted = "[guardian] " + G.arrivals_alert_title(same_shape)
+        assert other_posted != posted, (
+            f"two over-capacity sets sharing a first name and a size posted one name: "
+            f"{posted}")
+        assert len(other_posted) <= 120, other_posted
+        # The description is NOT shortened: the compact heading is a heading, and the
+        # person still has to be able to see all four names somewhere.
+        assert all(n in filed[0]["description"] for n in names), filed[0]["description"]
+
+
+def test_two_over_budget_finding_sets_never_collapse_on_the_fallback_heading(
+        tmp_path, monkeypatch):
+    """Clause 2's hard half: the fallback heading must be per SET, not per COUNT.
+
+    A first draft of the builder fell back to `{heading}: {n} new name(s)` when even
+    `first (+N more)` overflowed the 59 characters the board cap leaves, and that string
+    is a function of the COUNT alone. These two sets share their alphabetically-first
+    name and their size and differ only in a name the compact form cannot show, so the
+    count-only fallback posted ONE heading for two different incidents at the root — the
+    exact collapse #3424 exists to remove, reintroduced by the one branch of its own fix
+    that only an over-long name reaches. The fallback therefore carries a digest of the
+    whole sorted set, which is also why no name is ever cut to fit: a truncated
+    `workers-board-stewa` looks like a data-root name, is not one, and collides with
+    every name that shares its prefix.
+
+    The two sets below sit just past the middle shape's budget, so this node pins the
+    FALLBACK. The middle shape's own injectivity is the node beside it,
+    `test_two_sets_sharing_their_first_name_and_count_never_share_shape_two`: this shape is
+    where a first draft of #3424 left a hole, and the review rung of round
+    SM_20261102_223914 filled it in by calling the builder rather than reading it.
+    """
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    shared = "m" * 66 + ".db"
+    set_a, set_b = [shared, "n" * 66 + ".db"], [shared, "o" * 66 + ".db"]
+
+    title_a = G.arrivals_alert_title(set_a)
+    title_b = G.arrivals_alert_title(set_b)
+    assert title_a != title_b, (
+        f"two finding sets that differ only past the compact form posted one heading, so "
+        f"the second arrival is silenced by the first's open draft: {title_a}")
+    # Pinned to notify's slice, read from its source, never to `G.ARRIVALS_BOARD_NAME_CAP`:
+    # an assert against the constant under test stays green when someone raises the constant,
+    # and the posted name then runs past the board's slice.
+    assert len(f"[guardian] {title_a}") <= _notify_board_name_cap(), title_a
+    # The fallback names NOTHING: no fragment of any finding name may appear in it, which
+    # is what "no name cut mid-word" means once there is no room for a whole one.
+    for name in set_a + set_b:
+        assert name[:12] not in title_a, f"a truncated name is in the heading: {title_a}"
+    assert re.fullmatch(
+        re.escape(ARR) + r": 2 new name\(s\) \[[0-9a-f]{%d}\]" % G.ARRIVALS_TITLE_DIGEST_CHARS,
+        title_a), title_a
+    # One set makes one string, whichever order the scan noticed them in — that
+    # determinism is what lets #2080's exact-name rule keep suppressing a re-fire.
+    assert G.arrivals_alert_title(list(reversed(set_a))) == title_a
+    assert G.arrivals_alert_title(sorted(set_a)) == title_a
+
+    board = tmp_path / "board"
+    board.mkdir()
+    with _stub_board(tmp_path, None, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        g._runtime_data_incident(_NOW)
+        for n in set_a:
+            (data / n).write_bytes(b"x" * 4096)
+            os.utime(data / n, (_NOW, _NOW))
+        g._runtime_data_incident(_NOW + _DAY)
+        g._alert_seen.clear()
+        (data / set_b[1]).write_bytes(b"x" * 4096)
+        os.utime(data / set_b[1], (_NOW + _DAY, _NOW + _DAY))
+        g._runtime_data_incident(_NOW + 2 * _DAY)
+
+        filed = _arrivals_posts(seen["posts"], ARR)
+        assert len(filed) == 2, (
+            "the second over-budget arrival filed nothing: "
+            f"{[p.get('name') for p in seen['posts']]}")
+        posted = [p.get("name") for p in filed]
+        assert posted[0] != posted[1], posted
+        # Again notify's own slice, not `G.ARRIVALS_BOARD_NAME_CAP`: these are the bytes the
+        # board stores, and that slice is what would have cut them.
+        assert all(len(p) <= _notify_board_name_cap() for p in posted), posted
+        assert len(seen["gets"]) >= 1, (
+            "the second filing happened without a board read, so this node would pass "
+            "with #2080's guard deleted")
+
+
+def test_two_sets_sharing_their_first_name_and_count_never_share_shape_two(
+        tmp_path, monkeypatch):
+    """Clause 2, the half the review rung of SM_20261102_223914 found missing.
+
+    Its refusal read, in part: "calling the committed builder showed the middle shape is not
+    injective: ['false','workers-board-steward-extract.db','workers-board-steward-export.db']
+    and ['false','research-board-steward-export.db','research-board-steward-wal.db'] both post
+    '...: false (+2 more)'". Those two sets fit shape 2 with room to spare (15 of the 59
+    characters the board name leaves), so they never reach the digest-carrying fallback: the
+    shape chosen in the one case that matters keyed on ONE name plus a count, and the second
+    arrival would have been silenced by the first's open draft exactly as the constant title
+    silenced #3231 behind #3227. Shape 2 therefore carries the same per-set digest as shape 3,
+    and these are the review's two sets, unaltered.
+
+    Asserted twice over on purpose. First through the builder, because that is where the
+    collision is a property of the string. Then through the real leg and the real
+    `_backlog_task`, because a heading that differs only in the lab files nothing: the second
+    arrival is only a decision if it reaches the board while the first row is still open.
+    """
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+    set_a = ["false", "workers-board-steward-extract.db", "workers-board-steward-export.db"]
+    set_b = ["false", "research-board-steward-export.db", "research-board-steward-wal.db"]
+
+    # The premise of the review's counterexample, asserted rather than assumed: same size,
+    # same sorted-first name, and neither list fits shape 1 — so the middle shape IS the one
+    # both sets are named by, not the fallback.
+    assert len(set_a) == len(set_b) == 3
+    assert sorted(set_a)[0] == sorted(set_b)[0] == "false"
+    room = (G.ARRIVALS_BOARD_NAME_CAP - len(G.ARRIVALS_BOARD_NAME_PREFIX)
+            - len(ARR) - 2)
+    assert len(", ".join(sorted(set_a))) > room > len(", ".join(sorted(set_b)[:1]))
+    assert len(f"{sorted(set_a)[0]} (+{len(set_a) - 1} more)") <= room, (
+        "these sets must land on the MIDDLE shape, or this node is testing the fallback "
+        "the node above already pins")
+
+    title_a = G.arrivals_alert_title(set_a)
+    title_b = G.arrivals_alert_title(set_b)
+    assert re.fullmatch(re.escape(ARR) + r": false \(\+2 more\) \[[0-9a-f]{%d}\]"
+                        % G.ARRIVALS_TITLE_DIGEST_CHARS, title_a), title_a
+    assert title_a != title_b, (
+        f"the middle shape collapsed two finding sets that share their first name and count "
+        f"into one heading — the review's counterexample, unfixed: {title_a}")
+    # Built before the slice, so nothing is cut: `notify` stores these bytes unchanged.
+    assert len(f"[guardian] {title_a}") <= _notify_board_name_cap(), title_a
+    assert "workers-board-steward-export" not in title_a, (
+        f"shape 2 must name its first finding whole and digest the rest, not truncate one: "
+        f"{title_a}")
+
+    # And the same two sets through the leg, where the second decision either files or does
+    # not. `false` is what the two sets share, so it is planted once and the two pairs of
+    # research/workers names arrive an hour apart.
+    board = tmp_path / "board"
+    board.mkdir()
+    with _stub_board(tmp_path, None, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        g._runtime_data_incident(_NOW)
+        for n in ("false", "workers-board-steward-extract.db",
+                  "workers-board-steward-export.db"):
+            (data / n).write_bytes(b"x" * 4096)
+            os.utime(data / n, (_NOW, _NOW))
+        g._runtime_data_incident(_NOW + _DAY)
+        g._alert_seen.clear()
+        # `false` is already in the baseline, so re-presenting it needs #3422's prune — the
+        # route the item's own finding records as the ONLY way a seen name becomes a finding
+        # again. Delete it, prune it, put it back, and add the second set's own two names.
+        (data / "false").unlink()
+        import datawatch as D
+        pruned, refused = D.prune_arrivals_baseline(
+            G.policy.GUARDIAN_STATE, ["false"], now=_NOW + _DAY, root=str(data))
+        assert pruned == ["false"] and refused == [], (pruned, refused)
+        (data / "false").write_bytes(b"x" * 4096)
+        os.utime(data / "false", (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
+        for n in ("research-board-steward-export.db", "research-board-steward-wal.db"):
+            (data / n).write_bytes(b"x" * 4096)
+            os.utime(data / n, (_NOW + 2 * _DAY, _NOW + 2 * _DAY))
+        g._runtime_data_incident(_NOW + 2 * _DAY)
+
+        filed = _arrivals_posts(seen["posts"], ARR)
+        assert len(filed) == 2, (
+            f"the second set, which shares its first name and count with the first, filed "
+            f"nothing: {[p.get('name') for p in seen['posts']]}")
+        posted = [p.get("name") for p in filed]
+        assert posted[0] != posted[1], posted
+        assert all(len(p) <= 120 for p in posted), posted
+        assert len(seen["gets"]) >= 1, (
+            "no board read before the second filing, so the guard is not being exercised")
+
+
+def test_an_identical_refire_files_nothing_and_is_recorded_until_the_row_closes(
+        tmp_path, monkeypatch):
+    """Clause 3: #2080's suppression survives the varying title, in both directions.
+
+    The same name set arriving again must not produce a second item — the heading is
+    stable because the names are stable — and the suppression must be the RECORDED one,
+    in `backlog-skipped.json` under the posted name, which is the file the live board
+    already proves this mechanism reaches (`'[guardian] Runtime data is being written
+    into the code tree': {count: 6}`). Then the human closes the item, and the next
+    identical firing files again: the guard is keyed on the board's OPEN rows and never
+    on this file, or a closed decision would silence its own recurrence.
+    """
+    import datawatch
+    import notify
+    from tests.test_guardian_predicates import _stub_board
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+
+    def refire(at: float) -> None:
+        """Make the next pass report the SAME one name again.
+
+        `new_top_level_names`' whole rule is `name not in previous`, and
+        `write_arrivals_baseline` MERGES the previous baseline in — so a name the leg has
+        once reported can never become a finding again, not by deleting the file and
+        re-creating it, not by touching its mtime. The one thing that re-presents it is the
+        baseline losing the name, which is also the honest description of what happens in
+        the field: the state file is lost or re-armed empty, and the leg reports what
+        stands at the root as though it had never seen it. `data_root` is named explicitly
+        because the parameter's default is the pre-patch module constant, and a baseline
+        recorded against the wrong root reads as no baseline at all.
+        """
+        state = Path(G.policy.GUARDIAN_STATE) / datawatch.ARRIVALS_STATE_FILE
+        state.unlink()
+        datawatch.write_arrivals_baseline(state.parent, {}, at, str(data))
+        g._alert_seen.clear()
+
+    board = tmp_path / "board"
+    board.mkdir()
+    with _stub_board(tmp_path, None, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        g._runtime_data_incident(_NOW)
+        (data / "false").write_bytes(b"")
+        os.utime(data / "false", (_NOW, _NOW))
+        g._runtime_data_incident(_NOW + _DAY)
+        first = _arrivals_posts(seen["posts"], ARR)
+        assert len(first) == 1, f"{[p.get('name') for p in seen['posts']]}"
+        name = first[0]["name"]
+        # The half that makes this node about the BOARD guard and not about heading
+        # stability. An identical re-fire files nothing under the pre-change constant title
+        # too, and posts one item and one skip entry exactly as it does here — so a node that
+        # stopped at "one post, one skip, count 1" would be green before #3424 and would say
+        # nothing about it. What is new is WHICH string the guard compared: a heading that
+        # names the finding. Pinned here, the suppression is #2080's rule applied to a
+        # name-carrying row, which is the same comparison that lets a DIFFERENT set file at
+        # all — this node and the two above are that one mechanism read from both sides.
+        assert name == f"[guardian] {ARR}: false", (
+            f"the row the guard suppressed against does not carry the finding name, so the "
+            f"suppression below is the pre-change constant's, not #3424's: {name!r}")
+
+        gets_before = len(seen["gets"])
+        refire(_NOW + 2 * _DAY)
+        g._runtime_data_incident(_NOW + 3 * _DAY)
+
+        assert _arrivals_posts(seen["posts"], ARR) == first, (
+            "a re-fire of the same name set filed a second item, which is the duplicate "
+            f"#2080 rules against: {[p.get('name') for p in seen['posts']]}")
+        assert len(seen["gets"]) > gets_before, (
+            f"the re-fire was suppressed across {len(seen['gets']) - gets_before} board "
+            "reads — none. The repeat guard or the skip file did it, and #2080's open-row "
+            "comparison never ran, which is the comparison this item changed the input to")
+        assert len(_arrivals_alerts(alerts, ARR)) == 2, (
+            "the re-fire never reached the alert, so this node proved the repeat guard and "
+            f"not the board guard: {alerts}")
+        skip_path = tmp_path / notify.BACKLOG_SKIP_STATE_NAME
+        assert skip_path.is_file(), (
+            "a suppressed filing left no record, so the silencing is invisible to whoever "
+            f"later wonders where the arrival went: {sorted(q.name for q in tmp_path)}")
+        skip = json.loads(skip_path.read_text(encoding="utf-8"))
+        assert skip["suppressed"][name]["count"] == 1, skip
+
+        closed = _close_board_row(board)
+        assert closed, "no board row was closed, so the reopen half proved nothing"
+        refire(_NOW + 4 * _DAY)
+        g._runtime_data_incident(_NOW + 5 * _DAY)
+
+        again = _arrivals_posts(seen["posts"], ARR)
+        assert len(again) == 2 and again[1]["name"] == name, (
+            "closing the item did not let the identical arrival file again, so a decided "
+            f"incident would silence its own recurrence: {[p.get('name') for p in again]}")
+        assert skip["suppressed"][name]["count"] == 1, (
+            "the filing after the close was also recorded as suppressed, which would mean "
+            f"the skip file had become an input: {skip}")
+
+
+def test_a_name_carrying_arrivals_heading_is_cleared_on_both_alert_surfaces(
+        tmp_path, monkeypatch):
+    """Clause 4: the hard half — clearance is title-EXACT everywhere.
+
+    `notify.py` matches ALERT.md's single held slot on `held == title` and a daily-note
+    section on `sect[0] != title`, and the arrivals all-clear used to hand it one
+    constant. Once the heading carries names, an all-clear that names only the constant
+    retracts nothing, and the surviving record of a resolved incident stays standing as
+    an instruction about a file the person has already deleted. So the leg remembers the
+    exact heading it posted and the all-clear walks it, plus the bare constant, which is
+    what every heading opened before this change stands under.
+
+    Both surfaces are read, because they are two writes: ALERT.md's held line and
+    `memory/<today>.md`'s section with its `_(still open on the next check)_` marker. Both
+    come from `_alert_surfaces`, the one place that knows where `Notifier` writes: the state
+    dir file by name and the daily note by GLOB, because the note is named from the wall
+    clock's date and not from the `now` this node hands the leg.
+    """
+    import notify
+
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    ARR = G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE
+
+    def _both_surfaces():
+        """(ALERT.md text, newest daily note text) — ALERT.md first, note last."""
+        surfaces = _alert_surfaces(tmp_path)
+        assert len(surfaces) >= 2, (
+            f"the leg never wrote a daily note, so only half the clearance is readable: "
+            f"{[s.name for s in surfaces]}")
+        return surfaces[0].read_text(encoding="utf-8"), surfaces[-1].read_text(encoding="utf-8")
+
+    g._runtime_data_incident(_NOW)
+    (data / "false").write_bytes(b"")
+    os.utime(data / "false", (_NOW, _NOW))
+    g._runtime_data_incident(_NOW + _DAY)
+    title = _arrivals_alerts(alerts, ARR)[0][0]
+    assert title == f"{ARR}: false", title
+
+    alert_md, note = _both_surfaces()
+    assert f"# {title}" in alert_md, alert_md
+    assert f"{notify.DAILY_SECTION_PREFIX}{title}" in note, note
+    assert notify.DAILY_STILL_OPEN in note, note
+
+    # A pass that finds no new names: the posted heading must now reach a cleared line.
+    # `false` STAYS on disk and stays baselined, so the arrivals half reports nothing new,
+    # `arrivals_measured` is True, and the all-clear branch runs. Taking the file away is the
+    # one thing this pass may not do: removal fires the DEPARTURES leg (#3584, which reached
+    # main after the branch this node was cut from — there the assertion held for the narrower
+    # reason that no departures leg existed yet), a non-empty `departed` skips the clear
+    # branch on its `not departed` arm, and the departure alert takes ALERT.md's ONE slot with
+    # it, displacing the arrivals heading so there is nothing left to clear.
+    g._runtime_data_incident(_NOW + 2 * _DAY)
+
+    alert_md, note = _both_surfaces()
+    assert f"\n{notify.ALERT_CLEARED_PREFIX} " in alert_md, (
+        f"ALERT.md still holds the arrivals alarm as a live directive: {alert_md[:400]}")
+    assert f"\n{notify.DAILY_CLEARED_PREFIX} " in note, (
+        f"the daily note still shows the arrivals section open: {note[:600]}")
+    assert notify.DAILY_STILL_OPEN not in note, note
+    assert [t for t, ok in cleared if t == title] == [title], (
+        "the all-clear never named the heading that was standing: "
+        f"{[t for t, _ in cleared]}")
+    # The walk is every heading this leg can be standing under, deduplicated: the
+    # name-carrying one it remembered, then the bare constant — which is what every
+    # arrivals heading opened BEFORE the title carried names still stands under, including
+    # the one ALERT.md holds on the first night after this lands. Once each, because the
+    # walk is `dict.fromkeys`: a heading that is also the constant is not sealed twice, and
+    # no heading is sealed on behalf of another.
+    def _walked():
+        # Scoped to this leg's own headings: the same pass also walks the stray and shadow
+        # headings, and those are #3124's nodes' subject, not this one's.
+        return [t for t, _ in cleared if t == ARR or t.startswith(ARR + ": ")]
+
+    assert _walked() == [title, ARR], (
+        f"the all-clear walked {_walked()}, not {[title, ARR]}")
+    assert G.datawatch.read_arrivals_titles(tmp_path / "guardian-state") == [], (
+        "a cleared heading stayed on the list, so the next clean pass seals it again")
+
+    # A second arrival under a second heading, cleared the same way: with the heading
+    # carrying names, the set of things this leg can leave standing is no longer one, and
+    # #3124's rule — resolving one heading must not leave another open — now has more than
+    # one heading to apply to.
+    (data / "workers.db").write_bytes(b"x" * 4096)
+    os.utime(data / "workers.db", (_NOW + 3 * _DAY, _NOW + 3 * _DAY))
+    g._runtime_data_incident(_NOW + 3 * _DAY)
+    second = _arrivals_alerts(alerts, ARR)[-1][0]
+    assert second == f"{ARR}: workers.db" and second != title, second
+    # `workers.db` STAYS at the root and stays baselined, for the same reason the first
+    # all-clear pass above does not remove `false`: unlinking it would fire the departures
+    # leg, whose non-empty `departed` skips this clear branch and whose alert would take
+    # ALERT.md's one slot.
+    g._runtime_data_incident(_NOW + 4 * _DAY)
+
+    _, note = _both_surfaces()
+    assert notify.DAILY_STILL_OPEN not in note, (
+        f"the second arrivals section was left open: {note[:600]}")
+    # One cleared line per heading this leg posted, and not one line fewer: a walk that
+    # sealed only the newest heading would still leave the first section's marker here.
+    assert note.count(f"\n{notify.DAILY_CLEARED_PREFIX}") == 2, (
+        f"{note.count(chr(10) + notify.DAILY_CLEARED_PREFIX)} cleared lines for two "
+        f"posted headings:\n{note[:800]}")
+    assert _walked() == [title, ARR, second, ARR], (
+        f"the second clean pass walked {_walked()[-2:]} instead of {[second, ARR]}")
