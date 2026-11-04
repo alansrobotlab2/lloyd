@@ -1237,8 +1237,9 @@ def reopen(reopen_raw, cfg) -> dict:
 #: `test_the_eleventh_pinned_pool_is_a_committed_boot_line_too` re-derives the integer from those
 #: bytes and pins that it falls before this window, not inside it.
 #:
-#: 2026-10-29 (#3691) is the fourth day that needs a pin, and the only one of the four whose
-#: chat miss does NOT meet the filing condition — it is pinned so the walk can be run at all,
+#: 2026-10-29 (#3691) is the fourth day that needs a pin, and of the pinned days that carry a
+#: chat miss it is the only one whose miss does NOT meet the filing condition — it is pinned so
+#: the walk can be run at all,
 #: and what the walk finds is the day's close rather than a sixth qualifying event. Its
 #: window holds no boot and its extract ships `pool_tokens: []`. The size is the last boot
 #: before the window, read out of the live rotation on 2026-11-01 and quoted verbatim as
@@ -1252,8 +1253,28 @@ def reopen(reopen_raw, cfg) -> dict:
 #: cited because the rotation reaches back only to 2026-10-18 today, and re-reading it stops
 #: being possible. `test_the_twelfth_pinned_pool_is_a_quoted_boot_line_the_walk_can_use`
 #: re-derives the integer from the quoted bytes through the script's own `_POOL_RE`.
+#:
+#: 2026-10-28 (#3693) is the fifth day that needs a pin, and it needs one for the structural
+#: reason the first one did rather than the editorial reason the third did: `_qualifying` walks
+#: EVERY tracked extract through `_gap_events`, so a no-boot day with no entry raises its
+#: `KeyError` inside nodes that are grading other days entirely — 9 of them did when this
+#: extract first landed. The entry is what lets the filing-condition sweep run; what it finds
+#: for this day is nothing, because its one chat turn carries no miss. Its window holds no boot
+#: and its extract ships `pool_tokens: []`. The size is the SAME boot #3691 quotes as
+#: `TWELFTH_BOOT` — `(EngineCore pid=5968) INFO 10-26 14:58:24 [kv_cache_utils.py:2320] GPU KV
+#: cache size: 844,969 tokens` — quoted here too, as `THIRTEENTH_BOOT`, because a provenance
+#: that lives only in another day's constant is one deletion away from orphaning this one. The
+#: boot after it is the `484,612`-token dip quoted as `THIRTEENTH_NEXT_BOOT` at
+#: `INFO 10-29 23:12:47`, which on the engine's own clock (`engine_tz` in the extract is
+#: `America/Los_Angeles`) is 2026-10-30 06:12 UTC and so falls after this UTC day closes: no
+#: engine restarted inside the window, so the day was served start to finish by the 10-26 boot.
+#: Both lines are quoted rather than cited because the rotation reaches back only to 2026-10-19
+#: today, and #3271's own note puts lines of this vintage leaving it around 2026-11-06.
+#: `test_the_thirteenth_pinned_pool_is_the_quoted_boot_that_served_the_day` re-derives the
+#: integer from the quoted bytes through the script's own `_POOL_RE` and pins that the boot
+#: falls before the window and the next one after it.
 NO_BOOT_POOL = {"2026-10-15": 844969, "2026-10-23": 844969, "2026-10-25": 844969,
-                "2026-10-29": 844969}
+                "2026-10-28": 844969, "2026-10-29": 844969}
 
 
 def _with_pool(ex: dict) -> dict:
@@ -5309,6 +5330,23 @@ _NEWEST_CLEARING_DAY = "2026-10-23"
 _COUNTED_THROUGH = "2026-10-24"
 _NEWEST_HEADING_RE = re.compile(r"newest day,? as counted through (\d{4}-\d\d-\d\d)")
 
+#: Days that clear all four criteria on their committed bytes whose displacement of the
+#: headline is NOT this file's to make. §10's own close assigns it — "the bound is a counting
+#: one, owed-check's to move with the next extract" — and #3101's owed entry is where the ruling
+#: is recorded (ruled DISPLACE on 2026-10-25, which is what made 2026-10-23 the headline through
+#: #3341). 2026-10-28 (#3693) is the first and only entry: the day is the first committed
+#: extract that clears the bar while the page headlines an earlier one, because at 267 turns and
+#: ONE chat turn it is a thinner window than any the page has counted, and whether thinness
+#: denies criterion (a) its test is precisely the ruling §10 assigns elsewhere. #3271 named the
+#: temptation this constant exists to refuse: "a round that committed the fixture and re-cut §10
+#: in the same diff would have made an editorial decision by arithmetic".
+#:
+#: This is a hold on named days, not an exemption: a round that lands owed-check's ruling
+#: empties it, and until then `test_the_displaced_headline_is_re_bound_and_the_superlative_is_
+#: never_stale` still fails on any OTHER day that clears the bar, which is the #1918 tripwire
+#: doing its job one day behind the data rather than not at all.
+_UNRULED_CLEARING_DAYS = {"2026-10-28"}
+
 
 def _clears_all_four(path: Path, gate: float) -> bool:
     """Whether the committed extract in `path` clears (a), (b), (c) and (d) at `gate`
@@ -5573,6 +5611,17 @@ def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
     may name a day that a real extract disproves: the sweep over the daily job's
     extracts is what makes "2026-10-23 is the newest" a derived statement rather than
     this file's opinion, and it is the check that catches the next displacement.
+
+    Since #3693 the sweep and the headline may disagree by exactly the days
+    `_UNRULED_CLEARING_DAYS` names — today 2026-10-28, which clears all four on its bytes
+    at ONE chat turn while the page still headlines 2026-10-23's three. That gap is not
+    this file deciding the question: naming the newest all-four day is owed-check's under
+    #3101's owed entry, and committing the fixture is what makes the question answerable
+    from git before the log rotation deletes the evidence for it. The two asserts either
+    side of the sweep keep the hold narrow — a clearing day outside the set fails the
+    headline compare, a held day that stops clearing fails the containment compare — so
+    the page runs one named day behind its data under an owner, never silently behind
+    whatever extracts happen to land.
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
@@ -5636,10 +5685,24 @@ def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
     assert _NEWEST_CLEARING_DAY in clearing, (
         f"the committed extract for {_NEWEST_CLEARING_DAY} no longer clears all four "
         f"criteria at the {gate} gate, so the headline this block pins is false")
-    assert max(clearing) == _NEWEST_CLEARING_DAY, (
-        f"the committed family now clears the bar latest on {max(clearing)}, not "
-        f"{_NEWEST_CLEARING_DAY}: the page's newest-day headline has to move to that "
-        "day and this one re-bound to the window-end it was counted through")
+    # #3693: which day the page HEADLINES is owed-check's ruling (§10's own close, #3101's
+    # owed entry), so `_UNRULED_CLEARING_DAYS` is allowed to sit between this sweep and the
+    # headline — for the days named there and for no others. The tripwire is intact: a day
+    # outside the set that clears the bar still fails the `max` below, and a held day that
+    # stops clearing it fails the line after, so the hold cannot quietly become the rule.
+    unruled = [d for d in clearing if d not in _UNRULED_CLEARING_DAYS]
+    assert unruled, (
+        "every clearing day on the committed bytes is inside `_UNRULED_CLEARING_DAYS`, so no "
+        "headline is derived from the sweep at all and this node is grading an opinion")
+    assert _UNRULED_CLEARING_DAYS <= set(clearing), (
+        f"`_UNRULED_CLEARING_DAYS` holds {sorted(_UNRULED_CLEARING_DAYS - set(clearing))}, "
+        "which no longer clears all four criteria: a ruling can only be pending on a day the "
+        "tree still supports, and this one is carrying an exemption")
+    assert max(unruled) == _NEWEST_CLEARING_DAY, (
+        f"the committed family now clears the bar latest on {max(unruled)}, not "
+        f"{_NEWEST_CLEARING_DAY}, and that day is not held for a pending ruling: the page's "
+        "newest-day headline has to move to it and this one re-bound to the window-end it was "
+        "counted through")
     disproved = [p.stem.rsplit("_", 1)[-1] for p in _tracked_extracts()
                  if not _clears_all_four(p, gate)]
     assert disproved, (
@@ -6298,3 +6361,395 @@ def test_the_twelfth_paragraph_closes_the_day_and_asks_nothing_upstream(cfg):
     assert "asserts no upstream filing, comment or ask" in p, (
         "the paragraph has to say plainly that it asks for nothing — that is what a reader "
         "arriving with only this page needs")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── #3693: the thirteenth tracked day — 2026-10-28 ───────────────────────────
+# The first day since the 2026-10-23 fixture on which all four acceptance-bar criteria read as
+# HOLDING — and the thinnest window the family has ever carried a verdict on: 267 turns, ONE
+# chat turn, and a (d) arm with nothing under the bar to exercise. The four criteria are
+# written out below rather than waved at, because the day's whole editorial question is WHICH
+# of §10's two stated tests of a thin population a reader applies. §10 rejects 2026-09-23
+# because "its chat count was a handful and its rounds were four" — and `derive` on the
+# committed 09-23 fixture says that handful is 4 chat turns — while two bullets later it counts
+# 2026-10-23 on 3, naming its own denominator ("thinner than 2026-10-09's 9, and still not the
+# zero of zero the bar refuses to test"). 2026-10-28 sits under both tests at once.
+#
+# Committing it is the time-critical half and nothing else: its status lines survive in ONE
+# rotation file against an 11-file rotation, and #3271's own note puts lines of this vintage
+# leaving that rotation around 2026-11-06. What this block deliberately does NOT do is write a
+# word into architecture/vllm.md. Whether 10-28 displaces 10-23 as §10's newest all-four day is
+# owed-check's ruling under #3101's owed entry, and the precedent is on the record — that entry
+# reads `ruling: DISPLACE. 2026-10-23 becomes the headline newest bar-clearing day; 2026-10-09
+# remains a prior clearing day and 2026-09-25 remains the counted reading` (owed-check,
+# 2026-10-25, vault `backlog/3101-10-records-2026-10-09-as-the-second-day-to-clear-a.md:75-77`,
+# which is what became #3341). The hold that keeps this round's own suite green while its SECOND
+# ruling is pending is `_UNRULED_CLEARING_DAYS`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+THIRTEENTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-28.json"
+
+#: sha256 of the standing daily job's own copy, taken off `~/lloyd-data/vllm-prefix-miss/` at
+#: the moment #3693 copied it into the tree. Both copies hash to this today, and it is what
+#: keeps clause 1's byte identity an assertion after the job's file moves on.
+THIRTEENTH_JOB_SHA = "cb9c13403fc2621dcb7dae98181a7ad597e576eee34635f700c61557bb8932aa"
+
+#: The engine line the pinned pool was read from, quoted verbatim out of the live rotation on
+#: 2026-10-28's re-check. It is the SAME line `TWELFTH_BOOT` quotes, because it is the same
+#: boot: the last engine restart before this window. Quoted a second time rather than referred
+#: to, because a provenance that lives only inside another day's constant is one deletion away
+#: from orphaning this one.
+THIRTEENTH_BOOT = ("(EngineCore pid=5968) INFO 10-26 14:58:24 [kv_cache_utils.py:2320] "
+                   "GPU KV cache size: 844,969 tokens, Maximum concurrency for 262,144 tokens "
+                   "per request: 3.22x")
+
+#: The first boot AFTER the window, also quoted, because the claim the pinned pool rests on is
+#: a claim about a window and not about a number: this day was served start to finish by the
+#: 10-26 engine, and that is only true if nothing restarted inside it. The stamp is engine-local
+#: clock — the extract's own `engine_tz` is `America/Los_Angeles` — so `INFO 10-29 23:12:47` is
+#: 2026-10-30 06:12 UTC and falls after this UTC day closes. `test_the_thirteenth_pinned_pool_
+#: is_the_quoted_boot_that_served_the_day` converts both quoted stamps and pins the ordering.
+THIRTEENTH_NEXT_BOOT = ("(EngineCore pid=2087229) INFO 10-29 23:12:47 [kv_cache_utils.py:2320] "
+                        "GPU KV cache size: 484,612 tokens, Maximum concurrency for 262,144 "
+                        "tokens per request: 1.85x")
+
+#: `derive`'s in-window status-line count for this day, against the 2,972 rows the extract
+#: itself carries. Two numbers by construction, not two spellings of one: `extract` fills
+#: `kv_samples` over the lookback plus a trailing interval, `derive` recounts inside the window.
+#: #3695 owns the family's confusion of the pair, and this item's triage had to un-write it.
+THIRTEENTH_KV_SAMPLES = 2783
+THIRTEENTH_RAW_KV_ROWS = 2972
+
+
+@pytest.fixture(scope="module")
+def thirteenth_raw() -> dict:
+    """2026-10-28 00:00 → 2026-10-29 00:00 UTC, as the standing daily job cut it on 10-29."""
+    return json.loads(THIRTEENTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def thirteenth(thirteenth_raw, cfg) -> dict:
+    """The same bytes through `derive`, at the gate `config.yaml` carries.
+
+    `NO_BOOT_POOL` is deliberately NOT applied here, exactly as `twelfth` withholds it: `derive`
+    reads the window's own `pool_tokens`, this one booted nothing, so its churn arm is `None`
+    and the pinned denominator belongs to the per-event walk in `_gap_events` alone.
+    """
+    return W.derive(thirteenth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def test_the_thirteenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(
+        thirteenth_raw):
+    """#3693 clauses 1, 2 and 3: the day is on disk, tracked by git, one canonical
+    `--write-extract` line, and byte-identical to the copy the standing daily job wrote.
+
+    Byte identity is asked of the job's file rather than of a re-run of `--write-extract`, for
+    the reason the family has repeated since #2248: what is worth pinning is that nobody re-cut
+    the numbers between the job that found the day and the round that committed it. For THIS day
+    a re-run would have survived — #3693's triage re-ran a read-only
+    `extract('2026-10-28','2026-10-29')` against the live logs on 2026-11-01 and got 85,175
+    bytes, equal to the saved copy — but surviving on the day it is measured is worth nothing
+    here: the day's status lines sit in one rotation file against an 11-file rotation, and the
+    same clock that made #3271 write "around 2026-11-06" for the 10-23 lines applies to these.
+    The comparison against the job's copy is the half that catches a re-derivation; the digest
+    below is the half that survives the box.
+    """
+    assert thirteenth_raw["window"] == ["2026-10-28", "2026-10-29"], (
+        "the committed day is not the [2026-10-28, 2026-10-29) UTC window the item quotes")
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(THIRTEENTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{THIRTEENTH_EXTRACT.name} is on disk but not in git; `tests/fixtures/.gitignore` "
+        "negates this family on purpose, so an untracked extract is a day whose evidence dies "
+        "with the rotation that produced it — the whole reason this item exists")
+    raw = THIRTEENTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(thirteenth_raw, separators=(",", ":")) + "\n", (
+        f"{THIRTEENTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes for the "
+        "rows it holds, so the committed reading has been edited by hand")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one compact line; a multi-line fixture would make every figure in it "
+        "diffable by hand")
+    assert len(THIRTEENTH_EXTRACT.read_bytes()) == 85_175, (
+        "the committed extract is no longer the 85,175 bytes the item quotes as the live "
+        "extract's size, so the byte-identity claim in the item and the file in the tree are "
+        "describing different readings")
+    assert hashlib.sha256(THIRTEENTH_EXTRACT.read_bytes()).hexdigest() == THIRTEENTH_JOB_SHA, (
+        "the committed day is no longer the bytes the daily job wrote; re-deriving a day and "
+        "committing it is the re-cut this clause exists to catch")
+    daily = DAILY_EXTRACT_DIR / THIRTEENTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; the living copy is the second half "
+                    "of this identity and only the job can produce it — the digest and the "
+                    "byte count above still pin which bytes the job wrote")
+    assert daily.read_bytes() == THIRTEENTH_EXTRACT.read_bytes(), (
+        "the committed day differs from the job's bytes, and the gap between the two is the "
+        "unauditable one: someone re-cut the day between finding it and committing it")
+
+
+def test_the_thirteenth_figures_are_derived_from_the_committed_bytes_at_the_config_gate(
+        thirteenth, thirteenth_raw, cfg):
+    """#3693 clause 4: every figure the item quotes for this day is `derive` on the COMMITTED
+    bytes at `config.yaml`'s gate, so the readings are pinned by the tree whether or not §10
+    carries a bullet for the day yet.
+
+    The four criteria's inputs, each from the key §10 grades it against: (a) `chat_turns` and
+    `chat_turns_with_misses`; (b) `misses` and `reprefill_tokens` against §6.1's per-day 97 and
+    10.3M, which the ratios below divide here rather than remember; (c) `kv_p50` against the
+    gate; (d) the two-request split. The ratios are 0.06x and 0.06x — six hundredth-parts of a
+    day's budget, which is the load gap between this day and the 0.77x / 0.82x that 2026-10-23
+    cleared at, and it is the whole editorial question of the item in two numbers.
+
+    The sample-count assert is not decoration. The saved extract carries 2,972 `kv_samples`
+    rows and the day's reading is 2,783 status lines, because `extract` fills the raw list over
+    an hour of lookback plus a trailing interval while `derive` recounts inside the window. A
+    node that pinned the raw length would be quoting a number that reads like a rotation loss.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, "the item's readings are at the config gate; this pins which one"
+
+    assert thirteenth["turns"] == 267 and thirteenth["measured"] == 267
+    assert thirteenth["chat_turns"] == 1
+    assert thirteenth["chat_turns_with_misses"] == 0
+    assert thirteenth["turns_with_misses"] == 2
+    assert thirteenth["misses"] == 6 and thirteenth["miss_events"] == 6
+    assert thirteenth["reprefill_tokens"] == 624_225
+    assert thirteenth["by_kind"] == {"autonomy": [6, 624_225]}, (
+        "every miss in the window belongs to an autonomy turn: the day's single chat turn "
+        "carries none, which is what makes (a) a true statement here")
+
+    miss_budget, tok_budget = _per_day_budget(_section(6))
+    assert (miss_budget, tok_budget) == (97, 10.3), (
+        "§6.1's per-day budget is counted from its own sentence, so the ratios quoted for this "
+        "day are derived and not a remembered pair")
+    assert f"{thirteenth['misses'] / miss_budget:.2f}" == "0.06" and \
+        f"{thirteenth['reprefill_tokens'] / (tok_budget * 1e6):.2f}" == "0.06", (
+        "the item quotes 0.06x and 0.06x of budget; if the division says otherwise the "
+        "comparison against 2026-10-23's 0.77x / 0.82x has to be re-written, not carried")
+
+    assert thirteenth["kv_samples"] == THIRTEENTH_KV_SAMPLES
+    assert len(thirteenth_raw["kv_samples"]) == THIRTEENTH_RAW_KV_ROWS
+    assert THIRTEENTH_RAW_KV_ROWS != THIRTEENTH_KV_SAMPLES, (
+        "the raw row count and the in-window count are different numbers by construction (the "
+        "lookback and one trailing interval), and only the second is the day's reading")
+    assert round(thirteenth["kv_p50"], 3) == 0.121 < gate
+    assert round(thirteenth["kv_p90"], 3) == 0.272
+    assert round(thirteenth["kv_max"], 3) == 0.822
+    assert thirteenth["pool_tokens"] is None and thirteenth_raw["pool_tokens"] == []
+
+
+def test_the_thirteenth_clears_all_four_with_one_chat_turn_and_an_unexercised_d(
+        thirteenth, thirteenth_raw, cfg):
+    """#3693 clause 4's other half, stated as the item states it: all four criteria hold on
+    this day's bytes, one chat turn is what (a) rests on, and (d) is UNEXERCISED rather than
+    measured — and the tree has to say so in the same breath.
+
+    (d)'s bar is a rate, and no window got near it: the slowest of the day's 636 two-request
+    windows is 41.3 tok/s against `STALL_TOK_S` = 15.0, so `two_request_under_stall` is zero and
+    `two_request_under_stall_not_cold` is vacuously zero. Zero under a bar nothing approached is
+    not a day that withstood the stall test; it is a day the test was not asked of. The assert
+    below ties the vacuity to the rate so the reading cannot be re-quoted later as a measured
+    pass — the same distinction #3271 forced on 2026-10-23's `NO_BOOT_POOL` denominator.
+
+    (a) is the day's real exposure. Its population is ONE turn, which is thinner than the 4
+    chat turns §10 calls "a handful" in rejecting 2026-09-23 and thinner than the 3 the page
+    counts for 2026-10-23. Both of those numbers are recomputed from committed fixtures here —
+    the handful's value is not this file's memory — and the ordering is pinned, because
+    whichever way owed-check rules the displacement, §10's "handful" sentence is contradicted
+    by the bullet two below it and needs the number in it.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert _clears_all_four(THIRTEENTH_EXTRACT, gate), (
+        "the day no longer clears all four criteria on its committed bytes; §10 has no bullet "
+        "for it, so nothing but this node would notice the item's premise going false")
+
+    assert W.STALL_TOK_S == 15.0, "criterion (d)'s bar is §10's own figure; this pins which one"
+    assert thirteenth["two_request_windows"] == 636
+    assert thirteenth["two_request_tok_s_p50"] == 1865.5
+    assert thirteenth["two_request_tok_s_min"] == 41.3
+    assert thirteenth["two_request_under_stall"] == 0
+    assert thirteenth["two_request_under_stall_cold_admission"] == 0
+    assert thirteenth["two_request_under_stall_not_cold"] == 0
+    assert thirteenth["two_request_tok_s_min"] >= W.STALL_TOK_S, (
+        "(d)'s zero is only vacuous while nothing reaches the bar at all; the moment a window "
+        "does fall under it, this day's (d) becomes a measured pass and the paragraph that "
+        "states it has to say which kind it is")
+    # A zero out of a counting function is only evidence of quiet if the function counts when
+    # asked to. Re-running the same walk on the same rows at a bar this day's slowest window
+    # DOES fall under (45.0 tok/s, above the 41.3) makes it report 1 slow window, so the 0 at
+    # 15.0 is a population with nothing in it rather than a walk over an empty list — and the
+    # not-cold arm is still 0 at that bar, which is the precise sense in which the day was
+    # never asked.
+    slower = W.two_request_throughput(thirteenth_raw, stall_tok_s=45.0)
+    assert slower["two_request_windows"] == 636 and slower["two_request_under_stall"] == 1, (
+        "the throughput walk has to still fire on this day's rows at a bar above its slowest "
+        "window, or (d)'s zero would be indistinguishable from a window list that never filled")
+    assert slower["two_request_under_stall_not_cold"] == 0, (
+        "the slow window is a cold admission even at the raised bar, so no bar this day's "
+        "traffic could produce has made (d)'s not-cold arm fire")
+
+    def _chat_turns(day: str) -> int:
+        p = ROOT / "tests" / "fixtures" / f"vllm_prefix_miss_{day}.json"
+        return W.derive(json.loads(p.read_text(encoding="utf-8")),
+                        gate=gate)["chat_turns"]
+
+    september, october_twentythird = _chat_turns("2026-09-23"), _chat_turns("2026-10-23")
+    assert september == 4 and october_twentythird == 3, (
+        f"§10 rejects 2026-09-23 as 'a handful' and counts 2026-10-23: those populations are "
+        f"{september} and {october_twentythird} chat turns on the committed fixtures, and the "
+        "whole thin-population argument of this item is measured against those two numbers")
+    assert thirteenth["chat_turns"] == 1 < october_twentythird < september, (
+        "the ordering that makes this day a decision rather than a datapoint: it is thinner "
+        "than the day the page counts and thinner than the day the page refuses")
+
+
+def test_the_thirteenth_pinned_pool_is_the_quoted_boot_that_served_the_day(thirteenth_raw,
+                                                                          cfg):
+    """#3693 clause 4's denominator: the window holds no boot, so the pool is pinned from a
+    quoted engine line — and the two quoted lines have to bracket the window, because the pin
+    claims an engine served the WHOLE day.
+
+    Without the `NO_BOOT_POOL` entry `_with_pool` raises its KeyError, which is the correct
+    outcome for a no-boot day and also, as this landing discovered, a KeyError that fires
+    inside nine nodes grading OTHER days: `_qualifying` walks every tracked extract through
+    `_gap_events`, so an un-pinned day in the family breaks the evidence-set sweep wholesale.
+    The entry is not an exemption from the walk, and the asserts below run it: six gap events,
+    tying to `derive`'s own aggregate, two of them churned, three over the gate, and none of
+    them meeting the filing condition — because the day's single chat turn carries no miss,
+    the walk has no chat event to attribute at all.
+
+    The bracket is the part no earlier day needed. `THIRTEENTH_BOOT`'s stamp is engine-local:
+    10-26 14:58:24 at `America/Los_Angeles` is 2026-10-26 21:58 UTC, four days before the
+    window opens. `THIRTEENTH_NEXT_BOOT` is the first restart after it: 10-29 23:12:47 local is
+    2026-10-30 06:12 UTC, past the window's close. Convert both and compare against the
+    window's own ends — a pin justified by "the rotation says 844,969" would still be standing
+    after a boot moved inside the day it describes.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert thirteenth_raw["pool_tokens"] == [], "the window holds no boot, as the pin says"
+    assert thirteenth_raw["window"] == ["2026-10-28", "2026-10-29"]
+    assert "2026-10-28" in NO_BOOT_POOL, (
+        "a no-boot day with no pinned pool raises KeyError in _with_pool, which takes the "
+        "filing-condition sweep down with it")
+    assert NO_BOOT_POOL["2026-10-28"] == 844_969
+    for quoted, want in ((THIRTEENTH_BOOT, 844_969), (THIRTEENTH_NEXT_BOOT, 484_612)):
+        m = W._POOL_RE.search(quoted)
+        assert m and int(m.group(1).replace(",", "")) == want, (
+            "a quoted boot line must parse, through the script's own pattern, to the size it "
+            "is cited for — otherwise the provenance is decoration")
+
+    # Imported in here, as #1921's walk does its own: a module-scope `timezone` would shadow
+    # the function-local one that module already carries for its chat-turn conversion.
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+
+    assert thirteenth_raw["engine_tz"] == "America/Los_Angeles", (
+        "the bracket below converts engine-local stamps, so it is only valid against the clock "
+        "the extract itself names")
+    tz = ZoneInfo(thirteenth_raw["engine_tz"])
+    start = _Moment.fromisoformat(thirteenth_raw["window"][0]).replace(tzinfo=timezone.utc)
+    end = _Moment.fromisoformat(thirteenth_raw["window"][1]).replace(tzinfo=timezone.utc)
+
+    def _boot_moment(quoted: str) -> _Moment:
+        stamp = re.search(r"INFO (\d\d-\d\d) (\d\d:\d\d:\d\d)", quoted)
+        assert stamp, f"the quoted line carries no engine stamp to convert: {quoted!r}"
+        month, day = (int(x) for x in stamp.group(1).split("-"))
+        hour, minute, second = (int(x) for x in stamp.group(2).split(":"))
+        return _Moment(thirteenth_raw["year"], month, day, hour, minute, second,
+                       tzinfo=tz).astimezone(timezone.utc)
+
+    boot, next_boot = _boot_moment(THIRTEENTH_BOOT), _boot_moment(THIRTEENTH_NEXT_BOOT)
+    assert boot < start <= end < next_boot, (
+        f"the pinned pool is only this day's engine if the boot precedes the window "
+        f"({boot:%Y-%m-%d %H:%M}Z) and the next one follows it "
+        f"({next_boot:%Y-%m-%d %H:%M}Z); a restart inside [2026-10-28, 2026-10-29) UTC means "
+        "the day was served by two engines and one denominator cannot describe it")
+
+    pinned = _with_pool(thirteenth_raw)
+    assert pinned["pool_tokens"] == [844_969] and thirteenth_raw["pool_tokens"] == [], (
+        "_with_pool must hand the walk the pool without rewriting the extract it was given")
+    d = W.derive(pinned, gate=gate)
+    events = _gap_events(pinned, gate)
+    assert len(events) == d["misses_with_gap"] == 6, (
+        "the per-event walk has to tie to derive's aggregate or the split is invented")
+    assert sum(1 for e in events if e["churn"]) == d["misses_gap_churned_free_pool"] == 2, (
+        "with the denominator pinned, derive's churn arm becomes measurable and reads two — "
+        "this is the number the extract alone cannot print")
+    assert sum(1 for e in events if e["peak"] >= gate) == d["misses_gap_over_gate"] == 3
+    assert [e for e in events if e["kind"] == "chat"] == [], (
+        "the day's one chat turn carries no miss, so there is no chat gap to attribute; the "
+        "filing condition has nothing to fire on here")
+    assert thirteenth_raw["window"][0] not in _qualifying_days(gate), (
+        "this day would have joined the accepted-loss evidence set, which every paragraph that "
+        "counts those days is graded against")
+
+
+def test_the_thirteenth_extract_moves_no_graded_reading_and_no_page_sentence(cfg):
+    """#3693 clause 5: naming a thirteenth reading moves no reading the suite already grades,
+    and puts no sentence about this day into §10.
+
+    Three things stay exactly where they were. The 2026-09-25 counted reading and its (a)–(d)
+    bullets are byte-for-byte what they were — a round that adds a fixture for a different day
+    has no business re-cutting that paragraph. The accepted-loss evidence set stays five days
+    (09-27, 09-29, 10-01, 10-15, 10-25), because this day's chat turn carries no miss for the
+    filing condition to act on. And the family grows by exactly one extract, every day still
+    carried once, so the sweeps that enumerate it see the new day rather than tripping over it.
+
+    The fourth is the one that could have been smuggled in by arithmetic. The sweep over the
+    committed family now clears the bar latest on 2026-10-28, and §10 still headlines
+    2026-10-23; that gap is held open by `_UNRULED_CLEARING_DAYS` and by nothing else, so this
+    node pins both halves of it — the page's newest-clearing-day bullet is still the 10-23 one,
+    and §10 carries no 10-28 sentence at all. Naming the newest all-four day is owed-check's to
+    rule (#3101's owed entry), and #3271 wrote the sentence this assert exists to enforce: a
+    round that committed the fixture and re-cut §10 in the same diff would have made an
+    editorial decision by arithmetic.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    page = _section(10)
+
+    assert hashlib.sha256(_september_counted_reading().encode("utf-8")).hexdigest() == \
+        _SEPTEMBER_READING_SHA, (
+        "the 2026-09-25 counted reading and its (a)/(b)/(c)/(d) bullets changed bytes. #3693 "
+        "commits a fixture and writes nothing into §10: a real re-read of 2026-09-25 belongs in "
+        "its own round, with every figure in those bullets re-derived the way the nodes above "
+        "do, not smuggled into a commit that added a fixture for a different day")
+
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+        f"the evidence set moved to {days}: 2026-10-28 was expected to join no set, and every "
+        "paragraph that counts these days is graded against this list")
+
+    extracts = _tracked_extracts()
+    assert THIRTEENTH_EXTRACT in extracts, (
+        "the family no longer enumerates this day, so the sweeps that read the evidence set "
+        "cannot see it — which is the same silence as not committing it")
+    assert len(extracts) == 13, (
+        f"the tracked family holds {len(extracts)} extracts, not the thirteen this item makes "
+        "it; the count is pinned so a second day smuggled into this diff is noticed here")
+    windows = [json.loads(p.read_text(encoding="utf-8"))["window"][0] for p in extracts]
+    assert windows == sorted(windows) and len(set(windows)) == len(windows), (
+        f"the tracked extracts no longer carry one day each in order: {windows}")
+    assert windows[-2:] == ["2026-10-28", "2026-10-29"], (
+        f"the newest two tracked days are {windows[-2:]}, so the day #3693 committed is not "
+        "second-newest as the block above assumes")
+
+    clearing = _committed_clearing_days(gate)
+    assert clearing == ["2026-09-25", "2026-10-09", "2026-10-23", "2026-10-28"], (
+        f"the sweep now clears the bar on {clearing}; the pending-ruling hold names "
+        f"{sorted(_UNRULED_CLEARING_DAYS)}, and anything else in that list is a headline the "
+        "page has not caught up with and nobody has ruled on")
+    assert _UNRULED_CLEARING_DAYS == {"2026-10-28"}, (
+        "the hold grew. Each day in it is an editorial question this file is declining to "
+        "answer for owed-check; a second entry means two rulings are pending and the page's "
+        "headline is no longer derived from anything")
+
+    assert _NEWEST_HEADING in page, (
+        "§10 no longer carries the 2026-10-23 newest-day bullet while the committed family's "
+        "newest clearing day is held for a ruling: the headline has moved without the hold "
+        "being emptied, which is the drift #1918 exists to stop")
+    assert "2026-10-28" not in page, (
+        "§10 carries a 2026-10-28 sentence while owed-check's ruling is still pending: name "
+        "the ruling on #3693's owed entry, land the bullet in its own diff, and empty "
+        "`_UNRULED_CLEARING_DAYS` in that same commit")
