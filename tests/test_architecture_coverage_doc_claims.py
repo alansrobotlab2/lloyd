@@ -4332,6 +4332,28 @@ def preset_rows(body: str) -> dict[str, tuple[str, int | None, int | None]]:
             for name, mark, kept, total in _PRESET_ROW.findall(body)}
 
 
+def preset_set_difference(rows, presets) -> tuple[set[str], set[str]]:
+    """Both sides of the ONE comparison the preset table is graded by: `(doc_only,
+    dict_only)` over the row names and the `ARMS` keys.
+
+    One function because the comparison lived inline twice, and the second copy is the
+    control that exists to prove the first (`arms_flag_declarers`'s shape of reasoning,
+    applied to itself). The injection node computed `set(rows) - presets` and
+    `presets - set(rows)` on its own line, so the two could say different things about
+    one pair of sets — the control green against a graded node that no longer compares
+    anything — and the drift the reviewer note is guarding is exactly that, not the
+    arithmetic (#3638 note 3). Sharing the helper is what makes "the control bites" mean
+    "the node bites": whatever this returns for the injected table is the same pair
+    `test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict` asserts empty.
+
+    Both sides are returned rather than one, because the two directions are different
+    failures — a row naming no preset, and a preset no reader can find in the doc — and
+    a helper that folded them into one set would let a pair that cancels read as empty.
+    """
+    doc, declared = set(rows), set(presets)
+    return doc - declared, declared - doc
+
+
 #: The two roots §Arms that are flag values says the `--arms` flag is declared
 #: across: "a flag nine runner scripts under `eval/` and `scripts/` declare".
 ARMS_FLAG_ROOTS = ("eval", "scripts")
@@ -4339,24 +4361,76 @@ ARMS_FLAG_ROOTS = ("eval", "scripts")
 #: The runner whose `ARM_ON`/`ARM_OFF` pair the section's egress example quotes.
 CANARY_REL = "eval/run_injection_canary.py"
 
+#: The egress disclosure §Arms that are flag values carried until #3587, VERBATIM as
+#: `architecture/measurement.md` held it at `ada21245~1`, where it ran over three
+#: wrapped lines. Compared whitespace-flattened, like `OLD_DISCLOSURE` above.
+#:
+#: Verbatim is the substance of the note, not a preference (#3638 note 4). This node
+#: controlled its own predicate with a hand-written string, and that string was a
+#: paraphrase: it read "graded against one runner's `ARMS` dict, so the other eight's
+#: values (`off`/`enforce` in `eval/egress_arms.py`)", dropping both the runner's own
+#: path — `` `eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the nine ``
+#: — and the `` surface names in `eval/cross_engine_disagreement.py` `` half of the
+#: disclosure. So it refused a sentence the doc never carried, which is a control that
+#: proves nothing about the text it is named for: a paraphrase can drop anything, and
+#: what it drops is exactly what would have made the difference visible.
+#: `test_the_retired_egress_disclosure_is_the_sentence_measurement_md_carried_before_ada21245`
+#: is what pins the word "verbatim" down to that revision rather than to this constant.
+OLD_EGRESS_DISCLOSURE = (
+    "The preset table below is graded against "
+    "`eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the nine — so "
+    "the other eight's values (`off`/`enforce` in `eval/egress_arms.py`, surface names "
+    "in `eval/cross_engine_disagreement.py`) are outside the guard (#3582).")
 
-def arms_flag_declarers() -> set[str]:
-    """Repo-relative paths of the scripts that declare an `--arms` flag.
 
-    AST over `eval/*.py` and `scripts/**/*.py`, for two reasons. A grep counts the
-    flag's name inside a help string or a comment as a declaration, and a doc node
-    that dies on an unrelated import reads the same as one that dies on the doc
-    (the standing rule behind `_declared_sources`). Files, not `add_argument` sites:
-    `eval/run_memory_eval.py` declares the flag twice for two parser builds, and the
-    sentence counts runner scripts, so a site count would push the prose to a number
-    that is not what the sentence is about.
+def arms_flag_scan(base: Path = ROOT,
+                   roots: tuple[str, ...] = ARMS_FLAG_ROOTS) -> dict:
+    """One recursive walk of every `--arms` root, returning what the count rests on.
+
+    `{"declarers": {path}, "unparseable": {path}, "nested": {root: int},
+    "files": {root: int}}`, paths relative to `base`. `base` and `roots` are
+    caller-supplied so a node can point the walk at a scratch tree: the hole the notes
+    describe is a walk that reads the live tree correctly and nothing else, and only a
+    tree the author built can show what a walk misses.
+
+    `rglob` for BOTH roots, which is reviewer note 1 on #3587, applied by #3638. The
+    walk used to be `base.glob("*.py") if root == "eval" else base.rglob("*.py")`, and
+    the sentence it grades names both roots and counts scripts, so a tenth declarer at
+    `eval/sub/x.py` would have sat outside the enumeration while the node kept agreeing
+    with the doc's number — a count that quietly reads a smaller tree than the prose.
+    Nothing under `eval/` declares the flag today (the 25 nested `eval/**/*.py` files
+    hold no declarer), so this closes a latent hole: on the live tree the returned set is
+    the same nine paths.
+
+    `nested` is what turns that from a hope into a check. The count's existing
+    dead-walk guard refuses a root that contributed no declarer, and a root that
+    contributed eight of ten files passes it. `nested[root] == 0` is the same failure one
+    remove over: a flattened walk of a root that has 101 `.py` files and enumerates 76 of
+    them still finds its eight declarers, and only the absent sub-directory path says the
+    walk was not the recursion the sentence describes.
+
+    `unparseable` is note 2. A bare `ast.parse` inside the loop raises `SyntaxError`
+    naming the parser's line and never the file, and a node that dies that way reads to a
+    reader as a broken test module rather than as one unreadable script among 341. One
+    such file is therefore collected, named by path in an assertion, and never skipped
+    into a count that looks measured.
     """
-    found: set[str] = set()
-    for root in ARMS_FLAG_ROOTS:
-        base = ROOT / root
-        files = base.glob("*.py") if root == "eval" else base.rglob("*.py")
-        for py in sorted(files):
-            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+    declarers: set[str] = set()
+    unparseable: set[str] = set()
+    nested: dict[str, int] = {}
+    files: dict[str, int] = {}
+    for root in roots:
+        base_dir = base / root
+        count = depth = 0
+        for py in sorted(base_dir.rglob("*.py")):
+            count += 1
+            if len(py.relative_to(base_dir).parts) > 1:
+                depth += 1
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+            except (SyntaxError, ValueError):
+                unparseable.add(str(py.relative_to(base)))
+                continue
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)
@@ -4364,9 +4438,45 @@ def arms_flag_declarers() -> set[str]:
                         and node.args
                         and isinstance(node.args[0], ast.Constant)
                         and node.args[0].value == "--arms"):
-                    found.add(str(py.relative_to(ROOT)))
+                    declarers.add(str(py.relative_to(base)))
                     break
-    return found
+        nested[root] = depth
+        files[root] = count
+    return {"declarers": declarers, "unparseable": unparseable,
+            "nested": nested, "files": files}
+
+
+def arms_flag_declarers(base: Path = ROOT,
+                        roots: tuple[str, ...] = ARMS_FLAG_ROOTS) -> set[str]:
+    """Repo-relative paths of the scripts that declare an `--arms` flag.
+
+    AST over every root in `ARMS_FLAG_ROOTS` recursively, for two reasons. A grep counts
+    the flag's name inside a help string or a comment as a declaration, and a doc node
+    that dies on an unrelated import reads the same as one that dies on the doc
+    (the standing rule behind `_declared_sources`). Files, not `add_argument` sites:
+    `eval/run_memory_eval.py` declares the flag twice for two parser builds, and the
+    sentence counts runner scripts, so a site count would push the prose to a number
+    that is not what the sentence is about.
+
+    The two guards here are what make the returned count a measurement of the tree and
+    not of the walk: an unreadable file is named rather than dropped, and a root whose
+    enumeration holds no sub-directory path is refused even when it found declarers. See
+    `arms_flag_scan` for why each is the failure the sentence is exposed to.
+    """
+    seen = arms_flag_scan(base, roots)
+    assert not seen["unparseable"], (
+        f"the declarer scan could not parse {len(seen['unparseable'])} file(s) under "
+        f"{list(roots)} and so cannot count them: {sorted(seen['unparseable'])} — a "
+        "skipped file makes the count below a count of the files that happened to "
+        "parse, which is the number the doc's sentence is not about")
+    for root in roots:
+        assert seen["nested"][root] > 0, (
+            f"{root}/ contributed no sub-directory path among the "
+            f"{seen['files'][root]} files the walk enumerated, so the enumeration is "
+            f"flat while §Arms that are flag values counts scripts under `{root}/` at "
+            "any depth: a flattened root still returns its depth-1 declarers and reads "
+            "as agreement with the section")
+    return seen["declarers"]
 
 
 def module_string_constants(rel: str, *names: str) -> dict[str, str]:
@@ -4423,10 +4533,13 @@ def test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict():
 
     rows = preset_rows(body)
     assert rows, "no preset rows parsed — the table stopped being parseable"
-    assert set(rows) == set(runner_presets()), (
+    # `preset_set_difference` and not a local set expression: this is the comparison the
+    # injection node controls, and a copy of it here is a control that could go green
+    # against a node that stopped comparing (#3638 note 3).
+    doc_only, dict_only = preset_set_difference(rows, runner_presets())
+    assert not (doc_only or dict_only), (
         f"measurement.md's preset table and {RUNNER_REL}'s ARMS dict disagree: "
-        f"doc-only {sorted(set(rows) - set(runner_presets()))}, "
-        f"dict-only {sorted(set(runner_presets()) - set(rows))}")
+        f"doc-only {sorted(doc_only)}, dict-only {sorted(dict_only)}")
     for preset in SUMMARY_PRESETS:
         assert preset in rows, f"{preset} has no row in the preset table"
 
@@ -4627,10 +4740,16 @@ def test_the_preset_check_names_a_hyphenated_row_that_matches_no_preset():
         f"`preset_rows()` dropped the injected `{extra}` row unparsed, so it cannot be "
         "named doc-only — an unparsed row is invisible to both preset nodes, which is "
         "the hole #3587 files")
-    assert set(rows) - presets == {extra}, (
-        "the comparison reports something other than the injected row as doc-only: "
-        f"{sorted(set(rows) - presets)}")
-    assert not (presets - set(rows)), (
+    # The same call the graded node makes, on the injected table: so what this node
+    # reports is the pair `test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict`
+    # would report, and an injection this node sees that that node does not is now only
+    # possible if `preset_set_difference` itself is broken — which is the failure the
+    # node below this one is for (#3638 note 3).
+    doc_only, dict_only = preset_set_difference(rows, presets)
+    assert doc_only == {extra}, (
+        "the comparison reports something other than the injected row as doc-only, so "
+        f"the graded node would not name it either: {sorted(doc_only)}")
+    assert not dict_only, (
         "the injection lost real preset rows, so the doc-only set above is an "
         "artefact of a table that no longer parses at all")
 
@@ -4713,15 +4832,268 @@ def test_the_flag_value_section_names_the_egress_pair_by_its_declared_values():
         f"token (the pair is {sorted(pair)}, from ARM_OFF and ARM_ON); it reads "
         f"{hits[0][:120]!r} — a paraphrase is how `off`/`enforce` got here")
 
-    # The control: the wording this section carried until #3587, through the same
-    # predicate. If it passed, the assertion above would be grading prose shape and
-    # not the two constants.
-    stale = ("The preset table below is graded against one runner's `ARMS` dict, so "
-             "the other eight's values (`off`/`enforce` in `eval/egress_arms.py`) are "
-             "outside the guard (#3582).")
-    assert not _names_backticked(stale, pair), (
-        "the mis-spelled pair satisfies the check, so the check is not reading "
-        "ARM_ON and ARM_OFF")
+    # The control: the sentence this section carried until #3587, VERBATIM, through the
+    # same predicate. If it passed, the assertion above would be grading prose shape and
+    # not the two constants. It is the constant and not a string written here: the
+    # paraphrase this node used carried "`off`/`enforce` in `eval/egress_arms.py`" and
+    # nothing else, which is not the sentence the doc retired, so it refused words no
+    # reader ever read — the arm a paraphrase cannot carry (#3638 note 4).
+    assert not _names_backticked(OLD_EGRESS_DISCLOSURE, pair), (
+        "the retired disclosure satisfies the check, so the check is not reading "
+        f"ARM_ON and ARM_OFF (the pair is {sorted(pair)})")
+    # ...and the retired wording is actually gone from the window it was retired from,
+    # the `OLD_DISCLOSURE` pattern: without this, an assertion about a sentence the doc
+    # no longer carries is green whether or not the section was ever edited.
+    assert _flat(OLD_EGRESS_DISCLOSURE) not in flat, (
+        "the pre-#3587 disclosure is back in the section, so the check above is "
+        "grading a paragraph that was supposed to have been replaced")
+
+
+# ─────────────── #3638: the four reviewer notes on those four nodes ───────────────
+#
+# All four notes are about a control, not about behaviour: none of them moves a preset
+# or an `--arms` value, and the numbers below are the tree's, measured on the commit this
+# round was opened at (`b67c4e9e`, the same numbers #3638's triage re-measured at
+# `aead64fc`). Nine scripts declare `--arms` — eight under `eval/`, all at depth 1, plus
+# `scripts/autoresearch/strategy_arms.py` — the walk enumerates 101 `.py` files under
+# `eval/` of which 25 are nested and 240 under `scripts/` of which 176 are nested, and no
+# file under either root fails `ast.parse`. So the recursion note closes a hole nothing
+# had fallen into yet, and the parse note names a failure mode that has not happened:
+# today one unreadable file would surface as a `SyntaxError` traceback at collection,
+# which reads to whoever finds it as a broken test module.
+
+#: The nine declarers, as of `aead64fc` and unchanged by the recursive walk. A tenth
+#: means a script started declaring the flag: this set, the count-word in §Arms that are
+#: flag values, and the "(six when this section was written)" parenthetical — which is a
+#: dated record and does NOT move — all have to be read together.
+NINE_ARMS_DECLARERS = {
+    "eval/cross_engine_disagreement.py", "eval/diagnosis_fanout_replay.py",
+    "eval/egress_arms.py", "eval/run_compaction_recall_eval.py",
+    "eval/run_memory_eval.py", "eval/run_prefetch_cost_eval.py",
+    "eval/run_stale_fact_eval.py", "eval/run_tts_fidelity_eval.py",
+    "scripts/autoresearch/strategy_arms.py"}
+
+
+def _arms_tree(root: Path) -> Path:
+    """A scratch tree with three `--arms` declarers, one of them under each root's
+    sub-directory, and one file that declares nothing.
+
+    The point of building it rather than reading the live tree is that the live tree
+    cannot show the failure: every eval declarer sits at depth 1, so a flat `eval/*.py`
+    walk and a recursive one return the same eight files and the difference is invisible
+    until a declarer is added at `eval/sub/x.py`. Only a tree the author writes has one.
+    """
+    files = {
+        "eval/top.py": "import argparse\np = argparse.ArgumentParser()\n"
+                       "p.add_argument('--arms')\n",
+        "eval/no_flag.py": "import argparse\np = argparse.ArgumentParser()\n"
+                           "p.add_argument('--dry-run')\n",
+        "eval/nested/deep.py": "import argparse\np = argparse.ArgumentParser()\n"
+                               "p.add_argument('--arms')\n",
+        "scripts/flat.py": "import argparse\np = argparse.ArgumentParser()\n"
+                           "p.add_argument('--help-arms-flag')\n",
+        "scripts/nested/deeper/deepest.py": "import argparse\n"
+                                            "p = argparse.ArgumentParser()\n"
+                                            "p.add_argument('--arms')\n",
+    }
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
+def test_the_declarer_walk_recurses_into_both_roots_so_a_nested_script_is_counted(tmp_path):
+    """#3638 note 1, measured on a tree that has the shape the live tree lacks.
+
+    Three declarers here, at `eval/top.py`, `eval/nested/deep.py` and
+    `scripts/nested/deeper/deepest.py`. The walk this replaced enumerated `eval/*.py`
+    flat, so it returned two of the three — `top` and the scripts one — and a doc that
+    said "two" would have been graded green against it. The assertion that matters is
+    therefore not the count but which paths are in it.
+    """
+    _arms_tree(tmp_path)
+    declared = arms_flag_declarers(base=tmp_path)
+    assert declared == {"eval/top.py", "eval/nested/deep.py",
+                        "scripts/nested/deeper/deepest.py"}, (
+        "a declarer under a sub-directory of eval/ was not counted, so the walk is flat "
+        "where the sentence counts scripts at any depth")
+    seen = arms_flag_scan(base=tmp_path)
+    assert seen["nested"] == {"eval": 1, "scripts": 1}, seen["nested"]
+    assert seen["files"] == {"eval": 3, "scripts": 2}, seen["files"]
+    assert not seen["unparseable"], seen["unparseable"]
+
+
+def test_a_root_whose_enumeration_holds_no_sub_directory_path_is_refused(tmp_path):
+    """#3638 note 1, the dead-walk half: a flattened root may not read as agreement.
+
+    The guard the count already had — a root must contribute a declarer — passes here:
+    `eval/` contributes `top.py`. What trips this is the enumeration itself, three files
+    and not one of them nested, which is exactly what `base.glob("*.py")` over a root
+    that holds 101 files looks like from the outside. The second half of the node is the
+    control on the control: adding one nested file makes the same call pass, so the
+    guard is holding nesting and not the root's identity.
+    """
+    _arms_tree(tmp_path)
+    (tmp_path / "eval" / "nested" / "deep.py").unlink()
+    with pytest.raises(AssertionError) as seen:
+        arms_flag_declarers(base=tmp_path)
+    assert "eval/" in str(seen.value), (
+        "a flat eval enumeration did not trip the dead-walk guard: " + str(seen.value)[:160])
+    assert "sub-directory" in str(seen.value), str(seen.value)[:160]
+
+    (tmp_path / "eval" / "nested" / "back.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--arms')\n",
+        encoding="utf-8")
+    assert "eval/nested/back.py" in arms_flag_declarers(base=tmp_path), (
+        "the guard did not clear when the root gained a nested path, so it is refusing "
+        "something other than a flat walk")
+
+
+def test_the_recursive_walk_still_returns_the_nine_scripts_the_flat_walk_returned():
+    """#3638 note 1 on the live tree: closing the hole moved no number.
+
+    Nine, the same nine paths, and no declarer under `eval/` below depth 1 — which is the
+    same fact as "a recursive eval walk and the old flat one agree today", stated from the
+    scan's own output rather than by re-implementing the old walk to compare against. If
+    it ever trips, a script started declaring `--arms` in a sub-directory: the count is
+    then ten, and the section's count-word has to move with it, which is
+    `test_the_flag_value_section_states_the_declarer_count_the_tree_has` re-deriving the
+    number from this same set.
+    """
+    declared = arms_flag_declarers()
+    assert declared == NINE_ARMS_DECLARERS, (
+        f"the declarer set changed from nine ({sorted(declared)}); the walk now reads "
+        "files it did not before, or one stopped declaring the flag")
+    nested_eval = [d for d in declared
+                   if d.startswith("eval/") and "/" in d[len("eval/"):]]
+    assert not nested_eval, (
+        f"{nested_eval} declare `--arms` below a sub-directory of eval/, which the old "
+        "flat eval walk could not see: the section's count-word is now wrong, not this "
+        "set")
+    seen = arms_flag_scan()
+    assert not seen["unparseable"], (
+        f"unparseable under either root: {sorted(seen['unparseable'])}")
+    assert all(v > 0 for v in seen["nested"].values()), seen["nested"]
+
+
+def test_a_file_the_declarer_scan_cannot_parse_is_named_by_path_and_not_by_a_traceback(
+        tmp_path):
+    """#3638 note 2: one unreadable file is a named path in a failure, not a crash.
+
+    The scratch tree is the same three-declarer tree plus one file `ast.parse` refuses.
+    Before this the loop had no per-file handling, so the node died with `SyntaxError:
+    invalid syntax (<unknown>, line 1)` — `<unknown>`, because a tree parsed from a
+    string carries no filename, and 341 candidates under either root. The message has to
+    name the path, so the first assertion is about the path appearing and the second is
+    that the count is refused rather than quietly returned short.
+    """
+    _arms_tree(tmp_path)
+    (tmp_path / "eval" / "broken.py").write_text("def oops(:\n", encoding="utf-8")
+    with pytest.raises(AssertionError) as seen:
+        arms_flag_declarers(base=tmp_path)
+    message = str(seen.value)
+    assert "eval/broken.py" in message, (
+        "the failure does not name the file, so a reader has a traceback and 341 "
+        f"suspects: {message[:200]}")
+    assert "def oops" not in message and "SyntaxError" not in message, (
+        f"the source line is what is quoted, not the path: {message[:200]}")
+    seen2 = arms_flag_scan(base=tmp_path)
+    assert seen2["unparseable"] == {"eval/broken.py"}, seen2["unparseable"]
+    assert seen2["declarers"] == {"eval/top.py", "eval/nested/deep.py",
+                                 "scripts/nested/deeper/deepest.py"}, (
+        "the scan stopped early rather than collecting the rest of the walk, so the "
+        "unparseable set below the failure would be a partial list")
+
+
+def test_both_preset_nodes_ask_one_helper_for_the_doc_vs_dict_difference():
+    """#3638 note 3, pinned where a drift would actually start: the two nodes' bodies.
+
+    A reviewer note that says "the control re-implements the comparison" cannot be closed
+    by a node that re-implements the comparison a third time, so this reads the source of
+    the two preset nodes and asks the same question the note asks of them — does either
+    still hold a `-` between the two sets? The count is `== 1` and not `>= 1` because two
+    calls in one node would mean two comparisons again. The live-behaviour half of the
+    note — that the injection really does turn the graded node red — is the injection
+    node's own job and stays there.
+    """
+    import inspect
+
+    mod = sys.modules[__name__]
+    nodes = ("test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict",
+             "test_the_preset_check_names_a_hyphenated_row_that_matches_no_preset")
+    for name in nodes:
+        body = inspect.getsource(getattr(mod, name))
+        assert body.count("preset_set_difference(") == 1, (
+            f"{name} calls the shared helper {body.count('preset_set_difference(')} "
+            "time(s); the node and its control have to ask one function")
+        assert not re.search(r"(?:set\(rows\)|set\(runner_presets\(\)\)|presets)\s*-\s*"
+                             r"(?:set\(rows\)|set\(runner_presets\(\)\)|presets)", body), (
+            f"{name} still subtracts one preset set from the other inline, which is the "
+            "copy the note exists to remove")
+    assert len(re.findall(r"^def preset_set_difference", inspect.getsource(mod), re.M)) == 1, (
+        "there is more than one `preset_set_difference`, which is the drift again")
+
+
+def test_the_retired_egress_disclosure_is_the_sentence_measurement_md_carried_before_ada21245():
+    """#3638 note 4: `OLD_EGRESS_DISCLOSURE` is the doc's own retired words, not this
+    file's summary of them.
+
+    The constant is only a control if it is the sentence that was retired, and the only
+    witness of that is the revision before the one that replaced it — so the comparison
+    is against `git show ada21245~1`, sliced between the two markers rather than by line
+    numbers, because the doc is hand-wrapped and the sentence begins mid-line 101 and
+    ends on 104 of that revision. The three content assertions after it are what the
+    paraphrase dropped or kept: the runner's own path, the `cross_engine_disagreement.py`
+    clause, and the mis-spelled `off`/`enforce` pair the section carried then. The last
+    two lines are the note's own rail: exactly one string in this module may open with
+    the retired sentence, and it has to be the constant. The hand-written paraphrase
+    began the same way, one word off ("graded against one runner's" where the doc named
+    the runner), and a second string beside the one the control reads is how a control
+    came to refuse words nobody had read.
+    """
+    shown = subprocess.run(["git", "show", "ada21245~1:architecture/measurement.md"],
+                           capture_output=True, text=True, cwd=ROOT)
+    assert shown.returncode == 0, (
+        f"cannot read measurement.md at ada21245~1 to compare the retired disclosure "
+        f"with it: {shown.stderr.strip()[:200]}")
+    start = shown.stdout.find("The preset table below is graded against")
+    end = shown.stdout.find("(#3582).", start)
+    assert start >= 0 and end > start, (
+        "the retired disclosure is not findable in measurement.md at ada21245~1, so "
+        "there is no witness here for the constant's wording")
+    retired = shown.stdout[start:end + len("(#3582).")]
+    assert _flat(OLD_EGRESS_DISCLOSURE) == _flat(retired), (
+        "OLD_EGRESS_DISCLOSURE is not the sentence the doc carried: it reads "
+        f"{_flat(OLD_EGRESS_DISCLOSURE)!r} and the revision reads {_flat(retired)!r}")
+    assert f"`{RUNNER_REL}`" in OLD_EGRESS_DISCLOSURE, (
+        "the constant dropped the runner's own path, which is the half the paraphrase "
+        "dropped and the reason it stopped naming the retired sentence")
+    assert "`eval/cross_engine_disagreement.py`" in OLD_EGRESS_DISCLOSURE, (
+        "the constant dropped the surface-names half of the disclosure")
+    assert "`off`/`enforce`" in OLD_EGRESS_DISCLOSURE, (
+        "the constant no longer carries the mis-spelled pair #3587 replaced, so the "
+        "stale control below it is refusing something else again")
+    assert _flat(OLD_EGRESS_DISCLOSURE) not in _flat(_text("measurement.md")), (
+        "the retired sentence is in the doc today, so it is not a retired sentence")
+    import inspect
+
+    here = inspect.getsource(sys.modules[__name__])
+    # AST over this file, and only the right-hand side of an assignment: that is the
+    # shape the paraphrase had (`stale = ("The preset table below is graded against "
+    # ...)`) and the shape any future stand-in for the constant would have. A substring
+    # search over the source cannot say this, because prose is allowed to quote the
+    # paraphrase it is explaining — this file's own comment on the constant does — and
+    # this file's two `git show` markers are string literals too, in call position, which
+    # the walk over assignments leaves alone by construction.
+    strings = [n.value.value for n in ast.walk(ast.parse(here))
+               if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+               and isinstance(n.value.value, str)
+               and n.value.value.startswith("The preset table below")]
+    assert strings == [OLD_EGRESS_DISCLOSURE], (
+        f"{len(strings)} assigned string(s) in this file open with the retired sentence; "
+        "exactly one may, and it must be the constant the control reads — a second one "
+        f"is how a control came to refuse words nobody had read: {[s[:70] for s in strings]}")
 
 
 #: The #2168 `tool_clear`/`sidecar` pair (#2682), run 2026-10-14 the way the
