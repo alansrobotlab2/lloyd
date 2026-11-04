@@ -5076,16 +5076,18 @@ def test_the_flag_value_section_names_the_egress_pair_by_its_declared_values():
 # today one unreadable file would surface as a `SyntaxError` traceback at collection,
 # which reads to whoever finds it as a broken test module.
 
-#: The nine declarers, as of `aead64fc` and unchanged by the recursive walk. A tenth
-#: means a script started declaring the flag: this set, the count-word in §Arms that are
-#: flag values, and the "(six when this section was written)" parenthetical — which is a
-#: dated record and does NOT move — all have to be read together.
-NINE_ARMS_DECLARERS = {
+#: The declarers of `--arms`, as of #3642. Nine stood at `aead64fc`, unchanged by the
+#: recursive walk; #3642's complement probe is the tenth, and it is the first declarer
+#: under a `scripts/` sub-directory, so §Arms that are flag values moved nine -> ten with
+#: it. The "(six when this section was written)" parenthetical is a dated record and does
+#: NOT move. An eleventh has to move this set and that count-word together.
+ARMS_FLAG_DECLARERS = {
     "eval/cross_engine_disagreement.py", "eval/diagnosis_fanout_replay.py",
     "eval/egress_arms.py", "eval/run_compaction_recall_eval.py",
     "eval/run_memory_eval.py", "eval/run_prefetch_cost_eval.py",
     "eval/run_stale_fact_eval.py", "eval/run_tts_fidelity_eval.py",
-    "scripts/autoresearch/strategy_arms.py"}
+    "scripts/autoresearch/strategy_arms.py",
+    "scripts/retrieval/complement_probe.py"}
 
 
 def _arms_tree(root: Path) -> Path:
@@ -5164,20 +5166,21 @@ def test_a_root_whose_enumeration_holds_no_sub_directory_path_is_refused(tmp_pat
         "something other than a flat walk")
 
 
-def test_the_recursive_walk_still_returns_the_nine_scripts_the_flat_walk_returned():
-    """#3638 note 1 on the live tree: closing the hole moved no number.
+def test_the_recursive_walk_still_returns_the_ten_scripts_the_flat_walk_returned():
+    """#3638 note 1 on the live tree, re-measured by #3642: the walk reads ten now.
 
-    Nine, the same nine paths, and no declarer under `eval/` below depth 1 — which is the
-    same fact as "a recursive eval walk and the old flat one agree today", stated from the
-    scan's own output rather than by re-implementing the old walk to compare against. If
-    it ever trips, a script started declaring `--arms` in a sub-directory: the count is
-    then ten, and the section's count-word has to move with it, which is
-    `test_the_flag_value_section_states_the_declarer_count_the_tree_has` re-deriving the
-    number from this same set.
+    Ten paths, of which one — `scripts/retrieval/complement_probe.py` — is a declarer in
+    a `scripts/` sub-directory, which is exactly the case #3638's note said would make the
+    count ten and told the next author to move §Arms' count-word with it. That is what
+    happened at #3642, and `test_the_flag_value_section_states_the_declarer_count_the_tree_has`
+    re-derives the section's number from this same set, so the two cannot part company. No
+    declarer sits under `eval/` below depth 1, which is the same fact as "a recursive eval
+    walk and the old flat one agree today", stated from the scan's own output rather than
+    by re-implementing the old walk to compare against.
     """
     declared = arms_flag_declarers()
-    assert declared == NINE_ARMS_DECLARERS, (
-        f"the declarer set changed from nine ({sorted(declared)}); the walk now reads "
+    assert declared == ARMS_FLAG_DECLARERS, (
+        f"the declarer set changed from ten ({sorted(declared)}); the walk now reads "
         "files it did not before, or one stopped declaring the flag")
     nested_eval = [d for d in declared
                    if d.startswith("eval/") and "/" in d[len("eval/"):]]

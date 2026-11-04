@@ -96,10 +96,10 @@ an annotation, but such a pair is never an admissible verdict.
 ## Arms that are flag values: the compaction-recall runner
 
 §The arms inventories **directories**. The same word carries a second, unrelated
-sense in this tree: `--arms` is a flag nine runner scripts under `eval/` and
+sense in this tree: `--arms` is a flag ten runner scripts under `eval/` and
 `scripts/` declare (six when this section was written), and its values are
 configuration presets inside one script. The preset table below is graded against
-`eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the nine — so the
+`eval/run_compaction_recall_eval.py`'s `ARMS` dict alone — one of the ten — so the
 other eight's values (`enforce-off`/`enforce-on`, the `choices=` of `--arms` in
 `eval/egress_arms.py`, surface names in `eval/cross_engine_disagreement.py`) are
 outside the guard (#3582).
