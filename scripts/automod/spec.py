@@ -278,9 +278,41 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # every other `dist/` file to a source, and the rebuild belongs to the round that
     # changes the source — #3598's follow-on, not this entry, which changes no bytes under
     # `chrome-extension/`. Pinned by tests/test_automod_spec.py's
-    # test_only_a_verbatised_path_under_chrome_extension_may_be_admitted.
+    # test_only_paths_the_grant_names_under_chrome_extension_may_be_admitted — renamed from
+    # `test_only_a_verbatised_path_under_...` by #3769, which admitted one build-output
+    # directory and so could no longer call every admitted path verbatim. The rule it holds,
+    # and the manifest it exists to keep out, are unchanged by the rename.
     "chrome-extension/src/background/service-worker.ts",
     "chrome-extension/dist/service-worker.js",
+    # #3769 (panel build-output grant): the side panel's shipped bytes, and the one
+    # build-output directory this grant admits — `chrome-extension/dist/assets/`, which is
+    # not the directory. #3646 admitted the worker pair above; the panel half has been
+    # unreachable ever since. `web/src/sidepanel/**` is writable and the chunks those sources
+    # build into are not, so a round that changed a panel string went red in
+    # tests/test_chrome_extension_manifest_tracked.py with a message telling a person to
+    # rebuild by hand, and the rebuild's own output came back `unlisted` and could not be
+    # committed either: the drift was detectable and not repairable. `dist/sidepanel.html` is
+    # named verbatim; `dist/assets/` is a glob, because the bundle names its chunks by content
+    # hash (`sidepanel-BaMPpFsS.js` today, another string after any rebuild) and a verbatim
+    # list of hashes is a grant that expires the first time it is used. It is the ONLY wildcard
+    # under this name-space, and the directory it reaches holds no permission surface:
+    # `dist/manifest.json` is a SIBLING of `dist/assets/`, not a member, so it stays
+    # `unlisted` — the distinction the rail in tests/test_automod_spec.py re-pins rather than
+    # relaxes, because substituting `chrome-extension/**` or `chrome-extension/dist/**` for
+    # this entry makes `chrome-extension/dist/manifest.json` classify `allowed`, and the
+    # blanket spelling takes `chrome-extension/manifest.json` with it. Everything else in the
+    # directory is refused for the reasons #3646 recorded, repeated here so the claim is
+    # checkable beside the entry: `dist/manifest.json`, because `manifest.json` is Chrome's
+    # permission grant and that file is its build output; `README.md`, the build command a
+    # round could repoint at another outDir; `icons/` in both spellings, the extension's
+    # identity; and `web/vite.chrome.config.ts`, the build entry point, which sets this
+    # `outDir` with `emptyOutDir: true` and is refused on its own merits under `web/`.
+    # Admitting the output is still not a licence to author it: the rebuild belongs to the
+    # round that changes the source, so the round that wrote THIS comment touched no path
+    # under `chrome-extension/` at all — pinned by tests/test_automod_spec.py's
+    # test_the_admission_changes_no_verdict_but_the_two_paths_it_grants.
+    "chrome-extension/dist/sidepanel.html",
+    "chrome-extension/dist/assets/**",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (
