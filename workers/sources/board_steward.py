@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1019,8 +1020,99 @@ def parse_steward(structured: Any) -> dict | None:
             "summary": " ".join(str(structured.get("summary") or "").split())[:SUMMARY_MAX]}
 
 
-def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, str]) -> dict:
+def _as_instant(raw: Any) -> datetime | None:
+    """A ledger stamp as an aware UTC datetime, or None when it is not one.
+
+    The ledger carries two shapes and both are live: `created_at`, which
+    `state.append_event` writes as an ISO-8601 string, and `ts`, which the
+    writers set as an epoch float. A row whose stamp cannot be read is returned
+    as None and the caller treats it as UNSTAMPED — it can neither prove nor
+    disprove that the board moved — rather than guessed at: an unparsable string
+    compared as a string sorts against an ISO cutoff by luck of the date prefix,
+    and luck is what #3752 is here to take out of this comparison.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(raw), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # A naive stamp in this store has always meant local wall clock written as
+    # UTC (#3752's own triage compares `created_at` strings against a UTC cutoff),
+    # so a missing offset is read as UTC rather than shifted by the machine's.
+    return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+
+
+def moved_item_ids(ledger: Path | None, table_read_at: Any) -> set[int]:
+    """Every item id with a ledger row stamped STRICTLY AFTER `table_read_at`.
+
+    The set the abstention is decided from (#3752). `table_read_at` is the
+    instant `execute` read `desired_statuses`, so an id here is an item whose own
+    history moved between that read and now — the round that started, landed or
+    was abandoned while the steward was thinking. Those are the events
+    `desired_statuses` reads its answer from (its `in_flight` arm is a ledger
+    read), so a row in this set is the proof that the table being scored against
+    is no longer the table the steward reasoned over.
+
+    Whole-file, like every other reader of this ledger: `state.read_events(path,
+    0)` returns what is there, and a bounded read could miss the one row that
+    matters and call a stale disagreement real — the failure this function
+    exists to catch. A ledger that cannot be read returns the empty set, which
+    leaves the tick scoring exactly as it scored before this function existed:
+    the guard removes disagreements and never manufactures one, so failing open
+    here cannot lift the rate, and the warning is what makes the gap visible.
+    """
+    cutoff = _as_instant(table_read_at)
+    if ledger is None or cutoff is None:
+        if table_read_at is not None and ledger is None:
+            logger.warning("board-steward: no ledger path to check staleness against "
+                           "(table read at %r): every disagreement scores as same-instant",
+                           table_read_at)
+        return set()
+    try:
+        from scripts.automod import state as S   # deferred, as every ledger read here is
+        events = S.read_events(ledger, 0)
+    except Exception as exc:  # noqa: BLE001 — see the docstring: fail open, and say so
+        logger.warning("board-steward: staleness scan of %s failed (%s): every "
+                       "disagreement scores as same-instant", ledger, exc)
+        return set()
+    moved: set[int] = set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        stamp = _as_instant(ev.get("created_at")) or _as_instant(ev.get("ts"))
+        if stamp is None or stamp <= cutoff:
+            continue
+        try:
+            iid = int(ev.get("item_id"))
+        except (TypeError, ValueError):
+            continue            # a ledger row naming no item moved no item
+        moved.add(iid)
+    return moved
+
+
+def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, str],
+              *, table_read_at: Any = None, ledger: Path | None = None) -> dict:
     """How far the steward's moves match the state machine's table.
+
+    `table_read_at` and `ledger` together are the #3752 freshness guard, and they
+    are keyword-only because every caller in the fleet but `execute` has no
+    instant to give: the two arguments mean "this `expected` was read at
+    `table_read_at`, and here is the ledger to check it against". With both
+    present, an id whose own ledger rows moved after that instant is counted in
+    the new `stale` list instead of `disagree` — see `moved_item_ids`. With
+    either absent the counts are exactly what they were before the guard, which
+    is what every existing caller and test depends on.
 
     `expected` is `desired_statuses(...)`: `{item_id: (status, why[, needs_human])}`
     for every item the machine has an opinion about. Three counts, kept
@@ -1049,6 +1141,22 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     # stranded landings parked `in_progress`; 55789b6 removed that branch —
     # `in_progress` now means a round is in flight or under observation.)
     disagree = [i for i, s in proposed.items() if i in expected and expected[i][0] != s]
+    # #3752: a disagreement the board moved under is not the steward disagreeing.
+    # `expected` is a snapshot with an instant (`table_read_at`), and the tick that
+    # filed this item ran 146.6 s — during which #3570 got a `backlog_implement
+    # phase=started` row 14 s in. Scoring that reply against the 14-seconds-stale
+    # table booked it as a disagreement, and re-running `desired_statuses` on the
+    # same ledger answers `in_progress` for the item, which is the steward's own
+    # answer. So an id with a row of its own after the read abstains: it leaves
+    # `disagree`, leaves `judged` and leaves `disagree_sides`, and lands in `stale`
+    # beside them. The guard can only ever REMOVE a disagreement — an id in `agree`
+    # stays in `agree` — and it moves the stale id out of `judged`, the
+    # denominator, which is what an abstention is: #1688 removed an unmeasured
+    # tick from that denominator the same way. It gates the INSTRUMENT and not the
+    # write — with `apply` on, a stale move is still written, because the steward
+    # judged the board it saw and `round_flag` is the guard on the write.
+    stale = sorted(set(disagree) & moved_item_ids(ledger, table_read_at))
+    disagree = [i for i in disagree if i not in set(stale)]
     # The machine's side of each disagreement, AS THIS TICK SCORED IT, into the block that
     # goes to the `board_steward` ledger event and to the run's `meta_json`. `disagree` is
     # a list of ids, and an id is only half a disagreement: the filer that turns a row into
@@ -1075,14 +1183,22 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     machine_moves = [i for i, want in expected.items() if current.get(i) != want[0]]
     # Rate over the decisions BOTH sides made: the machine's pending moves and
     # the steward's moves on items the machine has an opinion about.
-    judged = set(machine_moves) | {i for i in proposed if i in expected}
+    judged = (set(machine_moves) | {i for i in proposed if i in expected}) - set(stale)
     # No rate over an empty judged set (#1688). It used to read 1.0, and 76 of
     # 93 live ticks judged nothing, so the record the `apply` flip is judged
     # from read "agreement 100%" four ticks in five. `judged` is the count the
     # flip is gated on; the set is not recoverable from the lists above (an
     # `agree` on an item already at its wanted status is not a machine move).
+    # A `stale` id is out of it too (#3752): the tick judged a board the table had
+    # already stopped describing, so that decision is unmeasured rather than wrong,
+    # and `judged` is the leg that says how much of the window was measured.
     return {"agree": sorted(agree), "disagree": sorted(disagree),
             "no_opinion": sorted(no_opinion), "missed": sorted(missed),
+            # #3752: the abstentions, published beside the disagreements rather than
+            # folded into them. A reader that sees `disagree` fall must be able to
+            # tell an abstention from a steward that stopped disagreeing, so the
+            # count rides in the same block the aggregate reads.
+            "stale": stale,
             # beside the id lists, so the machine's half of a disagreement reaches the
             # `board_steward` event and `meta_json` with the tick's own numbers (#3677)
             "disagree_sides": disagree_sides,
@@ -1182,6 +1298,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # is not this loop's to move, and the steward was proposing exactly those
     # (#38, #40, #626, #756 — filed under `no_opinion` every tick overnight).
     open_items = await asyncio.to_thread(B.open_items, B.DEFAULT_BOARDS)
+    # #3752: the instant the table was read, kept with it. `desired_statuses` is a
+    # snapshot of a board that keeps moving — the pool opens a round continuously —
+    # and a score needs both the answer and the instant the question was asked. A
+    # live board-steward tick measured 146.6 s from `started_at` to `completed_at`,
+    # and #3570's `backlog_implement phase=started` row landed 14 s into it: the
+    # reply was scored against a table 14 s (and one round-start) out of date.
+    table_read_at = S.now_iso()
     expected = await asyncio.to_thread(B.desired_statuses, ledger)
     current = {i.id: i.status for i in open_items}
     pending = {i for i, want in expected.items() if current.get(i) != want[0]}
@@ -1258,7 +1381,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "failed", "summary": f"no structured answer: {err}",
                 "meta": {"session_id": run.get("session_id")}}
 
-    agree = agreement(parsed["moves"], expected, current)
+    # Threaded because the guard reads the ledger to decide it (#3752): the same
+    # reason the tick's every other ledger read is threaded — blocking this event
+    # loop is how a steward tick starves the pool.
+    agree = await asyncio.to_thread(agreement, parsed["moves"], expected, current,
+                                    table_read_at=table_read_at, ledger=ledger)
 
     # #3547: the flag gates the WRITE and never the SCORE. `agree` above is built
     # from `parsed["moves"]` — the steward's own answer — and its `rate` is one of
@@ -1346,7 +1473,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # characters, and only on a tick that refused something, which is the case whose
     # outcome would otherwise be lost to the 500-character cap this string carries.
     refused = (f", {len(suppressed)} refused by round_flag" if suppressed else "")
-    counts = (f"{len(parsed['moves'])} move(s) {verb}{refused}, agreement "
+    # Only on a tick that abstained (#3752): the count costs ~45 characters on the
+    # one tick in which it means anything, and this string is capped at 500 on its
+    # way into `runs.summary` with 77 of 154 rows already stopping at exactly 500.
+    abstained = (f", {len(agree['stale'])} abstained (the board moved mid-tick)"
+                 if agree["stale"] else "")
+    counts = (f"{len(parsed['moves'])} move(s) {verb}{refused}{abstained}, agreement "
               f"{rate} ({len(agree['agree'])} agree, "
               f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
               f"where the machine abstains, {len(agree['missed'])} missed); "

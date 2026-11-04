@@ -181,153 +181,212 @@ def _recorded_row_ids(body: str) -> set[int]:
     return out
 
 
-def _window_moves(window: dict, ledger: Path) -> dict[int, str]:
-    """Every proposal the window's own ticks wrote, newest first.
+def _window_pairs(window: dict, ledger: Path) -> dict[int, dict]:
+    """`{item_id: {"tick", "proposed", "side"}}` — one disagreement as ONE tick scored it.
 
-    Each steward tick appends a `board_steward` event carrying `moves`, and each move is
-    keyed `item_id, status, note` — so the proposal side of a disagreement is in the store
-    for the whole window, not only for the tick that tripped the trigger. Read newest-first
-    with `setdefault` so the proposal kept for an id that disagreed twice is its most recent
-    one, matching the order `judgement_aggregate` lists `disagree_ids` in.
+    The unit a ruling needs is a PAIR: the status the steward proposed and the status the
+    machine wanted, both written by the same tick at the same instant. `_window_moves` and
+    `_window_sides` used to walk the ledger separately and keep separate winners — newest
+    tick for the proposal, oldest for the side — and the two winners were different ticks.
+    #3752's measured case is #3433: the tick that disagreed about it
+    (`2026-10-28T06:26:33Z`) proposed `draft` and recorded no side, and the row printed
+    `steward proposed up_next` — the proposal of an AGREEING tick at `2026-11-03T23:43:23Z` —
+    beside a machine side that agreed with it. An agreement printed inside a list of
+    disagreements is the same class of lie as the abstentions #3677 was filed on, and
+    pairing is what makes it unrepresentable: one traversal, one chosen tick per id, and
+    `proposed` and `side` read out of that tick together.
 
-    An id with no move anywhere is absent from the result, which is the honest answer: the
-    tick that judged it wrote no `moves` row for it (a parse dropping a malformed entry
-    still counts the item as judged-and-disagreed), so there is nothing to name as its
-    proposed side. `disagreement_rows` already renders those as `(not in its moves)`.
+    Which tick, per id: the NEWEST window tick that disagreed about the id AND recorded its
+    side (`agreement.disagree_sides`, shipped by #3680 in `7fdb8c69`); if none recorded,
+    the NEWEST window tick that disagreed, with `side` None. A recorded side outranks a
+    newer unrecorded one because a tick that recorded left BOTH halves behind, and that is
+    the row a reader can rule on — which is what
+    `test_the_recorded_side_survives_the_ledger_line_the_filer_reads` holds: a later tick
+    that disagreed and recorded nothing must not blank it.
+
+    Which ticks count as disagreeing: an event whose `agreement` block is a dict counts
+    ONLY for the ids that block's `disagree` names — an event that scored the id as `agree`
+    is exactly the source this closes out. An event with no `agreement` block predates
+    #1688 and cannot be attributed either way, so its moves are still offered (which is
+    what #3651's recovery drives) with `side` None, and its row prints
+    `(the machine's side for this tick was not recorded)` rather than an answer.
+
+    An id with no move anywhere is absent, which is the honest answer: the tick that
+    judged it wrote no `moves` row for it, so there is nothing to name as its proposed
+    side, and `disagreement_rows` renders those as `(not in its moves)`.
+
+    Missing ledger, unreadable ledger and an empty window all give `{}`. The read is
+    whole-file (`limit=0`) because a seven-day window has 116 of its 185 steward events
+    outside a last-400 read; a reader that silently saw two days of a seven-day window
+    would understate coverage, which is the failure #3651 was filed for.
     """
-    proposed: dict[int, str] = {}
+    proposed: dict[int, dict] = {}        # newest disagreeing tick, side or not
+    recorded: dict[int, dict] = {}        # newest disagreeing tick that recorded a side
     since = str(window.get("window_since") or "")
     if not since:
-        return proposed
+        return {}
     try:
         from scripts.automod import state as S
-        # The cheap stat first: on a box with no ledger there is nothing to widen with and
-        # no reason to pay for the decode, and `read_events(limit=0)` is the whole file.
         events = S.read_events(ledger, 0)   # limit=0 is the whole file
     except Exception:
         # FileNotFoundError for a store that does not exist yet, and nothing here may
         # break a tick. The cost of swallowing is that a READER BUG lands here too: a
         # call into `state` for a function that was never there raises AttributeError,
-        # is caught, and the window silently has no moves — every row then reads
+        # is caught, and the window silently has no pairs — every row then reads
         # `(not in its moves)` and the filing still files. It happened while writing
-        # this: `state.read_limit` does not exist, and only
+        # #3651: `state.read_limit` does not exist, and only
         # `test_the_filing_names_every_window_id_whose_move_is_in_the_window` caught
         # the silent reader. Hence the warning rather than a bare `return`.
-        logger.warning("disagreement widening read no moves from %s", ledger,
+        logger.warning("disagreement widening read no pairs from %s", ledger,
                        exc_info=True)
-        return proposed
-    for ev in reversed(events):
-        if ev.get("event") != "board_steward":
+        return {}
+    for ev in events:
+        if not isinstance(ev, dict) or ev.get("event") != "board_steward":
             continue
-        if str(ev.get("created_at") or "") < since:
+        created = str(ev.get("created_at") or "")
+        if created < since:
             continue            # rows are appended in order, but this window is the bound
+        block = ev.get("agreement")
+        scored = isinstance(block, dict)
+        disagreed: set[int] = set()
+        sides: dict[int, tuple[str, str]] = {}
+        if scored:
+            disagreed = {i for i in (block.get("disagree") or [])
+                         if isinstance(i, int) and not isinstance(i, bool)}
+            for rec in (block.get("disagree_sides") or []):
+                if not isinstance(rec, dict):
+                    continue
+                sid = rec.get("item_id")
+                try:
+                    sid = int(sid) if not isinstance(sid, bool) else None
+                except (TypeError, ValueError):
+                    continue    # an id the JSON round trip mangled is not this row's
+                if sid is None or not rec.get("status"):
+                    continue
+                sides[sid] = (str(rec["status"]), str(rec.get("why") or ""))
         for m in (ev.get("moves") or []):
             iid = m.get("item_id") if isinstance(m, dict) else None
-            if isinstance(iid, int) and not isinstance(iid, bool) and m.get("status"):
-                proposed.setdefault(iid, str(m["status"]))
-    return proposed
+            if not isinstance(iid, int) or isinstance(iid, bool) or not m.get("status"):
+                continue
+            if scored and iid not in disagreed:
+                continue        # this tick AGREED about it: not a side of a disagreement
+            pair = {"tick": created, "proposed": str(m["status"]),
+                    "side": sides.get(iid)}
+            proposed[iid] = pair                # forward walk: newest candidate wins
+            if pair["side"]:
+                recorded[iid] = pair
+    return {iid: recorded.get(iid, pair) for iid, pair in proposed.items()}
+
+
+def _window_moves(window: dict, ledger: Path) -> dict[int, str]:
+    """The proposals of the paired ticks: `{item_id: proposed_status}`.
+
+    A view over :func:`_window_pairs`, kept under its own name because a proposal is what
+    a row's first half is. It used to walk the ledger on its own and keep the NEWEST tick's
+    proposal while `_window_sides` kept the OLDEST tick's side, and that split is what let
+    one tick's proposal be printed beside another tick's answer (#3752).
+    """
+    return {iid: pair["proposed"]
+            for iid, pair in _window_pairs(window, ledger).items() if pair["proposed"]}
 
 
 def _window_sides(window: dict, ledger: Path) -> dict[int, tuple[str, str]]:
-    """Every machine side a window's ticks recorded, OLDEST tick winning.
+    """The machine sides of the paired ticks: `{item_id: (status, why)}`.
 
-    The mirror of :func:`_window_moves`, and the reason the record goes into the
-    `board_steward` event rather than only into the tick's own arguments: a merge names
-    ids from earlier ticks, and the side a row must print is the one *that* tick scored
-    against, not the one a later read of the board happens to give.
-    `agreement()["disagree_sides"]` writes these records — dicts of JSON scalars — so an
-    id that comes back through `read_events` as the string `"3456"` is coerced here.
-
-    Forward order with `setdefault`, which is the OPPOSITE of `_window_moves`: a proposal
-    is the steward's latest word about an id, while a recorded side belongs to the one
-    tick that scored it, and letting a later tick overwrite an earlier one would silently
-    re-date a row that is already filed. An id the machine abstained about is never in
-    `disagree_sides` at all, so every entry here is a side it actually held — which is
-    what lets a row print one as fact instead of asserting abstention.
-
-    The read is the same cheap one `_window_moves` uses, including its failure mode: a
-    missing ledger or a bug in this function lands in `except`, warns, and returns an
-    empty record, which renders rows as **not recorded** rather than as a guess.
+    The other view over :func:`_window_pairs`. Every entry is a side a tick that ALSO
+    disagreed recorded — `agreement()["disagree_sides"]` writes it for exactly the ids in
+    that tick's `disagree`, and the pairing above refuses a side from a tick that scored
+    the id as `agree` — so a row can print one as fact instead of asserting abstention
+    (#3677). An id whose disagreeing tick recorded nothing is absent, and renders
+    **not recorded**.
     """
-    out: dict[int, tuple[str, str]] = {}
-    since = str(window.get("window_since") or "")
-    if not since:
-        return out
-    try:
-        from scripts.automod import state as S
-        events = S.read_events(ledger, 0)   # limit=0 is the whole file
-    except Exception:
-        logger.warning("disagreement widening read no machine sides from %s", ledger,
-                       exc_info=True)
-        return out
-    for ev in events:
-        if ev.get("event") != "board_steward":
-            continue
-        if str(ev.get("created_at") or "") < since:
-            continue            # rows are appended in order, but this window is the bound
-        agree = ev.get("agreement")
-        if not isinstance(agree, dict):
-            continue
-        for rec in agree.get("disagree_sides") or []:
-            if not isinstance(rec, dict):
-                continue
-            iid = rec.get("item_id")
-            try:
-                iid = int(iid) if not isinstance(iid, bool) else None
-            except (TypeError, ValueError):
-                continue
-            if iid is None or not rec.get("status"):
-                continue
-            out.setdefault(iid, (str(rec["status"]), str(rec.get("why") or "")))
-    return out
+    return {iid: pair["side"]
+            for iid, pair in _window_pairs(window, ledger).items() if pair["side"]}
 
 
 def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
-           window: dict, ledger: Path) -> tuple[list[int], list[dict], dict, dict]:
+           window: dict, ledger: Path) -> tuple[list[int], list[dict], dict]:
     """The rows a ruling can actually be made on: the window's, not the tick's.
 
-    Returns `(ids, moves, expected, stats)`. `ids` is the tick's disagree set (unchanged,
-    in order, first) followed by every other id the window's aggregate names. For those
-    extras the machine's side is recomputed from `desired_statuses` — the same function the
-    tick compared against, over the same ledger — because `agree`/`expected` in scope here
-    are only this tick's board subset. The tick's own values win wherever both exist.
+    Returns `(ids, moves, expected)`. `ids` is the tick's disagree set (unchanged,
+    in order, first) followed by every other id the window's aggregate names.
 
-    `stats` carries what the widening could NOT do, for the Coverage bullet: how many named
-    ids have no proposal in any ledger move, and how many ids the row cap dropped.
+    Where each half of a row comes from, and it is the whole design of this function:
+      - an id THIS tick scored as a disagreement: its proposal is this tick's move and its
+        side is this tick's `disagree_sides`, falling back to `expected` — the same object
+        the tick scored against, so it is that tick's answer and not a later reading;
+      - any other id: BOTH halves from the one window tick `_window_pairs` chose, or the
+        row prints `(not in its moves)` / `(the machine's side for this tick was not
+        recorded)`.
+    `expected` is never used for the second group. That seed is what made #3433's row
+    print a machine side — `('up_next', 'triage confirmed it with an acceptance check')`,
+    the filing tick's live `desired_statuses` for an id it had not judged — beside an
+    `up_next` proposal lifted off an agreeing tick, an agreement inside the disagreement
+    list. #3677 removed the re-run of `desired_statuses` for window ids and #3680 shipped
+    the per-tick record; this removes the last way a row can speak from an instant that
+    did not score it.
 
-    The machine's half used to be filled for those `missing` ids by re-running
-    `desired_statuses` over that ledger HERE, at filing time, and that is what made a row
-    lie (#3677). `agreement()` puts an id in `disagree` only when the machine had an
-    opinion at that tick (`workers/sources/board_steward.py:920`; an id absent from the
-    table lands in `no_opinion` at `:921`), yet the re-run answered abstention for 12 of
-    the 22 ids the window named and answered "the same status the steward asked for" for
-    2 more — 12 abstentions and 2 agreements inside rows the classifier had already
-    ruled conflicts. `desired_statuses` is the board's live state read at a later
-    instant, so it can only ever speak about that instant; the side a row must print is
-    the one the disagreeing tick scored, which is what `_window_sides` recovers from
-    that tick's own event.
+    The last loop drops any pair whose two halves name the SAME status. A pair like that
+    cannot come from an honest tick — `disagree_sides` is written for exactly the ids whose
+    status differs from the proposal — so it means the halves came from different places,
+    and rendering it is the lie the clause forbids. The row stays named and renders
+    **not recorded**, which is also how Coverage counts it.
+
+    `stats`, from `row_stats`, carries what the widening could NOT do for the Coverage
+    bullet: how many named ids have no proposal in any ledger move, and how many ids the
+    row cap dropped.
     """
     tick_ids = [int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)]
     win_ids = [i for i in (window.get("disagree_ids") or []) if isinstance(i, int)]
     ids = tick_ids + [i for i in win_ids if i not in set(tick_ids)]
 
-    wide_moves: dict[int, Any] = dict.fromkeys(ids)   # None where nothing proposed it
-    for m in (moves or []):
-        iid = m.get("item_id") if isinstance(m, dict) else None
-        if isinstance(iid, int) and iid in wide_moves and m.get("status"):
-            wide_moves[iid] = str(m["status"])   # this tick's own moves are authoritative
-    if any(v is None for v in wide_moves.values()):
-        for iid, status in _window_moves(window, ledger).items():
-            if iid in wide_moves and wide_moves[iid] is None:
-                wide_moves[iid] = status
+    pairs = _window_pairs(window, ledger)
+    proposed = {m.get("item_id"): m.get("status") for m in (moves or []) if isinstance(m, dict)}
 
-    wide_expected = dict(expected or {})
-    missing = [i for i in ids if i not in wide_expected]
-    if missing:
-        recorded = _window_sides(window, ledger)
-        for iid in missing:
-            if iid in recorded:
-                wide_expected[iid] = recorded[iid]
+    wide_moves: dict[int, Any] = dict.fromkeys(ids)   # None where nothing proposed it
+    # This tick's move is authoritative for the ids IT scored as disagreements, and for
+    # no others: this tick's `moves` list also carries every item it happened to agree
+    # with, and putting one of those statuses in a window id's row is half of #3433's lie.
+    for iid in tick_ids:
+        status = proposed.get(iid)
+        if isinstance(status, str) and status:
+            wide_moves[iid] = status
+    if any(v is None for v in wide_moves.values()):
+        for iid, pair in pairs.items():
+            if iid in wide_moves and wide_moves[iid] is None and pair["proposed"]:
+                wide_moves[iid] = pair["proposed"]
+
+    # The machine's halves, each one from the tick that scored it. For an id this tick
+    # judged, its own record wins even over a ledger pair — that pair can only be an
+    # EARLIER tick's disagreement about the same item, and the row being written now is
+    # this tick's.
+    wide_expected: dict[int, tuple[str, str]] = {
+        iid: pair["side"] for iid, pair in pairs.items() if pair["side"]}
+    recorded_sides = {}
+    for side in (agree.get("disagree_sides") or []):
+        if not isinstance(side, dict) or not isinstance(side.get("item_id"), int):
+            continue
+        if not side.get("status"):
+            continue
+        recorded_sides[side["item_id"]] = (str(side["status"]), str(side.get("why") or ""))
+    for iid in tick_ids:
+        side = recorded_sides.get(iid)
+        if side is None:
+            # The same table the id was scored against, held by reference from the top of
+            # the tick — the tick's own answer, which is what `disagree_sides` would have
+            # written had this tick been running the build that records it (#3677). Not a
+            # re-read: `execute` reads `desired_statuses` once and passes it down.
+            entry = (expected or {}).get(iid)
+            side = ((str(entry[0]), str(entry[1]) if len(entry) > 1 else "")
+                    if entry else None)
+        if side:
+            wide_expected[iid] = side
+
+    # A pair whose two halves name the same status is not a disagreement, so it gets the
+    # rendering of a side nobody recorded rather than an agreement printed inside the list.
+    for iid in [k for k, want in wide_expected.items()
+                if want[0] and wide_moves.get(k) == want[0]]:
+        wide_expected.pop(iid)
 
     rows = [{"item_id": i, "status": s} for i, s in wide_moves.items() if s]
     return ids, rows, wide_expected

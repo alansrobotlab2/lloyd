@@ -3212,10 +3212,18 @@ def test_a_row_is_rendered_from_a_record_only_the_ledger_carries(board, tmp_path
     rather than about the moment the file was written.
     """
     ledger = tmp_path / "promotions.jsonl"
+    # The status PROPOSED has to differ from the side RECORDED, because no honest tick ever
+    # writes both for one status: `agreement()` puts an id in `disagree` only where
+    # `expected[i][0] != s`, and `disagree_sides` is built from exactly that list. An event
+    # whose `moves` say `up_next` and whose `disagree_sides` also say `up_next` is a tick
+    # that could not have run, and the filer now refuses to print such a pair — #3752's
+    # fourth clause is that no filed row may name the same status on both sides — so the
+    # row this node is about would render **not recorded** and the assertion at the bottom
+    # would be grading an impossible artifact rather than the ledger read.
     S.append_event({"event": "board_steward",
                     "agreement": _agree_with_sides(
                         [3450], {3450: ("up_next", "triaged, no verdict yet")}),
-                    "moves": [{"item_id": 3450, "status": "up_next",
+                    "moves": [{"item_id": 3450, "status": "in_progress",
                                "note": "its own reason"}]}, path=ledger)
     # The tick scored only DIS_AGREE; 3450 enters the filing the way every widened row
     # does — named by the window's `disagree_ids` — and its machine side is NOT in this
@@ -3943,3 +3951,262 @@ def test_a_move_that_only_changed_tags_endorses_a_status_without_claiming_one(bo
     assert [m["applied"] for m in out] == [True], "the tag did go on: the move was applied"
     assert "needs-human" in _fm_of(board, 13)["tags"]
     assert _move_rows() == [], "no status changed, so no status claim"
+
+
+# ───────────────────── #3752: the table has an instant, the board does not ─────────────────────
+#
+# The figures are #3752's own, measured on the tree it was triaged on. The board-steward
+# tick that filed it ran 2026-11-04T04:13:50.44Z → 04:16:17.06Z (146.6 s), and #3570's
+# `backlog_implement phase=started` row is stamped 04:14:04Z — 14 s after that tick read
+# `desired_statuses` (`workers/sources/board_steward.py`) and 132 s before its reply was
+# scored against that same table. Re-running `desired_statuses` over the same ledger at
+# 04:47Z answers `('in_progress', 'an automod round is in flight for it')` for #3570: the
+# STEWARD's answer. The window that filed it: judged 99, agree 86, disagree 11, rate
+# 0.8687, `below_floor()` True. Scanning every window tick's `started_at`→`completed_at`
+# against each item's own ledger rows puts 3 of the window's 11 disagreement instances in
+# this class — #3524 (`land_rescued`, `round_abandoned`), #3418 (`land_rescued`,
+# `status_moved`) and #3570 (`backlog_implement`, `round_start`) — because the pool opens
+# rounds continuously while the steward is thinking.
+#
+# The second class the same item measured: #3433's row printed `steward proposed up_next`
+# beside `the state machine wants up_next`. Its disagreeing tick
+# (2026-10-28T06:26:33Z) proposed `draft` and recorded no side; the `up_next` came from an
+# AGREEING tick at 2026-11-03T23:43:23Z, and the machine's side came from the filing
+# tick's live table — an agreement, printed inside the disagreement list.
+
+STALE_READ = "2026-11-04T04:13:50Z"        # the instant `expected` was read
+STALE_MOVE = "2026-11-04T04:14:04Z"        # 14 s later: inside the same tick
+STALE_BEFORE = "2026-11-04T04:13:40Z"      # 10 s earlier: the board was still still
+
+#: Every row of a `## Rows` section, for the invariant no single row can show alone.
+_ROW_STATUSES = re.compile(r"steward proposed `(?P<steward>[a-z_]+)`; the state machine "
+                           r"wants `(?P<machine>[a-z_]+)`")
+
+
+def _rows_of(body: str) -> list[str]:
+    return [ln for ln in body.splitlines() if ln.startswith("- #")]
+
+
+def test_an_item_whose_ledger_moved_after_the_table_read_abstains_rather_than_disagreeing(tmp_path):
+    """#3752 clause 1: `agreement()` is given the instant its `expected` was read, and an
+    id with a ledger row of its own after that instant is an abstention, not a disagreement.
+
+    The id being weighed is #3570, and the row is the one this item was filed on: a round
+    starting is exactly the event `desired_statuses`' `in_flight` arm reads its answer
+    from, so a row after the read is proof the table has stopped describing the board the
+    steward reasoned over. `stale` is published BESIDE `disagree` rather than folded into
+    it, because a reader of the aggregate has to be able to tell a steward that stopped
+    disagreeing from a guard that stopped counting.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _led(led, event="backlog_implement", item_id=3570, phase="started",
+         round_id="SM_20261104_041404", created_at=STALE_MOVE)
+    agree = W.agreement(moves=[{"item_id": 3570, "status": "in_progress"},
+                               {"item_id": 3433, "status": "in_progress"}],
+                        expected={3570: ("up_next", "triage confirmed it with an "
+                                                    "acceptance check"),
+                                  3433: ("up_next", "triage confirmed it with an "
+                                                    "acceptance check")},
+                        current={3570: "up_next", 3433: "up_next"},
+                        table_read_at=STALE_READ, ledger=led)
+    assert agree["stale"] == [3570], (
+        "a round start 14 s after the table read must not score as the steward disagreeing")
+    assert agree["disagree"] == [3433], "the id the board did not move is untouched"
+    assert [s["item_id"] for s in agree["disagree_sides"]] == [3433], (
+        "an abstention has no machine side to record, because it was never scored")
+    assert agree["judged"] == 1 and agree["rate"] == 0.0, (
+        "the stale id leaves the DENOMINATOR: an abstention is #1688's shape — a decision "
+        "not measured — and never an agreement credited to the steward")
+
+
+def test_a_round_started_while_the_steward_was_answering_is_not_scored_as_a_disagreement(
+        board, monkeypatch):
+    """#3752 clause 1 over the seam the bug lives on, not the function that fixes it.
+
+    The row is appended INSIDE the canned turn, because that is where a round start
+    happens in a real tick: `execute` reads the table, hands the prompt to the model, and
+    the pool opens a round while it is answering. A unit test of `agreement()` alone could
+    pass with a `table_read_at` that was never the read's instant, which is the whole
+    failure — the instant has to travel from the read to the score.
+    """
+    from workers.sources import _common as C
+    from workers import board_disagreement as D
+
+    _ten_item_board(board)
+    monkeypatch.setattr(B, "desired_statuses",
+                        lambda ledger: {7: ("up_next", "confirmed with acceptance")})
+    monkeypatch.setattr(D, "window_now", lambda **kw: _window7())
+    started_at = (datetime.now(timezone.utc)
+                  + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def turn(prompt, **kw):
+        _ev(event="backlog_implement", item_id=7, phase="started", round_id="SM_3752",
+            created_at=started_at)          # 14 s in, where #3570's row landed
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [{"item_id": 7, "status": "draft",
+                                          "note": "never triaged"}],
+                               "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+
+    assert out["status"] == "success", out
+    blk = out["meta"]["agreement"]
+    assert blk["stale"] == [7] and blk["disagree"] == [], blk
+    assert blk["judged"] == 0 and blk["rate"] is None, (
+        "the tick judged a board its table had stopped describing: that is an unmeasured "
+        "tick, and saying so is the only honest output it has")
+    assert "1 abstained" in out["summary"], out["summary"]
+    assert _filed(board) == [], "a disagreement the board moved under may not reach a ruler"
+    ticks = [e for e in S.read_events(path=S.LEDGER_PATH)
+             if e.get("event") == "board_steward"]
+    assert len(ticks) == 1 and ticks[0]["agreement"]["stale"] == [7], (
+        "the abstention has to be in the ledger row the next reader sums, or the guard is "
+        "invisible to the instrument it protects")
+
+
+def test_a_disagreement_the_board_did_not_move_still_lands_with_its_recorded_side(tmp_path):
+    """#3752 clause 2: the guard abstains, and a guard that also blinded the instrument
+    would raise the flip bar by deleting the evidence.
+
+    Two rows that are NOT proof the board moved are weighed here: #3508's `status_moved`
+    is stamped 10 s BEFORE the read (the table was read after it, so it describes the
+    board), and #3456's `round_abandoned` has both stamps mangled — `created_at` and the
+    epoch `ts` that `state.append_event` writes beside it are neither a parsable date nor a
+    number — so it can neither prove nor disprove that the board moved. One readable stamp
+    would be enough to date a row, which is why the row's OTHER half has to be blanked too. Both disagreements stand, with the
+    machine's side recorded for each. The last assertion is the rail for every caller that
+    has no instant to give: with no `table_read_at` the counts are exactly what they were
+    before the guard existed.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _led(led, event="status_moved", item_id=3508, to="in_progress", created_at=STALE_BEFORE)
+    _led(led, event="round_abandoned", item_id=3456, created_at="not a timestamp",
+         ts="not a number")
+    kwargs = dict(moves=[{"item_id": 3508, "status": "in_progress"},
+                         {"item_id": 3456, "status": "draft"}],
+                  expected={3508: ("up_next", "triage confirmed it with an acceptance"),
+                            3456: ("up_next", "triage confirmed it with an acceptance")},
+                  current={3508: "up_next", 3456: "up_next"})
+    agree = W.agreement(table_read_at=STALE_READ, ledger=led, **kwargs)
+    assert agree["stale"] == [], "a row from before the read is not the board moving after it"
+    assert agree["disagree"] == [3456, 3508], agree
+    assert [s["item_id"] for s in agree["disagree_sides"]] == [3456, 3508]
+    assert agree["judged"] == 2 and agree["rate"] == 0.0
+    assert W.agreement(**kwargs)["disagree"] == [3456, 3508], (
+        "the guard is opt-in on the instant: a caller that passes none scores as before")
+
+
+def test_no_filed_row_borrows_the_machine_side_of_the_filing_tick_for_an_id_it_never_judged(
+        board, tmp_path):
+    """#3752 clause 3: `expected` is THIS tick's answer, never a table to seed the window with.
+
+    The id being weighed is #3433 and both halves of its real row are reproduced: the tick
+    that disagreed about it (`2026-10-28T06:26:33Z`) proposed `draft` and recorded no
+    machine side, while the filing tick's live `desired_statuses` — which is the very
+    object passed in as `expected` — answers `('up_next', 'triage confirmed it with an
+    acceptance check')` for it. #3677 retired the RE-RUN of `desired_statuses` for window
+    ids, and the seed `wide_expected = dict(expected or {})` survived it, which is how that
+    side still reached the row. So the assertion is not just that the row admits it: this
+    exact status string, the filing tick's own answer for an item it had not judged, may
+    appear nowhere in the body. The Coverage figure counts only ids whose side the ledger
+    holds, so 3433 is not in it either — 5 of the 8 named rows, the five this tick scored.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _led(led, event="board_steward", apply=False, created_at="2026-10-28T06:26:33+00:00",
+         disagree=[3433], moves=[{"item_id": 3433, "status": "draft",
+                                 "note": "no triage verdict in its history"}])
+    expected = {**DIS_EXPECTED,
+                3433: ("up_next", "triage confirmed it with an acceptance check")}
+    ids, rows, wide = D._widen(_agree(*DIS_AGREE), DIS_MOVES, expected,
+                              _window7(disagree_ids=DIS_WINDOW + [3433]), led)
+    assert 3433 in ids, "the window's id is still named — a side is not required to name it"
+    assert 3433 not in wide, "the filing tick's table was seeded into the window's rows"
+    assert {"item_id": 3433, "status": "draft"} in rows, (
+        "its proposal is still the disagreeing tick's own move")
+
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, expected,
+                           window=_window7(disagree_ids=DIS_WINDOW + [3433]),
+                           backlog_dir=board, ledger=led)
+    assert out is not None and 3433 in out["ids"]
+    body = _filed(board)[0].body
+    assert "triage confirmed it with an acceptance check" not in body, (
+        "the machine's side was taken from the filing tick's live `desired_statuses`, not "
+        "from the tick that scored the disagreement")
+    row = [ln for ln in body.splitlines() if ln.startswith("- #3433")][0]
+    assert "not recorded" in row and "`draft`" in row, row
+    assert "- 5 of the 8 named rows carry the machine's side" in body, (
+        "Coverage counted a side the ledger does not hold")
+
+
+def test_a_row_that_could_only_be_built_from_two_ticks_prints_the_newer_side_it_never_had(
+        board, tmp_path):
+    """#3752 clause 4: one tick, both halves — an agreement cannot be printed inside the
+    disagreement list, whatever the store holds.
+
+    Both rows here are #3433's real ledger: the disagreeing tick at
+    `2026-10-28T06:26:33Z` proposed `draft`, and a LATER tick at `2026-11-03T23:43:23Z`
+    scored the item as `agree` with a `up_next` proposal — the two separate ledger walks
+    kept the newer proposal and the older (unrecorded) side, and printed an agreement.
+    `_window_pairs` walks once and takes both halves from the one tick that disagreed, so
+    the row prints the `draft` that was actually disagreed with and admits no machine side
+    was recorded. The loop after it is the clause as an invariant over the whole body, not
+    a property of one row: no line may name the same status on both sides.
+    """
+    led = tmp_path / "ledger.jsonl"
+    # Both rows carry an `agreement` block, because that block is how the window counted
+    # them at all: `judgement_aggregate` sums `agreement.disagree`, so a window id with no
+    # scoring block in its tick is a row this filer never sees. Neither carries
+    # `disagree_sides`: the record shipped with #3680, after both these ticks ran.
+    _led(led, event="board_steward", apply=False, created_at="2026-10-28T06:26:33+00:00",
+         agreement=_agree(3433),
+         moves=[{"item_id": 3433, "status": "draft",
+                 "note": "no triage verdict in its history"}])
+    _led(led, event="board_steward", apply=False, created_at="2026-11-03T23:43:23+00:00",
+         agreement={"judged": 1, "agree": [3433], "disagree": [], "no_opinion": [],
+                    "missed": [], "machine_moves": 1, "proposed": 1, "rate": 1.0},
+         moves=[{"item_id": 3433, "status": "up_next", "note": "triaged, ready"}])
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(disagree_ids=DIS_WINDOW + [3433]),
+                           backlog_dir=board, ledger=led)
+    assert out is not None and 3433 in out["ids"]
+    body = _filed(board)[0].body
+    row = [ln for ln in body.splitlines() if ln.startswith("- #3433")][0]
+    assert "`draft`" in row, f"the row printed the agreeing tick's proposal: {row}"
+    assert "not recorded" in row, row
+    for ln in _rows_of(body):
+        pair = _ROW_STATUSES.search(ln)
+        if pair and "not recorded" not in ln:
+            assert pair.group("steward") != pair.group("machine"), (
+                f"an agreement inside the disagreement list: {ln}")
+
+
+def test_a_pair_whose_two_halves_name_the_same_status_is_dropped_rather_than_printed(
+        board, tmp_path):
+    """#3752 clause 4, the rail on the rendering itself.
+
+    No honest tick writes this row — `agreement()` records a side only for an id whose
+    status differs from the proposal it made — so a ledger event that carries both halves
+    for one status is a mangled read or a future writer bug, not evidence. It used to
+    render as a disagreement naming `up_next` twice; now the pair is dropped and the row
+    says what is true of it, that no tick recorded a side, and the body-wide invariant
+    still holds. Contrast
+    `test_a_row_is_rendered_from_a_record_only_the_ledger_carries`, which is the same
+    shape with honest numbers and must still print the recorded side.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _led(led, event="board_steward", apply=False, created_at=DIS_OLDER_STAMP,
+         agreement=_agree_with_sides([3450], {3450: ("up_next", "triaged, no verdict yet")}),
+         moves=[{"item_id": 3450, "status": "up_next", "note": "its own reason"}])
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(disagree_ids=DIS_WINDOW + [3450]),
+                           backlog_dir=board, ledger=led)
+    assert out is not None and 3450 in out["ids"], "the id stays named even with no pair"
+    body = _filed(board)[0].body
+    row = [ln for ln in body.splitlines() if ln.startswith("- #3450")][0]
+    assert "not recorded" in row, f"the same status printed on both sides: {row}"
+    for ln in _rows_of(body):
+        pair = _ROW_STATUSES.search(ln)
+        if pair and "not recorded" not in ln:
+            assert pair.group("steward") != pair.group("machine"), (
+                f"an agreement inside the disagreement list: {ln}")
