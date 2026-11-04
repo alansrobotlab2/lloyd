@@ -1762,3 +1762,224 @@ def test_the_run_report_prints_the_marked_count_only_when_there_is_one(
     assert "variants proposed under >1 canonical" not in out, (
         "the block printed on a run whose record has no collision, so the line stops "
         f"meaning anything: {out}")
+
+
+# ---------------------------------------------------------------------------
+# #3758 — a row's `action` is a snapshot of one day's store, so the durable
+# record must be re-guarded the next time it is written
+#
+# `merge_allowed` decides `merge` vs `alias_only` from `count_facts` and
+# `entity_degree` on the store AS IT STANDS on emission day. The row then lives in
+# `semantic-proposals-cumulative.jsonl` — which the retention sweep holds
+# (`retention-sweep.py`'s `MEMORY_GRAPH_HELD_NAMES`), so it can never age out — and
+# `merge_proposals` refreshes `last_seen_at` on a re-statement but never re-asks the
+# guard. Live witness, both rows of it re-guarded with the real function on
+# 2026-11-04: `Best-of <- Best-of-N` and `Jason <- Jason Ma`, both `action: merge`,
+# both refused today by `variant_too_many_facts` (the smaller side holds 7 fact files
+# against `MERGE_VARIANT_MAX_FACTS = 3`) — 2 of the 73 `action: merge` rows in the
+# record. The same day's own run re-emitted the first pair the OTHER way round as
+# `alias_only` with that guard, so the reviewer's file held "merge this" and "too big
+# to merge" for one pair with no row saying which reading is current. The harm is
+# published too: `kg_hygiene.merge_queue_report` ages the queue off the oldest
+# `first_seen_at` of the `action == "merge"` rows, and on 2026-11-04 that age was 35
+# days, anchored on the `Jason` row the guard would refuse.
+#
+# `count_facts` is the outside world here, so the tests patch it rather than the
+# guard: `merge_allowed` itself is the thing under test on every one of these paths.
+# The fact counts are the live witness's (7 and 13 on the `Best-of` pair, which is
+# why the reason is the smaller-side rule and not `combined_facts_over_cap`: 7 + 13
+# is under the cap of 25).
+# ---------------------------------------------------------------------------
+
+OUTGROWN_FACTS = {"Best-of": 7, "Best-of-N": 13, "Jason": 2, "Jason Ma": 3}
+
+
+def _seed_record(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _record_rows(path):
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def _stored_row(canonical, variant, first_seen, facts_free=False):
+    """A merge row as the record holds it: emitted on `first_seen`, guard passed."""
+    return {
+        "canonical": canonical, "variant": variant, "action": "merge",
+        "verdict": "same", "confidence": 0.93, "reason": "seed",
+        "guard_reason": None, "review_flag": None,
+        "first_seen_at": first_seen, "last_seen_at": first_seen,
+    }
+
+
+def test_a_record_merge_row_the_store_has_outgrown_is_written_as_alias_only(
+        tmp_path, monkeypatch):
+    """Clause 1: the guard is re-run over the accumulated rows when the record is written.
+
+    The outgrown row is SEEDED rather than emitted by this run, because that is the
+    defect: `Best-of <- Best-of-N` passed the guard on 2026-10-21 and this run did not
+    judge it again — the store grew underneath a row nobody re-asked. Read back through
+    the sweep's real loader, which follows `latest` to the cumulative record, because
+    that is the file a human approves merges from; a downgrade that lived only in this
+    run's dated file would leave the reviewer's copy offering the merge.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00")])
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+
+    rows = {r["canonical"]: r for r in _record_rows(cumulative)}
+    assert rows["Best-of"]["action"] == "alias_only", (
+        "a merge row the guard refuses today was rewritten to the record unchanged: "
+        f"{rows['Best-of']}")
+    assert counts["outgrown_merge_rows"] == 1, counts
+    # The reviewer's own path sees the downgrade, not just the file on disk.
+    seen = {r["canonical"]: r for r in sweep.load_semantic_proposals(tmp_path)}
+    assert seen["Best-of"]["action"] == "alias_only", seen["Best-of"]
+
+
+def test_a_downgraded_row_names_the_guard_and_a_current_row_stays_a_clean_merge(
+        tmp_path, monkeypatch):
+    """Clause 2: `stale_guard_reason` names the guard that now fires, and nothing else gains it.
+
+    The field is the whole point of the label: `guard_reason` stays as emitted
+    (`null` — the guard passed on emission day), so a downgraded row would otherwise
+    read as an alias-only proposal that carries no reason, and a reader could not tell
+    "alias-only from the day it was judged" apart from "alias-only because the store
+    grew". The `Jason` pair is the second half of the live witness and stays a merge:
+    2 facts on the smaller side is under the cap of 3, so the pass must leave it
+    claiming nothing — a field stamped on every row labels nothing.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00"),
+        _stored_row("Jason", "Jason Ma", "2026-09-30T00:00:00+00:00")])
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+
+    rows = {r["canonical"]: r for r in _record_rows(cumulative)}
+    outgrown = rows["Best-of"]
+    assert outgrown["action"] == "alias_only" and \
+        outgrown["stale_guard_reason"] == "variant_too_many_facts", outgrown
+    assert outgrown["guard_reason"] is None, (
+        "the guard that fired on emission day was overwritten by the one that fired "
+        f"today: {outgrown['guard_reason']}")
+    current = rows["Jason"]
+    assert current["action"] == "merge", current
+    assert "stale_guard_reason" not in current, (
+        f"a row the guard still allows was stamped anyway: {current}")
+    assert dict(counts["outgrown_guard_reasons"]) == {"variant_too_many_facts": 1}, \
+        counts
+
+
+def test_the_outgrown_pass_removes_no_row_and_moves_no_other_field(
+        tmp_path, monkeypatch):
+    """Clause 3: labelling-and-downgrading, not deleting — #1410's record is intact.
+
+    The item left the scope call open ("drop the row, or label it") and the answer here
+    is to keep it: dropping would erase the LLM verdict behind the row and silently
+    shrink the record #1410 exists to protect, and `count_facts`/`entity_degree` only
+    grow, so a stale row can never become safe again and has no other exit but this
+    label. Every row's identity, verdict, confidence and both dates are asserted
+    against the pre-write snapshot, including on the row whose `action` moved.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    seeded = [
+        _stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00"),
+        _stored_row("Jason", "Jason Ma", "2026-09-30T00:00:00+00:00"),
+        {"canonical": "Qwen3-TTS", "variant": "qwen 3 tts", "action": "alias_only",
+         "verdict": "same", "confidence": 0.7, "reason": "seed",
+         "guard_reason": "below_merge_threshold", "review_flag": None,
+         "first_seen_at": "2026-09-12T00:00:00+00:00",
+         "last_seen_at": "2026-09-12T00:00:00+00:00"},
+    ]
+    _seed_record(cumulative, seeded)
+    fields = ("canonical", "variant", "verdict", "confidence", "first_seen_at",
+              "last_seen_at", "guard_reason", "reason", "review_flag")
+    before = sorted(str({k: r[k] for k in fields}) for r in seeded)
+
+    counts = ser.emit_proposals(
+        [_proposal("Isaac Lab", "IsaacLab", 0.91)],
+        run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+
+    after_rows = _record_rows(cumulative)
+    assert len(after_rows) == 4, (
+        f"the pass was asked to move no row: 3 seeded + 1 emitted, got {after_rows}")
+    after = sorted(str({k: r[k] for k in fields}) for r in after_rows
+                   if r["canonical"] != "Isaac Lab")
+    assert after == before, f"a field besides `action` moved:\n{before}\n{after}"
+    assert counts["cumulative"] == 4, counts
+
+
+def test_emit_proposals_still_writes_the_record_when_handed_no_graph(
+        tmp_path, monkeypatch):
+    """Clause 4: the re-guard is optional, so every graph-free caller is untouched.
+
+    `emit_proposals` has no graph in scope of its own — `neighbors` is built in `main`
+    from `load_graph()`/`build_neighbors()` — and ~15 existing tests call it with no
+    graph at all (`tests/test_semantic_entity_resolution.py:194,303,320,333,358,430,
+    447,458,464,478,562,569`), which is what keeps #744/#1410/#3122/#3536's tests
+    unchanged. With no graph there is no store to ask, so the honest answer is to
+    re-guard nothing and write the row as emitted; the assertion is that the outgrown
+    row SURVIVES the call unlabelled, which is what makes the default a skip rather
+    than a silent veto.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00")])
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest)
+
+    rows = _record_rows(cumulative)
+    kept = [r for r in rows if r["canonical"] == "Best-of"]
+    assert len(kept) == 1 and kept[0]["action"] == "merge", (
+        "a graph-free emit rewrote or dropped a row it had no store to judge: "
+        f"{kept}")
+    assert "stale_guard_reason" not in kept[0], kept[0]
+    assert counts["outgrown_merge_rows"] == 0, counts
+
+
+def test_the_run_report_counts_the_outgrown_rows_and_is_quiet_at_zero(
+        tmp_path, monkeypatch, capsys):
+    """Clause 5, across the process seam: main()'s own stdout, both ways.
+
+    Driven through `_drive_main`, so the assertion is on the text an operator reads in
+    the #67 run log and not on a count dict — the run must be able to say "N merge rows
+    in the record the store has outgrown" without anyone re-implementing this item's
+    probe. The outgrown pair is `Browser`/`Browser Tool`, the #1175 suffix-asymmetry
+    shape, which a name-shape guard refuses with no facts on either side: the seeded
+    row is outgrown by shape, so the run's patched `count_facts` (everything at 0, for
+    every test in this file) cannot make the test's premise depend on it. The quiet run
+    then proves the line is a signal and not decor, and is proven non-vacuous by the
+    merge row it still holds.
+    """
+    seeded = tmp_path / "semantic-proposals-cumulative.jsonl"
+    _seed_record(seeded, [
+        _stored_row("Browser", "Browser Tool", "2026-10-21T00:00:00+00:00")])
+
+    _drive_main(tmp_path, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "merge rows the record has outgrown" in out, out[-1500:]
+    block = out.split("merge rows the record has outgrown")[1]
+    # The existing blocks' shape: the reason left-padded at 30 columns, the count after
+    # it, four spaces in — the same lines `guard_downgrades` and `review_flags` print.
+    assert re.search(r"^ {4}suffix_asymmetry\s+1$", block, re.M), block[:300]
+
+    seeded.unlink()
+    _drive_main(tmp_path, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "merge rows the record has outgrown" not in out, (
+        f"the block printed on a run whose every merge row still passes: {out}")
+    held = [r for r in _record_rows(seeded) if r["action"] == "merge"]
+    assert held, "the quiet run held no merge row at all, so its silence proved nothing"

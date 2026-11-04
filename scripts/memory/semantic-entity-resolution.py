@@ -1175,8 +1175,64 @@ def mark_multi_canonical(rows: list[dict],
     return len(colliding)
 
 
+# Field naming the guard that fires TODAY on a row whose stored `action` predates it.
+# Separate from `guard_reason`, which stays the answer of the day the pair was judged.
+STALE_GUARD_FIELD = "stale_guard_reason"
+
+
+def downgrade_outgrown_merges(rows: list[dict],
+                              neighbors: dict[str, set[str]]) -> tuple[int, "Counter[str]"]:
+    """Re-ask `merge_allowed` for every `merge` row in `rows`; downgrade the stale ones.
+
+    Why this exists. `action` is decided on emission day by `merge_allowed`, which reads
+    `count_facts` and `entity_degree` — the store AS IT STANDS then. The row then lives
+    in `semantic-proposals-cumulative.jsonl`, where `merge_proposals` refreshes
+    `last_seen_at` on a re-statement but never re-asks the guard, and the retention sweep
+    holds that file (`MEMORY_GRAPH_HELD_NAMES`), so it can never age out. Measured
+    2026-11-04: 2 of the record's 73 `action: merge` rows no longer pass the function
+    that produced them — `Best-of <- Best-of-N` (first seen 2026-10-21) and
+    `Jason <- Jason Ma` (2026-09-30), both refused today by `variant_too_many_facts`,
+    7 fact files on the smaller side against `MERGE_VARIANT_MAX_FACTS = 3` — while that
+    day's own run re-emitted the first pair the OTHER way round as `alias_only` with
+    exactly that guard. So the reviewer's file held "merge this" and "too big to merge,
+    alias only" for one pair with no row saying which reading is current, and
+    `kg_hygiene.merge_queue_report` was ageing the destructive-merge queue off the
+    `Jason` row: 35 days, anchored on a merge the guard would refuse.
+
+    The direction of harm is one-way, which is what makes re-asking enough: `count_facts`
+    and `entity_degree` grow monotonically, so a pair leaves merge eligibility and never
+    re-enters it. A stale row can therefore only ever over-offer a merge, never withdraw
+    one that is still safe.
+
+    Labelling, like `mark_multi_canonical`, and for the same reasons. `action` becomes
+    `alias_only` — the answer of the very guard that chose it in the first place — and
+    `stale_guard_reason` names that guard. Nothing else moves: not `guard_reason`, which
+    is the record of the day the pair was judged (`null` on a merge row, and overwriting
+    it would erase the fact the row ever passed, leaving an alias-only row with no
+    reason at all), not the verdict or confidence behind it, not either date, and no row
+    is dropped — #1410's record-integrity reason: the row is the only surviving evidence
+    the pair was judged. Whether an outgrown row should leave the queue entirely is a
+    reviewer's ruling, not this pass's.
+    """
+    downgraded = 0
+    reasons: Counter[str] = Counter()
+    for row in rows:
+        if row.get("action") != "merge":
+            continue
+        ok, reason = merge_allowed(str(row.get("canonical") or ""),
+                                   str(row.get("variant") or ""), neighbors)
+        if ok:
+            continue
+        row["action"] = "alias_only"
+        row[STALE_GUARD_FIELD] = reason
+        reasons[reason] += 1
+        downgraded += 1
+    return downgraded, reasons
+
+
 def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
-                   latest: Path, now_iso: str | None = None) -> dict:
+                   latest: Path, now_iso: str | None = None,
+                   neighbors: dict[str, set[str]] | None = None) -> dict:
     """Append this invocation's proposals to the dated file, refresh the
     cumulative record, point `latest` at it.
 
@@ -1220,6 +1276,21 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     # count returned below are all one pass over one set (#3536).
     by_variant = canonicals_by_variant(merged)
     marked_variants = mark_multi_canonical(merged, by_variant)
+    # The accumulated rows were guarded on the day each was emitted and the store has
+    # grown since (#3758), so the guard is re-asked over `merged` — the same set the
+    # marker walks, read before anything is written, so the dated file, the record, the
+    # `latest` link and the count below are still one pass over one set. This run's own
+    # rows are in that set and are re-asked harmlessly: `main` judged them against the
+    # same `neighbors` moments earlier and `merge_allowed` is symmetric in the pair, so
+    # the only rows that can move here are ones this run did not judge. Skipped when no
+    # graph was handed in, because `merge_allowed` cannot answer without `neighbors` and
+    # `emit_proposals` has no graph of its own — a graph-free caller gets the record
+    # written as emitted rather than a guess, which is what leaves the ~15 existing
+    # graph-free calls to this function (and #744/#1410/#3122/#3536's tests) untouched.
+    outgrown: int = 0
+    outgrown_reasons: Counter[str] = Counter()
+    if neighbors is not None:
+        outgrown, outgrown_reasons = downgrade_outgrown_merges(merged, neighbors)
     # The dated file is this run's rows, which `merged` may have dropped as duplicates
     # of rows already in the record; labelling them from the same map is what makes
     # "every row in the dated file carries the marker" true rather than accidental.
@@ -1243,6 +1314,13 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
             # the SET, not of rows: two rows of one collision is one thing to fix, and
             # counting rows would make a three-canonical variant look like two problems.
             "multi_canonical_variants": marked_variants,
+            # Merge rows the store has outgrown, counted over the merged RECORD rather
+            # than this run's rows, because the rows that matter are the ones this run
+            # never re-judged (#3758). The Counter is the reason a human acts on: two
+            # rows refused for `variant_too_many_facts` and one for a name shape are two
+            # different follow-ups.
+            "outgrown_merge_rows": outgrown,
+            "outgrown_guard_reasons": outgrown_reasons,
             "reset": lost_proof is not None, "reset_from": len(existing)}
 
 
@@ -1506,7 +1584,8 @@ def main() -> int:
     proposals = filter_artifact_proposals(proposals)
     proposals.sort(key=lambda p: -p["confidence"])
     counts = emit_proposals(proposals, run_log=PROPOSAL_LOG,
-                            cumulative=PROPOSAL_CUMULATIVE, latest=PROPOSAL_LATEST)
+                            cumulative=PROPOSAL_CUMULATIVE, latest=PROPOSAL_LATEST,
+                            neighbors=neighbors)
     # The count of variants the record proposes under more than one canonical — the
     # set-level reading no per-pair guard can produce (#3536). Same two-space, labelled
     # shape as the guard-downgrade and review-flag blocks above it, and silent when zero
@@ -1520,6 +1599,21 @@ def main() -> int:
         print("  variants proposed under >1 canonical (labelling only, both rows "
               "kept):")
         print(f"    {'multi_canonical':<30} {marked_variants}")
+    outgrown = counts.get("outgrown_merge_rows", 0)
+    if outgrown:
+        # The same two-space label over four-space padded entries as the guard-downgrade,
+        # review-flag and `multi_canonical` blocks, and silent at 0 for the reason they
+        # are: a line printed on every run is decor and gets skipped. The count is of the
+        # RECORD, not of this run's rows — the rows it counts are precisely the ones this
+        # run never re-judged — which is why it can only be printed once
+        # `emit_proposals` has merged. Before #3758 a run that outgrew two merge rows
+        # said nothing at all, and finding them meant re-implementing `merge_allowed`
+        # against the file by hand.
+        print("  merge rows the record has outgrown (row kept, action downgraded to "
+              "alias_only):")
+        print(f"    {'total':<30} {outgrown}")
+        for k, n in counts["outgrown_guard_reasons"].most_common():
+            print(f"    {k:<30} {n}")
     print(f"[info] {counts['run']} proposals → {PROPOSAL_LOG}")
     print(f"[info] {counts['cumulative']} total in the accumulated record; "
           f"{PROPOSAL_LATEST.name} → {PROPOSAL_CUMULATIVE.name}, so a proposal the "
