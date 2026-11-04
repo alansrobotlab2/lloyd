@@ -888,8 +888,9 @@ async def test_the_create_endpoint_refuses_a_platform_it_cannot_classify(tmp_pat
     the honest answer precisely because `is_user_session`'s default is generous:
     the endpoint must not be the place that quietly decides a new client is
     human. Existing senders keep working — the Chrome side panel posts `browser`
-    (`chrome-extension/src/background/lloyd-client.ts:15`), the workers post
-    `worker`, autonomy posts `autonomy`, and the four-part mint in the endpoint
+    (`chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession`),
+    the workers post `worker`, autonomy posts `autonomy`, and the four-part mint
+    in the endpoint
     is unchanged (`<ts>_iv<4hex>`).
     """
     import httpx
@@ -941,9 +942,10 @@ def test_every_client_that_names_a_platform_to_the_endpoint_names_a_known_one():
     process boundary the code graph does not cross and a language this file cannot
     import. That is the right trade, but only if no live sender is newly refused:
     the Chrome side panel posts `browser`
-    (`chrome-extension/src/background/lloyd-client.ts:15`) and Mission Control
-    posts `mission-control` twice (`web/src/components/RightChatSidebar.tsx:196`,
-    `web/src/components/pages/InnerVoicePage.tsx:145`). This sweep is the check
+    (`chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession`)
+    and Mission Control posts `mission-control` twice, at
+    `web/src/components/RightChatSidebar.tsx:199` (`api.createSession`) and
+    `web/src/components/pages/InnerVoicePage.tsx:145`. This sweep is the check
     that they still do, so a rename on either side fails HERE, in Python, rather
     than as a side panel that can no longer start a conversation.
 
@@ -1989,3 +1991,323 @@ async def test_a_mixed_naive_and_aware_directory_lists_in_instant_order(tmp_path
     assert [s["session_id"] for s in ivs] == want_chat
     assert [s["id"] for s in bgs] == want_bg
     assert [r["session_id"] for r in recent] == want_chat
+
+
+# ── the one citation that crosses into TypeScript (#3570) ──────────────────
+#
+# Six files rest a load-bearing claim on what the Chrome extension's client
+# posts: that a `platform: browser` session is a human conversation, so it
+# belongs in the chat listing, the embedded corpus and the miner's `browser`
+# class. All eight of those sites cited `lloyd-client.ts` line 15, and that
+# line is blank. It had been blank since the file's last edit (`15344e51`,
+# 2026-09-28) — the platform word is in the body of `createBrowserSession`, five
+# lines below, and the companion claim ("the panel sends a real user turn per
+# follow-up") is `fireKickoff`.
+#
+# Nothing in the tree could catch that. The architecture span rail keeps a
+# citation only `if hit.suffix == ".py"`
+# (`tests/test_architecture_coverage_doc_claims.py:1994`, and the file says so at
+# `:8304-8307`), and the seven Python-comment sites are outside the doc corpus by
+# construction. So this is the rail: a symbol name is the only spelling of a
+# TypeScript citation that cannot go stale, and these nodes resolve every symbol
+# the prose names against the file as it stands.
+
+#: The TypeScript client that mints a `browser` session, and the only file the
+#: platform-classification prose may point at for that claim.
+TS_CLIENT = ROOT / "chrome-extension" / "src" / "background" / "lloyd-client.ts"
+
+#: Every prose file whose comment or docstring rests on that client. Six files,
+#: eight sites before #3570: `app/routers/sessions.py` and this file carry two
+#: each (the mint claim and the sentence that names the other senders).
+_TS_PROSE_SITES = (
+    ROOT / "app" / "routers" / "sessions.py",
+    ROOT / "app" / "sessions_io.py",
+    ROOT / "architecture" / "background-runs.md",
+    ROOT / "scripts" / "extract-trajectories.py",
+    ROOT / "tests" / "test_session_platform_checks.py",
+    ROOT / "tests" / "test_trajectory_extraction.py",
+)
+
+#: The spelling #3570 retires. Graded by nothing else in the tree, which is how
+#: eight sites carried a blank line's number at once.
+_TS_LINE_CITATION = re.compile(r"lloyd-client\.ts`?:(\d+)")
+
+#: A citation is a BACKTICKED path. Requiring the backticks is what separates a
+#: citation from a mention of the filename: `tests/test_trajectory_extraction.py`
+#: asserts the architecture page names the file, and an assertion about a path is
+#: not an appeal to what the file says, so grading it as a citation would demand a
+#: symbol from a sentence that is about the path itself. The reach is the mention's
+#: line plus two, capped, because a citation wrapped so the name falls at the start
+#: of the next line is how a comment gets written here — refusing to read that
+#: far would push every site to name the symbol mid-sentence to satisfy the
+#: checker rather than to inform a reader. The closing backtick is optional
+#: because the retired spelling carried its number INSIDE the backticks.
+#: The path must carry a slash. This repo already rules that a directory-less
+#: basename plus a number is a citation no rail can read
+#: (`_BASENAME_LINE_CITATION`, `tests/test_architecture_coverage_doc_claims.py`), and
+#: the same reason applies one step earlier: a bare `lloyd-client.ts` in prose is
+#: often just naming the file the code is pointed at — `def _ts_definitions`'s
+#: docstring, an error message's subject — and demanding a symbol from those turns
+#: the checker into grading its own commentary instead of the eight sites it exists
+#: to hold. The full path is the citation; `_TS_LINE_CITATION` still catches a bare
+#: basename carrying a number, which is clause 4's separate refusal.
+_TS_MENTION = re.compile(
+    r"`(?P<path>[\w.-]+/[\w./-]*lloyd-client\.ts)"
+    r"(?P<line>:\d+)?`?(?P<gap>[^\n]*(?:\n[^\n]*){0,2})")
+
+#: How far into that reach a backticked name still counts as THIS citation's: a
+#: symbol two paragraphs down is not evidence the citation named it, and an
+#: uncapped reach turns a checker into a keyword search.
+_CITATION_WINDOW = 200
+
+#: A backticked camelCase identifier: the shape of a TypeScript function name.
+#: Deliberately not `[A-Za-z_]\w*`, which would sweep in `browser` and
+#: `mission-control`-shaped platform words and turn this check into a list of
+#: every word the prose mentions.
+_TS_SYMBOL_SPAN = re.compile(r"`(?P<sym>[a-z]+(?:[A-Z]\w+)+)`")
+
+#: Every definition `lloyd-client.ts` makes — `createBrowserSession`,
+#: `patchBrowserMetadata`, `fireKickoff` — exported or not: a prose citation that
+#: names a local is still a citation to something that must exist.
+_TS_DEFINITION = re.compile(
+    r"^(?:export\s+)?(?:async\s+)?(?:function|const|let|class)\s+"
+    r"(?P<name>[A-Za-z_$][\w$]*)", re.M)
+
+
+def _ts_definitions() -> "set[str]":
+    """Every name `lloyd-client.ts` defines, read from the file as it stands."""
+    return set(_TS_DEFINITION.findall(TS_CLIENT.read_text(encoding="utf-8")))
+
+
+def _cited_ts_symbols(text: str) -> "list[tuple[str, list[str]]]":
+    """Each `lloyd-client.ts` mention in prose, with the symbols named beside it.
+
+    Returns one `(mention, symbols)` pair per occurrence, where `symbols` is the
+    camelCase identifiers backticked on the same line after it. An empty list is
+    the failure this function exists to find: a citation that names a file and no
+    symbol asserts a location nothing can check.
+    """
+    out = []
+    for m in _TS_MENTION.finditer(text):
+        out.append((m.group(0), _TS_SYMBOL_SPAN.findall(m.group("gap"))))
+    return out
+
+
+@pytest.mark.parametrize("site", [str(p.relative_to(ROOT)) for p in _TS_PROSE_SITES])
+def test_no_platform_prose_cites_the_typescript_client_by_line_number(site):
+    """The acceptance check as a node: eight sites carried `:15`, a blank line.
+
+    Repo-wide, the same claim is `git grep -n "lloyd-client\\.ts:[0-9]"` printing
+    nothing; this reads the six files directly so the rule holds in a tree where
+    git is unavailable, and the repo-wide sweep below is its sibling.
+    """
+    text = (ROOT / site).read_text(encoding="utf-8")
+    bad = _TS_LINE_CITATION.findall(text)
+    assert not bad, (
+        f"{site} cites the TypeScript client by line ({bad[0]!r}). No rail reads a "
+        ".ts line number — `py_anchor_citations` keeps `.py` only — so the number "
+        "drifted to a blank line unnoticed; name the symbol instead.")
+
+
+def test_no_file_in_the_repo_cites_the_typescript_client_by_line_number():
+    """`git grep` over every tracked file, not just the six the item listed.
+
+    The eight were found by a repo-wide grep, so the check has to be repo-wide
+    too: a ninth site would otherwise be a green run and a stale pointer.
+    """
+    import subprocess
+    out = subprocess.run(
+        ["git", "grep", "-n", r"lloyd-client\.ts:[0-9]", "--", "."],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert out.returncode == 1 and not out.stdout.strip(), (
+        "a tracked file still cites lloyd-client.ts by line — the symbol form is "
+        f"the only one nothing grades:\n{out.stdout}")
+
+
+@pytest.mark.parametrize("site", [str(p.relative_to(ROOT)) for p in _TS_PROSE_SITES])
+def test_every_typescript_symbol_the_platform_prose_names_is_defined_in_the_client(site):
+    """The check that did not exist: resolve the name across the language boundary.
+
+    Two failure shapes, both silent before this node: a mention that names no
+    symbol at all (it asserts a location nothing can read), and a mention naming a
+    symbol the file does not define (a rename on the TypeScript side, which no
+    import graph reports into Python).
+    """
+    text = (ROOT / site).read_text(encoding="utf-8")
+    defs = _ts_definitions()
+    for mention, syms in _cited_ts_symbols(text):
+        assert syms, (
+            f"{site} mentions the client ({mention!r}) without naming a symbol; the "
+            "citation would then assert a line number nothing in this repo grades.")
+        for sym in syms:
+            assert sym in defs, (
+                f"{site} names `{sym}` in `lloyd-client.ts`; the file defines "
+                f"{sorted(d for d in defs if d[0].islower())!r}.")
+
+
+@pytest.mark.parametrize("site", [str(p.relative_to(ROOT)) for p in _TS_PROSE_SITES])
+def test_every_site_that_counts_browser_sessions_as_human_names_the_mint(site):
+    """Clause 1 by name: the evidence for "a person typed this" is the mint.
+
+    The node above accepts ANY symbol the client defines, which is the right rule for
+    a citation but not enough for this clause: a site could cite `fireKickoff` alone
+    and still leave the platform claim — that the session is created with
+    `platform: "browser"` — resting on nothing. The mint is what posts that word, so
+    every one of the six sites must name `createBrowserSession` beside the path.
+    """
+    text = (ROOT / site).read_text(encoding="utf-8")
+    named = [syms for _m, syms in _cited_ts_symbols(text)]
+    assert named, f"{site} cites the client nowhere, so the claim has no evidence left"
+    for syms in named:
+        assert "createBrowserSession" in syms, (
+            f"{site}: a citation of the client that names {syms} proves the turn claim "
+            "at best; `createBrowserSession` is what posts `platform: \"browser\"`.")
+
+
+def test_the_typescript_symbol_check_fails_on_a_name_the_client_does_not_export():
+    """The control for the node above, so a green corpus is not an empty scan.
+
+    `postBrowserTurn` is a plausible name — it is the shape of the two real ones —
+    and it is not in the file, so a check that only *appears* to resolve symbols
+    has to be caught here rather than by the next drifted citation.
+
+    The seed is assembled at run time, not written out as one citation literal,
+    because this file is itself part of the corpus the node above reads: a literal
+    citation naming the fake symbol would sit in the source and fail that node, so
+    the control would be the thing the check is rejecting. The scan found exactly
+    that on this node's first run, which is the behaviour the control exists to show.
+    """
+    defs = _ts_definitions()
+    seed_path = "chrome-extension/src/background/lloyd-client.ts"
+    seed_name = "postBrowserTurn"
+    seeded = f"the panel mints in `{seed_path}`, `{seed_name}`)"
+    mention, syms = _cited_ts_symbols(seeded)[0]
+    assert syms == ["postBrowserTurn"], (mention, syms)
+    assert "postBrowserTurn" not in defs, (
+        "the seeded name resolved, so this control proves nothing about the check")
+
+    text = (ROOT / "app" / "sessions_io.py").read_text(encoding="utf-8")
+    swapped = text.replace("`fireKickoff`", "`postBrowserTurn`")
+    unresolved = [s for _m, ss in _cited_ts_symbols(swapped) for s in ss if s not in defs]
+    assert unresolved == ["postBrowserTurn"], unresolved
+
+
+def test_the_two_symbols_the_platform_prose_relies_on_are_the_client_own_two():
+    """The positive half, named: the mint and the turn are different functions.
+
+    `createBrowserSession` is the evidence for `platform: "browser",
+    inner_voice: true`; `fireKickoff` is the evidence that a follow-up in the
+    panel is a real user turn. Collapsing them into one name would make the
+    second claim rest on a function that posts no turn at all.
+    """
+    defs = _ts_definitions()
+    assert {"createBrowserSession", "fireKickoff"} <= defs, sorted(defs)
+    assert "createBrowserSession" in TS_CLIENT.read_text(
+        encoding="utf-8").split("fireKickoff")[0], (
+        "`createBrowserSession`'s definition must stand on its own in the file")
+
+
+@pytest.mark.parametrize("site", [
+    "app/sessions_io.py", "architecture/background-runs.md"])
+def test_the_mint_claim_names_create_browser_session_and_the_turn_claim_names_fire_kickoff(site):
+    """Clause 1 and 2 together, at the two sentences that carry both claims.
+
+    The flat sentence in `sessions_io`'s `INTERACTIVE_PLATFORMS` comment and this
+    doc's browser paragraph are the two places that say the panel posts a real
+    turn; each must name `fireKickoff` for it. Both also justify counting the
+    session as a conversation, which is `createBrowserSession`'s evidence.
+    """
+    text = " ".join((ROOT / site).read_text(encoding="utf-8").split())
+    anchor = "the panel sends a real user turn per follow-up"
+    assert anchor in text, f"{site} no longer carries the companion claim at all"
+    window = text[text.index(anchor):text.index(anchor) + 320]
+    assert "fireKickoff" in window, (
+        f"{site}: the companion claim names no function — {window[:200]!r}")
+    assert "`lloyd-client.ts`, `fireKickoff`" in text or "lloyd-client.ts`, `createBrowserSession`" in text, (
+        f"{site}: the client citation is not in the symbol form")
+    assert "createBrowserSession" in text, (
+        f"{site}: the mint claim lost its symbol")
+
+
+def test_no_site_cites_lloyd_client_ts_by_number_anywhere_in_the_working_tree():
+    """Same claim as the git sweep, without git — a worktree walk over text files.
+
+    Kept because the review runs in a worktree and `git grep` there is correct,
+    but a checkout without git must not read as a pass: this walks the tracked
+    extensions directly.
+    """
+    hits = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file() or path.suffix not in (".py", ".md", ".ts", ".tsx"):
+            continue
+        if ".git" in path.parts or "chrome-extension" == path.parent.name:
+            continue
+        if _TS_LINE_CITATION.search(path.read_text(encoding="utf-8", errors="ignore")):
+            hits.append(str(path.relative_to(ROOT)))
+    assert not hits, f"line-number citations to the client survive in {hits}"
+
+
+# ── clause 5: the sibling citations in the same comment blocks ─────────────
+#
+# Found while re-reading the same paragraphs: `RightChatSidebar.tsx:196` lands on
+# a closing brace, while the `platform: 'mission-control',` the sentence is about
+# is at `:199`, inside the `api.createSession` call. Its two siblings in those
+# blocks are correct and stay line-cited — `InnerVoicePage.tsx:145` really is
+# `platform: 'mission-control',` and `:146` really is `inner_voice: true,`. The
+# difference is that these are checked here, so a re-drift fails a test instead of
+# quietly landing on a brace.
+
+_WEB_CITATIONS = {
+    "web/src/components/RightChatSidebar.tsx": "platform: 'mission-control',",
+    "web/src/components/pages/InnerVoicePage.tsx": "platform: 'mission-control',",
+}
+
+
+@pytest.mark.parametrize("site", ["app/routers/sessions.py",
+                                  "tests/test_session_platform_checks.py"])
+def test_every_web_citation_in_the_platform_comment_lands_on_the_line_it_names(site):
+    """A `.tsx:NN` in these two comments must be the platform post it claims to be.
+
+    Not a ban on numbers here — these are the two files whose comment justifies
+    `mission-control` being interactive, and a number that resolves is evidence.
+    The rule is that the number must still say what the sentence says it says.
+    """
+    text = (ROOT / site).read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    cited = re.findall(r"(web/src/components/(?:pages/)?\w+\.tsx):(\d+)", flat)
+    assert cited, f"{site} no longer cites either web sender at all"
+    for rel, num in cited:
+        want = _WEB_CITATIONS.get(rel)
+        if want is None:
+            continue
+        lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+        got = lines[int(num) - 1].strip()
+        assert got == want, (
+            f"{site} cites {rel}:{num}, which is {got!r}, not the {want!r} the "
+            "sentence claims is there")
+
+
+def test_the_right_chat_sidebar_citation_names_the_call_it_lands_inside():
+    """`api.createSession` beside the number, so a reader who arrives after a
+    re-drift can still find the post — and so the sentence does not depend on the
+    number alone for its meaning.
+    """
+    for site in ("app/routers/sessions.py", "tests/test_session_platform_checks.py"):
+        flat = " ".join((ROOT / site).read_text(encoding="utf-8").split())
+        i = flat.find("RightChatSidebar.tsx:")
+        assert i >= 0, site
+        assert "api.createSession" in flat[i:i + 120], (
+            f"{site}: the sidebar citation carries a number and no call name")
+
+
+def test_the_inner_voice_page_citation_is_left_at_the_line_that_resolves():
+    """The sibling the item says must NOT be touched, pinned so it cannot drift
+    along with the one that was wrong.
+    """
+    flat = " ".join((ROOT / "app" / "routers" / "sessions.py").read_text(
+        encoding="utf-8").split())
+    assert "InnerVoicePage.tsx:145" in flat, "the correct citation was rewritten too"
+    line = (ROOT / "web" / "src" / "components" / "pages" / "InnerVoicePage.tsx"
+            ).read_text(encoding="utf-8").splitlines()[144]
+    assert line.strip() == "platform: 'mission-control',", line

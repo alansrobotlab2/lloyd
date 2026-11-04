@@ -3291,9 +3291,9 @@ def test_the_class_comes_from_platform_and_not_from_inner_voice(
     """The same chat-shaped id at both settings of `inner_voice`.
 
     `inner_voice: true` is what the Inner Voice tab and the Chrome extension send
-    when a person starts a chat (`InnerVoicePage.tsx:146`,
-    `chrome-extension/src/background/lloyd-client.ts:15`), so a classifier that
-    read it as an observer turn classified Alan's chats away. #493 asserted the
+    when a person starts a chat (`InnerVoicePage.tsx:146`, and
+    `chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession`),
+    so a classifier that read it as an observer turn classified Alan's chats away. #493 asserted the
     opposite of every row in this table with `inner_voice` true.
     """
     assert et.classify_session(

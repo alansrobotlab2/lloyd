@@ -337,11 +337,12 @@ listing:
   until #1064 they sat in the chat history and the embedded corpus because the
   deny-list had never heard of them. The other side of that census is on disk
   too: 54 sessions
-  carry `platform: browser` (ids `<ts>_iv<4hex>`, minted by the
-  Chrome extension's side panel, which posts `platform: "browser",
-  inner_voice: true` to `POST /api/sessions/create` from
-  `chrome-extension/src/background/lloyd-client.ts:15`). These are not harness
-  runs: the panel sends a real user turn per follow-up a person types, which is
+  carry `platform: browser` (ids `<ts>_iv<4hex>`), minted by the
+  Chrome extension's side panel: in
+  `chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession`
+  posts `platform: "browser", inner_voice: true` to `POST /api/sessions/create`.
+  These are not harness runs: the panel sends a real user turn per follow-up a
+  person types (`fireKickoff`, defined beside `createBrowserSession` there), which is
   why `browser` is on the allow-list and they stay in the chat history and the
   embedded `sessions/` corpus; since #1143 the trajectory miner keeps them under
   their own `browser` class. An earlier draft of this page ascribed them to the

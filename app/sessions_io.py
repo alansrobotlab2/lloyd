@@ -119,10 +119,10 @@ def is_user_session(data: dict) -> bool:
 
 #: The platforms that name a surface a person reads their own conversation on.
 #: `mission-control` is the web UI (and every session that predates the
-#: `platform` field); `browser` is the Chrome side-panel extension — the panel
-#: sends a real user turn per follow-up a person types
-#: (`chrome-extension/src/background/lloyd-client.ts:15`), so #493's open scope
-#: question about whether it belongs in the interactive pool notwithstanding,
+#: `platform` field); `browser` is the Chrome side-panel extension, whose session
+#: `chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession` mints,
+#: and the panel sends a real user turn per follow-up a person types (`fireKickoff`)
+#: — so #493's open scope question about it notwithstanding,
 #: excluding it here would delete 54 real conversations from the history.
 #: Everything else is either a machine run (`autonomy`, `worker`, the
 #: `e2e-harness` smokes, the gate's `canary` turn) or a client that has not

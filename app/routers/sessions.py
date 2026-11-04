@@ -926,8 +926,8 @@ async def create_session(request: Request):
     # is keyed off this one word, so a value nobody has named was worth less
     # than nothing: `is_user_session` is a deny-list and read any new word as
     # "a human wrote this". 54 of the sessions this endpoint minted were
-    # `platform: browser` (the Chrome side panel, `lloyd-client.ts:15`) and 3
-    # were `e2e-harness` (the automod smoke harness) — the first genuinely
+    # `platform: browser` (the Chrome side panel's `createBrowserSession`) and
+    # 3 were `e2e-harness` (the automod smoke harness) — the first genuinely
     # human, the second a harness that had to be told, not guessed. An unknown
     # word is now a 400 with the real choices, so a new caller names itself
     # here, in the diff that adds it, instead of quietly opting into the human
@@ -936,9 +936,9 @@ async def create_session(request: Request):
     #
     # A 400 across a process boundary needs every sender re-read before it ships,
     # and the two trees that send this word are TypeScript, so nothing in this
-    # repo's import graph reaches them: `chrome-extension/src/background/
-    # lloyd-client.ts:15` posts `browser` and
-    # `web/src/components/RightChatSidebar.tsx:196` plus
+    # repo's import graph reaches them: `chrome-extension/src/background/lloyd-client.ts`
+    # mints `browser` with `createBrowserSession`, and `fireKickoff` sends the follow-up
+    # turn; `web/src/components/RightChatSidebar.tsx:199` (`api.createSession`) plus
     # `web/src/components/pages/InnerVoicePage.tsx:145` post `mission-control`.
     # `tests/test_session_platform_checks.py::
     # test_every_client_that_names_a_platform_to_the_endpoint_names_a_known_one`

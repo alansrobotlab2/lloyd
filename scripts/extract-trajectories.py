@@ -111,8 +111,8 @@ CHAT_SESSION_ID_RE = re.compile(r"^\d{8}_\d{6}_[A-Za-z0-9]+$")
 
 # platform -> class. `browser` keeps its own label rather than folding into
 # `interactive`: it is the Chrome extension's side panel
-# (`chrome-extension/src/background/lloyd-client.ts:15`), a different surface with
-# its own failure modes, so a candidate that only ever came from it stays
+# (`chrome-extension/src/background/lloyd-client.ts`, `createBrowserSession`), a
+# different surface with its own failure modes, so a candidate from it stays
 # attributable — and it is still a human session, so it is admitted (Alan's ruling:
 # "kept by default, under their own `browser` label so they can still be reported
 # separately").
