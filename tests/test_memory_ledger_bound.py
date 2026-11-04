@@ -515,8 +515,8 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (26,149 B / 82 lines, as
-        re-measured from the copy by the #3719 re-freeze), and it names
+      * the corpus is the whole file at its exact bytes (28,336 B / 82 lines, as
+        re-measured from the copy by the #3764 re-freeze), and it names
         `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an empty
         slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
@@ -606,22 +606,34 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # `c04c2241` (#3561) rewrote §5's retirement bullet: the 2026-09-25 `8a414797`
     # instruction that a retired line's topic file "stays where it is … never touch the
     # file" contradicted `validate_memory_index.py`'s unlinked arm, and a vault land
-    # cannot stage a `tests/` path, so the re-freeze has to be a code round.
+    # cannot stage a `tests/` path, so the re-freeze has to be a code round. That item is
+    # this comment's rule rather than an exception to it: #3719 quoted 25,872 at triage and
+    # corrected itself to 26,031 in a figure correction on the same day, and the copy came in
+    # past both — which is why the superseded figure lives in no live statement here.
+    # 2026-11-04, #3764: the pairing after #2284 (`3c1c9515`), #2415 (`d13514fa`), #2468
+    # (`42298875`), #2540 (`72db44a1`), #2628, #3282, #3440 and #3719.
+    # Vault `e2e9cd833` (#3763) rewrote §0 and §5 to state MEMORY.md's room as
+    # `INDEX_ROOM_RESERVE_BYTES` and the CURATE trigger as 1 KiB under the file's own printed
+    # tight limit, deleting both hand-copied figures rather than updating them, and grew the
+    # skill by 2,187 B on the same 82 lines.
     #
     # Both literals below are THIS copy's own bytes, re-measured after the copy and not
-    # carried from the item. `wc -c` answered 26,149 and `tr -cd '\n' | wc -c` answered 82.
-    # The item is the reason for that rule rather than an exception to it: #3719 quoted
-    # 25,872 at triage, then corrected itself to 26,031 in a figure correction on the same
-    # day, and the live file measured 26,149 when this copy was written. A skill that the
-    # nightly and a live vault round are both editing is exactly why the receipt is taken
-    # from the copy and never from the handoff —
+    # carried from the item. `wc -c` answered 28,336 and `tr -cd '\n' | wc -c` answered 82.
+    # The live skill measured the same 28,336 when this copy was written, and that equality
+    # is the thing the `live_vault` node below re-checks, so the receipt here and the drift
+    # check there can never quote two different figures. #3764 measured 28,336 at triage and
+    # still forbade writing it as a target, and the ban is the rule rather than this freeze's
+    # answer: the number above is what the copy measured, which is the only question a
+    # receipt answers. A skill the nightly and a live vault round are both editing is exactly
+    # why it is taken from the copy and never from the handoff —
     # `test_the_witness_receipt_never_lies_about_the_corpus`, below this node, is what
     # keeps all four statements of it from parting company at the next re-freeze.
-    # The newline count is unchanged at 82: the §5 bullet grew in BYTES and added no line.
-    # Verified on the copy, not assumed from the 82 the previous freeze recorded.
-    assert len(raw) == 26_149 and text.count("\n") == 82, (
+    # The newline count is unchanged at 82: #3763's two edits were rewrites in place, so the
+    # skill grew in BYTES and added no line. Verified on the copy, not assumed from the 82 the
+    # previous freeze recorded.
+    assert len(raw) == 28_336 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "26,149 B / 82 lines of the whole skill file — a partial copy would make the "
+        "28,336 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -744,8 +756,9 @@ def test_the_witness_receipt_never_lies_about_the_corpus():
     `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` states the
     frozen copy's size in its docstring, in the measurement comment, as the assert literal,
     and inside its own failure message — #3719's triage found the fourth site in an item
-    that named only three, and all seven re-freezes this file records (#2284, #2415, #2468,
-    #2540, #2628, #3282, #3440) had to move every one of them by hand. A red message
+    that named only three, and all eight re-freezes this file records before this one
+    (#2284, #2415, #2468, #2540, #2628, #3282, #3440, #3719) had to move every one of them
+    by hand. A red message
     quoting a number the assert never checked leaves a reader unable to tell a bad corpus
     from a bad test, which is the #3070 class this file keeps running into.
 
