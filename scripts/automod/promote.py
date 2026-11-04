@@ -584,23 +584,34 @@ def _system_scope_unit_names(installer: "Path | None" = None):
                                else INSTALL_SERVICES)
 
 
-def _prune_system_scope_decoys(unit_scope) -> list:
+def _prune_system_scope_decoys(unit_scope) -> "tuple[list, list]":
     """Clear user-unit entries an earlier landing left for system-scope units.
+
+    Returns `(notes, removed_names)` — the second half is what decides whether systemd
+    is owed a `daemon-reload` (#3765), so it counts successful unlinks only and not the
+    `FAILED to remove` notes, which report an entry that is still there.
 
     The decoy is not hypothetical: the landing of SM_20261025_103401 recorded
     `installed nvidia-power-limit.service` and its link still sat in
     `~/.config/systemd/user` when #3450 was filed — inert (`is-active` inactive, in
     no target), but present, which is exactly the state `install-services.sh:46-50`
-    refuses to create: it makes `systemctl --user restart nvidia-power-limit.service`
-    look like the right command during an Xid-79 investigation, while the unit that
-    actually clamps the GPU is the hand install under `/etc/systemd/system/`.
+    refuses to create: it makes a user-scope act on that name look like the right
+    command during an Xid-79 investigation, while the unit that actually clamps the GPU
+    is the hand install under `/etc/systemd/system/`.
 
     Matched on what the entry RESOLVES TO, not on its name: a user unit dir entry
     pointing somewhere else is somebody's deploy, and `wrongtarget:` is
     `check_unit_file_links`' row to raise, not a promotion's to delete. Only the
     LINK is unlinked — never its target, which is the tracked unit file.
+
+    Called on every landing, not only on one that changed a unit file (#3765): the only
+    producer of the artifact is a unit-touching landing and this was the only cleaner,
+    which on this box meant 146 promoted landings in five days could not reach it and
+    the decoy sat listed the whole time. A cleanup gated on a monthly event is not a
+    cleanup.
     """
     notes: list[str] = []
+    removed: list[str] = []
     deployed_dir, unit_tree = SYSTEMD_USER_DIR, SYSTEMD_UNIT_TREE
     for name in sorted(unit_scope):
         entry = deployed_dir / name
@@ -613,9 +624,10 @@ def _prune_system_scope_decoys(unit_scope) -> list:
         except OSError as exc:
             notes.append(f"FAILED to remove {name} from {deployed_dir}: {exc}")
             continue
+        removed.append(name)
         notes.append(f"removed {name} from {deployed_dir}: system scope — the link an "
                      f"earlier landing put there, which the user manager cannot use")
-    return notes
+    return notes, removed
 
 
 def _apply_service_changes(changed: list[str]) -> list[str]:
@@ -630,6 +642,11 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
     round could pass a full drill, land, be marked healthy, and leave the
     running system on the old definition indefinitely — the change looked
     delivered and was not.
+
+    It has a second duty since #3765: sweeping the user unit directory for a decoy a
+    PREVIOUS landing left there, which is why it reads the installer's scope list even
+    when `changed` names no unit file — the thing to clean up is almost never in the
+    diff that can clean it.
 
     Never fatal to the promotion: the code is already live and verified by the
     time this runs, and a failure to reload a conf is worth an alert, not a
@@ -654,16 +671,27 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
     # `SYSTEMD_USER_DIR / src.name` regardless, which is how the landing of
     # SM_20261025_103401 put `nvidia-power-limit.service` back into the manager
     # #1108 had taken it out of, and how a changed `system/` unit would have been
-    # flattened onto its basename. Read once per call, like the globs it bounds.
-    unit_scope = _system_scope_unit_names() if touched_units else set()
+    # flattened onto its basename. Read once per call, like the globs it bounds — and
+    # read on EVERY call (#3765): the same list decides which stale entry to prune
+    # below, and a decoy is left there by some EARLIER landing, so gating the read on
+    # this call's paths meant the answer was `set()` on the 146 landings in a row that
+    # had nothing else to do but clean up.
+    unit_scope = _system_scope_unit_names()
+    scope_known = unit_scope is not None
     if unit_scope is None:
         # Blind, and saying so: refusing to link here would strand every user unit
         # this landing changed, and silently linking would re-create the decoy the
         # check on the other side exists to catch. `check_unit_file_links`' unknown
         # row is the precedent for reporting the read failure instead of grading.
+        # Worded about THIS call, because the note now fires on a call that changed no
+        # unit at all: on this box that is every landing (all 146 promoted landings
+        # between 2026-10-30T22:07:11Z and 2026-11-04T15:31:28Z named no file under
+        # agent-services/systemd/), and "every touched unit was linked" is a false
+        # sentence about work that call did not do.
         notes.append(f"unit scope unknown: SYSTEM_SCOPE_UNITS could not be read "
-                     f"from {INSTALL_SERVICES} — every touched unit was linked, so a "
-                     f"system-scope decoy may have been placed in {SYSTEMD_USER_DIR}")
+                     f"from {INSTALL_SERVICES} — nothing here can tell a system-scope "
+                     f"unit from a user one, so any unit this call placed went in "
+                     f"unfiltered and no decoy under {SYSTEMD_USER_DIR} was pruned")
         unit_scope = set()
 
     for rel in touched_units:
@@ -701,12 +729,21 @@ def _apply_service_changes(changed: list[str]) -> list[str]:
             notes.append(f"installed {src.name}")
         except OSError as exc:
             notes.append(f"FAILED to install {src.name}: {exc}")
-    if touched_units:
-        # Clearing a decoy an EARLIER landing left is part of applying this one: the
-        # link outlived the landing that made it, so waiting for someone to notice it
-        # is what let it survive five days of landings before #3450. The reload below
-        # is what tells systemd the entry is gone.
-        notes.extend(_prune_system_scope_decoys(unit_scope))
+    # Clearing a decoy an EARLIER landing left is part of applying this call, and
+    # "this call" is now any call (#3765): the link outlived the landing that made it,
+    # and gating the prune on a unit-touching landing left the artifact listed across
+    # 146 promotions because unit files change about monthly. Skipped only when the
+    # scope read came back blind — with no list there is nothing this could match
+    # against, and pruning on a guess would delete a user unit.
+    if scope_known:
+        prune_notes, pruned = _prune_system_scope_decoys(unit_scope)
+        notes.extend(prune_notes)
+    else:
+        pruned = []
+    if touched_units or pruned:
+        # Owed whenever the unit directory changed under the manager: a landing that
+        # linked a unit, or a prune that took a stale entry out (#3765). Neither, and
+        # systemd is asked for nothing — the code-only landing has no unit news.
         r = _run(["systemctl", "--user", "daemon-reload"])
         notes.append("daemon-reload: "
                      f"{'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")

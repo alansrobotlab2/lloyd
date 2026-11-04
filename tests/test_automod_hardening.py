@@ -1593,6 +1593,174 @@ def test_a_decoy_link_left_by_an_earlier_landing_is_pruned_at_apply_time(
     assert len(d.reloads()) == 1, d.reloads()
 
 
+# ── #3765: the decoy sweep is not gated on a unit-touching landing ─────────────
+#
+# #3450 put `_prune_system_scope_decoys` and the `daemon-reload` that follows it inside
+# `if touched_units:`, so the sweep ran only on a landing that itself changed a unit
+# file. The only producer of the artifact is a unit-file landing and the sweep was the
+# only cleaner — on this box those two events are about a month apart: 146 promoted
+# landings from 2026-10-30T22:07:11Z to 2026-11-04T15:31:28Z named no file under
+# `agent-services/systemd/`, so the `nvidia-power-limit.service` link SM_20261025_103401
+# left stayed `linked` and `check_unit_file_links` carried a red `decoy:` row across all
+# 146, with no route to clearing it but a hand. These nodes pin the de-gated sweep: the
+# installer's scope list is read on every call, the prune runs whenever that read
+# succeeded, and the reload follows what actually changed under the manager.
+
+
+def test_a_landing_that_changed_no_unit_still_prunes_the_decoy(monkeypatch, tmp_path):
+    """#3765 clause 1: a call whose changed paths name no unit file clears a stale decoy.
+
+    The changed path is a Python module, which is the shape of nearly every landing this
+    box takes — a diff with nothing to do with units, and an entry to clear that some
+    earlier landing put there. Three things are pinned beside the removal, because
+    "the decoy is gone after a call that touched no unit" is equally satisfied by a
+    deployer that wiped the user unit directory: the co-resident user-scope link
+    survives, so this is a scope prune and not a sweep of everything; the tracked unit
+    file the decoy resolved to is still on disk, so the unlink acted on the link; and
+    the removal is noted, which is how a reader of the landing ledger learns the decoy
+    went away rather than having never existed.
+    """
+    from scripts.automod import promote as P
+    d = _SynthDeploy(P, monkeypatch, tmp_path,
+                     scope=["nvidia-power-limit.service"],
+                     units=["nvidia-power-limit.service",
+                            "lloyd-graph-backup.service"])
+    d.user.mkdir(parents=True)
+    decoy = d.user / "nvidia-power-limit.service"
+    os.symlink(d.unit_dir / "nvidia-power-limit.service", decoy)
+    keep = d.user / "lloyd-graph-backup.service"
+    os.symlink(d.unit_dir / "lloyd-graph-backup.service", keep)
+
+    notes = d.apply("app/inner_voice/guards.py")
+
+    assert not decoy.is_symlink() and not decoy.exists(), (
+        "a landing that changed no unit file left the system-scope decoy in place, so "
+        "the user manager still lists it — which is the state #3450's prune could only "
+        f"reach on a unit-touching landing; entries were {d.entries()}")
+    assert keep.is_symlink() and os.path.realpath(keep) == os.path.realpath(
+        d.unit_dir / "lloyd-graph-backup.service"), (
+        f"a prune that also removed the user-scope link is not a scope prune; entries "
+        f"were {d.entries()}")
+    assert (d.unit_dir / "nvidia-power-limit.service").is_file(), (
+        "the prune destroyed the tracked unit by acting on the target instead of the "
+        "link")
+    removal = [n for n in notes if "nvidia-power-limit.service" in n]
+    assert removal and any("removed" in n and "system scope" in n for n in removal), (
+        "the landing row has to record that the decoy was cleared on a call with no "
+        f"unit in its diff; notes were {notes}")
+
+
+def test_the_reload_follows_what_changed_under_the_manager(monkeypatch, tmp_path):
+    """#3765 clause 2: `daemon-reload` is issued when units were touched OR when the
+    prune removed an entry, and when neither happened it is not issued at all.
+
+    The three arms are the whole accounting table, and the middle one is the new edge:
+    a call with no unit in its diff now owes systemd a reload, because the prune just
+    deleted something the manager has cached. The first arm is the one that keeps this
+    from being "reload on every landing" — a code-only landing whose scope read came
+    back with nothing to remove asks systemd for nothing, which is what leaves
+    `test_a_code_only_change_touches_no_service_machinery` green. Its decoy is a symlink
+    to a FOREIGN file, the shape the target-safe match refuses to delete, so this arm
+    pins the match still holds on the newly de-gated path as well as the count.
+    """
+    from scripts.automod import promote as P
+
+    # Arm 1: nothing touched, nothing prunable (the entry points elsewhere) → no reload.
+    nothing = _SynthDeploy(P, monkeypatch, tmp_path / "nothing-to-prune",
+                           scope=["nvidia-power-limit.service"],
+                           units=["nvidia-power-limit.service"])
+    nothing.user.mkdir(parents=True)
+    foreign = tmp_path / "someone-elses-deploy.service"
+    foreign.write_text(_SYNTH_UNIT, encoding="utf-8")
+    alien = nothing.user / "nvidia-power-limit.service"
+    os.symlink(foreign, alien)
+
+    notes = nothing.apply("app/inner_voice/guards.py")
+
+    assert alien.is_symlink() and os.readlink(alien) == str(foreign), (
+        "the de-gated prune deleted an entry that resolves to something other than the "
+        "tracked copy, which is somebody else's deploy and `wrongtarget:`'s to report")
+    assert not any("removed" in n for n in notes), notes
+    assert nothing.reloads() == [], (
+        f"a landing that touched no unit and removed nothing still asked systemd for a "
+        f"daemon-reload; calls were {nothing.calls}")
+
+    # Arm 2: no unit touched, one entry pruned → exactly one reload.
+    pruned = _SynthDeploy(P, monkeypatch, tmp_path / "one-pruned",
+                          scope=["nvidia-power-limit.service"],
+                          units=["nvidia-power-limit.service"])
+    pruned.user.mkdir(parents=True)
+    decoy = pruned.user / "nvidia-power-limit.service"
+    os.symlink(pruned.unit_dir / "nvidia-power-limit.service", decoy)
+
+    pruned.apply("app/inner_voice/guards.py")
+
+    assert not decoy.exists(), "arm 2's premise: the prune had to remove something"
+    assert len(pruned.reloads()) == 1, (
+        f"the prune removed an entry and systemd was not told exactly once; got "
+        f"{pruned.reloads()}")
+
+    # Arm 3: a unit touched, nothing pruned → still exactly one reload.
+    touched = _SynthDeploy(P, monkeypatch, tmp_path / "unit-touched",
+                           scope=["nvidia-power-limit.service"],
+                           units=["lloyd-graph-backup.service"])
+
+    touched.apply("agent-services/systemd/lloyd-graph-backup.service")
+
+    assert len(touched.reloads()) == 1, (
+        f"a unit-touching landing still owes exactly one reload even with nothing to "
+        f"prune; got {touched.reloads()}")
+
+
+def test_a_blind_scope_read_prunes_nothing_and_asks_for_no_reload(monkeypatch, tmp_path):
+    """#3765 clause 3: with no scope list to match against, the de-gated sweep is inert.
+
+    De-gating the read means the blind answer now arrives on calls that were never
+    affected by it, so both halves have to hold at zero touched units. Nothing is
+    pruned — deleting an entry whose scope this call cannot establish is how a deployer
+    removes a real user unit — and no reload is issued for a change that did not happen.
+    The note still fires, because the read failing is a finding in its own right and
+    `check_unit_file_links`' unknown row is the precedent for reporting it.
+
+    The note's wording is asserted as an absence: the sentence #3450 shipped read
+    "every touched unit was linked, so a system-scope decoy may have been placed", which
+    on a call that touched no unit is a false statement about work that was not done,
+    and after this change would be printed on every landing of the commonest kind. A
+    note that names linking at all cannot be true at zero touched units, so the check is
+    that the blind note says nothing about placing or linking.
+    """
+    from scripts.automod import promote as P
+    for why in ("installer absent", "installer has no scope array"):
+        d = _SynthDeploy(P, monkeypatch, tmp_path / why.replace(" ", "-"),
+                         scope=["nvidia-power-limit.service"],
+                         units=["nvidia-power-limit.service"])
+        d.user.mkdir(parents=True)
+        decoy = d.user / "nvidia-power-limit.service"
+        os.symlink(d.unit_dir / "nvidia-power-limit.service", decoy)
+        if why == "installer absent":
+            d.installer.unlink()
+        else:
+            d.installer.write_text("#!/usr/bin/env bash\necho nothing\n",
+                                   encoding="utf-8")
+
+        notes = d.apply("app/inner_voice/guards.py")
+
+        assert decoy.is_symlink(), (
+            f"{why}: a deployer that cannot read the list deleted an entry it has no "
+            "evidence about — the blind answer is to prune nothing, not to guess")
+        assert d.reloads() == [], (
+            f"{why}: nothing was removed, so systemd was asked for a reload anyway; "
+            f"calls were {d.calls}")
+        loud = [n for n in notes if "unit scope unknown:" in n]
+        assert loud, f"{why}: it went blind and said nothing; notes were {notes}"
+        note = loud[0]
+        assert "could not be read" in note, note
+        assert str(d.installer) in note, note
+        assert "linked" not in note and "placed units" not in note, (
+            f"{why}: the blind note claims a unit was linked on a call that touched no "
+            f"unit, which is the false sentence #3765 clause 3 retires; note was {note}")
+
+
 def test_an_aggregator_verdict_is_confirmed_across_ticks(tmp_path):
     """`mcp_degraded_is_fatal` fires on a body reporting zero tools.
 

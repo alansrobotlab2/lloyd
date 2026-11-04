@@ -1427,8 +1427,8 @@ def check_unit_file_links(tree_dir: Path = SYSTEMD_UNIT_TREE,
                         f"by the byte pair above. Its only effect is to make a "
                         f"user-scope act on {tracked.name} look like the right command "
                         f"mid-Xid-79, which is why the installer skips it; "
-                        f"`scripts/automod/promote.py` prunes it on the next landing "
-                        f"that touches a unit, or remove {deployed} by hand",
+                        f"`scripts/automod/promote.py` prunes it on the next landing of "
+                        f"any kind (#3765), or remove {deployed} by hand",
                         tracked, deployed))
                 continue
             want = tracked.resolve()

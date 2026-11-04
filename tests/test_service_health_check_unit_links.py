@@ -761,6 +761,44 @@ def test_a_system_scope_unit_is_a_fault_when_present_and_ungraded_when_not(fleet
         "decoy:"), rows
 
 
+def test_the_decoy_row_names_the_next_landing_of_any_kind_as_the_remedy(fleet):
+    """#3765 clause 4: the row's remedy is the next landing, whatever that landing changed.
+
+    #3450 shipped this row promising that `promote.py` prunes the entry on the next
+    landing "that touches a unit". That was a promise about an event that had not
+    happened in the five days before #3450 landed and has not happened since either: 146
+    promoted landings between 2026-10-30T22:07:11Z and 2026-11-04T15:31:28Z named no file
+    under `agent-services/systemd/`, so the row was red, internally consistent, and
+    pointing at a remedy that never arrives. The same round that de-gated the prune
+    (#3765) has to take the qualifying clause out of the row, or the row keeps sending a
+    reader to a monthly event. Asserted as one absence and one phrase: no wording that
+    conditions the prune on a unit being in the diff, and a remedy that names the next
+    landing of any kind.
+
+    The second absence is the convention the row already keeps when it writes "a
+    user-scope act on {name}" instead of a command: a health row explains the decoy by
+    naming the act that makes it look plausible, and never spells out a runnable
+    user-scope service invocation someone would copy out of a red row mid-incident.
+    """
+    fleet.track("nvidia-power-limit.service")
+    fleet.link_to_tree("nvidia-power-limit.service")
+
+    row = _one(fleet.rows())
+    assert row["status"].startswith("decoy:"), row
+    assert "that touches a unit" not in row["status"], (
+        "the row still conditions the prune on a unit file being in the landing's diff, "
+        f"which is the gate #3765 removes: {row['status']}")
+    assert "next landing" in row["status"] and "of any kind" in row["status"], (
+        f"the remedy has to name the next landing unconditionally; got {row['status']}")
+    assert "promote.py" in row["status"], (
+        "the row has to keep saying which deployer clears it, so the reader can check "
+        f"the cleaner exists; got {row['status']}")
+    assert "systemctl" not in row["status"], (
+        f"a red health row must not hand out a runnable user-scope invocation; "
+        f"got {row['status']}")
+    assert str(fleet.deployed / "nvidia-power-limit.service") in row["status"], row
+
+
 def test_units_under_the_system_subdirectory_are_never_reported(fleet):
     """Clause 4's second exclusion: `agent-services/systemd/system/` holds the
     root-scope units that are installed by hand (`lloyd-data-snapshot-prune.*`), and
