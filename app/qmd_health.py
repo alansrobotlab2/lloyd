@@ -164,6 +164,67 @@ def note_ranker(ok: bool, reason: str = "", *,
         threading.Thread(target=fn, args=(title, body), daemon=True).start()
 
 
+#: The three things a run's artifact can honestly say about who ordered its
+#: document pool (#3754). The words live HERE, beside the counters they are read
+#: from, for the reason #1486 states for the seed record: the recall that ran and
+#: the artifact that records the run read ONE accessor, so a baseline cannot
+#: report a ranker different from the one that served it.
+RANKER_DJEV = "djev"
+#: At least one recall in this process asked for djev and took qmd's
+#: cross-encoder instead — the #3675 state, where `djev.enabled: true` in
+#: config.yaml made every recall name an engine that was down.
+RANKER_QMD_CROSS_ENCODER = "qmd-cross-encoder"
+#: No ranker verdict was booked at all. Its own token, for the same reason
+#: `app/uptake.py` has one for seeding: the absence of a measurement is not a
+#: measurement of the alternative. A process with `djev.enabled: false` lands here
+#: rather than at `qmd-cross-encoder` because these two counters only ever see the
+#: djev arm — nothing booked means nothing was observed, not that qmd answered.
+RANKER_UNRECORDED = "unrecorded"
+
+
+def observed_ranker_record() -> dict:
+    """Who actually ordered the document pool in this process, as an artifact record.
+
+    `{"ranker": <one of the three tokens above>, "djev_ranked": int,
+    "djev_fallbacks": int, "last_fallback_reason": str | None}`.
+
+    Read from the counters `note_ranker` moves — never from a requested knob. The
+    difference is the whole point (#3675): `app/djev.py`'s `enabled()` asks config
+    whether djev is switched on, not whether it answers, so the nightly eval of
+    2026-11-01 06:06 ran entirely inside that outage and every one of its recalls
+    was answered by qmd's cross-encoder while the knob it could have recorded said
+    the run was not djev-reranked. An artifact that records intent cannot be asked
+    which engine produced its numbers; this one can.
+
+    A mixed night is stamped as the fallback, not as the majority. The band this
+    feeds is a tolerance measured across nights, and a night whose recalls were
+    ordered two ways is comparable to NEITHER of the two pure nights — reading it
+    as "mostly djev" would pool it with the djev nights, which is the defect
+    #1547 was filed against. The two counts ride beside the token so a reader can
+    see the mix rather than take it on faith.
+
+    Scope, stated because it is load-bearing: the counters are process-lifetime, so
+    this answers for every recall this process has served, and the caller writing
+    an artifact is a process whose only recalls are the ones in its own run
+    (`eval/run_eval.py` is a fresh interpreter per night). A long-lived caller
+    would have to book a before/after pair; no caller does that today.
+    """
+    with _lock:
+        ranked = _stats["djev_ranked"]
+        fallbacks = _stats["djev_fallbacks"]
+        reason = _stats["last_djev_fallback_reason"]
+    if fallbacks > 0:
+        ranker = RANKER_QMD_CROSS_ENCODER
+    elif ranked > 0:
+        ranker = RANKER_DJEV
+    else:
+        ranker = RANKER_UNRECORDED
+    return {"ranker": ranker,
+            "djev_ranked": ranked,
+            "djev_fallbacks": fallbacks,
+            "last_fallback_reason": reason if fallbacks else None}
+
+
 def _reset_for_tests() -> None:
     global _last_log_at, _last_announce_at, _last_ranker_log_at, _last_ranker_announce_at
     with _lock:

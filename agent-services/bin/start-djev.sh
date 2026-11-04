@@ -345,9 +345,31 @@ if (( FREE_MIB < NEED_MIB )); then
         echo "what is on the card:" >&2
         printf '%s\n' "$GPU_HOLDERS" | sed 's/^/  /' >&2
         echo >&2
-        echo "If that is llama.cpp, the Qwen3.6 secondary still holds GPU $GPU." >&2
-        echo "They are an either/or: set secondary_enabled: false in config.yaml and" >&2
-        echo "  supervisorctl -c agent-services/supervisor/supervisord.conf stop agent-llm-secondary" >&2
+        # Advice by HOLDER CLASS, not one advice for every holder (#3754). The
+        # three lines this replaces named llama.cpp unconditionally, and they were
+        # right exactly as often as the card was llama.cpp. On 2026-10-31 the
+        # tenant holding GPU 2 was the vLLM-Omni TTS server — its engine shows up
+        # in nvidia-smi as `VLLM::EngineCore`, the same class as this script's own
+        # engine — and the refusal told whoever read it to set
+        # `secondary_enabled: false` and stop a program that was not on the card,
+        # which is how GPU 2 stayed double-booked for 17 hours. A wrong stop route
+        # is worse than none: it spends an operator's window on the wrong unit.
+        if printf '%s\n' "$GPU_HOLDERS" | grep -qi 'llama'; then
+            echo "If that is llama.cpp, the Qwen3.6 secondary still holds GPU $GPU." >&2
+            echo "They are an either/or: set secondary_enabled: false in config.yaml and" >&2
+            echo "  supervisorctl -c agent-services/supervisor/supervisord.conf stop agent-llm-secondary" >&2
+        elif printf '%s\n' "$GPU_HOLDERS" | grep -qiE 'vllm|enginecore'; then
+            echo "That is a vLLM engine, not llama.cpp — so it is NOT the Qwen3.6 secondary," >&2
+            echo "and stopping that would free nothing. The tenant on GPU $GPU that looks" >&2
+            echo "like this is the vLLM-Omni TTS server:" >&2
+            echo "  supervisorctl -c agent-services/supervisor/supervisord.conf stop agent-tts-omni" >&2
+            echo "If supervisorctl says that program is not running, the engine was hand-launched" >&2
+            echo "and has no unit to stop: ps -o ppid=,cmd= -p <pid> names who started it." >&2
+        else
+            echo "Neither llama.cpp nor a vLLM engine, so no slot of this fleet is claimed by" >&2
+            echo "those pids on their process name alone: ps -o ppid=,cmd= -p <pid> before" >&2
+            echo "stopping anything, and do not stop a slot on the strength of a byte count." >&2
+        fi
     fi
     exit 2
 fi

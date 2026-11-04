@@ -1214,7 +1214,7 @@ against a production serving `True/0.3` and scored a configuration nobody used.
 Every record now carries `matches_production_defaults`, and a `false` there means
 the run is not comparable to the others. The converse does not hold: the field is
 a conjunction over six knobs (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
-`graph_hops`, `seed_top_k`, `djev_rerank`, `eval/run_eval.py:2448`) and graph
+`graph_hops`, `seed_top_k`, `djev_rerank`, `eval/run_eval.py:2478`) and graph
 expansion is deliberately a *sibling* field (`expand_graph_matches_production`),
 because production defaults it False while the eval runs it on as a measurement
 choice (#1000). The comment block introducing those knobs counted them wrong until

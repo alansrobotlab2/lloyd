@@ -231,9 +231,16 @@ LIVE_275_450_275 = {0: 275.0, 1: 450.0, 2: 275.0}
 # that reason and in exactly that way: its rows ride the default run too, under
 # `DEPLOY_CATEGORY`, so the `gpu-power:0/1/2` lists below are only true of the power rows
 # while this sibling is silenced with the others.
+# `check_gpu_presence` joins the list for #3754 and in the same way again: its rows
+# ride the default run too, under their own `gpu-presence` heading, so the
+# `gpu-power:0/1/2` lists below stay true of the power rows only while it is silenced
+# with the others. Silencing it also keeps the one rule this section never breaks:
+# nothing here shells out, and the new check's readers call real `nvidia-smi` unless
+# the whole check is stubbed — an unstubbed one would make every node below a claim
+# about whatever cards the machine running the suite happens to have.
 SIBLING_CHECKS = ("check_deployed_copies", "check_ca_trust",
                   "check_unit_enabledness", "check_path_sandbox",
-                  "check_unit_file_links")
+                  "check_unit_file_links", "check_gpu_presence")
 
 
 def _fresh():

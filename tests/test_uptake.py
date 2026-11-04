@@ -668,15 +668,20 @@ def test_every_row_matches_the_declared_contract_hermetically():
 #: Sentinel for "this night has no `semantic_seeding` key at all" (#1547) —
 #: distinct from a night that records `{"enabled": False, "k": 0}`.
 _NO_SEEDING = object()
+#: Same sentinel shape for the observed-ranker field (#3754): a fixture that says
+#: nothing must OMIT the key, because omitting it is the state under test.
+_NO_RANKER = object()
 
 
 def _mk_baseline(path: Path, label: str, doc_hr: float, ndcg: float, *, prod=True,
-                 limit=20, seeding=_NO_SEEDING):
+                 limit=20, seeding=_NO_SEEDING, ranker=_NO_RANKER):
     """One baseline artifact, at the shape `run_eval.py` actually writes.
 
     `seeding` is omitted (not written as null) by default because that is the
     shape of every nightly on disk before #1547: the key is ABSENT, and absent
-    is the state the gate must not read as "seeding was off".
+    is the state the gate must not read as "seeding was off". `ranker` is omitted
+    for the same reason (#3754): every nightly on disk before this round, the
+    2026-11-01 outage night included, has no `observed_ranker` key at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {
@@ -690,6 +695,8 @@ def _mk_baseline(path: Path, label: str, doc_hr: float, ndcg: float, *, prod=Tru
     # tests/test_eval_scorer.py::test_the_seeding_record_lands_at_the_artifact_top_level_the_reader_reads.
     if seeding is not _NO_SEEDING:
         doc["semantic_seeding"] = seeding
+    if ranker is not _NO_RANKER:
+        doc["observed_ranker"] = ranker
     path.write_text(json.dumps(doc))
 
 
@@ -1154,6 +1161,17 @@ def test_live_nightly_band_is_a_capped_window_of_the_real_files():
                      or isinstance(rec.get("k"), bool)
                      else f"enabled={bool(rec.get('enabled'))},k={rec['k']}")
             if token != gate["shape"]["semantic_seeding"]:
+                continue
+            # The observed ranker is the fourth term of the same key (#3754), so
+            # this model of the pool has to carry it too: a recomputation that
+            # stopped at the seeding term would compare the gate against files it
+            # never pooled, and go red the first night that records a ranker.
+            rrec = doc.get("observed_ranker")
+            ranker = rrec.get("ranker") if isinstance(rrec, dict) else rrec
+            rtoken = (uptake.SEEDING_SHAPE_UNRECORDED
+                      if not isinstance(ranker, str) or not ranker.strip()
+                      else ranker.strip())
+            if rtoken != gate["shape"]["observed_ranker"]:
                 continue
             v = ((doc.get("summary") or {}).get("overall") or {}).get(metric)
             if isinstance(v, (int, float)):
@@ -4706,3 +4724,106 @@ def test_every_uptake_consumer_in_the_live_vault_states_every_citability_key():
     assert "EXPECTED_SCORING_ENGINE" in body, "the skill must name where the expectation lives"
     for gone in ("the alias resolves to the primary", "uptake: secondary retired"):
         assert gone not in body, f"the retired mechanism {gone!r} is back in the skill"
+
+
+# -----------------------------------------------------------------------------------------
+# The observed ranker is the fourth term of the run-shape key (#3754)
+# -----------------------------------------------------------------------------------------
+# The fixture below is a real directory: `nightly-20261101-20261101-060628.json` ran at
+# 06:06:28, inside the djev outage of 2026-10-31 16:40 → 2026-11-01 09:45, so every one of
+# its recalls was answered by qmd's cross-encoder while `config.yaml:75 djev.enabled` stayed
+# true — and its shape triple was identical to the djev nights on either side of it, so
+# `retrieval_gate` banded all three together and published a tolerance measured across a
+# ranker swap as if it were night-to-night noise.
+
+
+def test_the_night_djev_was_down_never_shares_a_band_with_the_djev_nights(tmp_path):
+    """The outage night's numbers are a different measurement, not a bad night.
+
+    Two djev nights and one cross-encoder night, the newest: the band belongs to
+    the djev pair, the newest night is EXCLUDED on ranker, and the exclusion is
+    readable from the published shape rather than discovered by diffing the
+    directory — the same discipline #1547 established for the seed definition.
+    """
+    d = tmp_path / "baselines"
+    _mk_night(d, 1, "nightly-20261030", 0.90, 0.55,
+              ranker={"ranker": "djev", "djev_ranked": 33, "djev_fallbacks": 0,
+                      "last_fallback_reason": None})
+    _mk_night(d, 2, "nightly-20261101", 0.86, 0.51,
+              ranker={"ranker": "qmd-cross-encoder", "djev_ranked": 0,
+                      "djev_fallbacks": 33,
+                      "last_fallback_reason": "djev: ConnectError"})
+    _mk_night(d, 3, "nightly-20261102", 0.95, 0.59,
+              ranker={"ranker": "djev", "djev_ranked": 33, "djev_fallbacks": 0,
+                      "last_fallback_reason": None})
+
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["shape"]["observed_ranker"] == "djev", gate["shape"]
+    assert gate["nights"] == 2 and gate["nights_in_shape"] == 2, gate
+    assert gate["latest"]["label"] == "nightly-20261102", gate
+
+
+def test_the_ranker_term_splits_the_band_it_is_supposed_to_and_no_more(tmp_path):
+    """The negative control. A band that never splits and a band that splits at
+    every row are the same broken instrument, so the green direction is pinned
+    beside the red one: three nights that all record the SAME ranker pool fully."""
+    d = tmp_path / "baselines"
+    for i, hr in enumerate((0.90, 0.88, 0.92)):
+        _mk_night(d, i, f"nightly-2026110{i + 1}", hr, 0.55,
+                  ranker={"ranker": "qmd-cross-encoder", "djev_ranked": 0,
+                          "djev_fallbacks": 33, "last_fallback_reason": "down"})
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["shape"]["observed_ranker"] == "qmd-cross-encoder", gate["shape"]
+    assert gate["nights"] == 3, gate
+    assert gate["doc_hit_rate"]["band"] == pytest.approx(0.04, abs=1e-4), gate
+
+
+def test_a_night_predating_the_ranker_field_bands_as_its_own_unrecorded_value(
+        tmp_path):
+    """Absence is not a measurement of the alternative (#3754, copying #1547's
+    rule verbatim because it is the same defect one layer down).
+
+    Three nights with no key at all plus one recorded djev night: the three band,
+    the recorded night is excluded, and the token the band was computed over is
+    the file's own word for unrecorded. The one-word invariant is pinned below so
+    a second spelling of the same absence cannot be introduced quietly."""
+    d = tmp_path / "baselines"
+    for i, lab in enumerate(("nightly-20261030", "nightly-20261031",
+                             "nightly-20261101")):
+        _mk_night(d, i, lab, 0.90 - 0.02 * i, 0.55 - 0.01 * i)   # pre-#3754: no key
+    _mk_night(d, 3, "nightly-20261102", 0.94, 0.58,
+              ranker={"ranker": "djev", "djev_ranked": 33, "djev_fallbacks": 0,
+                      "last_fallback_reason": None})
+
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["shape"]["observed_ranker"] == uptake.SEEDING_SHAPE_UNRECORDED, (
+        gate["shape"])
+    assert gate["nights"] == 3 and gate["nights_in_shape"] == 3, gate
+    assert gate["latest"]["label"] == "nightly-20261101", (
+        "the recorded-djev night is excluded from the unrecorded band; the shape "
+        "block is what says so")
+
+    # One word for "the producer recorded nothing", across both fields: a synonym
+    # would invite a later reader to pool the two absences as different facts.
+    assert uptake.RANKER_SHAPE_UNRECORDED == uptake.SEEDING_SHAPE_UNRECORDED
+
+
+def test_the_ranker_term_is_read_tolerantly_and_the_shape_block_names_it(tmp_path):
+    """A field the producer may yet reshape is read without guessing (#1547's
+    rule again): a bare token resolves, and anything unparseable is unrecorded —
+    never `djev`, which is the value a reader would most like to believe. The
+    published shape block carries the term, with no fifth key quietly added."""
+    d = tmp_path / "baselines"
+    # Shape is chosen MODALLY, so the parsable spelling needs the majority here:
+    # one night per shape and the tie falls to mtime, which is what the seeding
+    # nodes above already pin. Two bare-token nights, one unparsable.
+    _mk_night(d, 1, "nightly-20261103", 0.90, 0.55, ranker="djev")   # bare token
+    _mk_night(d, 2, "nightly-20261104", 0.88, 0.54, ranker={"ranker": 7})
+    _mk_night(d, 3, "nightly-20261105", 0.92, 0.56, ranker="djev")
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["shape"]["observed_ranker"] == "djev", gate["shape"]
+    assert gate["nights"] == 2 and gate["nights_in_shape"] == 2, (
+        f"an unparsable ranker must band as unrecorded, not as the token beside "
+        f"it: {gate}")
+    assert set(gate["shape"]) == {"limit", "matches_production_defaults",
+                                  "semantic_seeding", "observed_ranker"}, gate["shape"]

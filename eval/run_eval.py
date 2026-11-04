@@ -55,6 +55,11 @@ from agent_mcp.retrieval import (
     semantic_seeding_record as _semantic_seeding_record,
 )
 from app.kg_store import StoreUnavailable, store
+# The OBSERVED ranker, read from the counters the recall itself moves (#3754).
+# Imported as an accessor and never reconstructed here, for #1486's reason: the
+# recall that ordered the pool and the artifact that records the run have to read
+# one definition, or a baseline reports an engine nothing served it.
+from app.qmd_health import observed_ranker_record as _observed_ranker_record
 from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB, VAULT_ROOT
 # The absolute latency ceiling for THIS run's context, read from the one module
 # that owns it. Before #1129 the runner wrote `latency_ms_avg` into every
@@ -2405,6 +2410,17 @@ def build_run_config(args: argparse.Namespace) -> dict:
     to have used today's. The night of 2026-09-25 (seeding off) and the night of
     2026-09-26 (seeding on) both read `matches_production_defaults: true` and
     are not comparable on the entity leg — that is what this field is for.
+
+    `observed_ranker` is a third field of that same non-conjunction shape, and it
+    is the one that cannot be a knob at all: it records which engine ORDERED the
+    pool, which config decides and the hardware obeys or does not, so no parsed
+    value exists to compare. Before #3754 the only ranker in an artifact was the
+    requested `djev_rerank` flag, and the outage of 2026-10-31 → 2026-11-01 — every
+    recall answered by qmd's cross-encoder because djev was down while
+    `djev.enabled` stayed true — is precisely a night that an artifact could not
+    confess to. `app/uptake.py` bands on this field for the same reason it bands on
+    the seeding one: a step in the measurement definition is a step the gate exists
+    to detect, and it cannot detect what the file does not record.
     """
     expand_graph = not args.no_graph
     return {
@@ -2430,6 +2446,20 @@ def build_run_config(args: argparse.Namespace) -> dict:
         # neither parsed nor a constant — `expand_graph_matches_production` above
         # is the precedent for a knob that config owns.
         "semantic_seeding": _semantic_seeding_record(),
+        # WHICH ENGINE ACTUALLY ORDERED THE POOL (#3754), as opposed to the two
+        # knobs below, which record only what was asked for. `djev_rerank` is a
+        # parsed flag and `recall_reranker()` reads `app/djev.py::enabled()`, which
+        # asks config.yaml whether djev is switched on rather than whether it
+        # ANSWERS — so the night of 2026-11-01 06:06, run inside the 10-31 16:40 →
+        # 11-01 09:45 outage with `djev.enabled: true` at config.yaml:75, was
+        # answered end to end by qmd's cross-encoder and said nothing about it.
+        # The only honest source is the recall's own counters (`qmd_health
+        # .note_ranker` / `djev_fallbacks`), which is what the accessor reads. A
+        # sibling field like `semantic_seeding` above, never a term of the
+        # conjunction below: nothing parsed on the CLI can agree or disagree with
+        # it, and `args.djev_rerank == RECALL_DJEV_RERANK` staying in the
+        # conjunction is exactly the parity verdict this field does NOT replace.
+        "observed_ranker": _observed_ranker_record(),
         "djev_rerank": args.djev_rerank,
         "djev_rerank_top": args.djev_rerank_top,
         # #2271's two knobs, recorded as configuration and deliberately NOT terms

@@ -271,7 +271,7 @@ mechanism never existed post-#1000 and the claim is retired here.
 
 What genuinely did redefine this metric between one record and the next is what the
 record now carries instead: `fact_entity_recall_detail.run_config` is
-`eval/run_eval.py::build_run_config`'s own output — the same 15 keys the nightly
+`eval/run_eval.py::build_run_config`'s own output — the same 16 keys the nightly
 baseline stamps, `seed_top_k` and `semantic_seeding` among them — because
 `RECALL_SEED_TOP_K` 5→10 (2026-09-11) and semantic seeding #1486 (`dbfde750`,
 2026-09-25) both changed what the score means while its shape did not (#3009).

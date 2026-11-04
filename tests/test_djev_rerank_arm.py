@@ -357,3 +357,179 @@ def test_the_arm_and_the_shadow_are_exclusive():
     assert block.index("_djev_rerank_pool") < block.index("_djev_shadow_rerank")
     # djev AS the ranker (#1336) is decided before either, and excludes both.
     assert src.index('if ranker == "djev":') < i
+
+
+# ---------------------------------------------------------------------------
+# The OBSERVED ranker in the run artifact (#3754)
+# ---------------------------------------------------------------------------
+# The two nodes above pin what the recall BOOKS; these pin what the nightly
+# artifact RECORDS. The gap between them is the defect: on the night of
+# 2026-11-01 06:06, inside the djev outage that ran from 2026-10-31 16:40 to the
+# 2026-11-01 09:45 power cycle, every recall booked a fallback and the artifact
+# recorded nothing about it. Its 33 top-level keys carried the requested
+# `djev_rerank` flag and no ranker at all, and its run shape was identical to the
+# djev nights on either side of it — which is how `retrieval_gate` came to band a
+# cross-encoder night into a djev night's tolerance.
+
+
+def _qmd_health_reset():
+    from app import qmd_health
+    qmd_health._reset_for_tests()
+    return qmd_health
+
+
+def test_the_observed_ranker_record_reports_the_fallback_over_a_success():
+    """A night whose recalls were ordered TWO ways is comparable to NEITHER pure
+    night, so it is stamped as the fallback rather than the majority."""
+    qmd_health = _qmd_health_reset()
+    try:
+        qmd_health.note_ranker(True)
+        qmd_health.note_ranker(True)
+        assert qmd_health.observed_ranker_record()["ranker"] == "djev"
+        qmd_health.note_ranker(False, "djev: ConnectError")
+        rec = qmd_health.observed_ranker_record()
+        assert rec["ranker"] == "qmd-cross-encoder", rec
+        # The counts ride beside the token, so the mix is visible and not a
+        # verdict a later reader has to re-derive.
+        assert (rec["djev_ranked"], rec["djev_fallbacks"]) == (2, 1), rec
+        assert rec["last_fallback_reason"] == "djev: ConnectError", rec
+    finally:
+        qmd_health._reset_for_tests()
+
+
+def test_a_night_with_no_ranker_verdict_is_unrecorded_and_not_off():
+    """`djev.enabled: false` books nothing at all — the counters only ever see the
+    djev arm — and 'nothing was booked' is not a measurement of the alternative.
+    The same reason `app/uptake.py` has `SEEDING_SHAPE_UNRECORDED`."""
+    qmd_health = _qmd_health_reset()
+    try:
+        rec = qmd_health.observed_ranker_record()
+        assert rec["ranker"] == "unrecorded", rec
+        assert (rec["djev_ranked"], rec["djev_fallbacks"]) == (0, 0), rec
+        assert rec["last_fallback_reason"] is None, rec
+    finally:
+        qmd_health._reset_for_tests()
+
+
+def _drive_a_nightly(tmp_path, monkeypatch, book, label):
+    """Run the REAL `eval/run_eval.py` end to end over a one-query fixture, with
+    the recall replaced by one that BOOKS the ranker verdict `book` names.
+
+    Everything else is real: `build_parser`, `build_run_config`,
+    `_observed_ranker_record`, the artifact write and the JSON on disk. Only the
+    corpus touch is faked, because the thing under test is whether the run's own
+    ranker counters reach the file — and a fake of the accessor would be an
+    assertion about this file's own invention.
+    """
+    import json as _json
+    import sys as _sys
+
+    import eval.run_eval as ev
+    qmd_health = _qmd_health_reset()
+
+    def fake_recall(params, **kw):
+        if book == "djev":
+            qmd_health.note_ranker(True)
+        elif book == "fallback":
+            qmd_health.note_ranker(False, "djev: ConnectError")
+        return {"entities": [], "facts": [{"entity": "ObserverState", "text": "t",
+                                          "source": "memory/x.md"}],
+                "documents": [{"path": "memory/daily/2026-11-01.md"}],
+                "graph_expanded_facts": [], "graph_neighbors_used": [],
+                "fact_read_coverage": {"attempted": 1, "read": 1},
+                "graph_expansion": {}}
+
+    class _S:
+        def stats(self):
+            return {"entities_total": 1, "edges_total": 1, "edges_active": 1,
+                    "aliases": 0, "facts": 1}
+
+        def resolve(self, text):
+            return text
+
+        def active_edges(self):
+            return []
+
+        def neighbours(self, *a, **k):
+            return {}
+
+    qf = tmp_path / "q.yaml"
+    qf.write_text(
+        "queries:\n"
+        "  - id: ranker-night\n"
+        "    query: which engine ordered this pool\n"
+        "    category: entity\n"
+        "    expect_entities: [ObserverState]\n"
+        "    expect_docs: [memory/daily/2026-11-01.md]\n")
+    out = tmp_path / "baselines"
+    monkeypatch.setattr(ev, "_vault_recall", fake_recall)
+    monkeypatch.setattr(ev, "_recall_seeds", lambda q, k: [])
+    monkeypatch.setattr(ev, "_semantic_seed_k", lambda: 0)
+    monkeypatch.setattr(ev, "store", _S)
+    monkeypatch.setattr(ev, "EVAL_BASELINES_DIR", out)
+    monkeypatch.setattr(ev, "LLOYD_CODE_ROOT", tmp_path)
+    monkeypatch.setattr(_sys, "argv", ["run_eval.py", "--queries", str(qf),
+                                      "--label", label, "--allow-empty-corpus"])
+    try:
+        assert ev.main() == 0
+    finally:
+        qmd_health._reset_for_tests()
+    written = next(iter(sorted(out.glob(f"{label}-*.json"))))
+    return _json.loads(written.read_text())
+
+
+def test_the_nightly_artifact_records_the_ranker_that_answered(tmp_path, monkeypatch):
+    """Clause 1's green case: a night djev actually ranked says so, and says it in
+    the same record the seed definition uses — a sibling field, not a knob."""
+    blob = _drive_a_nightly(tmp_path, monkeypatch, "djev", "nightly-ranker-djev")
+    rec = blob["observed_ranker"]
+    assert rec["ranker"] == "djev", rec
+    assert rec["djev_fallbacks"] == 0, rec
+    # BESIDE the seed record: both are top-level fields of the run — the artifact
+    # flattens `build_run_config` into itself — and both are observed shape rather
+    # than a term of `matches_production_defaults`.
+    assert isinstance(blob["semantic_seeding"], dict), sorted(blob)
+
+
+def test_the_cross_encoder_night_is_recorded_though_no_knob_can_say_it(
+        tmp_path, monkeypatch):
+    """Clause 1's whole point, on the 2026-11-01 shape: the run's knobs are at
+    production defaults — `djev_rerank: false`, parity green, nothing a reader of
+    the config could point at — and the file still records that qmd's
+    cross-encoder ordered the pool."""
+    blob = _drive_a_nightly(tmp_path, monkeypatch, "fallback", "nightly-ranker-down")
+    rec = blob["observed_ranker"]
+    assert rec["ranker"] == "qmd-cross-encoder", rec
+    assert rec["djev_fallbacks"] == 1, rec
+    # The requested flag, still top-level and still False: nothing in the run's
+    # own configuration says what this line says.
+    assert blob["matches_production_defaults"] is True, sorted(blob)
+    assert blob["djev_rerank"] is False, blob["djev_rerank"]
+
+
+def test_a_nightly_that_booked_nothing_records_unrecorded(tmp_path, monkeypatch):
+    """A djev-disabled night is not a cross-encoder night in this field's words:
+    it booked no verdict, and `unrecorded` is what `app/uptake.py` bands it as."""
+    blob = _drive_a_nightly(tmp_path, monkeypatch, None, "nightly-ranker-none")
+    assert blob["observed_ranker"]["ranker"] == "unrecorded", blob["observed_ranker"]
+
+
+def test_the_field_is_read_from_the_counters_and_not_the_parsed_flag():
+    """The producer half, pinned as bytes: the artifact reads the accessor that
+    reads `note_ranker`'s counters, and the requested flag stays a SEPARATE field
+    of its own. The line is pinned by what it calls, not by a line number that
+    moves on the next edit to a 2,700-line file."""
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parent.parent
+           / "eval" / "run_eval.py").read_text(encoding="utf-8")
+    assert '"observed_ranker": _observed_ranker_record(),' in src, (
+        "the artifact must write the OBSERVED ranker from qmd_health's counters; "
+        "`args.djev_rerank` is what was asked for and cannot answer which engine "
+        "served the run (#3754)")
+    assert ("from app.qmd_health import observed_ranker_record" in src), (
+        "one accessor, imported, for the reason `_semantic_seeding_record` is "
+        "imported rather than reimplemented: producer and consumer one read")
+    assert '"djev_rerank": args.djev_rerank,' in src, (
+        "the requested flag stays recorded, and stays a term of the "
+        "matches_production_defaults conjunction; the observed field does not "
+        "replace the parity verdict")

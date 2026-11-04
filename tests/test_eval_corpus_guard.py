@@ -4833,7 +4833,15 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: itself. #3166's `c2a57f9b` left the anchor at `7bf6db35` untouched because its edit sat
 #: in the `#:` comment block above the `def`. A code change moves it deliberately, in the
 #: shape `NON_COMMENT_SURFACE_ANCHOR` already takes in `tests/test_automod_code_rules.py`.
-RUN_EVAL_CODE_ANCHOR = "63d46756"
+#: #3754 is that code change: `eval/run_eval.py` now writes an `observed_ranker` field
+#: into every run artifact, read from `app/qmd_health.observed_ranker_record()` instead of
+#: from `args.djev_rerank`, so the harness genuinely scores a richer record than the one
+#: `63d46756` stamped and the anchor moves in the commit that did it, as the re-stamp node
+#: below instructs. The named commit is the one carrying that field, so the projection
+#: compares the file against itself by a different name: if the round's commit was rebased
+#: on the way to `main`, the value below names the pre-rebase object, which still resolves
+#: and still holds the same bytes — `63d46756` was itself such a name for its first weeks.
+RUN_EVAL_CODE_ANCHOR = "618a4b23"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because

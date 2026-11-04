@@ -1164,6 +1164,26 @@ def check_unit_enabledness(runner=subprocess.run, pool_reader=None,
     return _annotate_units(_units_rows(recheck_text, recheck_code), miss, note)
 
 
+GPU_PRESENCE_CATEGORY = "gpu-presence"
+CONF_D_DIR = _TREE / "agent-services" / "supervisor" / "conf.d"
+PIN_PROGRAM = re.compile(r"^\[program:([^\]]+)\]")
+#: A launcher var claiming one card by nvidia-smi index. An exclusive claim: the fleet
+#: treats one such claim per card as an either/or between the programs that hold it.
+PIN_GPU_INDEX = re.compile(r'\bGPU="(\d+)"')
+#: An exclusive claim by stable hardware id. Comparable with nvidia-smi's index only
+#: because the same unit file also sets CUDA_DEVICE_ORDER="PCI_BUS_ID"; without that order
+#: CUDA's uuid list says nothing about nvidia-smi's enumeration.
+PIN_GPU_UUID = re.compile(r'CUDA_VISIBLE_DEVICES="(GPU-[0-9a-fA-F-]+)"')
+#: A device mask, not a claim: it restricts which devices a library may see, and four of
+#: this fleet's programs (qmd x2, tts, the worker) hold one simultaneously alongside the
+#: desktop. Graded for existence, never for sharing, and its card counts as named for the
+#: compute-app row below.
+PIN_GPU_MASK = re.compile(r'CUDA_VISIBLE_DEVICES="(\d+(?:\s*,\s*\d+)*)"')
+GPU_LIVE_ROW = re.compile(r"^\s*(\d+)\s*,\s*(GPU-[0-9a-fA-F-]+)\s*,\s*(.*)$")
+APP_NAME_MAX = 70
+APPS_SHOWN = 4
+
+
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary", "agent-djev"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
@@ -1185,6 +1205,11 @@ CATEGORIES = {
     # And again: `main` answers it from `check_path_sandbox`, which reads the aggregator's
     # /state rather than a supervisor program, a deployed file, a certificate or a wattage.
     PATH_SANDBOX_CATEGORY: [],
+    # And again (#3754): `main` answers it from `check_gpu_presence`, which reads the
+    # conf.d pins against the cards nvidia-smi answers for. A card is not a service, so
+    # this is the only heading its red row can live under without borrowing another
+    # heading's word — same reason GPU_POWER_CATEGORY is not a member of `deploy`.
+    GPU_PRESENCE_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
 
@@ -1628,6 +1653,331 @@ def check_gpu_power_limit(declared=None, live=None):
     return results
 
 
+# ---------------------------------------------------------------------------------------------
+# GPU pins versus live enumeration (#3754). Every GPU-owning supervisor program says which
+# card it is on, in one of THREE spellings. THIS block describes them by spelling and not by
+# program, because the rail at `test_the_script_names_no_programs_to_excuse` keeps a
+# hand-maintained roster out of this file: the programs come from the directory, and a list of
+# names kept here would be a second one, free to disagree with the files it claims to
+# describe. (Names still appear below where they are HISTORY — the two tenants of the
+# 2026-10-31 collision, and the unit file whose own comment explains a pin.) By spelling: (1) a
+# launcher-specific `GPU="2"`, in three different unit files at their lines 5, 26 and 50 — a
+# variable this fleet's own launcher scripts read, NOT CUDA's; (2) a
+# `CUDA_VISIBLE_DEVICES="GPU-<uuid>"` under `CUDA_DEVICE_ORDER="PCI_BUS_ID"`, in one unit file
+# at line 14; (3) a `CUDA_VISIBLE_DEVICES="0"` numeric mask (kind `cuda-index`), in four
+# files — CUDA's own device
+# list, which the same PCI_BUS_ID order makes comparable with nvidia-smi's index.
+# Because the spellings differ, no reading of the directory can tell you which pins land on
+# one card, and `set-gpu-power-limit.sh` says why the index spellings are not even stable:
+# "If a card drops off the bus (the known defect) the remaining cards shift down, so a 3090
+# could inherit an override meant for the PRO 6000." That is not hypothetical: on 2026-10-31
+# djev was booked onto GPU 2 while agent-tts-omni held the same physical card under its UUID,
+# the disagreement was invisible to every reader of the two files, and djev spent 17 hours
+# refusing to start against a card it believed was free. Its own category for #1726's reason:
+# nothing here checks whether a card is ANSWERING, so a pin pointing at a card that has left
+# the bus looked identical to the same pin pointing at a healthy one.
+
+
+def _pinned_gpu_cards(conf_dir=None) -> dict:
+    """Each supervisor program's GPU pins, as `{program: [(kind, value), ...]}`.
+
+    `kind` is `index` for a launcher `GPU="n"` claim, `uuid` for a
+    `CUDA_VISIBLE_DEVICES="GPU-…"`, `cuda-index` for one entry of a numeric
+    `CUDA_VISIBLE_DEVICES="0,2"` list. (The token is `cuda-index` and not the CUDA word
+    for the same list — `mask` — because this file already holds a rail that forbids a
+    systemd act word as a bare string constant, and `mask` is one of those acts: a check
+    of the cards must not be able to name what the units route may not do.) The three spellings
+    mean three different things, which is the whole reason the caller resolves them against
+    live hardware instead of comparing strings: two programs writing the same `2` into the
+    same kind of variable is a documented either/or, while a `2` and a `GPU-0bd4…` naming
+    one card is a double-booking nobody can read.
+
+    Only `environment=` lines are read. Almost every other line in these files is prose —
+    the comments explain the pins at length, and `lloyd-agent-worker.conf:15` quotes
+    `GPU="2"` while describing a DIFFERENT program's unit — so scanning comment text would
+    invent a pin that was never set.
+    """
+    conf = Path(conf_dir) if conf_dir else CONF_D_DIR
+    files = sorted(conf.glob("*.conf"))
+    if not files:
+        raise RuntimeError(f"no supervisor unit files under {conf}")
+    pins: dict = {}
+    program = "?"
+    for path in files:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            head = PIN_PROGRAM.match(line)
+            if head:
+                program = head.group(1).strip()
+                continue
+            if not line.startswith("environment="):
+                continue
+            for m in PIN_GPU_INDEX.finditer(line):
+                pins.setdefault(program, []).append(("index", int(m.group(1))))
+            for m in PIN_GPU_UUID.finditer(line):
+                pins.setdefault(program, []).append(("uuid", m.group(1)))
+            for m in PIN_GPU_MASK.finditer(line):
+                for tok in m.group(1).split(","):
+                    pins.setdefault(program, []).append(("cuda-index", int(tok.strip())))
+    return pins
+
+
+def _live_gpu_cards(runner=subprocess.run) -> dict:
+    """nvidia-smi's live answer as `{index: {"uuid": …, "name": …}}`.
+
+    Raises when the query itself fails rather than returning empty: a failing `nvidia-smi`
+    and a driver answering zero cards are two different findings, and the caller may go
+    advisory on either but must not confuse them. An EMPTY dict is the driver saying no card
+    is there at all, which is what a card-less box legitimately looks like.
+    """
+    out = runner(["nvidia-smi", "--query-gpu=index,uuid,name", "--format=csv,noheader"],
+                 capture_output=True, text=True, timeout=15)
+    if getattr(out, "returncode", 0):
+        raise RuntimeError((getattr(out, "stderr", "") or "nvidia-smi failed").strip()
+                           [:160] or "nvidia-smi failed")
+    cards: dict = {}
+    for line in (getattr(out, "stdout", "") or "").splitlines():
+        m = GPU_LIVE_ROW.match(line)
+        if m:
+            cards[int(m.group(1))] = {"uuid": m.group(2),
+                                      "name": m.group(3).strip() or "unnamed"}
+    return cards
+
+
+def _live_gpu_compute_apps(runner=subprocess.run) -> list:
+    """Every compute process nvidia-smi can see, as `[{"uuid", "pid", "mib", "name"}]`.
+
+    The process name is truncated because a vLLM or VS Code command line runs to hundreds of
+    characters and the row has to stay readable.
+    """
+    out = runner(["nvidia-smi",
+                  "--query-compute-apps=gpu_uuid,pid,used_memory,process_name",
+                  "--format=csv,noheader"],
+                 capture_output=True, text=True, timeout=15)
+    if getattr(out, "returncode", 0):
+        raise RuntimeError((getattr(out, "stderr", "") or "nvidia-smi failed").strip()
+                           [:160] or "nvidia-smi failed")
+    apps: list = []
+    for line in (getattr(out, "stdout", "") or "").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4 or not parts[0].startswith("GPU-"):
+            continue
+        if not parts[1].isdigit():
+            continue
+        mib = re.match(r"(\d+)", parts[2])
+        name = ", ".join(parts[3:])
+        apps.append({"uuid": parts[0], "pid": parts[1],
+                     "mib": int(mib.group(1)) if mib else None,
+                     "name": name[:APP_NAME_MAX]
+                             + ("…" if len(name) > APP_NAME_MAX else "")})
+    return apps
+
+
+def _gpu_presence_row(name: str, status: str, *, healthy: bool = False,
+                      exit_code: int = 0, output: str = "", verdict: str = "unknown",
+                      advisory: bool = False, **extra) -> dict:
+    """One gpu-presence row. A private category with no supervisor program behind it, so it
+    carries its own `category` exactly as `check_ca_trust` and the gpu-power rows do."""
+    row = {"name": f"{GPU_PRESENCE_CATEGORY}:{name}", "status": status,
+           "healthy": healthy, "exit_code": exit_code, "output": output,
+           "category": GPU_PRESENCE_CATEGORY, "verdict": verdict,
+           "advisory": advisory}
+    row.update(extra)
+    return row
+
+
+def _pin_text(kind: str, value) -> str:
+    return (f'GPU="{value}"' if kind == "index"
+            else f'CUDA_VISIBLE_DEVICES="{value}"' if kind == "uuid"
+            else f'CUDA_VISIBLE_DEVICES="{value}" (CUDA device index)')
+
+
+def _card_label(index, cards: dict) -> str:
+    if index is None:
+        return "a card nvidia-smi does not enumerate"
+    return f"GPU {index} ({cards[index]['name']}, {cards[index]['uuid']})"
+
+
+def check_gpu_presence(pins=None, enumeration=None, apps=None) -> list:
+    """Resolve every `conf.d` GPU pin against the cards the driver answers for (#3754).
+
+    Three findings, and the split between them is the point:
+
+    * RED — a pin naming a card nvidia-smi does not answer for. `GPU="2"` survives a card
+      leaving the bus as a string while the card it meant is gone, and every index above the
+      gap shifts down, so the launcher var that named a free 3090 now names a different card
+      or none. Naming the program and the card is the whole remedy: the operator has to
+      re-point the pin, not restart a program that only failed to get VRAM.
+    * RED — TWO PINNED PROGRAMS resolving to one card THROUGH DIFFERENT SPELLINGS (a
+      launcher `GPU=` index and a `GPU-<uuid>` id landing together). That is #3675's exact
+      state, and the only overlap that cannot be seen by reading the directory, because the
+      two files do not share a vocabulary.
+    * ADVISORY — programs sharing one card under the SAME spelling, and any card carrying a
+      compute app that no pin names at all. Both are true statements about the box that are
+      not outages. Three programs writing `GPU="2"` is this fleet's declared either/or
+      between three slots that share one card, one of which runs at a time (a vLLM
+      decision engine, a vLLM policy checker and the llama.cpp secondary, declared
+      either/or in their unit files' own comments) — `supervisorctl status` today shows
+      one RUNNING and the other two STOPPED, so
+      calling that red would report an outage on a healthy box every single day. And a
+      hand-launched engine on an unclaimed card is somebody's running experiment: the row
+      makes it visible without deleting their work. Both branches are `advisory: true` and
+      exit 0, the convention the drift rows above and `#2114`'s aggregator rows use.
+
+    Injectable for the same reason `_live_power_limits` is: the fleet's GPU truth lives only
+    in `nvidia-smi`, and a test that called it for real would be an assertion about whatever
+    hardware the check happens to run on. `pins`/`enumeration`/`apps` are callables returning
+    this function's three shapes. A box that answers NO GPU rows — an image with no driver, a
+    headless builder — is advisory and cannot go red: zero cards is what such a box
+    legitimately reports, exactly as `check_gpu_power_limit` treats an empty live list as
+    `verdict: unknown, advisory: true`. An unreadable pin directory is the same shape,
+    because that is the check's own file-reading failing, not the fleet's hardware.
+    """
+    pins = pins or _pinned_gpu_cards
+    enumeration = enumeration or _live_gpu_cards
+    apps = apps or _live_gpu_compute_apps
+    try:
+        pinned = pins()
+    except Exception as exc:
+        return [_gpu_presence_row(
+            "pins", "conf.d pins unreadable", verdict="unreadable", advisory=True,
+            output=f"{type(exc).__name__}: {str(exc)[:160]}")]
+    try:
+        cards = enumeration()
+        why = ""
+    except FileNotFoundError:
+        cards, why = None, "nvidia-smi is not on PATH"
+    except Exception as exc:
+        cards, why = None, f"{type(exc).__name__}: {str(exc)[:140]}"
+    if cards is None:
+        return [_gpu_presence_row(
+            "enumeration", "cards not enumerable", verdict="unknown", advisory=True,
+            output=f"{why}; the pins cannot be graded against hardware that was never "
+                   f"listed, so nothing here is evidence about the cards")]
+    if not cards:
+        return [_gpu_presence_row(
+            "enumeration", "no GPU enumerated", verdict="unknown", advisory=True,
+            output="nvidia-smi answered no card rows. Nothing can be graded against pins on "
+                   "a box that reports no cards, so this stays advisory — a driver-less box "
+                   "and a box whose cards have all left the bus look identical from here, "
+                   "and only one of them is a fault")]
+
+    by_uuid = {c["uuid"]: idx for idx, c in cards.items()}
+    seen = sorted(f"GPU {i} ({cards[i]['name']})" for i in cards)
+    results: list = []
+    resolved: dict = {}          # index -> [(program, kind)], exclusive claims only
+    #: Cards any claim resolves to, MASKS INCLUDED, keyed by the stable id — the compute
+    #: apps nvidia-smi reports come back keyed by uuid and a card is one card however many
+    #: names it answers to, so comparing a uuid against a set of indices would silently
+    #: make every pinned card look unclaimed.
+    named: set = set()
+
+    for program in sorted(pinned):
+        claims = sorted(set(pinned[program]), key=lambda kv: (kv[0], str(kv[1])))
+        for kind, value in claims:
+            spelled = _pin_text(kind, value)
+            if kind == "uuid":
+                index = by_uuid.get(value)
+                missing = f"no card with id {value}"
+            elif kind == "index":
+                index = value if value in cards else None
+                missing = f"no card at index {value}"
+            else:
+                index = value if value in cards else None
+                missing = f"no card at CUDA device index {value}"
+            if index is None:
+                results.append(_gpu_presence_row(
+                    program,
+                    f"{program} pins {spelled} and nvidia-smi answers no such card",
+                    verdict="missing-card",
+                    output=f"enumerated: {'; '.join(seen) or 'none'}. {missing}: a card "
+                           f"dropping off the bus shifts every higher index down and leaves "
+                           f"this pin pointing at nothing (the index caveat in "
+                           f"agent-services/bin/set-gpu-power-limit.sh), so re-point the pin "
+                           f"at the card the program actually wants",
+                    program=program, pin=spelled))
+                continue
+            # Keyed by the STABLE id, not the index: the compute apps come back
+            # keyed by uuid, and a card is one card however many names it answers
+            # to. Adding the index here would leave every pinned card looking
+            # unclaimed to the row below — the silent half of this check's own bug.
+            named.add(cards[index]["uuid"])
+            if kind in ("index", "uuid"):
+                resolved.setdefault(index, []).append((program, kind))
+            results.append(_gpu_presence_row(
+                program, f"{program} → {_card_label(index, cards)}",
+                healthy=True, exit_code=0, verdict="ok",
+                output=spelled, program=program, pin=spelled,
+                gpu_index=index, gpu_uuid=cards[index]["uuid"]))
+
+    for index in sorted(resolved):
+        entries = resolved[index]
+        programs = sorted({p for p, _ in entries})
+        kinds = sorted({k for _, k in entries})
+        if len(programs) < 2:
+            continue
+        if len(kinds) >= 2:
+            # Two vocabularies, one card: #3675's double-booking, and the reason this check
+            # exists. `agent-djev pins GPU="2"` and `agent-tts-omni pins
+            # CUDA_VISIBLE_DEVICES="GPU-0bd4…"` can be the same silicon.
+            results.append(_gpu_presence_row(
+                "collision",
+                f"{', '.join(programs)} resolve to one card: {_card_label(index, cards)}",
+                verdict="collision",
+                output=f"pinned by different spellings ({', '.join(kinds)}), which is how "
+                       f"the overlap hides: the two unit files do not share a vocabulary, so "
+                       f"nothing in the directory says they are the same card. Take one of "
+                       f"the two programs off that card, or re-point one pin — two engines on "
+                       f"one card is what put djev into a 17-hour startup loop on 2026-10-31",
+                programs=programs, gpu_index=index,
+                gpu_uuid=cards[index]["uuid"], spellings=kinds))
+        else:
+            # Same spelling, one card: the declared either/or between slots. Visible, never
+            # red, because two of them RUNNING at once is the fault and this check does not
+            # read supervisor.
+            results.append(_gpu_presence_row(
+                "shared-pin",
+                f"{', '.join(programs)} all pin {_card_label(index, cards)} by {kinds[0]}",
+                verdict="shared-pin", advisory=True,
+                output=f"{len(programs)} programs name this one card with the same spelling, "
+                       f"which is this fleet's either/or between slots never meant to run "
+                       f"together; `supervisorctl status` answers whether two of them are",
+                programs=programs, gpu_index=index, gpu_uuid=cards[index]["uuid"]))
+
+    try:
+        seen_apps = apps()
+    except Exception as exc:
+        results.append(_gpu_presence_row(
+            "compute-apps", "compute apps not enumerable", verdict="unknown",
+            advisory=True,
+            output=f"{type(exc).__name__}: {str(exc)[:160]}; the pins above are still what "
+                   f"the conf.d files say, unverified against what is running"))
+        return results
+    unpinned: dict = {}
+    for app in seen_apps:
+        if app["uuid"] in named:
+            continue
+        unpinned.setdefault(app["uuid"], []).append(app)
+    for uuid in sorted(unpinned):
+        index = by_uuid.get(uuid)
+        listed = unpinned[uuid]
+        shown = "; ".join(f"pid {a['pid']} {a['mib']} MiB {a['name']}"
+                          for a in listed[:APPS_SHOWN])
+        more = (f" (+{len(listed) - APPS_SHOWN} more)"
+                if len(listed) > APPS_SHOWN else "")
+        results.append(_gpu_presence_row(
+            "unpinned-compute",
+            f"{_card_label(index, cards)} carries compute no conf.d pin names",
+            verdict="unpinned-compute", advisory=True,
+            output=f"{shown}{more}. ADVISORY BY DESIGN: a hand-launched engine here is "
+                   f"somebody's running experiment and going red over it would call a "
+                   f"healthy box broken, but the card is unclaimed, so a launcher told to "
+                   f"find a free one has no way to know it is busy — which is how GPU 2 was "
+                   f"double-booked on 2026-10-31. Whether its owner keeps it, supervises it "
+                   f"or reclaims the card is an operator's call, not this row's",
+            gpu_index=index, gpu_uuid=uuid,
+            pids=[a["pid"] for a in listed],
+            total_mib=sum(a["mib"] or 0 for a in listed)))
+    return results
 
 
 def _aggregator_config():
@@ -2152,6 +2502,13 @@ def main():
     # not a healthy box (#2320).
     if not args.services and args.category in (None, PATH_SANDBOX_CATEGORY):
         results.extend(check_path_sandbox())
+    # The GPU pins versus live enumeration check (#3754), on the same rule a fifth time:
+    # whole-fleet run or its own category, never a `--services` ask. It reads the conf.d
+    # directory and asks nvidia-smi which cards answer; a box that answers no card rows, or
+    # has no nvidia-smi at all, returns advisory rows that change no verdict, so this costs
+    # a card-less box nothing.
+    if not args.services and args.category in (None, GPU_PRESENCE_CATEGORY):
+        results.extend(check_gpu_presence())
 
     # Calculate summary
     summary = {}

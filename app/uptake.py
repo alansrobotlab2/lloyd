@@ -2232,6 +2232,41 @@ def _seeding_shape_key(doc: dict) -> str:
     return f"enabled={bool(rec.get('enabled'))},k={k}"
 
 
+#: What a night that predates the `observed_ranker` field is banded as (#3754).
+#: The SAME token seeding uses, deliberately and not a second spelling: this file
+#: has one word for "the producer recorded nothing", and a synonym would invite a
+#: later reader to pool the two absences as if they were different facts.
+RANKER_SHAPE_UNRECORDED = SEEDING_SHAPE_UNRECORDED
+
+
+def _ranker_shape_key(doc: dict) -> str:
+    """Which engine actually ordered the pool on a night, as one token (#3754).
+
+    `djev` / `qmd-cross-encoder` for a night that says, `RANKER_SHAPE_UNRECORDED`
+    for one that does not — the rule `_seeding_shape_key` above already applies to
+    the seed definition, applied to the engine that produces the ordering those
+    seeds are scored against. The outage of 2026-10-31 16:40 → 2026-11-01 09:45 is
+    the proof it is needed: `nightly-20261101-20261101-060628.json` ran at 06:06:28
+    INSIDE that window, every one of its recalls was answered by qmd's
+    cross-encoder because djev was down while config still enabled it, and its
+    shape triple was identical to the djev nights on either side of it — so
+    `retrieval_gate` published a tolerance measured across a ranker swap and read
+    it as night-to-night noise.
+
+    Read tolerantly and never guessed at, same as seeding: a bare token or the
+    record dict the producer writes both resolve; a missing field, a non-string,
+    or an empty one is `unrecorded`. A night that fell back on SOME of its recalls
+    carries the fallback token (`app/qmd_health.observed_ranker_record` stamps a
+    mixed night as the fallback rather than the majority), so no band is ever
+    measured across two engines.
+    """
+    rec = doc.get("observed_ranker")
+    ranker = rec.get("ranker") if isinstance(rec, dict) else rec
+    if not isinstance(ranker, str) or not ranker.strip():
+        return RANKER_SHAPE_UNRECORDED
+    return ranker.strip()
+
+
 def retrieval_gate(baselines_dir: Path | str | None = None,
                    metrics: Sequence[str] = ("doc_hit_rate", "ndcg10")) -> dict[str, Any]:
     """A non-regression gate read from what the eval actually does at rest.
@@ -2243,8 +2278,14 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     the observed spread of comparable nights, so the tolerance is measured.
 
     Comparability is by run shape (`limit`, `matches_production_defaults`,
-    `semantic_seeding`), not by filename: folding a 40-query or rerank-on night
-    into the spread would widen the band with somebody else's experiment. The
+    `semantic_seeding`, `observed_ranker`), not by filename: folding a 40-query or
+    rerank-on night into the spread would widen the band with somebody else's
+    experiment. The fourth term is #3754, one layer below the third: the engine
+    that ORDERED the document pool is no more a CLI knob than the seed definition
+    is, and a night whose recalls fell back to qmd's cross-encoder because djev was
+    down is a step in the measurement definition rather than night-to-night noise —
+    which is exactly what `nightly-20261101-20261101-060628.json` was, banded with
+    its djev neighbours for three days until #3675's triage read it. The
     third term is #1547: #1486 changed the SEED DEFINITION the entity scores are
     built from — not a CLI knob, so invisible to `matches_production_defaults`,
     which compares six parsed args against six `RECALL_*` constants — and the two
@@ -2325,7 +2366,8 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     for r in basis:
         shapes.setdefault((r[2].get("limit"),
                            bool(r[2].get("matches_production_defaults")),
-                           _seeding_shape_key(r[2])), []).append(r)
+                           _seeding_shape_key(r[2]),
+                           _ranker_shape_key(r[2])), []).append(r)
     shape, comparable = max(shapes.items(), key=lambda kv: (len(kv[1]), kv[1][0][0]))
     # Newest first: `rows` was sorted by mtime descending and `shapes` was filled
     # in that order, so the front slice is the newest M nights of this shape.
@@ -2339,7 +2381,8 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
         # single-member, not because the pool was lost (#1547).
         "shape": {"limit": shape[0],
                   "matches_production_defaults": shape[1],
-                  "semantic_seeding": shape[2]},
+                  "semantic_seeding": shape[2],
+                  "observed_ranker": shape[3]},
         # Two counts, because the window makes them different quantities: the
         # band is computed over `nights`, drawn from `nights_in_shape` comparable
         # nights. One number is what let a 14-night sample read as a 7-night one.

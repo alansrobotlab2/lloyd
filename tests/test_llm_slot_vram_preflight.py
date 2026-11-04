@@ -925,9 +925,90 @@ def test_djev_refusal_still_fires_on_the_same_mocked_reading(tmp_path, shim_dir,
     out = r.stdout + r.stderr
     assert r.returncode == 2, f"djev refusal moved (rc={r.returncode}): {out[-600:]}"
     assert "refusing to start: GPU 2 has 20 MiB free, this needs" in out, out[-600:]
-    assert "agent-llm-secondary" in out, "the either/or must name its counterpart"
+    # The holder in this fixture is `DJEV_HOLDER` — `VLLM::EngineCore`, a vLLM process —
+    # so the llama.cpp either/or that used to be asserted here is exactly what #3675
+    # caught the script printing for seventeen hours while `agent-tts-omni` held the card.
+    # This node's subject is that the refusal still FIRES on the mocked reading; which
+    # advice it owes is the holder's class, and that is the two nodes below.
+    assert "agent-llm-secondary" not in out, f"vLLM holder told to stop llama.cpp: {out[-900:]}"
+    assert "agent-tts-omni" in out, f"a vLLM holder must be named: {out[-900:]}"
     assert DJEV_HOLDER in out, "and what is holding the card"
     assert not vllm_log.exists(), f"djev refused but still launched its engine: {out[-300:]}"
+
+
+# -----------------------------------------------------------------------------------------
+# Which counterpart the VRAM refusal names is the holder's class, not a guess (#3754)
+# -----------------------------------------------------------------------------------------
+# 2026-10-31 16:40 → 2026-11-01 09:45: `agent-djev` refused GPU 2 because the vLLM-Omni TTS
+# server held it, and every refusal told the reader to `set secondary_enabled: false` and
+# `stop agent-llm-secondary` — a llama.cpp program that was not holding the card. Seventeen
+# hours were spent against advice naming the wrong tenant, because the message printed its
+# llama.cpp either/or UNCONDITIONALLY while the holder lines it had just printed said
+# `VLLM::EngineCore`. `gpu_mem_holders` answers `pid, used_memory, process_name` per
+# process, so the class was in hand at the refusal site the whole time.
+
+
+def _djev_refusal_output(tmp_path, shim, apps):
+    """Boot `start-djev.sh` to its VRAM refusal against a card whose sole compute
+    app is `apps`.
+
+    The same fixture as `test_djev_refusal_still_fires_on_the_same_mocked_reading`:
+    what these two nodes vary is the PROCESS NAME the mocked nvidia-smi reports, the
+    only evidence the refusal has about who is on the card. The MiB figures are the
+    fixture's, not a reading; the class is the point.
+    """
+    home = tmp_path / "home"
+    venv = home / "djev-venv"
+    model = home / "djev-model"
+    src = home / "djev-spark"
+    _executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+    _executable(venv / "bin" / "vllm", "#!/bin/bash\nsleep 60\n")
+    (venv / ".djev-overlay-test").write_text("applied\n")
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text("{}\n")
+    (model / "part-00001.safetensors").write_bytes(b"\x00" * 64)
+    (src / "server").mkdir(parents=True, exist_ok=True)
+    (src / "server" / "structured_server.py").write_text("# stub\n")
+    env = {**os.environ, **shim(free=20, apps=apps),
+           "DJEV_VENV": str(venv), "DJEV_MODEL_DIR": str(model), "DJEV_SRC": str(src),
+           "PORT": "8110", "STRUCTURED_PORT": "8111", "WAIT_SECS": "5"}
+    r = subprocess.run(["/bin/bash", str(START_DJEV)], env=env, cwd=str(tmp_path),
+                       capture_output=True, text=True, timeout=90)
+    out = r.stdout + r.stderr
+    assert r.returncode == 2, f"the refusal moved (rc={r.returncode}): {out[-600:]}"
+    return out
+
+
+def test_a_vllm_holder_is_named_with_its_own_stop_route(tmp_path, shim_dir, shim):
+    """Clause 3, the class that did not exist: `DJEV_HOLDER` is a `VLLM::EngineCore`
+    — the name the vLLM-Omni TTS server's engine reports — and the advice now names
+    `agent-tts-omni` with the route that stops it, and offers neither the llama.cpp
+    config flag nor the llama.cpp program. Stopping those frees nothing here.
+    """
+    out = _djev_refusal_output(tmp_path, shim, apps=DJEV_HOLDER)
+    assert DJEV_HOLDER in out, f"the holder line itself must still be printed: {out[-900:]}"
+    assert "agent-tts-omni" in out, f"the real holder must be named: {out[-900:]}"
+    assert "stop agent-tts-omni" in out, f"with the route that stops it: {out[-900:]}"
+    assert "secondary_enabled: false" not in out, (
+        f"a llama.cpp config flag was offered for a vLLM holder: {out[-900:]}")
+    assert "agent-llm-secondary" not in out, (
+        f"the refusal named a program that is not holding the card: {out[-900:]}")
+    # The hand-launched case the fleet also has: an engine supervisorctl does not
+    # own has no unit to stop, and saying so beats sending a reader to `stop` twice.
+    assert "ps -o ppid=,cmd=" in out, f"{out[-900:]}"
+
+
+def test_a_llama_cpp_holder_still_gets_the_either_or(tmp_path, shim_dir, shim):
+    """The class the message was written for keeps every word of it. Classifying
+    the holder must not cost the llama.cpp case its advice: `secondary_enabled:
+    false` and `stop agent-llm-secondary` are the fix when llama.cpp is the tenant,
+    and naming a vLLM unit instead would be the same defect wearing the other hat."""
+    out = _djev_refusal_output(
+        tmp_path, shim, apps="12345, 22000 MiB, /usr/local/bin/llama-server")
+    assert "secondary_enabled: false" in out, out[-900:]
+    assert "stop agent-llm-secondary" in out, out[-900:]
+    assert "agent-tts-omni" not in out, (
+        f"a vLLM-Omni stop route was offered for a llama.cpp holder: {out[-900:]}")
 
 
 def test_djev_still_refuses_an_unreadable_card(tmp_path, shim_dir, shim):

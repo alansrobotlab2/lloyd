@@ -35,7 +35,7 @@ missing has written the drift into the file that is supposed to catch it.
 
 The one definition is `EVAL_BASELINES_DIR` at `app/paths.py:122` —
 `EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"` — and the record is written
-by `main` at `eval/run_eval.py:2686`, into that directory, not beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
+by `main` at `eval/run_eval.py:2716`, into that directory, not beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
 context-rot, compaction-recall and skills-index pins, for instance) so a reader
 knows the *shape*; the directory that answers "what has actually been measured
 lately" is under the data root, and it holds runs from the last few days rather

@@ -2710,7 +2710,7 @@ def unnamed_anchor_ceiling_report(rows: list[tuple[str, dict]]) -> str:
         + "Each anchor above cites a line with no symbol beside it, so the only "
         "verdict that could be reached was \"the line falls inside SOME definition\" "
         "— which is how both of #3580's drifts stayed green. Write the enclosing "
-        "definition's name beside the citation (`main` at `eval/run_eval.py:2686`, "
+        "definition's name beside the citation (`main` at `eval/run_eval.py:2716`, "
         "not the bare span) so that symbol's own span grades it. If you cleared "
         "one, lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — that is what "
         "records the shrink.")
@@ -3240,10 +3240,10 @@ def test_the_named_symbol_rail_reports_an_anchor_the_containment_fallback_decide
 
     The node above pins the shipped rule's silence as its boundary; this is the
     rail that closes it where the corpus opted in. Three synthetic sentences over
-    one real anchor, `eval/run_eval.py:2686` — the baseline write inside `main` —
+    one real anchor, `eval/run_eval.py:2716` — the baseline write inside `main` —
     so the graded line itself never moves and cannot go stale:
 
-      * named:      `main` at `eval/run_eval.py:2686` → the #3047 verdict decided
+      * named:      `main` at `eval/run_eval.py:2716` → the #3047 verdict decided
         it, which is what a rail doc must contain;
       * unnamed:    the bare path cite → nothing to grade against, so the
         containment fallback decided, and #3580's two drifts passed exactly here;
@@ -3256,10 +3256,10 @@ def test_the_named_symbol_rail_reports_an_anchor_the_containment_fallback_decide
         imported here, not assigned) → the sentence looks named and is not, so
         containment decided this one too.
     """
-    named = "the record is written by `main` at `eval/run_eval.py:2686`.\n"
-    unnamed = "it goes to `eval/run_eval.py:2686`, beside the script.\n"
-    mispicked = "`print_failures` at `eval/run_eval.py:2686` writes it.\n"
-    misnamed = "`EVAL_BASELINES_DIR` at `eval/run_eval.py:2686` writes it.\n"
+    named = "the record is written by `main` at `eval/run_eval.py:2716`.\n"
+    unnamed = "it goes to `eval/run_eval.py:2716`, beside the script.\n"
+    mispicked = "`print_failures` at `eval/run_eval.py:2716` writes it.\n"
+    misnamed = "`EVAL_BASELINES_DIR` at `eval/run_eval.py:2716` writes it.\n"
     for text, want in ((named, "named"), (unnamed, "unnamed"),
                        (mispicked, "mispicked"), (misnamed, "unnamed")):
         rows = fallback_decision(text)
@@ -3290,7 +3290,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2686`, `scripts/automod/gate.py:3043`,
+    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3043`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3326,7 +3326,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
         "measurement.md")
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
-    seeded = text.replace("eval/run_eval.py:2686", "eval/run_eval.py:2055")
+    seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
     seeded = seeded.replace("scripts/automod/gate.py:3043", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
@@ -3390,7 +3390,7 @@ def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
     asserts nothing — it would then read as a passing test for as long as the drift
     went unfixed, which is the failure #2795's rot bound was written to end.
     """
-    slug, span = "autonomy-jobs.md", "eval/run_eval.py:2686"
+    slug, span = "autonomy-jobs.md", "eval/run_eval.py:2716"
     seed = (f"\nThe ceiling's negative control cites `{span}` for the baseline "
             "write.\n")
     assert slug in PATH_DOC_SLUGS, f"{slug} is not a doc the ceiling reads"

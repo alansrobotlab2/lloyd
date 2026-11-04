@@ -313,8 +313,14 @@ def test_the_state_url_and_headers_come_from_the_aggregator_module(monkeypatch):
 # `check_unit_file_links` joins the list for #2714: its rows ride the default run under
 # the `deploy` category, so `Overall:` would otherwise count eighteen rows this file never
 # asked for and the one-row arithmetic below would read as a substrate fault.
+# `check_gpu_presence` joins it for #3754, for both of the reasons already recorded: its
+# rows ride the default run (under their own heading), and it is the third check in this
+# file that shells out to `nvidia-smi` — silenced only as a whole, since its readers
+# would otherwise make every node below a claim about this machine's cards. The node that
+# broke is the `Overall:` one, whose `assert "Advisory:" not in text` is a claim about
+# THIS row's grading and was falsified by three live advisory card rows.
 SIBLING_CHECKS = ("check_deployed_copies", "check_ca_trust", "check_unit_enabledness",
-                  "check_gpu_power_limit", "check_unit_file_links")
+                  "check_gpu_power_limit", "check_unit_file_links", "check_gpu_presence")
 
 
 def _drive(module, monkeypatch, capsys, payload, fmt="json", argv_extra=()):
