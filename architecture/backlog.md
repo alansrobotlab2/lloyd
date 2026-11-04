@@ -328,6 +328,33 @@ real without the item that surfaced it (#987, a bench with live Bash, was
 filed as a blocker of a retrieval item). `untriaged` in `board_health`'s
 `live_blockers` should drain to 0. `tests/test_backlog_blockers.py`.
 
+**A blocker's quoted gate line is re-read at the write.** That privilege — a
+confirmed blocker is taken *first* — is paid for by the item's evidence, and
+until #3721 nothing measured it. `#3720` (2026-11-03, `priority: high`, blocker
+of `#3609`) named a round's `gate.json` and quoted seven lines "out of" it;
+`grep -Fc` finds none of them in that file or its sibling `gate.log`, and one
+phrase it put in quotation marks is a string `scripts/automod/gate.py` never
+emitted. Only a triage's refutation kept it out of the implement pool. So a
+**create** carrying `blocker` is now checked by `app/backlog_evidence.py` before
+the dedupe: every inline-code span in a paragraph that names a round id is
+compared, verbatim and again with whitespace collapsed, against **every readable
+file in that round's directory** — not just the path the body cited, because the
+JSON stores `"passed": 22907` while the line a round would copy is only in
+`gate.log`. A span found in none of them is refused with the quote and the paths
+searched, and no board file is written. A miss is read as *unverifiable*, not
+absent, and the write goes through, when the span has an ellipsis in it, when it
+is a bare token (a node id, a path, a sha — no phrasing to compare), when it is a
+command the author wrote (a `Check:` line is never in a report), when the round
+directory has been swept, and whenever the item is not a blocker. Ledger paths are left alone for the same sibling reason: `promotions.jsonl`
+has no rendered counterpart to catch an honestly-quoted line. The prompt rule this
+enforces was already there (`workers/sources/autocode.py`, "copy any gate or
+ledger line you quote out of that artifact re-read from disk … and name the path
+you copied from"), which is why the refusal tells the round to re-read and
+re-quote rather than teaching it a new one. Refusing the file rather than
+stamping it is the standing default pending a severity ruling off observed
+refusals (the class fired once in 740 triages, 2026-10-21…11-04).
+`tests/test_backlog_blocker_evidence.py`.
+
 `triage_pool` returns the held count alongside the candidates, so a pass with
 nothing to do can say *which* nothing it means. "Every open backlog item has
 been triaged" was true, and misleading, on a board of 122 where 106 were this

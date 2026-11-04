@@ -17,6 +17,7 @@ from mcp.types import Tool
 from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
 from app import backlog_write as BW
+from app.backlog_evidence import blocker_quote_refusal
 from app.atomic_io import commit_lock
 from app.backlog_boards import BOARDS, UnknownBoard, check_board
 from app.backlog_move import now_stamp
@@ -380,6 +381,20 @@ def _handle_write(args: dict) -> str:
         if not task.get("_yaml_broken"):
             task.setdefault("segment", "backlog")
     else:
+        # A blocker is taken before the rest of the implement pool once triage
+        # confirms it, so its quoted gate evidence is the one claim on this path
+        # that used to go unmeasured: `#3720` named a round's `gate.json`, quoted
+        # seven lines "out of" it that appear nowhere in that file or its
+        # `gate.log`, and reached `draft` at `priority: high` with nothing said.
+        # Refused here — before the dedupe, so a forged quote cannot even be
+        # merged into a real item — and nowhere else: a miss that is not evidence
+        # (a swept round dir, an elided quote, no `blocker` tag) files as it did
+        # before. `app/backlog_evidence.py` holds the judgement and its reasons.
+        refused = blocker_quote_refusal(args.get("name"), args.get("description"),
+                                        args.get("tags"))
+        if refused:
+            logger.warning("backlog_write_task refused a blocker: %.400s", refused)
+            return json.dumps({"success": False, "error": refused})
         # Is this finding already on the board? Advisory for a human's write;
         # for the loop's own (`spawned-by-*`) writes a strong match is merged
         # into the existing item rather than filed beside it. Never blocks a

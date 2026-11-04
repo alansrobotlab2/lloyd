@@ -44,6 +44,18 @@ SPAWN_TAG_PREFIX = "spawned-by-"
 NEEDS_HUMAN_TAG = "needs-human"
 
 
+# The tag that marks the one finding an implement round may file of its own, and
+# the tag that buys that item a take before the rest of the implement pool: a
+# confirmed blocker skips the depth gate (`scripts/automod/backlog.py::live_blockers`,
+# `workers/sources/autotriage.py:540-542`). One definition here for the same
+# reason as the prefix above — the writer is the MCP server
+# (`agent_mcp/backlog.py`), the reader is the loop (`scripts/automod/backlog.py`,
+# whose liveness, expiry and scorecard gauges all test it), and since #3721 the
+# write-time evidence guard is a third reader that must not spell the word
+# privately.
+BLOCKER_TAG = "blocker"
+
+
 # What `tags` a *newly created* task gets when its caller named none (#1804).
 # Both live writers — `agent_mcp/backlog.py::_handle_write` and the
 # `POST /api/backlog/task-create` route — fall back to this one tuple rather

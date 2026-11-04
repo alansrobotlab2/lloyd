@@ -62,7 +62,7 @@ from app.backlog_status import (
     is_off_vocabulary,
 )
 from app.backlog_move import record_status_move
-from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, normalize_tags
+from app.backlog_tags import BLOCKER_TAG, NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, normalize_tags
 # Standard-library-only by design (see its docstring): this module is the light
 # one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
 # `app.backlog_write` and `app.atomic_io` hold to the same rule (#3036).
@@ -7121,7 +7121,13 @@ def apply_promotion_ruling(item_id: int, ruling: dict, why: str, *, ledger: Path
 # again — quarantined and bound by expiry — rather than closed: the finding
 # may be real without the item that surfaced it (#987, a bench that gave a
 # destructive prompt live Bash, was filed as a blocker of a retrieval item).
-BLOCKER_TAG = "blocker"
+#
+# The tag itself is `app.backlog_tags.BLOCKER_TAG`, imported above on ONE line:
+# the MCP writer needs the same string to decide whether a create's quoted
+# evidence reproduces, and #1160 is the record of what two spellings did. The
+# import must not be wrapped: a line added above here moves `WITNESS_MAX_BYTES`
+# off the line number `tests/test_skill_stranded_ruled_sets.py` makes a skill
+# section cite, and the gate reads that as a new failure (#3721).
 _BLOCKS_RE = re.compile(r"^\W*blocks\s+#(\d+)", re.IGNORECASE)
 
 
