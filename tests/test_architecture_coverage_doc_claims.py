@@ -4220,6 +4220,12 @@ def test_an_ignored_citation_is_exempt_and_a_fictional_one_is_not():
 #: tolerate it, and it is not a doc at all.
 RUNNER_REL = "eval/run_compaction_recall_eval.py"
 
+#: Where the runner is read from. `RUNNER_REL` does double duty — it is the string the
+#: doc cites and the path the dict is read at — so the two are split: a control that wants
+#: to point the READ somewhere else has to patch this and leave the citation alone, or it
+#: silently changes what the section is required to quote (#3639 clause 4).
+RUNNER_PATH = ROOT / RUNNER_REL
+
 #: The config-table cell #1787 rewrote, kept verbatim from base `d00f56d0` so the
 #: node that forbids it is known to match something.
 OLD_CONTEXT_WINDOW_ROW = (
@@ -4294,10 +4300,17 @@ def recall_section(text: str) -> tuple[str, str]:
 def runner_presets() -> list[str]:
     """The keys of the runner's `ARMS` dict, read by executing the module: what
     `--arms` actually accepts, so the doc is checked against the parser and not
-    against a transcription of the list in prose."""
+    against a transcription of the list in prose.
+
+    `RUNNER_PATH` is read at CALL time, which is the only reason a control can aim this at
+    a scratch copy of the runner and have the node above count a dict it did not write
+    (#3639 clause 4). Anything bound at import — a default argument, or a closure over the
+    path — would make that patch a no-op and the control would grade the real runner while
+    reporting that it graded the copy, which is the worse failure: it stays green.
+    """
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "_arms_probe", ROOT / RUNNER_REL)
+        "_arms_probe", RUNNER_PATH)
     module = importlib.util.module_from_spec(spec)
     # Registered before exec: the module builds `@dataclass` types at import and
     # `dataclasses` resolves the declaring module through `sys.modules`. Without
@@ -4352,6 +4365,60 @@ def preset_set_difference(rows, presets) -> tuple[set[str], set[str]]:
     """
     doc, declared = set(rows), set(presets)
     return doc - declared, declared - doc
+
+
+#: The section's preset count, anchored on its verb. Unanchored, `r'\b(\d+|[a-z]+)
+#: presets\b'` matches THREE places in this one window — `configuration presets` in the
+#: disclosure two paragraphs up, `holds sixteen presets`, and `the other two summary
+#: presets` in the baseline paragraph below — and `_word_to_int('configuration')` dies
+#: with "cannot read a row count out of 'configuration'", which reads to whoever finds it
+#: as a broken count-node rather than as what it is: a pattern that matched the wrong
+#: sentence (#3639's triage trap on its own clause 1). `holds` is the verb the sentence
+#: uses and the one no other sentence in the window uses with `presets`.
+PRESET_COUNT_PHRASE = re.compile(r"\bholds (\d+|[a-z]+) presets\b")
+
+
+def stated_preset_count(flat_window: str) -> str:
+    """The count-word §Arms that are flag values states for the runner's `ARMS` dict.
+
+    An `assert` on both shapes of absence, never a skip or an early return: a rewritten
+    sentence that drops "holds sixteen presets" would otherwise take the comparison with
+    it and leave the section free to state any number in any other form (#3639 clause 2 —
+    the shape `test_the_flag_value_section_states_the_declarer_count_the_tree_has` uses for
+    the declarer count one paragraph above, where the same silence is what let "six"
+    survive into #3582's false premise).
+
+    `flat_window` is the caller's flattened section, not read here: the scratch-copy
+    control passes text too, and a helper that reached for the doc itself could not be
+    pointed at a sentence that is not on disk.
+    """
+    hits = PRESET_COUNT_PHRASE.findall(flat_window)
+    assert hits, (
+        "the section no longer states its preset count in the form 'holds <count> "
+        "presets', so there is nothing here to compare with the runner's `ARMS` dict: the "
+        "count is transcribed prose again, which is what this node exists to refuse")
+    assert len(hits) == 1, (
+        f"{len(hits)} sentences in the window match 'holds <count> presets' ({hits}); the "
+        "count-word has to have exactly one home or the node is comparing whichever one "
+        "the regex found first")
+    return hits[0]
+
+
+def check_preset_count(word: str, derived: int, source: str = RUNNER_REL) -> None:
+    """Refuse unless the section's count-word reads as `derived`, the preset count read
+    off the runner.
+
+    One message for the live comparison and for the scratch-copy control that proves it
+    can bite, because a control that formats its own complaint names numbers its own way
+    and the thing under test is whether the real node's message would tell a reader which
+    of the two counts moved (#3639 clause 4: the failure names BOTH).
+    """
+    stated = _word_to_int(word)
+    assert stated == derived, (
+        f"the section states that the dict holds {word!r} presets ({stated}) while "
+        f"{source}'s `ARMS` dict has {derived}. The count-word is prose and the dict is "
+        "the fact: either the sentence needs the new number or the preset was never meant "
+        "to be reachable by `--arms`.")
 
 
 #: The two roots §Arms that are flag values says the `--arms` flag is declared
@@ -4798,6 +4865,153 @@ def test_the_flag_value_section_states_the_declarer_count_the_tree_has():
                                   bumped).group(1)) != len(declared), (
         "a declarer count one off the tree's own count still reads as agreement, so "
         "the assertion above is not comparing the sentence to the tree")
+
+
+def test_the_flag_value_section_states_the_preset_count_the_runner_has():
+    """#3639: "Its `ARMS` dict holds sixteen presets" is a fact about the runner, so the
+    runner decides here whether the sentence is true.
+
+    The number sits one paragraph below the declarer count #3587 clause 3 made derived, and
+    clause 3's list did not name it, so this sentence is the same failure mode left in
+    place: `measurement.md` carried "six when this section was written" for nine
+    declarers, and it was #3582 that noticed the drift. Nothing here is drift today — the
+    doc states `sixteen` and `runner_presets()` returns 16 keys and `preset_rows()` parses
+    16 rows — which is exactly when a count-word stops being a fact and starts being a
+    transcription nobody will re-check.
+
+    Anchored on `holds`, and the anchoring is the whole design (see `PRESET_COUNT_PHRASE`):
+    the window carries two other "<word> presets" phrases, so an unanchored pattern reads
+    "configuration" and dies in `_word_to_int` for a reason that has nothing to do with a
+    count.
+    """
+    flat = _flat(recall_section(_text("measurement.md"))[1])
+    word = stated_preset_count(flat)                # the one-match guard, clause 1
+    derived = len(runner_presets())
+    check_preset_count(word, derived)
+
+    # Clause 3's arithmetic, stated where the comparison is stated: the off-by-one the
+    # control seeds has to be a number this node can tell apart by exactly one.
+    # `_ROW_COUNT_WORDS` is `_bump_count_word`'s own table read backwards, so the seed is a
+    # word this file commits to reading, and going DOWN is forced — both word tables stop at
+    # 16, which is why `_bump_count_word('sixteen')` raises "no word for 17" instead of
+    # seeding upward. The consequence at 17 presets belongs in this file's findings rather
+    # than in this round: widening `_word_to_int`'s map and `_ROW_COUNT_WORDS` together
+    # touches every other count-word node in the file, and until then the failure mode at 17
+    # is this node going red naming `seventeen`, which is loud rather than silent.
+    assert derived - 1 in _ROW_COUNT_WORDS, (
+        f"{derived} presets, so the one-below seed is {derived - 1} and this file has no "
+        "word for it — the off-by-one control cannot run until that number is in "
+        "`_ROW_COUNT_WORDS`")
+    lower = _ROW_COUNT_WORDS[derived - 1]
+    assert _word_to_int(lower) == derived - 1, (
+        f"a seed of {lower!r} reads back as {_word_to_int(lower)}, not the one-preset "
+        f"off-by-one ({derived - 1}) the control below claims to seed")
+
+
+def test_the_preset_count_control_refuses_a_dropped_word_a_seed_and_a_new_preset(
+        tmp_path, monkeypatch):
+    """#3639 clauses 2-4: each of the three ways this count-word can stop meaning anything
+    turns the graded NODE red, not merely the helper under it.
+
+    The three are different failures and a node that caught only one would leave the other
+    two silent: a REWRITTEN sentence deletes the claim while the preset table stays green;
+    an OFF-BY-ONE doc is the transcription drift the count-word class is named for; and a
+    NEW PRESET is the tree moving under the doc, which is the one direction no doc-side
+    check can see. Each case below swaps one input and calls
+    `test_the_flag_value_section_states_the_preset_count_the_runner_has` itself, so what is
+    asserted is that node's failure and its message — the injection precedent at
+    `test_the_preset_check_names_a_hyphenated_row_that_matches_no_preset` re-runs the
+    comparison for the same reason, and a control that re-implemented the comparison would
+    be the drift #3638 note 3 is about.
+    """
+    mod = sys.modules[__name__]
+    live_text = _text("measurement.md")
+    flat = _flat(recall_section(live_text)[1])
+    word = stated_preset_count(flat)
+    derived = len(runner_presets())
+
+    def run_the_node(doc_text: str | None = None,
+                     runner_path: Path | str | None = None):
+        """Call the graded node with one input swapped — the doc's sentence, or the path
+        `runner_presets` reads. Nothing is stubbed: the node still parses the doc and still
+        executes a runner module to get its count, so a green run here would mean the node
+        genuinely compares what it claims to.
+
+        A `context()` and not the fixture's own patch bag: three cases run in sequence, and
+        a patch that outlived its case would leave the next comparing a rewritten sentence
+        against a scratch dict — a fourth failure nobody wrote, and worse, the final live
+        run below would inherit whichever swap came last and report the node red for a
+        reason this control caused.
+        """
+        with monkeypatch.context() as m:
+            if doc_text is not None:
+                m.setattr(mod, "_text", lambda slug: doc_text)
+            if runner_path is not None:
+                # `RUNNER_PATH` and not `RUNNER_REL`: the node also asserts that the doc
+                # cites the runner by that rel-path, so a control patching the rel-path
+                # would trip that assertion and report a failure this control invented.
+                m.setattr(mod, "RUNNER_PATH", Path(runner_path))
+            mod.test_the_flag_value_section_states_the_preset_count_the_runner_has()
+
+    # Baseline first: with nothing swapped, the node is green. Without this line every
+    # `pytest.raises` below would also pass against a node that always fails.
+    run_the_node()
+
+    # Clause 2: the phrase gone. A rewrite to "is configurable" leaves the section with no
+    # count, so the node must refuse rather than shrug — an assert, and the message names
+    # the missing form.
+    rewritten = live_text.replace(f"holds {word} presets", "is configurable", 1)
+    assert rewritten != live_text, (
+        "the rewrite did not take, so the assertion below is vacuous")
+    with pytest.raises(AssertionError) as gone:
+        run_the_node(doc_text=rewritten)
+    assert "no longer states" in str(gone.value), (
+        f"the missing count-word failed without naming what went missing: {gone.value}")
+
+    # Clause 3: a seeded off-by-one, DOWNWARD. `_bump_count_word` cannot seed this
+    # particular word: both word tables in this file stop at 16, so the upward seed dies
+    # with "no word for 17" before any comparison runs. `fifteen` is in both tables,
+    # parses, and differs from the tree — and the seed's own take is asserted, because a
+    # replace that misses would leave the node green and the control blind.
+    lower = _ROW_COUNT_WORDS[_word_to_int(word) - 1]
+    seeded = live_text.replace(f"holds {word} presets", f"holds {lower} presets", 1)
+    assert seeded != live_text, (
+        f"the seed {lower!r} did not replace {word!r}, so the off-by-one below proves "
+        "nothing")
+    with pytest.raises(AssertionError) as off:
+        run_the_node(doc_text=seeded)
+    msg = str(off.value)
+    assert lower in msg and str(derived) in msg, (
+        f"the off-by-one failure names neither the doc's word nor the tree's count: {msg}")
+
+    # Clause 4: the tree moves under the doc. One more key in a scratch copy of the
+    # runner, and the node is handed the copy's path by patching `RUNNER_PATH`, so the
+    # node executes a real module and counts a real dict rather than being told a number. A
+    # count typed here would be the very transcription this node refuses. The injected name
+    # is the one #3587 chose for the other direction of this same table.
+    extra = "shadow-gold-sample"
+    assert extra not in runner_presets(), (
+        f"{extra} is now a real preset, so injecting it no longer changes the count and "
+        "this control has stopped testing anything")
+    src = (ROOT / RUNNER_REL).read_text(encoding="utf-8")
+    scratch = tmp_path / "runner_copy.py"
+    scratch.write_text(src + f'\nARMS["{extra}"] = dict(ARMS["none"])\n', encoding="utf-8")
+    with monkeypatch.context() as m:
+        m.setattr(mod, "RUNNER_PATH", scratch)
+        scratch_presets = runner_presets()
+    assert len(scratch_presets) == derived + 1 and extra in scratch_presets, (
+        f"the scratch dict has {len(scratch_presets)} keys, not the live {derived} plus "
+        "one, so the run below is not a new preset")
+    with pytest.raises(AssertionError) as moved:
+        run_the_node(runner_path=scratch)
+    both = str(moved.value)
+    assert word in both and str(derived + 1) in both, (
+        "the moved-under failure names neither the doc's stated count nor the derived one, "
+        f"so a reader cannot tell which side moved: {both}")
+    # And the live pair still agrees after all three swaps are unwound: monkeypatch
+    # unwinds at teardown, but a node left reading a scratch dict would be worse than one
+    # that never ran, so say it here rather than find out in the next test.
+    run_the_node()
 
 
 def test_the_flag_value_section_names_the_egress_pair_by_its_declared_values():
