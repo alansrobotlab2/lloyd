@@ -559,3 +559,123 @@ def test_every_row_on_the_tracked_corpus_still_falls_back_to_the_date_bucket():
         "day split per fire — re-verify every figure this file pins before accepting")
     labels = [w["window"] for w in P.per_window(rows)]
     assert labels == sorted(labels) and all(" " not in lab for lab in labels), labels
+
+
+# ── #3747: the docstring's code-side claim, re-derived from git ───────────
+#
+# This module's own docstring used to publish `git diff bb99f4e0 HEAD --
+# app/compaction.py app/compaction_state.py` as EMPTY, "last touch `53a7fd11`". At
+# 2026-11-04 that command prints 40 lines: `1f6bf5c7` (#3641's
+# `microcompact_reduction_sidecar` flip) touched `app/compaction.py` on 2026-10-31, so
+# byte-identity holds only to `ec468e3f`. A reader who re-ran the command got a true
+# result off a false sentence and concluded the item it came from was wrong, which is the
+# failure #3200's "prove it with a command" guard is supposed to prevent rather than
+# cause. The nodes below therefore do NOT retype 40, `1f6bf5c7` or `ec468e3f` — they run
+# the same commands and demand the docstring match whatever git answers, so the sentence
+# can no longer outlive the fact.
+
+import re as _re
+import subprocess as _sp
+
+_COMPACTION_PATHS = ("app/compaction.py", "app/compaction_state.py")
+_IDENTITY_FLOOR = "ec468e3f"       # last commit the two modules were byte-identical at
+_FLIP_COMMIT = "1f6bf5c7"          # the one commit after it, and the claim it must be keyed to
+_DIFF_BASE = "bb99f4e0"            # the base the docstring's command names
+
+
+def _git(*args: str) -> str:
+    """One git call in THIS tree, at whatever HEAD the test suite is running on."""
+    return _sp.run(["git", "-C", str(ROOT), *args], capture_output=True,
+                   text=True, check=True).stdout
+
+
+def _diff_hunks() -> list[str]:
+    """The changed lines of the docstring's own command, hunks only."""
+    out = _git("diff", _DIFF_BASE, "HEAD", "--", *_COMPACTION_PATHS)
+    return [ln for ln in out.splitlines()
+            if (ln.startswith("+") or ln.startswith("-"))
+            and not ln.startswith(("+++", "---"))]
+
+
+def test_the_docstring_no_longer_claims_an_empty_diff():
+    """The falsified sentence is gone, in every spelling it appeared under."""
+    doc = P.__doc__ or ""
+    banned = ("is empty, last touch", "are byte-identical across all five windows")
+    hits = [b for b in banned if b in doc]
+    assert not hits, (
+        f"the probe republished a code-side claim that git contradicts: {hits}. "
+        "`git diff bb99f4e0 HEAD -- app/compaction.py app/compaction_state.py` is the "
+        "command; run it and re-key the sentence to what it prints")
+
+
+def test_the_docstring_s_keys_to_the_commits_git_names():
+    """Every shas the sentence cites are the shas `git log`/`git diff` answer with.
+
+    Not "the docstring mentions 1f6bf5c7" — the node asks git which commits after
+    `ec468e3f` touched either module, and requires that exact set to be what the sentence
+    leans on. A commit added or reverted means the sentence is stale again, and this is the
+    test that says so.
+    """
+    doc = P.__doc__ or ""
+    commits = _git("log", "--format=%h", f"{_IDENTITY_FLOOR}..HEAD",
+                   "--", *_COMPACTION_PATHS).split()
+    assert commits == [_FLIP_COMMIT], (
+        f"git now names {commits} as the commits after {_IDENTITY_FLOOR} that touched "
+        f"{_COMPACTION_PATHS}; the docstring is keyed to {_FLIP_COMMIT} and has to be "
+        "re-keyed to the new set")
+    assert _FLIP_COMMIT in doc and _IDENTITY_FLOOR in doc, (
+        "the re-keyed sentence lost the commits it is keyed to")
+    flip = _git("log", "-1", "--format=%aI %s", _FLIP_COMMIT)
+    assert "2026-10-31" in flip and "microcompact_reduction_sidecar" in flip, flip
+    assert "2026-10-31" in doc, "the sentence lost the date the flip landed on"
+
+
+def test_the_diff_is_comment_only_which_is_why_the_five_windows_still_share_a_build():
+    """The whole force of the claim: a 40-line diff that changes no behaviour.
+
+    The docstring says the only post-`ec468e3f` edit is comment-only, and that is the
+    sentence standing between "the code moved" and "#3200's guard is still unsatisfied".
+    So the node reads the changed lines themselves: every one must be a comment or blank.
+    One non-comment line would mean the emitting code DID change inside the cited windows,
+    which retires the elimination argument on #3419 entry 2 and this whole measurement.
+    """
+    changed = _diff_hunks()
+    assert changed, "no diff at all: the re-keyed 40-line claim needs re-checking too"
+    non_comment = [ln for ln in changed
+                   if ln[1:].strip() and not ln[1:].strip().startswith("#")]
+    assert not non_comment, (
+        f"{len(non_comment)} non-comment line(s) in the diff — the code path that "
+        f"produced the cited windows is no longer unchanged: {non_comment[:4]}")
+    n_add = sum(1 for ln in changed if ln.startswith("+"))
+    n_del = sum(1 for ln in changed if ln.startswith("-"))
+    doc = P.__doc__ or ""
+    assert f"+{n_add}/-{n_del}" in doc, (
+        f"git says +{n_add}/-{n_del} but the docstring does not carry those numbers")
+    total = len(_git("diff", _DIFF_BASE, "HEAD", "--", *_COMPACTION_PATHS).splitlines())
+    assert f"| wc -l` prints **{total}**" in doc, (
+        f"the command now prints {total} lines and the sentence says otherwise")
+
+
+def test_the_repetition_run_the_docstring_points_at_agrees_with_its_artifact():
+    """The pointer at the end of the sentence has to resolve to the measurement it quotes.
+
+    The docstring cites `eval/summary_length_repetition_run.py` and quotes n, min, median
+    and max off its artifact. Both halves are checked: the module exists with the two
+    verdict labels, and the numbers in the prose equal the committed artifact's — so the
+    probe cannot keep quoting a superseded run once a newer one is on the tree.
+    """
+    doc = P.__doc__ or ""
+    sys.path.insert(0, str(ROOT / "eval"))
+    import summary_length_repetition_run as REP
+
+    art = REP.read_artifact()
+    assert art["verdict"] in (REP.VERDICT_REACHABLE, REP.VERDICT_NOT_REACHABLE)
+    assert "eval/summary_length_repetition_run.py" in doc
+    assert art["verdict"] in doc, "the probe quotes a different verdict than the artifact"
+    d = art["distribution"]
+    for fig in (f"n={d['n']}", f"min {d['min']}", f"median {d['median']}",
+                f"max {d['max']}"):
+        assert fig in doc, f"the probe quotes a measurement missing {fig}: {d}"
+    m = _re.search(r"n=(\d+), min (\d+) / median (\d+) / max (\d+)", doc)
+    assert m and [int(g) for g in m.groups()] == [d["n"], d["min"], d["median"], d["max"]], (
+        f"the quoted quadruple does not match the artifact {d}")

@@ -12156,3 +12156,84 @@ def test_the_two_denominators_are_labelled_on_both_surfaces_that_publish_them():
     seg = lab[lab.index("34/60"):lab.index("34/60") + 300]
     assert "35/72" in seg and "pool" in seg, (
         f"the labelling paragraph lost the 11-02 own/pooled pair: {seg!r}")
+
+
+# ── #3747 — the repetition measurement beside the two broken control rows ─
+#
+# The page's persistence table carries `16/60` and `27/60 — **control bound broken**` and
+# used to carry no attribution beside either: the nearest prose (#3419's keep ruling) says
+# only that the ruling rests on the three healthy windows. #3747 put a measurement there —
+# the dated output of `eval/summary_length_repetition_run.py`, folded 24 times over one
+# committed fixture at shipped decoding with the sidecar off. The node below does not
+# retype that run's numbers; it reads the committed artifact and requires the page to
+# match it, so a re-run that moved the paragraph without moving the artifact, or the other
+# way round, is a red test rather than two documents that disagree.
+
+def _repetition_block_and_artifact():
+    """(the page's measurement paragraph, the artifact it must match)."""
+    sys.path.insert(0, str(EVAL))
+    import summary_length_repetition_run as REP
+
+    art = REP.read_artifact()
+    page = (ARCH / "context-window.md").read_text(encoding="utf-8")
+    flag_row = page.index("16/60 — **control bound broken**")
+    # Bounded on BOTH sides: from the broken-control row down to the paragraph that
+    # follows the table. Searching the whole page would let a number cited 400 lines
+    # away satisfy the check, and "the measurement sits beside the rows it explains" is
+    # half of what this clause asks for.
+    after = page[flag_row:flag_row + 6000]
+    block = after[:after.index("\nRead the denominators")]
+    return block, art
+
+
+def test_the_broken_control_rows_now_carry_the_dated_measurement():
+    """n, min/median/max and the verdict label, on the page, equal to the artifact's."""
+    import re
+
+    block, art = _repetition_block_and_artifact()
+    d = art["distribution"]
+    assert art["measured_at"][:10] in block, "the page's measurement carries no date"
+    assert "2026-11-04" in block and art["measured_at"][:10] == "2026-11-04"
+    m = re.search(r"n=(\d+), min (\d+) / median (\d+) / max (\d+)", block)
+    assert m, f"the page has no n/min/median/max quadruple: {block[:400]!r}"
+    assert [int(g) for g in m.groups()] == [d["n"], d["min"], d["median"], d["max"]], (
+        f"the page quotes {m.groups()} but the committed artifact measured "
+        f"{(d['n'], d['min'], d['median'], d['max'])}: re-run the runner or fix the page, "
+        "but do not leave the two disagreeing")
+    assert art["verdict"] in block, "the page does not name which label the run returned"
+    assert d["below_bound"] == int(re.search(
+        r"(\d+) of \d+ draws under", block).group(1)), (
+        "the page's count of draws under the bound is not the artifact's")
+    assert str(d["at_or_above_lowest_healthy_mean"]) == re.search(
+        r"(\d+) of \d+\n?at/above", block).group(1), (
+        "the page's count of draws reaching the healthy band is not the artifact's")
+    for fig, live in ((2997, art["corpus_bands"]["healthy_means"]),
+                      (2669, art["corpus_bands"]["flagged_means"])):
+        assert fig in live, f"{fig} is no longer a band mean; the page's comparison is stale"
+
+
+def test_the_page_keeps_the_two_rulings_that_bound_that_measurement():
+    """Non-poolability of 2026-11-02, and 2700 as a window-mean predictor only.
+
+    Both are rulings the run had to inherit rather than re-derive (#3419's owed entry at
+    2026-11-03T23:47:40Z, and the probe's own control rows at 2762 and 3027 chars). They are
+    the sentences that stop a later reader pooling a knob-ON fire with this knob-OFF
+    distribution, or treating 2700 as a per-row tripwire, so the node demands each by the
+    evidence it names — not by the phrase.
+    """
+    block, _ = _repetition_block_and_artifact()
+    assert "not poolable with the five" in block, (
+        "the page lost the 2026-11-03 ruling that the knob-ON window is not poolable")
+    assert "2026-11-03T23:47:40Z" in block, "the ruling is not dated to its owed entry"
+    assert "1f6bf5c7" in block and "microcompact_reduction_sidecar" in block, (
+        "the ruling names no flip commit, so it cannot be re-checked")
+    assert "knob-**on**" in block and "knob-**off**" in block, (
+        "the two regimes are not both named, which is what makes the numbers comparable")
+    assert "window-mean predictor and never a per-row tripwire" in block
+    assert "3027" in block and "2762" in block, (
+        "the two at/above-the-bound counterexamples are not cited, so the caveat is bare")
+    # And the limit the run itself states: reachability, not cause.
+    assert "no cause" in block.lower() and "assigns no cause" in block.lower(), (
+        "the page does not say what the measurement cannot decide")
+    assert "eval/summary_length_repetition_run.py" in block, (
+        "the page names no command to re-measure by — the whole point of #3200's guard")

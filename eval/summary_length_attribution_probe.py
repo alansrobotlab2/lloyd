@@ -63,13 +63,26 @@ windows the probe prints 14 zeros below and 1 at/above, `r = 0.809`. So length p
 failure window by window (means 2997/3066/3056 on the healthy three, 2669/2746/2694 on the
 three that lost markers) without separating it row by row, and #3419's step (2) ruling now
 has a counterexample to weigh. What leaves the ruling open is the
-summariser prompt path against engine decoding: `app/compaction.py` and
-`app/compaction_state.py` are byte-identical across all five windows (`git diff
-bb99f4e0 HEAD -- app/compaction.py app/compaction_state.py` is empty, last touch
-`53a7fd11`, 2026-10-14) and `folds=1` with `arrival_rows`/`covered_rows` ~= 2 and
-`summary_model='primary'` in every window, so nothing on the code side differs — the
-ruling between prompt path and decoding needs a live A/B over >=10 fresh control rows,
-and that is owed on the item, not settled here.
+summariser prompt path against engine decoding, and what the code side can be shown is
+narrower than "identical". As measured at `6ecb948c` on 2026-11-04, `git diff bb99f4e0 HEAD
+-- app/compaction.py app/compaction_state.py | wc -l` prints **40**, not 0: `--numstat` is
++9/-6 in `app/compaction.py`, `1f6bf5c7` (#3641's `microcompact_reduction_sidecar` flip,
+2026-10-31T14:44:26Z) is the only commit after `ec468e3f` that touches either file, and
+every changed line of it is a comment — so behaviour across the cited five windows is
+unchanged and `app/compaction_state.py` is untouched, but BYTE-identity holds only to
+`ec468e3f`, and a reader who ran the command above and got 40 lines was reading a true
+result off a false sentence. `folds=1` with `arrival_rows`/`covered_rows` ~= 2 and
+`summary_model='primary'` in every window, so nothing on the code side differs *across them*
+either. The live run that question needed happened on 2026-11-04:
+`eval/summary_length_repetition_run.py` folds one committed fixture 24 times through the
+shipped summariser at shipped decoding with `microcompact_sidecar=False` and publishes
+n=24, min 2241 / median 2678 / max 3390 under the single label that protocol can carry
+(`low_mode_reachable` — the ~2700 low mode is reachable from a fixed input on this build).
+It varies neither the prompt nor the decoding, so it does not separate prompt path from
+decoding either, and that separation stays owed on #3419, not settled here.
+`tests/test_summary_length_attribution_probe.py` re-derives every number in this paragraph
+from git and from the committed artifact, so a commit that touches either module fails that
+test and has to re-key this sentence rather than leave it lying.
 
     .venvs/lloyd/bin/python eval/summary_length_attribution_probe.py
     LLOYD_CANARY_ROWS=/tmp/win/rows.jsonl …   # adds a scratch window's rows to the read

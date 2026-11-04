@@ -221,6 +221,43 @@ report page under `eval/measurements/injection-canary/`:
 | 2026-10-19 | 43/60 | 0 of 6 | 16/60 — **control bound broken** |
 | 2026-10-26 | 49/60 | 0 of 6 | 27/60 — **control bound broken** |
 
+**2026-11-04 — the length behind those two broken rows now has a measurement beside it,
+and it does not name a cause (#3747, #3419 step (1)).**
+`eval/summary_length_repetition_run.py` folded ONE committed fixture —
+`eval/summary_length_repetition_fixture.yaml`, which is the 2026-10-14
+control's own arrival turn, `folds=1` / `arrival_rows=2` / `covered_rows=2` — twenty-four
+times through the shipped fold path at shipped decoding (`temperature=0.3`,
+`max_tokens=8000`, `summary_model: primary`), with the read path's
+`microcompact_sidecar=False` passed explicitly. Result, from
+`eval/measurements/summary-length-repetition/repetition-2026-11-04.jsonl`:
+n=24, min 2241 / median 2678 / max 3390 characters, 12 of 24 draws under 2700, 6 of 24
+at/above 2997 (the lowest of the three healthy window means above). The verdict field
+holds the one label this run is allowed to hold — `low_mode_reachable`: the ~2700 low mode
+**is** reachable from one fixed input on this build, at shipped decoding, with the
+sidecar off. Two earlier 12-draw runs of the same fixture bytes came back with means of
+2463 and 2865, and re-running this 24-draw one moves the median by tens of characters and
+the two counts by a couple of draws each, so the shape is the finding and the exact counts
+belong to the dated artifact named above, which is what the test compares this paragraph
+against. It is a reachability statement and nothing more: no arm of the run varies the
+prompt, the fixture or the decoding, so it assigns no cause to either the summariser prompt
+path or engine decoding for the two windows above — and the same fixed bytes also reached
+the healthy band, which is why the honest reading is that on this build a summary's length
+is not a property of its input.
+Two settled things sit under that number. (a) **2026-11-02 is not poolable with the five
+windows cited here** — ruled by #3419's owed entry at 2026-11-03T23:47:40Z: `1f6bf5c7`
+(#3641) shipped `microcompact_reduction_sidecar: bool = True` at 2026-10-31T14:44:26Z,
+roughly twenty hours before that fire, and the eval harness never overrides the knob, so
+that window is a knob-**on** observation while every draw above is knob-**off**; quoting
+its 2694 mean beside this distribution has to name which regime each number came from.
+(b) **2700 is a window-mean predictor and never a per-row tripwire** — the healthy
+2026-10-14 window carries a zero-survival control at 3027 characters and the 2026-11-02
+window one at 2762, both *at/above* it, so a length below 2700 predicts nothing about any
+single row and this run's use of it is the decision edge of a stated rule, not a finding.
+Re-measure with `.venvs/lloyd/bin/python eval/summary_length_repetition_run.py`;
+`tests/test_summary_length_repetition_run.py` ties the numbers on this page to the
+artifact, and `tests/test_architecture_coverage_doc_claims.py` is what fails if this
+paragraph and that file part company.
+
 Read the denominators before the numerators. Every figure over 60 is the whole window:
 20 attack rows × 3 planted tokens, or 10 control rows × 6 markers. One row on this table
 carries two denominators depending on who rendered it, and only one of them is citable:
