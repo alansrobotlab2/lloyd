@@ -4825,12 +4825,15 @@ def test_the_committed_3076_upper_bound_witness_is_the_bytes_its_provenance_reco
 #: over `eval/`, a directory this diff edits.
 STALE_COLLECTION_COUNT = "15" + " collections"
 
-#: The last commit that changed anything executable in `eval/run_eval.py`
-#: (`eval: publish and difference-test one retrieval rate per entity leg (#2621)`,
-#: 2026-10-12). A comment-only edit leaves every non-comment line exactly where that
-#: sha left them; a code change moves this anchor deliberately, in the shape
-#: `NON_COMMENT_SURFACE_ANCHOR` already takes in `tests/test_automod_code_rules.py`.
-RUN_EVAL_CODE_ANCHOR = "7bf6db35"
+#: The last commit that changed `eval/run_eval.py`'s executable surface as `_executable`
+#: in the re-stamp node below defines it — every line whose stripped form is not a `#`
+#: comment, which INCLUDES a docstring line. `63d46756` (#3505) is a prose commit and the
+#: anchor anyway for exactly that reason: it re-dated `indexed_paths`' cost figure and
+#: touched nothing else, and a sentence dated inside a docstring moves this projection by
+#: itself. #3166's `c2a57f9b` left the anchor at `7bf6db35` untouched because its edit sat
+#: in the `#:` comment block above the `def`. A code change moves it deliberately, in the
+#: shape `NON_COMMENT_SURFACE_ANCHOR` already takes in `tests/test_automod_code_rules.py`.
+RUN_EVAL_CODE_ANCHOR = "63d46756"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
@@ -5006,7 +5009,10 @@ def test_the_re_stamp_moved_no_executable_line_of_the_eval_harness():
     bodies and those are prose too — and keeps everything else, so `indexed_paths` and
     `gold_docs_unreturnable` are compared as bytes instead of as a promise. Changing this
     harness's code is legitimate and moves the anchor on purpose, in the commit that
-    changes it; a prose round moving it as a side effect is the thing under guard.
+    changes it; a round moving it as an unremarked side effect is the thing under guard.
+    #3505 is the case that is neither: its edit was inside `indexed_paths`' docstring,
+    which this projection keeps, so the move was unavoidable and is recorded in the
+    anchor's own comment rather than left to look like an accident.
     """
     shown = subprocess.run(
         ["git", "-C", str(ROOT), "show", f"{RUN_EVAL_CODE_ANCHOR}:eval/run_eval.py"],
@@ -5023,6 +5029,273 @@ def test_the_re_stamp_moved_no_executable_line_of_the_eval_harness():
     moved = [(i, b, a) for i, (b, a) in enumerate(zip(before, after)) if b != a]
     assert not moved and len(before) == len(after), (
         f"the executable surface differs from {RUN_EVAL_CODE_ANCHOR}: "
-        f"{moved[:3] or f'{len(after)} lines vs {len(before)}'} — #3166 was comment-only, "
-        "and if the harness genuinely changed, move RUN_EVAL_CODE_ANCHOR in the commit "
-        "that changed it")
+        f"{moved[:3] or f'{len(after)} lines vs {len(before)}'} — a `#:` block edit leaves "
+        "this projection alone and a docstring edit moves it on purpose (#3505), so if the "
+        "harness genuinely changed, move RUN_EVAL_CODE_ANCHOR in the commit that changed it")
+
+# ── #3505: `indexed_paths` prices the walk with a dated figure, not a memory ────
+#
+# The sentence above the walk read `over ~14 roots: ~2 seconds on the live vault` and
+# had not been re-run since the commit that wrote it: `git log -S'~2 seconds on the'
+# -- eval/run_eval.py` on 2026-10-27 returned `6186e6e4` (#1599) alone. Re-measured
+# from the main checkout on 2026-11-04 the same call is 0.70, 0.70 and 0.72 s over a
+# pool of 21,256 paths from 14 roots, so for the last weeks of that sentence's life the
+# harness quoted a price near 3x the thing it described, to readers who had no command
+# with which to notice. #3166 (`c2a57f9b`) dated the `#:` block above the `def` and left
+# this line deliberately; SM_20261022_163807's review had already graded a `partial` on
+# precisely that figure/date split for #3161's 7.5 s, and `41b1a752` fixed the watcher's
+# copy of the shape by handing the reader a command instead of a number. These nodes are
+# the same rule, applied here.
+#
+# What the sweep below deliberately does NOT claim: that no docstring under `eval/` may
+# carry an undated duration. An ast walk over the 100 `.py` files under `eval/` on
+# 2026-11-04 found 26 undated duration lines in 13 files, 25 of them in the 12 files that
+# are not this one — an incident's `16.652 s of wall clock`, a lease `refreshed every
+# 60 s`, audio crops of `1/2/3/4 s` — and not one of those prices a call its reader is
+# about to make. Whether they owe the same dating is the scope ruling this item left
+# owed. What is pinned here is a figure that prices a walk of the corpus, in whichever
+# `eval/` docstring states one — the reach `_suite_sweep()` in
+# `tests/test_qmd_single_build.py` never had, because it greps `-- tests/` and stops at
+# that directory, which is how this line stayed current for five weeks after it stopped
+# being true.
+#
+# Why the replacement is exactly three long lines rather than a paragraph and a command
+# block: the edit had to be line-neutral. Two rails pin a *line number* of this file to
+# prose elsewhere — `architecture/autonomy-jobs.md:1217` cites `eval/run_eval.py:2448`,
+# checked by `test_every_live_prose_citation_resolves_to_the_symbol_beside_it` in
+# `tests/test_autonomy_jobs_doc_claims.py`, and `test_the_doc_s_citation_still_lands_on_
+# the_conjunction` in `tests/test_eval_scorer.py` reads the same number out of the same
+# doc. The first gate this round went on came back red on both, because the dated sentence
+# arrived as eight lines of prose plus a fenced command where three lines had been and
+# pushed everything from 531 down by sixteen. A docstring fix that grows this file is
+# therefore not a documentation-only change: it re-points a citation held in another file,
+# and the second gate buys its green back only by editing that file too. Three lines in,
+# three lines out, and the whole dated-discipline fix stays inside the span clause 3
+# confines it to.
+# for five weeks after it stopped being true.
+
+#: The retired figure, assembled from two pieces so this file cannot be its own hit: the
+#: discipline of `STALE_COLLECTION_COUNT` above, for the same reason — the check that
+#: closes this item is a grep over `eval/`, and a rail that quotes its quarry reports
+#: itself.
+RETIRED_WALK_FIGURE = "~2 " + "seconds"
+
+#: A duration: a number, whitespace, then a unit. The whitespace is load-bearing — drop
+#: it and every `f"{arm:15s}"`-style format spec in `eval/` reads as a duration.
+DURATION_FIGURE = re.compile(r"\d[\d.]*\s+(?:seconds|second|secs|s)(?![A-Za-z0-9_])")
+
+#: The only thing that makes a figure checkable by someone who did not take it: the day
+#: it was measured, spelled the way the `#:` history above already spells it.
+MEASUREMENT_DATE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
+
+#: The prose these nodes police — a sentence pricing a corpus walk, as against the
+#: one-off observations listed in the block above.
+WALK_COST_PROSE = re.compile(r"one walk|per call|walk of the whole|against a nightly", re.I)
+
+
+def _docstring_nodes(text: str) -> list[tuple[int, int]]:
+    """`(first, last)` 1-based line spans of every string docstring in `text`, outermost
+    nodes first. Empty for text that does not parse — a sweep must not turn a syntax
+    error in one file into a false statement about the other ninety-nine.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    spans = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        head = node.body[0] if node.body else None
+        if (isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant)
+                and isinstance(head.value.value, str)):
+            spans.append((head.lineno, head.end_lineno))
+    return spans
+
+
+def _undated_walk_cost_lines(text: str) -> list[str]:
+    """Lines of `text` that price a corpus walk while stating no date for the figure.
+
+    The marker is matched against the whole docstring, never line by line, because that
+    is exactly how the retired sentence hid: `...: ~2 seconds on the` wrapped onto
+    `live vault, against a nightly that takes minutes`, so the line carrying the number
+    carried no marker of its own and a line-scoped test would have walked past the bug
+    these nodes exist for. Once a docstring is admitted as a walk-cost docstring, every
+    duration line inside it must date itself — the one-line rule SM_20261022_163807's
+    review graded #3161 `partial` for breaking, and the reason
+    `test_the_corpus_walk_price_dates_its_figure_on_the_same_line` insists on it too.
+    """
+    lines = text.splitlines()
+    out = []
+    for start, end in _docstring_nodes(text):
+        body = lines[start - 1:end]
+        if not WALK_COST_PROSE.search(" ".join(body)):
+            continue
+        for offset, line in enumerate(body, start):
+            if DURATION_FIGURE.search(line) and not MEASUREMENT_DATE.search(line):
+                out.append(f"{offset}: {line.strip()}")
+    return out
+
+
+def _indexed_paths_docstring_lines() -> list[str]:
+    """`indexed_paths`' docstring as raw lines, cut by the AST rather than by line
+    number — line numbers move the moment anyone adds a sentence, which is the reason
+    `_collection_history_block` above walks the file too.
+    """
+    import ast
+
+    src = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fns = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "indexed_paths"]
+    assert len(fns) == 1, f"expected exactly one `def indexed_paths`, got {len(fns)}"
+    head = fns[0].body[0]
+    assert isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant), (
+        "`indexed_paths` has no docstring to date, so every claim below about its cost "
+        "line would be a claim about nothing")
+    return src.splitlines()[head.lineno - 1:head.end_lineno]
+
+
+def test_the_corpus_walk_price_dates_its_figure_on_the_same_line():
+    """#3505 clause 1: the walk's price carries the day it was measured, on the line
+    that states it — and the retired figure is gone rather than commented out.
+
+    The date has to ride the figure's own line, not the paragraph: a date one sentence
+    away is a figure the next reader quotes as today's cost, which is the reading
+    SM_20261022_163807's review refused #3161 for and the sibling nodes in
+    `tests/test_qmd_single_build.py` enforce on the watcher's 7.5 s. The token below is
+    the pointer that replaces the memory — `deployed_collections` is what to time this
+    walk on — so the sentence cannot be rewritten back into a bare figure without
+    deleting the means to re-measure it. It is the only thing the three-line budget
+    (`test_the_prose_edit_left_both_corpus_function_bodies_untouched`'s comment says why
+    the budget is three lines) allowed to survive out of the full command.
+    """
+    doc = _indexed_paths_docstring_lines()
+    text = " ".join(doc)
+
+    assert RETIRED_WALK_FIGURE not in text, (
+        f"`{RETIRED_WALK_FIGURE}` is back in the docstring, undated as written: "
+        f"{[ln for ln in doc if RETIRED_WALK_FIGURE in ln]}")
+    priced = [ln for ln in doc if DURATION_FIGURE.search(ln)]
+    assert len(priced) == 1, (
+        f"the walk's cost is stated on {len(priced)} lines where exactly one is expected "
+        f"— two figures in one docstring is two readers quoting two prices: {priced}")
+    assert MEASUREMENT_DATE.search(priced[0]), (
+        f"the cost line never says when it was measured, which is the shape this item was "
+        f"filed on: {priced[0]!r}")
+    for token in ("deployed_collections", "timing"):
+        assert token in text, (
+            f"the docstring no longer names `{token}`, so the instruction to re-measure "
+            "the figure is no longer there to follow: "
+            "it has to say what to time this walk on, not just what it once cost")
+
+
+def test_no_eval_docstring_prices_a_corpus_walk_without_a_date():
+    """#3505 clause 4: the sweep, over `eval/`, plus its own proof that it bites.
+
+    Run over every `.py` under `eval/` rather than over `SCRIPT`, because the gap this
+    item names is a directory, not a file: `_suite_sweep()` in
+    `tests/test_qmd_single_build.py` passes `-- tests/` to its grep and never reaches
+    here. The two controls below are the point, not decoration: a guard whose only
+    green path is an empty tree is indistinguishable from a guard that stopped reading,
+    so the same helper has to flag the retired sentence as it stood at `6186e6e4` and
+    stay quiet when the date rides the figure's line. Without the second control the
+    node would be asking for something no prose can satisfy.
+    """
+    files = sorted((ROOT / "eval").rglob("*.py"))
+    assert len(files) > 50, (
+        f"the sweep walked {len(files)} files under eval/, so it is reading a directory "
+        "that is not the one this item was filed about")
+
+    hits = [f"{p.relative_to(ROOT)} {h}" for p in files
+            for h in _undated_walk_cost_lines(p.read_text(encoding="utf-8"))]
+    assert hits == [], (
+        f"an eval/ docstring is pricing a corpus walk with an undated figure, which is "
+        f"exactly what nobody re-runs: {hits}")
+
+    retired = (
+        "def indexed_paths(collections):\n"
+        '    """One walk of the whole deployed corpus per call, over ~14 roots: '
+        + RETIRED_WALK_FIGURE + ' on the\n'
+        "    live vault, against a nightly that takes minutes.\n"
+        '    """\n'
+        "    return []\n")
+    flagged = _undated_walk_cost_lines(retired)
+    assert len(flagged) == 1, (
+        f"the sweep read the retired sentence and called it clean ({flagged}), so it "
+        "would call this tree clean for the same reason")
+    assert DURATION_FIGURE.search(retired.splitlines()[1]), (
+        "the control's figure is no longer a duration the pattern recognises, so the "
+        "control above proves nothing")
+
+    dated = retired.replace(" on the\n", " on 2026-11-04 on the\n")
+    assert _undated_walk_cost_lines(dated) == [], (
+        "the sweep rejects the same sentence a date was added to, so it is not asking "
+        "for a date — it is forbidding a figure")
+
+
+def test_the_walk_still_states_its_root_count_verbatim():
+    """#3505 clause 2: `over ~14 roots` survives byte for byte, because this item is a
+    dating fix and not a count audit.
+
+    The count was measured correct on both 2026-10-27 and 2026-11-04 (14 collections,
+    14 of them directories), and the only thing an undated *count* has to learn from an
+    undated *cost* is the date — not a rewrite. Pinned as one exact substring plus a
+    count inventory, because a rewrap that renders it `~14 roots (2026-11-04)` inside
+    the same sentence is still a count the item did not authorise.
+    """
+    text = " ".join(_indexed_paths_docstring_lines())
+
+    assert "over ~14 roots" in text, (
+        f"`over ~14 roots` no longer appears verbatim in the docstring: {text[:200]!r}")
+    counts = re.findall(r"~?\d[\d,]* roots", text)
+    assert counts == ["~14 roots"], (
+        f"the docstring now states its root count as {counts}; one count, as written")
+
+
+def test_the_prose_edit_left_both_corpus_function_bodies_untouched():
+    """#3505 clause 3: every changed line of the docstring fix lies inside a docstring,
+    so both corpus functions are byte-identical to the anchor apart from their prose.
+
+    `RUN_EVAL_CODE_ANCHOR` cannot check this, and that is the trap the item's own clause
+    spelled out: `_executable` above drops only `#` comments, so a docstring line IS in
+    that projection — which is why a prose-only edit had to re-stamp the anchor at all,
+    where #3166's comment-block edit did not. This node takes the complement: it drops
+    each function's docstring and compares what is left against the anchor's, so a round
+    that reaches one line past the closing triple quote fails here on its first gate rather than
+    landing a behavioural change under a documentation headline.
+    """
+    import ast
+
+    shown = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{RUN_EVAL_CODE_ANCHOR}:eval/run_eval.py"],
+        capture_output=True, text=True)
+    assert shown.returncode == 0, (
+        f"`{RUN_EVAL_CODE_ANCHOR}` does not resolve in this tree: {shown.stderr.strip()}")
+
+    def _bodies(text: str) -> dict[str, list[str]]:
+        tree = ast.parse(text)
+        lines = text.splitlines()
+        out: dict[str, list[str]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name not in {"indexed_paths", "gold_docs_unreturnable"}:
+                continue
+            head = node.body[0]
+            has_doc = (isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant)
+                       and isinstance(head.value.value, str))
+            out[node.name] = lines[head.end_lineno if has_doc else head.lineno - 1:node.end_lineno]
+        return out
+
+    before, after = _bodies(shown.stdout), _bodies(SCRIPT.read_text(encoding="utf-8"))
+    assert set(after) == {"indexed_paths", "gold_docs_unreturnable"}, (
+        f"only {sorted(after)} is a module-level function now, so the anchor comparison "
+        "below would be grading a tree that lost one of them")
+    for name in sorted(before):
+        assert before[name] == after[name], (
+            f"{name}'s body differs from {RUN_EVAL_CODE_ANCHOR} even though only its "
+            f"docstring was cleared to change: "
+            f"{[(i, b, a) for i, (b, a) in enumerate(zip(before[name], after[name])) if b != a][:3]}"
+            " — move RUN_EVAL_CODE_ANCHOR in the commit that changes behaviour instead")

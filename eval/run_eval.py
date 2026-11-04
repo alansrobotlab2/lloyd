@@ -525,9 +525,9 @@ def indexed_paths(collections: list[dict]) -> list[str]:
     collection whose root is not a directory contributes nothing — it is deployed in
     config and empty on disk, which is the state #1599 is about.
 
-    One walk of the whole deployed corpus per call, over ~14 roots: ~2 seconds on the
-    live vault, against a nightly that takes minutes. Call it once and pass the pool
-    down; `gold_docs_unreturnable` does.
+    One walk of the whole deployed corpus per call, over ~14 roots: 0.70 s on 2026-11-04
+    for a 21,256-path pool: re-price it by timing this walk on `deployed_collections()`.
+    Call it once and pass the pool down; `gold_docs_unreturnable` does.
     """
     pool = []
     for coll in collections:
