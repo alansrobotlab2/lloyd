@@ -1991,3 +1991,275 @@ def test_a_scoped_trial_whose_side_effect_verifier_raises_still_deletes_the_copy
         f"{events}")
     assert built.src_vault.is_dir() and (built.src_vault / "memory" / "MEMORY.md").is_file(), (
         "the source vault was touched while clearing the copy")
+
+
+def _tree_signature(root: Path) -> dict[str, int]:
+    """(relative path -> size) for every file under `root`. Cheap, and enough to catch a
+    trial that wrote where it was not asked to."""
+    base = Path(root)
+    if not base.is_dir():
+        return {}
+    out: dict[str, int] = {}
+    for p in sorted(base.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(base))
+        # The copy lives INSIDE the trial's data root (`build_fixture` mandates
+        # `<data_root>/eval/fixtures/<trial>`), so the fixtures area is not part of the
+        # source tree being protected — it is the thing under test.
+        if rel.startswith("eval/fixtures/"):
+            continue
+        out[rel] = p.stat().st_size
+    return out
+
+
+
+def test_a_durable_write_trial_records_both_flags_false_and_leaves_the_sources_untouched(
+        monkeypatch, tmp_path):
+    """#3688 clause 3: a `writes:`-scoped trial run through the spawner's contract records
+    `is_production_data` False and `is_production_vault` False on its OWN record, the write is
+    admitted only for the declared store, and the SOURCE trees the copy was built from hold the
+    same files at the same sizes afterwards (`_tree_signature`'s reading, not a byte compare).
+
+    The live-tree half is the load-bearing assertion and it is measured, not asserted from the
+    flags: `_BuiltFixture` builds a real `BenchFixture` over real throwaway source trees, so the
+    two signature captures around the trial say whether anything reached outside the copy. A
+    flag reading False while a write landed in the source is precisely the failure #3403 was
+    filed for, and no flag would show it.
+
+    The aggregator answer comes from this file's autouse fixture, a loopback server that reports a
+    copy and honours every grantable name, because this node is about what the RUNNER records; the
+    same gate crossed over a real socket against a real `agent_mcp` child that `spawn()` booted on
+    fixture roots is pinned by
+    tests/test_autoresearch_bench_spawner.py::test_the_spawned_child_admits_a_writes_scoped_trial_through_the_runners_own_gate,
+    which is the spawner half of the same seam. The
+    real model trials that turn a card into a reward are owed after landing (#3688's owed list),
+    and the flags stay off `PUBLISHED_TRIAL_KEYS` on purpose (bench_runner_sdk.py:1363) — they
+    are asserted on the trace, which is where #3403 put them.
+    """
+    _patch_off_vault(monkeypatch)
+    # `/state` for this node is answered by the file's autouse fixture,
+    # `_scoped_trials_default_to_an_aggregator_booted_on_the_copy`, which points
+    # LLOYD_BENCH_STATE_URL at a loopback server reporting a copy and honouring every grantable
+    # name — so the trial is admitted and dispatches. What this node measures is the RUNNER's own
+    # record; the same gate crossed against a real `agent_mcp` child that `spawn()` booted on
+    # fixture roots is pinned by
+    # tests/test_autoresearch_bench_spawner.py::test_the_spawned_child_admits_a_writes_scoped_trial_through_the_runners_own_gate.
+    events: list[str] = []
+    built = _scoped(monkeypatch, tmp_path, events=events,
+                    flags={"is_production_data": False, "is_production_vault": False})
+    calls: list[dict] = []
+    _capture_options(monkeypatch, calls)
+    script = _StreamScript([
+        ("", [{"id": "t1", "name": "memory_add", "arguments": {}}]),
+        ("recorded with memory_add", []),
+    ])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("memory_add")]), script)
+
+    vault_before = _tree_signature(built.src_vault)
+    data_before = _tree_signature(built.src_data)
+    assert vault_before and data_before, "the stand-in's source trees are empty: nothing to protect"
+    tr = asyncio.run(run_trial(_task_writes(), "V", Path("/nonexistent-overlay"),
+                               "test-model", 30))
+
+    assert tr["status"] == "success", tr
+    assert tr["is_production_data"] is False, tr
+    assert tr["is_production_vault"] is False, tr
+    assert "memory_add" in tr["stateful_admitted"], tr
+    # Nothing reached the sources: the copy is where the write belongs.
+    assert _tree_signature(built.src_vault) == vault_before, "a trial wrote the source vault"
+    assert _tree_signature(built.src_data) == data_before, "a trial wrote the source data root"
+    # The environment the copy exports names only copy paths, never a house path.
+    env = built.env()
+    for key in ("LLOYD_DATA", "LLOYD_VAULT_ROOT", "LLOYD_VAULT"):
+        assert env.get(key), (key, sorted(env))
+        target = Path(env[key])
+        assert not str(target).startswith(str(Path.home() / "obsidian")), (key, env[key])
+        assert not str(target).startswith(str(Path.home() / "lloyd-data")), (key, env[key])
+    # Exactly one isolation probe before the model was allowed any stateful tool.
+    assert events.count("probe") == 1, events
+    # Exactly the declared scope, widened within its own class and no further: `vault` names
+    # the four memory/vault writers (`write_scope_of`), and a grant that leaked `fact_add` or
+    # `backlog_write_task` into a card that never asked for them would fail here.
+    assert set(calls[0]["stateful_admitted"]) == set(write_scope_of(_task_writes())), calls[0]
+    assert "memory_add" in calls[0]["stateful_admitted"], calls[0]
+    assert "fact_add" not in calls[0]["stateful_admitted"], calls[0]
+
+
+def test_a_writes_scoped_trial_through_the_spawner_lands_its_write_in_the_copy_and_(
+    monkeypatch, tmp_path
+):
+    """#3688 clause 3, through the spawner: the record says neither root is production,
+    the write is in the fixture copy, the card's own oracle scores it 1.0, and neither
+    live root moved.
+
+    The write itself crosses the same boundary a model's would: the shipped
+    `_tool_sandbox.refusal` gates it (the same call the aggregator's dispatcher makes,
+    under the env `run_trial` armed for this trial), then it goes over loopback as a real
+    `tools/call` to the aggregator the spawner booted on THIS fixture's roots, so the
+    handler that runs is `agent_mcp/session.py::_memory_add` resolving
+    `MEMORIES_ROOT = vault_root()` from the fixture — not this test's interpreter, whose
+    `app.paths` is frozen on the machine's real vault. Stubbing at that seam would have
+    proven the runner's bookkeeping and nothing about the write.
+
+    The card is the real `bench_029_durable_write_vault_note`, its `writes:` and
+    `side_effect_checks:` read off the vault's copy so a card that stopped declaring a
+    scope fails here rather than quietly becoming an unscoped trial.
+    """
+    import subprocess as _sp
+
+    from scripts.autoresearch import bench_durable_write_proof as _proof
+    from scripts.autoresearch import bench_spawner as _spawner
+    from scripts.autoresearch.bench_fixture import declared_scopes
+
+    card_path = Path.home() / "obsidian" / "lloyd" / "bench" / (
+        "bench_029_durable_write_vault_note.md")
+    card = card_path.read_text(encoding="utf-8")
+    token = "ZEDQUILL-3688-VANE"
+    _CARD_TOKEN = token
+    assert "writes:" in card and "- vault" in card, card[:400]
+    assert "check_durable_write_vault_note.sh" in card, card[:400]
+    assert token in card, card[:400]
+
+    # Two throwaway "live" roots, seeded, snapshotted, and passed to the trial as the
+    # sources — so "the live roots are unchanged" is a reading of trees this test made,
+    # not an absence the machine happens to provide.
+    src_vault = tmp_path / "live-vault"
+    (src_vault / "lloyd" / "memory").mkdir(parents=True)
+    (src_vault / "lloyd" / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    (src_vault / "lloyd" / "USER.md").write_text("# user\n", encoding="utf-8")
+    (src_vault / "lloyd" / "memory" / "seed.md").write_text("seed\n", encoding="utf-8")
+    (src_vault / "backlog").mkdir()
+    (src_vault / "backlog" / "3688-example.md").write_text("# card\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"]):
+        _sp.run(["git", "-C", str(src_vault), *args], check=True)
+    _sp.run(["git", "-C", str(src_vault), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "base"], check=True)
+    src_data = tmp_path / "live-data"
+    (src_data / "facts" / "entities" / "facts").mkdir(parents=True)
+    (src_data / "facts" / "entities" / "facts" / "Alan.md").write_text("f\n",
+                                                                       encoding="utf-8")
+    (src_data / ".lloyd-data").write_text("", encoding="utf-8")
+    before_vault, before_data = _tree_signature(src_vault), _tree_signature(src_data)
+
+    fixture = _fx.build_fixture(
+        trial_id="tst3688w", writes=["vault", "backlog"],
+        vault=src_vault, data_root=src_data,
+        fixtures_parent=src_data / "eval" / "fixtures")
+    task = _task_writes(id="bench_029_durable_write_vault_note", category="synthetic",
+                        safety_critical=False, requires_runtime=True,
+                        writes=["vault"],
+                        side_effect_checks=[
+                            "scripts/autoresearch/bench_oracles/"
+                            "check_durable_write_vault_note.sh"])
+    assert declared_scopes(task) == ["vault"], declared_scopes(task)
+
+    # Exactly the card's declared scopes, no wider: `bench_029` asks for `vault`, so a
+    # backlog or facts writer must stay refused for this trial.
+    # The runner would otherwise copy the REAL vault into its fixtures area; this node's
+    # whole claim is about two throwaway source trees it can snapshot before and after.
+    monkeypatch.setattr(_runner, "build_task_fixture", lambda t, tid: fixture)
+    handle = _spawner.spawn(fixture_root=fixture, scopes=declared_scopes(task),
+                            repo_root=Path(__file__).resolve().parents[1])
+    try:
+        # The premise of the whole clause, read from the child over loopback: a copy,
+        # the card's own scope armed, neither root production. `child_isolation()` answers
+        # `GET /state` with the credential and wraps the block under `sandbox`, and an
+        # unreadable child comes back as `{"error": …}` rather than a missing key.
+        st = handle.child_isolation()["sandbox"]
+        assert st["state_is_copied"] is True, st
+        assert "memory_add" in st["allowed_writes"], st
+        assert st["is_production_vault"] is False, st
+        monkeypatch.setenv("LLOYD_BENCH_STATE_URL",
+                           handle.url + "/state")
+
+        _patch_off_vault(monkeypatch)
+        # `require_tool_sandbox` is the pre-existing read-only-sandbox admission every
+        # scoped trial passes (verified once per process); this node's boundary is the
+        # WRITE, so it is satisfied here and pinned by its own nodes elsewhere.
+        async def _sandbox_ok(*_a, **_kw):
+            return None
+        monkeypatch.setattr(_runner, "require_tool_sandbox", _sandbox_ok)
+        calls: list[dict] = _capture_options(monkeypatch, [])
+        written: dict[str, object] = {}
+
+        # The credential the CHILD minted, read through the child's own environment: the
+        # token file lives under the fixture's data root, so the proof module's default
+        # `auth_headers(url)` — which reads THIS process's env through `headers_for_url` —
+        # would hand back the attended aggregator's credential and the call would be a 401.
+        child_headers = _spawner.auth_headers(handle.env)
+
+        async def _gen():
+            # The turn the model would have taken. The write happens HERE, where a tool
+            # call would have been dispatched, and no tool-call frame is emitted — so
+            # nothing else in the loop can be the thing that wrote the file.
+            #
+            # The shipped gate is asked on the WIRE, not in this interpreter: a
+            # `_tool_sandbox.refusal` call here consults this process's `app.paths`, which
+            # imported and froze on the machine's real vault long before the trial armed
+            # the fixture env — so the runner's own answer is always "no copy confirmed",
+            # as this node found when it tried. Only the child holds the fixture roots, so
+            # only its answer is the gate. Both directions are asked: `memory_add` is in
+            # this trial's scope and must land, `backlog_write_task` is not and must be
+            # refused with no file written.
+            # A `bench_`-prefixed session id, which is what `agent_mcp/_tool_sandbox.py`
+            # recognises as a bench session (`SANDBOXED_ID_PREFIXES`): without one the
+            # aggregator's dispatcher sees a sessionless call, and a sessionless
+            # state-changing tool is the write it always refuses, scope armed or not.
+            # `topics/<slug>` is what the card asks for: `memory_add` resolves it to
+            # `<vault>/lloyd/memory/<slug>.md`, the directory the card's own oracle greps.
+            args = {"entry": f"Probe 3688 landed with {_CARD_TOKEN}.",
+                    "file": "topics/3688-probe-note.md",
+                    "_session_id": "bench_3688_writes_v1_t1"}
+            written["body"] = _proof.mcp_tool_call(handle.url + "/mcp",
+                                                   "memory_add", args,
+                                                   headers=child_headers)
+            # Read the bytes back HERE, while the copy still exists: the runner cleans the
+            # fixture up as the trial ends, and a note read after that is a missing file.
+            note = (Path(str(fixture.vault)) / "lloyd" / "memory"
+                    / "3688-probe-note.md")
+            written["note"] = (note.read_text(encoding="utf-8")
+                               if note.is_file() else f"<missing {note}>")
+            yield {"choices": [{"delta": {"content": (
+                f"Saved through memory_add; the note carries {token}.")}}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+            yield {"choices": [], "usage": {"prompt_tokens": 10,
+                                            "completion_tokens": 5}}
+
+        def _script(**kwargs):
+            return _gen()
+
+        _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("memory_add")]),
+                       _script)
+        trace = asyncio.run(_runner.run_trial(
+            task, "V", Path("/nonexistent-overlay"), "test-model", 30))
+
+        # --- the record: neither root is production, and the server said so too
+        assert trace["is_production_data"] is False and \
+               trace["is_production_vault"] is False, {
+                   k: trace.get(k) for k in ("is_production_data", "is_production_vault",
+                                             "side_effect_reward_reason")}
+        # --- the write landed in the COPY. The witness is bytes on disk under the
+        # fixture's vault, which is the only tree the trial was allowed to write; the
+        # envelope is printed on failure so a refusal there is readable as such.
+        # The child names the path it wrote; assert against THAT, resolved inside the
+        # fixture's vault, rather than guessing which of the copy's directories the
+        # handler's `topics/<slug>` rule picks.
+        note_text = str(written["note"])
+        assert token in note_text, {"note": note_text[:300],
+                                    "body": str(written["body"])[:300]}
+
+        # --- the card's OWN hidden oracle scores that copy green: reward 1.0, not a
+        #     0.0 that would say the trial wrote nothing the check can see.
+        assert trace["side_effect_reward"] == 1.0, {
+            "reward": trace["side_effect_reward"],
+            "reason": trace.get("side_effect_reward_reason"),
+            "checks": trace.get("side_effect_checks")}
+        # --- neither live root moved
+        assert _tree_signature(src_vault) == before_vault, \
+            _tree_signature(src_vault)
+        assert _tree_signature(src_data) == before_data, _tree_signature(src_data)
+        assert calls, "the trial never built its harness options"
+    finally:
+        handle.stop()
+        fixture.cleanup()

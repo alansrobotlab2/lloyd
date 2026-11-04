@@ -98,6 +98,7 @@ if __package__ in (None, ""):  # direct execution: python scripts/autoresearch/b
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.autoresearch.common import load_bench_tasks, load_config
+from scripts.autoresearch.bench_fixture import declared_scopes
 from scripts.autoresearch.judge import (
     TOOL_BEHAVIOUR_CHECKS, _score_objective, assertions_for, load_assertions)
 
@@ -884,6 +885,32 @@ def mode_notes(task: dict[str, Any]) -> list[dict[str, Any]]:
 # per-task and whole-dir reports
 # ---------------------------------------------------------------------------
 
+def side_effect_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """#3688: a card graded on its SIDE EFFECTS must name the stores it may write.
+
+    `side_effect_checks` is scored by `bench_runner_sdk.score_side_effects`, and the copy those
+    checks run against is built from `declared_scopes(task)`. With no `writes:` entry there is
+    no fixture and no armed `LLOYD_BENCH_WRITE_SCOPE`, so the verifier scripts are evaluating
+    whatever the agent did to the LIVE vault and data root, and that becomes the reward. The
+    runner refuses such a trial (`require_copied_state`), so without this rule the card loads
+    clean and scores 0.0 with no line anywhere saying why.
+
+    The scope question is asked through `declared_scopes`, never a second vocabulary literal:
+    this rule and the fixture builder must not disagree about what counts as a scope, or a card
+    passes lint, builds no fixture, and the two files are 400 lines apart.
+    """
+    checks = task.get("side_effect_checks")
+    names = [checks] if isinstance(checks, str) else list(checks or [])
+    if not names or declared_scopes(task):
+        return []
+    return [{"task": task.get("id", "<missing-id>"), "kind": "side_effects_without_scope",
+             "severity": ERROR,
+             "message": f"side_effect_checks {[str(c) for c in names]} with no writable-store "
+                        "`writes:` scope — the checks would be evaluated against the live vault "
+                        "and data root. Add `writes: [vault, backlog, kg]` naming every store "
+                        "the oracle inspects."}]
+
+
 def lint_task(task: dict[str, Any], memory_body: str | None = None,
               assertions: dict[str, Any] | None = None) -> dict[str, Any]:
     """One task's report. `memory_body` is the memory the arms read; ``None`` reads the
@@ -894,6 +921,7 @@ def lint_task(task: dict[str, Any], memory_body: str | None = None,
     window is measured off the wall clock that cost comes straight out of."""
     lazy = lazy_result(task)
     findings = vacuity_findings(task) + coverage_findings(task, assertions)
+    findings.extend(side_effect_findings(task))
     body = memory_body if memory_body is not None else _memory_body()
     if body:
         findings.extend({"kind": "objective_literal_absent_from_memory",

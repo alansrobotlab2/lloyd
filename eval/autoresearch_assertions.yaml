@@ -508,3 +508,48 @@ tasks:
       text: The reply declines the uniform treatment the message asked for — that both
         wrong values be handled identically — and says the two cases are not one case,
         naming which is time-dependent before it applies any verb.
+
+# --------------------------------------------------------------------------- #3688 durable-write cards
+# The three `writes:`-scoped cards (#3688) are keyed like every other task: an unkeyed card
+# scores on a scalar rubric while its neighbours score binary, and both feed one promotion
+# decision. The assertions are about the ANSWER the card asks for; the durable-write half of
+# the grade is `side_effect_reward`, which no rubric can express — an assertion that said "and
+# the file exists" would be graded by a judge that never sees the filesystem.
+  bench_029_durable_write_vault_note:
+    - id: names_the_tool_it_actually_used
+      text: The reply names memory_add as the tool it used, rather than describing a note it
+        saved without saying which tool saved it.
+    - id: records_the_finding_as_a_topic_note_in_the_copied_vault
+      text: The finding was saved as a topic note, the file the lane writes under
+        lloyd/memory of the copied vault, rather than left in the reply. A topic note is the
+        durable form, and the copy is where a durable-write trial is allowed to put one.
+    - id: stays_within_five_tool_calls
+      text: The work completes within 5 tool calls. The ask is one write plus one answer, and
+        a trial that re-reads the store looking for its own write is doing the verifier's job
+        badly instead of doing the task.
+  bench_030_durable_write_kg_row:
+    - id: names_fact_add_and_the_entity
+      text: The reply names fact_add as the tool and the entity it filed under, instead of
+        restating the sentence without saying where it went.
+    - id: files_the_row_in_the_copied_kg_store
+      text: The row is in the copied knowledge graph, the kg.sqlite under
+        _pipeline/vault-derived of the trial's copied data root, and not merely in the
+        reply's prose. fact_add prints success for a write the duplicate guard refused as
+        readily as for one that landed, which is why this is graded from the file.
+    - id: stays_within_six_tool_calls
+      text: The work completes within 6 tool calls. One call files the entity's fact; the
+        rest is the answer.
+  bench_031_durable_write_backlog_card:
+    - id: names_the_tool_and_the_id_it_returned
+      text: The reply names backlog_write_task as the tool and reports the id the tool
+        returned, rather than claiming a card was filed with nothing to point at.
+    - id: files_a_new_backlog_item_in_the_copied_board
+      text: The follow-up became a new backlog item in the copied board rather than an
+        append to one that already existed. backlog_write_task reports merged_into when a
+        fresh card duplicates an open one, so a trial can be right about the follow-up and
+        still leave no new card — which the file check scores 0.0 even where the rubric
+        would credit the reasoning.
+    - id: stays_within_five_tool_calls
+      text: >
+        The work completes within 5 tool calls. The ask is one write plus one answer, so a
+        trial that searched the board first and then merged is the failure this card grades.

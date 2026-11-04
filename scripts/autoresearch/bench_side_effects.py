@@ -25,11 +25,22 @@ own oracle is not a hard task, it is a broken check, and finding that out from a
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scripts.autoresearch.bench_fixture import BenchFixture
+# Runnable BOTH ways, and the second way is the one the item's acceptance check uses:
+# `python scripts/autoresearch/bench_side_effects.py --dir ~/obsidian/lloyd/bench`. Run that
+# way, sys.path[0] is `scripts/autoresearch/`, where no `scripts` package lives, and the
+# absolute import below raised `ModuleNotFoundError: No module named 'scripts'` — the CLI was
+# unusable as a path, which is how a human reaches a script in `scripts/`. No repo root is
+# printed on the way: this is plumbing, and #1928 lists that as an explicit non-goal.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scripts.autoresearch.bench_fixture import BenchFixture, FixtureRefused  # noqa: E402
 
 #: How long one verifier script may run. A verifier is a query, not a job; one that
 #: hangs is a broken verifier, and hanging the trial reporter for it is how a suite
@@ -53,7 +64,7 @@ class VerifierResult:
 def _resolve_script(script: str | Path, search_root: Path | None) -> Path:
     """Locate a verifier script, accepting repo-relative or absolute spellings.
 
-    A task YAML says `side_effect_checks: [eval/bench/check_card_moved.sh]` and the
+    A task YAML says `side_effect_checks: [scripts/autoresearch/bench_oracles/check_card_moved.sh]` and the
     runner is invoked from anywhere, so resolution is against the checkout root rather
     than the cwd — a check that only runs when the runner happens to be started from the
     right directory is a check that silently stops running.
@@ -174,7 +185,16 @@ def admit_task(*, task: dict[str, Any], fixture_factory, search_root: Path | Non
         return Admission(task_id, False, False, False, f"oracle script not found: {oracle_path}")
 
     # Arm 1: the oracle performs the write; the verifier must go green.
-    fx = fixture_factory(task)
+    #
+    # The factory is where `build_fixture`'s `FixtureRefused` arrives — a card that names a
+    # store with no `writes:` scope, or an unresolvable root, refuses AT BUILD TIME — and it
+    # has to be turned into a refusal here rather than allowed to propagate: the CLI's own
+    # contract is to name what it refused, and an traceback exiting 1 reads exactly like the
+    # `TypeError` this file was fixed for (#3688's second reported crash).
+    try:
+        fx = fixture_factory(task)
+    except FixtureRefused as exc:
+        return Admission(task_id, False, False, False, f"fixture refused: {exc}")
     try:
         env = dict(fx.env())
         try:
@@ -193,7 +213,11 @@ def admit_task(*, task: dict[str, Any], fixture_factory, search_root: Path | Non
         fx.cleanup()
 
     # Arm 2: nothing runs; the same verifier must go red.
-    fx2 = fixture_factory(task)
+    try:
+        fx2 = fixture_factory(task)
+    except FixtureRefused as exc:
+        return Admission(task_id, False, oracle_green, False,
+                         f"fixture refused on the empty arm: {exc}")
     try:
         empty_verdict = run_verifiers(fixture=fx2, checks=checks, search_root=search_root)
         empty_red = empty_verdict["reward"] == 0.0
@@ -225,14 +249,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    from app.data_root import resolve_data_root, vault_root
+    from app.data_root import DataRootMissing, resolve_data_root_for_tree, vault_root
     from scripts.autoresearch.bench_fixture import (
         build_fixture, fixture_parent, new_trial_id)
-    from app.paths import DATA_ROOT as _DATA_ROOT
 
-    src_vault = Path(args.vault) if args.vault else vault_root()
-    src_data = Path(args.data_root) if args.data_root else resolve_data_root() or _DATA_ROOT
     root = Path(__file__).resolve().parents[2]
+    # `resolve_data_root()` was called here with no arguments, and it is keyword-only with
+    # five required parameters (`app/data_root.py:173`) — a TypeError on every run that got
+    # past the import. The script-facing entry is `resolve_data_root_for_tree`, which takes
+    # the tree it lives in and reads the environment itself. An unmarked production checkout
+    # raises `DataRootMissing`, which here is only "no default was derivable": the flag is
+    # still there, and a refusal that names the flag is more useful than a traceback.
+    src_vault = Path(args.vault) if args.vault else vault_root()
+    if args.data_root:
+        src_data = Path(args.data_root)
+    else:
+        try:
+            src_data = resolve_data_root_for_tree(root)
+        except DataRootMissing as exc:
+            print(f"--data-root not given and no default derivable: {exc}", file=sys.stderr)
+            return 2
 
     tasks: list[dict[str, Any]] = []
     for path in sorted(Path(args.dir).glob("*.md")):

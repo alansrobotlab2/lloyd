@@ -2295,3 +2295,96 @@ def test_bench_002_objective_checks_are_pinned_byte_for_byte() -> None:
             "[A-Za-z0-9_' ]{0,40}gestalt73@gmail\\.com\n") in text, (
         "bench_002's objective layer no longer matches the two checks the item quotes; "
         "re-measure the premise rather than editing this assertion to fit")
+
+
+# --------------------------------------------------------------------------- #3688: side effects need a scope
+
+
+def _dw_card(**over):
+    card = {
+        "id": "bench_099_side_effect_scope",
+        "segment": "lloyd",
+        "prompt": "File a card whose description carries bench-durable-write-3688.",
+        # A context-bearing regex, not a bare `contains`: a contains-only check lazy-passes
+        # (the probe scores 1.00 on its own value), which would make `valid` False for a reason
+        # this node is not about. Same shape as bench_029's real objective layer.
+        "objective_checks": [{
+            "type": "regex",
+            "value": "(backlog_write_task|backlog card)[\\s\\S]{0,160}bench-durable-write-3688"}],
+        "rubric_criteria": ["task_completion"],
+        "side_effect_checks": ["scripts/autoresearch/bench_oracles/check_durable_write_backlog_card.sh"],
+    }
+    card.update(over)
+    return card
+
+
+def _error_kinds(report):
+    return {f["kind"] for f in report["findings"] if f.get("severity") == bench_lint.ERROR}
+
+
+def test_a_card_with_side_effect_checks_and_no_writes_scope_is_an_error():
+    """#3688 clause 5: `side_effect_checks` without `writes:` is refused, and not `valid`.
+
+    ERROR rather than a note because the alternative is a card that scores 0.0 forever:
+    `require_copied_state` refuses the trial at run time and `score_side_effects` never gets a
+    fixture, so nothing else in the chain ever says the card is malformed rather than the model
+    being bad at the task. `bench_lint` carried no side-effect rule at all before this round.
+    """
+    report = bench_lint.lint_task(_dw_card(), memory_body="bench-durable-write-3688")
+    assert "side_effects_without_scope" in _error_kinds(report), report["findings"]
+    assert report["valid"] is False
+    message = next(f["message"] for f in report["findings"]
+                   if f["kind"] == "side_effects_without_scope")
+    assert "writes:" in message and "live vault" in message, message
+
+
+def test_the_same_card_with_a_writes_scope_clears_the_rule():
+    """The refused card becomes clean the moment it names a store — one field, whole difference.
+
+    Asserted against the SAME dict plus one key so the rule cannot be refusing something else
+    about the card, and the two `valid` verdicts are compared to each other rather than to a
+    literal that would also be satisfied by a rule that never fires.
+    """
+    refused = bench_lint.lint_task(_dw_card(), memory_body="bench-durable-write-3688")
+    accepted = bench_lint.lint_task(_dw_card(writes=["backlog"]),
+                                    memory_body="bench-durable-write-3688")
+    # Compared as SETS, not via `report["valid"]`: this fixture's objective layer lazy-passes
+    # for its own reason (a separate lint rule, unrelated to scopes), so `valid` would be False
+    # on both sides and would not show the rule's effect at all. The rule's own verdict is what
+    # changed, and the set difference says so exactly.
+    assert "side_effects_without_scope" in _error_kinds(refused), refused["findings"]
+    assert "side_effects_without_scope" not in _error_kinds(accepted), accepted["findings"]
+    assert _error_kinds(refused) - _error_kinds(accepted) == {"side_effects_without_scope"}, \
+        (sorted(_error_kinds(refused)), sorted(_error_kinds(accepted)))
+
+
+def test_a_card_naming_no_side_effect_checks_is_untouched_by_the_rule():
+    """The 28 cards already in the corpus declare no `side_effect_checks:` and stay put.
+
+    Without this node a rule that fired on every card, or on none, would leave the two green
+    nodes above just as green.
+    """
+    report = bench_lint.lint_task(_dw_card(side_effect_checks=None),
+                                  memory_body="bench-durable-write-3688")
+    assert "side_effects_without_scope" not in _error_kinds(report), report["findings"]
+
+
+def test_the_scope_rule_asks_the_fixture_builder_the_same_question():
+    """Lint and the fixture builder must never disagree about what a scope is.
+
+    A card that passes lint and then builds no fixture is the exact failure this rule exists to
+    prevent, so the rule's verdict is compared against `declared_scopes` — the ONE function that
+    decides which slice gets copied — rather than against a second vocabulary list here.
+    """
+    from scripts.autoresearch.bench_fixture import declared_scopes
+
+    for writes, want_fired in ((None, True), (["vault"], False), ("memory", False),
+                               ([], True)):
+        card = _dw_card()
+        if writes is not None:
+            card["writes"] = writes
+        fired = "side_effects_without_scope" in _error_kinds(
+            bench_lint.lint_task(card, memory_body="bench-durable-write-3688"))
+        assert fired is bool(declared_scopes(card)) is False or fired is want_fired, \
+            (writes, fired, want_fired)
+        assert fired is want_fired, (writes, fired, want_fired)
