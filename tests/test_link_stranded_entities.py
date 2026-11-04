@@ -1741,3 +1741,163 @@ def test_the_attended_refusal_and_the_freeze_refusal_name_different_remedies(
     assert _backup_traces(tmp_path) == []
     assert st.edges.count(active_only=True) == seeded, \
         "one of the refusals wrote edges anyway"
+
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# #3768 — the attended class has to be reachable from a real child process.
+#
+# Every node above reaches `--apply` by `monkeypatch.setenv` in the pytest process
+# and calling `linker.main` in the same process. That is the right shape for pinning
+# the linker's own gate and the wrong shape for the question #3768 asks: whether any
+# caller in production can ever satisfy it. The only writer of the variable was
+# `agent_mcp/_rpc.py`'s `bash_env`, which answers `(None, None)` for a turn the loop
+# did not stamp, and `harness.rpc.enabled` is false — so before that item, the
+# honest environment a Lloyd Bash child gets had no id in it and every real apply
+# refused. These nodes drive the script as its own process with the environment a
+# real Bash child has, which is the only witness that crosses that boundary.
+# ─────────────────────────────────────────────────────────────────────────────────
+
+def _child_env(*, sid: str | None) -> dict:
+    """A copy of this process's environment, with the session id set or removed.
+
+    Set-or-removed rather than either alone, because the two runs have to differ in
+    exactly one variable: the autouse fixture above has already put an attended id in
+    `os.environ`, so an "unset" child built by copying the environment would inherit
+    it and every refusal asserted below would be vacuous. And once #3768's own fix is
+    live, the pytest process is itself a Bash child whose id was stamped, so
+    inheriting would silently decide which class the child believes it is.
+    """
+    env = {k: v for k, v in os.environ.items() if k != _env_var()}
+    if sid is not None:
+        env[_env_var()] = sid
+    env["PYTHONPATH"] = str(ROOT)
+    return env
+
+
+def _apply_child(db: Path, *, sid: str | None, live_db: Path):
+    """Run the script as its own process, and report every store it opened.
+
+    The child wraps `KGStore.__init__` before it runs the script, so the opened paths
+    are the child's own record rather than a claim the parent makes about code it
+    cannot see into: clause 4's "no test may touch the live store" is then read out of
+    the process that could have touched it. The config the write gate reads is
+    replaced inside the child (`writes_disabled_by_rebuild` does its
+    `from app.config import CONFIG` at call time — the same reason the #2246 node
+    above can pin a real process at all), so the apply here is held only by the caller
+    class this item is about, with no rebuild freeze in the way. That half is not this
+    node's: the freeze is pinned against a freeze-shaped config by
+    `test_the_rebuild_freeze_still_refuses_apply`. `main` seats the caller-class check
+    first — its own comment gives the reason, that it is a fact about the caller and
+    costs no config read — and `writes_disabled_by_rebuild()` second, so this node's
+    exit-2 reading is the caller refusal, and neither node has to hold the other's gate
+    to cover the pair.
+    """
+    child = (
+        "import runpy, sys\n"
+        "import app.config, app.kg_store\n"
+        "opened = []\n"
+        "_real = app.kg_store.KGStore.__init__\n"
+        "def _spy(self, *a, **k):\n"
+        "    opened.append(str(a[0] if a else k.get('db_path') or ''))\n"
+        "    return _real(self, *a, **k)\n"
+        "app.kg_store.KGStore.__init__ = _spy\n"
+        "app.config.CONFIG = {'knowledge_graph': {'write_enabled': True}}\n"
+        "sys.argv = ['link_stranded_entities.py', '--apply', '--db', %r, '--sample', '0']\n"
+        "try:\n"
+        "    runpy.run_path(%r, run_name='__main__')\n"
+        "finally:\n"
+        "    sys.stderr.write('OPENED ' + __import__('json').dumps(\n"
+        "        {'opened': opened, 'default_db': %r}) + '\\n')\n"
+    ) % (str(db), str(SCRIPT), str(live_db))
+    return subprocess.run([sys.executable, "-c", child], cwd=str(ROOT),
+                          env=_child_env(sid=sid), capture_output=True, text=True,
+                          timeout=300)
+
+
+def _opened_paths(proc) -> dict:
+    """The child's own record: which stores it opened, and which path was the default.
+
+    One JSON object on one `OPENED ` line, so a reader gets the child's list and the
+    `--db` default it did not use from the same write, and the parent cannot mistake a
+    path in one for a path in the other.
+    """
+    line = next((ln for ln in proc.stderr.splitlines() if ln.startswith("OPENED ")), "")
+    assert line, f"the child reported no store paths:\n{proc.stderr[-800:]}"
+    witness = json.loads(line[len("OPENED "):])
+    assert set(witness) == {"opened", "default_db"}, witness
+    return witness
+
+
+def test_a_real_apply_writes_only_under_an_attended_id(tmp_path):
+    """Clause 4: the same script, the same copy of the store, one variable apart.
+
+    The attended run is the crossing the owed entry says nothing has ever proved:
+    `--apply` as its own process, holding the environment a Lloyd Bash child
+    actually carries, exiting 0 and writing its four edges into a copy under tmp. The
+    refused run is the identical call with the variable removed — exit 2, no edge in
+    the copy, and no `kg-stranded-*` snapshot beside it, so a refusal cannot leave
+    even the file that a write takes. Neither run may reach the live store, which the
+    child's own `KGStore.__init__` record settles, and the live file's own size and
+    mtime are re-read afterwards as a second instrument.
+    """
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    st.close()
+
+    run_dir = tmp_path / "apply-run"
+    run_dir.mkdir()
+    copy = run_dir / "kg.sqlite"
+    copy.write_bytes((tmp_path / "kg.sqlite").read_bytes())
+    live_db = Path(linker.VAULT_KG_DB)
+
+    ok = _apply_child(copy, sid=ATTENDED_SESSION, live_db=live_db)
+    assert ok.returncode == 0, (
+        f"an attended apply from a real process refused: rc={ok.returncode}\n"
+        f"{ok.stdout[-900:]}\n{ok.stderr[-900:]}")
+    assert "applied 4 edges" in ok.stdout, ok.stdout[-900:]
+    assert REFUSAL not in ok.stdout, ok.stdout[-900:]
+    names = _backup_traces(tmp_path)
+    assert len(names) == 1, f"a real apply takes exactly one backup: {names}"
+
+    after_ok = KGStore(copy)
+    try:
+        assert after_ok.edges.count(active_only=True) == seeded + 4, \
+            "the attended apply's edges did not land in the copy"
+        assert after_ok.edges.find_active(STRANDED, "TGS-RAG", linker.EDGE_TYPE) \
+            is not None, "the row #1019 is named for is the one that had to link"
+    finally:
+        after_ok.close()
+
+    # The unset run: same argv, same copy-populated directory, no id in the
+    # environment at all. Everything it must not do is what the run above did.
+    ref = _apply_child(copy, sid=None, live_db=live_db)
+    assert ref.returncode == 2, (
+        f"a real apply with no session id in its environment wrote anyway: "
+        f"rc={ref.returncode}\n{ref.stdout[-900:]}")
+    assert REFUSAL in ref.stdout, ref.stdout[-900:]
+    assert _backup_traces(tmp_path) == names, \
+        "the refused apply took a backup beside the copy"
+    after_ref = KGStore(copy)
+    try:
+        assert after_ref.edges.count(active_only=True) == seeded + 4, \
+            "the refused apply wrote edges into the copy"
+    finally:
+        after_ref.close()
+
+    # Clause 4's last clause, from each child's own witness: the only store either
+    # run constructed was the copy under tmp, and neither one opened the path `--db`
+    # defaults to — which in a live run is the production graph. (Under a test tree
+    # `app.paths` re-anchors that default into the test root, so what this pins is the
+    # property that matters: the run never touches the default, only the path it was
+    # handed.) No size-or-mtime check on that store is asserted here: the live system
+    # writes its own graph all day, so a moved mtime would not be this node's doing and
+    # an unmoved one would not be evidence. A store a process never constructed cannot
+    # have read or written, which is why the child reports the list itself.
+    for proc, label in ((ok, "attended"), (ref, "unset")):
+        witness = _opened_paths(proc)
+        assert witness["opened"], f"the {label} run opened no store at all"
+        assert witness["default_db"] == str(live_db), \
+            f"the {label} child reported the wrong `--db` default"
+        for path in witness["opened"]:
+            assert Path(path).resolve() == copy.resolve(), \
+                f"the {label} run opened {path!r}, not the copy at {copy}"

@@ -1740,13 +1740,22 @@ Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.
   for byte what they were. The aggregator serves exactly the Bash calls that
   carry the stamp (`rpc_policy.override` lets an eval arm switch it per
   context with no restart).
-- **The env** (`builtin_bash._bash`, both spawn branches): `LLOYD_SESSION_ID`,
-  `LLOYD_TURN_ID`, `LLOYD_PARENT_CALL_ID`, `LLOYD_EFFECT_SCOPE`,
-  `LLOYD_SURFACE`, `LLOYD_RPC_DENY`, `LLOYD_RPC_DEADLINE` (now + timeout − 5 s;
-  a background child gets the 600 s foreground ceiling), `LLOYD_RPC_DEPTH=1`,
-  `LLOYD_RPC_URL`, `LLOYD_RPC_TOKEN_FILE` = the aggregator's own credential
-  file, only when it is a 0600 regular file of this uid. **A sandboxed
-  (bench/eval) session gets none of it**, and bwrap now unsets
+- **The env** (`builtin_bash._bash`, both spawn branches): `LLOYD_SESSION_ID`
+  travels on **every non-sandboxed** Bash child, stamped or not (#3768). It is the
+  caller's own id rather than a credential, and a child that cannot say whose turn it
+  is on cannot be classified by one: `scripts/memory/link_stranded_entities.py` admits
+  `--apply` only to a process whose `LLOYD_SESSION_ID` classifies `attended`, so while
+  the id arrived only on a stamped turn that class was unreachable from outside —
+  stamping needs `harness.rpc.enabled` and that is false. `rpc_policy.ENV_NAMES` still
+  lists the name, so bwrap unsets it for a sandboxed child besides the `{}`
+  `_rpc.session_id_env` answers for one. The rest of the list — `LLOYD_TURN_ID`,
+  `LLOYD_PARENT_CALL_ID`, `LLOYD_EFFECT_SCOPE`, `LLOYD_SURFACE`, `LLOYD_RPC_DENY`,
+  `LLOYD_RPC_DEADLINE` (now + timeout − 5 s; a background child gets the 600 s
+  foreground ceiling), `LLOYD_RPC_DEPTH=1`, `LLOYD_RPC_URL`, `LLOYD_RPC_TOKEN_FILE` =
+  the aggregator's own credential file, only when it is a 0600 regular file of this
+  uid — arrives **only when the turn was stamped**, which means the loop stamped it and
+  nothing has blocked the feature since. **A sandboxed (bench/eval) session gets none of
+  it**, and bwrap now unsets
   `LLOYD_MCP_TOKEN*` and every `LLOYD_RPC_*` and binds `/dev/null` over the
   token file, so a trial cannot read the secret at all.
 - **Server-authoritative.** Spawning a stamped Bash registers a *parent* (id,

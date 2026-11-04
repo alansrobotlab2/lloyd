@@ -138,6 +138,35 @@ def _token_file_ok(path) -> bool:
             and not (st.st_mode & 0o077))
 
 
+def session_id_env(*, sandboxed: bool) -> dict[str, str]:
+    """`{LLOYD_SESSION_ID: <this call's session id>}`, or `{}` when there is none.
+
+    #3768. The session id is not an rpc variable, and it has to travel without one:
+    `scripts/memory/link_stranded_entities.py` admits `--apply` only when the id in
+    its environment classifies ATTENDED, and the only writer of that variable was
+    `bash_env` below — which answers `(None, None)` for every turn the loop did not
+    stamp, i.e. every turn while `harness.rpc.enabled` is false (config.yaml:883).
+    So the class the linker admits was unreachable from the outside: no caller
+    anywhere could cross its own gate.
+
+    `{}` — add nothing — for a sandboxed call, for a call bound to no session, and
+    for a session id that is itself sandboxed. That last check is the same belt
+    `bash_env` carries two paragraphs below: `sandboxed` is the flag the caller
+    passes, and the id is the fact, so a lost flag cannot hand a bench or eval trial
+    an id this module's caller never granted.
+    """
+    from agent_mcp import _task_registry, _tool_sandbox
+
+    if sandboxed:
+        return {}
+    sid = _task_registry.current_session_id.get() or ""
+    if not sid:
+        return {}
+    if _tool_sandbox.is_sandboxed_session(sid):
+        return {}
+    return {rpc_policy.ENV_SESSION_ID: sid}
+
+
 def bash_env(*, sandboxed: bool, timeout_s: float, background: bool
              ) -> tuple[dict[str, str] | None, Parent | None]:
     """The child environment for a Bash call, and the parent it registered.

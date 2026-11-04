@@ -249,6 +249,11 @@ async def _bash(args: dict[str, Any]) -> str:
         # foreground ceiling; its parent is retired by its deadline, and it
         # gets no trailer — its result is returned before it has run.
         env, _parent = _rpc.bash_env(sandboxed=False, timeout_s=0.0, background=True)
+        # #3768, the same one key as the foreground branch below: a detached child
+        # that carries no session id cannot say who ran it, and the linker's `--apply`
+        # gate reads exactly that. Background Bash is refused for a sandboxed session
+        # above, so this call is never a bench or eval one.
+        env = _merge_session_id(env, sandboxed=False)
         return await _spawn_background(command, _background_label(args), cwd, env=env)
 
     # P9: `lloyd_rpc` env for the shell, only when the loop stamped this call
@@ -322,7 +327,15 @@ async def _bash(args: dict[str, Any]) -> str:
                 # so leaving an inherited `LLOYD_PATH_SANDBOX=enforced` in the child's
                 # environment has it reporting a substrate it is not running under.
                 env=_path_sandbox.child_env(
-                    _resource_ceiling.launcher_env(rpc_env), sb_enforced),
+                    # #3768: the session id merges in before the two env builders,
+                    # so it rides on the inherited environment rather than replacing
+                    # it. Unstamped (`rpc_env` None, which is every turn while
+                    # `harness.rpc.enabled` is false) the child still learns whose
+                    # Bash it is; sandboxed, `_merge_session_id` adds nothing and
+                    # bwrap unsets the name besides.
+                    _resource_ceiling.launcher_env(
+                        _merge_session_id(rpc_env, sandboxed=sandboxed)),
+                    sb_enforced),
                 start_new_session=True,
             )
     except Exception as exc:
@@ -467,6 +480,47 @@ def _background_label(args: dict) -> str:
     if isinstance(legacy, str) and legacy.strip():
         return legacy.strip()
     return (_task_registry.current_call_summary.get() or "").strip()
+
+
+def _merge_session_id(env: dict[str, str] | None, *, sandboxed: bool
+                      ) -> dict[str, str] | None:
+    """Add the caller's session id to a spawn env, keeping `None` meaning inherit.
+
+    #3768. Both spawn branches build the child environment through
+    `_resource_ceiling.launcher_env` and `_path_sandbox.child_env`, and both of those
+    read a `None` as "start from `os.environ`". So the merge has two shapes it must
+    not take: returning a bare `{LLOYD_SESSION_ID: sid}` would be handed to
+    `create_subprocess_exec` as a complete environment and strip `PATH` from every
+    Bash child on the machine (`launcher_env` would then copy that one-key dict, not
+    the process env), and returning `{}` where the caller passed `None` would do the
+    same thing one step later. Hence: `None` in, `None` out when there is nothing to
+    add; a copy with the one key merged in otherwise.
+
+    A sandboxed call is not given the id. `_rpc.session_id_env` already answers `{}`
+    for one, and bwrap unsets the name besides (`_tool_sandbox.bwrap_argv`,
+    `rpc_policy.ENV_NAMES`), so a bench or eval child keeps today's environment.
+    """
+    extra = _rpc.session_id_env(sandboxed=sandboxed)
+    if not extra:
+        return env
+    # The same rule the two builders below apply, and for the same reason: `None` is
+    # the caller's way of saying "from the process environment", so merging into a
+    # `None` has to materialise that environment first. Measured at this round's first
+    # attempt, which did not: `{**(env or {}), **extra}` handed the spawn a one-key
+    # environment, and the child's `env` came back as `LLOYD_SESSION_ID` plus whatever
+    # bwrap, the scope launcher and bash set for themselves — no `PATH` from the
+    # aggregator, and no caller-set variable. (The launcher is named without its
+    # command here because one static node counts every occurrence of that command's
+    # name in this file, and its zero is what pins the argv living in one module.)
+    # No rebuild-freeze check here, deliberately. The freeze is a property of the
+    # store, so it is enforced at the write site: `link_stranded_entities.main` asks
+    # its own `writes_disabled_by_rebuild()` before it opens a transaction, and that
+    # order is what makes the refusal readable. Suppressing the id for a frozen turn
+    # instead would make the script answer a store question with "no session is
+    # established", sending the next reader looking for a missing export. The id is
+    # identity; the freeze is privilege, and only one of them belongs in this function.
+    base = os.environ if env is None else env
+    return {**base, **extra}
 
 
 async def _spawn_background(command: str, description: str, cwd: str | None = None,
