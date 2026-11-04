@@ -3756,3 +3756,167 @@ def test_the_review_tab_asks_for_the_pending_pile_at_the_ceiling_and_labels_both
         "the tab keeps the server's own counts apart from `items.length`")
     assert "q.set('status', opts.status)" in api_src, (
         "`api.workersPending` must send the param, not accept and ignore it")
+
+
+# ---------------------------------------------------------------------------
+# #3526 — the health payload splits a source's outcomes by the run's own kind
+# ---------------------------------------------------------------------------
+
+
+def _kinded_health_client(monkeypatch, tmp_path: Path, specs, sources):
+    """A health client over ONE real `WorkQueue` seeded with `specs`.
+
+    The shape `_evidence_client` above establishes — real queue, no double, because
+    a fabricated rollup would test only the router's pass-through — plus the one
+    thing that helper cannot express: a `status` per row. `kind` is stored through
+    `record_run`, the same call `workers/pool.py` makes, so a test that read the
+    payload without the column ever being written would pass on the seed and fail
+    on the store. The jobs file is pointed at a path that does not exist so the
+    schedule section adds no source rows of its own to what the test reads back.
+    """
+    from workers.queue import WorkQueue, new_run_id
+
+    queue = WorkQueue(tmp_path / "workers.db")
+    for source, kind, status, stamp, duration in specs:
+        queue.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                         status=status, started_at="2000-01-01T00:00:00+00:00",
+                         completed_at=stamp, duration_seconds=duration, kind=kind)
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    monkeypatch.setattr(
+        router, "CONFIG",
+        {"workers": {"sources": {name: {"enabled": True, "interval_seconds": 900}
+                                 for name in sources}}},
+        raising=False)
+    monkeypatch.setattr(router, "WORKERS_JOBS_PATH",
+                        tmp_path / "absent-jobs.json", raising=False)
+    return client, queue
+
+
+# Acceptance clause 4 (item #3526); the clause names this file. /api/workers/health
+# publishes a by_kind map on each source's health block giving that kind's total,
+# failed and fail_rate over the same window, runs with no kind under one distinct
+# key, the per-kind totals summing to the source's total and its paper and video
+# entries both readable where today one row is, while every existing per-source key
+# keeps exactly its current value.
+def test_health_publishes_paper_and_video_rates_that_sum_to_the_source_total(monkeypatch, tmp_path):
+    """Clause 4 end to end: one seeded store, the real queue, the real rollup, the
+    real route, the response body — the seam `run_rollup_by_source` →
+    `app/routers/workers.py` assigns verbatim as `health: rollup.get(name)` → JSON.
+
+    What the item could only measure by hand is what the body now carries. On the
+    real store on 2026-11-04 the `youtube-digest` row read `total: 50, failed: 1,
+    fail_rate: 0.02`, and the one failure inside it belonged to the paper half,
+    which was 7 runs and 1 failure — 1 in 7, published as 2 %. `queue.kind` had
+    always said which half a run was, and the route could not reach it: the join
+    existed only in the reviewer's terminal. The seed below is that story at
+    fixture size — 4 `youtube-digest` runs, 2 video successes, 1 paper success and
+    1 paper failure, plus one `queue-maintenance` run written with no queue row at
+    all, which is the poison sweep's own shape and has to be countable without
+    being given a kind it never had.
+
+    The assert is a WHOLE-DICT comparison, not a key probe, because the clause is
+    that every existing per-source key keeps exactly its current value: `total`,
+    `ok`, `failed`, `skipped`, `silent`, `unfinished_matrix`, `deadline_cut`,
+    `matrix_shrunk`, the six evidence keys, `fail_rate`, `gpu_hours`,
+    `last_completed`, `last_failure` and `consecutive_failures` are all spelled out
+    below at the values the same seed produced before `by_kind` existed. A change
+    that moved any of them fails here on the dict, not on a probe a future author
+    could widen by accident.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    ok_stamp = now.isoformat()
+    bad_stamp = (now - timedelta(hours=1)).isoformat()
+    client, queue = _kinded_health_client(
+        monkeypatch, tmp_path,
+        [("youtube-digest", "video", "success", ok_stamp, 1800.0),
+         ("youtube-digest", "video", "success", ok_stamp, 1800.0),
+         # The paper half carries the source's only failure — the live shape, in
+         # which a 1-in-7 paper rate was published as 2 % for the whole source.
+         ("youtube-digest", "paper", "success", ok_stamp, 1800.0),
+         ("youtube-digest", "paper", "failed", bad_stamp, 1800.0),
+         # The poison sweep's own report: `queue_id=None`, so nothing to read.
+         ("queue-maintenance", None, "success", ok_stamp, 1800.0)],
+        ["youtube-digest", "queue-maintenance"])
+
+    body = client.get("/api/workers/health?days=7").json()
+    rows = {row["name"]: row for row in body["sources"]}
+    ydigest = rows["youtube-digest"]["health"]
+    stored = {r["kind"] for r in queue.list_runs(source="youtube-digest")}
+
+    assert ydigest == {
+        "total": 4, "ok": 3, "failed": 1, "skipped": 0, "silent": 0,
+        "unfinished_matrix": 0, "deadline_cut": 0, "matrix_shrunk": 0,
+        "runs_with_bundle": 0, "runs_without_bundle": 4,
+        "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
+        "claims_insufficient": 0,
+        "fail_rate": 0.25, "gpu_hours": 2.0,
+        "last_completed": ok_stamp, "last_failure": bad_stamp,
+        "consecutive_failures": 0,
+        "by_kind": {
+            "video": {"total": 2, "failed": 0, "fail_rate": 0.0},
+            "paper": {"total": 2, "failed": 1, "fail_rate": 0.5},
+        },
+    }, ("the kind split reached an existing key, or a half is missing, or a rate is "
+        "not the kind's own denominator")
+    assert sum(v["total"] for v in ydigest["by_kind"].values()) == ydigest["total"], (
+        "the per-kind totals are not a partition of the row's `total` — a kind the "
+        "query dropped would read as a smaller fleet")
+    assert sum(v["failed"] for v in ydigest["by_kind"].values()) == ydigest["failed"]
+    assert ydigest["by_kind"]["paper"]["fail_rate"] == 0.5, (
+        "the paper half still reads as the source's blended 0.25 — the mask moved, "
+        "it did not lift")
+
+    assert stored == {"video", "paper"}, (
+        f"the published split did not come from a stored column: {stored!r}")
+
+    maintenance = rows["queue-maintenance"]["health"]
+    assert maintenance["by_kind"] == {
+        "__none__": {"total": 1, "failed": 0, "fail_rate": 0.0}}, (
+        "a run with no queue row landed under a guessed kind: "
+        f"{maintenance['by_kind']!r}")
+
+
+def test_the_kind_key_is_present_whenever_a_health_block_is(monkeypatch, tmp_path):
+    """Where `by_kind` is and is not, at the boundary a reader actually stands at.
+
+    Two readings, both of them pre-existing behaviour that this change must not
+    have shifted, and both of them things Mission Control has to code against:
+
+    - A source with completed runs publishes `by_kind` ALWAYS. A source whose runs
+      carry no kind at all gets one `__none__` group rather than an empty map, so
+      "no kind recorded" is a countable number and the per-kind totals still add up
+      to `total`. An empty map is exactly how a column that was never written would
+      look — indistinguishable from a source that has never run. Measured on a copy
+      of the live store after the migration runs, that group is small and it is
+      accounted for: 12 rows, every one of them `queue-maintenance` (the poison
+      sweep, the one writer with no queue row to read a kind from), against 17
+      distinct kinds the backfill recovered for the rest of the fleet.
+    - A source with NO completed run in the window publishes `health: null`, as it
+      did before this column existed, because `run_rollup_by_source` groups rows and
+      a source with no rows produces no group to read. So `by_kind` is absent with
+      the whole block, never `{}`. What Mission Control does with it is owed and not
+      in this diff: `by_kind` is not declared anywhere in the `health` object type at
+      `web/src/api.ts:337`, so a component that reads `health.by_kind` is a type
+      error until that type gains the key — recorded under `## Findings` on item
+      #3526, whose other deferred lines are the `queue-health-check` reporting line
+      and the §Intake prose.
+    """
+    client, _ = _kinded_health_client(
+        monkeypatch, tmp_path,
+        [("queue-maintenance", None, "success",
+          datetime.now(timezone.utc).isoformat(), 60.0)],
+        ["queue-maintenance", "autocode"])
+
+    body = client.get("/api/workers/health?days=7").json()
+    rows = {row["name"]: row for row in body["sources"]}
+
+    assert rows["queue-maintenance"]["health"]["by_kind"] == {
+        "__none__": {"total": 1, "failed": 0, "fail_rate": 0.0}}, (
+        "kind-less runs have to be a group, not an omission — an empty map is what "
+        "a column nobody wrote would read as")
+    assert rows["autocode"]["health"] is None, (
+        "a source with no run in the window used to publish no health block at all; "
+        "adding a per-kind key must not have invented an empty one")

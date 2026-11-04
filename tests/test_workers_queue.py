@@ -2541,3 +2541,339 @@ def test_no_names_passed_leaves_every_waiting_row_counted_as_starvation(tmp_path
         held_entry["over_bound_count"] == 6, (
         "the two counts partition the same six rows; neither is the whole story alone")
     assert entry["max_wait_seconds"] == 0.0 and entry["held_max_wait_seconds"] == 32400.0
+
+
+# ---------------------------------------------------------------------------
+# #3526 — `runs.kind`: a run is classifiable by function with no join
+# ---------------------------------------------------------------------------
+
+#: The `runs` table exactly as it stood before #3526: the 13 columns the item
+#: names, `meta_json` and `claims_json` already migrated in, and no `kind`.
+#: Hand-written rather than taken from `_SCHEMA`, because the node is about what a
+#: store that predates the column does when a real `_init_db` runs over it — and a
+#: fixture built from the current schema would have the column and prove nothing.
+_LEGACY_SCHEMA = """
+CREATE TABLE queue (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  source        TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  priority      INTEGER NOT NULL DEFAULT 50,
+  payload_json  TEXT NOT NULL,
+  dedup_key     TEXT UNIQUE,
+  state         TEXT NOT NULL DEFAULT 'queued',
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  enqueued_at   TEXT NOT NULL,
+  claimed_at    TEXT,
+  claimed_by    TEXT,
+  completed_at  TEXT,
+  error         TEXT
+);
+CREATE TABLE runs (
+  run_id            TEXT PRIMARY KEY,
+  queue_id          INTEGER,
+  source            TEXT NOT NULL,
+  task_id           TEXT,
+  status            TEXT NOT NULL,
+  started_at        TEXT NOT NULL,
+  completed_at      TEXT NOT NULL,
+  duration_seconds  REAL,
+  summary           TEXT,
+  artifact_path     TEXT,
+  response_json     TEXT,
+  meta_json         TEXT,
+  claims_json       TEXT
+);
+"""
+
+
+def _make_legacy_store(path) -> None:
+    """A pre-#3526 `workers.db` holding the four kinds of run row a backfill meets.
+
+    One row per recoverability case, and the four are the whole space: a run whose
+    queue row says `paper`, one whose queue row says `video`, one written with
+    `queue_id=NULL` (the poison sweep's own report is written that way), and one
+    whose queue row is gone. Two of those four have no kind to recover, and how
+    the migration treats them is the clause: a kind it cannot read has to stay
+    NULL, because a filled-in one would be a guess the migration signed.
+    """
+    con = sqlite3.connect(str(path))
+    con.executescript(_LEGACY_SCHEMA)
+    con.execute("INSERT INTO queue (id, source, kind, payload_json, enqueued_at) "
+                "VALUES (1,'youtube-digest','paper','{}','2026-11-01T00:00:00+00:00')")
+    con.execute("INSERT INTO queue (id, source, kind, payload_json, enqueued_at) "
+                "VALUES (2,'youtube-digest','video','{}','2026-11-01T00:00:00+00:00')")
+    con.execute("INSERT INTO queue (id, source, kind, payload_json, enqueued_at) "
+                "VALUES (3,'youtube-digest','video','{}','2026-11-01T00:00:00+00:00')")
+    for run_id, queue_id, status in (("r-paper", 1, "success"),
+                                     ("r-video", 2, "failed"),
+                                     ("r-no-queue", None, "success"),
+                                     ("r-orphan", 99, "success")):
+        con.execute(
+            "INSERT INTO runs (run_id, queue_id, source, status, started_at,"
+            " completed_at, duration_seconds) VALUES "
+            f"('{run_id}',{queue_id if queue_id is not None else 'NULL'},"
+            "'youtube-digest'," f"'{status}',"
+            "'2026-11-01T00:00:00+00:00','2026-11-01T00:01:00+00:00',60.0)")
+    # Queue row 3 is still live but has no run at all: the backfill must not
+    # reach sideways from a kind to a row, only down a row's own `queue_id`.
+    con.commit()
+    con.close()
+
+
+def test_the_kind_column_arrives_on_a_store_that_predates_it(tmp_path):
+    """Clause 1's first half: `PRAGMA table_info(runs)` names `kind` after a real
+    `_init_db`, and nothing else about the table moved.
+
+    The additive rule is the one this file's own comment says the column list
+    drifts by — `meta_json`, then `claims_json`, both ALTER TABLE — so the check
+    is that the new column is APPENDED after the 13 and the 13 keep their order.
+    A reader's stored `SELECT` with a column list, and every test in this file
+    that builds a row by position, depend on that.
+    """
+    path = tmp_path / "legacy.db"
+    _make_legacy_store(path)
+    before = [r[1] for r in sqlite3.connect(str(path)).execute(
+        "PRAGMA table_info(runs)")]
+
+    WorkQueue(path)
+
+    after = [r[1] for r in sqlite3.connect(str(path)).execute("PRAGMA table_info(runs)")]
+    assert after == before + ["kind"], (
+        f"`kind` is not the one appended column on the 13 it was added to: {after}")
+
+
+# Acceptance clause 3 (item #3526); the clause names this file. The same migration
+# fills `kind` on existing rows from their own queue row, and leaves NULL any row
+# whose queue_id is NULL or whose queue row no longer exists.
+def test_the_kind_migration_backfills_existing_rows_from_their_own_queue_row(tmp_path):
+    """Clause 3: historical rows get the kind of the queue row they came from, and
+    the two rows with no queue row to read one from keep NULL.
+
+    The deleted half is why the predicate, not just the subquery, is pinned here:
+    `queue_id IS NOT NULL` and a subquery that yields NULL for a missing row are
+    two different guards, and a `COALESCE(kind, source)`-style shortcut would fill
+    the orphan with `youtube-digest` — a string that is not a kind of anything and
+    would then read as one on the health panel forever.
+    """
+    from workers.queue import NO_KIND
+
+    path = tmp_path / "backfill.db"
+    _make_legacy_store(path)
+    q = WorkQueue(path)
+
+    kinds = {r["run_id"]: r["kind"] for r in q.list_runs(limit=10)}
+    assert kinds == {"r-paper": "paper", "r-video": "video",
+                     "r-no-queue": None, "r-orphan": None}, (
+        "a row's kind came from somewhere other than its own queue row")
+    assert NO_KIND not in set(kinds.values()), (
+        "`__none__` is a published rollup key, not a stored value — writing it "
+        f"into `runs.kind` would make the guess permanent: {kinds}")
+
+
+def test_the_kind_backfill_is_a_one_time_migration_not_a_reconciler(tmp_path):
+    """A second boot must leave every stored kind exactly as it is.
+
+    `_init_db` runs at every construction of a `WorkQueue` — backend boot, pool
+    boot, this suite, a maintenance script — and the backfill sits INSIDE the
+    `if "kind" not in run_cols` guard, so it is a migration that happens once
+    rather than a reconciler that runs on every import of the module. That
+    distinction is what protects a stored kind here: the statement never gets a
+    second chance at a row a writer already labelled, and the kind a run was
+    claimed under survives every later boot of the process. A row whose stored kind
+    came back NULL after a reboot would silently move a source's paper half out of
+    the tally the moment the queue was next opened.
+
+    The statement's own `kind IS NULL` predicate is a second, redundant safety on
+    top of that guard — inert while the UPDATE lives inside it, and load-bearing
+    the day someone hoists the statement out, which is why it stays. This node
+    pins the observable behaviour: the second boot changes nothing.
+    """
+    path = tmp_path / "no-rewrite.db"
+    _make_legacy_store(path)
+    WorkQueue(path)
+    with sqlite3.connect(str(path)) as con:
+        # Two edits a naive re-run would undo: a kind written where the backfill
+        # could read none, and a kind deliberately CHANGED from the one the
+        # backfill itself stored.
+        con.execute("UPDATE runs SET kind='paper' WHERE run_id='r-orphan'")
+        con.execute("UPDATE runs SET kind='paper' WHERE run_id='r-video'")
+
+    WorkQueue(path)
+
+    assert {r["run_id"]: r["kind"] for r in WorkQueue(path).list_runs(limit=10)} == {
+        "r-paper": "paper", "r-video": "paper",
+        "r-no-queue": None, "r-orphan": "paper"}, (
+        "a boot after the migration rewrote a kind a writer had stored")
+
+
+def test_a_run_written_from_a_claimed_item_is_classifiable_with_no_join(q):
+    """Clause 1's second half, on the pool's own writer: the row says which of the
+    source's two functions it was, read straight off `runs`.
+
+    `list_runs` is `SELECT * FROM runs` with no join anywhere in it, which is the
+    point — the whole item is that separating `youtube-digest`'s video half from
+    its paper half needed `JOIN queue ON queue.id = runs.queue_id`, a statement no
+    script in this repo wrote (`git grep -n 'JOIN queue' -- '*.py'` returned one
+    hit, `list_runs_joined`, selecting `q.payload_json` and never `q.kind`).
+    """
+    q.enqueue("youtube-digest", "paper", payload={"arxiv_id": "2511.00001"})
+    item = q.claim_next("worker-0")
+    assert item.kind == "paper", "fixture is wrong: the item did not carry its kind"
+    stamp = datetime.now(timezone.utc).isoformat()
+
+    q.record_run(run_id=new_run_id(item.source), queue_id=item.id,
+                 source=item.source, status="success", started_at=stamp,
+                 completed_at=stamp, duration_seconds=1.0, kind=item.kind)
+
+    row = q.list_runs(source="youtube-digest")[0]
+    assert row["kind"] == "paper", (
+        "the row is not classifiable by function from `runs` alone")
+
+
+def test_the_crash_recovery_sweep_stamps_its_row_with_the_claimed_kind(q):
+    """Clause 1's third writer: the boot-time sweep, whose row is the one an alarm
+    is most likely to be about.
+
+    The sweep reads from one snapshot SELECT, so naming `kind` there is what makes
+    these rows classifiable — a snapshot that left it out would write NULL into
+    every crash row and hand back exactly the blind spot #3526 exists to close, on
+    the one population an alarm is raised from. The row is aged past the reclaim
+    bound by the file's own helper because a sweep does not reap a live claim: an
+    unaged fixture would assert on zero swept rows and read as a pass.
+    """
+    q.enqueue("youtube-digest", "paper", payload={"arxiv_id": "2511.00002"})
+    item = q.claim_next("worker-0")
+    q.mark_running(item.id)
+    _backdate_claimed_at(q, item.id, seconds=9999)
+
+    assert q.recover_claimed() == 1, "fixture is wrong: the row was not swept"
+
+    row = _interrupted_rows(q)[0]
+    assert row["kind"] == "paper", (
+        "the interrupted row lost the kind its queue row was holding")
+
+
+# Acceptance clause 2 (item #3526); the clause names this file. A run row with no
+# queue row to read a kind from - queue_id NULL, as the poison sweep's own row
+# writes - stores NULL rather than a guessed kind.
+def test_a_run_row_with_no_queue_item_stores_null_kind_not_a_guess(q):
+    """Clause 2: `queue_id=NULL` means no kind, not the source's name in the kind column.
+
+    The poison sweep writes its own report this way (`workers/maintenance.py`:
+    `record_run(..., queue_id=None, source=SOURCE, ...)`), and it is the only
+    writer that holds no `QueueItem`, so it passes no kind at all and the column
+    has to stay empty rather than invent one. A guessed kind would be counted in a
+    per-kind fail rate as evidence for a function that never ran, and would make
+    the sum of the per-kind totals stop equaling the source's `total`.
+    """
+    stamp = datetime.now(timezone.utc).isoformat()
+    q.record_run(run_id=new_run_id("queue-maintenance"), queue_id=None,
+                 source="queue-maintenance", status="success", started_at=stamp,
+                 completed_at=stamp, duration_seconds=0.5)
+
+    row = q.list_runs(source="queue-maintenance")[0]
+    assert row["kind"] is None, (
+        f"a run with no queue item got a kind from nowhere: {row['kind']!r}")
+
+
+def _seed_kind_run(q, source: str, kind, status: str, *, stamp=None, **kw) -> None:
+    """One completed run in the current window, carrying `kind` (which may be
+    None) and `status`. `kind` is passed through exactly as `workers/pool.py`
+    passes it — the pool hands over `item.kind`, so a `None` here is a caller with
+    no queue item, not a source that has one and left it blank.
+
+    `stamp` is for the nodes that compare two stores: `last_completed` is a
+    `MAX(completed_at)` over these rows, so a seed stamped at call time differs
+    between two runs of the same seed by microseconds and poisons the comparison
+    with a difference that has nothing to do with the change under test.
+    """
+    q.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                 status=status, started_at="2000-01-01T00:00:00+00:00",
+                 completed_at=stamp or datetime.now(timezone.utc).isoformat(),
+                 duration_seconds=60.0, kind=kind, **kw)
+
+
+def test_the_rollup_splits_a_source_by_kind_over_its_own_window(q):
+    """Clause 4's math, at the rollup: per-kind `total`, `failed` and `fail_rate`
+    over the same window, with the kind-less runs under their own key.
+
+    The motivating figures are live ones: `youtube-digest` on the real store on
+    2026-11-04 published one row of `total: 50, failed: 1, fail_rate: 0.02`, while
+    its `paper` half inside that same window was 7 runs with 1 failure — a 1-in-7
+    rate printed as 2 %. The seed below is that shape at test size: 8 rows, one
+    failure, and the failure in the `paper` group — so a source rate of 1/8 has to
+    read as `paper: 1/1`, `video: 0/6`, `__none__: 0/1`, or the split has done
+    nothing but move the mask to a different field.
+
+    The `__none__` group is the third row of the seed and the clause's own
+    requirement: a run with no kind is still a run in the window, so it has to be
+    counted somewhere, and the only place it can go that keeps the totals honest
+    is a key of its own.
+    """
+    from workers.queue import NO_KIND
+
+    for _ in range(6):
+        _seed_kind_run(q, "youtube-digest", "video", "success")
+    _seed_kind_run(q, "youtube-digest", "paper", "failed")
+    _seed_kind_run(q, "youtube-digest", None, "success")
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["youtube-digest"]
+
+    assert rollup["by_kind"]["paper"] == {"total": 1, "failed": 1, "fail_rate": 1.0}
+    assert rollup["by_kind"]["video"] == {"total": 6, "failed": 0, "fail_rate": 0.0}
+    assert rollup["by_kind"][NO_KIND] == {"total": 1, "failed": 0, "fail_rate": 0.0}
+    assert rollup["by_kind"][NO_KIND]["fail_rate"] == 0.0, (
+        "the kind-less bucket is a real group with a real rate, not a null to "
+        "be skipped by a reader")
+    assert sum(v["total"] for v in rollup["by_kind"].values()) == rollup["total"], (
+        "the per-kind totals are not a partition of the source's total")
+    assert sum(v["failed"] for v in rollup["by_kind"].values()) == rollup["failed"], (
+        "`failed` per kind is not the same status pair the source-level count is")
+
+
+def test_the_kind_split_moves_no_existing_rollup_key(q):
+    """The additive rule, pinned as a whole-dict comparison rather than a spot check.
+
+    `tests/test_egress_window_unit.py` already pins `gpu_hours` and the
+    failed/interrupted SUM against committed witness rows, and the #3211 `silent`
+    key is the precedent this one copies: present, additive, and leaving `total`,
+    `ok`, `failed`, `skipped` and `fail_rate` exactly as they are. So the fix is
+    graded here by running the SAME seed twice — once through a store that has the
+    column and one kind value, once through a store where every row is kind-less —
+    and comparing the two dicts with `by_kind` taken out. Anything other than
+    `by_kind` differing is the change reaching a key it was told not to touch.
+    """
+    from workers.queue import NO_KIND
+
+    # One stamp for both stores. `last_completed` and `last_failure` are MAXes over
+    # these rows and the window predicate is a string compare, so two seeds stamped
+    # at call time differ by microseconds and the dict comparison below would fail
+    # on the clock rather than on the change.
+    stamp = datetime.now(timezone.utc).isoformat()
+    _seed_kind_run(q, "scheduled-task", "autonomy_task", "success", stamp=stamp,
+                   meta_json='{"silent": true}')
+    _seed_kind_run(q, "scheduled-task", "autonomy_task", "failed", stamp=stamp)
+    plain = WorkQueue(q.db_path.parent / "plain.db")
+    _seed_kind_run(plain, "scheduled-task", None, "success", stamp=stamp,
+                   meta_json='{"silent": true}')
+    _seed_kind_run(plain, "scheduled-task", None, "failed", stamp=stamp)
+
+    with_kind = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["scheduled-task"]
+    without = plain.run_rollup_by_source("2000-01-01T00:00:00+00:00")["scheduled-task"]
+    split = with_kind.pop("by_kind")
+    plain_split = without.pop("by_kind")
+
+    assert with_kind == without, (
+        "an existing per-source key changed value when the kind split was added")
+    assert set(with_kind) >= {"total", "ok", "failed", "skipped", "silent",
+                              "unfinished_matrix", "deadline_cut", "matrix_shrunk",
+                              "runs_with_bundle", "runs_without_bundle",
+                              "claims_checked", "claims_verified", "claims_refuted",
+                              "claims_insufficient", "fail_rate", "gpu_hours",
+                              "last_completed", "last_failure",
+                              "consecutive_failures"}
+    assert (split["autonomy_task"]["total"], split["autonomy_task"]["failed"],
+            split["autonomy_task"]["fail_rate"]) == (2, 1, 0.5)
+    assert plain_split == {NO_KIND: {"total": 2, "failed": 1, "fail_rate": 0.5}}, (
+        "a source whose runs carry no kind must publish one `__none__` group, not "
+        "an empty map — an empty map is how a missing column would read")

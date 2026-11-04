@@ -417,21 +417,34 @@ def shorten_summary(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
 
 # The one INSERT for the `runs` table. `record_run` and the crash-recovery sweep
 # both write run rows, and the column list drifts (it gained `meta_json`, then
-# `claims_json`, by ALTER TABLE): two copies of it is how one of them stops
-# writing a column the other fills, and a row missing `completed_at` is invisible
-# to every window query this table has.
+# `claims_json`, then `kind`, by ALTER TABLE): two copies of it is how one of them
+# stops writing a column the other fills, and a row missing `completed_at` is
+# invisible to every window query this table has. `kind` is in the list for the
+# same reason the sweep carries `source`: a run row that cannot say which of its
+# source's functions it was is only classifiable by joining back to `queue`, and
+# #3526's whole point is that no instrument was going to do that join.
 _RUN_INSERT_SQL = """INSERT INTO runs (run_id, queue_id, source, task_id, status,
                                      started_at, completed_at, duration_seconds,
                                      summary, artifact_path, response_json, meta_json,
-                                     claims_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                                     claims_json, kind)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+
+#: The `by_kind` key for a run that has no kind to report (#3526). A run written
+#: with `queue_id=NULL` — the poison sweep's own report — has no queue row to read
+#: one from, and its rows have to be countable without being guessed at, or the
+#: sum of the per-kind totals stops being the source's `total`. Not the string
+#: `"null"`: that collides with a JSON `null` in every reader that walks the map,
+#: and no `queue.kind` this pool enqueues is spelled with leading and trailing
+#: underscores, so the no-kind bucket cannot be shadowed by a real kind.
+NO_KIND = "__none__"
 
 
 def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int],
                 source: str, status: str, started_at: str, completed_at: str,
                 duration_seconds: float, summary: str = "", artifact_path: str = "",
                 response_json: str = "", task_id: Optional[str] = None,
-                meta_json: str = "", claims_json: str = "") -> None:
+                meta_json: str = "", claims_json: str = "",
+                kind: Optional[str] = None) -> None:
     """Insert one run row on `conn`, without committing.
 
     `summary` goes through `shorten_summary`, not a slice: this is the one place
@@ -449,6 +462,14 @@ def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int
     cannot be half-applied — a run recorded while its queue row is still
     `running`, or a row reclaimed with no run behind it, are both the reading
     this item exists to prevent.
+
+    `kind` is stored as handed in, with no default filled in. It is the claimed
+    queue item's `kind`, and a run whose writer holds no queue row — the poison
+    sweep records its own report under `queue_id=None` — has no kind to store, so
+    it stays NULL and lands under the rollup's `NO_KIND` key rather than under a
+    kind guessed from the source name. Guessing here would put a run inside a
+    tally it is not evidence for, and would make the per-kind totals stop adding
+    up to the source's `total` in exactly the rows nobody can re-derive.
     """
     conn.execute(
         _RUN_INSERT_SQL,
@@ -458,6 +479,7 @@ def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int
             shorten_summary(summary), artifact_path, response_json[:50000],
             meta_json[:20000] if meta_json else None,
             claims_json[:20000] if claims_json else None,
+            kind,
         ),
     )
 
@@ -674,6 +696,34 @@ class WorkQueue:
             # `runs_without_bundle` rather than as a clean sheet.
             if "claims_json" not in run_cols:
                 conn.execute("ALTER TABLE runs ADD COLUMN claims_json TEXT")
+            # Additive migration (#3526): the claimed item's KIND, denormalised
+            # onto the run row. `queue.kind` has always been NOT NULL, and a
+            # source that runs two different functions — `youtube-digest` its
+            # videos and its `paper` children — has always been able to separate
+            # them with a JOIN. Nothing did: `/api/workers/health` reported the
+            # source as one row, so a paper half that starts failing sits behind
+            # the video half's rate and the reader has to hand-write the join to
+            # know which half an alarm is about. `meta_json.kind` is not the
+            # substitute: `workers/sources/youtube_digest.py` stamps it on paper
+            # runs only, so 0 of that source's video rows carry the key at all,
+            # and the rows missing it are the early failure paths — exactly the
+            # population a fail-rate alarm is about.
+            if "kind" not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN kind TEXT")
+                # Backfill the history once, from each row's own queue row. A
+                # correlated subquery rather than `UPDATE ... FROM`, and the
+                # predicate does the honesty: `queue_id IS NOT NULL` leaves the
+                # rows that never had a queue item (the poison sweep writes its
+                # own report that way) alone, and a run whose queue row has since
+                # been deleted keeps NULL because the subquery yields NULL — the
+                # kind is unknown, and filling it from `source` would be a guess
+                # signed by the migration. `kind IS NULL` in the WHERE makes the
+                # statement a no-op on any row that already carries one, so
+                # re-running it can never overwrite a kind a writer stored.
+                conn.execute(
+                    "UPDATE runs SET kind = ("
+                    "       SELECT q.kind FROM queue q WHERE q.id = runs.queue_id)"
+                    " WHERE kind IS NULL AND queue_id IS NOT NULL")
             # The `run_id` the pool minted for the attempt now holding the row
             # (#1137). The log names it the moment the attempt starts; this is
             # what lets the recovery sweep write the interrupted row under the
@@ -1079,8 +1129,13 @@ class WorkQueue:
                 owner_args = list(worker_ids)
             cap = self.max_attempts
 
+            # `kind` is in this list because it is read: the sweep is one of the
+            # two writers of `runs`, and a snapshot that did not name it would
+            # write every crash row with a NULL kind — leaving the interrupted
+            # population, which is precisely the one an alarm gets raised on,
+            # invisible to the per-kind tally (#3526).
             swept = conn.execute(
-                f"SELECT id, state, attempts, source, claimed_at, enqueued_at, "
+                f"SELECT id, state, attempts, source, kind, claimed_at, enqueued_at, "
                 f"payload_json, current_run_id FROM queue "
                 f"WHERE state IN ('claimed','running'){owner_sql}",
                 owner_args,
@@ -1130,6 +1185,11 @@ class WorkQueue:
           the task through its LEFT JOIN and its payload.
         - `source` is the queue row's own, so the per-source rollup attributes
           the interruption instead of dropping it.
+        - `kind` (#3526) is the queue row's own for the same reason. Crash rows
+          are the population an alarm is most likely to be about, so a sweep that
+          left the column NULL would put exactly the runs worth separating back
+          behind their source's blended rate — which is what `queue.kind` has been
+          unable to answer from the runs side until now.
         - `started_at` is the row's `claimed_at` — the instant the attempt began.
           A row left `claimed` with no stamp (a writer that died between the two
           UPDATEs) falls back to `enqueued_at`: `started_at` is NOT NULL, and a
@@ -1195,6 +1255,12 @@ class WorkQueue:
             run_id=stamped or new_run_id(str(row["source"])),
             queue_id=row["id"],
             source=str(row["source"]),
+            # Read straight off the snapshot, with no `row.keys()` fallback: a
+            # sweep whose SELECT stopped naming `kind` must raise here rather than
+            # write a batch of NULLs and hand the crash rows back to the blind
+            # spot #3526 closes. `queue.kind` is NOT NULL, so this is never NULL
+            # for a row that was claimed — every swept row was.
+            kind=row["kind"],
             task_id=None if task_id is None else str(task_id),
             status="interrupted",
             started_at=str(claimed_at),
@@ -1475,7 +1541,17 @@ class WorkQueue:
         task_id: Optional[str] = None,
         meta_json: str = "",
         claims_json: str = "",
+        kind: Optional[str] = None,
     ) -> None:
+        """Record one finished run.
+
+        `kind` is the claimed item's kind (#3526), and the pool — the only caller
+        that holds a `QueueItem` — passes `item.kind` on all three of its arms
+        (success, timeout, exception), so a run is classifiable by function from
+        its own row instead of by joining to `queue`. Left None by a caller that
+        has no queue item to read one from, which the rollup publishes under
+        `NO_KIND` rather than guessing.
+        """
         with self._lock, self._connect() as conn:
             _insert_run(
                 conn, run_id=run_id, queue_id=queue_id, source=source,
@@ -1483,6 +1559,7 @@ class WorkQueue:
                 duration_seconds=duration_seconds, summary=summary,
                 artifact_path=artifact_path, response_json=response_json,
                 task_id=task_id, meta_json=meta_json, claims_json=claims_json,
+                kind=kind,
             )
             conn.commit()
 
@@ -1553,6 +1630,29 @@ class WorkQueue:
         ambiguity over a burst the reader could only date by hand-running a
         `SELECT max(completed_at)` this payload should have carried. Neither key
         moves `total`, `ok`, `failed`, `skipped` or `fail_rate`.
+
+        The `by_kind` map (#3526) answers a question a per-SOURCE row cannot:
+        which of a source's two functions an alarm is about. `youtube-digest` is
+        documented as two — the video digest and the `kind="paper"` child — and
+        the split has always been real in `queue.kind` and invisible here: one
+        row per source, so a paper half that starts failing sits behind the video
+        half's rate and vice versa. Measured 2026-11-04 over the live 7-day
+        window, that source published `total: 50, failed: 1, fail_rate: 0.02`
+        while its paper half was 6 success and 1 failure — a 1-in-7 rate printed
+        as 2 %, recoverable only by hand-writing `JOIN queue`, which no script in
+        this repo does. `run.kind` is what makes it a column read instead of a
+        join; `runs.meta_json.kind` is not, because `workers/sources/youtube_digest.py`
+        stamps it on paper rows only (0 of that source's video rows carry the key,
+        and the paper rows missing it are the early failure paths). One entry per
+        kind with `total`, `failed` and `fail_rate` over the SAME window; runs
+        with no kind land under `NO_KIND`. The partition is exact — every window
+        row is in exactly one group — so the per-kind totals sum to this dict's
+        `total`, and `failed` uses the identical status pair, so they sum to
+        `failed` too. Nothing else here moves: `total`, `ok`, `failed`, `skipped`,
+        `silent`, `unfinished_matrix`, `deadline_cut`, `matrix_shrunk`, the six
+        evidence keys, `fail_rate`, `gpu_hours`, `last_completed`, `last_failure`
+        and `consecutive_failures` are computed by the statements that computed
+        them before this key existed.
 
         Aggregated in SQL rather than by walking rows in Python, because the
         Background tab polls this beside everything else and `runs` is the
@@ -1780,6 +1880,46 @@ class WorkQueue:
                 " GROUP BY r.source",
                 (since_iso, since_iso)).fetchall()]
             streak = {str(r["source"]): int(r["consec"] or 0) for r in streak_rows}
+            # #3526: the same window, split by the run's own `kind`. One grouped
+            # statement beside the streak's, on the same connection and with the
+            # same `since_iso`, because a second window edge would be a second
+            # denominator — and `failed` here is the IDENTICAL status pair the
+            # main SELECT counts, so the per-kind failures add up to the source's
+            # `failed` by construction rather than by agreement between two
+            # spellings. A `GROUP BY source, kind` also cannot invent a row: every
+            # window row lands in exactly one group, NULL included, which is what
+            # makes the per-kind totals sum to `total`.
+            kind_rows = [dict(r) for r in conn.execute(
+                "SELECT source                                  AS source,"
+                "       kind                                    AS kind,"
+                "       COUNT(*)                                AS total,"
+                "       SUM(status IN ('failed','interrupted'))  AS failed"
+                " FROM runs WHERE completed_at >= ?"
+                " GROUP BY source, kind",
+                (since_iso,)).fetchall()]
+
+        # #3526: one entry per (source, kind) group, keyed by the kind's own
+        # spelling so a reader greps the payload for `paper` and finds the paper
+        # half. A NULL `kind` — a run written with no queue row to read one from,
+        # or one whose queue row predates the column — goes under `NO_KIND`, which
+        # keeps the partition total instead of dropping the rows that are hardest
+        # to attribute. `fail_rate` divides by that kind's OWN total: the source's
+        # rate is the blend this exists to look through, and quoting it per kind
+        # would put the masked figure back in the field that unmasks it.
+        by_kind: dict[str, dict[str, dict]] = {}
+        for r in kind_rows:
+            src = str(r["source"])
+            key = NO_KIND if r["kind"] is None else str(r["kind"])
+            kind_total = int(r["total"] or 0)
+            kind_failed = int(r["failed"] or 0)
+            by_kind.setdefault(src, {})[key] = {
+                "total": kind_total,
+                "failed": kind_failed,
+                # A group only exists because a row fell into it, so the
+                # denominator is never 0; the guard is the same shape as the
+                # source-level one above rather than a second opinion on it.
+                "fail_rate": (kind_failed / kind_total) if kind_total else None,
+            }
 
         def _tally_zero() -> dict:
             """The four claim counts at zero. Written once, used by both passes."""
@@ -1917,6 +2057,17 @@ class WorkQueue:
                 # means only "ran, and nothing failed".
                 "last_failure": r["last_failure"],
                 "consecutive_failures": streak.get(src, 0),
+                # #3526: the source's outcomes split by the run's own `kind`, and
+                # additive in exactly the way `silent` and the evidence six are —
+                # every key above is computed by the same unchanged statement, so
+                # a reader that divides `failed` by `total` still divides the same
+                # two numbers. Its absence would be the whole defect: on the live
+                # store the day this landed, `youtube-digest` reported one row
+                # whose single failure belonged to the `paper` half, and the only
+                # way to see that was a hand-written JOIN no script in the repo
+                # does. Present for every source, `{}` is not a gap — a source
+                # whose runs all carry no kind still gets the `NO_KIND` key.
+                "by_kind": by_kind.get(src, {}),
             }
         return out
 

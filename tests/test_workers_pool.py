@@ -3490,3 +3490,89 @@ def test_stall_factor_comment_records_the_ruling_and_not_the_question():
         "STALL_FACTOR moved off 3.0: this item records a ruling that KEPT the value, "
         "so any drift here is a behaviour change smuggled into a comment edit")
     assert dispatch_watch.STALL_FACTOR == 3.0
+
+
+# ---------------------------------------------------------------------------
+# #3526 — the pool is the writer that knows which function it ran
+# ---------------------------------------------------------------------------
+
+
+async def test_a_successful_run_stores_the_kind_it_was_claimed_under(q, monkeypatch):
+    """Clause 1's writer, across the real boundary: a claimed item goes through a
+    real pool and the stored row names its kind.
+
+    Everything up to this node asserted on a `record_run` call made by a test. The
+    caller in production is `workers/pool.py`, which holds a `QueueItem` and is the
+    only party that can say which of a source's two functions ran — `youtube-digest`
+    its videos and its paper children, both arriving on one source name. The kind
+    has to survive the hand-off from `item` into the row, because everything
+    downstream (the rollup's split, the health payload's `by_kind`, and the owed
+    ruling on whether the paper half should become its own source) reads a number
+    that comes from this line and not from a join.
+
+    The kind is deliberately NOT the default the existing tests use: `"paper"` on a
+    source named `youtube-digest` is the case where a writer that reached for
+    `item.source` instead of `item.kind` would still store a plausible-looking
+    string, so the assertion is on the exact value and not on non-emptiness.
+    """
+    async def execute(item):
+        return {"summary": "digested 2511.00001"}
+
+    q.enqueue("youtube-digest", "paper", payload={"arxiv_id": "2511.00001"})
+    runs = await _drain_one(
+        q, monkeypatch, SimpleNamespace(NAME="youtube-digest", execute=execute),
+        source_name="youtube-digest")
+
+    assert runs[0]["kind"] == "paper", (
+        "the pool wrote a run row that cannot say which of the source's functions "
+        f"it was: kind={runs[0]['kind']!r}")
+
+
+async def test_a_raised_failure_stores_the_kind_because_that_is_the_run_an_alarm_fires_on(
+        q, monkeypatch):
+    """The exception arm, and the reason all three arms have to carry the key.
+
+    A run that died is the run a fail rate is about, so a `paper` attempt that
+    raised has to land in the paper tally — leaving the key off this arm would
+    leave the failures unkinded and the per-kind rate blind in exactly the place it
+    was added to see. The masked figure this closes is measured, not hypothetical:
+    on the live store on 2026-11-04 `youtube-digest` published one health row of
+    `total: 50, failed: 1, fail_rate: 0.02`, and the single failure inside it was a
+    paper run, whose own half of that window was 7 runs and 1 failure — 1 in 7.
+    """
+    async def execute(item):
+        raise ValueError("arxiv fetch failed")
+
+    q.enqueue("youtube-digest", "paper", payload={"arxiv_id": "2511.00002"})
+    runs = await _drain_one(
+        q, monkeypatch, SimpleNamespace(NAME="youtube-digest", execute=execute),
+        source_name="youtube-digest")
+
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["kind"] == "paper", (
+        "the failed arm lost the kind, so a paper failure would be counted against "
+        "the video half")
+
+
+async def test_a_timed_out_run_stores_the_kind_too(q, monkeypatch):
+    """The third arm: the overrun. Same key, different `record_run` call site.
+
+    The three arms of the pool's completion path are three separate calls, and the
+    one that reads as the odd case — a cancelled coroutine, a summary the pool
+    wrote itself — is the one most likely to be re-typed without the extra
+    argument. A cap of 1 second and a 30-second sleep is the same fixture
+    `test_a_run_that_overruns_its_cap_is_stopped_and_recorded` uses, so nothing
+    here depends on a new kind of timing.
+    """
+    async def execute(item):
+        await asyncio.sleep(30)
+
+    q.enqueue("youtube-digest", "paper", payload={"arxiv_id": "2511.00003"})
+    runs = await _drain_one(
+        q, monkeypatch, SimpleNamespace(NAME="youtube-digest", execute=execute),
+        source_name="youtube-digest", cfg={"max_duration_seconds": 1})
+
+    assert runs[0]["status"] == "failed"
+    assert "max_duration_seconds=1" in runs[0]["summary"]
+    assert runs[0]["kind"] == "paper", (
+        "the timeout arm's row lost the kind its item was claimed under")

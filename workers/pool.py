@@ -2024,6 +2024,13 @@ class WorkerPool:
                         run_id=run_id,
                         queue_id=item.id,
                         source=item.source,
+                        # #3526: the CLAIMED ITEM's own kind, not the source's.
+                        # The pool is the only writer of `runs` holding a
+                        # `QueueItem`, so this is where `runs.kind` gets its value,
+                        # and where a source that runs two functions —
+                        # `youtube-digest` its videos and its `paper` children —
+                        # stops reporting both as one health row.
+                        kind=item.kind,
                         status=run_status,
                         started_at=started_at_iso,
                         completed_at=completed_at,
@@ -2095,6 +2102,12 @@ class WorkerPool:
                         run_id=run_id,
                         queue_id=item.id,
                         source=item.source,
+                        # #3526, and the arm that matters most for it: a run that
+                        # died is the run an alarm fires on, so a killed `paper`
+                        # attempt has to land in the paper tally. Dropping the key
+                        # here would leave the failures — the population the
+                        # per-kind rate exists to separate — unkinded.
+                        kind=item.kind,
                         status="failed",
                         started_at=started_at_iso,
                         completed_at=completed_at,
@@ -2154,6 +2167,12 @@ class WorkerPool:
                         run_id=run_id,
                         queue_id=item.id,
                         source=item.source,
+                        # #3526, and the arm that matters most for it: a run that
+                        # died is the run an alarm fires on, so a killed `paper`
+                        # attempt has to land in the paper tally. Dropping the key
+                        # here would leave the failures — the population the
+                        # per-kind rate exists to separate — unkinded.
+                        kind=item.kind,
                         status="failed",
                         started_at=started_at_iso,
                         completed_at=completed_at,

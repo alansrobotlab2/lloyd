@@ -100,10 +100,14 @@ def _shuffled(**_kwargs):
     ]
 
 
+# Every column the real writer ends up with: `workers/queue.py`'s DDL plus each
+# additive `ALTER TABLE runs ADD COLUMN`. #3526 added the third of those (`kind`),
+# which is why this string carries it — the node below exists precisely so an
+# additive column cannot land here unnoticed.
 RUNS_SCHEMA = (
     "CREATE TABLE runs (run_id TEXT PRIMARY KEY, queue_id TEXT, source TEXT, task_id TEXT,"
     " status TEXT, started_at TEXT, completed_at TEXT, duration_seconds REAL, summary TEXT,"
-    " artifact_path TEXT, response_json TEXT, meta_json TEXT, claims_json TEXT)"
+    " artifact_path TEXT, response_json TEXT, meta_json TEXT, claims_json TEXT, kind TEXT)"
 )
 
 
@@ -253,9 +257,10 @@ def test_load_runs_opens_the_ledger_read_only(tmp_path, monkeypatch):
 
 def test_the_fixture_ledger_schema_is_the_schema_the_worker_writes(tmp_path):
     """The join runs on `runs.run_id`, `task_id`, `status`, `started_at`, `completed_at` and
-    `meta_json`. `workers/queue.py` defines that table as its DDL *plus* two additive
-    migrations, so a fixture that copied only the DDL would be missing the very column the join
-    needs — the fixture schema is therefore asserted against the real writer's column list."""
+    `meta_json`. `workers/queue.py` defines that table as its DDL *plus* three additive
+    migrations (`meta_json`, `claims_json`, and `kind` from #3526), so a fixture that copied
+    only the DDL would be missing the very column the join needs — the fixture schema is
+    therefore asserted against the real writer's column list."""
     queue_py = REPO_ROOT / "workers" / "queue.py"
     source = queue_py.read_text(encoding="utf-8")
     block = source[source.index("CREATE TABLE IF NOT EXISTS runs ("):].split(");")[0]
