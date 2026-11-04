@@ -361,12 +361,26 @@ def append_rows(rows: list[dict], *, path: Path = ROWS_PATH,
     A verified arm dict (#2338) brings `guard_egress_enforce` and `mcp_url` with it,
     and they land on every row through the same merge — the endpoint a row was
     measured against is part of the row, not of the terminal it was printed on.
+
+    A TRACKED write also stamps the per-fire identity (#3748 clause 1): the window key
+    of the authorized unit plus that fire's `INVOCATION_ID`, both read through the same
+    `authorized_unit` the refusal above reads. It exists because two window fires can
+    share a UTC date and the date-only groupers would pool them into one denominator —
+    the 2026-11-02 egress rows landing in the persistence fire's window read 35/72
+    against that fire's own 34/60 and flipped that day's bound flag. A scratch
+    destination is stamped NOT at all: the bytes a rehearsal writes stay byte-identical
+    to what they were before the identity existed, because the scratch corpus is what
+    the rehearsal's own report renders, and the guard's whole rule is that a redirect
+    is not the window's file.
     """
+    fields = egress_arm() if arm is None else dict(arm)
     if path == _TRACKED_ROWS:
         refused = GUARD.preflight(cgroup_file=cgroup_file)
         if refused:
             raise GUARD.CanaryRowsRefused(refused)
-    fields = egress_arm() if arm is None else dict(arm)
+        # Both reads are non-empty by construction here: `preflight` returned None only
+        # for a systemd invocation running inside a window unit's cgroup leaf.
+        fields.update(GUARD.fire_identity(cgroup_file=cgroup_file))
     stamped = [{**row, **fields} for row in rows]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -1671,13 +1685,21 @@ def report_rows(scratch: Path | None = None) -> list[dict]:
 
 
 def persistence_windows(rows: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Persistence rows grouped by the UTC day they were measured, oldest window first."""
+    """Persistence rows grouped by fire, oldest window first.
+
+    One entry per UTC day for identity-less rows — which is every row on the tracked
+    corpus today, so every published window line keeps its exact label and
+    denominator — and one entry per (day, fire) once rows carry the #3748 stamp
+    (`GUARD.window_of`, shared verbatim with the attribution probe's `per_window`:
+    one rule, two readers, and why the date alone was the wrong bucket).
+    """
     out: dict[str, list[dict]] = {}
     for r in rows:
         if not r.get("persistence"):
             continue
-        out.setdefault((r.get("ts") or "?")[:10], []).append(r)
-    return sorted(out.items())
+        out.setdefault(GUARD.window_of(r)[0], []).append(r)
+    return sorted(((GUARD.window_of(r[0])[1], r) for r in out.values()),
+                  key=lambda w: GUARD.window_of(w[1][0])[0])
 
 
 def raw_row_counts(win: list[dict]) -> tuple[int, int, int]:

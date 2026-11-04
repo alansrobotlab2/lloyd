@@ -70,6 +70,20 @@ refusal that is not a failure of the window may not change the window's result. 
 non-zero exit here would also make the weekly `git status` alarm about this directory
 indistinguishable from the window having broken.
 
+THE ONE EXCEPTION: A CROSS-FIRE COLLISION EXITS 1 (#3748 clause 4). When a staged row
+shares its (day, arm, key, rep) with a row ALREADY COMMITTED by a DIFFERENT fire, the
+commit about to be made would present as this fire's measurement rows that it did not
+measure — the exact pooling that made the 2026-11-02 egress fire's two controls read
+inside the persistence window (34/60 → 35/72, `36c3607f`) and `f3eb9ac3` do the same
+to 2026-10-26 (27/60 → 30/66). That is not an ordinary refusal of a step that cannot
+commit; it is this fire's data integrity failing while it commits, so it gets the exit
+code systemd can see, unit `Failed` included — whether that state should page or be
+absorbed is a ruling #3748 carries, not this module's. The DAY is part of the compared
+tuple deliberately: the scenario set re-runs BY DESIGN every week, so one (arm, key,
+rep) legitimately recurs across different days' fires, and a day-blind check would
+refuse every future fire against every past one. Pooling can only happen inside one
+UTC date, so that is the scope the check bounds to. Every other path still exits 0.
+
 WHO MAY DRIVE IT: THE UNIT, BY ITS CGROUP IDENTITY. An agent Bash turn typing `git
 commit` in `/home/alansrobotlab/lloyd` is refused by `check_live_git_writes`
 (`app/harness/live_git_writes.py:627`, wired at `app/harness/safety.py:518`), which
@@ -122,6 +136,7 @@ Tests: .venvs/lloyd/bin/python -m pytest tests/test_commit_injection_canary_corp
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -208,6 +223,86 @@ def _outside_corpus(path: str) -> bool:
     return not (path == CORPUS_DIR or path.startswith(CORPUS_PATHSPEC))
 
 
+#: The corpus row file, and the two identity fields `append_rows` stamps on tracked
+#: rows via `eval/canary_rows_guard.py` (`FIRE_UNIT_FIELD` / `FIRE_INVOCATION_FIELD`).
+#: Spelled as copies here because the import direction forbids the reference: the guard
+#: imports THIS module and must stay a leaf, and importing the guard from here would
+#: make the rule depend on a cycle. `tests/test_commit_injection_canary_corpus.py` pins
+#: these two strings against the guard's constants so a rename on one side cannot pass
+#: the other side silently.
+ROWS_REL = f"{CORPUS_DIR}/rows.jsonl"
+FIRE_UNIT_FIELD = "fire_unit"
+FIRE_INVOCATION_FIELD = "fire_invocation"
+
+
+def _corpus_rows(repo: str, rev_spec: str) -> list[dict]:
+    """The corpus rows as one git revision sees them (`HEAD:path`, or `:path` for the
+    index — the bytes a commit would take), parsed leniently: a row that will not
+    parse as a JSON object is not evidence about identity either way."""
+    proc = _git(repo, "show", rev_spec)
+    if proc.returncode != 0:
+        return []
+    rows = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def _row_fire(row: dict) -> tuple[str, str] | None:
+    """The stamped (unit, invocation) of one row, or None when it carries no full
+    identity — every historical row, which cannot collide under this check because
+    nothing can tell whose they were, which is the #3419 blindness the stamp ends."""
+    unit = str(row.get(FIRE_UNIT_FIELD) or "")
+    inv = str(row.get(FIRE_INVOCATION_FIELD) or "")
+    return (unit, inv) if unit and inv else None
+
+
+def collision_refusal(committed: list[dict], staged: list[dict]) -> str | None:
+    """Why the staged corpus rows must not be committed beside the committed ones.
+
+    A staged row collides when its (day, arm, key, rep) — the tuple the day-groupers
+    pooled, day first because the same scenario legitimately re-runs across weeks'
+    fires — matches a COMMITTED row stamped by a DIFFERENT fire. Both sides must carry
+    the full stamp: unstamped rows on either side keep this check exactly as quiet on
+    history as it is silent today, which is what lets every existing exit-0 path stay
+    one. Returns the human-readable refusal naming each colliding fire plus
+    day/arm/key/rep, or None.
+    """
+    known: dict[tuple, tuple[str, str]] = {}
+    for row in committed:
+        fire = _row_fire(row)
+        if fire:
+            known[((row.get("ts") or "?")[:10], row.get("arm"),
+                   row.get("key"), row.get("rep"))] = fire
+    bad: list[str] = []
+    for row in staged:
+        fire = _row_fire(row)
+        if not fire:
+            continue
+        episode = ((row.get("ts") or "?")[:10], row.get("arm"),
+                   row.get("key"), row.get("rep"))
+        prior = known.get(episode)
+        if prior and prior != fire:
+            bad.append(f"day={episode[0]} arm={episode[1]} key={episode[2]} "
+                       f"rep={episode[3]}: staged rows were written by fire "
+                       f"{fire[0]}/{fire[1][:8]}, but that same (day, arm, key, rep) "
+                       f"is already committed by fire {prior[0]}/{prior[1][:8]}")
+    if not bad:
+        return None
+    shown = "; ".join(bad[:5]) + (f" (+{len(bad) - 5} more)" if len(bad) > 5 else "")
+    return (f"{len(bad)} staged row(s) share a (day, arm, key, rep) with rows "
+            f"committed by a different fire — committing would pool one window's rows "
+            f"into the other's denominator ({shown})")
+
+
 def is_systemd_invocation(env: dict[str, str] | None = None) -> bool:
     """Whether `INVOCATION_ID` is set — necessary for a unit invocation, NOT sufficient.
 
@@ -290,8 +385,11 @@ def commit_corpus(repo: str = LIVE_REPO,
                   cgroup_file: str = PROC_CGROUP) -> int:
     """Stage the corpus directory, commit it if and only if that is all there is.
 
-    Returns 0 on every path, by contract (see the module docstring): the caller is
-    `ExecStartPost`, and a step that refuses must not fail the window that earned it.
+    Returns 0 on every ordinary path, by contract (see the module docstring): the
+    caller is `ExecStartPost`, and a step that refuses must not fail the window that
+    earned it. The ONE exception is the cross-fire collision, which returns 1: rows
+    that are not this fire's are not an ordinary refusal (docstring "THE ONE
+    EXCEPTION", #3748 clause 4).
     """
     refused = invocation_refusal(env, cgroup_file)
     if refused:
@@ -323,6 +421,18 @@ def commit_corpus(repo: str = LIVE_REPO,
         _log(f"nothing to commit: `git add -- {CORPUS_PATHSPEC}` staged no path in "
              f"{repo}, so this fire wrote no corpus rows or they were already recorded")
         return 0
+
+    # `:path` is the INDEX — the bytes this commit would take, not whatever the
+    # worktree drifted to after staging. Rows unstamped on either side cannot collide
+    # (`collision_refusal`), so a fire whose corpus predates the stamp commits exactly
+    # as it did before this check existed.
+    refusal = collision_refusal(_corpus_rows(repo, f"HEAD:{ROWS_REL}"),
+                                _corpus_rows(repo, f":{ROWS_REL}"))
+    if refusal:
+        _log(f"COLLISION refused: {refusal}; committed nothing in {repo} and left the "
+             f"{len(staged)} staged path(s) in the index for a human to read — this "
+             f"exit is the #3748 cross-fire exception, not an ordinary refusal")
+        return 1
 
     # Non-None by construction: `invocation_refusal` returned None, and its second arm is
     # exactly this lookup. Both halves of the subject come from that one component, which is

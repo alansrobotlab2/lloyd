@@ -223,11 +223,19 @@ def test_the_only_staging_command_is_the_corpus_directory_alone(tmp_path, repo,
     mutating_verbs = {"add", "commit", "checkout", "reset", "restore", "stash", "rm",
                       "mv", "clean", "revert", "merge", "rebase", "switch"}
     ran = {a[3] for a in recorded if a[1] == "-C" and len(a) > 3}
-    assert ran == {"add", "commit", "diff", "rev-parse"}, \
-        f"the step's git verbs are not add, diff, commit, rev-parse — {sorted(ran)}: " \
-        f"{recorded!r}"
-    assert ran <= mutating_verbs | {"diff", "rev-parse"}, \
-        f"the step ran a git verb beyond add, commit and its two reads: {sorted(ran)!r}"
+    # `show` joined the set with #3748 clause 4 and joins it as a pure read: the
+    # collision check asks `HEAD:rows.jsonl` and the index's `:rows.jsonl` what they
+    # hold — the same class of read `diff` and `rev-parse` already were. Two mutators,
+    # three reads, and no fourth way the step can touch a repo.
+    assert ran == {"add", "commit", "diff", "rev-parse", "show"}, \
+        f"the step's git verbs are not add, diff, commit, rev-parse, show — " \
+        f"{sorted(ran)}: {recorded!r}"
+    assert ran <= mutating_verbs | {"diff", "rev-parse", "show"}, \
+        f"the step ran a git verb beyond add, commit and its three reads: {sorted(ran)!r}"
+    for a in recorded:
+        if a[3:4] == ["show"]:
+            assert a[4].split(":", 1)[0] in ("HEAD", ""), \
+                f"`show` asked for a rev beyond HEAD and the index: {a!r}"
     commits = [a for a in recorded if a[3:5] == ["commit", "--only"]]
     assert len(commits) == 1, f"expected one `commit --only`: {recorded!r}"
     assert commits[0][:6] == ["git", "-C", str(repo), "commit", "--only", "-m"], \
@@ -757,3 +765,93 @@ def test_a_turn_without_an_invocation_id_still_exits_zero_at_the_boundary(repo):
         f"{proc.stdout!r}"
     assert _head(repo) == before and not _staged(repo), \
         "a turn with no INVOCATION_ID changed the checkout"
+
+
+# --- #3748 clause 4: a cross-fire collision exits 1, naming both fires -----------------
+
+def _frow(ts, key, rep, unit, inv, arm="enforce-off"):
+    import json
+    return json.dumps({"ts": ts, "arm": arm, "key": key, "rep": rep,
+                       "fire_unit": unit, "fire_invocation": inv}) + "\n"
+
+
+def _corpus_text(repo, text):
+    (repo / CORPUS / "rows.jsonl").write_text(text, encoding="utf-8")
+
+
+def test_a_stamped_row_colliding_with_another_fire_commits_nothing_and_exits_1(
+        repo, as_unit, capsys):
+    """The first non-zero path this script has ever had — reserved for data integrity.
+
+    Fire B stages a row whose (day, arm, key, rep) is already committed by fire A: the
+    2026-11-02 pooling (`36c3607f` landing two egress controls inside the persistence
+    fire's date, 34/60 read as 35/72) in synthetic form. Exit 1 is deliberate and
+    singular — the module contract is exit-0-on-refusal because `ExecStartPost` must
+    not fail a window for a housekeeping miss, but rows that are not the fire's own are
+    not a housekeeping miss: they silently move another window's published denominator.
+    """
+    a = _frow("2026-11-09T02:21:00+00:00", "control-benign", 1,
+              STEP.PERSISTENCE_UNIT, "a" * 32)
+    b = _frow("2026-11-09T06:34:00+00:00", "control-benign", 1,
+              STEP.EGRESS_UNIT, "b" * 32)
+    _corpus_text(repo, a)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0, "fire A's own row must commit"
+    before = _head(repo)
+    _corpus_text(repo, a + b)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 1
+    assert _head(repo) == before, "the collision path still committed"
+    out = capsys.readouterr().out
+    assert "COLLISION refused" in out, out[-400:]
+    assert f"{STEP.EGRESS_UNIT}/bbbbbbbb" in out and \
+        f"{STEP.PERSISTENCE_UNIT}/aaaaaaaa" in out, (
+        f"the refusal must name BOTH fires by unit and short invocation: {out!r}")
+    assert "day=2026-11-09 arm=enforce-off key=control-benign rep=1" in out, out[-400:]
+    assert _staged(repo), "the index was reset; the module leaves staged paths to a human"
+
+
+def test_the_same_key_and_rep_on_a_different_utc_date_is_not_a_collision(repo, as_unit):
+    """The scenario set re-runs BY DESIGN every week; only one UTC date can pool.
+
+    A day-blind (arm, key, rep) check would refuse every future fire against every
+    historical one — the corpus shows the same control keys recurring at rep 1-10 in
+    every window. The day is part of the compared tuple for exactly this reason, and
+    this node is what stops a well-meant tightening from bricking the weekly fire.
+    """
+    a = _frow("2026-11-09T02:21:00+00:00", "control-benign", 1,
+              STEP.PERSISTENCE_UNIT, "a" * 32)
+    later = _frow("2026-11-16T02:21:00+00:00", "control-benign", 1,
+                  STEP.EGRESS_UNIT, "b" * 32)
+    _corpus_text(repo, a)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+    _corpus_text(repo, a + later)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+
+
+def test_one_fire_appending_its_own_new_rows_never_self_collides(repo, as_unit):
+    """Same fire, same day, new keys: the ordinary weekly growth path must stay exit 0."""
+    a1 = _frow("2026-11-09T02:21:00+00:00", "control-benign", 1,
+               STEP.PERSISTENCE_UNIT, "a" * 32)
+    a2 = _frow("2026-11-09T02:22:00+00:00", "control-legit-write", 1,
+               STEP.PERSISTENCE_UNIT, "a" * 32)
+    _corpus_text(repo, a1)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+    _corpus_text(repo, a1 + a2)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+
+
+def test_unstamped_history_never_trips_the_collision_path(repo, as_unit):
+    """All 256 committed rows carry no stamp; unstamped rows cannot collide with anything.
+
+    The fires that commit against stamp-less history must behave exactly as they did
+    before the check existed — including re-appending rows an earlier unstamped commit
+    already holds, same tuple and all. This is the clause-4 half of "no published
+    figure moves": the check must be a pure addition to fire behaviour, never a
+    retroactive accusation against the corpus.
+    """
+    import json
+    plain = json.dumps({"ts": "2026-11-09T02:21:00+00:00", "arm": "enforce-off",
+                        "key": "control-benign", "rep": 1}) + "\n"
+    _corpus_text(repo, plain)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+    _corpus_text(repo, plain + plain.replace("02:21", "02:22"))
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0

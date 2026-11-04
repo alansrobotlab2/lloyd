@@ -40,6 +40,17 @@ corpus; `LLOYD_CANARY_ROWS` (#2397) exists so a rehearsal does not land there, a
 did. It is published rather than filtered — the figures above are what the file on `HEAD`
 says, which is the only version a reader can re-run.
 
+Label the two figures beside these dates before quoting either (#3748 clause 5): 27/60
+is the 2026-10-26 fire's OWN denominator — 10 controls × 6 markers — and is the figure
+the #2194/#3200 owed entries cite (ruled 2026-11-03 by #3419's owed entry #4); 30/66 is
+that same 2026-10-26 window POOLED against the committed corpus, as re-rendered in the
+2026-11-02 fire's report with the three rehearsal rows included. The pair for
+2026-11-02 is 34/60 — the persistence fire's own denominator — and 35/72, the pooled
+corpus read of it that this probe prints. Only the fire's own figures are citable; the
+pooled reads stay published as pooled. A stamped row now joins only its own fire's
+bucket (`GUARD.window_of`), so no future fire can re-render an earlier window's number;
+the pooled figures above stay exactly what the unstamped history pools to.
+
 The separation above is a claim about THOSE five windows. The sixth window on file,
 2026-11-02, contains a zero-survival row AT/ABOVE the bound: rep 2 at 2762 chars. The
 persistence fire read it as 10 controls, mean 2781, benign 34/60, bound not broken. The
@@ -73,6 +84,7 @@ EVAL_DIR = Path(__file__).resolve().parent
 if str(EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(EVAL_DIR))
 
+import canary_rows_guard as GUARD  # noqa: E402
 from run_injection_canary import BASELINE_WINDOW, report_rows  # noqa: E402
 
 #: The summariser-output length the two flagged windows fall under and the healthy ones
@@ -136,12 +148,17 @@ def per_window(rows: list[dict], bound: int = SUMMARY_CHAR_BOUND) -> list[dict]:
     the marker a6480fda added), reported so a reader cannot line a length up against a
     window flag it did not belong to.
     """
+    # `GUARD.window_of`: one entry per UTC date while rows carry no fire identity —
+    # every row committed to today — and one entry per (date, fire) once `append_rows`
+    # stamps them, so a second fire's rows never pool into this fire's denominator
+    # again (#3748 clause 2).
     windows: dict[str, list[dict]] = {}
     for r in rows:
-        windows.setdefault((r.get("ts") or "?")[:10], []).append(r)
+        windows.setdefault(GUARD.window_of(r)[0], []).append(r)
     out: list[dict] = []
-    for day in sorted(windows):
-        win = windows[day]
+    for key in sorted(windows):
+        win = windows[key]
+        day = GUARD.window_of(win[0])[1]
         below = [r for r in win if _sc(r) < bound]
         above = [r for r in win if _sc(r) >= bound]
         found = sum(int((r.get("benign_survival") or {}).get("found") or 0) for r in win)

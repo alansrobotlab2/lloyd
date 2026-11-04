@@ -12107,3 +12107,52 @@ def test_neither_doc_claims_module_recomputes_a_scan_it_is_only_meant_to_quote()
     assert [m for m in RESCAN_MARKERS if m in planted] == list(RESCAN_MARKERS), (
         "a planted corpus walk tripped none of the markers, so the absences above "
         "assert nothing")
+
+
+# --- #3748 clause 5: which 27/60 is citable, stated on both surfaces -------------------
+
+def test_the_two_denominators_are_labelled_on_both_surfaces_that_publish_them():
+    """#3748 clause 5: 27/60 is the fire's own citable figure; 30/66 and 35/72 are pooled.
+
+    #3419's owed entry #4 (2026-11-03) ruled that the #2194/#3200 owed entries cite
+    27/60 — the 2026-10-26 fire's OWN 10-control denominator — while 30/66 is that same
+    window POOLED against the committed corpus (rendered inside the 2026-11-02 fire's
+    report); 2026-11-02's pair is its own 34/60 versus the probe's pooled 35/72. A
+    ruling nobody can read is not a ruling, so the labelling on both surfaces that
+    print the figures is pinned here: the architecture page's `Read the denominators
+    before the numerators` section and the probe's module docstring must each call
+    27/60 the own-denominator figure and associate 30/66 with pooling; the probe's must
+    carry 34/60 and 35/72 the same way.
+    """
+    page = (ROOT / "architecture" / "context-window.md").read_text(encoding="utf-8")
+    i = page.index("Read the denominators before the numerators")
+    sec = page[i:i + 2400]
+    assert "27/60" in sec and "30/66" in sec, "the section lost one of the two figures"
+    seg_own = sec[sec.index("27/60"):sec.index("27/60") + 400]
+    assert "own denominator" in seg_own and "cite" in seg_own, (
+        f"27/60 is not labelled the citable own-denominator figure: {seg_own!r}")
+    seg_pool = sec[sec.index("30/66"):sec.index("30/66") + 400]
+    assert "pool" in seg_pool, f"30/66 is not labelled as the pooled read: {seg_pool!r}"
+    seg_1102 = sec[sec.index("34/60"):sec.index("34/60") + 400]
+    assert "35/72" in seg_1102 and "pool" in seg_1102, (
+        f"the 2026-11-02 own/pooled pair is not stated: {seg_1102!r}")
+
+    sys.path.insert(0, str(ROOT / "eval"))
+    import summary_length_attribution_probe as _probe
+    doc = _probe.__doc__ or ""
+    anchor = "Label the two figures beside these dates"
+    assert anchor in doc, "the probe docstring lost its labelling paragraph"
+    # Scoped to the labelling paragraph: the docstring's own per-window TABLE also
+    # carries 30/66 and 35/72 as raw digits, and a first-index search would land on
+    # the table — a label read beside an unlabelled table row is a false pass.
+    lab = doc[doc.index(anchor):doc.index(anchor) + 1400]
+    for fig in ("27/60", "30/66", "34/60", "35/72"):
+        assert fig in lab, f"the labelling paragraph lost {fig}"
+    seg = lab[lab.index("27/60"):lab.index("27/60") + 300]
+    assert "OWN denominator" in seg and "cite" in seg, (
+        f"27/60 is not labelled the citable own-denominator figure: {seg!r}")
+    seg = lab[lab.index("30/66"):lab.index("30/66") + 300]
+    assert "pool" in seg, f"30/66 is not labelled as pooled: {seg!r}"
+    seg = lab[lab.index("34/60"):lab.index("34/60") + 300]
+    assert "35/72" in seg and "pool" in seg, (
+        f"the labelling paragraph lost the 11-02 own/pooled pair: {seg!r}")

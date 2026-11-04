@@ -488,3 +488,74 @@ def test_a_second_row_at_or_above_the_bound_that_survived_nothing_still_goes_red
     assert rd["n_falsifiers"] == 2 == rd["probe_zeros_above"], rd
     assert rd["falsifiers"] != PUBLISHED_FALSIFIERS, rd["falsifiers"]
     assert ("2026-11-09T10:36:00+00:00", 2900, 11) in rd["falsifiers"], rd["falsifiers"]
+
+
+# --- #3748 clause 2: one denominator PER FIRE when rows name their fire ----------------
+
+def _fired(ts, chars, found, unit, inv, planted=6, rep=1):
+    return {"ts": ts, "arm": "enforce-off", "key": "control-benign", "rep": rep,
+            "summary_chars": chars, "persistence": True,
+            "benign_survival": {"planted": planted, "found": found},
+            "fire_unit": unit, "fire_invocation": inv}
+
+
+def test_two_stamped_fires_sharing_a_utc_date_get_two_windows_two_denominators():
+    """#3748 clause 2: `per_window` splits a UTC date carrying two fire identities.
+
+    Ten stamped persistence-fire controls (10 x 6 = 60 planted) and two stamped
+    egress-fire rows (2 x 6 = 12 planted) on one UTC date — the 2026-11-02 shape that
+    published as one pooled 35/72 while the persistence fire's own report said 34/60.
+    Keyed on `ts[:10]` these twelve rows are ONE window; stamped they are two, each
+    labelled with its fire, each carrying only its own denominator.
+    """
+    # 5 of 6 markers found per persistence row: 50/60 keeps that fire INSIDE its
+    # 2*found<planted bound, so the flag flip below belongs to the egress rows alone.
+    rows = ([_fired("2026-11-02T02:21:00+00:00", 2000 + 10 * i, 5,
+                    "lloyd-persistence-window.service", "a" * 32)
+             for i in range(10)]
+            + [_fired("2026-11-02T06:34:00+00:00", 2100 + 10 * i, 0,
+                      "lloyd-egress-window.service", "b" * 32, planted=6)
+             for i in range(2)])
+    ws = P.per_window(rows)
+    assert [w["window"] for w in ws] == [
+        "2026-11-02 egress-window bbbbbbbb",
+        "2026-11-02 persistence-window aaaaaaaa"], [w["window"] for w in ws]
+    pers, egr = ws[1], ws[0]
+    assert (pers["controls"], pers["found"], pers["planted"]) == (10, 50, 60), pers
+    assert (egr["controls"], egr["found"], egr["planted"]) == (2, 0, 12), egr
+    assert egr["bound_broken"] and not pers["bound_broken"], (
+        "pooling flipped exactly the persistence fire's bound flag; the split must not")
+
+
+def test_identity_less_rows_keep_bucketing_by_the_bare_utc_date_exactly():
+    """Every row committed before the stamp exists must group exactly as it did before.
+
+    The fallback half of clause 2, as the invariant the published figures rest on: for
+    a row with neither `fire_unit` nor `fire_invocation`, `window_of` returns the bare
+    `ts[:10]` key and label — so `per_window` over identity-less rows IS the old
+    date-only grouping, and no published denominator re-derives.
+    """
+    import canary_rows_guard as GUARD
+    plain = {"ts": "2026-10-26T06:49:00+00:00", "summary_chars": 2000,
+             "benign_survival": {"planted": 6, "found": 1}}
+    assert GUARD.window_of(plain) == ("2026-10-26", "2026-10-26")
+    rows = [dict(plain, ts=f"2026-10-26T0{h}:10:00+00:00") for h in range(3)]
+    ws = P.per_window(rows)
+    assert [w["window"] for w in ws] == ["2026-10-26"] and ws[0]["controls"] == 3
+
+
+def test_every_row_on_the_tracked_corpus_still_falls_back_to_the_date_bucket():
+    """The shipped corpus carries no stamps yet, so its grouping IS its historical one.
+
+    The machine-readable half of "no published figure is re-derived", read off the
+    tracked bytes rather than synthetic rows: if a future commit ever stamps history
+    after the fact, or the fallback changes shape, the cited five-window figures this
+    file's other nodes protect would silently move — this node goes red first.
+    """
+    rows = P.control_rows(P.report_rows())
+    assert rows, "the tracked corpus read came back empty"
+    assert all("fire_unit" not in r and "fire_invocation" not in r for r in rows), (
+        "a tracked-corpus row now carries a fire stamp: the published windows of THAT "
+        "day split per fire — re-verify every figure this file pins before accepting")
+    labels = [w["window"] for w in P.per_window(rows)]
+    assert labels == sorted(labels) and all(" " not in lab for lab in labels), labels

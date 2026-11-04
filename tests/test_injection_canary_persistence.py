@@ -2031,3 +2031,51 @@ def test_the_benign_bound_marker_and_its_footnote_name_only_the_benign_bound():
             "benign bound broke")
     assert "benign" in cells[9] and "bound" in cells[9], (
         f"the marker no longer says which bound broke: {cells[9]!r}")
+
+
+# --- #3748 clause 3: the persistence report groups per fire too ------------------------
+
+def _stamp(rows, unit, inv):
+    return [dict(r, fire_unit=unit, fire_invocation=inv) for r in rows]
+
+
+def test_two_stamped_fires_on_one_utc_date_render_two_window_lines(tmp_path):
+    """`persistence_windows` + `render_persistence_report` split a shared date by fire.
+
+    Clause 2's synthetic pair through the REPORT path. The real 2026-11-02 pooling put
+    the egress fire's two controls (2112 and 2406 chars, `36c3607f`) inside the
+    persistence fire's window and moved its published denominator from 34/60 toward a
+    pooled 35/72; stamped, the renderer emits one table line per fire, and each line's
+    denominators are that fire's rows only. Sort order is the GUARD.window_of key: day,
+    then full unit name — egress before persistence.
+    """
+    pers = _stamp([_wrow("control-benign", "2026-11-02T02:21:00+00:00", control=True)
+                   for _ in range(2)], "lloyd-persistence-window.service", "a" * 32)
+    egr = _stamp([_wrow("control-benign", "2026-11-02T06:34:00+00:00", control=True)
+                  for _ in range(2)], "lloyd-egress-window.service", "b" * 32)
+    wins = RC.persistence_windows(pers + egr)
+    assert [label for label, _ in wins] == [
+        "2026-11-02 egress-window bbbbbbbb",
+        "2026-11-02 persistence-window aaaaaaaa"], wins
+    text = RC.render_persistence_report(pers + egr)
+    lines = [l for l in text.splitlines() if l.startswith("| 2026-11-02 ")]
+    assert len(lines) == 2, text
+    assert any("egress-window bbbbbbbb" in l for l in lines) and \
+        any("persistence-window aaaaaaaa" in l for l in lines), lines
+
+
+def test_the_same_rows_without_identity_render_the_single_line_they_render_today(
+        tmp_path):
+    """Identity-less rows keep the one-line-per-date table every report on file has.
+
+    The fallback the published reports depend on: two same-day fires WITHOUT stamps
+    must still render the single `| 2026-11-02 |` line — including its exact label, no
+    suffix — because `run-2026-11-02-persistence.md` and every earlier report say so.
+    """
+    rows = [_wrow("control-benign", "2026-11-02T02:21:00+00:00", control=True),
+            _wrow("control-benign", "2026-11-02T06:34:00+00:00", control=True)]
+    wins = RC.persistence_windows(rows)
+    assert [label for label, _ in wins] == ["2026-11-02"]
+    text = RC.render_persistence_report(rows)
+    lines = [l for l in text.splitlines() if l.startswith("| 2026-11-02")]
+    assert len(lines) == 1 and lines[0].startswith("| 2026-11-02 | "), lines

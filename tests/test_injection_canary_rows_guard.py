@@ -283,10 +283,14 @@ def test_the_guard_imports_the_predicate_and_never_invokes_the_step():
 
     `tests/test_commit_injection_canary_corpus.py::the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation`
     keeps the committer's importer set closed, and this module is the one addition to it:
-    it reads `WINDOW_UNITS`, `PROC_CGROUP` and `invocation_refusal` so that "the same fire"
-    means one thing to the write side and to the commit side. What must stay true is that
-    it never calls the step — `commit_corpus` or `main` — because a second caller of that
-    would hand an unscheduled process a committer designed for a window's own invocation.
+    it reads `WINDOW_UNITS`, `PROC_CGROUP`, `invocation_refusal` and — since #3748
+    clause 1 — `authorized_unit`, so the window key stamped on a tracked row is the
+    output of the very function that admitted the write, not a second cgroup parse that
+    could drift from it. All four are identity facts; "the same fire" must mean one
+    thing to the write side and to the commit side. What must stay true is that the
+    guard never calls the step — `commit_corpus` or `main` — because a second caller of
+    that would hand an unscheduled process a committer designed for a window's own
+    invocation.
     """
     tree = ast.parse((ROOT / "eval" / "canary_rows_guard.py").read_text(encoding="utf-8"))
     imported: list[str] = []
@@ -294,9 +298,10 @@ def test_the_guard_imports_the_predicate_and_never_invokes_the_step():
         if isinstance(node, ast.ImportFrom) and (node.module or "").endswith(
                 "commit_injection_canary_corpus"):
             imported += [a.name for a in node.names]
-    assert set(imported) <= {"PROC_CGROUP", "WINDOW_UNITS", "invocation_refusal"}, \
-        f"the rows guard pulls {sorted(imported)} from the committer; only the identity " \
-        "predicate may cross that seam"
+    assert set(imported) <= {"PROC_CGROUP", "WINDOW_UNITS", "invocation_refusal",
+                             "authorized_unit"}, \
+        f"the rows guard pulls {sorted(imported)} from the committer; only identity " \
+        "facts may cross that seam"
     for forbidden in ("commit_corpus",):
         assert forbidden not in imported, f"the guard calls into the step ({forbidden})"
     assert "cgroup_components" not in imported, (
@@ -392,3 +397,84 @@ def test_the_guard_module_answers_the_operator_by_exit_code():
                              env=scratch_env(**{RC.ROWS_ENV_VAR: "/tmp/win/rows.jsonl"}),
                              capture_output=True, text=True, timeout=120)
     assert allowed.returncode == 0, allowed.stderr[-300:]
+
+
+# --- #3748 clause 1: a tracked row names the fire that wrote it -----------------------
+
+_UNIT_CG = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+            "lloyd-persistence-window.service\n")
+
+
+def test_an_allowed_tracked_write_stamps_the_fire_identity(tmp_path, monkeypatch):
+    """Every row `append_rows` writes to the tracked corpus carries its fire's identity.
+
+    #3748 clause 1: the stamp is the window key of the authorized unit plus that fire's
+    `INVOCATION_ID`, both read through the same `authorized_unit` the refusal above
+    reads — so a row can only ever name a fire the write-side guard itself admitted, and
+    the two sides cannot drift into naming different fires. Without it two window fires
+    sharing a UTC date are untellable after the fact, which is exactly the 2026-10-26
+    (27/60 → 30/66) and 2026-11-02 (34/60 → pooled 35/72) damage (#3419).
+
+    `_TRACKED_ROWS` is redirected into a tmp file: `append_rows` reads the module global
+    at call time, and the tracked corpus itself must never receive a test row — it is
+    append-only published history.
+    """
+    from scripts.maintenance import commit_injection_canary_corpus as STEP
+    cg = tmp_path / "cgroup"
+    cg.write_text(_UNIT_CG.replace("lloyd-persistence-window.service",
+                                   STEP.PERSISTENCE_UNIT), encoding="utf-8")
+    target = tmp_path / "rows.jsonl"
+    monkeypatch.setattr(RC, "_TRACKED_ROWS", target)
+    monkeypatch.setenv("INVOCATION_ID", "f" * 32)
+    RC.append_rows([{"ts": "2026-11-09T02:21:00+00:00", "key": "control-benign",
+                     "rep": 1}],
+                   path=target, arm={"arm": "enforce-off"}, cgroup_file=str(cg))
+    written = [json.loads(line) for line in
+               target.read_text(encoding="utf-8").splitlines()]
+    assert len(written) == 1
+    row = written[0]
+    assert row[GUARD.FIRE_UNIT_FIELD] == STEP.PERSISTENCE_UNIT, row
+    assert row[GUARD.FIRE_INVOCATION_FIELD] == "f" * 32, row
+    assert row["arm"] == "enforce-off" and row["key"] == "control-benign" \
+        and row["rep"] == 1 and row["ts"] == "2026-11-09T02:21:00+00:00", (
+        f"the stamp merged over the row's own fields instead of beside them: {row!r}")
+
+
+def test_a_scratch_write_carries_no_stamp_even_inside_a_unit_environment(tmp_path,
+                                                                         monkeypatch):
+    """The same authorized environment writing a SCRATCH destination stays byte-identical.
+
+    Clause 1's second half — "a write to a scratch destination outside a window unit is
+    byte-identical to what it writes today, with no new field and no new refusal" —
+    tested at its strongest: the environment here is a window unit's cgroup leaf AND a
+    live `INVOCATION_ID`, everything the stamp could read, with only the destination
+    differing. The destination decides, because the scratch corpus is what a rehearsal's
+    own report renders and a rehearsal row is not a fire's measurement; and the written
+    object is asserted EQUAL to the pre-identity row+arm merge, so "byte-identical" is
+    the equality, not the absence of the two field names.
+    """
+    cg = tmp_path / "cgroup"
+    cg.write_text(_UNIT_CG, encoding="utf-8")
+    monkeypatch.setenv("INVOCATION_ID", "f" * 32)
+    scratch = tmp_path / "rehearsal.jsonl"
+    RC.append_rows([{"ts": "2026-11-09T02:21:00+00:00", "key": "control-benign",
+                     "rep": 1}],
+                   path=scratch, arm={"arm": "enforce-off"}, cgroup_file=str(cg))
+    assert json.loads(scratch.read_text(encoding="utf-8")) == {
+        "ts": "2026-11-09T02:21:00+00:00", "key": "control-benign", "rep": 1,
+        "arm": "enforce-off"}
+
+
+def test_the_stamped_field_names_are_one_spelling_on_both_sides_of_the_seam():
+    """The runner's stamp and the committer's collision check must name the fields alike.
+
+    They live in different packages (`eval/` and `scripts/maintenance/`), and the
+    collision check (#3748 clause 4) reads exactly what the stamp writes; two spellings
+    of `fire_unit`/`fire_invocation` is a collision check that silently never fires —
+    every row would read unstamped, which is also the fallback that must stay true for
+    history. Pinning the literals, not just their pairwise equality, because a shared
+    typo in a shared constant is the failure this seam actually has.
+    """
+    from scripts.maintenance import commit_injection_canary_corpus as STEP
+    assert GUARD.FIRE_UNIT_FIELD == STEP.FIRE_UNIT_FIELD == "fire_unit"
+    assert GUARD.FIRE_INVOCATION_FIELD == STEP.FIRE_INVOCATION_FIELD == "fire_invocation"

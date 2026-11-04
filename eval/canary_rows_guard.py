@@ -56,7 +56,7 @@ if str(LLOYD_HOME) not in sys.path:
     sys.path.insert(0, str(LLOYD_HOME))
 
 from scripts.maintenance.commit_injection_canary_corpus import (  # noqa: E402
-    PROC_CGROUP, WINDOW_UNITS, invocation_refusal)
+    PROC_CGROUP, WINDOW_UNITS, authorized_unit, invocation_refusal)
 
 #: The redirect that makes a caller's destination scratch and therefore always allowed.
 #: Read from the same name the bench writes (`eval/run_injection_canary.py:ROWS_ENV_VAR`);
@@ -70,6 +70,67 @@ REPORT_ENV_VAR = "LLOYD_CANARY_REPORT"
 #: answers is about the CALLER, and a guard that resolved paths would disagree with the
 #: caller about which file was meant under a test that monkeypatches `ROWS_PATH`.
 TRACKED_CORPUS_ROWS = "eval/measurements/injection-canary/rows.jsonl"
+
+#: The env var naming one systemd invocation, read by `is_systemd_invocation` there.
+INVOCATION_ENV_VAR = "INVOCATION_ID"
+
+#: The two row fields carrying the per-fire identity (#3419 step 3 / #3748). `fire_unit`
+#: is the KEY of `WINDOW_UNITS` that `authorized_unit` matched — the window key of the
+#: authorized unit — and `fire_invocation` is that fire's `INVOCATION_ID`. Groupers
+#: (`per_window`, `persistence_windows`) split a UTC date by the pair when both are
+#: present and pool by date alone when either is absent, so every identity-less
+#: historical row keeps bucketing by `ts[:10]` and no published figure re-derives.
+FIRE_UNIT_FIELD = "fire_unit"
+FIRE_INVOCATION_FIELD = "fire_invocation"
+
+
+def window_of(row: dict) -> tuple[str, str]:
+    """`(sort key, display label)` of the measurement window one row counts toward.
+
+    Two window fires sharing a UTC date pooled into ONE denominator, because both
+    groupers keyed on `ts[:10]` alone: the 2026-11-02 egress fire's two controls
+    (`36c3607f`) landed inside the persistence fire's window and turned its published
+    34/60 into a pooled 35/72 with a flipped bound flag, and `f3eb9ac3` did the same
+    to 2026-10-26 with rehearsal rows, 27/60 → 30/66 (#3419, #3748).
+
+    A row stamped by `append_rows` (see `fire_identity`) sorts and labels by
+    `day + fire_unit + fire_invocation`, so one UTC date carrying two fires yields two
+    windows, each with its own denominator. A row carrying NEITHER field — every row
+    committed before the stamp existed, which is every row on the tracked corpus today —
+    keeps the bare date, exactly what both groupers computed on every historical row
+    before this function, so no published figure re-derives. The key is a string with
+    the day first, so "oldest window first" survives, and an unstamped date's window
+    sorts ahead of its own stamped splits.
+
+    Lives here, not in the runner, because the attribution probe imports this module
+    and must not pay for the runner's asyncio/http-server harness to learn a bucketing
+    rule — and a rule read by two groupers may only be written once.
+    """
+    day = (row.get("ts") or "?")[:10]
+    unit = str(row.get(FIRE_UNIT_FIELD) or "")
+    inv = str(row.get(FIRE_INVOCATION_FIELD) or "")
+    if unit and inv:
+        short = unit.removeprefix("lloyd-").removesuffix(".service")
+        return f"{day} {unit} {inv}", f"{day} {short} {inv[:8]}"
+    return day, day
+
+
+def fire_identity(env: dict[str, str] | None = None,
+                  cgroup_file: str = PROC_CGROUP) -> dict[str, str]:
+    """The per-fire stamp `append_rows` merges into every row of a TRACKED-corpus write.
+
+    Both parts are facts about the caller that nothing in the caller controls per-row:
+    the cgroup component systemd wrote when it started the unit, and the `INVOCATION_ID`
+    systemd generated for that one invocation. Read through the SAME `authorized_unit`
+    the refusal reads, so the identity stamped on a row and the identity that admitted
+    the write cannot come apart. No validation here: the only tracked write that reaches
+    this is one `preflight` already admitted, which means both reads are non-empty —
+    outside a window the dict is simply what the environment says, and `append_rows`
+    never stamps a scratch destination with it (#3748 clause 1).
+    """
+    inv = (os.environ if env is None else env).get(INVOCATION_ENV_VAR) or ""
+    return {FIRE_UNIT_FIELD: authorized_unit(cgroup_file) or "",
+            FIRE_INVOCATION_FIELD: inv}
 
 
 class CanaryRowsRefused(RuntimeError):

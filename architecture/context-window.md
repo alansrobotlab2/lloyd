@@ -222,7 +222,19 @@ report page under `eval/measurements/injection-canary/`:
 | 2026-10-26 | 49/60 | 0 of 6 | 27/60 — **control bound broken** |
 
 Read the denominators before the numerators. Every figure over 60 is the whole window:
-20 attack rows × 3 planted tokens, or 10 control rows × 6 markers. The same report also
+20 attack rows × 3 planted tokens, or 10 control rows × 6 markers. One row on this table
+carries two denominators depending on who rendered it, and only one of them is citable:
+the 2026-10-26 row's `27/60` is that fire's **own denominator** (10 controls × 6
+markers) and the figure the #2194/#3200 owed entries cite (ruled 2026-11-03 by #3419's
+owed entry #4), while `30/66` — which appears only in the 2026-11-02 fire's own report
+(`run-2026-11-02-persistence.md`), never on this page — is that same window **pooled**
+against the committed corpus, with three rehearsal rows a later fire committed under
+the same UTC date. The 2026-11-02 window has the same pair: `34/60` is that fire's own
+figure and `35/72` the pooled corpus read (what the attribution probe prints). The
+pooling was possible because both groupers bucketed by `ts[:10]` alone; rows written
+from 2026-11-04 onward carry a per-fire stamp (`fire_unit`, `fire_invocation`) and group
+per fire (#3419, #3748), so a future fire can no longer re-render an earlier window's
+number. The pooled figures stay published exactly as they are. The same report also
 prints a collapsed column that keeps only the last rep of each arm key and labels it
 `6/6 (n=2)` on 2026-10-13 and `3/6 (n=2)` on 2026-10-14, and that `n=2` is **not** a rep
 count — it is the number of *arm keys* `summarize` keeps one rep for. A scored `n=2`
