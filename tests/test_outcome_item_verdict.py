@@ -141,9 +141,10 @@ def test_1242s_outcome_is_unreported_not_rejected():
     # The premise no longer holds; every clause is already true on the live tree.
     ({"acceptance": "unnecessary", "landed": False, "deferred_to": [], "spawned": [],
       "summary": "", "clause_outcomes": []}, False),
-    ({"acceptance": "unnecessary", "landed": False, "deferred_to": [], "spawned": [],
-      "summary": "already true at HEAD",
-      "clause_outcomes": [{"clause": 1, "outcome": "met", "evidence": "t", "deferred_to": []}]}, False),
+    # (An `unnecessary` carrying a clause reported `met` used to stand — it no
+    # longer does. #3729's finish row was exactly that object, and the pair is
+    # self-contradictory whatever the ledger says: see
+    # `test_unnecessary_with_a_clause_reported_met_is_refused_on_the_object_itself`.)
     # Landed the instrument, rejected the idea: the gain clause is not met and
     # the measurement is there. A landing alone does not void a rejection.
     ({"acceptance": "rejected", "landed": True, "deferred_to": [], "spawned": [],
@@ -176,7 +177,13 @@ def test_an_ordinary_outcome_passes_through_untouched():
 
 # ── through `execute`: the item is not closed under a landing ────────────────
 
-def _run_turn(monkeypatch, tmp_path, item_id, structured, *, rid="SM_T", land=True):
+def _run_turn(monkeypatch, tmp_path, item_id, structured, *, rid="SM_T", land=True, gate=False):
+    """One implement turn through `execute`. `land` writes the marker
+    `automod_land` leaves behind before it returns; `gate` writes one rung row of
+    the round's gate ladder — the evidence that a landing was OWED. A row of
+    `rung: "tests"` and `ok: True`, as `gate.py:2130` appends it, so it is not
+    also a review refusal (`_review_note` reads these same rows for `ok: false`
+    with `rung: "review"`)."""
     from scripts.automod import round as R, worktree as W
     import app.sessions_io as sio
     wt = tmp_path / "wt"
@@ -190,6 +197,10 @@ def _run_turn(monkeypatch, tmp_path, item_id, structured, *, rid="SM_T", land=Tr
     async def turn(prompt, **kw):
         S.append_event({"event": "round_start", "round_id": rid, "item_id": item_id,
                         "session_id": "s-turn"}, path=S.LEDGER_PATH)
+        if gate:
+            S.append_event({"event": "gate", "round_id": rid, "rung": "tests", "ok": True,
+                            "detail": "1182 passed", "skipped": False, "seconds": 214.0},
+                           path=S.LEDGER_PATH)
         if land:
             # What `automod_land` leaves behind before it returns.
             import os
@@ -251,6 +262,96 @@ def test_the_same_verdict_with_nothing_landing_still_closes_the_item(isolated, m
     fin = _run_turn(monkeypatch, tmp_path, 726, structured, land=False)
     assert _fm(p)["status"] == "done" and B.REJECTED_TAG in _fm(p)["tags"]
     assert fin["outcome"]["acceptance"] == "rejected" and fin["outcome_refused"] == ""
+
+
+# ── a verdict from a round that owed a landing (#3756) ────────────────────────
+#
+# `unnecessary` closes an item with the verb that means *already true*, and the
+# branch that wrote it asked only whether a landing had been SEEN — never
+# whether one was owed. So a round whose turn budget cut after its gate and
+# before `automod_land` booked its item `done` and pasted the sentence
+# disproving it into the same close reason. #3729 is the instance, re-measured
+# 2026-11-04: its round `SM_20261103_100438` has `round_start`, `gate` rows,
+# `item_closed` at 11:02:15, a passing `review`, then `round_aborted` /
+# `round_abandoned` at 11:04:33 — and no `promoted` or `item_landed` row
+# anywhere, with six commits of its work still only on the kept branch.
+
+OUTCOME_3729 = {
+    "landed": False, "acceptance": "unnecessary", "deferred_to": [], "spawned": [],
+    "summary": ("Round SM_20261103_100438 built the guard and tested it; NOT landed, because "
+                "the gate had not finished when the turn's budget cut — `automod_land` was "
+                "never called."),
+    "clause_outcomes": [
+        {"clause": n, "outcome": "met", "evidence": f"tests/test_memory_index_cap.py::t{n}",
+         "deferred_to": []} for n in (1, 2, 3, 4, 5)],
+}
+
+
+def test_a_round_that_owed_a_landing_cannot_close_its_item_as_unnecessary(
+        isolated, monkeypatch, tmp_path):
+    """Clause 1. #3729's own object, from a round that ran its gate ladder and
+    never reached the land step, must leave the item where the loop offers it
+    again — not `done`."""
+    p = _write_item(isolated, 3729)
+    fin = _run_turn(monkeypatch, tmp_path, 3729, OUTCOME_3729, land=False, gate=True)
+    assert _fm(p)["status"] != "done", (
+        "booked `done`, the verb that means already true, on a round whose landing never ran")
+    assert not [e for e in S.read_events(path=S.LEDGER_PATH)
+                if e.get("event") == "item_closed"], "an item_closed row for an unlanded round"
+    assert fin["outcome"]["acceptance"] != "unnecessary"
+    assert fin["outcome"]["item_verdict_refused"] == "unnecessary" and fin["outcome_refused"]
+
+
+def test_the_same_unnecessary_verdict_with_no_gate_row_still_closes_the_item(
+        isolated, monkeypatch, tmp_path):
+    """Clause 2. The guard keys on a landing that was OWED, not on the verb and
+    not on a round merely existing: a round that opened and never gated committed
+    nothing to ship, so the premise-no-longer-holds close still happens. No land
+    marker either, as in the `rejected` control above."""
+    p = _write_item(isolated, 731)
+    structured = {"acceptance": "unnecessary", "landed": False, "deferred_to": [],
+                  "spawned": [], "clause_outcomes": [],
+                  "summary": "the premise no longer holds: the check is already at HEAD"}
+    fin = _run_turn(monkeypatch, tmp_path, 731, structured, land=False)
+    assert _fm(p)["status"] == "done", "the guard keyed on a round existing, not on a landing owed"
+    assert fin["outcome"]["acceptance"] == "unnecessary" and fin["outcome_refused"] == ""
+    assert [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_closed"]
+
+
+def test_unnecessary_with_a_clause_reported_met_is_refused_on_the_object_itself():
+    """Clause 3, the unit level: nothing landed and nothing owed, so this is the
+    verdict contradicting itself — "no work was needed" riding on a report that
+    the work was done. Refused, and the acceptance comes back off the clauses."""
+    parsed = B.parse_outcome(OUTCOME_3729)
+    out, why = B.settle_item_verdict(parsed, landing_seen=False)
+    assert out["acceptance"] == "met" and out["item_verdict_refused"] == "unnecessary"
+    assert "no work was needed" in why and "5 clause(s) met" in why
+
+
+def test_unnecessary_with_a_clause_reported_met_leaves_the_item_open(isolated, monkeypatch,
+                                                                    tmp_path):
+    """Clause 3 through `execute`, with no gate row at all. The acceptance
+    re-derived from five clauses reported `met` is `met`, `met` is not an item
+    verdict, and so nothing closes here."""
+    p = _write_item(isolated, 3731)
+    fin = _run_turn(monkeypatch, tmp_path, 3731, OUTCOME_3729, land=False)
+    assert _fm(p)["status"] != "done"
+    assert fin["outcome"]["acceptance"] == "met"
+    assert fin["outcome"]["item_verdict_refused"] == "unnecessary"
+
+
+def test_the_owed_landing_is_recorded_where_a_reader_sees_it(isolated, monkeypatch, tmp_path):
+    """Clause 4: legible without reading a verdict verb. The refusal reason on
+    the `finished` row names the round that reached its gate without calling the
+    land step, and the item's own activity log says a landing is owed — which is
+    where #3729's missing landing had to wait for a nightly knowledge pass to be
+    noticed, sitting unread inside its close reason."""
+    p = _write_item(isolated, 3732)
+    fin = _run_turn(monkeypatch, tmp_path, 3732, OUTCOME_3729, land=False, gate=True)
+    assert "SM_T" in fin["outcome_refused"], fin["outcome_refused"]
+    assert "gate" in fin["outcome_refused"] and "land" in fin["outcome_refused"]
+    log = "\n".join(_fm(p)["activity_log"])
+    assert "SM_T" in log and "landing is still owed" in log, log
 
 
 # ── the settle sweep: the review rung stands in for what was not reported ────

@@ -1477,14 +1477,18 @@ would never have been offered again. In a third turn that day the finalizer's
 
 | what | where | rule |
 |---|---|---|
-| the verdict carries its own evidence | `backlog.settle_item_verdict`, called by `autocode.execute` before the close | `unnecessary` stands only when nothing landed (the schema: "close WITHOUT a landing"). `rejected` stands only with a `summary` of at least `MIN_REJECTION_SUMMARY` (25) characters AND either nothing landed or a clause reported `not_met`. Either is refused when the ledger shows a landing and the outcome says `landed: false`. Acceptance re-derived from the clauses, `""` with none. `outcome_refused` on the `finished` row |
+| the verdict carries its own evidence | `backlog.settle_item_verdict`, called by `autocode.execute` before the close | `unnecessary` stands only when nothing landed (the schema: "close WITHOUT a landing"), no landing is owed (`landing_owed` empty), and no clause of its own report says `met`. `rejected` stands only with a `summary` of at least `MIN_REJECTION_SUMMARY` (25) characters AND either nothing landed or a clause reported `not_met`. Either is refused when the ledger shows a landing and the outcome says `landed: false`. Acceptance re-derived from the clauses, `""` with none. `outcome_refused` on the `finished` row |
 | what "landing" means | `autocode._landing_seen`, or a vault commit this turn made | the live land marker, `current.json`, a `promoted`/`land_failed`/`land_rescued` row, or `vault_commits` — never the turn's word |
+| what "a landing was OWED" means | `autocode._gate_reached` × `not _landing_seen` | one `gate` row carrying the round's id means the ladder was walked over a committed diff, so the round owed a call to `automod_land`; if none was seen, `unnecessary` is refused, the owed landing goes on the item, and the reaper re-offers it. #3729's round `SM_20261103_100438` had `gate` rows and no landing row and its item was still booked `done` — the verb said already true and only the close reason said otherwise |
 | the review stands in for a missing outcome | `backlog.code_review_outcome`, in `settled_landings` | the vault rule (§3.2b) for the other surface: newest graded review of the round, not blocking, clauses 1..n all `met`. A reported outcome is never overridden |
 | said where it is read | `automod_land`'s result (`outcome`), the finalizer's own prompt | what `landed` means costs the length-bounded template nothing; the template gained one sentence — a clause is judged on the change, "never that it is not promoted yet" (two turns reported every clause `not_met` for a finished, gated change) |
 
-What still stands: `unnecessary` with nothing landing, and `rejected` with its
-measurement — including a round that landed its instrument and rejected the
-idea (`landed: true`, a clause not met, the numbers in `summary`).
+What still stands: `unnecessary` with nothing landing and no landing owed (a
+round that opened and never gated owes nothing — the guard keys on the gate row,
+not on the verb), and `rejected` with its measurement — including a round that
+landed its instrument and rejected the idea (`landed: true`, a clause not met,
+the numbers in `summary`). A rejected change is meant to have no landing, which
+is why the owed-landing guard is not applied to it.
 
 The first cut of that check listed contradictions, and a third false `rejected`
 walked through it the same evening: #982, a vault landing the vault review had

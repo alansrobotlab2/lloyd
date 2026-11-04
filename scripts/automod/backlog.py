@@ -883,9 +883,26 @@ def parse_outcome(structured) -> dict | None:
 MIN_REJECTION_SUMMARY = 25
 
 
-def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[dict | None, str]:
+def settle_item_verdict(outcome: dict | None, *, landing_seen: bool,
+                        landing_owed: str = "") -> tuple[dict | None, str]:
     """An item verdict has to carry its own evidence, or it is not taken.
     Returns `(outcome, why_refused)`; `why_refused` is empty when it stands.
+
+    `landing_owed` is the round id whose gate ladder ran while no landing of
+    that round's was seen — the shape a capped turn leaves behind: a diff
+    committed, a gate walked, and no call to `automod_land` before the turn's
+    budget cut. #3729 is the instance. Its round `SM_20261103_100438` carries
+    `gate` rows and no `promoted`/`item_landed` row, its item was booked `done`
+    at 2026-11-03T11:02:15 with the words "NOT landed … `automod_land` was never
+    called" pasted into the very close reason, and six commits of its work are
+    still only on the kept branch. The verb said *already true* and only a
+    reader of the reason, not the verb, could see that it was not. So
+    `unnecessary` is refused while a landing is owed: the acceptance re-derived
+    below is then not an item verdict, the item stays open, and the reaper
+    re-offers it. The same guard is deliberately NOT applied to `rejected` — a
+    change built, gated and then found not worth shipping is *supposed* to have
+    no landing, and Alan's rule (2026-09-16) is that a negative result is a
+    clean close.
 
     `unnecessary` and `rejected` close an item at the end of the turn, with no
     landing to wait for and no re-triage afterwards, and `parse_outcome` keeps
@@ -913,7 +930,12 @@ def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[di
 
     * **`unnecessary`** says the item "should close WITHOUT a landing" (the
       schema's words). It stands only when nothing landed: `landed` false AND
-      no landing seen.
+      no landing seen; AND only when no landing is owed (`landing_owed` empty —
+      a round that reached its gate never got out of calling `automod_land`
+      without one); AND only when the report it arrived with does not say the
+      work was done, because a verdict of "no work was needed" carrying a clause
+      reported `met` contradicts itself on the object, whichever way the ledger
+      reads.
     * **`rejected`** says "you built or measured it and the evidence says it
       does not improve things — put the measurement in summary". It stands only
       with a summary of at least `MIN_REJECTION_SUMMARY` characters, AND either
@@ -938,11 +960,18 @@ def settle_item_verdict(outcome: dict | None, *, landing_seen: bool) -> tuple[di
     outcomes = {c.get("outcome") for c in clauses}
     landing = bool(landing_seen or outcome.get("landed"))
     summary = " ".join(str(outcome.get("summary") or "").split())
+    met = [str(c.get("clause")) for c in clauses if c.get("outcome") == "met"]
     why = ""
     if landing_seen and not outcome.get("landed"):
         why = f"`{verdict}` with `landed: false` while the turn's own landing is on the ledger"
     elif verdict == "unnecessary" and landing:
         why = "`unnecessary` closes an item WITHOUT a landing, and this turn landed"
+    elif verdict == "unnecessary" and landing_owed:
+        why = (f"`unnecessary` while round {landing_owed} reached its gate and never called the "
+               f"land step: a landing is still owed")
+    elif verdict == "unnecessary" and met:
+        why = (f"`unnecessary` says no work was needed, but this outcome reports "
+               f"{len(met)} clause(s) met (clause {', '.join(met)})")
     elif verdict == "rejected" and len(summary) < MIN_REJECTION_SUMMARY:
         why = (f"`rejected` with no measurement in `summary` ({summary!r})" if summary
                else "`rejected` with no measurement in `summary`")

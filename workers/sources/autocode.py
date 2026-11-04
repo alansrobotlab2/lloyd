@@ -490,6 +490,41 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
         return False
 
 
+def _gate_reached(round_id: str | None, events: list[dict]) -> bool:
+    """Did this round's gate ladder run at all? One `gate` row carrying the
+    round's id is enough: `gate.py` writes a row per rung
+    (`scripts/automod/gate.py:2112`, `:2130`, `:4157`), so a round that was
+    never gated has none and a round that was has at least one — whatever the
+    rungs decided.
+
+    This is the discriminator for "a landing was OWED". A round that reached its
+    gate had a diff it meant to ship, and the only way out of a gate that does
+    not end in a landing is a turn that ran out of budget before it called
+    `automod_land` — which is how #3729 came to be booked `done` at
+    2026-11-03T11:02:15 while its round `SM_20261103_100438` has `gate` rows, no
+    `promoted`/`item_landed` row, and six commits `main` never received. A round
+    that opened and never gated is a different thing — the work was never
+    started, and `unnecessary` on a premise found false there is exactly the
+    close the schema means. `_review_note` already filters these same rows by
+    `round_id`; the second ledger look mirrors `_landing_seen`, because the gate
+    is a detached process and its rows can land after the snapshot.
+    """
+    if not round_id:
+        return False
+
+    def _row(source: list[dict]) -> bool:
+        return any(ev.get("round_id") == round_id and ev.get("event") == "gate"
+                   for ev in source)
+
+    if _row(events):
+        return True
+    from scripts.automod import state as S
+    try:
+        return _row(S.read_events(limit=500))
+    except Exception:  # noqa: BLE001 — an unreadable ledger proves nothing owed
+        return False
+
+
 def _abandon_grace_seconds() -> int:
     """How long a round left open waits before the reaper acts: none.
 
@@ -2401,10 +2436,35 @@ async def _run_and_record(item, candidate, triage, budget, started,
     # and reported `landed: true` from exactly that half.
     round_seen = _landing_seen(round_id, events)
     seen = round_seen or bool(vault_commits)
-    outcome, verdict_refused = B.settle_item_verdict(outcome, landing_seen=seen)
+    # A landing is OWED when the round walked its gate ladder and never reached
+    # the land step: the gate means a diff it meant to ship, and the only exit
+    # from a gate without a landing is a turn whose budget cut before
+    # `automod_land`. `unnecessary` is the only verdict that can spend that fact
+    # — a `rejected` change is meant to have no landing, and refusing it would
+    # cost Alan's negative-result rule (2026-09-16) (#3756).
+    landing_owed = ""
+    if (round_id and not round_seen and outcome
+            and outcome.get("acceptance") == "unnecessary"
+            and _gate_reached(round_id, events)):
+        landing_owed = round_id
+    outcome, verdict_refused = B.settle_item_verdict(outcome, landing_seen=seen,
+                                                     landing_owed=landing_owed)
     if verdict_refused:
         logger.warning("backlog #%s: item verdict not taken — %s (round %s)",
                        candidate.id, verdict_refused, round_id)
+    if landing_owed and verdict_refused and outcome:
+        # Onto the item, where whoever reads it next will: the refusal reason
+        # lands on the `finished` ledger row, which nothing but an investigation
+        # opens. #3729's missing landing was already in its close reason and
+        # still took a nightly knowledge pass to find.
+        try:
+            B.note_item(candidate.id,
+                        f"round {landing_owed} reached its gate and never called the land step: "
+                        f"no landing row and no landing in flight, so a landing is still owed. "
+                        f"The turn's `{outcome.get('item_verdict_refused')}` verdict was not "
+                        f"taken and the item stays open for a re-offer.")
+        except Exception as exc:  # noqa: BLE001 — a note is not the round
+            logger.warning("#%s: could not record the owed landing: %s", candidate.id, exc)
     # The other half of the same cross-check, on the field `settle_item_verdict`
     # does not read: `landed` itself. A round that never reached `automod_land`
     # reports `landed: true` and the row used to store it verbatim — #415's spent
