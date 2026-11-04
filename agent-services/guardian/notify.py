@@ -264,6 +264,20 @@ def asks_for_a_human(title: str, body: str) -> bool:
 #: backlog directory from this process — the same reasoning `voiceloss.py`'s `_rows`
 #: gives for its own read of this same route.
 BACKLOG_LIST_PATH = "/api/backlog/tasks"
+#: The route that moves a row's status (`app/routers/backlog.py:689`), posted by the
+#: retraction in `resolve` (#3757). `voiceloss.py:96` already writes this route for the
+#: voice-loss escalation; this is the same seam walked by the alerting families that
+#: file through `_backlog_task`.
+BACKLOG_UPDATE_PATH = "/api/backlog/task-update"
+#: The only status the route accepts that is NOT open: `task-update` validates against
+#: `_VALID_STATUSES = frozenset(PIPELINE_STATUSES)` (`app/routers/backlog.py:62`, i.e.
+#: draft/up_next/in_progress/done) and `voiceloss.py:123` counts `draft`, `up_next` and
+#: `in_progress` as OPEN, so `done` is the one answer. The consequence is that a guardian
+#: all-clear is booked in the item's own `activity_log` as `"set from Mission Control"`
+#: (`app/routers/backlog.py:757-759` → `app/backlog_move.py:130`), which is the wrong
+#: attribution for a clear. The route takes no caller-supplied reason, and giving it one
+#: is a separate ruling (#3757's owed check 2); this does not change the route.
+BACKLOG_CLOSED_STATUS = "done"
 #: The board `_backlog_task` files on. Named in its payload since #1990, and the
 #: duplicate read is scoped to the same board, so an item on `personal` that
 #: happens to carry a guardian's title can never silence that guardian alert.
@@ -847,9 +861,15 @@ class Notifier:
         markers standing below the single `cleared:` line, leaving the only surviving
         record of a finished incident an instruction to do work. It writes nothing when
         no incident is open for `title`, which is what makes the second, third and
-        hundredth all-clear check silent. No other channel is touched: a clear is not
-        an alert, so no toast, no speech, no backlog task — and the ledger still holds
-        every individual firing either way.
+        hundredth all-clear check silent. What a clear does NOT do is make noise: no
+        toast and no speech, and no NEW backlog task, because a clear is not an alert —
+        and the ledger still holds every individual firing either way. It does, however,
+        reach the backlog row that this title's alert filed (#3757): see
+        `_retract_board_item` below the `external` gate, which takes that row out of the
+        OPEN set while it still silences the next filing. The sentence this replaces
+        read "no other channel is touched… no backlog task", and that is the behaviour
+        #3755 was written by: ALERT.md sealed at 09:18:50Z over a `draft` board item the
+        same alert created at 09:18:40Z.
 
         ALERT.md is sealed first and by the same rules (#1967), ABOVE the
         `external` gate and before any of this: `alert()` writes that file on
@@ -877,6 +897,17 @@ class Notifier:
         (#1590): an alert written 23:05 and all-cleared 00:05 returned success and left the
         alarm's own section claiming it was still open.
         """
+        # Was there anything HERE for this call to seal? Asked before the seal, from the
+        # same parse the retraction uses (`alert_file_incident`, #3019), because the
+        # board read below is the `?q=` scan #3551 measured at 18.6 s cold on 3,693
+        # rows (against the 5 s ceiling then in force; the ceiling is
+        # `BACKLOG_READ_TIMEOUT_SECONDS = 30.0` now, so a read that slow now COMPLETES
+        # — which is exactly why it must not be scheduled). The ordinary hourly
+        # all-clear has nothing to retract and must not be put on a timer that pays it. ALERT.md's slot is one small file in the
+        # state dir and it is already read twice by the retraction below; the 30 s cost
+        # is a board question, so that is the only thing this flag gates.
+        held = self.alert_file_incident()
+        alert_seals = bool(held) and held[0] == title and not held[1]
         retracted = self._alert_file_retract(title, note_text)
         if not self.external:
             return retracted
@@ -885,6 +916,12 @@ class Notifier:
         # moment ago must not be able to mask one it cannot touch.
         out_of_reach = bool(self._open_days_beyond_window(title))
         wrote = True
+        # Did any daily note actually gain a `cleared:` line on this call? The other
+        # half of the seal test above, and the half that carries most real service-down
+        # incidents: ALERT.md is ONE last-writer-wins slot, so a second alert displaces
+        # the first and the recovery tick finds this title's section open in the note
+        # with some other title's alarm in the file.
+        sealed_a_note = False
         for day in self._scan_days():
             note = self._daily_note_path(day)
             if note is None or not note.is_file():
@@ -916,7 +953,121 @@ class Notifier:
                 note.write_text(sealed, encoding="utf-8")
             except OSError:
                 wrote = False
+            else:
+                sealed_a_note = True
+        # ── the board half of the retraction (#3757) ──────────────────────────
+        # Placed here, BELOW the `external` gate and after the seal is known to have
+        # happened, so it inherits the drill's board-silence for free and pays the
+        # board read only on a tick that actually closed an incident.
+        if alert_seals or sealed_a_note:
+            self._retract_board_item(title)
         return False if (out_of_reach or not retracted) else wrote
+
+    def _retract_board_item(self, title: str) -> int:
+        """Take the board row this title's alert filed out of the OPEN set (#3757).
+
+        Filing and retraction were one story until now, told by one channel.
+        `alert` routes a needs-human alert to `_backlog_task`, which posts
+        `[guardian] <title>` at `status: draft`/`priority: high` on `lloyd`
+        (`_backlog_task`'s payload: `"status": "draft"`, `"priority": "high"`, `"board": "lloyd"`),
+        and while a row of that EXACT name stands OPEN the
+        next firing is suppressed outright (`_open_duplicate_on_board`) — `draft` is
+        in `voiceloss.OPEN_STATUSES` (`voiceloss.py:123`), so a self-clearing incident
+        both leaves a `priority: high` item asserting a down service AND silences the
+        filing of the next, genuine, outage of the same family. The live witness at
+        filing: ALERT.md carries
+        `cleared: 2026-11-04T01:18:50.338811-08:00 — liveness read came back healthy:
+        lloyd-mc:lloyd-backend.` over the item #3755 that the same alert filed 10
+        seconds earlier (`created: '2026-11-04T09:18:40.750499'`, `status: draft`),
+        with nothing on the clearance path able to reach it —
+        `guardian.py:2758-2775` and the boot reconcile `_seal_measured_incident`
+        (`guardian.py:3014`) call `resolve` and nothing else.
+
+        The row is closed by its `id` and nothing else. `GET /api/backlog/tasks`
+        carries `description_snippet` and no `description`
+        (`app/routers/backlog.py:421-453`), and `task-update` replaces the WHOLE body
+        and silently drops a shorter one unless `force_body_replace` is set
+        (`app/routers/backlog.py:732-733`), so a body rebuilt from a list row would
+        truncate the item's own evidence — which is the opposite of what a retraction
+        is for. `voiceloss.py:296` is the only other writer of this route in the
+        guardian, and it is the precedent for posting through the route over loopback
+        rather than touching the backlog directory from this process.
+
+        Every exact-name OPEN row is closed, not just the newest: #2080's four copies
+        (#3551, #3558, #3559, #3566) are the shape this guard exists for, and leaving
+        three of four open would keep silencing the next real filing, which is the
+        half of the harm this method exists to remove. A row that merely QUOTES this
+        alert in its body comes back from the `?q=` read too and is left alone —
+        the exact-name rule is #2080's, reaffirmed for this family by #3229's
+        owed-check on 2026-10-27 ("I will not loosen #2080's exact-name rule"), and
+        this method borrows the test rather than loosening it.
+
+        An unreadable board, an unimportable status vocabulary, or a row with no usable
+        `id` all answer 0 and post nothing. That is the fail-closed direction for a
+        write: `_open_duplicate_on_board` fails OPEN (files) because its worst case is a
+        duplicate, while this one's worst case is closing an item a human still owns,
+        and a stale row is the pre-existing condition rather than a new harm. The count
+        is not folded into `resolve`'s return, which stays a claim about the two note
+        surfaces it seals — the same reason `_backlog_task`'s bool has no reader.
+        """
+        name = f"[guardian] {title}"[:120]
+        try:
+            import voiceloss
+        except Exception:
+            return 0
+        self._board_read_error = None
+        rows = self._board_rows(name)
+        if not rows:                      # None (unreadable) or [] (nothing matching)
+            return 0
+        closed = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("name") or "") != name:
+                continue
+            if voiceloss.canonical_status(row.get("status")) not in voiceloss.OPEN_STATUSES:
+                continue
+            row_id = row.get("id")
+            if not isinstance(row_id, int) or isinstance(row_id, bool) or row_id <= 0:
+                continue                  # no addressable row: never post `id: null`
+            if self._post_board_close(row_id):
+                closed += 1
+        return closed
+
+    def _post_board_close(self, row_id: int) -> bool:
+        """Move one board row out of the OPEN set by id, with no body (#3757).
+
+        `id` and `status` and nothing else: a `description` key would replace the
+        item's whole body `app/routers/backlog.py:719-733`, and the list read this
+        close is keyed from carries no body to post back. `status` is
+        `BACKLOG_CLOSED_STATUS`, the one value outside `voiceloss.OPEN_STATUSES` that
+        `_VALID_STATUSES` accepts.
+        """
+        # Named `close_body` rather than `payload`, for a reason that is not style:
+        # `tests/test_guardian_predicates.py::test_the_needs_human_route_posts_the_payload_the_board_reads`
+        # cuts `_backlog_task`'s filing block out of THIS file by cutting the source at
+        # the first assignment of a json-dumped value to the name `payload`, and taking
+        # everything between the filing's own field-name comment and there. One of those
+        # written earlier in the file makes that slice empty and the filing node goes red
+        # with nothing wrong with the filing — so this method's request bytes get a
+        # different name, and this comment deliberately does not spell the pattern out.
+        close_body = json.dumps({"id": row_id,
+                                 "status": BACKLOG_CLOSED_STATUS}).encode()
+        req = urllib.request.Request(
+            f"{self.backend_url}{BACKLOG_UPDATE_PATH}",
+            data=close_body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                if not (200 <= resp.status < 300):
+                    return False
+                reply = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+        # The route's own success flag, for the reason `_backlog_task` gives at its
+        # create: a 2xx is not evidence the row moved. `backlog_task_update` answers
+        # `{"success": true, "description_ignored": …}` (app/routers/backlog.py:811).
+        return isinstance(reply, dict) and reply.get("success") is True
 
     # ── daily-note incident plumbing (#1536) ──────────────────────────────
     #

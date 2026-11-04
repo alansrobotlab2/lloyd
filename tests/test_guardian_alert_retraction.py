@@ -36,7 +36,10 @@ writes; its `test_the_cleared_stamp_*` nodes pin clause 5.)
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,27 +76,33 @@ NOTE = ("no runtime stores inside the code tree of /repo — absent with no move
         "here accounts for a path that was named and is now gone")
 
 
-def _notifier(tmp_path: Path, *, external: bool = True) -> notify.Notifier:
+def _notifier(tmp_path: Path, *, external: bool = True,
+              backend_url: str = "http://127.0.0.1:1") -> notify.Notifier:
     """A Notifier whose whole world is `tmp_path`: ledger, ALERT.md and vault
     all inside it, pointed at a dead backend so no backlog POST can reach the
     live board. Room channels are muted by `tests/conftest.py` for every node,
     so `external=True` fans out into files only — the same shape
     `tests/test_guardian_predicates.py::_stray_incident` runs the whole
-    incident cycle in."""
+    incident cycle in.
+
+    `backend_url` is a parameter for the #3757 nodes, which need the board to
+    ANSWER: their claim is about how many requests it receives, and a discarded
+    connection cannot count them.
+    """
     vault = tmp_path / "obsidian"
     (vault / "memory").mkdir(parents=True, exist_ok=True)
     return notify.Notifier(ledger=tmp_path / "ledger.jsonl",
                            state_dir=tmp_path,
                            vault_root=str(vault),
-                           backend_url="http://127.0.0.1:1",
+                           backend_url=backend_url,
                            external=external)
 
 
-def _raise(n: notify.Notifier, title: str = TITLE) -> bytes:
+def _raise(n: notify.Notifier, title: str = TITLE, body: str = BODY) -> bytes:
     """Fan out one alarm through the shipped `alert()` and hand back the ALERT.md
     bytes it wrote. `alert()`, not `_alert_file()` directly, because the seam
     under test is the whole write path a production tick takes."""
-    results = n.alert(LEVEL, title, BODY, coalesce=True)
+    results = n.alert(LEVEL, title, body, coalesce=True)
     assert results["alert_file"] is True, results
     return (n.state_dir / "ALERT.md").read_bytes()
 
@@ -1406,3 +1415,153 @@ def test_a_sealed_section_is_never_refreshed_by_the_next_alert(tmp_path):
     assert secs[1].count(notify.DAILY_STILL_OPEN) == 1, secs[1]
     assert text.count(f"\n{notify.DAILY_CLEARED_PREFIX} ") == 1, (
         f"the new alert retracted the incident it was reporting:\n{text}")
+
+
+# ── #3757: the board half of a retraction, and the two ways it must not fire ────
+
+LIST_ROUTE = "/api/backlog/tasks"
+UPDATE_ROUTE = "/api/backlog/task-update"
+BOARD_ROW = {"id": 3755, "name": "[guardian] Service down, but no promotion to revert",
+             "status": "draft"}
+SERVICE_DOWN = "Service down, but no promotion to revert"
+#: The alarm and the retraction note the liveness branch actually produces:
+#: `guardian.py:93` is this title's only definition, `guardian.py:2773` builds the note,
+#: and the 24-timeout FATAL line is what the 2026-11-04 alert carried into ALERT.md.
+SERVICE_DOWN_BODY = "lloyd-mc:lloyd-backend: FATAL: can't find command (repeated 24 times)"
+SERVICE_DOWN_NOTE = "liveness read came back healthy: lloyd-mc:lloyd-backend."
+
+
+class _WatchingBoard:
+    """A loopback board that counts every request, so "no board read" is checkable.
+
+    Clause 4 and clause 5 are both about requests that must NOT happen, and a dead
+    backend (`_notifier`'s default `127.0.0.1:1`) answers a refused connection for
+    both the code under test and a call that was never made — which pins nothing. So
+    these two nodes are the only ones in this file that stand up a server: the count
+    it takes is the measurement, and it answers exactly as `app/routers/backlog.py`
+    does (a bare array on the list at `:686`,
+    `{"success": true, "description_ignored": …}` on the update at `:811`) so the code
+    under test is not steered by a shape the real board would not send.
+    """
+
+    def __init__(self, rows=(), list_status=200):
+        self.rows = list(rows)
+        self.list_status = list_status
+        self.gets: list[str] = []
+        self.posts: list[tuple[str, dict]] = []
+        board = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, status, obj):
+                payload = json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                board.gets.append(self.path)
+                if board.list_status != 200:
+                    self._send(board.list_status, {"detail": "board unavailable"})
+                    return
+                # A BARE array, because that is the route's shape
+                # (`app/routers/backlog.py:686`, `JSONResponse(tasks)`). A wrapper
+                # object is precisely what `_board_rows` refuses as
+                # `"body is dict, not a list"`, so a stand-in that answered the wrong
+                # shape would pin a read production never performs.
+                self._send(200, board.rows)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                board.posts.append((self.path, json.loads(self.rfile.read(length) or b"{}")))
+                self._send(200, {"success": True, "description_ignored": False})
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    @property
+    def closes(self) -> list[dict]:
+        return [body for path, body in self.posts if path == UPDATE_ROUTE]
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def test_an_all_clear_with_nothing_to_seal_never_asks_the_board(tmp_path):
+    """#3757 clause 4: the ordinary healthy all-clear costs no board read.
+
+    `resolve` runs on every clean tick — the stray check is `STRAY_CHECK_SECONDS =
+    3600.0` (`agent-services/guardian/policy.py:413`, gated at `guardian.py:2381`, and a
+    clear leg like `guardian.py:2197` is what calls it) — as well as on the liveness
+    recovery branch, and the row lookup it now performs for a sealed incident is the
+    same `?q=` scan #3551 measured at 18.6 s cold over 3,693 rows — under the 5 s
+    ceiling then in force, and the ceiling is `BACKLOG_READ_TIMEOUT_SECONDS = 30.0`
+    beside it now, so a read that slow now completes rather than timing out. Scheduled
+    onto every clear tick, that read is the dedup guard's own worst case turned into a
+    timer, so the read is owed only by a call that actually sealed something.
+
+    The two shapes of "nothing to seal" are both here because they are different code
+    paths: an all-clear for a title that never alerted, and the SECOND all-clear of an
+    incident the first one already sealed — which is the hourly case, since the
+    condition stays clear and `resolve` keeps running against sealed bytes.
+    """
+    never_alerted = _WatchingBoard(rows=[BOARD_ROW])
+    n = _notifier(tmp_path, backend_url=never_alerted.url)
+
+    assert n.resolve(SERVICE_DOWN, SERVICE_DOWN_NOTE) is True
+    assert never_alerted.gets == [], (
+        "a clear for a title that never alerted read the board, paying the 30 s scan "
+        "for a row it was not going to close")
+    assert never_alerted.posts == []
+
+    reopened = tmp_path / "second"
+    reopened.mkdir()
+    board = _WatchingBoard(rows=[dict(BOARD_ROW)])
+    m = _notifier(reopened, backend_url=board.url)
+    m.alert("error", SERVICE_DOWN, SERVICE_DOWN_BODY, coalesce=True)
+    assert m.resolve(SERVICE_DOWN, SERVICE_DOWN_NOTE) is True
+    first_closes = list(board.closes)
+    assert len(first_closes) == 1, (
+        "fixture: the seal that DID happen is expected to close the open row")
+
+    assert m.resolve(SERVICE_DOWN, SERVICE_DOWN_NOTE) is True
+    assert board.closes == first_closes, (
+        "the second all-clear of an already-sealed incident re-read the board and "
+        "posted again: "
+        f"{board.posts[len(first_closes):]}")
+    lookups = [p for p in board.gets if p.startswith(LIST_ROUTE)]
+    assert len(lookups) == 1, (
+        f"the row lookup ran {len(lookups)} times for one seal: {board.gets}")
+
+
+def test_a_drill_seals_alert_md_and_never_posts_a_close(tmp_path):
+    """#3757 clause 5: the close sits BELOW `resolve`'s `external` gate.
+
+    `resolve` returns at its `if not self.external` when `external` is false, the same
+    gate `alert` applies before filing — so a drill that cannot
+    file must not be able to close either: a drill's all-clear aimed at the live board
+    would move a row the drill never created. #1967's node above
+    (`test_the_retraction_runs_below_the_external_gate`) pins the ALERT.md half of that
+    asymmetry, which is why the seal is asserted here too and not assumed: the
+    retraction reaching the board must not cost the drill its ability to close its own
+    alarm file.
+    """
+    board = _WatchingBoard(rows=[BOARD_ROW])
+    n = _notifier(tmp_path, external=False, backend_url=board.url)
+    _raise(n, SERVICE_DOWN, SERVICE_DOWN_BODY)
+
+    assert n.resolve(SERVICE_DOWN, SERVICE_DOWN_NOTE) is True
+
+    assert len(_cleared_lines(tmp_path)) == 1, (
+        "the board-silence below the gate cost the drill its ALERT.md seal")
+    assert board.posts == [], (
+        f"a drill posted to the live board: {board.posts}")
+    assert board.gets == [], (
+        "the board read sits above the external gate, so a drill pays the row "
+        "lookup it cannot act on")
