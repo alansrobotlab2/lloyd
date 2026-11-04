@@ -264,10 +264,38 @@ on after the output directory had already been emptied.
   `chrome-extension/src/background/service-worker.ts` (in `pushFocus`) and, after
   rebuilding through `web/vite.chrome.config.ts` into a temporary outDir and copying only
   `service-worker.js` back, exactly once in the tracked
-  `chrome-extension/dist/service-worker.js` that Chrome loads. Not measurable the obvious
-  way: `grep -c canCheck` on the bundle reads `1` before and after this change, because the
-  one hit is `pushFocus`'s own `canCheck:s` in both trees, so the pins slice the bundle and
+  `chrome-extension/dist/service-worker.js` that Chrome loads. Not measurable by reading the
+  text: `grep -c canCheck` on the bundle reads `1` before and after this change, because the
+  one hit is `pushFocus`'s own send site in both trees, so the pins slice the bundle and
   then follow the awaited callee into the compiled function
-  (`tests/test_automod_spec.py`, `tests/test_chrome_extension_manifest_tracked.py`). The
-  rebuild also renamed minifier-local identifiers across the whole bundle, which is why
-  `chrome-extension/dist/` is a tracked build output and not hand-edited.
+  (`tests/test_automod_spec.py`, `tests/test_chrome_extension_manifest_tracked.py`). Those two
+  can only ever say a string is present in the bytes Chrome loads; the flag itself is driven
+  now, by the harness in the next bullet. The rebuild also renamed minifier-local identifiers
+  across the whole bundle — which is why the pins below match a property by its shape and
+  never by its identifier — and why `chrome-extension/dist/` is a tracked build output and not
+  hand-edited.
+- **2026-11-04 — the tracked bundle is driven headlessly, so the #3568 click-through is no
+  longer owed to a person (#3772).** `tests/test_sidepanel_focus_headless.py` starts a node
+  child, installs a stub `chrome` global over the ten `chrome.X.Y` members
+  `chrome-extension/dist/service-worker.js` calls (measured: `grep -o
+  "chrome\.[a-zA-Z]*\.[a-zA-Z]*"` over the bundle, sorted unique — `storage.session`,
+  `tabs.get`/`onActivated`/`onUpdated`/`onRemoved`, `runtime.onConnect`/`onInstalled`,
+  `webNavigation.onCommitted`/`onHistoryStateUpdated`, `sidePanel.setPanelBehavior`), imports
+  the tracked bundle as an ES module, and runs the repro in order: a port named
+  `lloyd-sidepanel` handed to the captured `runtime.onConnect` listener, a `panel-ready`
+  message, and only then the captured `tabs.onActivated` listener. Both `webNavigation`
+  registrations are in the stub because they run while the module body executes, so a stub
+  written from the source rather than from the bundle's call sites fails the `import()`. What
+  the test asserts is the object `port.postMessage` received: `type: "focus-session"` with
+  `canCheck` true for `https://example.com/article` and false for
+  `https://mail.google.com/mail/u/0/#inbox` from one process and one import, exactly one tab
+  switch listener and one connect listener, `sessionKey`/`url`/`title` filled from a seeded
+  `chrome.storage.session.get` and `sessionKey` null with the flag still computed when the
+  store is empty, and zero `fetch` calls. A positive control drives a temporary copy whose one
+  `canCheck:` send site was removed by shape and asserts the key is absent from both pushes —
+  the leg that makes the two flag assertions evidence rather than a green-by-construction read,
+  since #3568 is precisely an incident a text pin passed through. Its ceiling is the panel's
+  own DOM: the button's enabled state and the empty-state copy in
+  `web/src/sidepanel/SidePanelApp.tsx` are rendered by the side panel, and
+  `web/vitest.config.ts` `include` reaches only `web/src/**`, so that leg is still a browser
+  concern and still owed.
