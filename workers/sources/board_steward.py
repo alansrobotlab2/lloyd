@@ -223,6 +223,19 @@ record, so proposing it costs the agreement and changes nothing on the board. Th
 flag is projected from the same rows the \
 five states above are read from, and it names no status the machine wants — only \
 whether a round is live.
+- **`triage=` is on EVERY board line, and it is the only thing that decides the \
+`up_next` -> `draft` rule.** Three values, no others: `confirmed` (a triage turn \
+wrote a `confirmed` verdict for this item and nobody has re-triaged it since), \
+`confirmed-held` (confirmed, and the machine is HOLDING it because a landed \
+round's own clause verdict came back not `met` — it stays where it is until that \
+ruling is cleared, which takes a landed round or a re-triage, not a board move), \
+`none` (no confirmed verdict the state machine counts: never triaged, or \
+re-triaged since the confirmation). It is derived from the same ledger rows the \
+machine reads, so a line and a machine that disagree about a VERDICT mean one of \
+them is broken — that is worth a proposal with a `reason` saying so. The verdict is \
+an OBSERVATION and not an instruction: `triage=confirmed` does not make an item your \
+next pick, and no line ever names the status the machine wants, because this tick is \
+scored against that table and printing it would be handing you the answer sheet.
 - **`round_state=closing`: the landing is over, its outcome is not yet on the \
 item, and the item stays `in_progress`.** The commit `settled`, the sweep has not \
 yet written this item's `item_landed` row, and `desired_statuses` is holding it \
@@ -275,14 +288,21 @@ Do not send it back to `up_next` because the outcome looks recoverable.
 its own history; the umbrella carries it.
 - A human moved it by hand if the board disagrees with the ledger and the \
 last event is older than the item's `updated`. Honour the human.
-- **An item with no triage verdict that sits in `up_next` goes back to \
-`draft`.** `up_next` means the loop may implement it, and the loop only takes \
-items triage confirmed; nothing can pull an untriaged item out of there, and \
-autotriage only reads `draft`. A writer that files straight into `up_next` \
-(the first tick under the shared rule missed #1024 and #1025, both filed by \
-a triage turn that way) has parked it where nothing will look.
+- **An `up_next` item whose line reads `triage=none` goes back to `draft`.** \
+`up_next` means the loop may implement it, and the loop only takes items triage \
+confirmed; nothing can pull an untriaged item out of there, and autotriage only \
+reads `draft`. A writer that files straight into `up_next` (the first tick under \
+the shared rule missed #1024 and #1025, both filed by a triage turn that way) has \
+parked it where nothing will look. **`triage=` is the ONLY thing that decides this \
+rule, and it is on every board line**: `triage=confirmed` or `triage=confirmed-held` \
+means a triage turn confirmed this item and nobody has re-triaged it since, so \
+`draft` is the WRONG move for it however parked it looks — say so in `reason` and \
+propose `up_next`, or propose nothing. Do not infer a verdict from the body: the \
+line prints 280 characters and a confirmed item's verdict lives in its acceptance, \
+below the cut. And `triage=none` still does not order you to move it — an item whose \
+tags or recent events say a human is mid-sentence stays where it is, with a note.
 - Otherwise, never move an item you have no event for. Silence is not \
-evidence — the untriaged-in-`up_next` case above is the one silence that is.
+evidence — an `up_next` line reading `triage=none` is the one silence that is.
 
 `next_pick`: the `up_next` item the loop should implement next. A first \
 re-offer whose branch `automod/<round>` still exists is one fix cycle, not an \
@@ -760,6 +780,53 @@ def round_flag(round_state: tuple | None) -> str:
     return "observation_live"
 
 
+#: The three values a board line's `triage=` field takes. None of them is a status,
+#: which is the rail this field has to keep to: #3329's no-answer-sheet rule says the
+#: line may carry an OBSERVATION the model can check its proposal against, and may
+#: never carry the status `desired_statuses` wants. `confirmed` is the observation
+#: "#3433 has a confirmed verdict on the ledger that is newer than any re-triage mark
+#: on it", which is a fact about the ledger and not a destination.
+TRIAGE_VALUES = ("confirmed", "confirmed-held", "none")
+
+
+def _triage_map(ledger) -> dict[int, str]:
+    """item_id -> the value its `triage=` field carries, for every item with a verdict.
+
+    The point of this function is what it does NOT read. It calls the same
+    `backlog.confirmed_verdicts` `desired_statuses` calls, and `held_confirmations`
+    too, so the field and the machine's own branch at `backlog.py:6571` answer from
+    one measurement: a verdict that `confirmed_verdicts` drops as older than the
+    item's newest `backlog_retriage` mark is absent HERE as well, and the line says
+    `triage=none` rather than showing a verdict the machine no longer counts. That
+    agreement is the whole #3766 fix — four items (#3433 #3537 #3656 #3704) were
+    moved to `draft` by a model that had never been told they were confirmed, in a
+    tick where `confirmed_verdicts` had a live row for each of them.
+
+    An item whose newest confirmed row is HELD (a landing froze its acceptance) reads
+    `confirmed-held`, because that is a different machine branch: held items go to
+    `draft` and are never re-triaged, so a line that said merely `confirmed` would
+    invite the model to keep such an item in the implement pool — the opposite error.
+    An item held but with no live confirmed row is absent: `desired_statuses` only
+    consults `held` behind `iid in confirmed` (backlog.py:6576), so showing held for
+    it would be a second, better-informed reader — #3677's exact defect.
+
+    A row whose `item_id` is not an integer is skipped by `confirmed_verdicts` itself;
+    nothing here re-widens that.
+    """
+    from scripts.automod import backlog as B
+    confirmed = B.confirmed_verdicts(ledger)
+    held = B.held_confirmations(ledger)
+    out = {int(iid): "confirmed" for iid in confirmed}
+    for iid in held:
+        try:
+            key = int(iid)
+        except (TypeError, ValueError):
+            continue
+        if key in out:
+            out[key] = "confirmed-held"
+    return out
+
+
 def move_contradicts_flag(move: dict, flag: str) -> bool:
     """Whether writing `move` would contradict what the machine sees on this item.
 
@@ -881,7 +948,8 @@ def board_view(items: list[Any], touched: set[int], *, max_items: int = DEFAULT_
     return (due + pool + rest)[:max_items]
 
 
-def _item_line(i: Any, *, round_state: tuple | None = None) -> str:
+def _item_line(i: Any, *, round_state: tuple | None = None,
+               triage: str = "none") -> str:
     """One board line. The bracketed status is the item's OWN status on disk and
     nothing else: what `desired_statuses` wants is deliberately not rendered here,
     because the agreement metric scores this prompt's proposals against that
@@ -900,10 +968,22 @@ def _item_line(i: Any, *, round_state: tuple | None = None) -> str:
     seven days to 2026-10-29T17:54Z, whatever their destinations were. The
     fine-grained `round=… round_state=…` stays exactly where #3546 puts it — only on a
     line whose round is unfinished.
+
+    #3766 gives the triage verdict the same treatment: `triage=` is on EVERY line,
+    `triage=none` included, from `_triage_map` over the same `confirmed_verdicts` /
+    `held_confirmations` calls `desired_statuses` reads. Before it the prompt's rule
+    "an item with no triage verdict that sits in `up_next` goes back to `draft`" had no
+    field to evaluate — a line carried status, name, created, tags, `round_flag=` and
+    `body[:280]`, and #3433's first 280 characters carry no verdict — so the rule fired
+    on four confirmed items in one tick (#3433 #3537 #3656 #3704) and trailing-7-day
+    agreement fell to 0.8788 against owed-check's 0.90 floor. It names the VERDICT and
+    never a status: the no-answer-sheet rail (#3329) forbids printing what
+    `desired_statuses` WANTS, and "confirmed" is an observation about the ledger, not a
+    destination.
     """
     body = " ".join((i.body or "").split())[:BODY_CHARS]
     tags = ",".join(i.tags or [])
-    rel = [f"round_flag={round_flag(round_state)}"]
+    rel = [f"round_flag={round_flag(round_state)}", f"triage={triage}"]
     if i.group:
         rel.append(f"group=#{i.group}")
     if i.members:
@@ -962,19 +1042,33 @@ def _decisions_line(d: dict | None) -> str:
 
 def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts: float,
                  health: dict | None = None, round_state: dict[int, tuple] | None = None,
-                 item_refs: dict[str, int] | None = None) -> str:
+                 item_refs: dict[str, int] | None = None,
+                 triage: dict[int, str] | None = None) -> str:
     """`round_state` / `item_refs` are `unfinished_rounds` / `item_refs` for the
     items in play (#3546); both default to nothing, which renders the prompt as it
     read before that item. They are arguments rather than reads because the cheap
-    test path passes no ledger, and because the caller already holds the path."""
+    test path passes no ledger, and because the caller already holds the path.
+
+    `triage` is #3766's map, and it defaults to a DERIVATION rather than to nothing:
+    this prompt re-renders the board from `items`, so defaulting to "no map" would
+    print `triage=none` beside a confirmed item on the very path `execute` takes — the
+    defect the round exists to close. A caller passes a map to reuse one ledger read;
+    `None` is how a cheap test path still gets a correct line."""
     since = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(since_ts)) if since_ts else "the beginning"
     rs = round_state or {}
+    if triage is None:
+        from scripts.automod import state as ST
+        tm = _triage_map(ST.LEDGER_PATH) if items else {}
+    else:
+        tm = triage
     return PROMPT.format(
         since=since, n_events=len(events),
         events="\n".join(_event_line(d, item_refs=item_refs) for d in events) or "(none)",
         health=_health_lines(health),
         n_items=len(items), n_open=n_open,
-        board="\n".join(_item_line(i, round_state=rs.get(i.id)) for i in items) or "(empty)",
+        board="\n".join(_item_line(i, round_state=rs.get(i.id),
+                                   triage=tm.get(i.id, "none"))
+                        for i in items) or "(empty)",
     )
 
 
@@ -1331,8 +1425,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     round_state = await asyncio.to_thread(unfinished_rounds, ledger,
                                           {i.id for i in shown})
     refs = await asyncio.to_thread(item_refs, ledger)
+    # `triage=` (#3766): derived from the same ledger path `desired_statuses` was just
+    # called with, so the line the steward reads and the machine's own branch cannot
+    # answer differently about the same item.
     prompt = build_prompt(events=events, items=shown, n_open=len(open_items), since_ts=since_ts,
-                          health=health, round_state=round_state, item_refs=refs)
+                          health=health, round_state=round_state, item_refs=refs,
+                          triage=_triage_map(ledger))
     try:
         run = await run_prompt_in_session(
             prompt, title=f"board steward ({len(events)} events)", source=NAME,

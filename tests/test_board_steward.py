@@ -169,7 +169,10 @@ def test_the_prompt_names_the_vocabulary_and_forbids_done():
                    # the rule the first dry-run missed, and the umbrella/member split
                    "A triage verdict moves the item", "An `umbrella` is an ordinary confirmed item",
                    # the converse, missed on the first tick under the shared rule
-                   "no triage verdict that sits in `up_next` goes back to",
+                   # #3766 re-pointed this rule at the field it had no way to read;
+                   # the sentence below is the rule it replaced, kept in the assert so a
+                   # reader can see the condition is now `triage=none` and not a silence.
+                   "whose line reads `triage=none` goes back to",
                    # the rule #860 was refused on, forty-four ticks running
                    "A review refusal on the contract spends nothing either"):
         assert phrase in text, phrase
@@ -4210,3 +4213,175 @@ def test_a_pair_whose_two_halves_name_the_same_status_is_dropped_rather_than_pri
         if pair and "not recorded" not in ln:
             assert pair.group("steward") != pair.group("machine"), (
                 f"an agreement inside the disagreement list: {ln}")
+
+
+# ─────────────────────────── triage= on the board line (#3766) ─────────────────
+#
+# The four items this is for are #3433 #3537 #3656 and #3704: one steward tick
+# (runs row completed 2026-11-04T18:09:24.134070+00:00, `judged=7 agree=3
+# disagree=[3433,3537,3656,3704]`) proposed `draft` for all four while
+# `desired_statuses` wanted `up_next` for all four. All four ARE triage-confirmed.
+# The steward was never told: `_item_line` rendered status, name, created, tags,
+# round_flag and 280 body characters, and none of those carries a verdict — while
+# the prompt at `board_steward.py:278-283` told the model that "An item with no
+# triage verdict that sits in `up_next` goes back to `draft`". A rule whose
+# condition is a field that is not on the line is a rule that fires on everything,
+# which is the same defect #3547 fixed for rounds by putting `round_flag=` on every
+# line. Trailing-7-day agreement at filing: judged=99, rate=0.8788 against
+# owed-check's 0.90 floor; re-measured 2026-11-04 at judged=106, rate=0.8491.
+
+def _triage_item(d, iid, status, *, verdict="confirmed", acceptance="step: do the thing",
+                 hours_old=48, held=False, **fm):
+    """An item on the board plus the ledger row that makes it what it is.
+
+    `held=True` puts `held: true` on the CONFIRMATION row itself, which is what
+    `backlog.held_confirmations` selects and what `confirmed_verdicts` drops — the
+    pair of readings the `triage=` field is derived from.
+    """
+    _write(d, iid, status, hours_old=hours_old, **fm)
+    if verdict:
+        _ev(event="backlog_triage", item_id=iid, verdict=verdict, acceptance=acceptance,
+            **({"held": True} if held else {}))
+
+
+def test_every_board_line_names_the_verdict_confirmed_verdicts_derives(board):
+    """Clause 1. The line carries the verdict, derived from the machine's own reader.
+
+    Four items, four ledger situations: #11 confirmed, #12 confirmed and HELD by a
+    landing, #13 confirmed-then-re-triaged (so `confirmed_verdicts` no longer returns
+    it), #14 never triaged. Each line's `triage=` must be what
+    `backlog.confirmed_verdicts`/`held_confirmations` say about that item right now,
+    and the word must never be a status — the no-answer-sheet rail (#3329) holds only
+    if the new field names an OBSERVATION and not a destination.
+    """
+    _triage_item(board, 11, "up_next")
+    # `confirmed-held` is the confirmation carrying `held: true` — the same row
+    # `held_confirmations` returns and `confirmed_verdicts` therefore drops.
+    _triage_item(board, 12, "up_next", held=True)
+    _triage_item(board, 13, "up_next")
+    _ev(event="backlog_retriage", item_id=13, ts=time.time() + 5, reason="premise re-checked")
+    _write(board, 14, "up_next")
+
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    assert len(W.board_view(items, set())) == 4
+    board_text = W.build_prompt(events=[], items=items, n_open=4, since_ts=0.0)
+    verdicts = B.confirmed_verdicts(S.LEDGER_PATH)
+    held = B.held_confirmations(S.LEDGER_PATH)
+    for iid, want in ((11, "confirmed"), (12, "confirmed-held"), (13, "none"),
+                      (14, "none")):
+        line = _line(board_text, iid)
+        found = re.findall(r"\btriage=(\S+)", line)
+        assert len(found) == 1, f"{line}\nexpected exactly one triage=, found {found}"
+        assert found[0] == want, f"#{iid}: line says {found[0]!r}, ledger says {want!r}"
+        # The field is derived, not authored: it agrees with the reader the machine
+        # itself consults, item by item.
+        assert ((iid in held) if want == "confirmed-held" else
+                (iid in verdicts) if want == "confirmed" else iid not in verdicts), \
+            f"#{iid}: `triage={want}` contradicts confirmed_verdicts/held_confirmations"
+    for line in board_text.splitlines():
+        if line.startswith("- #"):
+            assert not re.search(r"\btriage=(draft|up_next|in_progress|done|ready)\b", line), \
+                f"the triage field named a status, which is the answer sheet: {line}"
+
+
+def test_a_confirmed_verdict_older_than_the_retriage_mark_reads_none(board):
+    """Clause 2. One measurement, so the model and the machine cannot disagree.
+
+    #15 was confirmed six hours ago and re-triaged one hour ago. `confirmed_verdicts`
+    drops it (`ts` before the newest `backlog_retriage` mark), so the line must read
+    `triage=none` and not `confirmed`. The direction of the risk is worth naming: a
+    line that showed a superseded verdict would be the STEWARD holding an item the
+    machine considers untriaged, while a line that hides a live verdict is what
+    produced #3433 #3537 #3656 #3704. Hiding a stale one is correct only because it is
+    the same answer the machine gives — the clause is "one measurement", not "less
+    information".
+    """
+    _triage_item(board, 15, "up_next")
+    _ev(event="backlog_retriage", item_id=15, ts=time.time(), reason="premises re-checked")
+    assert 15 not in B.confirmed_verdicts(S.LEDGER_PATH), \
+        "the fixture no longer holds: a re-triaged item must drop out of confirmed_verdicts"
+
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    assert len(W.board_view(items, set())) == 1, "the item must be shown to be ruled on"
+    board_text = W.build_prompt(events=[], items=items, n_open=1, since_ts=0.0)
+    assert "triage=none" in _line(board_text, 15), _line(board_text, 15)
+    assert "triage=confirmed" not in _line(board_text, 15)
+
+
+def test_the_up_next_to_draft_rule_can_only_fire_on_a_line_reading_triage_none(board):
+    """Clause 3. The rule's condition is now a field the model can actually read.
+
+    The shipped rule (prompt lines 278-283) said "An item with no triage verdict that
+    sits in `up_next` goes back to `draft`" — and the line carried no verdict field, so
+    the model could only satisfy it by guessing, and guessed `draft` for four confirmed
+    items in one tick. The rewrite must (a) name `triage=none` as the ONLY trigger,
+    (b) forbid the move on a line reading `triage=confirmed` or `confirmed-held`, and
+    (c) still not become an order to move every confirmed item, which is the rail the
+    #3547 rule already holds.
+    """
+    _triage_item(board, 16, "up_next")
+    _write(board, 17, "up_next")
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    prompt = W.build_prompt(events=[], items=items, n_open=2, since_ts=0.0)
+
+    start = prompt.index("- **An `up_next` item")
+    bullet = prompt[start:prompt.index("\n- ", start + 1)]
+    assert "`triage=none`" in bullet, f"the rule's trigger is not the field: {bullet}"
+    assert "`triage=confirmed`" in bullet, \
+        f"the rule never says the move is forbidden on a confirmed line: {bullet}"
+    assert "no triage verdict" not in bullet, \
+        f"the rule still reads on the absence of a field the line now always carries: {bullet}"
+    # The field is documented where the other fields are documented, or the model
+    # sees a token it has no rule for.
+    assert "- **`triage=`" in prompt, "the field is never named to the steward"
+    field_doc = prompt[prompt.index("- **`triage=`"):]
+    field_doc = field_doc[:field_doc.index("\n\n")]
+    for value in W.TRIAGE_VALUES:
+        assert value in field_doc, f"`{value}` is rendered but never defined: {field_doc}"
+
+
+def test_a_confirmed_item_the_steward_parks_is_still_scored_as_a_disagreement(
+        board, monkeypatch):
+    """Clause 4. Grounding informs and does not silence.
+
+    #18 is `up_next`, confirmed, and the machine wants it to stay `up_next`. The
+    steward proposes `draft` — the exact move #3433 made. Telling the model the
+    verdict is only a fix if a wrong answer still costs: the flip gate is
+    `judged >= 50 AND rate >= 0.90` (#3089 asked, #3329 ruled), so any change that
+    quietly removed these proposals from the denominator would lift the rate by
+    deleting its evidence. This asserts the disagreement survives end-to-end:
+    the move is in the row's `moves`, in `agreement.disagree`, and
+    `agreement.disagree_sides` names the machine's side for it.
+    """
+    from scripts.automod import state as S, state as ST
+    from workers.sources import _common as C
+
+    _triage_item(board, 18, "up_next")
+    expected = {18: ("up_next", "confirmed, acceptance names an actionable step")}
+    monkeypatch.setattr(B, "desired_statuses", lambda *a, **k: dict(expected))
+
+    raw = [{"item_id": 18, "status": "draft", "note": "looks parked"}]
+    seen: dict[str, str] = {}
+
+    async def turn(prompt, **kw):
+        seen["prompt"] = prompt
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": raw, "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": True})))
+    assert out["status"] == "success", out
+
+    row = [e for e in ST.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+    assert 18 in row["agreement"]["disagree"], \
+        f"grounding a proposal removed it from the score: {row['agreement']}"
+    sides = [r for r in row["agreement"]["disagree_sides"] if r["item_id"] == 18]
+    assert len(sides) == 1, \
+        f"disagree_sides lost the machine's half of this disagreement: {sides}"
+    assert sides[0]["status"] == "up_next", sides[0]
+    assert row["moves"][0]["item_id"] == 18 and row["moves"][0]["status"] == "draft", \
+        row["moves"]
+    assert "triage=confirmed" in seen["prompt"], \
+        "the steward was scored on a line that still never named the verdict"
