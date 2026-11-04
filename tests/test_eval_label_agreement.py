@@ -2087,3 +2087,131 @@ def test_the_ranking_the_cap_cuts_is_the_ranking_the_ladder_measures():
     for cap in (1, 2, len(_NS)):
         assert sorted(lac.entity_candidates(q, _NS, cap=cap, seed=7, query_id="q1")) \
             == sorted(ranked[:cap])
+
+
+# ── clause 5 (#3753): the artifact records the checkpoint behind the name ───
+
+DJEV_ROOT = ("/home/alansrobotlab/lloyd/agent-services/llm/models/"
+             "nvidia-diffusiongemma-26B-A4B-it-NVFP4")
+DJEV_URL = "http://127.0.0.1:8010/v1/chat/completions"
+
+
+def _fake_models_doc(root: str | None = DJEV_ROOT, *, served_id: str = "djev") -> dict:
+    """What :8010 actually answers on `/v1/models`: a STATIC `id`, the checkpoint in
+    `root`. The `id` is vLLM's `--served-model-name`, so it says `djev` whatever
+    weights are loaded — which is why the name is not an identity."""
+    entry: dict = {"id": served_id, "object": "model"}
+    if root is not None:
+        entry["root"] = root
+    return {"object": "list", "data": [entry]}
+
+
+def _models_fetcher(doc: dict, seen: list[str] | None = None):
+    def fetch(url: str) -> dict:
+        if seen is not None:
+            seen.append(url)
+        return doc
+    return fetch
+
+
+def test_the_checkpoint_root_is_read_from_the_same_models_call_that_names_the_engine():
+    """One `GET /v1/models`, the OTHER field of it — no fourth probe path."""
+    seen: list[str] = []
+    got = lac.served_checkpoint_root(DJEV_URL, fetch=_models_fetcher(_fake_models_doc(), seen))
+    assert got == DJEV_ROOT
+    assert seen == ["http://127.0.0.1:8010/v1/models"], (
+        f"the root must come from the endpoint the caller is about to label with, "
+        f"not from a config-side guess: {seen}")
+
+
+def test_an_endpoint_publishing_only_its_static_name_yields_no_identity():
+    """The tautology, caught at the reader rather than in the report.
+
+    An engine that answers `id: "djev"` and no `root` is exactly today's :8010, and an
+    artifact recorded against it would compare `djev == djev` forever. `unresolved` is
+    the answer that keeps the artifact honest: the labeler still gets to produce a
+    ceiling, but the file says its judge identity is unknown instead of implying it is
+    the name.
+    """
+    assert lac.served_checkpoint_root(
+        DJEV_URL, fetch=_models_fetcher(_fake_models_doc(root=None))) == "unresolved"
+
+
+def test_the_checkpoint_root_refuses_to_guess_between_two_checkpoints():
+    """A runtime serving two models has no single identity; naming one would be the
+    invention this function exists to prevent. `resolve_engine` refuses the same
+    ambiguity for a NAME by dying, because there the choice is a decision input; here
+    it is bookkeeping, so the answer is `unresolved` and the run continues."""
+    two = {"object": "list", "data": [
+        {"id": "djev", "root": DJEV_ROOT},
+        {"id": "other", "root": DJEV_ROOT.replace("26B", "27B")}]}
+    assert lac.served_checkpoint_root(DJEV_URL, fetch=_models_fetcher(two)) == "unresolved"
+
+
+def test_a_quiet_or_rudish_endpoint_yields_no_identity_and_never_raises():
+    """Bookkeeping never stops a labelling run: an unreachable engine and a reply that
+    is not a model list both come back `unresolved`, and no rung of the labeler's own
+    ladder changes because the checkpoint was undisclosed."""
+    def boom(url: str) -> dict:
+        raise OSError("connection refused")
+    assert lac.served_checkpoint_root(DJEV_URL, fetch=boom) == "unresolved"
+    assert lac.served_checkpoint_root(
+        DJEV_URL, fetch=_models_fetcher({"models": ["not", "a", "list"]})) == "unresolved"
+
+
+def test_a_freshly_written_engine_artifact_records_the_root_beside_the_name(
+        tmp_path, monkeypatch, capsys):
+    """Clause 5, end to end: argv in, artifact on disk, and the two fields disagree.
+
+    This is the writer half of #3753 — `scripts/maintenance/grader_identity_drift.py`
+    can only compare a djev ceiling against the live engine once the ceiling itself
+    carries something comparable. `model` keeps its old meaning (the served name, what
+    the payload sends and what `run_eval.py` prints) so the loader's refusal of a stub
+    ceiling and every existing reader are untouched; `served_root` is the new one.
+    """
+    _queries, corpus_path = _corpus(tmp_path)
+    seen: list[str] = []
+    monkeypatch.setattr(lac, "entity_name_table", lambda: list(ENTITIES))
+    monkeypatch.setattr(lac, "vault_markdown_paths", lambda: list(VAULT_DOCS))
+    monkeypatch.setattr(lac, "http_get_json", _models_fetcher(_fake_models_doc(), seen))
+    monkeypatch.setattr(lac, "http_post_json",
+                        lambda url, payload: {"choices": [{"message": {"content":
+                            '{"entities": [0], "docs": [0]}'}}]})
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", [
+        "label_agreement_ceiling.py", "--labeler-url", DJEV_URL,
+        "--labeler-model", "djev", "--corpus", str(corpus_path),
+        "--out-dir", str(out)])
+
+    assert lac.main() == 0
+    files = sorted(out.glob(lac.ARTIFACT_GLOB))
+    assert len(files) == 1, files
+    labeler = json.loads(files[0].read_text(encoding="utf-8"))["labeler"]
+    assert labeler["kind"] == "engine" and labeler["endpoint"] == DJEV_URL
+    assert labeler["model"] == "djev", (
+        "the served name is what the labelling payload sends and what the loader "
+        "prints; the new field may not replace it")
+    assert labeler["served_root"] == DJEV_ROOT, (
+        "an artifact whose judge is only a static served name cannot outlive the "
+        "checkpoint that produced it")
+    assert labeler["served_root"] != labeler["model"], (
+        "recording the name twice is the tautology, in a new spelling")
+    assert seen == ["http://127.0.0.1:8010/v1/models"], seen
+    assert "[checkpoint " + DJEV_ROOT + "]" in capsys.readouterr().out, (
+        "the operator running a 900-second labelling pass should see which checkpoint "
+        "the labels are attributed to")
+
+
+def test_a_stub_or_script_labeler_records_no_checkpoint_root(tmp_path):
+    """The root is an endpoint fact. A stub has no endpoint and a scripted labeler has
+    no checkpoint, so inventing one for them would be a provenance claim with no
+    measurement behind it — the exact class of line #3753 is written against."""
+    art, _, _ = _run(tmp_path)
+    assert "served_root" not in art["labeler"], art["labeler"]
+    scripted = lac.label_corpus(
+        labeler=lambda request: {"entities": [0], "docs": [0]},
+        labeler_identity={"kind": "scripted", "model": "second-pass-v1",
+                          "endpoint": "in-process"},
+        queries=_corpus(tmp_path)[0], entity_names=ENTITIES, vault_paths=VAULT_DOCS,
+        seed=lac.SEED, corpus_path=_corpus(tmp_path)[1])
+    assert "served_root" not in scripted["labeler"], scripted["labeler"]

@@ -4455,8 +4455,15 @@ class Gate:
         from scripts.automod import review as RV
         head, pending_amendments = ctx["head"], ctx["pending_amendments"]
         grade_root = snapshot or self.worktree
+        # `grader_model` is the slot; `grader_model_served` is whatever was sitting in
+        # it while this grade ran (#3753). A slot name re-points under a verdict when
+        # the engine behind it is upgraded, the served string cannot, so a movement in
+        # the refusal rate is attributable to the diff or to the instrument by reading
+        # the two fields side by side.
         base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
-                      "attempt": ctx["attempt"], "head": head, "grader_model": "primary",
+                      "attempt": ctx["attempt"], "head": head,
+                      "grader_model": GRADER_MODEL_ALIAS,
+                      "grader_model_served": grader_served_model(GRADER_MODEL_ALIAS),
                       "snapshot": bool(snapshot), "snapshot_note": snap_note,
                       "prechecks": ctx["pre"],
                       # Why a `blocking` honesty finding may not appear here: the
@@ -4835,6 +4842,60 @@ def main(argv=None) -> int:
     (out / "gate.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
     print(json.dumps(report.to_dict(), indent=2))
     return 0 if report.ok else 1
+
+
+# ── below every rung on purpose ──────────────────────────────────────────────
+# These three live at the end of the module so that adding them shifts no line
+# number above: `measurement.md` anchors a sentence into this file by line, and
+# `tests/test_architecture_coverage_doc_claims.py` refuses an anchor that stops
+# landing inside the definition its own sentence names. Placement is not a style
+# choice there — an edit that moves a cited line silently un-anchors a claim about
+# a different subsystem. They are module globals, resolved when `_review_call`
+# runs, so defining them after `Gate` costs nothing.
+
+# ── who actually graded ──────────────────────────────────────────────────────
+#: The model slot the review rung grades with. It is `RV.grade`'s own default and
+#: `Gate._review_call` never passes `model=` (verified across every call site on
+#: 2026-11-04), so this alias is what every grade on the box runs under —
+#: `tests/test_gate_concurrent_review.py::test_the_recorded_alias_is_the_one_grade_defaults_to`
+#: pins the two together, because an alias copied here would go stale silently the
+#: moment the default moved.
+GRADER_MODEL_ALIAS = "primary"
+
+#: What `grader_model_served` holds when the grading endpoint would not name itself.
+#: Deliberately NOT the alias: #3753 exists because the alias re-points whenever the
+#: primary slot is upgraded, so substituting it for a failed probe would print back
+#: the exact claim this field exists to stop. `coverage_leg.measurement_context`
+#: refused the same substitution with `"unresolved"`, for the same reason.
+GRADER_SERVED_UNKNOWN = "unknown"
+
+
+def grader_served_model(model_alias: str = GRADER_MODEL_ALIAS) -> str:
+    """What the engine serving `model_alias` says it is serving, or `unknown`.
+
+    #3753: the review event recorded `grader_model: "primary"` — a slot name, not an
+    identity — while that slot is upgraded in place (#545's triage recorded the
+    primary slot swapping to `Qwen3.8-Flash-Next-nvfp4` under commit `4ee58ce`), so a
+    movement in the refusal rate could not be told apart from a movement in the
+    grader. One `GET /v1/models` answers it, through the resolver this repo already
+    has for alias→served — `scripts/autoresearch/coverage_leg.py::resolve_served_model`
+    (`app.model_identity.probe_served_model` over `bench_runner._endpoint_for`), which
+    already returns `None` rather than a guess. No fourth probe path is opened here.
+
+    The cost is one request to the engine that is about to grade, immediately before
+    it grades, and it never raises: an engine that will not name itself is recorded as
+    `unknown` and the grade proceeds anyway, because a grader that is merely mute must
+    not cost a round its rung (#1549/#3749: record, do not refuse).
+    """
+    try:
+        from scripts.autoresearch.coverage_leg import resolve_served_model
+        served = resolve_served_model(model_alias) or ""
+    except Exception as exc:  # noqa: BLE001 — the record says `unknown`, it does not lie
+        print(f"[warn] grader identity probe failed for {model_alias}: "
+              f"{type(exc).__name__}: {exc}")
+        served = ""
+    return served.strip() or GRADER_SERVED_UNKNOWN
+
 
 
 if __name__ == "__main__":

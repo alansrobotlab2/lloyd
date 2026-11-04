@@ -323,3 +323,116 @@ def test_the_graders_pytest_excludes_what_the_gate_excludes(tmp_path):
     text = script.read_text()
     assert G.TESTS_MARK_EXPR == "not live_vault and not fault_injection"
     assert f"-m '{G.TESTS_MARK_EXPR}'" in text
+
+
+# ── who actually graded (#3753 clauses 1-3) ────────────────────────────────
+
+SERVED_A = ("/home/alansrobotlab/lloyd/agent-services/llm/models/"
+            "Inferact-Qwen3.8-Flash-Next-NVFP4 Qwen3.8-Flash-Next-nvfp4 primary")
+SERVED_B = "/models/nova2-9b-cpt-sft-rl nova2-9b-cpt-sft-rl primary"
+
+
+def _resolver(monkeypatch, served):
+    """Point the ONE alias→served door at an answer, and the gate's probe runs for real.
+
+    `grader_served_model` calls `scripts.autoresearch.coverage_leg.resolve_served_model`,
+    which is `app.model_identity.probe_served_model` over
+    `bench_runner._endpoint_for(alias)` — the door the coverage leg already used. The
+    test patches that door rather than the gate's own function, so the code under test is
+    the code the gate runs; patching `grader_served_model` would pin only the call site
+    and leave a broken probe passing.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+    monkeypatch.setattr(cov, "resolve_served_model", lambda alias: served)
+
+
+def test_the_review_event_records_the_served_model_behind_the_alias(armed, monkeypatch):
+    """Clause 1: the event names the engine, not the slot it was served from.
+
+    `grader_model: "primary"` was the whole identity field for every one of the 499
+    review rows in the ledger at triage, while the primary slot demonstrably re-points
+    under a verdict — `expect_model` at `config.yaml:395` swapped to
+    `Qwen3.8-Flash-Next-nvfp4` in commit `4ee58ce` and every grader pointing at the
+    alias moved with it. With both fields present, a movement in the refusal rate is
+    attributable: same served string, the diff moved it; different served string, the
+    instrument did.
+    """
+    _resolver(monkeypatch, SERVED_A)
+    armed["monkeypatch"].setattr(RV, "grade", _Grader())
+    report = _Gate(armed["tmp"], _green).run()
+    rev = _reviews(armed["events"])
+    assert len(rev) == 1, rev
+    assert report.ok
+    assert rev[0]["grader_model_served"] == SERVED_A, rev[0]["grader_model_served"]
+    assert rev[0]["grader_model"] == "primary", (
+        "the alias stays: it says which slot was asked, which is a different fact from "
+        "what was sitting in it, and #545/#657 read the slot")
+    assert rev[0]["grader_model_served"] != rev[0]["grader_model"], (
+        "a served field that repeats the alias records nothing")
+    assert set(rev[0]) >= {"grader_model", "grader_model_served"}
+
+
+@pytest.mark.parametrize("failure", ["silent", "raising"],
+                         ids=["the door returns None", "the door raises"])
+def test_a_grader_that_will_not_name_itself_is_recorded_unknown_and_still_grades(
+        armed, monkeypatch, failure):
+    """Clause 2: no alias substitution, no refused rung, for either kind of silence.
+
+    `None` is the resolver's own answer for an endpoint that did not answer, and a raise
+    is what a misconfigured endpoint, a `None` base_url or an import problem looks like
+    from here. Both must land as the literal `unknown` and the grade must still run and
+    still pass its rung: a grader that is merely mute has graded honestly, and
+    substituting `"primary"` would print back the claim #3753 exists to stop — the slot
+    name is exactly what is unknown when the endpoint is not answering. Refusing the
+    rung instead would cost a good build its round for an engine that would not chat.
+    """
+    def door(alias):
+        if failure == "raising":
+            raise RuntimeError("no endpoint configured for alias")
+        return None
+    from scripts.autoresearch import coverage_leg as cov
+    armed["monkeypatch"].setattr(cov, "resolve_served_model", door)
+    grader = _Grader()
+    armed["monkeypatch"].setattr(RV, "grade", grader)
+    report = _Gate(armed["tmp"], _green).run()
+    rev = _reviews(armed["events"])
+    assert len(rev) == 1 and rev[0]["grader_model_served"] == "unknown", rev
+    assert "primary" not in rev[0]["grader_model_served"]
+    assert len(grader.calls) == 1, "the identity probe stopped the grade it was annotating"
+    assert report.ok, [r.name for r in report.rungs if not r.ok]
+
+
+def test_two_grades_under_two_served_models_record_two_values(armed, monkeypatch):
+    """Clause 3: the field discriminates, which is the only thing it is for.
+
+    A constant would satisfy clause 1's shape and carry no more information than the
+    alias did. The second gate runs on a moved head so it is a real second grade rather
+    than a reuse of the first.
+    """
+    armed["monkeypatch"].setattr(RV, "grade", _Grader())
+    _resolver(monkeypatch, SERVED_A)
+    _Gate(armed["tmp"], _green).run()
+    armed["head"]["now"] = "d" * 40
+    _resolver(monkeypatch, SERVED_B)
+    _Gate(armed["tmp"], _green).run()
+    rev = _reviews(armed["events"])
+    assert len(rev) == 2, rev
+    assert [r["grader_model_served"] for r in rev] == [SERVED_A, SERVED_B]
+    assert rev[0]["grader_model"] == rev[1]["grader_model"] == "primary", (
+        "the slot did not change across the two grades; only the served string can see "
+        "that the engine behind it did")
+
+
+def test_the_recorded_alias_is_the_one_grade_defaults_to():
+    """The two `"primary"` literals are one fact, and this is what keeps them so.
+
+    `GRADER_MODEL_ALIAS` is gate-side; `model: str = "primary"` is `RV.grade`'s default,
+    which `Gate._review_call` never overrides (it passes no `model=` kwarg), so the
+    served string probed here is the served string of the engine that actually graded.
+    Were the default ever moved to another slot, this fails at the point of the move
+    instead of leaving `grader_model_served` describing a different engine from the one
+    that wrote the verdict — a wrong identity is worse than `unknown`.
+    """
+    import inspect
+    assert G.GRADER_MODEL_ALIAS == "primary"
+    assert inspect.signature(RV.grade).parameters["model"].default == G.GRADER_MODEL_ALIAS

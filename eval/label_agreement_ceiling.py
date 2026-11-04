@@ -623,6 +623,51 @@ def served_model_name(base: str, *, fetch: Callable[[str], dict] | None = None
     return ids[0]
 
 
+#: What `labeler.served_root` holds when the endpoint would not name its checkpoint.
+#: Never the served MODEL NAME, which is the whole point (#3753): :8010 answers
+#: `/v1/models` with `id: "djev"` — a static `--served-model-name` — and the ceiling
+#: artifact already records `labeler.model: "djev"`, so comparing those two passes
+#: forever however the checkpoint loaded at :8010 changes. `root` is the field that
+#: cannot say that: it names the directory the weights came from.
+SERVED_ROOT_UNRESOLVED = "unresolved"
+
+
+def served_checkpoint_root(endpoint: str, *, fetch: Callable[[str], dict] | None = None
+                           ) -> str:
+    """The checkpoint directory behind `endpoint`, read off the same door as the name.
+
+    One `GET {base}/v1/models` — the call `served_model_name` above already makes —
+    read for the OTHER field it carries: vLLM publishes `root` (the checkpoint
+    directory) beside `id`, and `app/model_identity.py` reads it for exactly that
+    reason on boot. No new probe path: this parses a response the file already asks
+    for, at the endpoint the caller is about to label with.
+
+    Deliberately never raises and never refuses. The name is a decision input (an
+    absent one stops the run, above); the root is bookkeeping written beside the
+    artifact, and a labeler that will not disclose its checkpoint must still be able
+    to produce a ceiling — it just produces one whose judge identity is on record as
+    `unresolved` rather than as a guess. Recorded, not enforced (#1549/#3749).
+
+    Three states, one string: exactly one `root` → that path; none (a runtime that
+    publishes no `root` — llama.cpp names itself by `--alias` and puts its
+    checkpoint in `/props`, which is `app.model_identity`'s door, not this one) or
+    more than one (an endpoint serving several checkpoints, where picking one would
+    be the guess this function exists to prevent) → `unresolved`; an endpoint that
+    will not answer, or answers with something that is not a model list → also
+    `unresolved`.
+    """
+    base = str(endpoint or "").split("/v1/")[0].rstrip("/")
+    get = fetch or http_get_json
+    try:
+        doc = get(f"{base}/v1/models")
+        roots = [str(entry.get("root") or "")
+                 for entry in (doc.get("data") or []) if isinstance(entry, dict)]
+    except Exception:                                     # noqa: BLE001 — bookkeeping
+        return SERVED_ROOT_UNRESOLVED
+    named = sorted({r for r in roots if r})
+    return named[0] if len(named) == 1 else SERVED_ROOT_UNRESOLVED
+
+
 def resolve_engine(name: str, *,
                    models_fetcher: Callable[[str], dict] | None = None
                    ) -> tuple[str, str]:
@@ -1732,9 +1777,19 @@ def main() -> int:
               "which model produced the ceiling changes what the number means.")
         return 2
 
+    # The checkpoint behind the name (#3753). `model` is a served NAME, and for djev
+    # that name is the static string `djev`, so an artifact carrying only the name
+    # cannot outlive the weights that produced it: the ceiling would keep being read
+    # against a labeler nobody can prove is the one it was calibrated on. One GET
+    # against the endpoint already named, and no refusal — an undisclosed checkpoint
+    # is recorded as `unresolved`, never as a guess.
+    if identity.get("kind") == "engine":
+        identity["served_root"] = served_checkpoint_root(identity["endpoint"])
+
     print(f"labelling {len(queries)} queries "
           f"({counts['entity_labels']} entity labels / {counts['doc_labels']} doc "
-          f"labels) with {identity['model']} @ {identity['endpoint']}")
+          f"labels) with {identity['model']} @ {identity['endpoint']}"
+          f" [checkpoint {identity.get('served_root', 'n/a')}]")
     names = entity_name_table()
     vault = vault_markdown_paths()
     print(f"  entity namespace: {len(names)} names   "
