@@ -2380,13 +2380,25 @@ def test_the_cross_root_label_appears_once_per_section(tmp_path, monkeypatch):
 
 
 def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
-    """#1536 clause 5: another alert's repetition is untouched.
+    """#1536 clause 5, as amended by #3793: coalescing stays scoped to the runtime title.
 
-    Two firings of a DIFFERENT title one interval apart — the same cadence, the
-    same notifier, `coalesce` left at its default — still append two sections.
-    Without this, the fix could be silently generalised to every guardian alert,
-    and a rollback or a broken-loop notice that recurs across a night would go
-    unread while it is still true.
+    Two firings of a DIFFERENT title one interval apart — the same cadence, the same
+    notifier, `coalesce` left at its default — still do NOT grow a coalescing section or
+    an open marker, and the runtime title still refreshes in place. That scoping is what
+    this node was written to own, and it still holds.
+
+    What changed is the byte count of the second firing. This node used to pin "two
+    firings append two sections", in the name of not generalising the coalescing fix to
+    every alert. #3793 generalises the *silencing* half on purpose, because on
+    `memory/2026-11-04.md` three sections of one such alert took 5,146 B of 6,872 B and
+    on `memory/2026-10-29.md` five took 11,250 B of 12,809 B. The hazard clause 5 named —
+    a recurring notice going unread while it is still true — is answered by the fold
+    line, which arrives on every firing after the first with the count and the newest
+    stamp on it (the body's own instant when it carries one, the write instant when it
+    does not). The fold's own contract is pinned in
+    `tests/test_guardian_daily_note_fold.py`; what is asserted here is only that a
+    non-coalescing alert still writes no marker and still gets its section folded rather
+    than re-pasted, seen through `alert()` on a tick cadence.
     """
     import guardian as gmod
     import notify
@@ -2397,7 +2409,15 @@ def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
         tick([])
 
     text = note.read_text(encoding="utf-8")
-    assert len(_sections(note, "Supervisord keeps dying")) == 2, text
+    assert len(_sections(note, "Supervisord keeps dying")) == 1, (
+        f"the second firing pasted a second body instead of folding:\n{text}")
+    folds = [ln for ln in text.splitlines()
+             if ln.startswith(notify.DAILY_FOLD_HEAD)
+             and ln[len(notify.DAILY_FOLD_HEAD):].partition('": ')[0]
+             == "Supervisord keeps dying"]
+    assert len(folds) == 1 and "1 earlier fire" in folds[0], (
+        f"the second firing left no trace of itself on the page, which is a silence:\n"
+        f"{text}")
     assert notify.DAILY_STILL_OPEN not in text, "a non-coalescing alert grew a marker"
     assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE) == []
     # The keyword's own default, since `alert` passes the flag explicitly: a caller

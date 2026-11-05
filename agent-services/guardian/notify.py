@@ -105,6 +105,41 @@ DAILY_SCAN_DAYS = 3
 #: open section, so only dated notes are consulted outside the window.
 DATED_NOTE_STEM = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+#: The line `_vault_note` writes INSTEAD of a second full copy of a section it has
+#: already put on today's note (#3793). The head ends inside the alarm's own title
+#: because the title is what the fold matches on — see `_fold_owed` — and a line whose
+#: subject a reader cannot name is a silence with brackets around it.
+#:
+#: The shape is the scheduler writer's, from `app/discord_notify.py:346-349`
+#: (`[daily-note fold: N earlier fires of this alarm today folded into this line; …]`),
+#: which every guardian alarm line in `memory/2026-10-29.md` and `memory/2026-11-04.md`
+#: already carries as a promise the guardian's own writer did not keep: 5 sections of
+#: one title stood at 11,250 B of that file's 12,809 B (87.8 %), and 3 stood at 5,146 B
+#: of 6,872 B (74.9 %).
+DAILY_FOLD_HEAD = '[daily-note fold: guardian alarm "'
+#: What every fold line promises about the NEXT copy. Both arms hold whatever the
+#: incident does next: further firings today fold because the fold reads the day's own
+#: note, and a NEW day's note carries no section to fold against, so the first firing
+#: after midnight is a full body again. It says nothing about whether the alarm clears —
+#: an all-clear that arrives after a fold has nothing left to seal and stays silent
+#: (`resolve`'s documented idempotent-silence contract), so a tail that promised a
+#: further body "when it clears" would be a sentence the note cannot honour.
+DAILY_FOLD_TAIL = ("further firings of this alarm today fold into this line; the next "
+                   "full body comes on the next calendar day]")
+#: The count clause of a fold line this module wrote, and the only place the number of
+#: folded firings is kept. Read back off the note rather than held in process memory,
+#: because the 2026-10-29 repeats were written by five DIFFERENT processes — one
+#: automod-round worktree per hourly tick — and state that dies with the writer resets
+#: a counter a reader can still see on the page.
+DAILY_FOLD_FIRES = re.compile(r"(\d+) earlier fires? today folded into this line")
+#: The newest ISO-8601 instant inside an incoming alert body. The bodies the fold
+#: collapses are stamped with the check's own instant — `guardian.py:474-475` puts
+#: `checked %Y-%m-%dT%H:%M:%SZ` in the shadow alert's first sentence, and the vault
+#: snapshot alarm's `state["text"]` carries the same shape — and that stamp is exactly
+#: the line a fold throws away, so the fold has to carry it forward or the note loses
+#: the one fact that says the alarm is still live and when it last spoke.
+ISO_STAMP_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?")
+
 
 #: The punctuation a clearance's prose puts after a path: the sentence carries on past
 #: it, so a path token has to be read without the character that follows it.
@@ -192,6 +227,33 @@ def _section_measured_roots(section_text: str) -> list[str]:
     kept = "\n".join(ln for ln in section_text.splitlines()
                      if not ln.strip().startswith(DAILY_CROSS_ROOT_PREFIX))
     return _absolute_roots(kept)
+
+
+def _foreign_roots(cleared: str | None, measured_root: str) -> list[str]:
+    """The roots a clearance names that this check did not measure, in order.
+
+    One predicate for two callers, so the seal label and the fold line can never
+    disagree about what "foreign" means: `_cross_root_seal_line` prints the sentence,
+    `Notifier._fold_line` names the newest root inside the fold (#3793). Empty means
+    there is nothing true to say — no clearance, no root handed over, a clearance that
+    names no path, or a clearance that names THIS root (presence, not sole-ness, for
+    the reason spelled out in `_cross_root_seal_line`).
+
+    The roots are the clearance's OWN sentence (`_clearance_measured_roots`, #3792), not
+    every path token on the line: #3792's `cross-root clearance:` marker prints the root of
+    the section it closed, which is a root the clearing process explicitly did not measure,
+    and counting it would let a foreign seal read as honest to the fold simply because the
+    marker also happens to print `measured_root`.
+    """
+    if not cleared or not measured_root:
+        return []
+    foreign: list[str] = []
+    for root in _clearance_measured_roots(cleared):
+        if root == measured_root or root.startswith(measured_root + "/"):
+            return []
+        if root not in foreign:
+            foreign.append(root)
+    return foreign
 
 
 def _cross_root_line_of(section_text: str) -> str | None:
@@ -852,10 +914,23 @@ class Notifier:
         """Write this alert's section into today's daily note.
 
         `coalesce=False` — every alert but the runtime-data stray one — appends a
-        section per fan-out, byte-identical to the pre-#1536 format. `coalesce=True`
-        opens a section on the first finding and REFRESHES that same section on every
-        later finding of the same incident, so one incident is one section no matter
-        how many checks it outlives.
+        section per fan-out, byte-identical to the pre-#1536 format, UNTIL this same
+        title has been written to this day's note once already: the second and later
+        firings of a title a day has already carried are FOLDED to one line
+        (`_fold_owed`, #3793). `coalesce=True` opens a section on the first finding and
+        REFRESHES that same section on every later finding of the same incident, so one
+        incident is one section no matter how many checks it outlives — and its append
+        branch, which an honest seal or a foreign one reaches, folds from the second
+        foreign-seal re-paste onward (see `_fold_owed` for why the first one does not).
+
+        The fold is a visible collapse, never a silence: every firing from the second
+        onward writes a line naming the title, how many of today's firings it folds,
+        and the newest `checked` stamp, and the line updates IN PLACE so one title owns
+        one fold line a day however long the incident runs. It is keyed on the heading
+        already in the note, not on body bytes, because the 2026-10-29 repeats whose
+        bytes the item measured were never byte-identical — the store's byte count and
+        the sealing worktree's path both move every hour — so a body hash would have
+        folded 0 of the 5 copies on that page.
 
         When the day's note does not exist yet it is CREATED with the shared
         front-matter header (`daily_note.fresh_header`, #1887) before the section is
@@ -898,6 +973,17 @@ class Notifier:
                         + "\n\n" + DAILY_STILL_OPEN + "\n" + body[end:])
                 note.write_text(body, encoding="utf-8")
                 return True
+            # The append branch is where a day's note gains a body, and it is the one
+            # place on this path that can see the whole note. Both doors into it re-paste
+            # an unchanged alarm: `coalesce=False` never looks for an open section at all
+            # (the 2026-11-04 witness — 3 sections, the first two byte-identical), and a
+            # coalesced title whose section was sealed is by definition not open (the
+            # 2026-10-29 witness — 5 sections, 87.8 % of the file). One predicate covers
+            # both, and it reads the note rather than process state, because those five
+            # sections came from five separate processes.
+            if self._fold_owed(body, title, coalesce=coalesce,
+                               measured_root=measured_root):
+                return self._write_daily_fold(note, body, title, text, measured_root)
             with open(note, "a", encoding="utf-8") as f:
                 if coalesce:
                     # Appending a fresh section is the one moment this writer can see the
@@ -958,6 +1044,152 @@ class Notifier:
             f"{' or '.join(section_roots)}. The section is closed, but this line is not a "
             "statement about that second root: the process that wrote it stands in the "
             "first.]")
+
+    def _fold_owed(self, text: str, title: str, *, coalesce: bool,
+                   measured_root: str = "") -> bool:
+        """Must this firing be a line instead of a body?
+
+        Matched on the HEADING, not the body: `_daily_sections` answers "has today's
+        note already carried a section under this title", which is the question the two
+        live witnesses actually ask. `memory/2026-11-04.md` holds three sections of one
+        title whose first two are byte-identical, and `memory/2026-10-29.md` holds five
+        whose bodies are NOT — the store's byte count moves (172,982,272 → 172,990,464 →
+        173,170,688) and so does the sealing worktree named in each `cleared:` line — so
+        anything keyed on normalised body bytes would have folded 0 of those 5 copies
+        while claiming to be a dedupe. A title is the only index a daily note has.
+
+        `coalesce=False` folds from the second firing of a title onward, and that is
+        safe because a non-coalescing title has no incident lifecycle to lose: its
+        sections carry no `_(still open on the next check)_` marker, so `resolve` never
+        seals them and there is no honest all-clear whose "new incident" this could
+        hide. #1536 clause 5 pinned the old two-sections-per-firing shape on exactly
+        this door (`tests/test_guardian_predicates.py`) in the name of not generalising
+        the coalescing fix to every alert; #3793 is the deliberate generalisation, and
+        the hazard that clause named — a recurring notice going unread — is answered by
+        the line arriving on every firing with the count and the newest stamp on it.
+
+        `coalesce=True` folds only once the note has SAID once that a foreign root
+        sealed this title AND that seal still stands — the newest section carries a
+        `cross-root seal:` label and the newest `cleared:` line for the title still
+        names a root `measured_root` cannot account for. A label is permanent on the
+        section that carries it, so keyed on the label alone an honest all-clear
+        followed by a genuinely new incident would be folded away and the note would
+        carry no open section for a live condition; the clearance test is what ends the
+        fold. The firings that get a full body are the two that are
+        not repetitions: an honest all-clear followed by a genuinely new incident
+        (#3150 clause 4: "coalescing may not turn a title into a mute"), and the first
+        re-paste after a seal written by a process that never measured this root
+        (#3628 clause 3, whose node is this item's own clause 5 — `test_a_shadow_
+        finding_sealed_from_another_root_re_alerts_with_the_label`, which is the shape
+        of 2026-10-29 and is why the label keeps its section). From the NEXT foreign
+        seal onward the note is re-printing a sentence it has already printed, and that
+        is the part that was 87.8 % of the page.
+        """
+        if not any(sect[0] == title for sect in self._daily_sections(text)):
+            return False
+        if coalesce:
+            newest = [s for s in self._daily_sections(text) if s[0] == title][-1]
+            if _cross_root_line_of(text[newest[1]:newest[2]]) is None:
+                return False
+            # A label is a permanent fact about the section that carries it, so it cannot
+            # by itself say what happened to the title NEXT. An honest all-clear that
+            # arrives after a labelled section closes the title for real, and the next
+            # firing is a genuinely new incident which must get its own body — folding it
+            # would leave the note with no open section and a condition nobody printed,
+            # the exact unread-alarm failure this item exists to remove. So the fold binds
+            # only while the seal still stands: the newest `cleared:` line for this title
+            # must still be one this check cannot account for. Honest (or no clearance at
+            # all) → the label is superseded → full body. With no `measured_root` handed
+            # over nothing can be proven foreign, and an unprovable fold is a silence, so
+            # this side stays open.
+            if not measured_root:
+                return False
+            return bool(_foreign_roots(self._newest_cleared_line(text, title),
+                                       measured_root))
+        return True
+
+    def _daily_fold_span(self, text: str, title: str):
+        """(start, end, fires) of this title's fold line in `text`, else None.
+
+        Read back off the note, which is the only state that survives the 2026-10-29
+        shape: one process per hourly tick, each of them a different automod-round
+        worktree, so an in-memory counter would restart at 1 fifty times a day and the
+        number on the page would be a lie. The scan is line-anchored on
+        `DAILY_FOLD_HEAD`, so a body that merely mentions a folded alarm — the
+        scheduler's `[daily-note fold: …]` line, which sits in these very notes — is not
+        mistaken for this writer's: only a line that opens with this module's own head
+        and names this title exactly is one.
+        """
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            bare = line.rstrip("\n")
+            if bare.startswith(DAILY_FOLD_HEAD):
+                subject, sep, tail = bare[len(DAILY_FOLD_HEAD):].partition('": ')
+                if sep and subject == title:
+                    found = DAILY_FOLD_FIRES.match(tail)
+                    return offset, offset + len(line), int(found.group(1)) if found else 0
+            offset += len(line)
+        return None
+
+    def _newest_stamp_in(self, text: str) -> str:
+        """The newest ISO-8601 instant the incoming body carries, or this instant.
+
+        `checked <ISO>` is the line the fold discards, so the line has to carry a
+        stamp or the note loses the only thing that says the alarm is still live. The
+        body's own reading wins over the writer's clock: a check that re-printed a
+        finding measured an hour ago should fold under that hour, not under the tick
+        that got around to writing it. A body that names no instant at all falls back
+        to `_stamp()`, which is what every other dated line on this note is stamped
+        with.
+        """
+        found = ISO_STAMP_IN_TEXT.findall(text)
+        if found:
+            return max(found)
+        return self._stamp().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _fold_line(self, title: str, fires: int, stamp: str, foreign: str) -> str:
+        """The one line that stands in for `fires` folded firings of `title`.
+
+        Shape is the scheduler's (`app/discord_notify.py:346-349`), because that is the
+        clause every guardian alarm line in the two witness notes already quotes:
+        the title, how many of today's fires it folds, the newest reading, and what
+        would make the next full body arrive. `foreign` is named only when a
+        `cross-root seal:` is what ended the section above — the same fact #3628's label
+        exists to say, kept to its root here because the sentence is already on the page
+        once and this line is not the place to print it twice.
+        """
+        plural = "s" if fires != 1 else ""
+        clauses = [f'{DAILY_FOLD_HEAD}{title}": {fires} earlier fire{plural} today '
+                   "folded into this line instead of a second full body",
+                   f"newest check {stamp}"]
+        if foreign:
+            clauses.append("the section above was sealed by a "
+                           f"`{DAILY_CROSS_ROOT_PREFIX}` naming {foreign}")
+        clauses.append(DAILY_FOLD_TAIL)
+        return "; ".join(clauses)
+
+    def _write_daily_fold(self, note, body: str, title: str, text: str,
+                          measured_root: str) -> bool:
+        """Write the fold `_fold_owed` called for, and return what `_vault_note` returns.
+
+        One fold line per title per day, not one per firing: an existing line is
+        rewritten in place with `fires + 1` and the new stamp, so an incident that runs
+        forty hours costs one line and not forty. The bytes before the line and after it
+        are untouched, which is the same prefix/suffix discipline the refresh branch
+        keeps for the other writers of this note.
+        """
+        span = self._daily_fold_span(body, title)
+        fires = (span[2] if span else 0) + 1
+        foreign = _foreign_roots(self._newest_cleared_line(body, title), measured_root)
+        line = self._fold_line(title, fires, self._newest_stamp_in(text),
+                               foreign[-1] if foreign else "")
+        if span is None:
+            with open(note, "a", encoding="utf-8") as f:
+                f.write(f"\n{line}\n")
+            return True
+        start, end, _old = span
+        note.write_text(body[:start] + line + body[end:], encoding="utf-8")
+        return True
 
     def resolve(self, title: str, note_text: str,
                 *, measured_root: str = "") -> bool:
@@ -1386,20 +1618,7 @@ class Notifier:
         cross-root process may seal at all is owed elsewhere, and if it comes back
         root-keyed this line becomes a backstop rather than the fix.
         """
-        if not measured_root:
-            return None
-        cleared = self._newest_cleared_line(text, title)
-        if cleared is None:
-            return None
-        foreign: list[str] = []
-        # The clearance's OWN sentence only: a #3792 marker inside that line names the root
-        # of the section it closed, which is a root this clearance did not measure, and
-        # counting it would call a marked foreign seal honest and lose this label.
-        for root in _clearance_measured_roots(cleared):
-            if root == measured_root or root.startswith(measured_root + "/"):
-                return None
-            if root not in foreign:
-                foreign.append(root)
+        foreign = _foreign_roots(self._newest_cleared_line(text, title), measured_root)
         if not foreign:
             return None
         return (
