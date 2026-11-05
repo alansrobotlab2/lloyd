@@ -3109,8 +3109,20 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # guardian/guardian.py | grep '^@@'` answers that one hunk and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # prints 1021 with 3304 below it.
-    assert heads[guardian]["main"] == 3304, (
-        f"`main` moved off :3304 ({heads[guardian]['main']}) — if it is gone "
+    # 3304 → 3315 is #3795: THREE hunks, `@@ -1761,7 +1761,11 @@` (+4) and
+    # `@@ -1851,7 +1855,11 @@` (+4) and `@@ -2467,7 +2475,10 @@` (+3), 14 added and 3 removed
+    # for a net +11 — each one replacing a published `/usr/bin/python3 <module file> <verb>`
+    # line in an alert body with `policy.published_watchdog_script(...)` plus the comment
+    # naming the dead command in `memory/2026-11-04.md` it replaces. They sit inside
+    # `check_vault`, `_vault_snapshot_stream` and `check_data` — the window between the two
+    # anchors, below `evaluate_liveness` and above `main` — so `evaluate_liveness` keeps
+    # :1021, `architecture/threat-model.md`'s T-26 row does not move, and `main` takes the
+    # whole +11. Re-check: `git diff <base> <head> -- agent-services/guardian/guardian.py |
+    # grep '^@@'` answers those three hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1021 with 3315 below it.
+    assert heads[guardian]["main"] == 3315, (
+        f"`main` moved off :3315 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1021, (
         f"`evaluate_liveness` moved off :1021 "

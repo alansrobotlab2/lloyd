@@ -660,6 +660,48 @@ def deployed_watchdog_refusal(module_file: "str | None" = None,
     return (f"pause refused: this process's guardian module is {here}, which is not the "
             f"watchdog under {bin_dir}; only the promoted snapshot posts to "
             f"{workers_pause_url()}")
+
+#: The source-checkout route a published command falls back to where nothing has been
+#: promoted yet: `<REPO>/agent-services/guardian/<script>`. `REPO` is the same
+#: account-named literal `guardian-stage.sh:30`'s `SRC` copies from, and it is a literal
+#: for the reason `deployed_watchdog_refusal` insists on a location: a round's worktree is
+#: a DIFFERENT directory that also holds these files, and which copy a process happened
+#: to load says nothing about which route a person can still run tomorrow.
+WATCHDOG_SRC_REL = ("agent-services", "guardian")
+
+
+def published_watchdog_script(module_file: "str | None" = None,
+                              state_dir: "_Path | str | None" = None) -> str:
+    """The script path to name in a watchdog command a HUMAN will run later.
+
+    Never `module_file`, and that omission is the whole of #3795. `memory/2026-11-04.md`
+    carries three `## Self-mod guardian: Vault snapshots are not arriving` sections whose
+    "same reading, and the same bound, from a shell:" line ordered the reader to run
+    `/usr/bin/python3 ~/lloyd-work/SM_20261104_123801/home/lloyd/agent-services/guardian/`
+    `vaultwatch.py status`: that process had loaded `vaultwatch` out of an automod round's
+    worktree, the round was cleaned, and `ls -d ~/lloyd-work/SM_20261104_123801` now exits
+    2, so the restore directive in a live alarm cannot be executed at all. The line that
+    tells a person under pressure what to type is not a comment; a path that exists only
+    while the writer's tree exists is not an instruction.
+
+    The route is chosen the way `deployed_watchdog_refusal` decides whether a process IS
+    the watchdog, for the same reason: `scripts/automod/worktree.py:65` symlinks every
+    home entry except `lloyd`/`lloyd-data` into a round, so `<GUARDIAN_STATE>/bin` is the
+    promoted snapshot whichever tree loaded this module, and `bin/<script>` is what
+    `lloyd-guardian.service:29` actually runs. So the same render comes back from the
+    watchdog's own process and from a round's, and neither is the tree that rendered it.
+    Where nothing has been promoted (`guardian-stage.sh` never ran on this box), the
+    fallback is the source checkout, which is stable across a round's cleanup too.
+    """
+    here = _Path(module_file if module_file is not None else __file__).resolve()
+    bin_dir = (_Path(state_dir) if state_dir is not None else GUARDIAN_STATE) \
+        .expanduser() / WATCHDOG_BIN_DIR
+    promoted = bin_dir / here.name
+    if promoted.is_file():
+        return str(promoted)
+    return str(_Path(REPO).expanduser().joinpath(*WATCHDOG_SRC_REL) / here.name)
+
+
 # Where `snapshot-data.sh` writes the hourly read-only snapshots of DATA_ROOT:
 # the same resolution as the script's `${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}`,
 # because the alert that sends a person to look for a restore point has to name

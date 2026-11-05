@@ -1761,7 +1761,11 @@ class Guardian:
             "Restore from a snapshot into a side directory with "
             "`~/lloyd/scripts/backup/restore-vault.sh` (never in place), check it, "
             "swap it in, then clear the tripwire with\n"
-            f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} clear\n"
+            # `policy.published_watchdog_script`, not `vaultwatch.__file__`: an alert body
+            # is a directive, and the tree this process loaded its module from is a round's
+            # worktree exactly when the alarm is a fixture's — which is the tree that gets
+            # deleted, taking the command with it (#3795).
+            f"  /usr/bin/python3 {policy.published_watchdog_script(vaultwatch.__file__)} clear\n"
             f"Sync will not start until then. Marker: {marker}",
             coalesce=True)
 
@@ -1851,7 +1855,11 @@ class Guardian:
             "said is in the journal:\n"
             "  journalctl --user -u lloyd-vault-backup.service -n 40 --no-pager\n"
             "The same reading, and the same bound, from a shell:\n"
-            f"  /usr/bin/python3 {Path(vaultwatch.__file__).resolve()} status\n"
+            # The 2026-11-04 line: three copies of this one, each naming
+            # `~/lloyd-work/SM_20261104_123801/…/vaultwatch.py`, written by a process whose
+            # `vaultwatch` resolved into that round and unrecoverable now it is cleaned.
+            # Same rule as the tripwire body above (#3795).
+            f"  /usr/bin/python3 {policy.published_watchdog_script(vaultwatch.__file__)} status\n"
             "Restore into a side directory with "
             "`~/lloyd/scripts/backup/restore-vault.sh <rev> <dest>` — never over the "
             "live vault — and check the tripwire marker before believing a stall: "
@@ -2467,7 +2475,10 @@ class Guardian:
             f"Hourly read-only snapshots are in {policy.DATA_SNAPSHOTS}. Restore into "
             "a side directory with `~/lloyd/scripts/backup/restore-data.sh` (never in "
             "place), check it, swap it in with the stack stopped, then clear with\n"
-            f"  /usr/bin/python3 {Path(datawatch.__file__).resolve()} clear\n"
+            # The data twin of the two vault bodies: `datawatch.__file__` is wherever this
+            # import landed, which for a round-rooted or pytest-rooted process is a tree
+            # that gets removed while the alarm it published is still open (#3795).
+            f"  /usr/bin/python3 {policy.published_watchdog_script(datawatch.__file__)} clear\n"
             f"Snapshots are refused until then. Marker: {marker}",
             coalesce=True)
 

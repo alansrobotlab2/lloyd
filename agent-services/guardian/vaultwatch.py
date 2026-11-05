@@ -45,6 +45,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import policy as P  # noqa: E402  (sibling, as `datawatch.py:51` does; both are staged
+                    # into the promoted `bin/` by `guardian-stage.sh`, and a CLI run has
+                    # this file's own directory on `sys.path`)
+
 #: The vault this process reads AND writes, resolved the one way the tree resolves a
 #: vault: `$LLOYD_VAULT_ROOT` when it is set, else `$HOME/obsidian` — the two branches
 #: `app/data_root.py::vault_root()`, `scripts/backup/backup-vault.sh` and
@@ -553,7 +557,11 @@ class VaultWatch:
             "before": before.to_dict() if before else None,
             "after": snap.to_dict() if snap else None,
             "actions": actions,
-            "clear_with": f"/usr/bin/python3 {Path(__file__).resolve()} clear",
+            # Never `__file__`: for a round-rooted watchdog that is the round's own copy,
+            # and the marker outlives the round — `sync_gate` below quotes this value at
+            # whoever runs `ob sync`, so a worktree path here is a dead command on the
+            # refusal a human reads. #3795.
+            "clear_with": f"/usr/bin/python3 {P.published_watchdog_script(__file__)} clear",
         }
         self.marker.write_text(json.dumps(body, indent=2), encoding="utf-8")
         return self.marker

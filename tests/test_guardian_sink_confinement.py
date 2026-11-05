@@ -30,12 +30,24 @@ The two mutes the probe sets (`LLOYD_JOURNAL_ALERTS`, `LLOYD_DESKTOP_ALERTS`,
 channel, which is the one under test. They are set because #2061's own lesson is that a
 fixture alert in a shared human-facing surface is the same pollution whether it lands in
 a note or in the live journal.
+
+#3795 added the second half of the same question. #3149 bounded WHERE an alarm may write
+and what it may name as its subject; it said nothing about the command the body tells a
+person to run. `memory/2026-11-04.md:35,48,61` are confined and correctly owned and still
+unusable, because each publishes `/usr/bin/python3
+~/lloyd-work/SM_20261104_123801/home/lloyd/agent-services/guardian/vaultwatch.py status`
+— a path that existed only inside the automod round whose tree the writing process had
+loaded its modules from, and that round is deleted. So the nodes below ask the one
+question that was missing: does the script path an alarm publishes survive the tree that
+rendered it? Every published command is read back out of the daily note the alert really
+wrote, for the same reason the nodes above read the note rather than a captured argument.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -305,3 +317,401 @@ def test_the_probe_runs_on_the_guardian_interpreter():
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[-2000:]
     print(f"\n#3149 probe interpreter: {PROBE_PY} (python {proc.stdout.strip()})")
+
+
+# ── #3795: the script path an alarm publishes must outlive the tree that wrote it ──
+
+#: One real guardian alarm, rendered by a process whose guardian modules came from a tree
+#: the caller names. argv: `<guardian tree> <scratch root> <family> <state dir> <mode>`.
+#:
+#: `family` picks which published command this process renders: `vault` trips the vault
+#: tripwire for real, `data` trips the data root's, `snapshot` runs the stalled-backup
+#: check that wrote the 2026-11-04 sections. `mode` is `promoted` (the guardian state dir
+#: holds a promoted `bin/`, as on this box) or `unpromoted` (nothing there, and
+#: `policy.REPO` pointed at a checkout holding the sources — the fallback branch).
+#:
+#: Nothing substituted is a stand-in for the thing under test: the trip is a real wipe of
+#: files, the watch is the shipped `VaultWatch`/`DataWatch`, `Guardian.alert` is the real
+#: method, and the published command is read back out of the daily note the alert wrote.
+#: What IS stubbed is the four actions that reach the machine — `_stop_sync` stops a
+#: supervisord program, `_pause_workers` POSTs at the live pool, `_vault_evidence` shells
+#: out to `ps`, `heartbeat` writes the ledger — plus the two checks these families are not
+#: about, exactly as `tests/test_guardian_alert_retraction.py:956-962` stubs them and for
+#: the reason its docstring gives.
+_PUBLISHED_COMMAND_PROBE = '''"""One real guardian alarm, published from a tree the caller names (#3795)."""
+import json
+import os
+import shutil
+import sys
+import time
+import types
+from pathlib import Path
+
+tree, scratch = Path(sys.argv[1]), Path(sys.argv[2])
+family, gstate, mode = sys.argv[3], Path(sys.argv[4]), sys.argv[5]
+
+sys.path.insert(0, str(tree))
+
+import datawatch as DW      # noqa: E402
+import guardian as G        # noqa: E402
+import policy as GP         # noqa: E402
+import vaultwatch as VW     # noqa: E402
+
+home = scratch / "home"
+note_vault = home / "obsidian"
+(note_vault / "memory").mkdir(parents=True, exist_ok=True)
+
+GP.REPO = str(scratch / "checkout")
+if mode == "unpromoted":
+    checkout = Path(GP.REPO) / "agent-services" / "guardian"
+    checkout.mkdir(parents=True, exist_ok=True)
+    for name in ("guardian.py", "vaultwatch.py", "datawatch.py"):
+        shutil.copyfile(tree / name, checkout / name)
+
+if family == "snapshot":
+    # A repository the vault's backup stream owns (`snapshot_repo_is_owned` weighs it
+    # against `snapshot_owner_dir()`, which is `$HOME`-relative) and has no commit: the
+    # stalled stream the alert is about, inside the scratch home and nowhere else.
+    os.environ["LLOYD_VAULT_BACKUP_REPO"] = str(
+        VW.snapshot_owner_dir() / "fixture-vault.git")
+
+# The tree the watch damages, deliberately NOT the tree the note is written into, so the
+# damaged subject and the human-facing surface are two different directories.
+watched = scratch / ("watched-" + family)
+(watched / "notes").mkdir(parents=True, exist_ok=True)
+for i in range(VW.TOPDIR_MIN_FILES + 5):
+    (watched / "notes" / f"n{i}.md").write_text("x\\n", encoding="utf-8")
+(watched / DW.ROOT_MARKER).write_text("", encoding="utf-8")
+(scratch / "inert-vault").mkdir(exist_ok=True)
+(scratch / "inert-data").mkdir(exist_ok=True)
+
+GP.VAULT_ROOT = str(watched if family == "vault" else scratch / "inert-vault")
+GP.DATA_ROOT = str(watched if family == "data" else scratch / "inert-data")
+GP.ALERT_REPEAT_SECONDS = 0.0
+
+args = types.SimpleNamespace(
+    repo=str(scratch / "repo"), state=str(scratch / "state"),
+    guardian_state=str(gstate), supervisor_sock="/nonexistent",
+    backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+    programs="lloyd-mc:lloyd-backend", interval=5.0)
+g = G.Guardian(args)
+g.notifier.vault_root = note_vault                  # the surface this node reads back
+g._stop_sync = lambda: "stopped (probe)"
+g._pause_workers = lambda actor: "paused (probe)"
+g._vault_evidence = lambda stamp: None
+g.heartbeat = lambda *a, **k: None
+g.ensure_chronic = lambda: None
+g._runtime_data_incident = lambda *a, **k: []
+DW.snapshot_report = lambda *a, **k: (True, "")
+
+# The two probe runs share this guardian-state root on purpose — a round's
+# `<home>/.local/state/lloyd-guardian` IS the deployed one — so a marker the earlier run
+# latched is visible here, and a latched watch both skips the trip and mutes the snapshot
+# check. Clearing an inherited latch is what makes the alarm this process publishes this
+# process's, rather than a stale one read back off the shared state.
+if g.vault.tripped():
+    g.vault.clear()
+if g.data.tripped():
+    g.data.clear()
+
+if family == "snapshot":
+    g._vault_snapshot_stream(time.time())
+else:
+    g._vault_snapshot_stream = lambda now: None     # not this family's subject
+    check = g.check_vault if family == "vault" else g.check_data
+    check()                                        # arms the watch; nothing lost yet
+    shutil.rmtree(str(watched / "notes"))
+    check()                                        # the mass deletion, and the alert
+
+marker_clear_with = None
+sync_gate_msg = None
+if family == "vault":
+    marker_clear_with = (g.vault.tripped() or {}).get("clear_with")
+    gate_ok, gate_msg = VW.sync_gate(str(watched), gstate)
+    sync_gate_msg = None if gate_ok else gate_msg
+
+notes = sorted((note_vault / "memory").glob("*.md"))
+print(json.dumps({
+    "tree": str(tree),
+    "module_files": {"guardian": G.__file__, "policy": GP.__file__,
+                     "vaultwatch": VW.__file__, "datawatch": DW.__file__},
+    "note_paths": [str(n) for n in notes],
+    "note_text": "\\n".join(n.read_text(encoding="utf-8") for n in notes),
+    "marker_clear_with": marker_clear_with,
+    "sync_gate_msg": sync_gate_msg,
+    "marker_path": str(g.vault.marker) if family == "vault" else None,
+    "snapshot_repo": os.environ.get("LLOYD_VAULT_BACKUP_REPO"),
+    "checkout_src": str(Path(GP.REPO) / "agent-services" / "guardian"),
+    "gstate_bin": str(gstate / "bin"),
+}))
+'''
+
+
+def _published_trees(tmp_path: Path, *, promote: bool = True):
+    """A promoted snapshot `bin/` and a round-worktree checkout, from one set of sources.
+
+    `bin/` is the directory `guardian-stage.sh` promotes into and the one
+    `lloyd-guardian.service:29`'s `ExecStart` runs from; the worktree copy is the same
+    files under `<home>/lloyd-work/<round id>/home/lloyd/agent-services/guardian`, which
+    is the shape a round's tree has and the shape that rendered the dead 2026-11-04
+    command. Both hang off ONE guardian-state root, because a round's
+    `<home>/.local/state/lloyd-guardian` IS the deployed one — `scripts/automod/
+    worktree.py:65` symlinks every home entry except `lloyd` and `lloyd-data` — so the two
+    processes share the state dir exactly as the incident's did.
+    """
+    gstate = tmp_path / "gstate"
+    bin_dir = gstate / "bin"
+    bin_dir.mkdir(parents=True)
+    worktree = (tmp_path / "lloyd-work" / "SM_20261104_123801" / "home" / "lloyd"
+                / "agent-services" / "guardian")
+    worktree.mkdir(parents=True)
+    sources = sorted(GUARDIAN_DIR.glob("*.py"))
+    assert len(sources) > 10, f"{GUARDIAN_DIR} holds only {len(sources)} .py files"
+    for src in sources:
+        if promote:
+            shutil.copyfile(src, bin_dir / src.name)
+        shutil.copyfile(src, worktree / src.name)
+    return bin_dir, worktree, gstate
+
+
+def _run_published_probe(tmp_path: Path, tree: Path, family: str, gstate: Path, tag: str,
+                         *, mode: str = "promoted") -> dict:
+    """One probe run: `family`'s alarm, published by a process rooted in `tree`.
+
+    `tag` names this run's scratch HOME and vault, and every node passes a different one
+    per run. It is not cosmetic: two runs sharing one home share one daily note, and the
+    second run's assertions would then be reading the first run's published line back off
+    it — a fixture that could only get the identity claim right. The guardian-state root
+    is deliberately NOT tagged: it is the one directory the two processes really do share.
+    """
+    scratch = tmp_path / f"probe-{family}-{tag}"
+    script = tmp_path / f"published-probe-{family}-{tag}.py"
+    script.write_text(_PUBLISHED_COMMAND_PROBE, encoding="utf-8")
+    env = dict(os.environ)
+    env.update({
+        "HOME": str(scratch / "home"),
+        "LLOYD_GUARDIAN_STATE": str(gstate),
+        "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
+        "LLOYD_DATA": str(scratch / "lloyd-data"),
+        "LLOYD_JOURNAL_ALERTS": "0",
+        "LLOYD_DESKTOP_ALERTS": "0",
+        "LLOYD_VOICE_ALERTS": "0",
+    })
+    # Popped, not inherited: the gate exports these two at its own vault mirror and a
+    # data root of its own, and a probe that measured a mirror would not be measuring the
+    # tree it names.
+    for var in ("LLOYD_VAULT_ROOT", "LLOYD_VAULT", "LLOYD_DAILY_NOTE_DIR"):
+        env.pop(var, None)
+    proc = subprocess.run(
+        [PROBE_PY, str(script), str(tree), str(scratch), family, str(gstate), mode],
+        capture_output=True, text=True, timeout=180, env=env)
+    assert proc.returncode == 0, (
+        f"probe ({family}/{mode}, tree {tree}) exited {proc.returncode}\n"
+        f"--- stdout ---\n{proc.stdout[-3000:]}\n"
+        f"--- stderr ---\n{proc.stderr[-4000:]}")
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["note_paths"], f"the alarm wrote no daily note at all: {out}"
+    return out
+
+
+def _published_commands(text: str) -> "list[str]":
+    """Every command line an alarm body publishes to its reader, in order.
+
+    Read off the note, not off a captured argument: the note is the surface the operator
+    opens, and it is where 2026-11-04's dead command was found.
+    """
+    return [ln.strip() for ln in text.splitlines() if "/usr/bin/python3 " in ln]
+
+
+def _script_of(command: str) -> str:
+    """The script path one published `/usr/bin/python3 <script> <verb>` line names."""
+    parts = command.split()
+    assert parts[0] == "/usr/bin/python3" and len(parts) >= 3, command
+    return parts[1]
+
+
+def _assert_route_outlives_the_round(out: dict, command: str, worktree: Path,
+                                     bin_dir: Path, script_name: str) -> str:
+    """The three things every published command must satisfy, checked on one run.
+
+    Shared by the four clause nodes so none of them can be green on a different rule than
+    its siblings: the route is the promoted snapshot, the file is really there, and the
+    tree that rendered the alarm is not where the route points.
+    """
+    script = _script_of(command)
+    assert script == str(bin_dir / script_name), (
+        f"the alarm published {script!r}, not the promoted snapshot "
+        f"{str(bin_dir / script_name)!r} (process loaded {out['module_files']})")
+    assert Path(script).is_file(), (
+        f"the alarm published a command for a script that is not on disk: {script}")
+    assert not Path(script).is_relative_to(worktree), (
+        f"the published route {script} is inside the round's tree {worktree}, which is "
+        f"deleted when the round is cleaned — exactly the 2026-11-04 failure")
+    assert script != out["module_files"].get(script_name.replace(".py", "")), (
+        f"the alarm is still publishing the file it was loaded from: {script}")
+    return script
+
+
+def test_the_vault_snapshot_status_command_renders_the_same_from_either_tree(tmp_path):
+    """Clause 1: the vault-snapshot body's published `/usr/bin/python3 … status` command
+    "renders identically whether the check runs with `vaultwatch` loaded from the deployed
+    tree or from a scratch/worktree copy".
+
+    This is the line that broke. Three sections of `memory/2026-11-04.md` each order the
+    reader to run `…/lloyd-work/SM_20261104_123801/home/lloyd/agent-services/guardian/
+    vaultwatch.py status`, under "The same reading, and the same bound, from a shell:",
+    and `ls -d ~/lloyd-work/SM_20261104_123801` exits 2 today: the restore directive in a
+    live alarm cannot be run, and it is not recoverable by editing the note, because the
+    next stall writes another one from whatever tree the writer was in.
+
+    The two runs differ in one thing only — which copy of the guardian `sys.path` resolved
+    first. Same sources, same HOME, same guardian-state root, same environment, so a
+    divergence between the two published lines has exactly one available explanation,
+    which is the one this item filed.
+    """
+    bin_dir, worktree, gstate = _published_trees(tmp_path)
+    promoted = _run_published_probe(tmp_path, bin_dir, "snapshot", gstate, "promoted-tree")
+    from_round = _run_published_probe(tmp_path, worktree, "snapshot", gstate, "round-tree")
+
+    assert from_round["module_files"]["vaultwatch"] == str(worktree / "vaultwatch.py"), (
+        f"the round-shaped run did not load its `vaultwatch` from the worktree: "
+        f"{from_round['module_files']}")
+    assert promoted["module_files"]["vaultwatch"] == str(bin_dir / "vaultwatch.py"), (
+        f"the promoted run did not load from the promoted snapshot: "
+        f"{promoted['module_files']}")
+
+    at_promoted = _published_commands(promoted["note_text"])
+    at_round = _published_commands(from_round["note_text"])
+    assert len(at_round) == 1, f"the snapshot alarm published {at_round}"
+    assert at_round == at_promoted, (
+        f"one alarm published two commands: the promoted tree said {at_promoted} and the "
+        f"round's tree said {at_round} — a reader of the round's copy has a path that "
+        f"does not exist")
+    _assert_route_outlives_the_round(from_round, at_round[0], worktree, bin_dir,
+                                     "vaultwatch.py")
+
+
+def test_the_vault_tripwire_clear_command_never_names_the_tree_it_loaded(tmp_path):
+    """Clause 2: the vault-tripwire body's published `clear` command "does not name the
+    tree the module was loaded from, and the same render from a scratch tree equals the
+    render from the deployed tree".
+
+    The trip is real — 25 files wiped from a watched root — and the command is read out of
+    the daily-note section the trip's `critical` alert wrote, which is where the sentence
+    "…then clear the tripwire with" sends a person.
+    """
+    bin_dir, worktree, gstate = _published_trees(tmp_path)
+    promoted = _run_published_probe(tmp_path, bin_dir, "vault", gstate, "promoted-tree")
+    from_round = _run_published_probe(tmp_path, worktree, "vault", gstate, "round-tree")
+
+    assert from_round["module_files"]["vaultwatch"] == str(worktree / "vaultwatch.py")
+    at_promoted = _published_commands(promoted["note_text"])
+    at_round = _published_commands(from_round["note_text"])
+    assert len(at_round) == 1, f"the vault tripwire published {at_round}"
+    assert at_round[0].endswith(" clear"), at_round
+    assert at_round == at_promoted, (
+        f"the same trip published two clear commands: {at_promoted} vs {at_round}")
+    _assert_route_outlives_the_round(from_round, at_round[0], worktree, bin_dir,
+                                     "vaultwatch.py")
+
+
+def test_the_data_tripwire_clear_command_never_names_the_datawatch_tree(tmp_path):
+    """Clause 3: the data-tripwire body's published `clear` command "does not name the
+    tree the `datawatch` module was loaded from".
+
+    Same probe, its own family: the data root's marker file makes the watch arm, a wipe of
+    `notes/` trips it, and the body that orders "swap it in with the stack stopped, then
+    clear with" is read off the note. It names `datawatch.py`, so the route is the
+    promoted snapshot's `datawatch.py` and not the copy this process imported.
+    """
+    bin_dir, worktree, gstate = _published_trees(tmp_path)
+    promoted = _run_published_probe(tmp_path, bin_dir, "data", gstate, "promoted-tree")
+    from_round = _run_published_probe(tmp_path, worktree, "data", gstate, "round-tree")
+
+    assert from_round["module_files"]["datawatch"] == str(worktree / "datawatch.py")
+    at_promoted = _published_commands(promoted["note_text"])
+    at_round = _published_commands(from_round["note_text"])
+    assert len(at_round) == 1, f"the data tripwire published {at_round}"
+    assert at_round[0].endswith(" clear"), at_round
+    assert at_round == at_promoted, (
+        f"the same data trip published two clear commands: {at_promoted} vs {at_round}")
+    _assert_route_outlives_the_round(from_round, at_round[0], worktree, bin_dir,
+                                     "datawatch.py")
+
+
+def test_the_trip_marker_clear_with_outlives_the_round_and_sync_gate_quotes_it(tmp_path):
+    """Clause 4: `VaultWatch.trip()` writes a `clear_with` lying outside the tree that
+    loaded the module, and `sync_gate`'s refusal quotes that same value.
+
+    The marker side matters with no daily note in sight: `worktree.py:65` symlinks the
+    home entries, so a round-rooted trip writes into the SHARED marker, and the deployed
+    `ob sync` refusal reads `clear_with` back out of it and shows it to whoever is trying
+    to sync. A worktree path there is a dead command on a refusal, from a process nobody
+    is looking at any more.
+
+    Both halves are read from disk in this node: the marker JSON the real trip wrote, and
+    the string the real `sync_gate` returned for the tripped root.
+    """
+    bin_dir, worktree, gstate = _published_trees(tmp_path)
+    from_round = _run_published_probe(tmp_path, worktree, "vault", gstate, "round-tree")
+    promoted = _run_published_probe(tmp_path, bin_dir, "vault", gstate, "promoted-tree")
+
+    clear_with = from_round["marker_clear_with"]
+    assert clear_with, f"the trip wrote no marker command: {from_round}"
+    assert Path(from_round["marker_path"]).is_file(), from_round["marker_path"]
+    assert from_round["marker_path"] == promoted["marker_path"], (
+        "the round's trip and the watchdog's own wrote different marker files, so this "
+        "node is not measuring the one shared marker a round writes through")
+    _assert_route_outlives_the_round(from_round, clear_with, worktree, bin_dir,
+                                     "vaultwatch.py")
+    assert clear_with == promoted["marker_clear_with"], (
+        f"a round's trip and the watchdog's own publish different commands into the one "
+        f"shared marker: {clear_with!r} vs {promoted['marker_clear_with']!r}")
+
+    refusal = from_round["sync_gate_msg"]
+    assert refusal, f"`ob sync` was not refused over a tripped root: {from_round}"
+    assert clear_with in refusal, (
+        f"sync_gate's refusal does not quote the marker's clear_with: {refusal!r}")
+    assert str(worktree) not in refusal, (
+        f"sync_gate's refusal quotes a path inside the round's tree: {refusal!r}")
+
+
+def test_with_nothing_promoted_the_published_route_is_the_checkout_not_the_round(tmp_path):
+    """The fallback branch, pinned because a route that only works once code has been
+    promoted is a route that does not work on a box where staging never ran.
+
+    With no `bin/` entry to name, the published script is the source checkout
+    (`policy.REPO` + `agent-services/guardian/`), which `guardian-stage.sh` copies FROM
+    and which a round's cleanup never touches. The negative control is the same probe with
+    the promoted `bin/` present, whose route is the snapshot — so the node cannot be green
+    on a helper that simply always answers one of the two.
+    """
+    bin_dir, worktree, gstate = _published_trees(tmp_path, promote=False)
+    assert not list(bin_dir.glob("*.py")), "the promoted snapshot was filled anyway"
+    from_round = _run_published_probe(tmp_path, worktree, "vault", gstate, "round-tree",
+                                      mode="unpromoted")
+
+    script = _script_of(from_round["marker_clear_with"])
+    assert script == str(Path(from_round["checkout_src"]) / "vaultwatch.py"), (
+        f"with nothing promoted the alarm published {script!r} instead of the checkout "
+        f"route {from_round['checkout_src']}")
+    assert Path(script).is_file(), f"the fallback route names a script that is not there: {script}"
+    assert not Path(script).is_relative_to(worktree), (
+        f"the fallback route {script} is inside the round's tree {worktree}")
+    assert script != from_round["module_files"]["vaultwatch"]
+
+    # The control is the SAME round-shaped tree with its `bin/` filled: the one difference
+    # between the two runs is whether anything has been promoted, so a helper that ignored
+    # that and always answered the checkout would fail here rather than look correct.
+    ctrl_bin, ctrl_worktree, ctrl_gstate = _published_trees(tmp_path / "control")
+    control = _run_published_probe(tmp_path, ctrl_worktree, "vault", ctrl_gstate,
+                                   "promoted-control")
+    control_script = _script_of(control["marker_clear_with"])
+    assert control_script == str(ctrl_bin / "vaultwatch.py"), (
+        f"with the snapshot promoted the route should have been "
+        f"{ctrl_bin / 'vaultwatch.py'} but the alarm published {control_script!r} — the "
+        f"same tree answered in both branches, which makes the assertion above "
+        f"unfalsifiable")
+    assert Path(control_script).is_file(), control_script
+    assert control_script != script, (
+        f"the promoted and unpromoted branches published the same route {script}")
