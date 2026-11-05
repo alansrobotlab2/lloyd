@@ -550,6 +550,30 @@ def test_the_cgroup_reader_separates_a_unit_from_a_generated_scope(tmp_path):
     assert STEP.is_systemd_invocation({"INVOCATION_ID": IV}) is True
 
 
+#: The surfaces that can name this step *as a caller*: Python modules, and the unit files
+#: that invoke it by absolute path. Tracked data is not one of them, and the difference is
+#: not hypothetical — committing `eval/measurements/refusal-detours/2026-11-04.rows.jsonl`
+#: for #3775 put this step's own filename into the repo as the **operand of a refusal the
+#: scan measured**, and the allowlist node below read that measurement row as a third caller
+#: of the committer. Scope the search to what can call, and a refusal corpus can be
+#: committed without tripping the rail; scope it wrong and real code disappears from the
+#: allowlist, which is what `test_the_caller_scope_hides_data_and_nothing_that_can_call`
+#: pins.
+CALLER_PATHSPECS = ["*.py", "agent-services/systemd"]
+
+#: Extensions that are records rather than code, used only to classify what the scope drops.
+DATA_SUFFIXES = (".json", ".jsonl", ".gz", ".md", ".txt", ".csv")
+
+
+def _grep_naming_the_step(*pathspecs: str) -> list[str]:
+    """Tracked files naming the step, over the caller surfaces unless told otherwise."""
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "grep", "-l", "commit_injection_canary_corpus", "--",
+         *(pathspecs or CALLER_PATHSPECS)],
+        capture_output=True, text=True)
+    return proc.stdout.split()
+
+
 def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation():
     """The seam the two files have to agree on: this script is invoked by absolute path
     from the unit, and nothing in the repo imports it or wires it into anything else.
@@ -576,13 +600,17 @@ def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation()
     intended: `tests/test_injection_canary_rows_guard.py::the_guard_imports_the_predicate_and_never_invokes_the_step`
     reads the guard's syntax tree and refuses anything broader than those three names — so
     an unattended process that grew into invoking `commit_corpus` would still fail here.
+
+    The search is scoped to `CALLER_PATHSPECS` — modules and unit files — because a tracked
+    data corpus can name this step without calling it: a refusal record in
+    `eval/measurements/refusal-detours/2026-11-04.rows.jsonl` carries the script's path as
+    the operand the harness denied. `test_the_caller_scope_hides_data_and_nothing_that_can_call`
+    pins that the scoping costs no caller.
     """
     assert SCRIPT.is_file() and not (SCRIPT.parent / "__init__.py").exists(), \
         "`scripts/` is a package, so importing this module could run it — the whole design " \
         "assumes the unit's argv is the only invocation"
-    importers = subprocess.run(
-        ["git", "-C", str(ROOT), "grep", "-l", "commit_injection_canary_corpus"],
-        capture_output=True, text=True).stdout.split()
+    importers = _grep_naming_the_step()
     units = {"agent-services/systemd/" + unit for unit in STEP.WINDOW_UNITS}
     allowed = units | {
         "scripts/maintenance/commit_injection_canary_corpus.py",
@@ -597,12 +625,40 @@ def test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation()
     }
     assert set(importers) <= allowed, \
         f"something besides the window units and their tests names the committer: " \
-        f"{sorted(set(importers - allowed))}"
+        f"{sorted(set(importers) - allowed)}"
     naming = set(importers) & units
     assert naming == units, \
         f"the units named here {sorted(naming)} are not the units the guard authorizes " \
         f"{sorted(units)}: one of them is a step that would be refused in silence, or an " \
         f"authorized caller this rail stopped watching"
+
+
+def test_the_caller_scope_hides_data_and_nothing_that_can_call():
+    """The scope that lets a refusal corpus be committed may not hide a single caller.
+
+    The allowlist node above searches only `CALLER_PATHSPECS`, and the reason is the
+    witness committed for #3775: one of its rows records a refusal whose operand was
+    `scripts/maintenance/commit_injection_canary_corpus.py`, so the file names the step as
+    the *thing the harness denied*, not as a thing it invokes. An unscoped `git grep -l`
+    over the whole tree cannot tell those two apart, counted the corpus as a caller, and
+    then raised `TypeError: unsupported operand type(s) for -: 'list' and 'set'` while
+    formatting its own failure message — a rail whose drift report crashes is a rail that
+    reports nothing. So the split is pinned from both sides: every file the whole-tree
+    search finds that is not data must be in the scoped set, which means a new module or
+    unit that starts naming the committer still fails the allowlist node rather than
+    vanishing from it; and if the refusal corpus names the step anywhere, it must be
+    outside the scoped set, which is the case the scope exists for.
+    """
+    whole = _grep_naming_the_step(".")
+    scoped = _grep_naming_the_step()
+    assert set(scoped) <= set(whole), (scoped, whole)
+    code = {p for p in whole if not p.endswith(DATA_SUFFIXES)}
+    assert code == set(scoped), \
+        f"the caller scope dropped something that can call: {sorted(code - set(scoped))}"
+    corpus = next((p for p in whole if "measurements/refusal-detours" in p), None)
+    if corpus is not None:
+        assert corpus not in set(scoped), \
+            f"{corpus} is a measurement corpus, so naming the step inside it is not an invocation"
 
 
 # ── #2976: a second window unit drives this step ───────────────────────────────────────

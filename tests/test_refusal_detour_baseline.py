@@ -803,6 +803,262 @@ def test_a_guard_class_that_cannot_measure_itself_says_so_over_live_shaped_rows(
     assert "UNMEASURED" not in rdb.render(summary)
 
 
+# ---------------------------------------------------------------------------
+# #3775 — a scan is cited by committed bytes, so a quoted report has history
+# ---------------------------------------------------------------------------
+
+#: The instrument's own measurement dir: `main()` defaults `--out` here, and git
+#: already tracks `2026-09-30.rows.jsonl` in it. This, not a scratch path, is where
+#: a scan's bytes belong.
+MEASUREMENTS_DIR = REPO / "eval" / "measurements" / "refusal-detours"
+MEASUREMENTS_REL = "eval/measurements/refusal-detours"
+
+#: The four keys a per-guard rate is built from. `verb`, `label` and `retry_tool` are
+#: diagnostics; a figure cannot be re-derived without these.
+_REQUIRED_ROW_KEYS = ("guard", "measurable", "same_target", "same_effect")
+
+#: A citation of a committed scan, as the notes are now required to write it.
+CITED_ROWS = re.compile(r"eval/measurements/refusal-detours/(\d{4}-\d{2}-\d{2})\.rows\.jsonl")
+
+#: The last scan taken before #3565, so the first window this item's witness covers.
+#: Compared on the leading `<YYYY-MM-DD>` of a file's *name*, not its `Path.stem`,
+#: which for `2026-09-30.rows.jsonl` is `2026-09-30.rows` and therefore sorts *after*
+#: the floor — a filter written that way would drag the pre-fix corpus into the window
+#: and then fail on its rows, which carry no `measurable` key at all.
+WINDOW_FLOOR = "2026-09-30"
+
+#: The two prose holders that quoted detour-scan figures out of `/tmp` (#3565's item
+#: note, and the synthesis note that published the 83.9% vs 10.6% wording split).
+ITEM_3565_GLOB = "backlog/3565-*.md"
+SYNTHESIS_GLOB = "knowledge/synthesis/2026-10-30-a-refusal-is-an-affordance-map-*.md"
+
+
+def _vault_note_or_stop(pattern: str, what: str) -> Path:
+    """One vault note's bytes, or a red line naming the clause left unpinned.
+
+    `tests/board_presence.py`'s rule honoured, not reinvented: never skip. These two
+    notes are the corpus clauses 3 and 4 certify, so a vault that is absent or a
+    glob that matches twice is the finding the node exists to report, and `skipped`
+    would file it as nobody's problem.
+    """
+    import board_presence
+
+    vault = board_presence.vault_root()
+    matches = sorted(vault.glob(pattern))
+    if len(matches) == 1:
+        return matches[0]
+    where = "the vault is absent" if not vault.is_dir() else f"{pattern} matched {len(matches)} files"
+    pytest.fail(
+        f"The {what} cannot run: {where} under {vault}. The clause {what} pins is "
+        f"NOT pinned by this run."
+    )
+
+
+def _rows_of(path: Path) -> list[dict]:
+    """Every row of a committed rows file, parsed — a bad line is a red test."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _per_guard(rows: list[dict]) -> dict[str, dict[str, int]]:
+    """refusals / measurable / same_target / same_effect per guard, counted from rows.
+
+    This is the recomputation every published figure is supposed to come out of, so
+    it is the one place the arithmetic lives: the summary `.json` is a rendering of
+    these numbers, which is why committing the rows file is a complete witness.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for r in rows:
+        block = out.setdefault(r["guard"], {"refusals": 0, "measurable": 0,
+                                            "same_target": 0, "same_effect": 0})
+        block["refusals"] += 1
+        for key in ("measurable", "same_target", "same_effect"):
+            block[key] += int(bool(r[key]))
+    return out
+
+
+def _tracked_measurement_rows() -> list[str]:
+    """What `git ls-files` lists under the measurement dir, or a red line.
+
+    Crosses the tool's own boundary: a scan is only a witness if the repo holds it,
+    so the claim is read out of git rather than off the filesystem, where an
+    untracked leftover looks identical to a committed one.
+    """
+    import subprocess
+
+    proc = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", MEASUREMENTS_REL],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.fail(f"`git ls-files -- {MEASUREMENTS_REL}` exited {proc.returncode}: "
+                    f"{proc.stderr.strip()}. The tracked-rows clause is NOT pinned by this run.")
+    return sorted(proc.stdout.split())
+
+
+def test_a_dated_rows_file_in_the_measurement_dir_is_tracked_and_recomputable():
+    """Clause 1: the 2026-10+ window has committed, parseable, non-empty witness bytes.
+
+    Every per-guard figure in #3565's landing block was computed from a scan whose
+    `--out` was a `/tmp` path. `/tmp` is tmpfs on this box, so the reboot at
+    2026-11-04T23:06Z deleted the only copy (`ls` → No such file or directory) and
+    the report's numbers became unfalsifiable. The rows file is therefore pinned on
+    three properties, and deliberately on no numbers: it is tracked by git (an
+    untracked file in that directory is what #3775 is fixing, so the filesystem
+    alone cannot tell the two states apart), every line carries the four keys a rate
+    is built from, and the `safety` denominator is non-empty — the class whose rate
+    the notes quote most. *Which* scan it is and what it counted are not pinned,
+    because a fresh run over the session store drifts as sessions age out.
+    """
+    dated = sorted(p for p in MEASUREMENTS_DIR.glob("*.rows.jsonl")
+                   if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.rows\.jsonl", p.name))
+    assert dated, f"nothing dated like <YYYY-MM-DD>.rows.jsonl exists in {MEASUREMENTS_DIR}"
+    window = [p for p in dated if p.name[:10] > WINDOW_FLOOR]
+    assert window, (f"{MEASUREMENTS_REL} holds only {dated}, so the 2026-10+ window "
+                    "quoted across the notes has no committed witness")
+    tracked = _tracked_measurement_rows()
+    for path in window:
+        rel = str(path.relative_to(REPO))
+        assert rel in tracked, f"{rel} is on disk but not tracked — the #3775 defect"
+        rows = _rows_of(path)
+        assert rows, f"{rel} is empty, so it witnesses nothing"
+        for r in rows:
+            for key in _REQUIRED_ROW_KEYS:
+                assert key in r, f"{rel}: a row carries no {key}: {r}"
+            assert isinstance(r["measurable"], bool), r
+            assert isinstance(r["same_target"], bool) and isinstance(r["same_effect"], bool), r
+        safety = _per_guard(rows).get("safety")
+        assert safety and safety["measurable"] > 0, \
+            f"{rel}: safety has no measurable refusal, so its rate is UNMEASURED, not a figure"
+
+
+def test_every_detour_figure_quoted_in_the_3565_note_recomputes_from_the_committed_rows():
+    """Clause 3's substance: the note's numbers are recomputable, not remembered.
+
+    The item's own instruction is to take every quoted figure from the committed
+    file rather than from the prose, so this node reads the date out of the note's
+    citation, re-derives the per-guard counts from those bytes, and demands the note
+    print exactly what the bytes say — refusals over measurable per guard, the row
+    count, and the byte count `wc -c` returns. It fails in both directions: a figure
+    that drifts from a re-committed scan reddens, and a citation pointing at a file
+    that was never committed reddens too.
+    """
+    note = _vault_note_or_stop(ITEM_3565_GLOB, "#3775 witness citation")
+    text = note.read_text(encoding="utf-8")
+    cited = set(CITED_ROWS.findall(text))
+    assert cited, (f"{note.name} cites no committed rows file under {MEASUREMENTS_REL}, "
+                   "so its figures have no reachable source")
+    window = {d for d in cited if d > WINDOW_FLOOR}
+    assert window, (f"{note.name} cites only {sorted(cited)}, none of them a scan in the "
+                    f"window after {WINDOW_FLOOR} that this item witnesses")
+    for date in sorted(cited):
+        path = MEASUREMENTS_DIR / f"{date}.rows.jsonl"
+        assert path.is_file(), f"{note.name} cites {date}, which is not in {MEASUREMENTS_DIR}"
+        if date not in window:
+            continue   # the pre-#3565 corpus: its rows carry no `measurable`, so no rate to check
+        rows = _rows_of(path)
+        for guard, block in _per_guard(rows).items():
+            quoted = f"{guard} {block['refusals']}/{block['measurable']}"
+            assert quoted in text, \
+                f"{note.name} does not print '{quoted}', which {path.name} yields for {guard}"
+        assert f"{len(rows)} rows" in text, \
+            f"{note.name} never states the {len(rows)} rows the witness holds"
+        size = path.stat().st_size
+        assert f"{size:,} bytes" in text, \
+            f"{note.name} never states the {size:,} bytes `wc -c` returns for {path.name}"
+
+
+def test_the_instrument_docstring_cites_a_scan_by_a_committed_path_never_tmp():
+    """Clause 2: the rule is stated where the next runner reads it.
+
+    `--out` accepts any path and defaults into the measurement dir, so nothing in
+    the code stopped #3565's runs from aiming at `/tmp`; the obligation is prose, and
+    prose that is not in the module a re-runner opens is prose nobody reads. Pinned
+    with the number it quotes, because a docstring figure that no longer matches the
+    committed bytes is the same defect one file over.
+    """
+    doc = rdb.__doc__ or ""
+    assert MEASUREMENTS_REL in doc, "the docstring never names the committed measurement dir"
+    assert re.search(r"never[^\n.]{0,120}/tmp", doc, re.IGNORECASE), \
+        "the docstring does not say a scan is cited by a committed path and never a /tmp path"
+    assert "--out /tmp" not in doc, "the docstring's own example still writes a scan to /tmp"
+    quoted = re.search(r"`eval/measurements/refusal-detours/(\d{4}-\d{2}-\d{2})\.rows\.jsonl` "
+                       r"\((\d{1,6}) rows\)", doc)
+    assert quoted, "the docstring names no dated rows file with its row count"
+    path = MEASUREMENTS_DIR / f"{quoted.group(1)}.rows.jsonl"
+    assert path.is_file(), f"the docstring cites {path.name}, which is not committed bytes yet"
+    assert len(_rows_of(path)) == int(quoted.group(2)), \
+        f"the docstring quotes {quoted.group(2)} rows; {path.name} holds {len(_rows_of(path))}"
+
+
+def test_the_3565_witness_entries_are_settled_and_name_the_committed_file():
+    """Clause 3: the owed entries point at committed bytes and stop sending a reader to /tmp.
+
+    Two `The witness bytes have no history` entries were owed on #3565, each telling a
+    future reader to copy a `/tmp/...` scan into `backlog/data/`. Both are settled here
+    in the sense the item means: the bytes have history, because the repo holds them.
+    Pinned on the two surfaces a reader actually follows — the `Owed after landing`
+    bullets and the landed block — which must name the committed rows path and name no
+    scratch path at all. The front matter is not in scope and deliberately not swept:
+    `activity_log`, `human_clauses` and `owed_settled` are timestamped records of what
+    was asked and ruled, and rewriting them would destroy the ledger the settlement is
+    recorded against.
+    """
+    note = _vault_note_or_stop(ITEM_3565_GLOB, "#3775 owed-entry settlement")
+    body = note.read_text(encoding="utf-8")
+    body = body[body.index("\n# "):]
+    witness = [line for line in body.splitlines() if "witness bytes have no history" in line]
+    assert witness, "the witness entries this clause settles have vanished from the body"
+    for line in witness:
+        assert "settled" in line.lower(), f"an owed witness entry is still open: {line[:160]}"
+    lines: list[str] = []
+    all_lines = body.splitlines()
+    idx = 0
+    while idx < len(all_lines):
+        if all_lines[idx].startswith("**Owed after landing**"):
+            nxt = idx + 1
+            while nxt < len(all_lines) and all_lines[nxt].strip():
+                lines.append(all_lines[nxt])
+                nxt += 1
+            idx = nxt
+            continue
+        if all_lines[idx].startswith("## Automod landed"):
+            lines.extend(all_lines[idx:])
+            break
+        idx += 1
+    assert lines, "neither an `Owed after landing` block nor a landed block survives to check"
+    landing = [line for line in lines if line.startswith("## Automod landed")]
+    assert landing, "the landed block is gone, so the witness has nothing to point at"
+    joined = "\n".join(lines)
+    assert MEASUREMENTS_REL in joined, "the owed bullets and landed block name no committed path"
+    for line in lines:
+        assert "/tmp/" not in line, f"a live witness instruction still names a scratch path: {line[:160]}"
+
+
+def test_the_synthesis_note_reproduces_from_the_committed_rows_file():
+    """Clause 4: the note that published 83.9% vs 10.6% can be re-run from the repo.
+
+    Its `Reproducing This Pass` block told a re-runner to write `--out` into `/tmp`
+    and to run two probe scripts that were themselves scratch, and its Evidence
+    section carried the same command; every one of those files died with the tmpfs
+    reboot, which is how the unfalsifiable wording split stayed quotable. Pinned as
+    absence too, because an instruction that survives as a parenthetical is still an
+    instruction a reader follows: no `/tmp/` path and no scratch script name may
+    remain anywhere in the note, and the block must cite a dated rows file that
+    exists and whose row count it states.
+    """
+    note = _vault_note_or_stop(SYNTHESIS_GLOB, "#3775 reproducing block")
+    text = note.read_text(encoding="utf-8")
+    assert "/tmp/" not in text, f"{note.name} still points a re-runner at a scratch path"
+    for scratch in ("detour_rows.json", "afford_probe.py", "handread.py"):
+        assert scratch not in text, f"{note.name} still tells a reader to run {scratch}"
+    assert "## Reproducing This Pass" in text, f"{note.name} lost its reproducing block"
+    block = text[text.index("## Reproducing This Pass"):]
+    cited = CITED_ROWS.search(block)
+    assert cited, f"the reproducing block cites nothing under {MEASUREMENTS_REL}"
+    path = MEASUREMENTS_DIR / f"{cited.group(1)}.rows.jsonl"
+    assert path.is_file(), f"the reproducing block cites {path.name}, which is not committed"
+    assert f"{len(_rows_of(path))} rows" in block, \
+        f"the reproducing block does not state the {len(_rows_of(path))} rows it reproduces"
+
+
 if __name__ == "__main__":
     # Re-measurement entry point, which is what this file's own consumer rail asks
     # for (`test_the_step_is_not_a_package_and_the_window_pair_are_its_only_invocation`

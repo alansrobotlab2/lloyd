@@ -40,6 +40,17 @@ summary under `devset`. The 2026-09-30 figures published in `CLAUDE.md` and
 inversion) came from the prose-mining version and are owed re-derivation with this
 instrument.
 
+**A scan is cited by a committed path, never by a scratch one.** `/tmp` is tmpfs
+on this box, so a run whose `--out` lands there leaves no history: the bytes
+behind the per-guard figures quoted in `backlog/3565-*` were written to `/tmp`,
+the next reboot deleted them, and the witness had to be re-seeded from runtime
+data (#3775). So citing a scan names a file under `eval/measurements/` that
+`git ls-files` lists — never a `/tmp` path. `--out` defaults to that directory
+and `--rows` writes the `.rows.jsonl` beside it, which is the witness itself:
+every per-guard figure recomputes from its lines, while the `.json` summary is a
+rendering of them. The 2026-10+ window is therefore quoted from
+`eval/measurements/refusal-detours/2026-11-04.rows.jsonl` (450 rows).
+
     python eval/refusal_detour_baseline.py [--sessions-dir DIR] [--window 3]
         [--since 2026-09-01] [--out eval/measurements/refusal-detours/<date>.json]
         [--no-devset]
