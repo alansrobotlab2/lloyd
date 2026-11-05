@@ -50,21 +50,35 @@ logger = logging.getLogger(__name__)
 #: sweep, the backup exclusion) already applies.
 FIXTURE_ROOT_RELATIVE = Path("eval") / "fixtures"
 
-#: How long a directory in the fixtures area may outlive its own build: the runner's
-#: per-trial hard cap, `scripts/autoresearch/common.py:170` (`timeout_secs = 300  # per-trial
-#: hard cap`), restated here rather than imported because that value is a local of
-#: `build_run_spec` and has no module-level spelling to import.
+#: How long a directory in the fixtures area may outlive its own build: 1800 s, three times
+#: the runner's operative per-trial turn cap — `DEFAULT_PER_TASK_TIMEOUT = 600`
+#: (`bench_runner_sdk.py:153`), handed to the SDK arm as `per_task_timeout` at
+#: `run_round.py:390`. Restated as a number rather than imported; the node that pins this
+#: constant also re-reads that cap out of `bench_runner_sdk.py`, so the two cannot quietly
+#: come apart the way the last restatement did.
+#:
+#: The arithmetic, which is what the previous 300 got wrong. A trial's hold on its own copy
+#: is not only its turn: `asyncio.wait_for` bounds the agent loop at `per_task_timeout`
+#: (`bench_runner_sdk.py:1141`), and the deletion sits in a `finally` at `:1199` — AFTER
+#: `score_side_effects` runs at `:1184`, whose window is `VERIFIER_TIMEOUT_SECONDS = 120`
+#: PER CHECK (`bench_side_effects.py:48`, applied to each check at `:119`). So one live
+#: hold is 600 (turn cap) + 120 x the checks the task declares (verifier) + margin, and 1800
+#: is 600 + 120 + 1080: the cap, one check's window, and the 1080 s of margin that keeps a
+#: copy whose own trial is still in its `finally` out of the sweep's reach for up to ten
+#: checks' worth of verifying. 300 was HALF the turn budget alone, so the sweep a sibling's
+#: build runs could delete the copy a live trial was still writing into.
 #:
 #: The ceiling is not a storage policy, it is a fact about the object: a fixture is built by
 #: one trial and deleted by the same trial, so a copy in this area older than a whole trial
-#: cannot be a live one. What it ages out is the orphan the always-delete rule cannot reach —
-#: `cleanup()` is called at the END of the trial (`bench_runner_sdk.py:1188`), after the
-#: side-effect verifier, so a raise between the trial's `finally` and that line, or a process
-#: killed mid-trial, leaves a second copy of Alan's actual memory with nothing that ages it.
-#: Whether the ceiling should be longer — kept for a failed run's forensics rather than
-#: deleted with the trial — is the ruling #3690 leaves to owed-check; the mechanism lives here
-#: so that ruling changes a number and not a design.
-ORPHAN_MAX_AGE_S = 300
+#: plus its verifier cannot be a live one. What it ages out is the orphan the always-delete
+#: rule cannot reach — `cleanup()` is called at the END of the trial
+#: (`bench_runner_sdk.py:1199`), after the side-effect verifier, so a raise between the
+#: trial's `finally` and that line, or a process killed mid-trial, leaves a second copy of
+#: Alan's actual memory with nothing that ages it. Whether the ceiling should be longer —
+#: kept for a failed run's forensics rather than deleted with the trial — is the ruling #3690
+#: leaves to owed-check; the mechanism lives here so that ruling changes a number and not a
+#: design. It has not been made: this copy is still deleted with its trial, always.
+ORPHAN_MAX_AGE_S = 1800
 
 #: The stores a task may declare, as `writes:` entries, that live in the data root
 #: rather than the vault. Anything else in `writes:` is a vault-relative path.
@@ -289,9 +303,15 @@ def build_fixture(*, trial_id: str, writes: list[str], vault: Path | str,
 
     # Bound the orphans before making room for this one. A build is the one moment the leak
     # is observable from the inside: the area is about to be used, so anything in it older
-    # than a whole trial belongs to a build that never reached its `cleanup()` — a trial that
-    # raised between its own `finally` and the call that follows it
-    # (`bench_runner_sdk.py:1188`), or a process killed mid-run.
+    # than a whole trial and its verifier belongs to a build that never reached its
+    # `cleanup()` — a trial that raised between its own `finally` and the call that follows
+    # it (`bench_runner_sdk.py:1199`), or a process killed mid-run. This is also why the
+    # ceiling is a multiple of the turn cap rather than the cap itself: the sweep runs from a
+    # sibling trial's build in this same gathered process, so a copy inside its own trial's
+    # total hold must be KEPT here. Concurrency is not on today's default path — every
+    # in-tree caller passes `max_parallel=1` — but `run_bench_sdk`'s own signature default is
+    # 2 (`bench_runner_sdk.py:1220`) and every process shares this one area, so the day it
+    # does, an under-sized ceiling is a live sibling deleted mid-trial.
     #
     # Here and not in the data-root retention sweep deliberately: the sweep resolves
     # `$LLOYD_DATA` (`scripts/groundskeeper/retention-sweep.py:395`), which rule (2) above

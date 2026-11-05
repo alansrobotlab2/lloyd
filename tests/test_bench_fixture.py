@@ -15,8 +15,10 @@ staking a copy of Alan's memory on the test.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +65,53 @@ def _build(tmp_path: Path, writes=("vault", "kg")):
     return build_fixture(trial_id=f"t_bench_fixture_{next(_BUILD_SEQ):04d}", writes=list(writes),
                          vault=vault, data_root=data,
                          fixtures_parent=fixture_parent(data))
+
+
+def _digest(path: Path) -> str:
+    """The content digest of a file: the source-tree witness `.is_file()` cannot be.
+
+    `assert src.is_file()` proves only that a path still exists, so a builder that MODIFIED
+    the source — rewrote `MEMORY.md` in place, copied over it the wrong way round — passed
+    every witness this file used to carry. A digest taken BEFORE the build and re-taken
+    after is the difference between "the file is there" and "the file is what it was".
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# The two source files whose numbers the ceiling is made of. Read as text, never imported:
+# these nodes ask what the SOURCE says, which is the only way a restated number can be
+# caught having rotted.
+_BENCH_FIXTURE_SRC = ROOT / "scripts" / "autoresearch" / "bench_fixture.py"
+_BENCH_RUNNER_SDK_SRC = ROOT / "scripts" / "autoresearch" / "bench_runner_sdk.py"
+_BENCH_SIDE_EFFECTS_SRC = ROOT / "scripts" / "autoresearch" / "bench_side_effects.py"
+
+
+def _module_int(path: Path, name: str) -> int:
+    """The literal `int` a module-level `NAME = <digits>` carries in `path`'s source."""
+    m = re.search(rf"^{name} = (-?\d+)\s*$", path.read_text(encoding="utf-8"), re.M)
+    assert m, f"{name} is no longer a module-level int literal in {path}"
+    return int(m.group(1))
+
+
+def _constant_comment_block(path: Path, name: str) -> str:
+    """The `#:` doc-comment block sitting directly above `NAME = ...`, and nothing else.
+
+    Scoped to the block on purpose: the retired source must be absent from the ceiling's
+    ARITHMETIC, and a whole-file grep would go red on any unrelated mention of it — the
+    module docstring's, another constant's, this file's own.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"{name} =")), None)
+    assert start is not None, f"{name} is no longer assigned at module level in {path}"
+    top = start
+    while top > 0 and lines[top - 1].lstrip().startswith("#:"):
+        top -= 1
+    block = "\n".join(lines[top:start + 1])
+    assert len(block) > 400, (
+        f"the comment above {name} in {path} is {len(block)} chars: the arithmetic that sets "
+        "this ceiling (turn cap + per-check verifier window + margin) is the part a reader "
+        "needs, and a one-line comment is how the number becomes folklore")
+    return block
 
 
 def test_the_fixture_lands_under_the_data_roots_fixture_area(tmp_path):
@@ -196,13 +245,22 @@ def test_a_writes_scope_outside_the_known_set_is_refused(tmp_path):
 
 
 def test_cleanup_removes_the_fixture_tree_and_refuses_to_delete_anything_else(tmp_path):
+    # `_live` is idempotent, so calling it here buys one thing: the digest is taken BEFORE
+    # the build rather than after. "The source file is still there" passed even for a
+    # builder that rewrote it, because `.is_file()` cannot see a modification.
+    _live(tmp_path)
+    src_memory = tmp_path / "obsidian" / "lloyd" / "MEMORY.md"
+    before = _digest(src_memory)
     fx = _build(tmp_path, writes=("vault",))
     root = fx.root
     fx.init_git()
     fx.cleanup()
     assert not root.exists(), "the second copy of the vault outlived the trial"
-    assert (tmp_path / "obsidian" / "lloyd" / "MEMORY.md").is_file(), (
-        "the source vault was touched")
+    assert src_memory.is_file(), "the source vault's file was deleted"
+    assert _digest(src_memory) == before, (
+        "the source vault's MEMORY.md changed bytes across a build and a cleanup: the copy "
+        "is a copy, and a builder that writes back into its own source has destroyed the "
+        "tree every later trial is graded against")
     # A path that is not a fixture directory is not deletable, even through cleanup().
     stray = tmp_path / "lloyd-data" / "eval" / "notfixtures" / "keep"
     stray.mkdir(parents=True)
@@ -250,19 +308,33 @@ def test_the_sweep_deletes_a_copy_older_than_the_ceiling_and_keeps_a_fresh_one(t
     """#3690 clause 1: the ceiling is a parameter, and the two sides of it are two
     outcomes.
 
-    The ceiling the sweep is given is the runner's per-trial hard cap — `ORPHAN_MAX_AGE_S`
-    restates `scripts/autoresearch/common.py:170`'s `timeout_secs = 300`, and the node that
-    pins the build wiring below uses that number rather than a convenient one, because a
-    fixture is built for exactly one trial and a copy still here after a whole trial
-    cannot be a live one.
+    The ceiling the sweep is given is `ORPHAN_MAX_AGE_S`, 1800 s — three times the runner's
+    operative per-trial turn cap, `DEFAULT_PER_TASK_TIMEOUT = 600`
+    (`scripts/autoresearch/bench_runner_sdk.py:153`), plus the post-timeout verifier window
+    (`VERIFIER_TIMEOUT_SECONDS = 120` per check, `scripts/autoresearch/bench_side_effects.py:48`)
+    and margin. A fixture outlives its build only by outliving the whole trial that holds it,
+    and that hold is the turn PLUS the verifier that runs after the turn is capped: at 300 s
+    the ceiling was half the turn budget alone, so a sibling's build could sweep a copy its
+    own trial was still writing into. The ages planted here (1900 s and 10 s) are well outside
+    and well inside it; the line itself is pinned by
+    `test_the_ceiling_boundary_is_pinned_one_second_either_side_under_a_fixtures_parent`.
     """
     now = time.time()
     parent = tmp_path / "fixtures"
-    aged = _plant(parent, "aged_deadbeef", age_s=400, now=now)
+    aged = _plant(parent, "aged_deadbeef", age_s=1900, now=now)
     fresh = _plant(parent, "fresh_deadbeef", age_s=10, now=now)
-    assert bench_fixture.ORPHAN_MAX_AGE_S == 300, (
-        "the ceiling drifted from the runner's per-trial cap; the constant's comment names "
-        "common.py:170 as its source")
+    assert bench_fixture.ORPHAN_MAX_AGE_S == 1800, (
+        "the ceiling drifted from 3x the runner's operative per-trial turn cap, "
+        "DEFAULT_PER_TASK_TIMEOUT = 600 s (scripts/autoresearch/bench_runner_sdk.py:153) — "
+        "the cap on the trial that HOLDS the fixture. The 300 this constant used to carry "
+        "named the `timeout_secs` written into the run-spec JSON by "
+        "scripts/autoresearch/common.py, which no code reads back, so it bounded nothing at "
+        "half the live hold's own turn budget")
+    # And the 600 that number is 3x of is re-read where it lives, not remembered: restating
+    # a cap is exactly how this constant came to cite one nobody enforces.
+    assert _module_int(_BENCH_RUNNER_SDK_SRC, "DEFAULT_PER_TASK_TIMEOUT") == 600, (
+        "the cap the ceiling is derived from moved; the ceiling is 3x it, so the constant "
+        "above has to be re-derived in the same change")
 
     report = sweep_orphan_fixtures(parent, bench_fixture.ORPHAN_MAX_AGE_S, now=now)
 
@@ -272,10 +344,112 @@ def test_the_sweep_deletes_a_copy_older_than_the_ceiling_and_keeps_a_fresh_one(t
     assert report["deleted"] == [str(aged)]
     assert report["kept"] == [str(fresh)]
     assert report["refused"] == []
-    # The same file, one second either side of the line, so a `>=`/`>` slip is visible.
+    # A parent NOT named `fixtures` (rail (1)), so this probes the rails and not the age
+    # line: the entry is one second old, inside any ceiling, and still refused.
     edge = _plant(parent / "fixtures_edge", "x", age_s=1, now=now)  # not a fixtures parent
-    assert sweep_orphan_fixtures(edge.parent, 300, now=now)["refused"], \
+    assert sweep_orphan_fixtures(edge.parent, bench_fixture.ORPHAN_MAX_AGE_S,
+                                now=now)["refused"], \
         "an age sweep offered a non-fixtures parent deleted something"
+
+
+def test_the_ceiling_boundary_is_pinned_one_second_either_side_under_a_fixtures_parent(tmp_path):
+    """#3817 clause 2: the age line is pinned at one second either side, under a parent
+    that is really the fixtures area.
+
+    Before this item the file planted 400 s, 10 s and 1 s — every one of them kept or deleted
+    identically however the comparison is written, and none of them at the ceiling — and the
+    node that claimed to sit "one second either side of the line" was aged 1 s under a parent
+    named `fixtures_edge`, which is rail (1): it refused for the parent's name and proved
+    nothing about the age. So the
+    sweep's `if mtime > cutoff:` in `sweep_orphan_fixtures` could have been written `>=` and
+    no node would have gone red.
+
+    Three entries in a parent actually named `fixtures`, aged against one injected `now`:
+    `ceiling - 1` is inside a live trial's hold and must survive, `ceiling + 1` is an orphan
+    and must go, and `ceiling` exactly — where `>` and `>=` disagree — is DELETED, which is
+    what makes this the node that catches the slip. The other two alone would not: 1799 s and
+    1801 s against an 1800 s ceiling land on the same branch of `mtime > cutoff` and of
+    `mtime >= cutoff` alike, so the item's own one-second-either-side pair bounds the ceiling
+    without pinning its operator, and the entry ON the line is what the pair was missing. The
+    clock is a fixed integer so the comparison is exact rather than near: `now` is
+    1_700_000_000.0 and the ceiling a whole number of seconds, so `now - ceiling` is the
+    cutoff to the last bit, and the assertion on the planted mtime below is what proves the
+    boundary is being sat on and not merely approached.
+    """
+    now = 1_700_000_000.0                      # an integer second: exact float arithmetic
+    ceiling = bench_fixture.ORPHAN_MAX_AGE_S   # 1800 s, pinned by the node above
+    parent = tmp_path / "fixtures"             # a parent NAMED `fixtures`: rail (1) passes
+    inside = _plant(parent, f"inside_{ceiling - 1}", age_s=ceiling - 1, now=now)
+    at_line = _plant(parent, f"at_{ceiling}", age_s=ceiling, now=now)
+    outside = _plant(parent, f"outside_{ceiling + 1}", age_s=ceiling + 1, now=now)
+    assert at_line.stat().st_mtime == now - ceiling, (
+        "the planted mtime did not round-trip to the cutoff exactly, so this node would be "
+        "circling the boundary rather than sitting on it")
+
+    report = sweep_orphan_fixtures(parent, ceiling, now=now)
+
+    assert inside.is_dir(), (
+        f"a copy {ceiling - 1} s old — one second inside the ceiling, a live trial's own "
+        "hold — was deleted")
+    assert not at_line.exists(), (
+        f"a copy of exactly {ceiling} s is what the sweep deletes today (`mtime > cutoff`); "
+        "written `mtime >= cutoff` it would be kept, and this is the node that notices")
+    assert not outside.exists(), (
+        f"a copy {ceiling + 1} s old is an orphan — the leak this ceiling exists to bound")
+    assert report["deleted"] == [str(at_line), str(outside)], report
+    assert report["kept"] == [str(inside)], report
+    assert report["refused"] == [], report
+
+
+def test_the_ceiling_comment_states_its_arithmetic_against_the_cap_that_bounds_the_hold():
+    """#3817 clause 5: the number is half the fix; the sentence above it is the other half.
+
+    A ceiling is a claim about how long a copy can be live, and the only way the next reader
+    can re-derive it is the comment. The one here derived it from `timeout_secs` in
+    `scripts/autoresearch/common.py` — a value `build_run_spec` writes into the round's
+    run-spec JSON and NOTHING reads back — which is how a self-described "per-trial hard cap"
+    came to sit at half the per-trial turn budget the trial actually gets. So this node reads
+    the comment as text and asks it, in order: does it name the cap that bounds the hold, does
+    it name the window that runs after that cap bites, is the arithmetic still true of the
+    numbers in the files it cites, and does it still cite the retired one.
+    """
+    block = _constant_comment_block(_BENCH_FIXTURE_SRC, "ORPHAN_MAX_AGE_S")
+    cap = _module_int(_BENCH_RUNNER_SDK_SRC, "DEFAULT_PER_TASK_TIMEOUT")
+    verifier = _module_int(_BENCH_SIDE_EFFECTS_SRC, "VERIFIER_TIMEOUT_SECONDS")
+    ceiling = bench_fixture.ORPHAN_MAX_AGE_S
+
+    assert "DEFAULT_PER_TASK_TIMEOUT" in block and str(cap) in block, (
+        "the comment no longer names the operative per-trial turn cap "
+        f"DEFAULT_PER_TASK_TIMEOUT = {cap} s "
+        "(scripts/autoresearch/bench_runner_sdk.py:153): the number in the source it cites is "
+        "what a reader re-derives the ceiling from")
+    assert "bench_runner_sdk.py:153" in block, (
+        "the comment no longer points at the file and line the cap lives on")
+    assert "VERIFIER_TIMEOUT_SECONDS" in block and str(verifier) in block, (
+        "the comment no longer names the post-timeout verifier window "
+        f"VERIFIER_TIMEOUT_SECONDS = {verifier} s per check: the ceiling has to cover it, "
+        "because cleanup sits in a `finally` AFTER score_side_effects runs "
+        "(scripts/autoresearch/bench_runner_sdk.py:1184 and :1199)")
+    assert "bench_side_effects.py:48" in block, (
+        "the comment no longer points at the file and line the verifier window lives on")
+
+    # The arithmetic the comment states, checked against the two files it cites rather than
+    # against itself: a comment can name true numbers and still not add up.
+    assert ceiling == 3 * cap, (
+        f"the ceiling {ceiling} is no longer 3x the {cap} s turn cap the comment names")
+    assert ceiling > cap + verifier, (
+        f"a live trial holds its copy for at least {cap} + {verifier} s — its turn, then one "
+        "verifier check after the turn's own cap bites — so a ceiling at or under that sum is "
+        "a sweep that can delete a running trial's own copy")
+
+    # And the retired source stays retired. The whole reason this item exists is that the
+    # comment cited a `timeout_secs` nothing reads; naming it here would hand the next reader
+    # the same wrong derivation. Scoped to the block, not the file: an unrelated mention
+    # elsewhere is not this ceiling's derivation.
+    assert "common.py" not in block and "timeout_secs" not in block, (
+        "the ceiling's comment cites scripts/autoresearch/common.py's `timeout_secs` again: "
+        "that value is written into the run-spec JSON by build_run_spec and read back by no "
+        "code, so it is not a cap and must not be the derivation of one")
 
 
 def test_the_sweep_refuses_a_parent_that_is_not_the_fixtures_area(tmp_path):
@@ -336,9 +510,9 @@ def test_the_sweep_refuses_an_aged_copy_inside_either_production_tree(tmp_path, 
 
 def test_building_a_fixture_sweeps_its_own_fixtures_area_first(tmp_path):
     """#3690 clause 3, and the item's own planted-directory acceptance check, run as
-    written: plant `aged_deadbeef` older than 300 s and `fresh_deadbeef` at the current
-    time, build in that parent, and the aged directory must be gone while the fresh one and
-    the new build both remain.
+    written: plant `aged_deadbeef` older than the ceiling (1900 s against the 1800 s the
+    builder passes) and `fresh_deadbeef` at the current time, build in that parent, and the
+    aged directory must be gone while the fresh one and the new build both remain.
 
     The builder is the only code that ever stands in the right directory, which is why the
     sweep lives on its path and not in the data-root retention sweep: that sweep resolves
@@ -347,10 +521,12 @@ def test_building_a_fixture_sweeps_its_own_fixtures_area_first(tmp_path):
     an empty path forever.
     """
     vault, data = _live(tmp_path)
+    src_memory = vault / "lloyd" / "MEMORY.md"
+    before = _digest(src_memory)          # BEFORE the build: see `_digest` for the hole this closes
     parent = fixture_parent(data)
     parent.mkdir(parents=True)
     now = time.time()
-    aged = _plant(parent, "aged_deadbeef", age_s=400, now=now)
+    aged = _plant(parent, "aged_deadbeef", age_s=1900, now=now)
     fresh = _plant(parent, "fresh_deadbeef", age_s=10, now=now)
 
     fx = build_fixture(trial_id="t_sweep_1", writes=["vault"], vault=vault, data_root=data,
@@ -364,7 +540,11 @@ def test_building_a_fixture_sweeps_its_own_fixtures_area_first(tmp_path):
         assert sorted(p.name for p in parent.iterdir()) == ["fresh_deadbeef", "t_sweep_1"]
         assert (fx.vault / "lloyd" / "MEMORY.md").is_file(), (
             "the sweep ran over the copy this build had just made")
-        assert (vault / "lloyd" / "MEMORY.md").is_file(), "the source vault was touched"
+        assert src_memory.is_file(), "the source vault's file was deleted"
+        assert _digest(src_memory) == before, (
+            "the build changed the SOURCE vault's MEMORY.md: a copied tree is read-only to "
+            "the build that reads it, and a builder that writes through its own copy has "
+            "modified the tree every later trial and every real tool is graded against")
     finally:
         fx.cleanup()
     # `cleanup()` and the sweep share one rails function, so the copy the build made is gone
