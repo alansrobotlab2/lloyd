@@ -1282,15 +1282,15 @@ class WorkerPool:
         """
         now = time.monotonic()
         checked, value = getattr(self, "_landing_probe", (0.0, False))
-        if now - checked < _LANDING_PROBE_SECONDS:
+        if now - checked < _LANDING_PROBE_SECONDS or getattr(self, "_landing_probe_running", False):
             return value
-        try:
-            from scripts.automod import state as S
-            # A land-train flush is the restart a landing used to be: what
-            # was held for it stays held until it is done.
-            value = bool(S.rounds_landing()) or bool(S.flush_in_progress())
-        except Exception:  # noqa: BLE001
-            value = False
+        # The claim path never gets here with a stale answer: `_claim_holds`
+        # refreshes it on a thread first (`_refresh_landing_probe`), because
+        # the walk over every round dir, on the event loop, competed for the
+        # GIL with the dashboard's threads and held `/health` up to 13 s
+        # (2026-11-05). This sync fallback is for other callers and tests,
+        # and still answers within the same freshness bound.
+        value = _probe_landing()
         self._landing_probe = (now, value)
         return value
 
@@ -1580,12 +1580,12 @@ class WorkerPool:
         home the primary reachability hold just took.
 
         Async because the third gate asks the engine a question. The other two
-        read a background sampler and a cached marker precisely so a claim does
-        not wait on the network, and `_primary_hold_held` keeps that promise by
-        serving a cached verdict and refreshing it on a thread.
+        read a background sampler and a cached marker (both refreshed off the
+        loop) so a claim never waits on the network or a directory walk.
         """
         held = set(await self._primary_hold_held(registry))
         held |= set(self._kv_gate_held(registry))
+        await _refresh_landing_probe(self)
         held |= set(self._round_hold_held(registry))
         return sorted(held)
 
@@ -2280,3 +2280,40 @@ async def start_pool(queue: WorkQueue, slots: int, max_attempts: int = 3) -> Wor
         _pool_instance = WorkerPool(queue, slots=slots, max_attempts=max_attempts)
     await _pool_instance.start()
     return _pool_instance
+
+
+def _probe_landing() -> bool:
+    """Whether a landing or a land-train flush is running. Fails open: an
+    unreadable state dir is not a landing. Blocking — it reads the automod
+    state dir — so the claim path calls it on a thread
+    (`WorkerPool._refresh_landing_probe`)."""
+    try:
+        from scripts.automod import state as S
+        # A land-train flush is the restart a landing used to be: what
+        # was held for it stays held until it is done.
+        return bool(S.rounds_landing()) or bool(S.flush_in_progress())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _refresh_landing_probe(pool: "WorkerPool") -> None:
+    """Refresh `pool._landing_probe` on a thread when it has aged out, so the
+    claim path's `_landing_in_flight` reads a cached answer.
+
+    The probe walks every round directory (2,477 on 2026-11-05). That is
+    ~30 ms of CPU, but on the event loop it competes for the GIL with the
+    dashboard's scan threads, and py-spy put the loop inside it in 33 of 40
+    samples of a backend whose `/health` took up to 13 s. One probe at a time:
+    a claim racing a running one reads the last answer.
+    """
+    checked, _ = getattr(pool, "_landing_probe", (0.0, False))
+    if time.monotonic() - checked < _LANDING_PROBE_SECONDS:
+        return
+    if getattr(pool, "_landing_probe_running", False):
+        return
+    pool._landing_probe_running = True
+    try:
+        value = await asyncio.to_thread(_probe_landing)
+        pool._landing_probe = (time.monotonic(), value)
+    finally:
+        pool._landing_probe_running = False

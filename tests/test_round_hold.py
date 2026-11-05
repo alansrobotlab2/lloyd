@@ -888,6 +888,47 @@ def test_an_unreadable_state_dir_is_not_a_landing(pool, monkeypatch):
     assert pool._round_hold_held(REGISTRY) == []
 
 
+def test_a_claim_refreshes_the_landing_probe_off_the_event_loop(pool, monkeypatch):
+    """The probe walks every round dir; on the loop it competed for the GIL with
+    the dashboard's threads and held `/health` up to 13 s (2026-11-05). The claim
+    path refreshes it on a thread, and the sync read then hits the cache."""
+    import threading
+    from scripts.automod import state as S
+    main = threading.get_ident()
+    seen: list[int] = []
+    monkeypatch.setattr(S, "rounds_landing", lambda: seen.append(threading.get_ident()) or ["SM_X"])
+    monkeypatch.setattr(S, "flush_in_progress", lambda: None)
+    pool._landing_probe = (0.0, False)
+
+    async def go():
+        await P._refresh_landing_probe(pool)
+        return pool._landing_in_flight()
+
+    assert asyncio.run(go()) is True
+    assert len(seen) == 1 and seen[0] != main
+
+
+def test_a_fresh_probe_is_not_refreshed_and_a_running_one_is_not_doubled(pool, monkeypatch):
+    from scripts.automod import state as S
+    calls = []
+    monkeypatch.setattr(S, "rounds_landing", lambda: calls.append(1) or [])
+    monkeypatch.setattr(S, "flush_in_progress", lambda: None)
+    pool._landing_probe = (0.0, False)
+
+    async def go():
+        first = asyncio.ensure_future(P._refresh_landing_probe(pool))
+        await asyncio.sleep(0)                         # its thread is now running
+        # A claim racing that refresh reads the last answer rather than walking
+        # the state dir on the loop itself.
+        held = pool._round_hold_held(REGISTRY)
+        await asyncio.gather(first, *(P._refresh_landing_probe(pool) for _ in range(4)))
+        await P._refresh_landing_probe(pool)            # fresh now: no second walk
+        return held
+
+    assert asyncio.run(go()) == []
+    assert calls == [1]
+
+
 def test_only_a_live_marker_counts(tmp_path, monkeypatch):
     from scripts.automod import state as S
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)

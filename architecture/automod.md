@@ -1603,7 +1603,10 @@ Four changes, each with its own switch or none needed:
    a sibling turn, three held sources were released 25 s before it paused the
    pool, and it then waited fourteen minutes for them. A live land marker now
    keeps the hold engaged; exempt sources are unaffected. Asked at most every
-   5 s; fails open.
+   5 s; fails open. The ask walks every round directory (2,477 by 2026-11-05),
+   so the claim path runs it on a thread (`pool._refresh_landing_probe`) and
+   reads the cached answer: on the event loop it competed for the GIL with the
+   dashboard's scan threads and held `/health` up to 13 s.
 
 6. **A gated round that will restart nothing holds no slot**
    (`autocode._rounds_about_to_land`, `_landing_restarts`). The hold on new
