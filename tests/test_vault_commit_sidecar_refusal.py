@@ -636,3 +636,109 @@ def test_the_widened_pin_passes_on_the_unchanged_tree():
     texts = [t.strip() for _, _, t in hits]
     assert any(t.startswith(f"{_ALIAS} = ") for t in texts), texts
     assert any(f".get({_ALIAS})" in t for t in texts), texts
+
+
+# ── #3814: the CLAIM about the seam may not be wider than the corpus `seam_lines` reads ──
+#
+# #3427 widened the CHECK — every setter spelling, `--untracked`, both names — and
+# left the reader module's docstring enumerating five surfaces as though all five
+# were grepped. Four of them (`app/`, `agent_mcp/`, `agent-services/`,
+# `config.yaml`) sit inside the repo the grep walks. The fifth does not: autonomy
+# task definitions load from `AUTONOMY_DIR = vault_root() / "autonomy"`
+# (`agent_mcp/autonomy.py:53`), i.e. `~/obsidian/autonomy/`, and no test reads that
+# tree for the seam. The 2026-11-04 ruling keeps the corpus repo-scoped — a vault
+# grep would call 42 prose lines setters to catch 0 real ones — so what changed is
+# the claim, and the nodes below are what stop the claim re-inflating.
+
+# Rebuilt rather than written out, on the `_LEGACY_SHELL` precedent above: this file
+# must not carry the retired fragment, whose absence from the tree IS the item's
+# verify, and a control that re-embeds a wording it exists to retire keeps it alive.
+_LEGACY_ENUMERATION = "or the " + "autonomy tasks"
+
+# The five anchors, split by which half of the claim each one holds. Kept as data
+# so `_claim_violations` and its control cannot disagree about the count.
+_CORPUS_ANCHORS = ("repo's own text", "tracked plus untracked", "outside `tests/`")
+_OUTSIDE_ANCHORS = ("~/obsidian/autonomy/", "checked by nothing")
+
+
+def _claim_violations(doc: str) -> list[str]:
+    """Every way the seam's own docstring can over- or under-state its reach.
+
+    One measurement, read by both the live assertion and the pre-fix control, so the
+    two sides cannot drift apart into two wordings of one rule.
+    """
+    bad = []
+    if _LEGACY_ENUMERATION in doc:
+        bad.append("enumerates surfaces as though all of them were pinned")
+    for anchor in _CORPUS_ANCHORS:
+        if anchor not in doc:
+            bad.append(f"does not name the corpus the pin reads: {anchor!r}")
+    for anchor in _OUTSIDE_ANCHORS:
+        if anchor not in doc:
+            bad.append(f"does not mark the vault autonomy tasks as unmeasured: {anchor!r}")
+    return bad
+
+
+def test_the_seam_docstring_scopes_its_claim_to_the_corpus_the_pin_greps():
+    """Clauses 1-3: "production never sets it" is pinned to the text `seam_lines`
+    actually reads, and the one surface outside that text says so in the docstring.
+
+    The corpus claim and the exemption claim are both load-bearing: a docstring that
+    quietly drops the second would read as "everything production can reach is
+    grepped", which is the overclaim #3814 was filed for, in fewer words.
+    """
+    doc = SCF.refusal_disabled_by_environment.__doc__ or ""
+    violations = _claim_violations(doc)
+    assert violations == [], (
+        "`refusal_disabled_by_environment`'s docstring no longer matches what "
+        f"`seam_lines` measures: {violations}")
+    # Clause 1 is about the FILE, not only the docstring: the item's verify is the
+    # fragment being absent from the module, so a comment elsewhere may not carry it.
+    assert _LEGACY_ENUMERATION not in _MODULE.read_text(encoding="utf-8"), (
+        "the retired enumeration is back in scripts/util/sqlite_sidecar_findings.py")
+
+
+def test_the_docstring_pin_fires_on_the_wording_it_retires():
+    """Non-vacuity for the node above: the pre-#3814 sentence, replanted as text,
+    trips every anchor — so the assertions discriminate rather than describe.
+    """
+    pre_fix = (
+        '"""True only when a test harness asked for the guard to stand down.\n'
+        "    Production never sets it: no caller in `app/`, `agent_mcp/`,\n"
+        "    `agent-services/`, `config.yaml` " + _LEGACY_ENUMERATION + ' writes it."""\n')
+    violations = _claim_violations(pre_fix)
+    assert len(violations) == 1 + len(_CORPUS_ANCHORS) + len(_OUTSIDE_ANCHORS), violations
+    assert any("enumerates" in v for v in violations), violations
+    assert pre_fix not in (SCF.refusal_disabled_by_environment.__doc__ or ""), (
+        "the control text is inside the live docstring, so the node above would be "
+        "reading its own plant")
+
+
+def test_seam_lines_never_reaches_outside_the_repo(monkeypatch):
+    """Clause 4: the corpus is part of the contract, so the pin's own argv is pinned.
+
+    The 2026-11-04 ruling closed reading `~/obsidian` into this check; a later round
+    that widened the grep would otherwise silently make the docstring's surviving
+    claim false again. This is the check on the check, not a second way to grep.
+    """
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        seen.append([str(part) for part in cmd])
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    seam_lines(_REPO)
+
+    greps = [argv for argv in seen if argv[:1] == ["git"]]
+    assert len(greps) == 1, f"seam_lines ran something other than one git grep: {greps}"
+    argv = greps[0]
+    assert argv[:3] == ["git", "-C", str(_REPO)], (
+        f"the corpus root is no longer the repo the test file lives in: {argv}")
+    assert argv[argv.index("--"):] == ["--", ":!tests/"], (
+        f"the corpus pathspec changed, so the pinned set no longer matches the "
+        f"docstring's claim: {argv}")
+    assert not any("obsidian" in part for part in argv), (
+        f"seam_lines reached into the vault, which the 2026-11-04 ruling closed "
+        f"off: {argv}")

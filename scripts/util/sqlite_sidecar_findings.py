@@ -221,10 +221,16 @@ def refusal_disabled_by_environment() -> bool:
     the ignore lines deleted and require the WAL+SHM in its commit — and a refusal
     keyed on the suffix sits in front of the very `git add` those controls measure,
     so they would refuse for the reason they exist to reproduce. The seam isolates
-    the ignore layer for them. Production never sets it: no caller in `app/`,
-    `agent_mcp/`, `agent-services/`, `config.yaml` or the autonomy tasks writes it,
-    and `tests/test_vault_commit_sidecar_refusal.py` pins both halves — that the
-    seam does what it says, and that nothing on the live path sets it.
+    the ignore layer for them. Production never sets it, and that assurance is
+    exactly as wide as the check behind it:
+    `tests/test_vault_commit_sidecar_refusal.py` greps the repo's own text —
+    tracked plus untracked, outside `tests/` — for either spelling of the seam's
+    name, and no line there writes one. What that rules out is every setter
+    written in the repo, `app/`, `agent_mcp/`, `agent-services/` and `config.yaml`
+    among them. The vault's autonomy task definitions — `~/obsidian/autonomy/`,
+    which `agent_mcp/autonomy.py` loads its tasks from — sit outside that corpus
+    and are checked by nothing; the 2026-11-04 ruling kept the corpus
+    repo-scoped, so their silence is a reading taken by hand, not a pin.
     """
     return (os.environ.get(MEASUREMENT_SEAM) or "").strip().lower() in {
         "off", "0", "no", "false"}
