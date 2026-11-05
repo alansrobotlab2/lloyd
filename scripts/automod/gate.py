@@ -513,6 +513,201 @@ def _vitest_run(web: Path, timeout: float = 600) -> tuple[bool | None, str]:
     return r.returncode == 0, text[-900:]
 
 
+#: The two `chrome-extension/` paths #3646 admits to `ALLOWED_GLOBS`, spelled as paths and
+#: never as a `chrome-extension/` prefix: that directory also holds `manifest.json`, whose
+#: blast radius is a browser permission rather than a build artifact.
+CHROME_WORKER_SRC = "chrome-extension/src/background/service-worker.ts"
+CHROME_WORKER_BUNDLE = "chrome-extension/dist/service-worker.js"
+CHROME_VITE_CONFIG = "vite.chrome.config.ts"
+CHROME_README = "chrome-extension/README.md"
+CHROME_VERDICT_OK = "chrome bundle provenance ok"
+
+#: What "the frontend changed" means, beside the `web/` prefix (#3770).
+FRONTEND_TRIGGER_PATHS: tuple[str, ...] = (CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE)
+
+#: The README's build line carries the API base the shipped bundle was baked with.
+_API_BASE_RE = re.compile(r"""VITE_API_BASE=['"]?([^'"\s]*)['"]?""")
+
+
+def frontend_changed(paths) -> list[str]:
+    """The one answer to "did the frontend change", for the two places that decide it.
+
+    `rung_frontend`'s changed-path filter and `Gate._reuse_rule`'s frontend branch each
+    spelled `p.startswith("web/")` to themselves until #3770 measured what that costs:
+    commit `dc81f046` rewrote `chrome-extension/dist/service-worker.js` — the bytes Chrome
+    actually loads — with zero `web/` paths in the diff, so the rung answered "no frontend
+    changed" for that round, and any later chrome-only commit reused the previous green
+    instead of re-running it. Fixing only one of the two leaves the other open, so both
+    read this predicate; one node in tests/test_automod_gate.py patches it and watches both
+    callers, which is what keeps a later edit from re-forking them in silence.
+
+    The extension entries are trigger paths, not a trigger prefix, for the same reason the
+    grant names them: `chrome-extension/manifest.json` is tracked here and is not frontend.
+    """
+    return [p for p in paths
+            if p.startswith("web/") or p in FRONTEND_TRIGGER_PATHS]
+
+
+def _api_base_from_readme(root: Path) -> str:
+    """The `VITE_API_BASE` value `chrome-extension/README.md` tells a human to build with.
+
+    Harvested, never hardcoded into the gate: the README and the shipped bundle are the pair
+    that "build-produced" actually means, so a round that repoints the extension at a
+    different backend AND rebuilds stays green here, while a README whose build command no
+    longer matches what was shipped reddens. Both empties are a stated skip, not a pass —
+    building with an unset base would bake `'/api'`, a different bundle, and the node would
+    report a provenance failure for what is really a missing instruction.
+    """
+    try:
+        text = (root / CHROME_README).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    m = _API_BASE_RE.search(text)
+    return m.group(1) if m else ""
+
+
+def _chrome_vite_build(web: Path, out_dir: Path, api_base: str,
+                       timeout: float = 600) -> tuple[bool, str]:
+    """Build the extension entries into `out_dir` with the chrome config (#3770 clause 1).
+
+    Deliberately NOT `_vite_build` with one more flag: that helper builds the dashboard and
+    has never passed `-c` at all (#3571's owed sentence, confirmed in the code at filing),
+    and sharing it would let one build's flags decide the other's clause — including the
+    `VITE_API_BASE`, which for the panel build comes from the environment and for this one
+    comes from the README. `-c vite.chrome.config.ts` is the whole difference; cwd stays
+    `web/` because the config resolves `__dirname` from there.
+
+    `out_dir` MUST be a scratch directory. The config's `copyExtensionStatic().closeBundle`
+    writes `dist/manifest.json` and `icons/` to the ABSOLUTE `chrome-extension/dist` no
+    matter what `--outDir` says, and a build with the config's own default outDir overwrites
+    the tracked panel chunks and dirties the worktree — which is why the node checks
+    porcelain afterwards instead of assuming a temp outDir means nothing was touched.
+    """
+    web = web.resolve()
+    vite = web / "node_modules" / ".bin" / "vite"
+    env = _node_env()
+    env["VITE_API_BASE"] = api_base
+    r = _run([str(vite), "build", "-c", CHROME_VITE_CONFIG, "--outDir", str(out_dir),
+              "--emptyOutDir", "--logLevel", "error"], cwd=web, env=env, timeout=timeout)
+    text = (r.stdout + r.stderr).strip()
+    return r.returncode == 0, text[-900:]
+
+
+def _porcelain_paths(root: Path, scope: str) -> list[str]:
+    """The paths `git status --porcelain -- <scope>` reports, git's order preserved.
+
+    Splits rename lines on `" -> "` and keeps the target, because a rename inside the
+    extension is exactly as dirty as an edit and reporting only the left-hand side would
+    name a path that no longer exists.
+    """
+    r = _run(["git", "status", "--porcelain", "--", scope], cwd=root, timeout=60)
+    out: list[str] = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:] if len(line) > 3 else ""
+        out.append(path.split(" -> ", 1)[1] if " -> " in path else path)
+    return out
+
+
+def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
+                             *, build=None, porcelain=None) -> tuple[bool, str, dict]:
+    """Prove the tracked worker bundle is what the tracked source builds (#3770).
+
+    Returns the rung's own `(ok, detail, data)` triple so a failure reddens the frontend
+    rung and a skip stays a skip. #3646's grant made `chrome-extension/dist/service-worker.js`
+    writable by a round, and the strongest thing any test asserted of it was that harvested
+    literals are PRESENT — `tests/test_chrome_extension_manifest_tracked.py` counts
+    `type:"focus-session"` occurrences and all ten of its nodes stay green for a minified
+    bundle nobody built. A byte comparison against a fresh build is the only thing that
+    distinguishes ship from hand-authoring, and it is cheap here because the config pins the
+    worker entry to a FIXED name (`entryFileNames` maps it to `service-worker.js`, hashless)
+    while the panel chunks are content-hashed.
+
+    That is also why the comparison is this one file and no other path under `dist/`: the
+    hashed panel half legitimately re-hashes on every build until #3769's follow-on lands its
+    rebuild, so widening the comparison would sit permanently red and say nothing new.
+
+    `build` and `porcelain` are injectable because the red leg and the dirty-tree leg need a
+    build that produces bytes the tracked file does not, and a node that shells out to vite
+    cannot be tested for either without a 2.6-second build per case; the shipped call is the
+    default, so the gate runs the real thing.
+    """
+    build = build or _chrome_vite_build
+    porcelain = porcelain or _porcelain_paths
+    worktree = Path(worktree)
+    web = Path(web)
+    # ONE value for both `_scratch_dir` and `_drop_scratch`: the two recompute the round's
+    # scratch parent independently, and `_drop_scratch` refuses a path whose parent is not
+    # the parent it derives. A default applied at the call site only would therefore raise
+    # inside the cleanup on every unit-test call that passes no round id — and `Gate._rung`
+    # records an exception as a FAILED rung, so the node would red on its own teardown.
+    round_id = round_id or "chrome-provenance"
+    vite = web / "node_modules" / ".bin" / "vite"
+    if not vite.exists():
+        return True, (f"chrome bundle provenance skipped: {vite} is not there, so the "
+                      "extension cannot be built here and a mismatch would be the missing "
+                      "install, not a hand-edited bundle"), {
+            "skipped": True, "reason": "no web/node_modules/.bin/vite"}
+    api_base = _api_base_from_readme(worktree)
+    if not api_base:
+        return True, (f"chrome bundle provenance skipped: {CHROME_README} carries no "
+                      "VITE_API_BASE, so the base the shipped bundle was baked with is "
+                      "unknown and the build would bake '/api' instead"), {
+            "skipped": True, "reason": "no VITE_API_BASE in chrome-extension/README.md"}
+
+    out_dir = _scratch_dir(round_id, "vite-chrome")
+    started = time.time()
+    ok, tail = build(web, out_dir, api_base)
+    seconds = time.time() - started
+    data = {"chrome_build_seconds": round(seconds, 2), "chrome_api_base": api_base}
+    if not ok:
+        _drop_scratch(out_dir, round_id)
+        return False, f"chrome bundle build failed in {seconds:.1f}s: {tail[-500:]}", data
+
+    produced = out_dir / "service-worker.js"
+    tracked = worktree / CHROME_WORKER_BUNDLE
+    if not produced.is_file():
+        _drop_scratch(out_dir, round_id)
+        return False, (f"chrome bundle build produced no service-worker.js in {out_dir} "
+                       f"(found: {sorted(p.name for p in out_dir.iterdir())[:8]}); "
+                       f"{CHROME_WORKER_BUNDLE} cannot be attributed to any build"), data
+    if not tracked.is_file():
+        _drop_scratch(out_dir, round_id)
+        return False, (f"the build wrote service-worker.js but {CHROME_WORKER_BUNDLE} is "
+                       "not in the worktree: a round deleted the file Chrome loads"), data
+
+    produced_bytes = produced.read_bytes()
+    tracked_bytes = tracked.read_bytes()
+    data.update({"chrome_produced_bytes": len(produced_bytes),
+                 "chrome_tracked_bytes": len(tracked_bytes)})
+    if produced_bytes != tracked_bytes:
+        _drop_scratch(out_dir, round_id)
+        return False, (
+            f"{CHROME_WORKER_BUNDLE} is not what the tracked source builds: a fresh "
+            f"`vite build -c {CHROME_VITE_CONFIG}` produced {len(produced_bytes)} bytes "
+            f"and the tracked file is {len(tracked_bytes)}. "
+            f"cd web && VITE_API_BASE='{api_base}' npx vite build -c "
+            f"{CHROME_VITE_CONFIG} && git add {CHROME_WORKER_BUNDLE} && git commit. "
+            "The literals tests/test_chrome_extension_manifest_tracked.py harvest are "
+            "satisfiable by hand; these bytes are not — and the panel half of dist/ is "
+            "deliberately NOT compared (hashed names, owned by #3769)."), data
+
+    dirty = porcelain(worktree, "chrome-extension/")
+    _drop_scratch(out_dir, round_id)
+    if dirty:
+        return False, (
+            f"the chrome build left {len(dirty)} path(s) dirty under chrome-extension/: "
+            f"{dirty[:6]}. The build's copy plugin rewrites `dist/manifest.json` and "
+            "`icons/` at their absolute paths whatever --outDir says, so a diff here means "
+            "the build output and the tracked bytes disagree — commit what it produced or "
+            "the bundle Chrome loads is not the bundle the gate just built."), data
+    return True, (f"chrome bundle provenance: {CHROME_WORKER_BUNDLE} matches a fresh "
+                  f"`vite build -c {CHROME_VITE_CONFIG}` byte-for-byte "
+                  f"({len(tracked_bytes)} bytes) in {seconds:.1f}s; chrome-extension/ "
+                  "porcelain-clean after the build"), data
+
+
 def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
     """Is the default model's endpoint answering? Decides whether `skip_smoke` holds.
 
@@ -2057,9 +2252,14 @@ class Gate:
         if not delta:
             return "nothing committed since"
         if name == "frontend":
-            if any(p.startswith("web/") for p in delta):
+            # The second of the two callers of the one predicate (#3770 clause 3). It spells
+            # the question as a delta rather than as a diff, which is why it is a separate
+            # call and not a shared variable — but the ANSWER has to come from the same
+            # function, or fixing rung_frontend's filter leaves this reusing the previous
+            # green for exactly the chrome-only commit that filter now catches.
+            if frontend_changed(delta):
                 return None
-            return "no web/ path in the delta"
+            return "no frontend path in the delta"
         if name == "venv":
             if any(p in ("requirements.txt", "requirements.lock") for p in delta):
                 return None
@@ -2871,10 +3071,18 @@ class Gate:
         turns this rung red, because the false-block rate has to be measured
         before a block is honest (`vet`'s precedent, and #623's grade-only one).
         """
-        changed_web = [p for p in self.report.changed_paths if p.startswith("web/")]
-        if not changed_web:
+        # One predicate decides this (#3770 clause 3). Before it, this line read
+        # `p.startswith("web/")` alone and commit `dc81f046` — which rewrote
+        # `chrome-extension/dist/service-worker.js` and touched no `web/` path at all — got
+        # "no frontend changed" from the rung that is supposed to look at the frontend.
+        # `changed_web` stays the dashboard subset because it is what the observe-only probe
+        # walks and what the `changed_web` data key has always named; `changed_fe` is what
+        # decides whether this rung runs at all.
+        changed_fe = frontend_changed(self.report.changed_paths)
+        if not changed_fe:
             return True, "no frontend changed", {"skipped": True,
-                                                "reason": "no web/ path"}
+                                                "reason": "no frontend path"}
+        changed_web = [p for p in changed_fe if p.startswith("web/")]
         web = self.worktree / "web"
         live_web = self.live / "web"
         nm = web / "node_modules"
@@ -2907,12 +3115,40 @@ class Gate:
         if tested is False:
             return False, f"vitest failed: {vt_tail}", {"changed_web": changed_web}
         unit = "vitest ok" if tested else f"vitest SKIPPED ({vt_tail})"
+        # The admitted bundle's provenance rides INSIDE this rung rather than as a rung of
+        # its own (#3770): it costs a build, it is meaningless without a node_modules
+        # symlink this rung made, and a new rung name is a new cache key in `gate_cache.json`
+        # that every already-cached round would have to pay for once. Its seconds land in the
+        # rung detail beside the other frontend timings, which is where a future cost review
+        # of the trigger set (#3770's owed note) will look.
+        chrome_triggers = [p for p in changed_fe if p in FRONTEND_TRIGGER_PATHS]
+        if chrome_triggers:
+            c_ok, c_detail, c_data = chrome_bundle_provenance(self.worktree, web,
+                                                              self.round_id)
+            if not c_ok:
+                return False, c_detail, c_data
+        else:
+            c_detail = (f"chrome bundle provenance skipped: neither {CHROME_WORKER_SRC} "
+                        f"nor {CHROME_WORKER_BUNDLE} is in this diff, so there is no "
+                        "bundle whose provenance this node could check")
+            c_data = {"chrome_verdict": c_detail, "chrome_build_seconds": None,
+                      "chrome_api_base": None, "chrome_porcelain_after": None}
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
                       f"vite build ok; {unit}; {_fe_probe.summary(probe)}; "
                       f"{_fe_layout.summary(probe.get('layout') or {})}; "
-                      f"{len(changed_web)} frontend file(s)"), {
-                          "changed_web": changed_web, "vitest": tested,
+                      f"{len(changed_web)} frontend file(s); {c_detail}"), {
+                          "changed_web": changed_web, "changed_frontend": changed_fe,
+                          "vitest": tested,
                           "probe": probe,
+                          # The node's whole dict, keys and all, not a `skipped`/`reason`
+                          # pair invented here and not a `chrome_*` prefix filter either:
+                          # the two skip arms answer `{skipped, reason}`, so a prefix filter
+                          # would have silently dropped the stated reason for declining from
+                          # the ledger row and left only the prose — which is the same
+                          # silence, one key deeper, that made the byte counts unreadable.
+                          "chrome_build_seconds": c_data.get("chrome_build_seconds"),
+                          "chrome_bundle_provenance": {
+                              "detail": c_detail, **c_data},
                           **({} if tested else {"vitest_skipped": vt_tail})}
 
     def _frontend_probe(self, built_dir: Path,

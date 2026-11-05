@@ -3290,7 +3290,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3043`,
+    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3287`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3299,6 +3299,17 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     as a live anchor by either node. That is the same move the path-citation rail
     already makes for such cites with its `historical` kind (the four admitted
     kinds are generated, historical, other-tree, stale).
+
+    The `gate.py` anchor is 3287, not the 3043 it was when the rail was written,
+    and that is the rail doing its job rather than a correction to it: #3770
+    inserted the chrome-bundle provenance node into `gate.py` above this rung, the
+    `label = f"item{…}" or f"gate-{…}"` assignment slid down, and the citation
+    landed inside `rung_pyright` while the sentence still named
+    `rung_prompt_surface` — the exact mispick #3580 was filed for, caught here
+    instead of surviving a month on containment. A round that inserts lines into
+    `gate.py` above `rung_prompt_surface` has to re-point this anchor in the same
+    commit; `test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too` is the
+    leg that reddens when it does not.
 
     Then the failure the rail exists for: seed the two real drifts back in, in the
     same symbol-naming sentences, and both must be reported. Their numbers sit
@@ -3327,7 +3338,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
-    seeded = seeded.replace("scripts/automod/gate.py:3043", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3287", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
@@ -3339,6 +3350,86 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     assert anchor_span_report(text)[1] == [], (
         "the doc as written is reported by the shipped rule, so the rail above is "
         "grading a tree this node's re-typing does not describe")
+
+
+#: The line `architecture/measurement.md` cited for the prompt-surface label before
+#: #3770 inserted the chrome-bundle provenance node into `gate.py` above that rung.
+#: Kept as a constant because the negative control needs the *previous* number, not a
+#: number invented for the control: it is the one value the rail refused for real.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3043
+
+
+def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
+    """#3770 clause 5: the doc's gate.py anchor is the label line, in THIS tree.
+
+    The rail node above proves the anchor is graded by a named symbol and cannot
+    prove the cited line is the line the sentence describes: containment is satisfied
+    by any line inside `rung_prompt_surface`, and at 76 lines that rung has 75 other
+    lines to land on. This node reads the bytes at the cited line and requires them
+    to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
+    which is the only property that makes `scripts/automod/gate.py:3287` the right
+    number rather than a defensible one.
+
+    Then the failure this round would have shipped. #3770 inserts the chrome-bundle
+    provenance node into `gate.py` above this rung, the assignment slides down by the
+    inserted length, and the stale number is then graded against a DIFFERENT
+    definition — the rung that happens to swallow it. Seeding the pre-#3770 value 3043
+    back into the same sentence must yield a non-`named` row whose enclosing
+    definitions are `Gate` and `rung_pyright`, and the shipped text must not be that
+    text. That is the leg which reddens for the next round that inserts lines above
+    `rung_prompt_surface` and forgets to re-point, and it names the number to point at.
+    """
+    text = _text("measurement.md")
+    cited = [(span, hit, line) for span, hit, line in py_anchor_citations(text)
+             if span.startswith("scripts/automod/gate.py:")]
+    assert len(cited) == 1, (
+        f"measurement.md is supposed to carry exactly one `gate.py` anchor (the label "
+        f"line), got {[c[0] for c in cited]} — a second one needs its own sentence and "
+        "its own name beside it before this node can hold either to a line")
+    span, hit, line = cited[0]
+
+    line_text = hit.read_text(encoding="utf-8", errors="replace").splitlines()[line - 1]
+    assert line_text.strip().startswith("label ="), (
+        f"`{span}` cites line {line}, which reads {line_text.strip()!r} — the sentence "
+        f"that cites it says the rung 'labels the run `item<id>` or `gate-<round_id>`', "
+        "so the anchor has to be the label assignment itself")
+    assert "item{" in line_text and "gate-{" in line_text, (
+        f"`{span}` is the label line but not the one the doc means: {line_text.strip()!r}")
+    assert line_text in (
+        '        label = f"item{self.item_id}" if self.item_id else f"gate-{self.round_id}"'), (
+        f"`{span}` is a label line but not the one whose two arms the doc names, so "
+        "either the rung was rewritten or this node's quote is stale: "
+        f"{line_text!r}")
+
+    rows = {r["span"]: r for r in fallback_decision(text)}
+    assert span in rows, f"`{span}` is not graded at all, so nothing below is graded"
+    assert "rung_prompt_surface" in rows[span]["enclosing"], (
+        f"`{span}` lands in {rows[span]['enclosing']}, not in the rung the sentence "
+        "names — re-point the anchor to the current label line")
+    assert rows[span]["mode"] == "named", (
+        f"`{span}` was decided by {rows[span]['mode']}: the sentence names "
+        f"{rows[span]['named']} and the line's own definitions are "
+        f"{rows[span]['enclosing']}")
+
+    stale = f"scripts/automod/gate.py:{_PRE_3770_PROMPT_SURFACE_ANCHOR}"
+    seeded = text.replace(span, stale)
+    assert seeded != text, (
+        f"the seed found no `{span}` to replace, so this node is grading a doc that "
+        "was re-typed again — update `_PRE_3770_PROMPT_SURFACE_ANCHOR` or the quote")
+    srows = [r for r in fallback_decision(seeded) if r["span"] == stale]
+    assert srows, (
+        f"the seeded stale anchor `{stale}` was not graded at all, so the rail cannot "
+        "be shown refusing it")
+    assert srows[0]["mode"] != "named", (
+        f"`{stale}` reads as `named` in this tree, so the drift this node exists for "
+        "has become invisible again")
+    assert "rung_pyright" in srows[0]["enclosing"], (
+        f"the pre-#3770 number now lands in {srows[0]['enclosing']}, not `rung_pyright`; "
+        "the negative control's enclosing definition has moved — re-measure it rather "
+        "than deleting the assert")
+    assert anchor_span_report(seeded)[1] == [stale], (
+        "the shipped rule does not flag the anchor the rail flags, so the two guards "
+        "have drifted apart")
 
 
 def test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling():

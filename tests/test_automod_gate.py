@@ -934,11 +934,18 @@ def test_the_rung_runs_no_probe_and_keeps_the_recorded_skip_without_a_web_change
     monkeypatch.setattr(G, "_vite_build", explode)
     ok, detail, res = g.rung_frontend()
     # The skip the rung already recorded is kept verbatim — `"no frontend changed"`
-    # with `{"skipped": True, "reason": "no web/ path"}` — and the probe's word
+    # with `{"skipped": True, "reason": "no frontend path"}` — and the probe's word
     # appears nowhere in it. 93 rounds ran this rung non-skipped and the rest land
     # on the strength of that skip reading as honest; a probe that decorated it
     # would make an unexamined landing look examined.
-    assert ok and res.get("skipped") is True and res.get("reason") == "no web/ path"
+    #
+    # #3770 clause 3 renamed the reason from "no web/ path" to "no frontend path" because
+    # this branch now asks `G.frontend_changed(...)`, which also admits the two granted
+    # chrome-extension paths; the OLD string would have made the skip claim a measurement it
+    # never took. What is kept is the shape: a skipped rung still says so, in words that
+    # match what was actually compared.
+    assert (ok and res.get("skipped") is True
+            and res.get("reason") == "no frontend path"), res
     assert detail == "no frontend changed", detail
     assert "probe" not in detail.lower(), detail
 
@@ -4116,3 +4123,549 @@ def test_rung_review_still_refuses_when_one_cited_node_is_not_measured_red(tmp_p
     by_clause = {c["clause"]: c for c in data["clauses"]}
     assert by_clause[2]["verdict"] == "partial", by_clause[2]
     assert not by_clause[2]["note"].startswith("pre-existing:"), by_clause[2]["note"]
+
+
+
+# --- #3770: the chrome bundle's build provenance ------------------------------- #
+#
+# `chrome-extension/dist/service-worker.js` became a path a round may edit when #3646
+# admitted it, and every test that reads it asserts LITERALS are present — a hand-edited
+# minified bundle that keeps the harvested literals passes all ten of them. These nodes pin
+# the tripwire: build the worker with the config Chrome's build uses and require the bytes.
+# None of them runs vite. `_frontend_gate`'s precedent is a `_fake_build` that writes into
+# the outDir it is handed, and the same shape covers the red leg, the skip legs and the
+# porcelain leg here, because what is under test is what the node DECIDES from the build's
+# exit code and the file it produced — not whether vite works on this box.
+
+import re
+
+CHROME_WORKER_SRC = "chrome-extension/src/background/service-worker.ts"
+CHROME_BUNDLE = "chrome-extension/dist/service-worker.js"
+TRACKED_WORKER_BYTES = b"const a=1;export const KIND=\"focus-session\";\n"
+README_WITH_BUILD_LINE = (
+    "# Lloyd Companion - Chrome extension\n"
+    "\n"
+    "```\nbash\ncd web && VITE_API_BASE='http://127.0.0.1:8080/api' npx vite build "
+    "-c vite.chrome.config.ts && cd ..\n```\n")
+
+
+def _chrome_repo(live_repo, *, tracked=TRACKED_WORKER_BYTES,
+                 readme=README_WITH_BUILD_LINE):
+    """Give the scratch repo the chrome half the grant admits, and commit it.
+
+    Called BEFORE `_frontend_gate`, which branches its worktree at the live HEAD, so the
+    worktree under test carries `chrome-extension/` the way a real round's does and the node
+    compares against bytes that are genuinely tracked.
+    """
+    (live_repo / "chrome-extension" / "dist").mkdir(parents=True, exist_ok=True)
+    (live_repo / "chrome-extension" / "README.md").write_text(readme)
+    (live_repo / "chrome-extension" / "dist" / "service-worker.js").write_bytes(tracked)
+    git(live_repo, "add", "chrome-extension")
+    git(live_repo, "commit", "-qm", "chrome half for the provenance nodes")
+    return live_repo
+
+
+def _fake_chrome_run(*, produce=TRACKED_WORKER_BYTES, ok=True, dirty=None,
+                     writes=None, calls=None):
+    """A `_run` that plays vite for the chrome config: writes `produce` into the outDir.
+
+    Only the vite invocation is faked. `git status --porcelain` inside the provenance node
+    must reach the REAL git, or the porcelain leg of clause 4 would be a fake reading a
+    fake: the dirty test writes bytes into the worktree precisely so that real `git status`
+    reports them.
+
+    `dirty` is a {repo-relative path: bytes} map applied to the worktree as if the build had
+    rewritten it with new content; `writes` is the same shape but content-identical, standing
+    in for the config's copy plugin, which rewrites `chrome-extension/dist/manifest.json` and
+    `icons/` at their ABSOLUTE paths no matter what `--outDir` says.
+    """
+    real_run = G._run          # captured now, while G._run is still the subprocess runner
+
+    def _run(cmd, cwd=None, env=None, timeout=900.0):
+        import types
+        if not str(cmd[0]).endswith("node_modules/.bin/vite"):
+            return real_run(cmd, cwd=cwd, env=env, timeout=timeout)
+        if calls is not None:
+            calls.append({"cmd": list(cmd), "cwd": cwd, "env": dict(env or {})})
+        out_dir = Path(cmd[cmd.index("--outDir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "service-worker.js").write_bytes(produce)
+        # Two maps, one loop shape: `dirty` writes NEW content (porcelain reports it),
+        # `writes` writes the SAME content the tree already tracks (porcelain does not) —
+        # that difference is clause 4's two arms and the only thing separating them.
+        for mapping in (dirty or {}, writes or {}):
+            for rel, blob in mapping.items():
+                target = Path(cwd).parent / rel          # cwd is <worktree>/web
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(blob)
+        return types.SimpleNamespace(returncode=0 if ok else 1,
+                                     stdout="" if ok else "rollup failed", stderr="")
+    return _run
+
+
+def test_the_frontend_predicate_admits_web_and_the_two_granted_chrome_paths():
+    """#3770 clause 3 at the level both callers share, and clause 2's trigger set.
+
+    The predicate is the whole of clause 3: `rung_frontend`'s filter and `_reuse_rule`'s
+    frontend branch both ask it, so a chrome-only commit cannot be a "no frontend changed"
+    skip in one and a re-run in the other. The refusals are the point of the second half:
+    both manifests, `README.md`, the panel html, one hashed asset, `url.ts`, the `.tsx` and
+    `.js` look-alikes of the worker source, and the prefix traps all stay OUT. A predicate
+    keyed on `chrome-extension/` would put the panel rebuild — whose bytes are not
+    reproducible, see #3769 — inside a rung that can only check the worker, and would then
+    red rounds whose diff never touched it. `web` and `webfoo/x.ts` are here because the
+    predicate replaced a `startswith("web/")` and must refuse everything that one refused.
+    """
+    assert G.frontend_changed(["web/src/api.ts"]) == ["web/src/api.ts"]
+    for trigger in G.FRONTEND_TRIGGER_PATHS:
+        assert G.frontend_changed([trigger]) == [trigger], trigger
+    # A filter, not a set: the diff's order survives, because the result is what the detail
+    # counts ("N frontend file(s)") and what the dashboard probe is handed as `changed_paths`.
+    # `git diff --name-only` reports a path once per diff, so a predicate that silently
+    # de-duplicated or re-ordered would make that count disagree with the diff it came from
+    # with no caller able to see that it had.
+    assert (G.frontend_changed(["web/src/main.tsx", "README.md", CHROME_BUNDLE,
+                                "app/m.py", CHROME_WORKER_SRC, "web/src/api.ts"])
+            == ["web/src/main.tsx", CHROME_BUNDLE, CHROME_WORKER_SRC,
+                "web/src/api.ts"]), (
+        "the predicate is not an order-preserving filter over the paths it is given, so the "
+        "detail's frontend file count and the probe's changed-path list disagree with the "
+        "diff")
+    assert G.frontend_changed([]) == []
+    for refused in ("app/m.py", "chrome-extension/manifest.json",
+                    "chrome-extension/dist/manifest.json", "chrome-extension/README.md",
+                    "chrome-extension/dist/sidepanel.html",
+                    "chrome-extension/dist/assets/sidepanel-BaMPpFsS.js",
+                    "chrome-extension/src/background/url.ts",
+                    "chrome-extension/src/background/service-worker.tsx",
+                    "chrome-extension/src/background/service-worker.js",
+                    "chrome-extension", "chrome-extension/", "web", "webfoo/x.ts", ""):
+        assert refused not in G.frontend_changed([refused]), (
+            f"{refused!r} counts as a frontend change; the rung would then run its tsc, "
+            "vitest and dashboard probe on a diff that touched none of the frontend")
+    # The trigger set is the WORKER pair specifically, which is narrower than "what the
+    # chrome grant admits": #3769 admitted a third verbatim path the same day this node was
+    # written (`chrome-extension/dist/sidepanel.html`), and its bytes are NOT reproducible —
+    # every build re-hashes the panel assets — so firing this node on it would sit
+    # permanently red. The relation pinned is "a subset of what the grant admits, and the
+    # admitted-but-unchecked remainder is exactly the panel html".
+    from scripts.automod import spec as SPEC
+    admitted = {e for e in SPEC.ALLOWED_GLOBS
+                if e.startswith("chrome-extension/") and "*" not in e}
+    assert set(G.FRONTEND_TRIGGER_PATHS) <= admitted, (
+        "the trigger set names a path the chrome grant does not admit, so this node would "
+        "refuse a round for editing a file it was never granted")
+    assert admitted - set(G.FRONTEND_TRIGGER_PATHS) == {
+        "chrome-extension/dist/sidepanel.html"}, admitted
+    assert list(G.FRONTEND_TRIGGER_PATHS) == [CHROME_WORKER_SRC, CHROME_BUNDLE]
+
+
+def test_a_chrome_only_diff_runs_the_rung_and_the_provenance_node(
+        live_repo, tmp_path, monkeypatch):
+    """Clauses 1, 2 and 5 together, across the boundary the change actually crosses.
+
+    This is the node a round's gate really reaches: a diff with a chrome path and NO `web/`
+    path — the exact shape of `dc81f046`, which rewrote the bytes Chrome loads while the
+    frontend rung answered "no frontend changed" — must reach the provenance node and must
+    report its verdict in the detail beside the tsc and build timings. Nothing here can be
+    red except the chrome node, so the call list is the evidence that the rung ran at all:
+    the old filter would have proven the same thing by NOT calling anything.
+    """
+    _chrome_repo(live_repo)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    assert calls, "the provenance node never ran for a diff that changed the bundle"
+    assert "byte-for-byte" in detail and "porcelain-clean" in detail, detail
+    assert data["chrome_build_seconds"] is not None
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_produced_bytes"] == row["chrome_tracked_bytes"] == \
+        len(TRACKED_WORKER_BYTES), row
+    assert data["changed_frontend"] == [CHROME_BUNDLE]
+    assert data["changed_web"] == [], (
+        "`changed_web` grew a chrome path, so the dashboard probe's change list and the "
+        "ledger key that has always named web/ files both moved without being asked")
+
+
+def test_the_provenance_node_skips_when_neither_worker_path_is_touched(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 2's skip arm, and it must cost nothing.
+
+    The `chrome-extension/README.md` in the changed list is deliberate: it is a chrome path
+    the grant does NOT admit, so it now moves the rung (clause 3's predicate refuses it, so
+    this diff only runs the rung because of the `web/` path) without moving this node.
+    """
+    _chrome_repo(live_repo)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=["web/src/App.tsx", "chrome-extension/README.md"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    assert not calls, "the node ran a build for a diff that touched neither worker path"
+    assert "chrome bundle provenance skipped: neither" in detail, detail
+    assert CHROME_WORKER_SRC in detail and CHROME_BUNDLE in detail, detail
+    assert data["chrome_build_seconds"] is None, (
+        "a skip carries a build time, so the ledger would record a build that did not run")
+
+
+def test_the_node_builds_with_the_chrome_config_and_the_readme_api_base(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 1's invocation, read off the command and environment it actually used.
+
+    `_vite_build` hardcodes its argument list with no `-c`, so the chrome config had never
+    been run by any code in the repo; this is the pin that says it runs now, with the
+    README's API base harvested rather than a literal in gate.py that would rot the first
+    time someone repoints the default, and into a scratch outDir rather than the tracked one
+    — the temp `--outDir` is load-bearing, because with the config's default the build
+    overwrites the tracked panel assets and dirties the very tree it is checking.
+    """
+    _chrome_repo(live_repo)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok and len(calls) == 1, (ok, detail, len(calls))
+    cmd = calls[0]["cmd"]
+    assert cmd[0].endswith("node_modules/.bin/vite"), cmd
+    assert cmd[1] == "build"
+    assert cmd[cmd.index("-c") + 1] == "vite.chrome.config.ts", cmd
+    assert "--emptyOutDir" in cmd and "--logLevel" in cmd, cmd
+    out_dir = Path(cmd[cmd.index("--outDir") + 1])
+    assert out_dir != wt / "chrome-extension" / "dist", cmd
+    assert out_dir.is_relative_to(Path.home() / "lloyd-work"), (
+        "the scratch outDir is not a gate scratch dir, so `clean_scratch` will never sweep "
+        "it and a red round leaves a tree-sized copy of the build behind")
+    assert calls[0]["cwd"] == wt / "web", calls[0]["cwd"]
+    assert calls[0]["env"]["VITE_API_BASE"] == "http://127.0.0.1:8080/api", calls[0]["env"]
+    assert data["chrome_bundle_provenance"]["chrome_api_base"] == \
+        "http://127.0.0.1:8080/api", data["chrome_bundle_provenance"]
+
+
+def test_a_readme_without_a_build_line_is_a_stated_skip_not_a_default_api_base(
+        live_repo, tmp_path, monkeypatch):
+    """The harvest, refused rather than invented.
+
+    Falling back to a hardcoded base would build a worker whose API base is a guess and then
+    call the result provenance: the byte compare would red for the wrong reason on every
+    round whose README had been edited, and green for the wrong reason if the guess ever
+    happened to match. This is `frontend_probe`'s `api_base_harvested` rule, one rung later.
+    """
+    _chrome_repo(live_repo, readme="# Lloyd Companion\n\nNo build command here.\n")
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    assert not calls, "a build ran with no harvested API base"
+    assert "chrome bundle provenance skipped" in detail, detail
+    assert "chrome-extension/README.md" in detail, detail
+    # The shipped wording, quoted exactly: the node says what an unset base would BAKE,
+    # because that is the mechanism by which a missing README line becomes a wrong bundle.
+    assert "bake '/api' instead" in detail, detail
+    # The skip arm's dict is `{skipped, reason}` — a named skip, not a zero-cost build — and
+    # the rung's record repeats it under `chrome_bundle_provenance`. Pinned as a shape: a
+    # reader must be able to tell "the node declined" from "the node ran and cost 0.0s", and
+    # the rung's top-level `chrome_build_seconds` key is only present on the arms that built.
+    assert data["chrome_bundle_provenance"]["skipped"] is True, data
+    assert "VITE_API_BASE" in data["chrome_bundle_provenance"]["reason"], data
+
+
+def test_the_node_reds_on_a_hand_edited_bundle_naming_both_byte_counts(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 1's red leg, which is clause 4's item-level leg: the bundle a round shipped.
+
+    The edit is the one every existing test lets through — a pinned literal added straight to
+    the minified file, which keeps the harvested literals and the API base and so passes all
+    ten nodes in tests/test_chrome_extension_manifest_tracked.py. The verdict has to name
+    both byte counts, because "the bytes differ" tells a reader nothing about whether they
+    were 2 bytes off or the file is a different document. And it compares ONLY the worker:
+    the panel half of `dist/` re-hashes on every build until #3769 lands its rebuild, so a
+    whole-`dist/` comparison would sit permanently red.
+    """
+    _chrome_repo(live_repo)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    monkeypatch.setattr(
+        G, "_run", _fake_chrome_run(produce=b"x" * (len(TRACKED_WORKER_BYTES) + 7),
+                                    calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    # A REFUSED arm returns the node's dict flat, unwrapped: the rung's failing return is
+    # `return False, c_detail, c_data`, so the row the reader gets on a red round has the
+    # `chrome_*` keys at the top level. Pinned as a shape because the two shapes are not
+    # interchangeable — a ledger consumer that reads `chrome_bundle_provenance` on a red row
+    # reads nothing at all, which is the difference between a finding and a silence.
+    row = data
+    assert (f"produced {len(TRACKED_WORKER_BYTES) + 7} bytes" in detail
+            and f"the tracked file is {len(TRACKED_WORKER_BYTES)}" in detail), detail
+    assert row["chrome_produced_bytes"] == len(TRACKED_WORKER_BYTES) + 7, row
+    assert row["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), row
+    assert CHROME_BUNDLE in detail, detail
+    assert "npx vite build -c vite.chrome.config.ts" in detail, detail
+    assert "panel half of dist/ is deliberately NOT compared" in detail, detail
+
+
+def test_a_round_that_rebuilds_the_worker_clears_the_node(
+        live_repo, tmp_path, monkeypatch):
+    """The green leg of the same boundary: source changed, bundle rebuilt, bytes match.
+
+    The round edits the source AND the bundle, which is what the grant is for. What makes
+    this a leg and not a tautology is the byte identity: the fake build returns the bytes
+    that are tracked, which is what a real `npx vite build -c vite.chrome.config.ts` produces
+    — measured twice byte-identical to tracked at this repo's HEAD, the worker entry having a
+    fixed name precisely because the config names it.
+    """
+    _chrome_repo(live_repo)
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=[CHROME_WORKER_SRC, CHROME_BUNDLE], head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(produce=TRACKED_WORKER_BYTES))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    assert "byte-for-byte" in detail, detail
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), row
+
+
+def test_a_rehashed_panel_asset_cannot_redden_the_worker_node(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 1's "compares no other path under `chrome-extension/dist/`", priced.
+
+    The green legs above already show it structurally — the fake build writes the worker and
+    nothing else, so a widened comparison would red them all on a missing file — but the clause
+    is about the files that DO exist, so this node hands the build a panel half that disagrees
+    with the tracked one and requires the rung to stay green. It disagrees the way the real
+    build's does: `#3769`'s own triage printed these renames, `sidepanel-BaMPpFsS.js →
+    sidepanel-B1WTfEMd.js`, `sidepanel-C_mryqSb.css → sidepanel-Y7m5TRdo.css`, and rewrote the
+    two asset lines in `dist/sidepanel.html`. Comparing them would sit every chrome round red
+    until that rebuild lands, which is the permanent-red the item rules out and #3769 owns.
+    """
+    import types
+
+    _chrome_repo(live_repo)
+    tracked_panel = b'<html><script src="/assets/sidepanel-BaMPpFsS.js"></script></html>\n'
+    (live_repo / "chrome-extension" / "dist" / "sidepanel.html").write_bytes(tracked_panel)
+    git(live_repo, "add", "chrome-extension/dist/sidepanel.html")
+    git(live_repo, "commit", "-qm", "tracked panel html for the no-widening leg")
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    real = G._run
+
+    def build(cmd, cwd=None, env=None, timeout=900.0):
+        if not str(cmd[0]).endswith("node_modules/.bin/vite"):
+            return real(cmd, cwd=cwd, env=env, timeout=timeout)
+        out_dir = Path(cmd[cmd.index("--outDir") + 1])
+        (out_dir / "service-worker.js").write_bytes(TRACKED_WORKER_BYTES)
+        (out_dir / "sidepanel.html").write_bytes(
+            b'<html><script src="/assets/sidepanel-B1WTfEMd.js"></script></html>\n')
+        (out_dir / "assets").mkdir(parents=True, exist_ok=True)
+        (out_dir / "assets" / "sidepanel-B1WTfEMd.js").write_bytes(b"rebuilt panel\n")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(G, "_run", build)
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    assert "byte-for-byte" in detail, detail
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_produced_bytes"] == row["chrome_tracked_bytes"] == \
+        len(TRACKED_WORKER_BYTES), row
+    assert git(wt, "status", "--porcelain", "--", "chrome-extension/").stdout == ""
+
+
+def test_the_node_reds_when_the_build_dirties_the_worktree(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 4: the copy plugin writes outside `--outDir`, and that write must be seen.
+
+    `copyExtensionStatic().closeBundle` rewrites `chrome-extension/dist/manifest.json` and
+    `icons/` at their absolute paths whatever `--outDir` says. Today the rewrite is
+    content-identical so porcelain is empty; a config that starts emitting something new, or
+    a round that tracked a different manifest, would leave the round's diff missing bytes the
+    build produced. The offending paths are named because "the tree is dirty" without them
+    sends the reader to `git status` on a worktree that is deleted after the round.
+    """
+    _chrome_repo(live_repo)
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(
+        produce=TRACKED_WORKER_BYTES,
+        dirty={"chrome-extension/dist/manifest.json": b'{"changed": true}\n'}))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    assert "dirty under chrome-extension/" in detail, detail
+    assert "chrome-extension/dist/manifest.json" in detail, detail
+    assert "copy plugin" in detail, detail
+
+
+def test_the_copy_plugin_rewriting_content_identically_leaves_the_node_green(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 4's pass arm, which is the state the node ships in.
+
+    The plugin rewrites the manifest on every build with the same bytes; porcelain reports
+    nothing, and the node must not invent a finding out of a touched mtime. The file is
+    rewritten here with its OWN content, which moves the mtime and not the blob — the exact
+    thing a real chrome build does to a clean tree, measured: `dist/manifest.json` mtime
+    changed and `cmp` against the tracked copy stayed silent.
+    """
+    _chrome_repo(live_repo)
+    manifest = b'{"manifest_version": 3, "name": "Lloyd Companion"}\n'
+    (live_repo / "chrome-extension" / "dist" / "manifest.json").write_bytes(manifest)
+    git(live_repo, "add", "chrome-extension/dist/manifest.json")
+    git(live_repo, "commit", "-qm", "tracked manifest for the copy-plugin leg")
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    assert git(wt, "status", "--porcelain", "--", "chrome-extension/").stdout == ""
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(
+        produce=TRACKED_WORKER_BYTES,
+        writes={"chrome-extension/dist/manifest.json": manifest}))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, (detail, data.get("chrome_bundle_provenance"))
+    assert "porcelain-clean" in detail, detail
+
+
+def test_a_base_without_the_chrome_half_is_a_stated_skip(
+        live_repo, tmp_path, monkeypatch):
+    """A base with no `chrome-extension/` at all is a skip, never a failure.
+
+    A worktree branched at a base without the chrome half cannot be compared, and the node
+    must not turn "nothing to compare" into "your bundle is wrong" — the same asymmetry
+    #3571 records for the tracked manifest nodes, where a missing file is a stated skip. It
+    returns before the build too: the seconds it would spend cannot buy a verdict.
+    """
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})   # no _chrome_repo: base has no chrome/
+    calls = []
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    # The arm that answers is the README one, and the ORDER is the finding: with no
+    # `chrome-extension/` in the base at all there is no README to harvest, so the node
+    # refuses to guess an API base and never launches a build. The deletion arm below this
+    # one ("a round deleted the file Chrome loads") is reachable only on a tree that HAS a
+    # README and a build and lacks the tracked bundle — a different round, and it is pinned
+    # there rather than here.
+    assert "chrome bundle provenance skipped" in detail and "chrome-extension/README.md" \
+        in detail, detail
+    assert not calls, "a build ran on a base with no chrome-extension/ to build or compare"
+    assert not calls, (
+        "the node ran a build to compare against a file that does not exist, which costs "
+        "the build's seconds and produces a mismatch it cannot explain")
+
+
+def test_the_node_skips_naming_the_vite_path_when_vite_is_absent(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5's skip arm, called on the node itself: no install says so, it does not fail.
+
+    Reached directly rather than through `rung_frontend`, and that is the finding: the rung
+    already refuses a round whose LIVE tree has no vite ("live web/node_modules has no vite
+    — run npm install"), so through the rung this arm is unreachable and a test that drove it
+    that way would fail on the rung's own guard, not on the node's. What is under test is the
+    node's answer when the worktree it was handed has no install — a machine where the gate
+    reached it some other way, or a future caller — and the answer must be a skip naming the
+    path, because a box with no `npm install` must not have every chrome round refused by a
+    check that never ran. `_vitest_run`'s None-skip is the same shape.
+    """
+    _chrome_repo(live_repo)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+    # No symlink yet: `_frontend_gate` only makes the LIVE install, and it is
+    # `rung_frontend` itself that links it into the worktree. So the worktree handed to the
+    # node here is exactly the thing the clause describes — a tree with no install.
+    assert not (wt / "web" / "node_modules").exists()
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    ok, detail, data = G.chrome_bundle_provenance(wt, wt / "web", "SM_T")
+    assert ok is True, detail
+    assert "chrome bundle provenance skipped" in detail, detail
+    assert "web/node_modules/.bin/vite" in detail, detail
+    assert not calls, "a build was launched with no vite to run it"
+    assert data == {"skipped": True, "reason": "no web/node_modules/.bin/vite"}, data
+
+
+def test_the_rung_detail_records_the_chrome_build_seconds(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5's cost arm: the node's wall-clock sits beside the other timings.
+
+    The frontend rung has always carried a cost line, and the reason this node needs one is
+    stated on the item: its real per-round cost is measurable only after landing, and the
+    trigger set is the knob to revisit if it stretches the rung. A node that adds seconds to
+    a ladder and reports none is how a 20-minute gate acquires a minute nobody can point at.
+    """
+    _chrome_repo(live_repo)
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
+                           head={}, base={})
+
+    def slow_run(cmd, cwd=None, env=None, timeout=900.0):
+        import types
+        if not str(cmd[0]).endswith("node_modules/.bin/vite"):
+            return real(cmd, cwd=cwd, env=env, timeout=timeout)
+        time.sleep(0.05)
+        out_dir = Path(cmd[cmd.index("--outDir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "service-worker.js").write_bytes(TRACKED_WORKER_BYTES)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    real = G._run
+    monkeypatch.setattr(G, "_run", slow_run)
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    secs = data["chrome_build_seconds"]
+    assert isinstance(secs, float) and secs >= 0.01, secs
+    assert re.search(r"chrome bundle provenance.*in \d+\.\d+s", detail), detail
+
+
+def test_a_chrome_only_delta_re_rungs_the_rung_rather_than_reusing_a_green():
+    """Clause 3's second caller, which is where the bug would have survived.
+
+    Fixing only `rung_frontend`'s filter leaves this rule: a round that passes, then commits
+    a rebuild while the gate is running, would reuse the earlier green and never look at the
+    rebuilt bytes. Both callers now ask the one predicate, so this delta and that filter
+    cannot disagree — and the disagreement is not hypothetical, it is how `dc81f046` would
+    still have skipped after only one of the two was fixed.
+    """
+    rule = G.Gate._reuse_rule
+    assert rule("frontend", [CHROME_BUNDLE]) is None
+    assert rule("frontend", [CHROME_WORKER_SRC]) is None
+    assert rule("frontend", ["web/src/api.ts"]) is None
+    assert rule("frontend", ["app/harness/loop.py"]) == "no frontend path in the delta"
+    assert rule("frontend", ["chrome-extension/manifest.json"]) == (
+        "no frontend path in the delta")
+    assert rule("venv", [CHROME_BUNDLE]) == "no requirements path in the delta", (
+        "the frontend branch fell through into another rung's rule")
+
+
+def test_a_red_chrome_verdict_refuses_the_rung_whose_build_passed(
+        live_repo, tmp_path, monkeypatch):
+    """The boundary this item exists for: `vite build` green is not provenance.
+
+    tsc is green, the dashboard build reports success, vitest is absent and skipped — the
+    rung is green on every signal it had before this node, and the only thing that refuses it
+    is the produced bytes differing from the tracked ones. If the verdict were ever downgraded
+    to a note the way the dashboard probe is observe-only, this node goes red, and that is
+    deliberate: the probe measures a false-block rate before it blocks, whereas this one ships
+    with a measured zero — byte-identical to tracked at this HEAD, twice, 5190 bytes.
+    """
+    _chrome_repo(live_repo)
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=[CHROME_WORKER_SRC], head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", lambda web, out_dir, timeout=600: (True, ""))
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(produce=b"hand-authored bundle\n"))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    assert "is not what the tracked source builds" in detail, detail
+    # The refusal is the NODE's sentence and nothing else — the tsc summary, the `vite build
+    # ok` of the dashboard bundle and the probe line are gone from the returned detail. That
+    # is the right call and is pinned so a later edit cannot quietly reverse it: a reader
+    # given "vite build ok; … ; the bundle is not what the source builds" has to find the
+    # finding inside a line that opened by saying everything was fine.
+    assert "vite build ok" not in detail and "tsc:" not in detail, detail
+    # The old signals were all green, which is what makes this the boundary: the build fake
+    # reported success, tsc found nothing new, and only the byte compare refused the round.
+    assert data["chrome_produced_bytes"] == 21, data          # flat, as a refusal returns it
+    assert data["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), data

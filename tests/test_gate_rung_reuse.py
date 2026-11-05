@@ -87,7 +87,12 @@ def test_a_rung_is_reused_when_nothing_relevant_changed(tmp_path, stub_git):
     assert got is not None
     data, why = got
     assert data == {"ok": 1}
-    assert "no web/ path" in why
+    # #3770 clause 3 renamed this rule's excuse, because the branch now asks
+    # `G.frontend_changed(delta)` — which admits the two granted chrome-extension paths as
+    # well as `web/` — so "no web/ path" was no longer the measurement it reported. The
+    # chrome-only delta that DOES re-run the rung is pinned beside it, in
+    # tests/test_automod_gate.py::test_a_chrome_only_delta_re_rungs_the_rung_rather_than_reusing_a_green.
+    assert "no frontend path" in why
 
 
 def test_a_rung_is_re_run_when_its_own_files_moved(tmp_path, stub_git):
