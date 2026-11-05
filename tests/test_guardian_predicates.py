@@ -2031,8 +2031,12 @@ def _stray_incident_with(tmp_path, monkeypatch, detector):
     clears: list[tuple[str, bool]] = []
     real_resolve = g.notifier.resolve            # the real method, wrapped not replaced
 
-    def _resolve(title, note_text):
-        ok = real_resolve(title, note_text)
+    def _resolve(title, note_text, *, measured_root=""):
+        # `measured_root` is a pass-through, not a subject: #3792 clause 1 put the root
+        # into the shipped call from `_runtime_data_incident`, and this wrapper records
+        # which headings the walk reached and whether each sealed — a claim that is the
+        # same whether or not the clearance carries a root.
+        ok = real_resolve(title, note_text, measured_root=measured_root)
         clears.append((title, ok))
         return ok
 

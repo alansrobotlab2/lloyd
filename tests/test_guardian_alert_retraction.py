@@ -1278,9 +1278,15 @@ def test_a_check_that_measures_neither_condition_still_walks_every_heading(tmp_p
 
     seen: list[tuple[str, bool]] = []
     real_resolve = g.notifier.resolve
-    monkeypatch.setattr(g.notifier, "resolve",
-                        lambda title, text: (lambda ok: (seen.append((title, ok)), ok)[1])(
-                            real_resolve(title, text)))
+    # `measured_root` is in the shim's signature because #3792 clause 1 put it in the
+    # shipped call: the clearance must carry the root it measured for the daily-note
+    # writer to be able to say so. The node's own claim — one `resolve` per heading, each
+    # True, nothing written — is asserted over `seen` and is unchanged by the widening.
+    monkeypatch.setattr(
+        g.notifier, "resolve",
+        lambda title, text, measured_root="": (
+            (lambda ok: (seen.append((title, ok)), ok)[1])(
+                real_resolve(title, text, measured_root=measured_root))))
 
     # Nothing is asserted about the return: on this path it is `retracted`, whether any
     # `resolve` succeeded, and the walk below is what this node is about.
@@ -1565,3 +1571,281 @@ def test_a_drill_seals_alert_md_and_never_posts_a_close(tmp_path):
     assert board.gets == [], (
         "the board read sits above the external gate, so a drill pays the row "
         "lookup it cannot act on")
+
+
+# ── #3792: the SEAL side — a foreign `cleared:` line says so in the line itself ──
+#
+# #3628 gave the ALERT SIDE a label (`cross-root seal:`) and said outright, at
+# `notify.py:79-80`, that "whether a cross-root process may seal at all is a ruling
+# #3628 does not take". The seal side stayed unlabelled: `Notifier.resolve` compared no
+# roots, so the line a human reads FIRST — the `cleared:` line that closed the section —
+# carried no marker whenever the finding had genuinely gone and no later check existed
+# to re-alert. `memory/2026-10-29.md` carries five of those, each certifying a
+# `lloyd-work/SM_*/home/lloyd-data` tree that no longer exists, over a rule whose purpose
+# is protecting `/home/alansrobotlab/lloyd-data`.
+#
+#: The live runtime-data root, i.e. the root the reader of the daily note means.
+DATA_LIVE = "/home/alansrobotlab/lloyd-data"
+#: The code tree the live guardian walks, and the path every shipped clearance prints
+#: beside its data root (`guardian.py`: "inside the code tree of {policy.REPO}").
+TREE_LIVE = "/home/alansrobotlab/lloyd"
+#: One automod round's data root: `worktree.py` symlinks `~/obsidian` into the round
+#: home, so a round's guardian writes THIS live vault while `LLOYD_DATA` names this tree.
+ROUND_DATA = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+#: The same round's code tree. Printed by a round's clearance exactly as the live one
+#: prints `TREE_LIVE`, and the path that must NOT reach the marker (#3628's own review
+#: advisory: the label listed `policy.REPO`, "a path the same check walks and prints in
+#: every clearance").
+ROUND_TREE = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd"
+#: The shipped shadow alert's heading, spelled as `RUNTIME_DATA_SHADOW_ALERT_TITLE`
+#: spells it at `guardian.py:193`.
+DATA_SHADOW_TITLE = (
+    "Content-empty databases under the data root are shadowing Lloyd's populated stores")
+#: Shaped like `_shadow_alert_body`'s output: the root it measured in its first
+#: sentence, then the named pair under that root. Every absolute path it prints is
+#: either `DATA_LIVE` or under it, which is what makes an all-clear naming `DATA_LIVE`
+#: an honest one and an all-clear naming `ROUND_DATA` a foreign one.
+DATA_SHADOW_BODY = (
+    "A content-empty database inside /home/alansrobotlab/lloyd-data has the same name "
+    "as a populated database elsewhere under that same root (1 such file, checked "
+    "2026-11-05T09:00:00Z). This check moves and deletes NOTHING.\n\n"
+    "- empty `/home/alansrobotlab/lloyd-data/kg.sqlite` (81,920 bytes, 0 rows in 4 "
+    "tables) — trust `/home/alansrobotlab/lloyd-data/kg.sqlite` (245,760 bytes)")
+#: The clearance the shipped check writes when both scans came back clean
+#: (`guardian.py:2364-2371`): the tree it walked, the data root it walked, and the
+#: "absent with no move recorded" wording.
+def _clearance(tree: str, data_root: str) -> str:
+    return (f"no runtime stores inside the code tree of {tree}, and no database with "
+            f"zero data rows shadowing a populated store under {data_root} — absent "
+            "with no move recorded by the guardian, so the instructions above are "
+            "stale and nothing here accounts for a path that was named and is now gone")
+
+
+def _cleared_line(text: str, title: str) -> str:
+    """The one `cleared:` line inside `title`'s section, by the shipped parser.
+
+    Asserted singular on purpose: a node that took `lines[0]` would pass on a note whose
+    seal duplicated the section, which is the failure #3150 exists to prevent.
+    """
+    hits = [ln for sec in _sections_of(text, title)
+            for ln in sec.splitlines()
+            if ln.startswith(f"{notify.DAILY_CLEARED_PREFIX} ")]
+    assert len(hits) == 1, f"expected exactly one cleared line:\n{text}"
+    return hits[0]
+
+
+def _marker_segment(line: str) -> str:
+    """The marker segment of one `cleared:` line, from its prefix to the line's end.
+
+    Scoped because the clearance's own prose — shipped bytes, unchanged by this round —
+    names its code tree ahead of the marker: asking whether a path is in the LINE could
+    never fail, and clause 3 is a claim about what the MARKER adds.
+    """
+    cut = line.find(notify.DAILY_CROSS_ROOT_CLEAR_PREFIX)
+    assert cut >= 0, f"no #3792 marker in that line:\n{line}"
+    return line[cut:]
+
+
+def _marker_paths(line: str) -> set[str]:
+    """Every absolute path inside the marker segment of one `cleared:` line."""
+    return set(notify._absolute_roots(_marker_segment(line)))
+
+
+def test_a_foreign_data_root_seal_marks_its_own_cleared_line_and_still_closes(
+        tmp_path):
+    """#3792 clause 1: the seal that measured another root says so IN ITS OWN LINE.
+
+    The open section's body measured `DATA_LIVE`; the clearance that closes it measured
+    one automod round's `home/lloyd-data`. The `cleared:` line therefore carries the
+    cross-root marker naming BOTH roots — the one this seal measured and the one the
+    section it closed measured — while the section still closes: the open marker is gone,
+    `resolve` still answers True, and the next finding of the same incident opens a fresh
+    section, which is #3628's re-alert behaviour and must stay exactly as shipped.
+
+    This is the byte that `memory/2026-10-29.md` lacked: five `cleared:` lines each
+    certifying a deleted `lloyd-work/SM_*` tree, none of them saying so.
+    """
+    n = _notifier(tmp_path)
+    assert n.alert("error", DATA_SHADOW_TITLE, DATA_SHADOW_BODY, coalesce=True)
+    note = _vault_note(n)
+    before = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN in before, (
+        f"precondition: nothing open, so a seal that wrote nothing would leave every "
+        f"assertion below true of a note that was never sealed:\n{before}")
+
+    assert n.resolve(DATA_SHADOW_TITLE, _clearance(ROUND_TREE, ROUND_DATA),
+                     measured_root=ROUND_DATA) is True, (
+        "clause 1: a marked seal must still CLOSE the section — `resolve` returning "
+        "False would keep the incident live and re-file it")
+
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN not in text, (
+        f"clause 1: the section did not close:\n{text}")
+    line = _cleared_line(text, DATA_SHADOW_TITLE)
+    assert notify.DAILY_CROSS_ROOT_CLEAR_PREFIX in line, (
+        f"clause 1: a foreign seal published an unmarked all-clear:\n{line}")
+    assert ROUND_DATA in line, f"clause 1: the root this seal measured:\n{line}"
+    assert DATA_LIVE in line, (
+        f"clause 1: the root the section it closed measured:\n{line}")
+    # #3628's alert-side label is a different line in a different section; the seal-side
+    # marker must not be mistaken for it, or the node below re-labels nothing new.
+    assert notify.DAILY_CROSS_ROOT_PREFIX not in text, (
+        f"the seal-side marker borrowed #3628's own prefix:\n{text}")
+    # The finding survives its own retraction (#1536): the reader still sees what was
+    # open, and can now see which root the clearance spoke for.
+    assert "/home/alansrobotlab/lloyd-data/kg.sqlite" in text, text
+    # …and the incident is genuinely closed, so the next finding is a NEW section rather
+    # than a refresh of history — #3628's re-alert, untouched by this change.
+    assert n._vault_note(DATA_SHADOW_TITLE, "a second, separate finding",
+                         coalesce=True) is True
+    text = note.read_text(encoding="utf-8")
+    assert len(_sections_of(text, DATA_SHADOW_TITLE)) == 2, (
+        f"the marked seal left the incident open to the next check:\n{text}")
+
+
+def test_an_all_clear_that_measured_the_root_the_section_measured_is_unchanged(
+        tmp_path):
+    """#3792 clause 2: the honest hourly all-clear keeps today's bytes, marker-free.
+
+    The same section, and a clearance naming the root its body already names (plus the
+    code tree every shipped clearance names). The `cleared:` line is then byte-for-byte
+    `cleared: ` plus the producer's own sentence with nothing appended, and the word
+    `cross-root` appears nowhere in the note — the live guardian's ordinary all-clear may
+    not start carrying a marker, which would make the marker mean nothing.
+    """
+    n = _notifier(tmp_path)
+    assert n.alert("error", DATA_SHADOW_TITLE, DATA_SHADOW_BODY, coalesce=True)
+    note = _vault_note(n)
+
+    assert n.resolve(DATA_SHADOW_TITLE, _clearance(TREE_LIVE, DATA_LIVE),
+                     measured_root=DATA_LIVE) is True
+
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN not in text, text
+    assert _cleared_line(text, DATA_SHADOW_TITLE) == (
+        f"{notify.DAILY_CLEARED_PREFIX} {_clearance(TREE_LIVE, DATA_LIVE)}"), (
+        "clause 2: the same-root all-clear is no longer the sentence the producer "
+        "wrote")
+    assert "cross-root" not in text, (
+        f"clause 2: an honest seal grew a marker:\n{text}")
+
+
+def test_the_seal_side_marker_names_no_path_the_two_sides_do_not_already_print(
+        tmp_path):
+    """#3792 clause 3: two roots in the marker, and nothing that is not one of them.
+
+    The clearance a round's check writes prints THREE absolute paths: its code tree, its
+    data root, and the files its body names. The marker's job is to say which root the
+    seal measured and which the section measured — so it names `ROUND_DATA` and
+    `DATA_LIVE` and NO THIRD ABSOLUTE PATH: `ROUND_TREE`, which the clearance prints as
+    plainly as its data root, stays out. That is the half #3628's own review advisories
+    never pinned (`tests/test_guardian_predicates.py:2277`,
+    `tests/test_guardian_data_root_shadow.py:633` assert both roots are IN the label and
+    never what must be out of it), and the reason the marker reads the measured root from
+    the caller rather than sweeping every path token out of the clearance.
+    """
+    n = _notifier(tmp_path)
+    assert n.alert("error", DATA_SHADOW_TITLE, DATA_SHADOW_BODY, coalesce=True)
+    note = _vault_note(n)
+
+    assert n.resolve(DATA_SHADOW_TITLE, _clearance(ROUND_TREE, ROUND_DATA),
+                     measured_root=ROUND_DATA) is True
+
+    line = _cleared_line(note.read_text(encoding="utf-8"), DATA_SHADOW_TITLE)
+    # The set IS the whole clause: `_absolute_roots` returns every absolute token in the
+    # marker segment, so equality with exactly these two roots says the clearance's own
+    # code tree — printed in that same sentence, one step ahead of the marker — did not
+    # join it. Written as a set because `ROUND_TREE` is a raw SUBSTRING of `ROUND_DATA`
+    # (the `/lloyd` vs `/lloyd-data` trap `_root_covered` dodges with its trailing slash),
+    # which makes `ROUND_TREE not in line` an assertion with no false answer: if this
+    # method ever fell back to sweeping the clearance's path tokens instead of the root it
+    # was handed, this node is what goes red.
+    assert _marker_paths(line) == {ROUND_DATA, DATA_LIVE}, (
+        f"clause 3: the marker names only the seal's root and the section's root, each "
+        f"printed by one of the two sides already:\n{line}")
+
+
+def test_a_clearance_naming_only_one_root_marks_exactly_that_root_and_the_section_s(
+        tmp_path):
+    """#3792 clause 3, the plain case: one foreign root in, two roots out, no third.
+
+    A clearance with no `measured_root` handed over — the shape `_seal_measured_incident`
+    and every boot-reconcile call already take — and a sentence naming exactly one
+    absolute path, which is not the one the section measured. The marker then names that
+    one root plus the section's, and no third path can come from anywhere, because the
+    only pool it draws from is the paths these two lines already print.
+    """
+    n = _notifier(tmp_path)
+    assert n.alert("error", DATA_SHADOW_TITLE, DATA_SHADOW_BODY, coalesce=True)
+    note = _vault_note(n)
+
+    assert n.resolve(DATA_SHADOW_TITLE,
+                     f"nothing content-empty remains under {ROUND_DATA} — the "
+                     "instructions above are stale") is True
+
+    line = _cleared_line(note.read_text(encoding="utf-8"), DATA_SHADOW_TITLE)
+    assert _marker_paths(line) == {ROUND_DATA, DATA_LIVE}, (
+        f"clause 3: one foreign root in, and the marker holds it plus the section's and "
+        f"nothing else:\n{line}")
+
+
+def test_the_runtime_data_check_hands_its_clearance_the_root_it_measured(tmp_path,
+                                                                         monkeypatch):
+    """#3792 across the seam: a round's hourly check marks its own all-clear, end to end.
+
+    The four nodes above drive `Notifier.resolve` directly. This one runs the producer:
+    `Guardian._runtime_data_incident` with `datawatch.DATA_ROOT` pointed at an automod
+    round's `home/lloyd-data` — which is exactly what a round's process measures, because
+    `gate.py`'s `_child_env` sets `LLOYD_DATA` into the round home while
+    `worktree.py:65` symlinks the LIVE `~/obsidian` beside it. The open section in that
+    live vault was written against `/home/alansrobotlab/lloyd-data`, the round's check
+    finds nothing, and the line its clearance writes must therefore say which root it
+    measured. `graph_explain` cannot see this boundary: it is a call from one module into
+    another whose value is a process-local constant, and the artefact is a file a third
+    process reads hours later.
+    """
+    import types
+
+    import guardian as G
+    import notify
+
+    round_home = tmp_path / "lloyd-work" / "SM_FAKE0000_000000" / "home"
+    round_data = round_home / "lloyd-data"
+    round_data.mkdir(parents=True)
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+
+    monkeypatch.setattr(G.policy, "REPO", str(round_home / "lloyd"))
+    monkeypatch.setattr(G.datawatch, "DATA_ROOT", str(round_data))
+    monkeypatch.setattr(G.datawatch, "stray_in_tree", lambda _tree: [])
+    monkeypatch.setattr(G.policy, "GUARDIAN_STATE", str(tmp_path / "guardian-state"))
+    clock = {"t": 1_762_300_000.0}
+    monkeypatch.setattr(G.time, "time", lambda: clock["t"])
+
+    n = notify.Notifier(ledger=tmp_path / "ledger.jsonl", state_dir=tmp_path,
+                        vault_root=str(vault), backend_url="http://127.0.0.1:1")
+    n.announce = lambda *a, **k: {}
+    # The section the LIVE guardian opened an hour ago, in the live vault, measured
+    # against the live data root — the bytes `_shadow_alert_body` writes.
+    assert n._vault_note(G.RUNTIME_DATA_SHADOW_ALERT_TITLE, DATA_SHADOW_BODY,
+                         coalesce=True, measured_root=DATA_LIVE) is True
+    note = _vault_note(n)
+    assert notify.DAILY_STILL_OPEN in note.read_text(encoding="utf-8")
+
+    g = G.Guardian.__new__(G.Guardian)
+    g.notifier = n
+    g.data = types.SimpleNamespace(armed=True)
+    g._alert_seen = {}
+    g.last_alert = ""
+
+    g._runtime_data_incident(clock["t"] + G.policy.STRAY_CHECK_SECONDS)
+
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN not in text, (
+        f"the round's check did not close the section:\n{text}")
+    line = _cleared_line(text, G.RUNTIME_DATA_SHADOW_ALERT_TITLE)
+    assert notify.DAILY_CROSS_ROOT_CLEAR_PREFIX in line, (
+        f"the process the witness names published an unmarked all-clear:\n{line}")
+    assert _marker_paths(line) == {str(round_data), DATA_LIVE}, (
+        f"the marker names the root this check measured and the root the section "
+        f"measured, whatever the two happen to be:\n{line}")

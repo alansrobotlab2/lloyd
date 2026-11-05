@@ -2367,8 +2367,18 @@ class Guardian:
             # still says its words. The line above names both roots, so it is true
             # beside either heading, and a title with no open section writes nothing: the
             # hourly all-clear after the first stays as silent as it was on one title.
+            #
+            # `measured_root` is this branch's own `shadow_root`, and the branch cannot be
+            # reached without it having been measured (`and shadow_measured` above), so the
+            # clearance is never handed a root it did not walk (#2056's rule, and #3109's
+            # reason for raising instead of answering `[]`). It is the same string this
+            # sentence already prints; all it adds is that the daily-note writer no longer
+            # has to guess which of the paths in this line was measured (#3792). The
+            # process that reaches this line from an automod round's checkout fills it in
+            # with the round's `home/lloyd-data`, and that is exactly the sentence the
+            # marker now says out loud instead of publishing bare.
             for _title in RUNTIME_DATA_ALERT_TITLES:
-                self.notifier.resolve(_title, cleared)
+                self.notifier.resolve(_title, cleared, measured_root=shadow_root)
 
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,

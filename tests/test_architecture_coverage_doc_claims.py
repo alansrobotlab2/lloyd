@@ -3100,8 +3100,17 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # :145 cites :1021 now); its half of the pair is pinned by its own node below,
     # `test_threat_model_t_26_cites_the_guardian_head_the_live_file_actually_has`, so
     # re-pointing one and not the other fails that pair.
-    assert heads[guardian]["main"] == 3294, (
-        f"`main` moved off :3294 ({heads[guardian]['main']}) — if it is gone "
+    # 3294 → 3304 is #3792: ONE hunk, `@@ -2367,8 +2367,18 @@` (11 added, 1 removed, net
+    # +10) — the all-clear's `resolve` loop handing the daily-note writer the root it
+    # measured, so a `cleared:` line can say which root it speaks for. The hunk sits inside
+    # `_runtime_data_incident`, the same window #3584 and #3424 chose for exactly this
+    # reason, so `evaluate_liveness` keeps :1021 and `architecture/threat-model.md`'s T-26
+    # row does not move with it. Re-check: `git diff <base> <head> -- agent-services/
+    # guardian/guardian.py | grep '^@@'` answers that one hunk and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1021 with 3304 below it.
+    assert heads[guardian]["main"] == 3304, (
+        f"`main` moved off :3304 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1021, (
         f"`evaluate_liveness` moved off :1021 "

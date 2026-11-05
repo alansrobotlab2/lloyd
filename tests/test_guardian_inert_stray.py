@@ -267,7 +267,13 @@ def _cleared(tmp_path, monkeypatch, tree, data, strays, armed=True):
     g.data = types.SimpleNamespace(armed=armed)
     cleared: list[tuple[str, str]] = []
 
-    def _resolve(title: str, body: str = "") -> bool:
+    def _resolve(title: str, body: str = "", *, measured_root: str = "") -> bool:
+        # `measured_root` is accepted and not recorded on purpose: these nodes assert the
+        # SENTENCE the guardian hands the human surface, and `cleared`'s (title, body)
+        # shape is what eight of them compare against. That the call now CARRIES the root
+        # is pinned where the artefact is the note itself —
+        # `tests/test_guardian_alert_retraction.py::test_the_runtime_data_check_hands_its_clearance_the_root_it_measured`
+        # (#3792), which runs this same method against a real vault instead of a capture.
         cleared.append((title, body))
         return True          # the real method's answer: a section was closed
 

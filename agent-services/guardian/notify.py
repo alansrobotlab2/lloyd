@@ -80,6 +80,19 @@ DAILY_DATED_PREFIX = "dated:"
 #: and no root is recorded here that the alert body and the clearance do not already
 #: print.
 DAILY_CROSS_ROOT_PREFIX = "cross-root seal:"
+#: What `resolve` appends INSIDE a `cleared:` line when the section it is closing measured
+#: a root this clearance does not name (#3792). The seal side's half of the constant above,
+#: and the reason it is a SUFFIX inside the clearance's own line rather than a line of its
+#: own: the line a human reads first is the `cleared:` line, and #3628's label only appears
+#: if some later check still has the finding to re-alert — so on the day the finding really
+#: did go, an unmarked foreign seal closed a live section and published a certification of
+#: a tree nobody is standing in, which is `memory/2026-10-29.md`'s five `cleared:` lines
+#: naming five deleted `lloyd-work/SM_*` trees. A different WORD from the prefix above on
+#: purpose: that one annotates a new alert, this one qualifies a retraction, and a reader
+#: (or a grep) has to be able to tell the two apart. Detection only, as #3628's is: the
+#: ruling on whether a cross-root process may seal at all is owed elsewhere, and this
+#: names no path that the clearance and the section's own body do not already print.
+DAILY_CROSS_ROOT_CLEAR_PREFIX = "cross-root clearance:"
 #: How many dated daily notes `resolve` scans back when it retracts an alarm (#1590). An
 #: alert written at 23:05 and cleared at 00:05 lives in TWO files, because `_daily_note` is
 #: keyed on the date it is called; scanning today's alone finds nothing to seal and used to
@@ -115,6 +128,70 @@ def _absolute_roots(line: str) -> list[str]:
         if stripped.startswith("/") and len(stripped) > 1:
             out.append(stripped)
     return out
+
+
+def _root_covered(root: str, others: list[str]) -> bool:
+    """True when `others` already names `root`, or a root of which it is part (#3792).
+
+    Presence, not sole-ness, and containment either way, which is #3628's rule reused:
+    a body prints its root AND the files under it, so `/…/lloyd-data/kg.sqlite` is the
+    same measurement as `/…/lloyd-data` and an all-clear naming the latter is honest
+    about a section that named the former. The trailing slash is not decoration —
+    `/home/alansrobotlab/lloyd` does NOT contain `/home/alansrobotlab/lloyd-data`, and a
+    bare `startswith` would call the live code tree an ancestor of the live data root and
+    silence the marker on the exact box this exists for.
+    """
+    for other in others:
+        if root == other or root.startswith(other + "/") or other.startswith(root + "/"):
+            return True
+    return False
+
+
+def _roots_outside(roots: list[str], others: list[str]) -> list[str]:
+    """The roots in `roots` no root in `others` covers, with nested paths collapsed.
+
+    Collapsing is what keeps a marker to two roots instead of four: `guardian.py`'s
+    shadow body names its data root and then both halves of the shadowed pair under it,
+    and only the root is the thing a reader needs beside the other side's. Order and
+    duplicates are handled here so both callers stay boring.
+    """
+    uniq: list[str] = []
+    for root in roots:
+        if root in uniq or _root_covered(root, others):
+            continue
+        uniq.append(root)
+    return [r for r in uniq
+            if not any(o != r and r.startswith(o + "/") for o in uniq)]
+
+
+def _clearance_measured_roots(cleared_line: str) -> list[str]:
+    """The roots a `cleared:` line's own sentence names, minus any #3792 marker.
+
+    `_cross_root_seal_line` asks which root the process that wrote this clearance
+    MEASURED, and the marker `resolve` appends names a second root that process explicitly
+    did not measure — the root of the section it was closing. Counting it would make a
+    marked foreign clearance read as an honest one to the next alert from the live root
+    (the marker prints that live root, so `measured_root` would be found "present"), and
+    #3628's label would go missing on exactly the day it is owed. So the marker segment is
+    cut off before the scan, and the answer stays the clearance's own sentence.
+    """
+    cut = cleared_line.find(DAILY_CROSS_ROOT_CLEAR_PREFIX)
+    if cut >= 0:
+        cleared_line = cleared_line[:cut]
+    return _absolute_roots(cleared_line)
+
+
+def _section_measured_roots(section_text: str) -> list[str]:
+    """The roots one section's own body prints, minus #3628's label line.
+
+    A section carrying `cross-root seal:` names the root of a THIRD process — the one that
+    closed the section above it — and that is not a root this section's check measured.
+    Reading it as one would let a label written by the alert side talk the seal side into
+    naming a root the body never walked.
+    """
+    kept = "\n".join(ln for ln in section_text.splitlines()
+                     if not ln.strip().startswith(DAILY_CROSS_ROOT_PREFIX))
+    return _absolute_roots(kept)
 
 
 def _cross_root_line_of(section_text: str) -> str | None:
@@ -840,7 +917,50 @@ class Notifier:
         except Exception:
             return False
 
-    def resolve(self, title: str, note_text: str) -> bool:
+    def _cross_root_clear_marker(self, section_text: str, note_text: str,
+                                 measured_root: str) -> str:
+        """The suffix for a `cleared:` line whose section measured a root it does not.
+
+        "" — the old bytes — unless BOTH sides have a root to complain about:
+
+        * the section's body names no absolute path the clearance fails to name. That is
+          the honest hourly all-clear by the live guardian, and clause 2 of #3792 is that
+          it stay byte-identical: a marker on an honest seal would make the marker mean
+          nothing;
+        * the clearance has no root of its own to name — neither a `measured_root` from its
+          producer nor a path in its own sentence. Then there is nothing true to say about
+          where it stood.
+
+        Otherwise the suffix names the root this seal measured and the root the section
+        measured, and NOTHING ELSE: the code tree the clearance walks as plainly as its
+        data root stays out, which is the half #3628's review advisories never pinned (the
+        two nodes it left behind assert both roots are in its label and never what must be
+        out of it). Every path here is one the clearance or the section already printed, so
+        the marker adds no claim — it only puts the two claims that were already on the
+        page next to each other, in the one line a reader reaches first.
+
+        `measured_root` is preferred over sweeping the clearance's path tokens because a
+        shipped clearance prints two of them and only one was measured.
+        """
+        section_roots_all = _section_measured_roots(section_text)
+        clearance_roots = _absolute_roots(note_text)
+        handed = [measured_root] if measured_root else []
+        section_roots = _roots_outside(section_roots_all, clearance_roots + handed)
+        if not section_roots:
+            return ""
+        seal_roots = _roots_outside(handed or clearance_roots, section_roots_all)
+        if not seal_roots:
+            return ""
+        return (
+            f" [{DAILY_CROSS_ROOT_CLEAR_PREFIX} "
+            f"{self._stamp().strftime('%Y-%m-%dT%H:%M:%SZ')} this all-clear measured "
+            f"{' or '.join(seal_roots)}; the section it is closing was measured against "
+            f"{' or '.join(section_roots)}. The section is closed, but this line is not a "
+            "statement about that second root: the process that wrote it stands in the "
+            "first.]")
+
+    def resolve(self, title: str, note_text: str,
+                *, measured_root: str = "") -> bool:
         """Close an open incident on the daily note. #1536.
 
         An alarm written to the surface a human reads is only half-written until its
@@ -870,6 +990,15 @@ class Notifier:
         read "no other channel is touched… no backlog task", and that is the behaviour
         #3755 was written by: ALERT.md sealed at 09:18:50Z over a `draft` board item the
         same alert created at 09:18:40Z.
+
+        `measured_root` is the runtime-data root THIS process walked, handed over by the
+        one check that has a root to name (#3792). It changes nothing about what gets
+        sealed and nothing about the return value: its whole effect is that a `cleared:`
+        line may say which root it speaks for, in its own text, when that root is not the
+        one the section it is closing was measured against. A caller with no root to name
+        passes nothing and still gets the marker when its own sentence names a root the
+        section's body does not — the check needs no new state, only the two sentences that
+        are already on the page.
 
         ALERT.md is sealed first and by the same rules (#1967), ABOVE the
         `external` gate and before any of this: `alert()` writes that file on
@@ -944,8 +1073,14 @@ class Notifier:
                 # retraction exists to change the answer to.
                 if stale.endswith(DAILY_STILL_OPEN):
                     stale = stale[:-len(DAILY_STILL_OPEN)].rstrip()
+                # Asked PER SECTION, from that section's own bytes, because a note whose
+                # copies name different roots has one honest seal and one foreign one in
+                # the same call (#3150's shape), and because recomputing it here is what
+                # lets clause 2's honest case be a byte-identical no-op rather than a
+                # special branch.
+                marker = self._cross_root_clear_marker(stale, note_text, measured_root)
                 sealed = (sealed[:start] + stale
-                          + f"\n\n{DAILY_CLEARED_PREFIX} {note_text}\n"
+                          + f"\n\n{DAILY_CLEARED_PREFIX} {note_text}{marker}\n"
                           + sealed[end:])
             if sealed == body:
                 continue
@@ -1257,7 +1392,10 @@ class Notifier:
         if cleared is None:
             return None
         foreign: list[str] = []
-        for root in _absolute_roots(cleared):
+        # The clearance's OWN sentence only: a #3792 marker inside that line names the root
+        # of the section it closed, which is a root this clearance did not measure, and
+        # counting it would call a marked foreign seal honest and lose this label.
+        for root in _clearance_measured_roots(cleared):
             if root == measured_root or root.startswith(measured_root + "/"):
                 return None
             if root not in foreign:
