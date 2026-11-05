@@ -2913,10 +2913,9 @@ def test_the_sixth_chat_miss_is_attributed_with_its_own_gap_line_count(sixth, si
     assert "one event on one day" in p
 
 
-def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
-        replication_raw, filing_raw, sixth_raw, seventh_raw, cfg):
+def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(cfg):
     """The filing condition's day count, the gap shape of every qualifying event, and the
-    gap p50 of the window it is quoted in — all derived, all four fixtures, in one node.
+    gap p50 of the window it is quoted in — all derived, every counted-day fixture, in one node.
 
     Three numbers in §10 looked like prose and were measurements: the ordinal "third counted
     day", the per-event gaps of the qualifying chat misses, and each window's OVERALL gap
@@ -2934,6 +2933,15 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
     qualifying gap was 126.5 s — false prose with a green rail on it, which is the failure
     this file exists to make impossible.
 
+    #3804 is why the family is a walk rather than a tuple. The five fixtures this node names
+    by constant were exactly the omission it is about: `_tracked_extracts()` already enumerated
+    the directory, so a sixth counted day arrived as a file, the eight pinned day-lists went
+    red, and hand-widening them would have left THIS scan walking the same five days forever —
+    `[4, 1, 1, 1, 1]`, `len(all_evs) == 8` and `len(windows) == 5` all satisfied over days that
+    no longer include the new one, with the day's gap shape and its share of the largest-gap
+    superlative ungraded and nothing red anywhere. The counts are day-keyed now for the same
+    reason: position over a derived family re-pairs an expectation with the wrong day.
+
     The p50 leg guards a different trap: three days of a per-window figure are a trend, four
     are a trend with a new extreme in it, and 2026-10-15's 100.2 s is that extreme. Quoting a
     day's gap p50 beside a qualifying event's 0.1–0.7 s gap invites the reader to substitute
@@ -2943,7 +2951,7 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], days
+    assert days == COUNTED_DAYS, days
     raw_doc = DOC.read_text(encoding="utf-8")
     assert f"the filing condition is met on a {_ordinal(len(days))} counted day" in raw_doc, (
         f"§10's heading does not carry the derived count ({_ordinal(len(days))}); the node "
@@ -2953,13 +2961,25 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
         "page's evidence set is built from has lost the day it was built on")
     assert f"{_ordinal(len(days))} counted day on which the condition is met" in _sixth_bullet()
 
-    qualifying = [_qualifying(r, gate) for r in
-                  (replication_raw, filing_raw, sixth_raw, seventh_raw,
-                   json.loads(ELEVENTH_EXTRACT.read_text(encoding="utf-8")))]
-    assert [len(evs) for evs in qualifying] == [4, 1, 1, 1, 1], (
-        f"a qualifying day's qualifying-event count moved: {[len(evs) for evs in qualifying]}")
+    # The family comes from `_counted_day_raws`, i.e. from the fixtures on disk, so a sixth
+    # counted day enters this scan the same way it enters `_qualifying_days()` — by being
+    # committed. The completeness of that family is the NEXT node's job, not this one's: an
+    # assert here could not fire on a day this walk never visited.
+    family = _counted_day_raws(gate)
+    assert [day for day, _ in family] == days, (
+        f"the scan walks {[day for day, _ in family]} and _qualifying_days() derives {days}")
+    qualifying = [_qualifying(raw, gate) for _, raw in family]
+    counted = {day: len(evs) for day, evs in zip([d for d, _ in family], qualifying)}
+    assert counted == QUALIFYING_EVENT_COUNTS, (
+        f"a counted day's qualifying-event count moved: derived {counted}, pinned "
+        f"{QUALIFYING_EVENT_COUNTS}")
     all_evs = [e for evs in qualifying for e in evs]
-    assert len(all_evs) == 8
+    # The total the page's "The eight chat miss events now meeting the condition" sentence is
+    # graded against, summed over the derived family instead of typed: at five counted days it
+    # is still 8, and a sixth day's events are in it before anyone writes a sentence.
+    assert len(all_evs) == _pinned_event_total([d for d, _ in family]), (
+        f"the scan derived {len(all_evs)} qualifying events over {[d for d, _ in family]}, "
+        f"not the {_pinned_event_total([d for d, _ in family])} its own days carry")
 
     # The event list §10 prints: one clause per day, each naming how many events that day
     # contributes and what their gaps are. If a qualifying event ever moves out of the
@@ -2983,12 +3003,20 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
     # two asserts are the mechanical half of clause 5: together they say six events are
     # sub-second inside one status line and the seventh is not, so no reading of the page can
     # take "sub-second, single status line" as a property of all seven.
-    first_three = [e for evs in qualifying[:3] for e in evs]
+    # Both keyed by day now, because the family is derived: `qualifying[3]` was the fourth
+    # element of a hand-named five-tuple, and once the walk enumerates the directory the
+    # fourth element is only 2026-10-15 for as long as nothing older is committed. The assert
+    # below has always SAID "2026-10-15's qualifying gap"; now it means that literally.
+    qual_by_day = dict(zip([d for d, _ in family], qualifying))
+    first_three = [e for d in days[:3] for e in qual_by_day[d]]
     assert all(e["n_lines"] == 1 for e in first_three), (
         "a qualifying gap from the first three days no longer fits inside a single status "
         "line, so the page's sub-second claim needs re-scoping again")
     assert max(round(e["gap_s"], 1) for e in first_three) < 1.0
-    late = qualifying[3]
+    late = qual_by_day.get("2026-10-15")
+    assert late is not None, (
+        "2026-10-15 has stopped being a counted day, so this node's odd-one-out and the "
+        "page's shape sentence both need re-scoping rather than this lookup guessing")
     assert all(e["n_lines"] > 1 and e["gap_s"] > 1.0 for e in late), (
         "2026-10-15's qualifying gap stopped being the long multi-line one, and the page "
         "still says it is")
@@ -2998,12 +3026,16 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
 
     # Both superlatives, from the same derivations the list above came from: which day's
     # OVERALL gap p50 is largest, and which day's longest QUALIFYING gap is largest.
-    windows = {r["window"][0]: W.derive(_with_pool(r), gate=gate)["gap_s_p50"]
-               for r in (replication_raw, filing_raw, sixth_raw, seventh_raw,
-                         json.loads(ELEVENTH_EXTRACT.read_text(encoding="utf-8")))}
+    windows = {raw["window"][0]: W.derive(_with_pool(raw), gate=gate)["gap_s_p50"]
+               for _, raw in family}
     worst_day = max(windows, key=windows.get)
     worst = f"{windows[worst_day]:.1f}"
-    assert len(windows) == 5, f"a counted day carries no gap-joined miss: {windows}"
+    # Derived over the same family as the events above, and compared to the same `days`: the
+    # `== 5` it replaced was a length literal that a sixth counted day would have left green
+    # while the superlative below silently stopped covering that day.
+    assert len(windows) == len(days), (
+        f"a counted day carries no gap-joined miss, so the largest-gap-p50 superlative "
+        f"below covers {len(windows)} of the {len(days)} counted days: {windows}")
     longest_qual = {day: max(round(e["gap_s"], 1) for e in evs)
                     for day, evs in zip(days, qualifying)}
     worst_q_day = max(longest_qual, key=longest_qual.get)
@@ -3037,6 +3069,443 @@ def test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event(
         f"no counted day's OVERALL gap p50 is over a second any more ({windows}), so the "
         "page's point that the per-day median and the qualifying-event gap are different "
         "populations has nothing to point at")
+
+
+def _scan_family_gaps(family_days: list[str], days: list[str]) -> list[str]:
+    """Which counted days the §10 gap-shape scan does not walk, NAMED — never a bare bool.
+
+    An omission has to arrive with the day in its mouth because the damage is per-day: an
+    unwalked counted day contributes nothing to `[len(evs) for evs in qualifying]`, nothing to
+    the per-day gap list, and nothing to the largest-gap-p50 superlative, so the page keeps
+    publishing a shape sentence that silently stopped covering that day. "The lengths differ"
+    names none of that.
+
+    Both directions are reported. A family carrying a day that is not counted is the same
+    class of bug — a scan whose membership and the evidence set have come apart — and it is
+    the one a hand-written tuple drifts toward first.
+    """
+    omitted = [f"{d} is a counted day the §10 gap-shape scan does not walk: its qualifying "
+               "events, its entry in the page's per-day gap list and its share of the "
+               "largest-gap-p50 superlative all go ungraded, and nothing else is red"
+               for d in days if d not in family_days]
+    extra = [f"{d} is in the §10 gap-shape scan's family but is not a counted day: the scan "
+              "would grade a day the evidence set does not contain"
+             for d in family_days if d not in days]
+    return omitted + extra
+
+
+def _fixture_reads_by_name(fn) -> list[str]:
+    """Names a test function `X` in `X.read_text(...)` — the fixtures it opens by constant.
+
+    `DOC` is excluded: every doc-claim node reads the page, and the thing being ruled out here
+    is a counted-day extract named by CONSTANT rather than enumerated from the directory. Same
+    idiom as the no-`datetime.now` pin further down this file — `inspect.getsource` and
+    `ast.walk` — for the same reason: the claim is about the code, and a grep of a string form
+    would miss any other way of writing it.
+    """
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap as _textwrap
+
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
+    return sorted({n.func.value.id for n in _ast.walk(tree)
+                   if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+                   and n.func.attr == "read_text" and isinstance(n.func.value, _ast.Name)
+                   and n.func.value.id != "DOC"})
+
+
+def test_the_counted_day_scan_family_is_complete(cfg):
+    """Clause 2 (#3804): the gap-shape scan walks every counted day, and this node is what
+    says so — with the omitted day named, and proven to be able to fail.
+
+    The rail cannot live inside the node it guards. `test_the_third_counted_day_…` discovers a
+    missing day only by walking it, so an omission inside that walk is invisible to it by
+    construction, which is why `_counted_day_raws` and this node are separate and why the
+    comparison below is against `_qualifying_days()` AND the pinned `COUNTED_DAYS`. That pin
+    is the load-bearing half: `_counted_day_raws` and `_qualifying_days()` read the same
+    directory, so a scan that shrank WITH its fixtures would agree with itself and be wrong —
+    the only thing that can catch a five-day scan on a six-day page is a five-day expectation
+    that was widened, and clause 4 keeps exactly one of those in the file.
+
+    The non-vacuity control is therefore the real content of this node. On today's tree every
+    leg so far passes trivially — the derived family IS the complete family — so the
+    comparison is run again against a family with the newest counted day removed, and the
+    node fails if that comes back clean or comes back without naming the day. A guard that
+    cannot be shown to fire is a comment with an `assert` in it.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    family = _counted_day_raws(gate)
+    family_days = [d for d, _ in family]
+    assert _scan_family_gaps(family_days, days) == [], _scan_family_gaps(family_days, days)
+    assert family_days == COUNTED_DAYS, (
+        f"the scan walks {family_days}, the page publishes {COUNTED_DAYS} and the fixtures "
+        f"derive {days}: these three are the same five days or one of them has moved")
+    assert len(family) == len(QUALIFYING_EVENT_COUNTS) == len(COUNTED_DAYS), (
+        f"{len(family)} fixtures, {len(QUALIFYING_EVENT_COUNTS)} pinned per-day counts and "
+        f"{len(COUNTED_DAYS)} published days: the per-day counts are keyed by day, so a scan "
+        "that silently stopped walking one would still match on the rest")
+    assert sorted(QUALIFYING_EVENT_COUNTS) == sorted(COUNTED_DAYS) == sorted(days), (
+        "the pinned per-day count table and the published day list are not the same set")
+
+    # The control: drop the newest counted day out of the family and the gap report has to
+    # name it. This is the exact state a sixth counted day leaves behind once somebody widens
+    # the pinned list by hand and the scan's family is left behind, which is the hole this
+    # clause exists to close.
+    dropped = family_days[-1]
+    shrunk = [d for d in family_days if d != dropped]
+    gaps = _scan_family_gaps(shrunk, days)
+    assert len(gaps) == 1, (
+        f"removing {dropped} from the family produced {len(gaps)} gap reports, not 1 — "
+        f"{gaps}: the comparison is not the one-to-one check this node claims to be")
+    assert dropped in gaps[0], (
+        f"the family went down to {len(shrunk)} of {len(days)} counted days and the report "
+        f"that fired did not name {dropped}: {gaps[0]!r}. A guard that omits the day is the "
+        "same silence with extra steps")
+    # And the symmetric control: a family with a day the evidence set does not have.
+    assert len(_scan_family_gaps(family_days + ["2026-11-11"], days)) == 1, (
+        "inventing a counted day in the family is not reported either, so the comparison "
+        "only looks one way and drift in the other direction is free")
+
+    # The leg that fails on TODAY's tree if the fix is reverted. Everything above compares a
+    # derived thing with a derived thing, so on a fixed tree each is true by construction and the
+    # only live failure left is `family_days == COUNTED_DAYS` — which a hand-widened list
+    # survives, the exact hole this item describes. What cannot be worked around from the page is
+    # the CODE: the scan must not read a fixture by NAME, because a counted day is a file and a
+    # name is not derived from one. Source-scanned in the file's own idiom (`inspect.getsource` +
+    # `ast.walk`; the precedent is the no-`datetime.now` pin on the newest-day functions), with a
+    # positive control beneath it so a scan that matches nothing cannot pass.
+    by_name = _fixture_reads_by_name(
+        test_the_third_counted_day_and_the_gap_shape_of_every_qualifying_event)
+    assert by_name == [], (
+        f"the gap-shape scan reads {by_name} — fixtures named by constant. That is the "
+        "pre-#3804 shape: its family came from `(replication_raw, filing_raw, sixth_raw, "
+        "seventh_raw, ELEVENTH_EXTRACT)`, a counted day arrives as a FILE, and the scan walks "
+        "five while the day-list literals that went red got hand-widened around it")
+    control = _fixture_reads_by_name(
+        test_the_eleventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte)
+    assert control, (
+        "the source scan found no fixture-by-name read in a node whose entire job is reading one "
+        "committed extract, so it is matching nothing and its verdict is an artefact")
+
+
+# ── #3804 clauses 4 and 5: a §10 sentence may not assert an evidence-set size the data denies
+#
+# The page states its own set size in prose, in eight places across the counted-day bullets and
+# the tracked-day one, and every one of those numbers was written on the day it was counted.
+# #3692 already paid this debt by hand once: the 2026-10-01 paragraph had to be rewritten to
+# survive the fifth counted day, and the fifth day's own numbers ("the five extracts", "four of
+# the five", "five-extract evidence set") hold only until the sixth lands. Hand-work at the next
+# counted day is exactly what this node replaces.
+#
+# The bound is not this round's invention. §10's 2026-10-09 and 2026-10-23 bullets have carried
+# "as counted through 2026-10-19" and "as counted through 2026-10-24" since #3088 for precisely
+# this reason — a count that is true of a dated pass stays true when the set grows — and these
+# nodes extend that convention from the acceptance-bar criteria to the evidence set. A sentence
+# naming a different size is fine when it says when it was counted; a sentence naming a
+# different size in the present tense is stale prose with a green rail on it.
+
+#: Cardinal number words, longest first so an alternation cannot match `eight` inside
+#: `eighteen` and then demand a word boundary where there is none.
+_NUM_WORDS = [w for w in _NUMERALS if w not in ("zero",)] + [
+    "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+_NUM_WORDS.sort(key=len, reverse=True)
+_NUM_VALUE = {w: _NUMERALS.index(w) for w in _NUM_WORDS if w in _NUMERALS}
+_NUM_VALUE.update({"thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+                   "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20})
+_NUM_ALT = "|".join(_NUM_WORDS)
+
+#: How §10 states the SIZE of the counted-day evidence set, one row per spelling, each carrying
+#: the two worked examples `test_the_evidence_set_size_clauses_still_match_prose` runs it
+#: against: a sentence at the WRONG size, which must be caught, and one at the derived size,
+#: which must not be.
+#:
+#: The examples are not decoration and not documentation. A pattern that drifts off the page's
+#: own wording makes the scan below silently permanent-green — the exact accident this item is
+#: fixing, a grep whose criterion was already satisfiable while the sentence it named was false.
+#: Every row therefore has to fire on its own stale example or name itself in the failure.
+#:
+#: `size_group` is which capture group holds the SET SIZE. For `N of the N` it is the second:
+#: "four of the five were" claims the set is five, and pins nothing on the four.
+#:
+#: Cardinal words only. §10 is dense with digits — "231 of those 243 misses", "9,709,548 of the
+#: 11,891,022 tokens" — and a cardinal-number scan that accepted digits would fire on
+#: measurements that have nothing to do with the evidence set, which is how the page's own
+#: #3804 criterion quietly returned hits that were all dated anyway.
+EVIDENCE_SET_SIZE_CLAUSES = (
+    {"name": "the N extracts",
+     "pat": re.compile(rf"\bthe ({_NUM_ALT}) extracts\b"),
+     "size_group": 1, "against": "days",
+     "stale": "and the report's evidence set is now the four extracts 2026-09-27 and 2026-09-29.",
+     "current": "and the report's evidence set is the five extracts 2026-09-27 and 2026-10-25."},
+    {"name": "N-extract evidence set",
+     "pat": re.compile(rf"\b({_NUM_ALT})-extract\b"),
+     "size_group": 1, "against": "days",
+     "stale": "this day's event joins the four-extract evidence set rather than an ask.",
+     "current": "this day's event joins the five-extract evidence set rather than an ask."},
+    {"name": "N of the N",
+     "pat": re.compile(rf"\b({_NUM_ALT}) of the ({_NUM_ALT})\b"),
+     "size_group": 2, "against": "days",
+     "stale": "and three of the six were already explained.",
+     "current": "and four of the five were already explained."},
+    {"name": "weakest of the N",
+     "pat": re.compile(rf"\bweakest of the ({_NUM_ALT})\b"),
+     "size_group": 1, "against": "days",
+     "stale": "So the day qualifies on the denominator that served it, and it is the weakest "
+               "of the four.",
+     "current": "So the day qualifies on the denominator that served it, and it is the weakest "
+                "of the five."},
+    {"name": "N events counted",
+     "pat": re.compile(rf"\b({_NUM_ALT}) events counted\b"),
+     "size_group": 1, "against": "events",
+     "stale": "the generalisation was true of the six events counted here and is false of the "
+              "seventh.",
+     "current": "the generalisation was true of the eight events counted here and is false of "
+                "the ninth."},
+)
+
+#: The newest `counted through <date>` bound §10 itself carries (2026-10-19 and 2026-10-24, in
+#: the 2026-10-09 and 2026-10-23 bullets. A bound is a claim that a counting pass happened on
+#: that date, so one naming a date after the page's own newest pass is a present-tense claim
+#: wearing the escape hatch's clothes and does not waive: `counted through 2027-01-01` is a pass
+#: that has not happened, and a check that accepted it would be a grep for the word "counted".
+#: The cap itself is `_COUNTED_THROUGH`, defined once further down this file for §10's two
+#: "newest day" claims and moved whenever the daily job's newest extract moves — which is
+#: precisely when a historical bound stops being historical, so the two uses must move together
+#: or one of them is wrong. Reading it from inside a function body (late-bound, at call time)
+#: rather than typing 2026-10-24 a second time is that definition's own standing instruction:
+#: "One definition, because two would let the comments diverge the first time either is edited
+#: while the second assignment silently wins."
+_COUNT_BOUND_RE = re.compile(r"\bcounted through (\d{4}-\d{2}-\d{2})")
+#: Sentence ends. Deliberately NOT `:` or an em dash, both of which §10 uses INSIDE one claim:
+#: "…the report's evidence set is **the five extracts 2026-09-27 (four events), …** — 2026-09-27
+#: is the day that FIRST met it**" is one sentence, and splitting at the dash would let a bound
+#: standing in one half of a claim waive a stale size stated in the other.
+_EVIDENCE_SENTENCE_END = re.compile(r"[.!?;]+\s+")
+
+
+def _s10_bullet_spans(raw_doc: str) -> list[tuple[int, str]]:
+    """§10 one bullet at a time: `(first line of the bullet, its text joined and collapsed)`.
+
+    Split on `^- ` and not on `_DAY_HEAD`, which is the file's other bullet finder and the one
+    a first draft of this node used. `_DAY_HEAD` is `- **The {} ` and the counted-day bullets
+    answer to it; the 2026-10-09, 2026-10-23 and 2026-10-29 bullets are `- **<date> …` and it
+    does not find them. A scan keyed on the counted-day headings would therefore skip the
+    2026-10-29 paragraph, which states the set size in the present tense ("the five-extract
+    evidence set the accepted-loss ruling is read against") while being a day that joins
+    nothing — exactly the sentence a sixth counted day rots first, because it never gets a
+    counted-day edit at all.
+
+    The scan is bounded at the next `## `, so the Review log is NOT in scope. Its entries are
+    dated changelog lines that record what the set was when each was written, several carry
+    superseded-by pointers for exactly that reason, and rewriting them would destroy the
+    history the page keeps them for.
+    """
+    m = re.search(r"^## 10\..*?(?=^## |\Z)", raw_doc, re.M | re.S)
+    assert m, "§10 is not in the page, so nothing below can be scanned and green would lie"
+    lines = m.group(0).splitlines()
+    first_line = raw_doc[:m.start()].count("\n") + 1
+    heads = [i for i, ln in enumerate(lines) if ln.startswith("- ")]
+    starts = [0] + heads
+    out = []
+    for n in range(len(starts)):
+        end = heads[n] if n < len(heads) else len(lines)
+        text = " ".join(" ".join(lines[starts[n]:end]).split()).replace("**", "")
+        if text:
+            out.append((first_line + starts[n], text))
+    return out
+
+
+def _stale_count_sentences(line: int, text: str, counts: dict[str, int]) -> list[str]:
+    """Sentences of ONE joined span that assert a set size `counts` denies with no date bound.
+
+    `line` exists only for the message: the caller supplies the span, so a hit can be reported
+    against the page while the matching runs on joined prose. Joining before matching is the
+    whole reason this is a node rather than the grep the item proposed — the 2026-10-15
+    paragraph puts "the four" at one line's end and "extracts" at the next, so #3804's own
+    line-based criterion passed over the page while the sentence it was grepping for was false
+    on it.
+    """
+    bad: list[str] = []
+    for sentence in _EVIDENCE_SENTENCE_END.split(text):
+        for clause in EVIDENCE_SET_SIZE_CLAUSES:
+            hit = clause["pat"].search(sentence)
+            if not hit:
+                continue
+            said = _NUM_VALUE[hit.group(clause["size_group"])]
+            want = counts[clause["against"]]
+            if said == want:
+                continue
+            bound = _COUNT_BOUND_RE.search(sentence)
+            if bound and bound.group(1) <= _COUNTED_THROUGH:
+                continue
+            bad.append(
+                f"architecture/vllm.md §10 near line {line} [{clause['name']}]: says "
+                f"{hit.group(0)!r} — {said} {clause['against']} — while the derived set is "
+                f"{want}. State {want}, or bound the sentence with `counted through <date>` "
+                f"(at or before {_COUNTED_THROUGH}) the way the 2026-10-09 and "
+                f"2026-10-23 bullets bound their counts. Sentence: {sentence.strip()!r}")
+    return bad
+
+
+def _evidence_set_stales(raw_doc: str, counts: dict[str, int]) -> list[str]:
+    """Every §10 bullet sentence asserting a set size `counts` denies with no date bound."""
+    return [bad for line, text in _s10_bullet_spans(raw_doc)
+            for bad in _stale_count_sentences(line, text, counts)]
+
+
+def test_no_counted_day_paragraph_asserts_a_stale_evidence_set_size(cfg):
+    """Clause 5 (#3804): no §10 per-day sentence states an evidence-set size in the present
+    tense that the derived count contradicts — and the scan is green on the live page.
+
+    The five spellings come from the item plus one it missed. Its own grep named "weakest of the
+    four", "six events counted" and "four-extract"; the sentence it was looking for at
+    "the report's evidence set is now the four extracts…" was missed because the page wraps
+    between "the four" and "extracts" — a false claim on the day the item was filed, which a
+    line-based check reads as clean. The 2026-09-27 paragraph's "What the two extracts support"
+    is false the same way and is bounded in the same edit.
+
+    What this node deliberately does NOT do is scope every ordinal. "2026-10-25 is the fifth
+    counted day" is a position in a sequence and stays true forever, so rewriting it is churn
+    that teaches the next editor nothing; "the evidence set is now the four extracts" is a claim
+    about the SIZE of a set and rots at the next counted day. Only the second kind is checked.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    counts = {"days": len(days), "events": _pinned_event_total(days)}
+    assert counts == {"days": 5, "events": 8}, (
+        f"{counts}: this file's own worked examples name five counted days and eight "
+        "qualifying events, so the numbers quoted below and in the scan's docstrings need "
+        "re-reading before any green here means what they say")
+    stales = _evidence_set_stales(DOC.read_text(encoding="utf-8"), counts)
+    assert stales == [], "§10 states a stale evidence-set size:\n  " + "\n  ".join(stales)
+
+
+def test_the_evidence_set_size_clauses_still_match_prose(cfg):
+    """Clause 4 (#3804): every spelling still catches its own sentence, and still waives on a
+    date bound.
+
+    This is the node that makes the one above a check rather than a description. Each row of
+    `EVIDENCE_SET_SIZE_CLAUSES` is run against a synthetic §10 carrying that row's stale
+    example — the same wording, one size off — and must report exactly it; then against the same
+    row's example at the derived size, which must be accepted, so the node is known to be
+    reading a WRONG count and not simply hating numbers; then with a `counted through
+    2026-10-19` bound bolted on, which must waive, so the escape hatch clause 5 promises is
+    actually wired. A row whose stale example goes uncaught names itself in the failure, and a
+    row that cannot be waived is the same failure the other way round.
+    """
+    # Derived, not typed. These examples are the page's own sentences at one size off, so the
+    # size they are one OFF from has to come from the same place the graded node reads; a
+    # hardcoded 5/8 would keep every leg green against a fiction the day a sixth counted day
+    # lands, which is the failure this whole item is about. When that day arrives the `current`
+    # leg below goes red first — correctly, because the examples are written for a five-day,
+    # eight-event set — and the fix is to re-pair them with the new size, not to widen this pin.
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    counts = {"days": len(days), "events": _pinned_event_total(days)}
+    assert len(EVIDENCE_SET_SIZE_CLAUSES) == 5, (
+        "the table's example legs are per clause, so adding one means adding its pair")
+    for clause in EVIDENCE_SET_SIZE_CLAUSES:
+        name = clause["name"]
+        head = "- **The 2026-01-01 count: the filing condition is met on a counted day.**\n"
+
+        def page(body: str) -> str:
+            return f"## 10. Still open\n{head}  {body}\n"
+
+        hits = _evidence_set_stales(page(clause["stale"]), counts)
+        assert len(hits) == 1 and name in hits[0], (
+            f"{name}: a §10 bullet carrying this clause's own stale example was NOT caught "
+            f"({hits}). The pattern has drifted off the page's wording, so "
+            "test_no_counted_day_paragraph_asserts_a_stale_evidence_set_size is green on a "
+            "blind spot — which is the failure mode #3804 exists to close.")
+        assert _evidence_set_stales(page(clause["current"]), counts) == [], (
+            f"{name}: this clause's example at the DERIVED size {counts} was flagged, which has "
+            "two causes and the message has to tell them apart — either the scan reports "
+            "correct prose as stale (and will be talked around within a week), or the counted "
+            f"day set has moved off the five-day, eight-event set these examples were written "
+            f"for, in which case re-pair `current` and `stale` with the new size; {days}")
+        bounded = clause["stale"].rstrip(".") + ", as counted through 2026-10-19.\n"
+        assert _evidence_set_stales(page(bounded), counts) == [], (
+            f"{name}: a `counted through` bound does not waive it, so every dated historical "
+            "sentence the page already carries would have to be rewritten instead — and the "
+            "first round that got tired of that would delete this node.")
+
+
+def test_the_2026_10_15_paragraph_bounds_every_count_it_states(cfg):
+    """Clause 5 (#3804): the 2026-10-15 bullet, the one the item named, sentence by sentence.
+
+    The node above grades §10 as a whole, which is the right scope but the wrong witness for
+    this clause: it would stay green if the 2026-10-15 paragraph were DELETED, and it says
+    nothing about whether the five claims the item enumerated (`:1222-1223`, `:1238`, `:1241`,
+    `:1244`, `:1246` at filing) were bounded or merely removed. So this node takes that one
+    bullet through `_day_head`, checks each of those claims is still on the page — the fix was
+    to scope them, not to launder them out — and then re-runs the same size check on the bullet
+    alone, twice: once as it stands, which must be clean, and once with every
+    `counted through <date>` stripped, which must come back with all four of them. The second
+    leg is what proves the bounds are doing the work. A paragraph that merely happens to agree
+    with the derived five would pass the first leg and fail this one.
+
+    Four claims, not five: "A fourth qualifying day again adds evidence" and "four-extract
+    evidence set" sit in ONE sentence — §10 runs the two together across a colon and the
+    sentence splitter deliberately does not break there — so the bound written for the
+    four-extract claim is the bound that whole sentence carries.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    counts = {"days": len(days), "events": _pinned_event_total(days)}
+    headed = [(ln, tx) for ln, tx in _s10_bullet_spans(DOC.read_text(encoding="utf-8"))
+              if tx.startswith("- The 2026-10-15 ")]
+    assert len(headed) == 1, (
+        f"{len(headed)} §10 bullets are headed `The 2026-10-15 ...`, expected exactly one, "
+        "so this clause has no single paragraph to grade")
+    line, bullet = headed[0]
+
+    for phrase in ("the four extracts", "weakest of the four", "six events counted",
+                   "fourth qualifying day", "four-extract evidence set"):
+        assert phrase in bullet, (
+            f"{phrase!r} has left the 2026-10-15 paragraph. Clause 5 asked for those counts to "
+            "be SCOPED to the pass they were counted through, not deleted: a paragraph with its "
+            "claims removed says nothing about the day and loses the reasoning #2852 filed.")
+
+    assert _stale_count_sentences(line, bullet, counts) == [], (
+        "the 2026-10-15 paragraph states a set size the derived set denies, with no bound: "
+        f"{_stale_count_sentences(line, bullet, counts)}")
+
+    unbounded = _COUNT_BOUND_RE.sub("counted here", bullet)
+    assert unbounded != bullet, (
+        "the 2026-10-15 paragraph carries no `counted through <date>` bound at all, so the "
+        "clean result above is the counts agreeing with the derived set rather than being "
+        "scoped — which is the thing this clause asked to be pinned")
+    stripped = _stale_count_sentences(line, unbounded, counts)
+    assert len(stripped) == 4, (
+        f"stripping every bound from the 2026-10-15 paragraph produced {len(stripped)} stale "
+        f"claims, not the four clause 5 enumerates: {stripped}. Four is the count of "
+        "set-size claims the bullet makes (the fourth-counted-day sentence, the weakest-of-the-"
+        "four denominator, the six-events sentence, and the four-extract sentence, which also "
+        "carries 'a fourth qualifying day' because §10 runs the two together across a colon)")
+
+
+def test_a_future_dated_count_bound_does_not_launder_a_stale_size():
+    """The bound is a claim that a counting pass happened, so a bound naming a date after the
+    page's newest published pass does not waive.
+
+    Without this leg the escape hatch is a blank cheque: any stale count could be excused by
+    appending `counted through 2027-01-01`, and the node would degrade into a grep for the word
+    "counted". The cap is the page's own newest bound (2026-10-24, published by #3088), pinned
+    as a literal so a future round cannot raise it by writing a newer bound beside the sentence
+    it is excusing.
+    """
+    counts = {"days": 5, "events": 8}
+    page = ("## 10. Still open\n"
+            "- **The 2026-01-01 count: the filing condition is met on a counted day.**\n"
+            "  The evidence set is the nine extracts, counted through 2027-01-01.\n")
+    assert len(_evidence_set_stales(page, counts)) == 1, (
+        "a future-dated `counted through` waived a stale count, so the bound is a way past "
+        "the check rather than a bound on it")
+    ok = page.replace("2027-01-01", _COUNTED_THROUGH)
+    assert _evidence_set_stales(ok, counts) == [], (
+        "a bound at the page's own newest published pass no longer waives, so the dated "
+        "sentences §10 already publishes would go red")
 
 
 def test_the_sixth_paragraph_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
@@ -3157,6 +3626,80 @@ def _qualifying_days(gate: float) -> list[str]:
         if _qualifying(raw, gate))
 
 
+#: The counted-day evidence set §10 publishes, pinned ONCE.
+#:
+#: This stays a literal while `_qualifying_days()` derives the same list from the fixtures,
+#: and the disagreement between them is the whole check: one is what the data says, this is
+#: what the page claims, and the eight nodes comparing them are what says so when they part.
+#: What #3804 collapses is the EIGHT copies of it that existed, which is eight places a
+#: hand-edit could go — and the failure mode was never a red node. A sixth counted day turns
+#: all eight red at once, somebody widens them by hand to chase it, and the paragraph counts
+#: in §10 then rot with every one of the eight reading green. One literal is the smallest
+#: thing that still fails, and it is the page's claim, not a second copy of the derivation.
+COUNTED_DAYS = ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"]
+
+
+#: Each counted day's qualifying-event count, keyed BY THE DAY rather than by position.
+#:
+#: The literal this replaced, `[4, 1, 1, 1, 1]`, was positional over a five-tuple of fixtures
+#: named by constant. Position is the bug: a sixth counted day sorting into the middle of the
+#: family re-pairs every expectation with the wrong day without moving one character of the
+#: assert, and the new day's gap shape gets graded against its predecessor's count. Keyed by
+#: day, both an omission and a re-pairing read as a dict that simply no longer matches.
+QUALIFYING_EVENT_COUNTS = {
+    "2026-09-27": 4,
+    "2026-09-29": 1,
+    "2026-10-01": 1,
+    "2026-10-15": 1,
+    "2026-10-25": 1,
+}
+
+
+def _pinned_event_total(days: list[str]) -> int:
+    """`QUALIFYING_EVENT_COUNTS` summed over `days`, with a missing day named.
+
+    A bare subscript would raise `KeyError: '2026-11-04'` from inside a `sum` — the right
+    instinct, the wrong message: a KeyError in a doc-claim suite reads like a broken fixture
+    rather than a pin doing its job, and it never says which table to widen or that widening
+    it is a DERIVATION and not a guess.
+    """
+    missing = [d for d in days if d not in QUALIFYING_EVENT_COUNTS]
+    assert not missing, (
+        f"{missing} is a counted day with no entry in QUALIFYING_EVENT_COUNTS, so its share "
+        "of the page's qualifying-event total is unknown. Derive it from the new extract "
+        "(`W.derive` at the config gate, count the chat misses `qualifying` keeps) and add it "
+        "there; do not default it to 1, which is what the four older days happen to be")
+    return sum(QUALIFYING_EVENT_COUNTS[d] for d in days)
+
+
+def _counted_day_raws(gate: float) -> list[tuple[str, dict]]:
+    """`(day, raw_extract)` for every counted day, in `_qualifying_days()` order.
+
+    The family for §10's per-event and per-window scan, enumerated by filename instead of
+    from a tuple of module constants. The scan used to name its five fixtures by hand —
+    `(replication_raw, filing_raw, sixth_raw, seventh_raw, ELEVENTH_EXTRACT)` — while
+    `_tracked_extracts()` walked the directory, so the day a sixth counted day arrived as a
+    FILE (the only way a counted day has ever arrived) the scan kept walking five. Loud at
+    first: the pinned literals go red and get hand-widened. Silent after that:
+    `[4, 1, 1, 1, 1]`, `len(all_evs) == 8` and `len(windows) == 5` all still read green over
+    the older days, and the new day's gap shape and its share of the worst-day superlative
+    are never computed at all. `test_the_counted_day_scan_family_is_complete` is the rail on
+    that, and it lives beside the node it guards rather than inside it: a node cannot fail on
+    its own omission, because the walk that would name the missing day is the walk that
+    dropped it.
+    """
+    raws: dict[str, dict] = {}
+    for p in _tracked_extracts():
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        raws[raw["window"][0]] = raw
+    days = _qualifying_days(gate)
+    missing = [d for d in days if d not in raws]
+    assert not missing, (
+        f"{missing} is a counted day with no extract to scan; _qualifying_days() found it "
+        "through this same directory walk, so the family would drop it in silence")
+    return [(d, raws[d]) for d in days]
+
+
 def _review_bullet_2026_10_05() -> str:
     """The Review-log bullet for #2248, whole and collapsed, bounded at the next bullet or
     heading — and at the end of the page, which is where it currently sits.
@@ -3272,7 +3815,7 @@ def test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives(cfg):
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], days
+    assert days == COUNTED_DAYS, days
     assert len(days) < len(_tracked_extracts()), (
         "every tracked extract now qualifies, so the join selected the whole directory and "
         "the count below is a restatement of `ls`")
@@ -3706,7 +4249,7 @@ def test_the_eighth_extract_joins_the_family_without_moving_a_graded_reading(eig
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         "the derived §10 evidence set moved under a commit that promised to touch no graded "
         "reading, so either the criteria changed or this day's bytes did")
     assert "2026-10-12" not in days
@@ -4034,7 +4577,7 @@ def test_every_counted_day_paragraph_ends_naming_the_dropped_escalation(cfg):
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         f"the counted-day set is {days}, so the pinned list in "
         "test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives has moved with "
         "a real fifth day — which is the case this node exists for: the new paragraph has to "
@@ -4431,7 +4974,7 @@ def test_the_ninth_extract_moves_no_graded_reading(ninth_raw, ninth, cfg):
         "the day now carries a chat miss, and the empty `_qualifying` above is no longer "
         "explained by the derivation")
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         "the derived §10 evidence set moved under a commit that promised to touch no graded "
         "reading, so either the criteria changed or this day's bytes did")
     assert "2026-10-09" not in days, (
@@ -4725,7 +5268,7 @@ def test_the_tenth_extract_moves_no_graded_reading(tenth_raw, tenth, cfg):
         "the day now carries a chat miss, and the empty `_qualifying` above is no longer "
         "explained by the derivation")
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         "the derived §10 evidence set moved under a commit that promised to touch no graded "
         "reading, so either the criteria changed or one of these days' bytes did")
     assert "2026-10-23" not in days, (
@@ -6437,7 +6980,7 @@ def test_the_twelfth_day_is_not_a_counted_day_and_moves_no_evidence_set(twelfth_
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         f"the evidence set moved to {days}: 2026-10-29 was expected to join no set, and "
         "every paragraph that counts these days is graded against this list")
     assert "2026-10-29" not in days
@@ -6835,7 +7378,7 @@ def test_the_thirteenth_extract_moves_no_graded_reading_and_no_page_sentence(cfg
         "do, not smuggled into a commit that added a fixture for a different day")
 
     days = _qualifying_days(gate)
-    assert days == ["2026-09-27", "2026-09-29", "2026-10-01", "2026-10-15", "2026-10-25"], (
+    assert days == COUNTED_DAYS, (
         f"the evidence set moved to {days}: 2026-10-28 was expected to join no set, and every "
         "paragraph that counts these days is graded against this list")
 

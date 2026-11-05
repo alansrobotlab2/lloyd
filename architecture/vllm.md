@@ -1127,9 +1127,10 @@ has still not been run as of 2026-09-11.
   while the prefix was out. So this is a second independent day carrying a chat-turn miss
   with **neither free-pool churn nor a gate-level KV explanation**: **the condition is met
   on two independent counted days**, 2026-09-29 on one event and this day on three, or
-  four with the marginal one. What the two extracts support is an exclusion and not a
-  cause: free-pool churn and gate pressure are ruled out for these events, and nothing on
-  this page measures that the unannotated draft group below is the reason. The upstream
+  four with the marginal one. What the two extracts, as counted through 2026-09-29, support is
+  an exclusion and not a cause: free-pool churn and gate pressure are ruled out for these
+  events, and nothing on this page measures that the unannotated draft group below is the
+  reason. The upstream
   escalation that would have followed from this and the day above it is **DROPPED, not
   owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the vLLM#57032 comment is
   not to be posted, so this page promises no write to a third-party repository and records
@@ -1218,9 +1219,11 @@ has still not been run as of 2026-09-11.
   **under the 0.60 gate**, while **408,165 tokens computed in the gap** against the
   **413,190 free blocks** that peak implies on the **844,969-token pool** is 98.8% of what
   the walk would have to evict, so neither free-pool churn nor a gate-level KV
-  explanation covers it — exactly §10's filing condition — and 2026-10-15 is therefore the
-  **fourth counted day on which the condition is met** and the report's evidence set is now **the four
-  extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**.
+  explanation covers it — exactly §10's filing condition — and 2026-10-15 is therefore, as
+  counted through 2026-10-15, the **fourth counted day on which the condition is met** and the
+  report's evidence set is **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and
+  2026-10-15**; the set has grown since, and the 2026-10-25 paragraph below states what it is
+  now.
   That arithmetic sits on a pool this window never measured, and saying so is part of the
   reading: this is the first counted day with **no boot line** inside it, because #2665
   bounds a `GPU KV cache size:` line to its own window and a day the engine was not restart
@@ -1235,15 +1238,15 @@ has still not been run as of 2026-09-11.
   tokens went against 462,198 free blocks: not-churned survives here only above an
   834,693-token pool, 1.2% under the one named, and on the 484,612-token pool the engine
   ALSO booted on 2026-10-12 this same gap would read as churned. So the day qualifies on the
-  denominator that served it, and it is the weakest of the four.
+  denominator that served it, and it is the weakest of the four as counted through 2026-10-15.
   One more thing this day moves, and it moves it against the page's own prose: the gap-shape
   generalisation above, that every qualifying gap is sub-second and spanned by a single status
-  line, was true of the six events counted here and is false of this seventh at 126.5 s over
-  14 lines — the first qualifying drop across an idle stretch rather than between two
-  consecutive requests, which is a different mechanism and cannot be folded into that
-  sentence. A fourth qualifying day again adds evidence, not stance: the accepted-loss
-  ruling and its consequence stand as written for every non-churn miss, and this day's
-  event joins the four-extract evidence set rather than an ask — the escalation is
+  line, was true of the six events counted through 2026-10-01 and is false of this seventh at
+  126.5 s over 14 lines — the first qualifying drop across an idle stretch rather than between
+  two consecutive requests, which is a different mechanism and cannot be folded into that
+  sentence. A fourth qualifying day again adds evidence, not stance: the accepted-loss ruling
+  and its consequence stand as written for every non-churn miss, and this day's event joins the
+  four-extract evidence set as counted through 2026-10-15 rather than an ask — the escalation is
   **DROPPED, not owed**: **Alan ruled by hand on 2026-10-12**, on #2250, that the
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
 - **2026-10-09 is the newest day, as counted through 2026-10-19, on which all
